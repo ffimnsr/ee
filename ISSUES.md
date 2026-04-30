@@ -102,12 +102,12 @@
 ### 1. Core frontend architecture
 
 - [x] Replace full-buffer `debug_get_contents` refresh in `crates/ee-tui/src/main.rs` with xi `update` operation application against a local line cache so redraw cost stays proportional to visible edits.
-- [ ] Stop deriving cursor position from local frontend guesses in `crates/ee-tui/src/main.rs` and instead drive caret and selection state from xi update payloads so motions, inserts, and selections never desynchronize.
-- [ ] Add an explicit viewport model to `crates/ee-tui` that tracks top line, left column, and cursor target column, and only renders visible content instead of the full buffer.
-- [ ] Send scroll and viewport updates between `ee-tui` and xi core so large files, wrapped lines, and off-screen edits do not require whole-buffer refreshes.
-- [ ] Replace ad hoc key handling match arms in `crates/ee-tui/src/main.rs` with a table-driven input dispatcher keyed by mode, prefix state, and count so advanced Vim-style commands can be added safely.
-- [ ] Move xi RPC processing in `crates/ee-tui` off the synchronous input path into a dedicated event loop so redraw, input, and backend notifications cannot stall each other. Current 100 ms poll + blocking RPC recv on edit blocks UI. Move xi RPC onto tokio task, drain on redraw tick.
-- [ ] Use display-width-aware cursor and layout measurement in `ee-tui` so tabs, wide Unicode, emoji, and combining characters render and navigate correctly.
+- [x] Stop deriving cursor position from local frontend guesses in `crates/ee-tui/src/main.rs` and instead drive caret and selection state from xi update payloads so motions, inserts, and selections never desynchronize.
+- [x] Add an explicit viewport model to `crates/ee-tui` that tracks top line, left column, and cursor target column, and only renders visible content instead of the full buffer.
+- [x] Send scroll and viewport updates between `ee-tui` and xi core so large files, wrapped lines, and off-screen edits do not require whole-buffer refreshes.
+- [x] Replace ad hoc key handling match arms in `crates/ee-tui/src/main.rs` with a table-driven input dispatcher keyed by mode, prefix state, and count so advanced Vim-style commands can be added safely.
+- [x] Move xi RPC processing in `crates/ee-tui` off the synchronous input path into a dedicated event loop so redraw, input, and backend notifications cannot stall each other. Current 100 ms poll + blocking RPC recv on edit blocks UI. Move xi RPC onto tokio task, drain on redraw tick.
+- [x] Use display-width-aware cursor and layout measurement in `ee-tui` so tabs, wide Unicode, emoji, and combining characters render and navigate correctly.
 
 ### 2. Modal editing parity
 
