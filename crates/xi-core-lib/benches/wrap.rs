@@ -16,10 +16,10 @@
 
 extern crate test;
 
+use test::Bencher;
 use xi_core_lib::line_offset::LineOffset;
 use xi_core_lib::tabs::BufferId;
 use xi_core_lib::view::View;
-use test::Bencher;
 use xi_rope::Rope;
 
 fn build_short_lines(n: usize) -> String {

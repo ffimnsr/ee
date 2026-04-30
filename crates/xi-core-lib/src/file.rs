@@ -132,11 +132,7 @@ impl FileManager {
 
     pub fn save(&mut self, path: &Path, text: &Rope, id: BufferId) -> Result<(), FileError> {
         let is_existing = self.file_info.contains_key(&id);
-        if is_existing {
-            self.save_existing(path, text, id)
-        } else {
-            self.save_new(path, text, id)
-        }
+        if is_existing { self.save_existing(path, text, id) } else { self.save_new(path, text, id) }
     }
 
     fn save_new(&mut self, path: &Path, text: &Rope, id: BufferId) -> Result<(), FileError> {

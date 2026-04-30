@@ -258,8 +258,7 @@ impl Deref for Selection {
 ///
 /// We say "cursor" here rather than "caret" because (depending on presentation)
 /// the front-end may draw a cursor even when the region is not a caret.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[derive(Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Affinity {
     /// The cursor should be displayed downstream of the line break. For
     /// example, if the buffer is "abcd", and the cursor is on a line break
@@ -271,7 +270,6 @@ pub enum Affinity {
     /// after "ab", it should be displayed on the previous line after "ab".
     Upstream,
 }
-
 
 /// A type representing a single contiguous region of a selection. We use the
 /// term "caret" (sometimes also "cursor", more loosely) to refer to a selection

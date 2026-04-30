@@ -2,8 +2,8 @@
 name = "xi-rpc"
 version = "0.3.0"
 license = "Apache-2.0"
-authors = ["Raph Levien <raph@google.com>"]
-repository = "https://github.com/google/xi-editor"
+authors = ["Raph Levien <raph@google.com>", "Edward Fitz Abucay <gh:ffimnsr>"]
+repository = "https://github.com/ffimnsr/ee"
 description = "Utilities for building peers (both client and server side) for xi's JSON RPC variant."
 edition.workspace = true
 rust-version.workspace = true

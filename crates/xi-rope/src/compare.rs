@@ -43,19 +43,21 @@ const SSE_STRIDE: usize = 16;
 #[doc(hidden)]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.2")]
-pub unsafe fn sse_compare_mask(one: &[u8], two: &[u8]) -> i32 { unsafe {
-    use std::arch::x86_64::*;
+pub unsafe fn sse_compare_mask(one: &[u8], two: &[u8]) -> i32 {
+    unsafe {
+        use std::arch::x86_64::*;
 
-    // too lazy to figure out the bit-fiddly way to get this mask
-    const HIGH_HALF_MASK: u32 = 0b11111111111111110000000000000000;
+        // too lazy to figure out the bit-fiddly way to get this mask
+        const HIGH_HALF_MASK: u32 = 0b11111111111111110000000000000000;
 
-    debug_assert!(is_x86_feature_detected!("sse4.2"));
+        debug_assert!(is_x86_feature_detected!("sse4.2"));
 
-    let onev = _mm_loadu_si128(one.as_ptr() as *const _);
-    let twov = _mm_loadu_si128(two.as_ptr() as *const _);
-    let mask = _mm_cmpeq_epi8(onev, twov);
-    (!_mm_movemask_epi8(mask)) ^ HIGH_HALF_MASK as i32
-}}
+        let onev = _mm_loadu_si128(one.as_ptr() as *const _);
+        let twov = _mm_loadu_si128(two.as_ptr() as *const _);
+        let mask = _mm_cmpeq_epi8(onev, twov);
+        (!_mm_movemask_epi8(mask)) ^ HIGH_HALF_MASK as i32
+    }
+}
 
 #[allow(dead_code)]
 const AVX_STRIDE: usize = 32;
@@ -65,13 +67,15 @@ const AVX_STRIDE: usize = 32;
 #[doc(hidden)]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-pub unsafe fn avx_compare_mask(one: &[u8], two: &[u8]) -> i32 { unsafe {
-    use std::arch::x86_64::*;
-    let onev = _mm256_loadu_si256(one.as_ptr() as *const _);
-    let twov = _mm256_loadu_si256(two.as_ptr() as *const _);
-    let mask = _mm256_cmpeq_epi8(onev, twov);
-    !_mm256_movemask_epi8(mask)
-}}
+pub unsafe fn avx_compare_mask(one: &[u8], two: &[u8]) -> i32 {
+    unsafe {
+        use std::arch::x86_64::*;
+        let onev = _mm256_loadu_si256(one.as_ptr() as *const _);
+        let twov = _mm256_loadu_si256(two.as_ptr() as *const _);
+        let mask = _mm256_cmpeq_epi8(onev, twov);
+        !_mm256_movemask_epi8(mask)
+    }
+}
 
 /// Returns the lowest `i` for which `one[i] != two[i]`, if one exists.
 pub fn ne_idx(one: &[u8], two: &[u8]) -> Option<usize> {
@@ -101,75 +105,81 @@ pub fn ne_idx_rev(one: &[u8], two: &[u8]) -> Option<usize> {
 #[doc(hidden)]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-pub unsafe fn ne_idx_avx(one: &[u8], two: &[u8]) -> Option<usize> { unsafe {
-    let min_len = one.len().min(two.len());
-    let mut idx = 0;
-    while idx < min_len {
-        let stride_len = AVX_STRIDE.min(min_len - idx);
-        let mask = avx_compare_mask(
-            one.get_unchecked(idx..idx + stride_len),
-            two.get_unchecked(idx..idx + stride_len),
-        );
-        // at the end of the slice the mask might include garbage bytes, so
-        // we ignore matches that are OOB
-        if mask != 0 && idx + (mask.trailing_zeros() as usize) < min_len {
-            return Some(idx + mask.trailing_zeros() as usize);
+pub unsafe fn ne_idx_avx(one: &[u8], two: &[u8]) -> Option<usize> {
+    unsafe {
+        let min_len = one.len().min(two.len());
+        let mut idx = 0;
+        while idx < min_len {
+            let stride_len = AVX_STRIDE.min(min_len - idx);
+            let mask = avx_compare_mask(
+                one.get_unchecked(idx..idx + stride_len),
+                two.get_unchecked(idx..idx + stride_len),
+            );
+            // at the end of the slice the mask might include garbage bytes, so
+            // we ignore matches that are OOB
+            if mask != 0 && idx + (mask.trailing_zeros() as usize) < min_len {
+                return Some(idx + mask.trailing_zeros() as usize);
+            }
+            idx += AVX_STRIDE;
         }
-        idx += AVX_STRIDE;
+        None
     }
-    None
-}}
+}
 
 #[doc(hidden)]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.2")]
-pub unsafe fn ne_idx_sse(one: &[u8], two: &[u8]) -> Option<usize> { unsafe {
-    let min_len = one.len().min(two.len());
-    let mut idx = 0;
-    while idx < min_len {
-        let stride_len = SSE_STRIDE.min(min_len - idx);
-        let mask = sse_compare_mask(
-            one.get_unchecked(idx..idx + stride_len),
-            two.get_unchecked(idx..idx + stride_len),
-        );
-        if mask != 0 && idx + (mask.trailing_zeros() as usize) < min_len {
-            return Some(idx + mask.trailing_zeros() as usize);
+pub unsafe fn ne_idx_sse(one: &[u8], two: &[u8]) -> Option<usize> {
+    unsafe {
+        let min_len = one.len().min(two.len());
+        let mut idx = 0;
+        while idx < min_len {
+            let stride_len = SSE_STRIDE.min(min_len - idx);
+            let mask = sse_compare_mask(
+                one.get_unchecked(idx..idx + stride_len),
+                two.get_unchecked(idx..idx + stride_len),
+            );
+            if mask != 0 && idx + (mask.trailing_zeros() as usize) < min_len {
+                return Some(idx + mask.trailing_zeros() as usize);
+            }
+            idx += SSE_STRIDE;
         }
-        idx += SSE_STRIDE;
+        None
     }
-    None
-}}
+}
 
 #[doc(hidden)]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.2")]
-pub unsafe fn ne_idx_rev_sse(one: &[u8], two: &[u8]) -> Option<usize> { unsafe {
-    let min_len = one.len().min(two.len());
-    let one = &one[one.len() - min_len..];
-    let two = &two[two.len() - min_len..];
-    debug_assert_eq!(one.len(), two.len());
-    let mut idx = min_len;
-    loop {
-        let mask = if idx < SSE_STRIDE {
-            let mut one_buf: [u8; SSE_STRIDE] = [0; SSE_STRIDE];
-            let mut two_buf: [u8; SSE_STRIDE] = [0; SSE_STRIDE];
-            one_buf[SSE_STRIDE - idx..].copy_from_slice(&one[..idx]);
-            two_buf[SSE_STRIDE - idx..].copy_from_slice(&two[..idx]);
-            sse_compare_mask(&one_buf, &two_buf)
-        } else {
-            sse_compare_mask(&one[idx - SSE_STRIDE..idx], &two[idx - SSE_STRIDE..idx])
-        };
-        let i = mask.leading_zeros() as usize - SSE_STRIDE;
-        if i != SSE_STRIDE {
-            return Some(min_len - (idx - i));
+pub unsafe fn ne_idx_rev_sse(one: &[u8], two: &[u8]) -> Option<usize> {
+    unsafe {
+        let min_len = one.len().min(two.len());
+        let one = &one[one.len() - min_len..];
+        let two = &two[two.len() - min_len..];
+        debug_assert_eq!(one.len(), two.len());
+        let mut idx = min_len;
+        loop {
+            let mask = if idx < SSE_STRIDE {
+                let mut one_buf: [u8; SSE_STRIDE] = [0; SSE_STRIDE];
+                let mut two_buf: [u8; SSE_STRIDE] = [0; SSE_STRIDE];
+                one_buf[SSE_STRIDE - idx..].copy_from_slice(&one[..idx]);
+                two_buf[SSE_STRIDE - idx..].copy_from_slice(&two[..idx]);
+                sse_compare_mask(&one_buf, &two_buf)
+            } else {
+                sse_compare_mask(&one[idx - SSE_STRIDE..idx], &two[idx - SSE_STRIDE..idx])
+            };
+            let i = mask.leading_zeros() as usize - SSE_STRIDE;
+            if i != SSE_STRIDE {
+                return Some(min_len - (idx - i));
+            }
+            if idx < SSE_STRIDE {
+                break;
+            }
+            idx -= SSE_STRIDE;
         }
-        if idx < SSE_STRIDE {
-            break;
-        }
-        idx -= SSE_STRIDE;
+        None
     }
-    None
-}}
+}
 
 #[inline]
 #[allow(dead_code)]

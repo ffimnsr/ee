@@ -18,7 +18,7 @@
 // Note: this data structure has nontrivial overlap with Subset in the rope
 // crate. Maybe we don't need both.
 
-use std::cmp::{max, min, Ordering};
+use std::cmp::{Ordering, max, min};
 use xi_rope::{RopeDelta, Transformer};
 
 pub struct IndexSet {

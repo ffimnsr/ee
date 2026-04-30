@@ -27,14 +27,14 @@ use std::thread;
 
 use log::{error, info};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use xi_rpc::{self, NewlineReader, NewlineWriter, RpcLoop, RpcPeer};
 
+use crate::WeakXiCore;
 use crate::config::Table;
 use crate::syntax::LanguageId;
 use crate::tabs::ViewId;
-use crate::WeakXiCore;
 
 use self::rpc::{PluginBufferInfo, PluginUpdate};
 
@@ -194,7 +194,8 @@ pub(crate) fn start_plugin_process(
 
                     core.plugin_connect(Ok(plugin));
                     let mut core = core;
-                    let err = looper.mainloop(|| NewlineReader::new(BufReader::new(child_stdout)), &mut core);
+                    let err = looper
+                        .mainloop(|| NewlineReader::new(BufReader::new(child_stdout)), &mut core);
                     core.plugin_exit(id, err);
                 }
                 Err(err) => core.plugin_connect(Err(err)),

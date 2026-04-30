@@ -15,10 +15,10 @@
 use std::fmt;
 use std::io;
 
-use serde::{Deserialize, Serialize};
 use serde::de::Deserializer;
 use serde::ser::Serializer;
-use serde_json::{json, Error as JsonError, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::{Error as JsonError, Value, json};
 
 const UNKNOWN_REMOTE_ERROR_CODE: i64 = -32001;
 
@@ -237,9 +237,7 @@ impl<'de> Deserialize<'de> for RemoteError {
             -32601 => RemoteError::MethodNotFound(resp.data),
             -32602 => RemoteError::InvalidParams(resp.data),
             -32603 => RemoteError::InternalError(resp.data),
-            UNKNOWN_REMOTE_ERROR_CODE => {
-                RemoteError::Unknown(resp.data.unwrap_or(Value::Null))
-            }
+            UNKNOWN_REMOTE_ERROR_CODE => RemoteError::Unknown(resp.data.unwrap_or(Value::Null)),
             _ => RemoteError::Custom { code: resp.code, message: resp.message, data: resp.data },
         })
     }

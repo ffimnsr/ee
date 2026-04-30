@@ -1,9 +1,9 @@
 [package]
-authors = ["Raph Levien <raph@google.com>"]
+authors = ["Raph Levien <raph@google.com>", "Edward Fitz Abucay <gh:ffimnsr>"]
 description = "A generic rope data structure built on top of B-Trees."
 license = "Apache-2.0"
 name = "xi-rope"
-repository = "https://github.com/google/xi-editor"
+repository = "https://github.com/ffimnsr/ee"
 version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true

@@ -14,9 +14,9 @@
 
 //! A proxy for the methods on Core
 use serde_json::json;
+use xi_core_lib::ViewId;
 use xi_core_lib::plugin_rpc::Hover;
 use xi_core_lib::plugins::PluginId;
-use xi_core_lib::ViewId;
 use xi_rpc::{RemoteError, RpcCtx, RpcPeer};
 
 #[derive(Clone)]

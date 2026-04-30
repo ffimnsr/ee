@@ -18,10 +18,10 @@ extern crate test;
 #[cfg(test)]
 mod bench {
     use std::cmp::max;
-    use test::{black_box, Bencher};
+    use test::{Bencher, black_box};
+    use xi_unicode::LineBreakIterator;
     use xi_unicode::linebreak_property;
     use xi_unicode::linebreak_property_str;
-    use xi_unicode::LineBreakIterator;
 
     fn linebreak_property_chars(s: &str) -> u8 {
         linebreak_property(black_box(s).chars().next().unwrap())

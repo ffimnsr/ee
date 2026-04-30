@@ -23,7 +23,7 @@ use crate::backspace::offset_for_delete_backwards;
 use crate::config::BufferItems;
 use crate::line_offset::{LineOffset, LogicalLines};
 use crate::linewrap::Lines;
-use crate::movement::{region_movement, Movement};
+use crate::movement::{Movement, region_movement};
 use crate::selection::{SelRegion, Selection};
 use crate::word_boundaries::WordCursor;
 

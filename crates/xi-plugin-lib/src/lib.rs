@@ -22,11 +22,11 @@ mod view;
 use std::io;
 use std::path::Path;
 
+use serde_json::Value;
 use xi_core_lib::plugin_rpc::{GetDataResponse, TextUnit};
 use xi_core_lib::{ConfigTable, LanguageId};
-use serde_json::Value;
-use xi_rope::interval::IntervalBounds;
 use xi_rope::RopeDelta;
+use xi_rope::interval::IntervalBounds;
 use xi_rpc::{NewlineReader, NewlineWriter, ReadError, RpcLoop};
 
 use self::dispatch::Dispatcher;

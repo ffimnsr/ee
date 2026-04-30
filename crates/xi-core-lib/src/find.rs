@@ -26,7 +26,7 @@ use crate::view::View;
 use crate::word_boundaries::WordCursor;
 use regex::{Regex, RegexBuilder};
 use xi_rope::delta::DeltaRegion;
-use xi_rope::find::{find, is_multiline_regex, CaseMatching};
+use xi_rope::find::{CaseMatching, find, is_multiline_regex};
 use xi_rope::{Cursor, Interval, LinesMetric, Metric, Rope, RopeDelta};
 
 const REGEX_SIZE_LIMIT: usize = 1000000;

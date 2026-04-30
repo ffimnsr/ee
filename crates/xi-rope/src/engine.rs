@@ -28,11 +28,11 @@
 //! `Engine::merge`, which is more powerful but considerably more complex.
 //! It enables support for full asynchronous and even peer-to-peer editing.
 
-use std::borrow::Cow;
-use std::collections::hash_map::DefaultHasher;
-use std::collections::BTreeSet;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+use std::collections::BTreeSet;
+use std::collections::hash_map::DefaultHasher;
 
 use crate::delta::{Delta, InsertDelta};
 use crate::interval::Interval;
@@ -248,7 +248,11 @@ impl Engine {
 
     /// Garbage collection means undo can sometimes need to replay the very first
     /// revision, and so needs a way to get the deletion set before then.
-    fn deletes_from_union_before_index(&self, rev_index: usize, invert_undos: bool) -> Cow<'_, Subset> {
+    fn deletes_from_union_before_index(
+        &self,
+        rev_index: usize,
+        invert_undos: bool,
+    ) -> Cow<'_, Subset> {
         let mut deletes_from_union = Cow::Borrowed(&self.deletes_from_union);
         let mut undone_groups = Cow::Borrowed(&self.undone_groups);
 
@@ -897,7 +901,7 @@ fn rebase(
         // expand by each in expand_by
         for &(trans_priority, ref trans_inserts) in &expand_by {
             let after = full_priority >= trans_priority; // should never be ==
-                                                         // d-expand by other
+            // d-expand by other
             inserts = inserts.transform_expand(trans_inserts, after);
             // trans-expand other by expanded so they have the same context
             let inserted = inserts.inserted_subset();

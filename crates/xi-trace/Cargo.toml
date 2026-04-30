@@ -2,9 +2,9 @@
 name = "xi-trace"
 version = "0.2.0"
 license = "Apache-2.0"
-authors = ["Vitali Lovich <vlovich@google.com>"]
+authors = ["Vitali Lovich <vlovich@google.com>", "Edward Fitz Abucay <gh:ffimnsr>"]
 categories = ["development-tools::profiling"]
-repository = "https://github.com/google/xi-editor"
+repository = "https://github.com/ffimnsr/ee"
 description = "Library-based distributed tracing API to meet the needs of xi-core, frontends and plugins"
 edition.workspace = true
 rust-version.workspace = true

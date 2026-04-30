@@ -14,10 +14,10 @@
 
 //! Management of annotations.
 
-use serde::{Deserialize, Serialize};
 use serde::de::Deserializer;
 use serde::ser::{SerializeSeq, Serializer};
-use serde_json::{self, json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::{self, Value, json};
 
 use std::collections::HashMap;
 
@@ -336,12 +336,15 @@ mod tests {
 
         let slices = store.iter_range(&view, &text, interval).collect::<Vec<_>>();
         assert_eq!(slices.len(), 1);
-        assert_eq!(slices[0].to_json(), json!({
-            "type": "find",
-            "ranges": [[0, 3, 0, 3]],
-            "payloads": ["cursor"],
-            "n": 1
-        }));
+        assert_eq!(
+            slices[0].to_json(),
+            json!({
+                "type": "find",
+                "ranges": [[0, 3, 0, 3]],
+                "payloads": ["cursor"],
+                "n": 1
+            })
+        );
     }
 
     #[test]
@@ -362,11 +365,14 @@ mod tests {
 
         let slices = store.iter_range(&view, &text, interval).collect::<Vec<_>>();
         assert_eq!(slices.len(), 1);
-        assert_eq!(slices[0].to_json(), json!({
-            "type": "find",
-            "ranges": [],
-            "payloads": [],
-            "n": 0
-        }));
+        assert_eq!(
+            slices[0].to_json(),
+            json!({
+                "type": "find",
+                "ranges": [],
+                "payloads": [],
+                "n": 0
+            })
+        );
     }
 }

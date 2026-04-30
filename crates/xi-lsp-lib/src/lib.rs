@@ -11,8 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-use xi_plugin_lib::mainloop;
 use xi_plugin_lib::Plugin;
+use xi_plugin_lib::mainloop;
 
 pub mod conversion_utils;
 pub mod language_server_client;

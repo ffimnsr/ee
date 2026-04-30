@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use log::error;
-use serde::{Deserialize, Serialize};
 use serde::de;
+use serde::{Deserialize, Serialize};
 use serde_json::{self, Value};
 
 use crate::syntax::{LanguageId, Languages};
@@ -259,11 +259,7 @@ impl ConfigManager {
     pub(crate) fn base_config_file_path(&self) -> Option<PathBuf> {
         let config_file = self.config_dir.as_ref().map(|p| p.join("preferences.xiconfig"));
         let exists = config_file.as_ref().map(|p| p.exists()).unwrap_or(false);
-        if exists {
-            config_file
-        } else {
-            None
-        }
+        if exists { config_file } else { None }
     }
 
     pub(crate) fn get_plugin_paths(&self) -> Vec<PathBuf> {
@@ -303,11 +299,7 @@ impl ConfigManager {
         let lang = self.language_for_path(path).unwrap_or_default();
         let has_changed = self.buffer_tags.get_mut(&id).map(|tag| tag.set_detected(lang)).unwrap();
 
-        if has_changed {
-            self.update_buffer_config(id)
-        } else {
-            None
-        }
+        if has_changed { self.update_buffer_config(id) } else { None }
     }
 
     /// Instructs the `ConfigManager` to stop tracking a given buffer.
@@ -333,11 +325,7 @@ impl ConfigManager {
             .get_mut(&id)
             .map(|tag| tag.set_user(Some(new_lang)))
             .expect("buffer must exist");
-        if has_changed {
-            self.update_buffer_config(id)
-        } else {
-            None
-        }
+        if has_changed { self.update_buffer_config(id) } else { None }
     }
 
     fn update_buffer_config(&mut self, id: BufferId) -> Option<Table> {
@@ -770,9 +758,9 @@ fn from_toml_value(value: toml::Value) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use super::*;
     use crate::syntax::LanguageDefinition;
+    use serde_json::json;
 
     #[test]
     fn test_overrides() {

@@ -37,11 +37,7 @@ impl<T: Clone + Hash + Eq> Context<T> {
     }
 
     fn entry(&self, s: State) -> Option<&Entry<T>> {
-        if s.0 == 0 {
-            None
-        } else {
-            Some(&self.entries[s.0 - 1])
-        }
+        if s.0 == 0 { None } else { Some(&self.entries[s.0 - 1]) }
     }
 
     /// The top of the stack for the given state.

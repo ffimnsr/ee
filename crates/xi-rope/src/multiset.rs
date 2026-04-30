@@ -14,9 +14,9 @@
 
 //! A data structure for representing multi-subsets of sequences (typically strings).
 
-use std::cmp;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
+use std::cmp;
 
 // These two imports are for the `apply` method only.
 use crate::interval::Interval;

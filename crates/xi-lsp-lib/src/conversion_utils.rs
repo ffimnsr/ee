@@ -15,8 +15,8 @@
 //! Utility functions meant for converting types from LSP to Core format
 //! and vice-versa
 
-use lsp_types::*;
 use crate::types::LanguageResponseError;
+use lsp_types::*;
 use xi_plugin_lib::{Cache, Error as PluginLibError, Hover as CoreHover, Range as CoreRange, View};
 
 pub(crate) fn marked_string_to_string(marked_string: &MarkedString) -> String {
@@ -37,11 +37,7 @@ pub(crate) fn markdown_from_hover_contents(
         }
         HoverContents::Markup(content) => content.value,
     };
-    if res.is_empty() {
-        Err(LanguageResponseError::FallbackResponse)
-    } else {
-        Ok(res)
-    }
+    if res.is_empty() { Err(LanguageResponseError::FallbackResponse) } else { Ok(res) }
 }
 
 /// Counts the number of utf-16 code units in the given string.

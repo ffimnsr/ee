@@ -21,10 +21,10 @@
 
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
 use serde::de::{self, Deserializer};
 use serde::ser::{self, Serializer};
-use serde_json::{self, json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::{self, Value, json};
 
 use crate::config::{ConfigDomainExternal, Table};
 use crate::plugins::PlaceholderRpc;
@@ -357,7 +357,6 @@ pub enum SelectionModifier {
     Add,
     AddRemovingCurrent,
 }
-
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
 #[serde(rename_all = "snake_case")]

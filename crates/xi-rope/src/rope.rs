@@ -18,7 +18,7 @@
 #![allow(clippy::needless_return)]
 
 use std::borrow::Cow;
-use std::cmp::{max, min, Ordering};
+use std::cmp::{Ordering, max, min};
 use std::fmt;
 use std::ops::Add;
 use std::str::{self, FromStr};
@@ -649,11 +649,7 @@ impl<'a> Cursor<'a, RopeInfo> {
     /// Get previous codepoint before cursor position, and advance cursor backwards.
     pub fn prev_codepoint(&mut self) -> Option<char> {
         self.prev::<BaseMetric>();
-        if let Some((l, offset)) = self.get_leaf() {
-            l[offset..].chars().next()
-        } else {
-            None
-        }
+        if let Some((l, offset)) = self.get_leaf() { l[offset..].chars().next() } else { None }
     }
 
     /// Get next codepoint after cursor position, and advance cursor.
@@ -737,11 +733,7 @@ pub struct LinesRaw<'a> {
 }
 
 fn cow_append<'a>(a: Cow<'a, str>, b: &'a str) -> Cow<'a, str> {
-    if a.is_empty() {
-        Cow::from(b)
-    } else {
-        Cow::from(a.into_owned() + b)
-    }
+    if a.is_empty() { Cow::from(b) } else { Cow::from(a.into_owned() + b) }
 }
 
 impl<'a> Iterator for LinesRaw<'a> {
@@ -1183,7 +1175,7 @@ mod tests {
 mod serde_tests {
     use super::*;
     use crate::Rope;
-    use serde_test::{assert_tokens, Token};
+    use serde_test::{Token, assert_tokens};
 
     #[test]
     fn serialize_and_deserialize() {

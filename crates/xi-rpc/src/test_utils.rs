@@ -15,13 +15,15 @@
 //! Types and helpers used for testing.
 
 use std::io::{self, Cursor};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
 use serde_json::{self, Value};
 
-use super::{Callback, Error, MessageReader, NewlineReader, Peer, ReadError, RequestId, Response, RpcObject,
-    WriteTransport};
+use super::{
+    Callback, Error, MessageReader, NewlineReader, Peer, ReadError, RequestId, Response, RpcObject,
+    WriteTransport,
+};
 
 /// Wraps an instance of `mpsc::Sender`, implementing [`WriteTransport`].
 ///
@@ -102,9 +104,7 @@ impl WriteTransport for DummyWriter {
     fn write_message(&mut self, data: &[u8]) -> io::Result<()> {
         let s = String::from_utf8(data.to_vec())
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        self.0
-            .send(s)
-            .map_err(|err| io::Error::other(format!("{:?}", err)))
+        self.0.send(s).map_err(|err| io::Error::other(format!("{:?}", err)))
     }
 }
 

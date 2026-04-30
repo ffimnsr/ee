@@ -19,7 +19,7 @@ use std::ops::Range;
 
 use log::warn;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::annotations::{AnnotationStore, Annotations, ToAnnotation};
 use crate::client::{Client, Update, UpdateOp};
@@ -28,7 +28,7 @@ use crate::find::{Find, FindStatus};
 use crate::line_cache_shadow::{self, LineCacheShadow, RenderPlan, RenderTactic};
 use crate::line_offset::LineOffset;
 use crate::linewrap::{InvalLines, Lines, VisualLine, WrapWidth};
-use crate::movement::{region_movement, selection_movement, Movement};
+use crate::movement::{Movement, region_movement, selection_movement};
 use crate::plugins::PluginId;
 use crate::rpc::{FindQuery, GestureType, MouseAction, SelectionGranularity, SelectionModifier};
 use crate::selection::{Affinity, InsertDrift, SelRegion, Selection};

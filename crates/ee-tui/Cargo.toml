@@ -1,0 +1,23 @@
+[package]
+name = "ee-tui"
+version = "0.1.0"
+license = "Apache-2.0"
+authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
+description = "Terminal UI frontend for ee-editor"
+categories = ["text-editors"]
+repository = "https://github.com/ffimnsr/ee"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ee"
+path = "src/main.rs"
+
+[dependencies]
+crossterm.workspace = true
+ratatui.workspace = true
+serde_json.workspace = true
+xi-rpc.workspace = true
+
+[dependencies.xi-core-lib]
+workspace = true

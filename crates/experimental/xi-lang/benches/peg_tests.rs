@@ -44,7 +44,7 @@ const TEST_STR: &str = "1.2345e56";
 
 #[cfg(all(test, feature = "pom"))]
 mod pom_benches {
-    use super::{test, TEST_STR};
+    use super::{TEST_STR, test};
     use pom::parser::{one_of, sym};
     use pom::{DataInput, Parser};
     use test::Bencher;
@@ -70,7 +70,7 @@ mod pom_benches {
 
 #[cfg(all(test, feature = "regex"))]
 mod regex_benches {
-    use super::{test, TEST_STR};
+    use super::{TEST_STR, test};
     use regex::Regex;
     use test::Bencher;
 
@@ -83,7 +83,7 @@ mod regex_benches {
 
 #[cfg(all(test, feature = "nom"))]
 mod nom_benches {
-    use super::{test, TEST_STR};
+    use super::{TEST_STR, test};
     use nom::digit;
     use test::Bencher;
 
@@ -114,7 +114,7 @@ mod nom_benches {
 
 #[cfg(all(test, feature = "combine"))]
 mod combine_benches {
-    use super::{is_digit, test, TEST_STR};
+    use super::{TEST_STR, is_digit, test};
     use combine::range::take_while1;
     use combine::*;
     use test::Bencher;

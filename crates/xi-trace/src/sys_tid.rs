@@ -40,12 +40,7 @@ pub fn current_tid() -> Result<u64, libc::c_int> {
 // pthread-based fallback
 #[cfg(all(
     target_family = "unix",
-    not(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "linux",
-        target_os = "android"
-    ))
+    not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "android"))
 ))]
 pub fn current_tid() -> Result<u64, libc::c_int> {
     unsafe { Ok(libc::pthread_self() as u64) }
