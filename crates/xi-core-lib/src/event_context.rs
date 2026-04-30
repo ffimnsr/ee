@@ -320,7 +320,7 @@ impl<'a> EventContext<'a> {
         let undo_group = ed.get_active_undo_group();
         //TODO: we want to just put EditType on the wire, but don't want
         //to update the plugin lib quite yet.
-        let v: Value = serde_json::to_value(&ed.get_edit_type()).unwrap();
+        let v: Value = serde_json::to_value(ed.get_edit_type()).unwrap();
         let edit_type_str = v.as_str().unwrap().to_string();
 
         let update = PluginUpdate::new(

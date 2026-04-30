@@ -57,12 +57,6 @@ impl Error {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
-enum ChromeTraceArrayEntries {
-    Array(Vec<Sample>),
-}
-
 /// This serializes the samples into the [Chrome trace event format](https://www.google.com/url?sa=t&rct=j&q=&esrc=s&source=web&cd=1&ved=0ahUKEwiJlZmDguXYAhUD4GMKHVmEDqIQFggpMAA&url=https%3A%2F%2Fdocs.google.com%2Fdocument%2Fd%2F1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU%2Fpreview&usg=AOvVaw0tBFlVbDVBikdzLqgrWK3g).
 ///
 /// # Arguments

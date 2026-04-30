@@ -164,7 +164,7 @@ fn get_flags() -> HashMap<String, Option<String>> {
             // Check the next argument doesn't start with the flag prefix
             // map_or accounts for peek returning an Option
             let next_arg_not_a_flag: bool =
-                args_iterator.peek().map_or(false, |val| !val.starts_with(flag_prefix));
+                args_iterator.peek().is_some_and(|val| !val.starts_with(flag_prefix));
             if next_arg_not_a_flag {
                 flags.insert(key, args_iterator.next());
             }

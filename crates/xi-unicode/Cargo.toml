@@ -5,4 +5,5 @@ license = "Apache-2.0"
 authors = ["Raph Levien <raph.levien@gmail.com>"]
 repository = "https://github.com/google/xi-editor"
 description = "Unicode utilities useful for text editing, including a line breaking iterator."
-edition = '2018'
+edition.workspace = true
+rust-version.workspace = true

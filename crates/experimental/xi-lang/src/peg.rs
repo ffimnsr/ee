@@ -145,7 +145,7 @@ impl Peg for Inclusive<ops::Range<u8>> {
 
 // Note: char ranges are also possible, but probably not commonly used, and inefficient
 
-impl<'a> Peg for &'a [u8] {
+impl Peg for &[u8] {
     #[inline(always)]
     fn p(&self, s: &[u8]) -> Option<usize> {
         let len = self.len();
@@ -157,7 +157,7 @@ impl<'a> Peg for &'a [u8] {
     }
 }
 
-impl<'a> Peg for &'a str {
+impl Peg for &str {
     #[inline(always)]
     fn p(&self, s: &[u8]) -> Option<usize> {
         self.as_bytes().p(s)

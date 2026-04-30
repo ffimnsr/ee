@@ -18,7 +18,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use url::Url;
 use xi_plugin_lib::{ChunkCache, CoreProxy, Plugin, View};
 use xi_rope::rope::RopeDelta;
 
@@ -31,7 +30,7 @@ use crate::utils::*;
 use crate::xi_core::{ConfigTable, ViewId};
 
 pub struct ViewInfo {
-    version: u64,
+    version: i32,
     ls_identifier: String,
 }
 
@@ -131,7 +130,7 @@ impl Plugin for LspPlugin {
                     .insert(view.get_id(), ViewInfo { version: 0, ls_identifier: identifier });
                 let mut ls_client = ls_client.lock().unwrap();
 
-                let document_uri = Url::from_file_path(path).unwrap();
+                let document_uri = file_path_to_uri(path).unwrap();
 
                 if !ls_client.is_initialized {
                     ls_client.send_initialize(workspace_root_uri, move |ls_client, result| {
@@ -203,11 +202,11 @@ impl LspPlugin {
     fn get_lsclient_from_workspace_root(
         &mut self,
         language_id: &str,
-        workspace_root: &Option<Url>,
+        workspace_root: &Option<Uri>,
     ) -> Option<(String, Arc<Mutex<LanguageServerClient>>)> {
         workspace_root
             .clone()
-            .map(|r| r.into_string())
+            .map(|root| root.to_string())
             .or_else(|| {
                 let config = &self.config.language_config[language_id];
                 if config.supports_single_file {

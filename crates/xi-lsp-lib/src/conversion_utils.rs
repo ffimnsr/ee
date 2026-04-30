@@ -68,7 +68,10 @@ pub(crate) fn get_position_of_offset<C: Cache>(
 
     let char_offset = count_utf16(&(view.get_line(line_num)?[0..(offset - line_offset)]));
 
-    Ok(Position { line: line_num as u64, character: char_offset as u64 })
+    Ok(Position {
+        line: u32::try_from(line_num).expect("line number should fit in u32"),
+        character: u32::try_from(char_offset).expect("character offset should fit in u32"),
+    })
 }
 
 pub(crate) fn offset_of_position<C: Cache>(

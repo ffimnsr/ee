@@ -500,9 +500,9 @@ impl ConfigManager {
         }
         match path.file_stem().and_then(|s| s.to_str()) {
             Some("preferences") => Some(ConfigDomain::General),
-            Some(name) if self.languages.language_for_name(&name).is_some() => {
+            Some(name) if self.languages.language_for_name(name).is_some() => {
                 let lang =
-                    self.languages.language_for_name(&name).map(|lang| lang.name.clone()).unwrap();
+                    self.languages.language_for_name(name).map(|lang| lang.name.clone()).unwrap();
                 Some(ConfigDomain::Language(lang))
             }
             //TODO: plugin configs
@@ -725,7 +725,7 @@ pub(crate) fn init_config_dir(dir: &Path) -> io::Result<()> {
 /// Attempts to load a config from a file. The config's domain is determined
 /// by the file name.
 pub(crate) fn try_load_from_file(path: &Path) -> Result<Table, ConfigError> {
-    let mut file = fs::File::open(&path)?;
+    let mut file = fs::File::open(path)?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
     table_from_toml_str(&contents).map_err(|e| ConfigError::Parse(path.to_owned(), e))
@@ -865,11 +865,11 @@ translate_tabs_to_spaces = true
         let mut manager = ConfigManager::new(None, None);
         let lang_defaults = json!({"font_size": 69, "font_face": "nice"});
         let lang_overrides = json!({"font_size": 420, "font_face": "cool"});
-        let lang_def = rust_lang_def(lang_defaults.as_object().map(Table::clone));
+        let lang_def = rust_lang_def(lang_defaults.as_object().cloned());
         let lang_id: LanguageId = "Rust".into();
         let domain: ConfigDomain = lang_id.into();
 
-        manager.set_languages(Languages::new(&[lang_def.clone()]));
+        manager.set_languages(Languages::new(std::slice::from_ref(&lang_def)));
         assert_eq!(manager.languages.iter().count(), 1);
 
         let buf_id = BufferId(1);
@@ -888,7 +888,7 @@ translate_tabs_to_spaces = true
         assert_eq!(config.items.font_size, 14.);
 
         manager
-            .set_user_config(domain.clone(), lang_overrides.as_object().map(Table::clone).unwrap())
+            .set_user_config(domain.clone(), lang_overrides.as_object().cloned().unwrap())
             .unwrap();
 
         // user config for unknown language is ignored

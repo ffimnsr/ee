@@ -125,7 +125,7 @@ impl<'a> Iterator for LineBreakIterator<'a> {
 
 impl<'a> LineBreakIterator<'a> {
     /// Create a new iterator for the given string slice.
-    pub fn new(s: &str) -> LineBreakIterator {
+    pub fn new(s: &str) -> LineBreakIterator<'_> {
         if s.is_empty() {
             LineBreakIterator {
                 s,
@@ -264,7 +264,7 @@ impl EmojiExt for char {
 }
 
 pub fn is_keycap_base(c: char) -> bool {
-    ('0'..='9').contains(&c) || c == '#' || c == '*'
+    c.is_ascii_digit() || c == '#' || c == '*'
 }
 
 #[cfg(test)]

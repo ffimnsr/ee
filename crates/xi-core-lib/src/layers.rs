@@ -225,7 +225,7 @@ impl ScopeLayer {
 
         for stack in stacks {
             let mut last_style: Option<StyleModifier> = None;
-            let mut upper_bound_of_last = stack.len() as usize;
+            let mut upper_bound_of_last = stack.len();
 
             // walk backwards through stack to see if we have an existing
             // style for any child stacks.

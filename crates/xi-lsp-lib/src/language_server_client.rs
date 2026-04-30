@@ -18,9 +18,9 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::process;
 
+use crate::lsp_types::Uri;
 use jsonrpc_lite::{Error, Id, JsonRpc, Params};
 use serde_json::{to_value, Value};
-use url::Url;
 use xi_plugin_lib::CoreProxy;
 
 use crate::lsp_types::*;
@@ -38,7 +38,7 @@ pub struct LanguageServerClient {
     pub status_items: HashSet<String>,
     pub core: CoreProxy,
     pub is_initialized: bool,
-    pub opened_documents: HashMap<ViewId, Url>,
+    pub opened_documents: HashMap<ViewId, Uri>,
     pub server_capabilities: Option<ServerCapabilities>,
     pub file_extensions: Vec<String>,
 }
@@ -184,20 +184,49 @@ impl LanguageServerClient {
 impl LanguageServerClient {
     /// Send the Initialize Request given the Root URI of the
     /// Workspace. It is None for non-workspace projects.
-    pub fn send_initialize<CB>(&mut self, root_uri: Option<Url>, on_init: CB)
+    pub fn send_initialize<CB>(&mut self, root_uri: Option<Uri>, on_init: CB)
     where
         CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
     {
-        let client_capabilities = ClientCapabilities::default();
+        #[derive(serde::Serialize)]
+        struct InitializeParamsCompat {
+            process_id: Option<u32>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            initialization_options: Option<Value>,
+            capabilities: ClientCapabilities,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            trace: Option<TraceValue>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            workspace_folders: Option<Vec<WorkspaceFolder>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            client_info: Option<ClientInfo>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            locale: Option<String>,
+            #[serde(flatten)]
+            work_done_progress_params: WorkDoneProgressParams,
+        }
 
-        let init_params = InitializeParams {
-            process_id: Some(u64::from(process::id())),
-            root_uri,
-            root_path: None,
+        let client_capabilities = ClientCapabilities::default();
+        let workspace_folders = root_uri.clone().map(|uri| {
+            let name = uri
+                .as_str()
+                .trim_end_matches('/')
+                .rsplit('/')
+                .find(|segment| !segment.is_empty())
+                .unwrap_or("workspace")
+                .to_string();
+            vec![WorkspaceFolder { uri, name }]
+        });
+
+        let init_params = InitializeParamsCompat {
+            process_id: Some(process::id()),
             initialization_options: None,
             capabilities: client_capabilities,
-            trace: Some(TraceOption::Verbose),
-            workspace_folders: None,
+            trace: Some(TraceValue::Verbose),
+            workspace_folders,
+            client_info: None,
+            locale: None,
+            work_done_progress_params: WorkDoneProgressParams::default(),
         };
 
         let params = Params::from(serde_json::to_value(init_params).unwrap());
@@ -205,7 +234,7 @@ impl LanguageServerClient {
     }
 
     /// Send textDocument/didOpen Notification to the Language Server
-    pub fn send_did_open(&mut self, view_id: ViewId, document_uri: Url, document_text: String) {
+    pub fn send_did_open(&mut self, view_id: ViewId, document_uri: Uri, document_text: String) {
         self.opened_documents.insert(view_id, document_uri.clone());
 
         let text_document_did_open_params = DidOpenTextDocumentParams {
@@ -238,12 +267,12 @@ impl LanguageServerClient {
         &mut self,
         view_id: ViewId,
         changes: Vec<TextDocumentContentChangeEvent>,
-        version: u64,
+        version: i32,
     ) {
         let text_document_did_change_params = DidChangeTextDocumentParams {
             text_document: VersionedTextDocumentIdentifier {
                 uri: self.opened_documents[&view_id].clone(),
-                version: Some(version),
+                version,
             },
             content_changes: changes,
         };
@@ -258,6 +287,7 @@ impl LanguageServerClient {
         // and is optional in LSP Specification
         let text_document_did_save_params = DidSaveTextDocumentParams {
             text_document: TextDocumentIdentifier { uri: self.opened_documents[&view_id].clone() },
+            text: None,
         };
         let params = Params::from(serde_json::to_value(text_document_did_save_params).unwrap());
         self.send_notification("textDocument/didSave", params);
@@ -285,7 +315,7 @@ impl LanguageServerClient {
     pub fn get_sync_kind(&mut self) -> TextDocumentSyncKind {
         match self.server_capabilities.as_ref().and_then(|c| c.text_document_sync.as_ref()) {
             Some(&TextDocumentSyncCapability::Kind(kind)) => kind,
-            _ => TextDocumentSyncKind::Full,
+            _ => TextDocumentSyncKind::FULL,
         }
     }
 }

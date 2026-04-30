@@ -70,10 +70,12 @@ pub enum PluginActivation {
 /// Describes the scope of events a plugin receives.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum PluginScope {
     /// The plugin receives events from multiple buffers.
     Global,
     /// The plugin receives events for a single buffer.
+    #[default]
     BufferLocal,
     /// The plugin is launched in response to a command, and receives no
     /// further updates.
@@ -223,11 +225,6 @@ impl PluginDescription {
     }
 }
 
-impl Default for PluginScope {
-    fn default() -> Self {
-        PluginScope::BufferLocal
-    }
-}
 
 #[cfg(test)]
 mod tests {

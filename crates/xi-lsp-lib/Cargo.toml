@@ -5,31 +5,32 @@ license = "Apache-2.0"
 repository = "https://github.com/google/xi-editor"
 description = "The base library for implementing LSP Plugins for Xi"
 authors = ["betterclever <paliwal.pranjal83@gmail.com>"]
-edition = '2018'
+edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
-languageserver-types = "0.54"
-serde = "1.0.66"
-serde_json = "1.0.20"
-serde_derive = "1.0.66"
+lsp-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_derive.workspace = true
 
-jsonrpc-lite = "0.5.0"
-url = "1.7.0"
-fern = "0.5.6"
-log = "0.4.3"
-chrono = "0.4.5"
+jsonrpc-lite.workspace = true
+fern.workspace = true
+log.workspace = true
+chrono.workspace = true
+url.workspace = true
 
 [dependencies.xi-plugin-lib]
-path = "../plugin-lib"
+workspace = true
 
 [dependencies.xi-core-lib]
-path = "../core-lib"
+workspace = true
 
 [dependencies.xi-rope]
-path = "../rope"
+workspace = true
 
 [dependencies.xi-rpc]
-path = "../rpc"
+workspace = true
 
 [dependencies.xi-trace]
-path = "../trace"
+workspace = true

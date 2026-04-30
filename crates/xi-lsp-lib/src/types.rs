@@ -17,7 +17,6 @@ use std::io::Error as IOError;
 
 use jsonrpc_lite::Error as JsonRpcError;
 use serde_json::Value;
-use url::ParseError as UrlParseError;
 use xi_plugin_lib::Error as PluginLibError;
 use xi_rpc::RemoteError;
 
@@ -112,13 +111,6 @@ pub enum Error {
     PathError,
     FileUrlParseError,
     IOError(IOError),
-    UrlParseError(UrlParseError),
-}
-
-impl From<UrlParseError> for Error {
-    fn from(err: UrlParseError) -> Error {
-        Error::UrlParseError(err)
-    }
 }
 
 impl From<IOError> for Error {

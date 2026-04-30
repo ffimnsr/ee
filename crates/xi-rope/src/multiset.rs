@@ -117,8 +117,8 @@ pub enum CountMatcher {
 impl CountMatcher {
     fn matches(self, seg: &Segment) -> bool {
         match self {
-            CountMatcher::Zero => (seg.count == 0),
-            CountMatcher::NonZero => (seg.count != 0),
+            CountMatcher::Zero => seg.count == 0,
+            CountMatcher::NonZero => seg.count != 0,
             CountMatcher::All => true,
         }
     }
@@ -288,13 +288,13 @@ impl Subset {
 
     /// Return an iterator over the ranges with a count matching the `matcher`.
     /// These will often be easier to work with than raw segments.
-    pub fn range_iter(&self, matcher: CountMatcher) -> RangeIter {
+    pub fn range_iter(&self, matcher: CountMatcher) -> RangeIter<'_> {
         RangeIter { seg_iter: self.segments.iter(), consumed: 0, matcher }
     }
 
     /// Convenience alias for `self.range_iter(CountMatcher::Zero)`.
     /// Semantically iterates the ranges of the complement of this `Subset`.
-    pub fn complement_iter(&self) -> RangeIter {
+    pub fn complement_iter(&self) -> RangeIter<'_> {
         self.range_iter(CountMatcher::Zero)
     }
 
@@ -331,7 +331,7 @@ impl Subset {
 
     /// Return a `Mapper` that can be use to map coordinates in the document to coordinates
     /// in this `Subset`, but only in non-decreasing order for performance reasons.
-    pub fn mapper(&self, matcher: CountMatcher) -> Mapper {
+    pub fn mapper(&self, matcher: CountMatcher) -> Mapper<'_> {
         Mapper {
             range_iter: self.range_iter(matcher),
             last_i: 0, // indices only need to be in non-decreasing order, not increasing
@@ -491,7 +491,7 @@ impl<'a> Mapper<'a> {
                 // past the end of the subset
                 None => {
                     // ensure we don't try to consume any more
-                    self.cur_range = (usize::max_value(), usize::max_value());
+                    self.cur_range = (usize::MAX, usize::MAX);
                     return self.subset_amount_consumed;
                 }
             }

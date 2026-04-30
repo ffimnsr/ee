@@ -158,6 +158,7 @@ impl<'a, W: Write + 'static> Drop for PanicGuard<'a, W> {
     }
 }
 
+#[allow(dead_code)]
 trait IdleProc: Send {
     fn call(self: Box<Self>, token: usize);
 }

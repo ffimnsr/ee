@@ -198,7 +198,7 @@ impl ThemeStyleMap {
         &self.default_style
     }
 
-    pub fn get_highlighter(&self) -> Highlighter {
+    pub fn get_highlighter(&self) -> Highlighter<'_> {
         Highlighter::new(&self.theme)
     }
 
@@ -408,7 +408,7 @@ impl ThemeStyleMap {
             if p.exists() {
                 return true;
             }
-            fs::DirBuilder::new().create(&p).is_ok()
+            fs::DirBuilder::new().create(p).is_ok()
         } else {
             false
         }

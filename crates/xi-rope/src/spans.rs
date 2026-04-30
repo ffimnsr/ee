@@ -152,7 +152,6 @@ pub struct SpanIter<'a, T: 'a + Clone> {
 impl<T: Clone> Spans<T> {
     /// Perform operational transformation on a spans object intended to be edited into
     /// a sequence at the given offset.
-
     // Note: this implementation is not efficient for very large Spans objects, as it
     // traverses all spans linearly. A more sophisticated approach would be to traverse
     // the tree, and only delve into subtrees that are transformed.
@@ -288,7 +287,7 @@ impl<T: Clone> Spans<T> {
 
     // possible future: an iterator that takes an interval, so results are the same as
     // taking a subseq on the spans object. Would require specialized Cursor.
-    pub fn iter(&self) -> SpanIter<T> {
+    pub fn iter(&self) -> SpanIter<'_, T> {
         SpanIter { cursor: Cursor::new(self, 0), ix: 0 }
     }
 

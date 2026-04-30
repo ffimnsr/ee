@@ -416,12 +416,7 @@ fn sel_region_to_interval_and_rope(base: &Rope, region: SelRegion) -> (Interval,
 }
 
 fn last_selection_region(regions: &[SelRegion]) -> Option<&SelRegion> {
-    for region in regions.iter().rev() {
-        if !region.is_caret() {
-            return Some(region);
-        }
-    }
-    None
+    regions.iter().rev().find(|&region| !region.is_caret()).map(|v| v as _)
 }
 
 fn get_tab_text(config: &BufferItems, tab_size: Option<usize>) -> &'static str {

@@ -149,10 +149,10 @@ fn test_invalidate() {
                         // current op (ins/copy/update) adds lines;
                         // wait for another invalidate/skip
                         .skip_while(|op| op["op"].as_str().unwrap() != "invalidate")
-                        // step over trailing "invalidate" and "skip"
-                        .skip_while(|op| op["op"].as_str().unwrap() == "invalidate"
-                            || op["op"].as_str().unwrap() == "skip")
-                        .next()
+                        .find(|op| {
+                            op["op"].as_str().unwrap() != "invalidate"
+                                && op["op"].as_str().unwrap() != "skip"
+                        })
                         .is_none(),
                     "bad update: {}",
                     &ops.iter()
@@ -194,7 +194,7 @@ fn test_malformed_json() {
         r#"{"method":"client_started","params":{}}
 {"id":0,method:"new_view","params":{}}"#,
     );
-    match rpc_looper.mainloop(|| read, &mut state).err().expect("malformed json exits with error") {
+    match rpc_looper.mainloop(|| read, &mut state).expect_err("malformed json exits with error") {
         ReadError::Json(_) => (), // expected
         err => panic!("Unexpected error: {:?}", err),
     }

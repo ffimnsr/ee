@@ -144,7 +144,7 @@ mod combine_benches {
 use xi_lang::peg::{Alt, OneByte, OneOrMore, Optional, Peg};
 
 fn is_digit(c: u8) -> bool {
-    (b'0'..=b'9').contains(&c)
+    c.is_ascii_digit()
 }
 
 fn my_number(s: &[u8]) -> Option<usize> {

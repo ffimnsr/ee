@@ -24,15 +24,15 @@
 //! Our wrapper provides a few useful features:
 //!
 //! - All `watch` calls are associated with a `WatchToken`; this
-//! allows for the same path to be watched multiple times,
-//! presumably by multiple interested parties. events are delivered
-//! once-per token.
+//!   allows for the same path to be watched multiple times,
+//!   presumably by multiple interested parties. events are delivered
+//!   once-per token.
 //!
 //! - There is the option (via `FileWatcher::watch_filtered`) to include
-//! a predicate along with a path, to filter paths before delivery.
+//!   a predicate along with a path, to filter paths before delivery.
 //!
 //! - We are integrated with the xi_rpc runloop; events are queued as
-//! they arrive, and an idle task is scheduled.
+//!   they arrive, and an idle task is scheduled.
 
 use crossbeam_channel::unbounded;
 use notify::{event::*, watcher, RecommendedWatcher, RecursiveMode, Watcher};
@@ -357,6 +357,7 @@ mod tests {
     }
 
     // from https://github.com/passcod/notify/blob/master/tests/utils/mod.rs
+    #[allow(dead_code)]
     pub trait TestHelpers {
         /// Return path relative to the TempDir. Directory separator must
         /// be a forward slash, and will be converted to the platform's
@@ -392,7 +393,7 @@ mod tests {
 
         fn create(&self, p: &str) {
             let path = self.mkpath(p);
-            if path.components().last().unwrap().as_os_str().to_str().unwrap().contains("dir") {
+            if path.components().next_back().unwrap().as_os_str().to_str().unwrap().contains("dir") {
                 fs::create_dir_all(path).expect("failed to create directory");
             } else {
                 let parent = path.parent().expect("failed to get parent directory").to_owned();

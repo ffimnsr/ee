@@ -240,13 +240,13 @@ impl Engine {
     // TODO: does Cow really help much here? It certainly won't after making Subsets a rope.
     /// Find what the `deletes_from_union` field in Engine would have been at the time
     /// of a certain `rev_index`. In other words, the deletes from the union string at that time.
-    fn deletes_from_union_for_index(&self, rev_index: usize) -> Cow<Subset> {
+    fn deletes_from_union_for_index(&self, rev_index: usize) -> Cow<'_, Subset> {
         self.deletes_from_union_before_index(rev_index + 1, true)
     }
 
     /// Garbage collection means undo can sometimes need to replay the very first
     /// revision, and so needs a way to get the deletion set before then.
-    fn deletes_from_union_before_index(&self, rev_index: usize, invert_undos: bool) -> Cow<Subset> {
+    fn deletes_from_union_before_index(&self, rev_index: usize, invert_undos: bool) -> Cow<'_, Subset> {
         let mut deletes_from_union = Cow::Borrowed(&self.deletes_from_union);
         let mut undone_groups = Cow::Borrowed(&self.undone_groups);
 
@@ -286,7 +286,7 @@ impl Engine {
     }
 
     /// Get the Subset to delete from the current union string in order to obtain a revision's content
-    fn deletes_from_cur_union_for_index(&self, rev_index: usize) -> Cow<Subset> {
+    fn deletes_from_cur_union_for_index(&self, rev_index: usize) -> Cow<'_, Subset> {
         let mut deletes_from_union = self.deletes_from_union_for_index(rev_index);
         for rev in &self.revs[rev_index + 1..] {
             if let Edit { ref inserts, .. } = rev.edit {

@@ -113,7 +113,7 @@ impl IndexSet {
     }
 
     /// Return an iterator that yields start..end minus the coverage in this set.
-    pub fn minus_one_range(&self, start: usize, end: usize) -> MinusIter {
+    pub fn minus_one_range(&self, start: usize, end: usize) -> MinusIter<'_> {
         let mut ranges = &self.ranges[..];
         while !ranges.is_empty() && start >= ranges[0].1 {
             ranges = &ranges[1..];

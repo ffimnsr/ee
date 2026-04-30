@@ -15,7 +15,6 @@
 //! Module for searching text.
 
 use std::cmp::{max, min};
-use std::iter;
 
 use crate::annotations::{AnnotationRange, AnnotationSlice, AnnotationType, ToAnnotation};
 use crate::line_offset::LineOffset;
@@ -329,7 +328,7 @@ impl Find {
         wrapped: bool,
         sel: &Selection,
     ) -> Option<SelRegion> {
-        if self.occurrences.len() == 0 {
+        if self.occurrences.is_empty() {
             return None;
         }
 
@@ -422,7 +421,7 @@ impl ToAnnotation for Find {
             })
             .collect::<Vec<AnnotationRange>>();
 
-        let payload = iter::repeat(json!({"id": self.id})).take(ranges.len()).collect::<Vec<_>>();
+        let payload = std::iter::repeat_n(json!({"id": self.id}), ranges.len()).collect::<Vec<_>>();
 
         AnnotationSlice::new(AnnotationType::Find, ranges, Some(payload))
     }
@@ -507,11 +506,11 @@ mod tests {
     fn find_multiline_regex() {
         let mut find = Find::new(1);
         find.set_find("a", true, true, false);
-        assert_eq!(find.is_multiline_regex(), false);
+        assert!(!find.is_multiline_regex());
         find.set_find(".*", true, true, false);
-        assert_eq!(find.is_multiline_regex(), false);
+        assert!(!find.is_multiline_regex());
         find.set_find("\\n", true, true, false);
-        assert_eq!(find.is_multiline_regex(), true);
+        assert!(find.is_multiline_regex());
     }
 
     #[test]

@@ -24,10 +24,19 @@ use xi_rope::rope::RopeDelta;
 
 use crate::conversion_utils::*;
 use crate::language_server_client::LanguageServerClient;
+use crate::lsp_types::Uri;
 use crate::lsp_types::*;
 use crate::parse_helper;
 use crate::result_queue::ResultQueue;
 use crate::types::Error;
+
+pub fn file_path_to_uri(path: &Path) -> Result<Uri, Error> {
+    Url::from_file_path(path)
+        .map_err(|_| Error::FileUrlParseError)?
+        .as_str()
+        .parse()
+        .map_err(|_| Error::FileUrlParseError)
+}
 
 /// Get contents changes of a document modeled according to Language Server Protocol
 /// given the RopeDelta
@@ -49,7 +58,9 @@ pub fn get_document_content_changes<C: Cache>(
                     start: get_position_of_offset(view, start)?,
                     end: get_position_of_offset(view, end)?,
                 }),
-                range_length: Some((end - start) as u64),
+                range_length: Some(
+                    u32::try_from(end - start).expect("range length should fit in u32"),
+                ),
                 text,
             };
 
@@ -75,7 +86,9 @@ pub fn get_document_content_changes<C: Cache>(
                     start: get_position_of_offset(view, start)?,
                     end: end_position,
                 }),
-                range_length: Some((end - start) as u64),
+                range_length: Some(
+                    u32::try_from(end - start).expect("range length should fit in u32"),
+                ),
                 text: String::new(),
             };
 
@@ -100,8 +113,8 @@ pub fn get_change_for_sync_kind(
     delta: Option<&RopeDelta>,
 ) -> Option<Vec<TextDocumentContentChangeEvent>> {
     match sync_kind {
-        TextDocumentSyncKind::None => None,
-        TextDocumentSyncKind::Full => {
+        TextDocumentSyncKind::NONE => None,
+        TextDocumentSyncKind::FULL => {
             let text_document_content_change_event = TextDocumentContentChangeEvent {
                 range: None,
                 range_length: None,
@@ -109,7 +122,7 @@ pub fn get_change_for_sync_kind(
             };
             Some(vec![text_document_content_change_event])
         }
-        TextDocumentSyncKind::Incremental => match get_document_content_changes(delta, view) {
+        TextDocumentSyncKind::INCREMENTAL => match get_document_content_changes(delta, view) {
             Ok(result) => Some(result),
             Err(err) => {
                 warn!("Error: {:?} Occured. Sending Whole Doc", err);
@@ -121,6 +134,14 @@ pub fn get_change_for_sync_kind(
                 Some(vec![text_document_content_change_event])
             }
         },
+        _ => {
+            let text_document_content_change_event = TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: view.get_document().unwrap(),
+            };
+            Some(vec![text_document_content_change_event])
+        }
     }
 }
 
@@ -130,7 +151,7 @@ pub fn get_change_for_sync_kind(
 pub fn get_workspace_root_uri(
     workspace_identifier: &str,
     document_path: &Path,
-) -> Result<Url, Error> {
+) -> Result<Uri, Error> {
     let identifier_os_str = OsStr::new(&workspace_identifier);
 
     let mut current_path = document_path;
@@ -139,7 +160,7 @@ pub fn get_workspace_root_uri(
         if let Some(path) = parent_path {
             for entry in (path.read_dir()?).flatten() {
                 if entry.file_name() == identifier_os_str {
-                    return Url::from_file_path(path).map_err(|_| Error::FileUrlParseError);
+                    return file_path_to_uri(path);
                 };
             }
             current_path = path;
@@ -179,22 +200,27 @@ pub fn start_new_server(
 
     {
         let ls_client = language_server_client.clone();
-        let mut stdout = process.stdout;
 
         // Unwrap to indicate that we want thread to panic on failure
         std::thread::Builder::new()
             .name(format!("{}-lsp-stdout-Looper", language_id))
             .spawn(move || {
-                let mut reader = Box::new(BufReader::new(stdout.take().unwrap()));
+                let stdout = process.stdout.take().unwrap();
+                let mut reader = Box::new(BufReader::new(stdout));
                 loop {
                     match parse_helper::read_message(&mut reader) {
                         Ok(message_str) => {
                             let mut server_locked = ls_client.lock().unwrap();
                             server_locked.handle_message(message_str.as_ref());
                         }
-                        Err(err) => error!("Error occurred {:?}", err),
+                        Err(err) => {
+                            error!("Error occurred {:?}", err);
+                            break;
+                        }
                     };
                 }
+
+                let _ = process.wait();
             })
             .unwrap();
     }

@@ -257,16 +257,16 @@ impl Parser for RustParser {
 }
 
 fn is_digit(c: u8) -> bool {
-    (b'0'..=b'9').contains(&c)
+    c.is_ascii_digit()
 }
 
 fn is_hex_digit(c: u8) -> bool {
-    (b'0'..=b'9').contains(&c) || (b'a'..=b'f').contains(&c) || (b'A'..=b'F').contains(&c)
+    c.is_ascii_digit() || (b'a'..=b'f').contains(&c) || (b'A'..=b'F').contains(&c)
 }
 
 // Note: will have to rework this if we want to support non-ASCII identifiers
 fn is_ident_start(c: u8) -> bool {
-    (b'A'..=b'Z').contains(&c) || (b'a'..=b'z').contains(&c) || c == b'_'
+    c.is_ascii_alphabetic() || c == b'_'
 }
 
 fn is_ident_continue(c: u8) -> bool {
