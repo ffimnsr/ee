@@ -15,6 +15,7 @@
 //! A general b-tree structure suitable for ropes and the like.
 
 use std::cmp::{Ordering, min};
+use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -22,6 +23,38 @@ use crate::interval::{Interval, IntervalBounds};
 
 const MIN_CHILDREN: usize = 4;
 const MAX_CHILDREN: usize = 8;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TreeInvariantError {
+    UnexpectedLeafSplit,
+    GetChildrenOnLeaf,
+    GetLeafOnInternal,
+    WithLeafMutOnInternal,
+    MergeLeavesOnNonLeaf,
+    EmptyBuilderLevel,
+    EmptyBuilderStack,
+    InternalNodeWithoutChildren,
+}
+
+impl fmt::Display for TreeInvariantError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            TreeInvariantError::UnexpectedLeafSplit => {
+                "unexpected split while building leaf subsequence"
+            }
+            TreeInvariantError::GetChildrenOnLeaf => "get_children called on leaf node",
+            TreeInvariantError::GetLeafOnInternal => "get_leaf called on internal node",
+            TreeInvariantError::WithLeafMutOnInternal => "with_leaf_mut called on internal node",
+            TreeInvariantError::MergeLeavesOnNonLeaf => "merge_leaves called on non-leaf",
+            TreeInvariantError::EmptyBuilderLevel => "tree builder stack level unexpectedly empty",
+            TreeInvariantError::EmptyBuilderStack => "tree builder stack unexpectedly empty",
+            TreeInvariantError::InternalNodeWithoutChildren => {
+                "internal node unexpectedly missing children"
+            }
+        };
+        f.write_str(message)
+    }
+}
 
 pub trait NodeInfo: Clone {
     /// The type of the leaf.
@@ -97,13 +130,10 @@ pub trait Leaf: Sized + Clone + Default {
 
     /// Same meaning as push_maybe_split starting from an empty
     /// leaf, but maybe can be implemented more efficiently?
-    ///
-    // TODO: remove if it doesn't pull its weight
     fn subseq(&self, iv: Interval) -> Self {
         let mut result = Self::default();
-        if result.push_maybe_split(self, iv).is_some() {
-            panic!("unexpected split");
-        }
+        let split = result.push_maybe_split(self, iv);
+        debug_assert!(split.is_none(), "{}", TreeInvariantError::UnexpectedLeafSplit);
         result
     }
 }
@@ -256,7 +286,8 @@ impl<N: NodeInfo> Node<N> {
         if let NodeVal::Internal(ref v) = self.0.val {
             v
         } else {
-            panic!("get_children called on leaf node");
+            debug_assert!(false, "{}", TreeInvariantError::GetChildrenOnLeaf);
+            &[]
         }
     }
 
@@ -264,7 +295,9 @@ impl<N: NodeInfo> Node<N> {
         if let NodeVal::Leaf(ref l) = self.0.val {
             l
         } else {
-            panic!("get_leaf called on internal node");
+            debug_assert!(false, "{}", TreeInvariantError::GetLeafOnInternal);
+            let children = self.get_children();
+            children[0].get_leaf()
         }
     }
 
@@ -272,15 +305,16 @@ impl<N: NodeInfo> Node<N> {
     ///
     /// This clones the leaf if the reference is shared. It also recomputes
     /// length and info after the leaf is mutated.
-    fn with_leaf_mut<T>(&mut self, f: impl FnOnce(&mut N::L) -> T) -> T {
+    fn with_leaf_mut<T>(&mut self, f: impl FnOnce(&mut N::L) -> T) -> Option<T> {
         let inner = Arc::make_mut(&mut self.0);
         if let NodeVal::Leaf(ref mut l) = inner.val {
             let result = f(l);
             inner.len = l.len();
             inner.info = N::compute_info(l);
-            result
+            Some(result)
         } else {
-            panic!("with_leaf_mut called on internal node");
+            debug_assert!(false, "{}", TreeInvariantError::WithLeafMutOnInternal);
+            None
         }
     }
 
@@ -323,7 +357,8 @@ impl<N: NodeInfo> Node<N> {
                 node1.info = N::compute_info(leaf1);
                 new
             } else {
-                panic!("merge_leaves called on non-leaf");
+                debug_assert!(false, "{}", TreeInvariantError::MergeLeavesOnNonLeaf);
+                None
             }
         };
         match res {
@@ -500,22 +535,47 @@ impl<N: NodeInfo> TreeBuilder<N> {
                     n = Node::concat(self.pop(), n);
                 }
                 Ordering::Equal => {
-                    let tos = self.stack.last_mut().unwrap();
-                    if tos.last().unwrap().is_ok_child() && n.is_ok_child() {
+                    let Some(tos) = self.stack.last_mut() else {
+                        debug_assert!(false, "{}", TreeInvariantError::EmptyBuilderStack);
+                        self.stack.push(vec![n]);
+                        break;
+                    };
+                    if tos.last().is_some_and(Node::is_ok_child) && n.is_ok_child() {
                         tos.push(n);
                     } else if n.height() == 0 {
                         let iv = Interval::new(0, n.len());
-                        let new_leaf = tos
-                            .last_mut()
-                            .unwrap()
-                            .with_leaf_mut(|l| l.push_maybe_split(n.get_leaf(), iv));
+                        let Some(last) = tos.last_mut() else {
+                            debug_assert!(false, "{}", TreeInvariantError::EmptyBuilderLevel);
+                            tos.push(n);
+                            break;
+                        };
+                        let Some(new_leaf) =
+                            last.with_leaf_mut(|l| l.push_maybe_split(n.get_leaf(), iv))
+                        else {
+                            tos.push(n);
+                            break;
+                        };
                         if let Some(new_leaf) = new_leaf {
                             tos.push(Node::from_leaf(new_leaf));
                         }
                     } else {
-                        let last = tos.pop().unwrap();
+                        let Some(last) = tos.pop() else {
+                            debug_assert!(false, "{}", TreeInvariantError::EmptyBuilderLevel);
+                            tos.push(n);
+                            break;
+                        };
                         let children1 = last.get_children();
                         let children2 = n.get_children();
+                        if children1.is_empty() || children2.is_empty() {
+                            debug_assert!(
+                                false,
+                                "{}",
+                                TreeInvariantError::InternalNodeWithoutChildren
+                            );
+                            tos.push(last);
+                            tos.push(n);
+                            break;
+                        }
                         let n_children = children1.len() + children2.len();
                         if n_children <= MAX_CHILDREN {
                             tos.push(Node::from_nodes([children1, children2].concat()));
@@ -613,8 +673,18 @@ impl<N: NodeInfo> TreeBuilder<N> {
 
     /// Pop the last vec-of-nodes off the stack, resulting in a node.
     fn pop(&mut self) -> Node<N> {
-        let nodes = self.stack.pop().unwrap();
-        if nodes.len() == 1 { nodes.into_iter().next().unwrap() } else { Node::from_nodes(nodes) }
+        let Some(nodes) = self.stack.pop() else {
+            debug_assert!(false, "{}", TreeInvariantError::EmptyBuilderStack);
+            return Node::from_leaf(N::L::default());
+        };
+        match nodes.len() {
+            0 => {
+                debug_assert!(false, "{}", TreeInvariantError::EmptyBuilderLevel);
+                Node::from_leaf(N::L::default())
+            }
+            1 => nodes.into_iter().next().unwrap_or_else(Node::default),
+            _ => Node::from_nodes(nodes),
+        }
     }
 }
 
@@ -700,8 +770,16 @@ impl<'a, N: NodeInfo> Cursor<'a, N> {
             {
                 return;
             }
+            if self.position == self.offset_of_leaf + l.len()
+                && self.position < self.root.len()
+                && self.next_leaf().is_some()
+            {
+                return;
+            }
+            if self.position + 1 == self.offset_of_leaf && self.prev_leaf().is_some() {
+                return;
+            }
         }
-        // TODO: walk up tree to find leaf if nearby
         self.descend();
     }
 
@@ -715,23 +793,17 @@ impl<'a, N: NodeInfo> Cursor<'a, N> {
     /// Note: the beginning and end of the tree may or may not be boundaries, depending on the
     /// metric. If the metric is not `can_fragment`, then they always are.
     pub fn is_boundary<M: Metric<N>>(&mut self) -> bool {
-        if self.leaf.is_none() {
-            // not at a valid position
+        let Some(leaf) = self.leaf else {
             return false;
-        }
+        };
         if self.position == self.offset_of_leaf && !M::can_fragment() {
             return true;
         }
         if self.position == 0 || self.position > self.offset_of_leaf {
-            return M::is_boundary(self.leaf.unwrap(), self.position - self.offset_of_leaf);
+            return M::is_boundary(leaf, self.position - self.offset_of_leaf);
         }
-        // tricky case, at beginning of leaf, need to query end of previous
-        // leaf; TODO: would be nice if we could do it another way that didn't
-        // make the method &mut self.
-        let l = self.prev_leaf().unwrap().0;
-        let result = M::is_boundary(l, l.len());
-        let _ = self.next_leaf();
-        result
+        self.peek_prev_leaf()
+            .is_some_and(|(prev_leaf, _)| M::is_boundary(prev_leaf, prev_leaf.len()))
     }
 
     /// Moves the cursor to the previous boundary.
@@ -882,19 +954,26 @@ impl<'a, N: NodeInfo> Cursor<'a, N> {
                 return None;
             }
             let (node, j) = self.cache[i].unwrap();
-            if j + 1 < node.get_children().len() {
+            let children = node.get_children();
+            if j + 1 < children.len() {
                 self.cache[i] = Some((node, j + 1));
-                let mut node_down = &node.get_children()[j + 1];
+                let mut node_down = &children[j + 1];
                 for k in (0..i).rev() {
+                    let node_children = node_down.get_children();
+                    if node_children.is_empty() {
+                        debug_assert!(false, "{}", TreeInvariantError::InternalNodeWithoutChildren);
+                        self.leaf = None;
+                        return None;
+                    }
                     self.cache[k] = Some((node_down, 0));
-                    node_down = &node_down.get_children()[0];
+                    node_down = &node_children[0];
                 }
                 self.leaf = Some(node_down.get_leaf());
                 self.offset_of_leaf = self.position;
                 return self.get_leaf();
             }
         }
-        if self.offset_of_leaf + self.leaf.unwrap().len() == self.root.len() {
+        if self.offset_of_leaf + leaf.len() == self.root.len() {
             self.leaf = None;
             return None;
         }
@@ -920,11 +999,23 @@ impl<'a, N: NodeInfo> Cursor<'a, N> {
             let (node, j) = self.cache[i].unwrap();
             if j > 0 {
                 self.cache[i] = Some((node, j - 1));
-                let mut node_down = &node.get_children()[j - 1];
+                let children = node.get_children();
+                if children.is_empty() {
+                    debug_assert!(false, "{}", TreeInvariantError::InternalNodeWithoutChildren);
+                    self.leaf = None;
+                    return None;
+                }
+                let mut node_down = &children[j - 1];
                 for k in (0..i).rev() {
-                    let last_ix = node_down.get_children().len() - 1;
+                    let node_children = node_down.get_children();
+                    if node_children.is_empty() {
+                        debug_assert!(false, "{}", TreeInvariantError::InternalNodeWithoutChildren);
+                        self.leaf = None;
+                        return None;
+                    }
+                    let last_ix = node_children.len() - 1;
                     self.cache[k] = Some((node_down, last_ix));
-                    node_down = &node_down.get_children()[last_ix];
+                    node_down = &node_children[last_ix];
                 }
                 let leaf = node_down.get_leaf();
                 self.leaf = Some(leaf);
@@ -939,6 +1030,62 @@ impl<'a, N: NodeInfo> Cursor<'a, N> {
         self.get_leaf()
     }
 
+    fn peek_prev_leaf(&self) -> Option<(&'a N::L, usize)> {
+        if self.offset_of_leaf == 0 {
+            return None;
+        }
+        for i in 0..CURSOR_CACHE_SIZE {
+            let Some((node, j)) = self.cache[i] else {
+                break;
+            };
+            if j > 0 {
+                let children = node.get_children();
+                if children.is_empty() {
+                    debug_assert!(false, "{}", TreeInvariantError::InternalNodeWithoutChildren);
+                    return None;
+                }
+                let mut node_down = &children[j - 1];
+                for _ in (0..i).rev() {
+                    let node_children = node_down.get_children();
+                    if node_children.is_empty() {
+                        debug_assert!(false, "{}", TreeInvariantError::InternalNodeWithoutChildren);
+                        return None;
+                    }
+                    node_down = &node_children[node_children.len() - 1];
+                }
+                let leaf = node_down.get_leaf();
+                return Some((leaf, self.offset_of_leaf - leaf.len()));
+            }
+        }
+        self.leaf_at(self.offset_of_leaf - 1)
+    }
+
+    fn leaf_at(&self, position: usize) -> Option<(&'a N::L, usize)> {
+        let mut node = self.root;
+        let mut offset = 0;
+        while node.height() > 0 {
+            let children = node.get_children();
+            if children.is_empty() {
+                debug_assert!(false, "{}", TreeInvariantError::InternalNodeWithoutChildren);
+                return None;
+            }
+            let mut i = 0;
+            loop {
+                if i + 1 == children.len() {
+                    break;
+                }
+                let nextoff = offset + children[i].len();
+                if nextoff > position {
+                    break;
+                }
+                offset = nextoff;
+                i += 1;
+            }
+            node = &children[i];
+        }
+        Some((node.get_leaf(), offset))
+    }
+
     /// Go to the leaf containing the current position.
     ///
     /// Sets `leaf` to the leaf containing `position`, and updates `cache` and
@@ -948,6 +1095,11 @@ impl<'a, N: NodeInfo> Cursor<'a, N> {
         let mut offset = 0;
         while node.height() > 0 {
             let children = node.get_children();
+            if children.is_empty() {
+                debug_assert!(false, "{}", TreeInvariantError::InternalNodeWithoutChildren);
+                self.leaf = None;
+                return;
+            }
             let mut i = 0;
             loop {
                 if i + 1 == children.len() {
@@ -977,7 +1129,12 @@ impl<'a, N: NodeInfo> Cursor<'a, N> {
         let mut node = self.root;
         let mut metric = 0;
         while node.height() > 0 {
-            for child in node.get_children() {
+            let children = node.get_children();
+            if children.is_empty() {
+                debug_assert!(false, "{}", TreeInvariantError::InternalNodeWithoutChildren);
+                return metric;
+            }
+            for child in children {
                 let len = child.len();
                 if pos < len {
                     node = child;
@@ -1003,6 +1160,11 @@ impl<'a, N: NodeInfo> Cursor<'a, N> {
         let mut offset = 0;
         while node.height() > 0 {
             let children = node.get_children();
+            if children.is_empty() {
+                debug_assert!(false, "{}", TreeInvariantError::InternalNodeWithoutChildren);
+                self.leaf = None;
+                return;
+            }
             let mut i = 0;
             loop {
                 if i + 1 == children.len() {
@@ -1260,6 +1422,34 @@ mod test {
         }
 
         assert_eq!(None, cursor.prev::<LinesMetric>());
+    }
+
+    #[test]
+    fn is_boundary_at_leaf_start_uses_previous_leaf() {
+        let left = format!("{}\n", "a".repeat(511));
+        let right = "b".repeat(511);
+        let boundary = left.len();
+        let rope = Node::concat(Rope::from(left), Rope::from(right));
+        let mut cursor = Cursor::new(&rope, boundary);
+
+        assert!(cursor.is_boundary::<LinesMetric>());
+        assert_eq!(cursor.pos(), boundary);
+        assert_eq!(cursor.get_leaf().map(|(_, offset)| offset), Some(0));
+    }
+
+    #[test]
+    fn set_can_step_into_adjacent_leaf() {
+        let left = "a".repeat(511);
+        let right = "b".repeat(511);
+        let boundary = left.len();
+        let rope = Node::concat(Rope::from(left), Rope::from(right));
+        let mut cursor = Cursor::new(&rope, boundary - 1);
+
+        cursor.set(boundary);
+
+        assert_eq!(cursor.pos(), boundary);
+        assert_eq!(cursor.get_leaf().map(|(_, offset)| offset), Some(0));
+        assert_eq!(cursor.get_leaf().map(|(leaf, _)| leaf.len()), Some(511));
     }
 
     #[test]
