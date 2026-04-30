@@ -14,8 +14,6 @@
 
 //! Utilities for detecting and working with indentation.
 
-extern crate xi_rope;
-
 use std::collections::BTreeMap;
 use xi_rope::Rope;
 

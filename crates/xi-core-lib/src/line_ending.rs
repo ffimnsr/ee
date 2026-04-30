@@ -14,8 +14,6 @@
 
 //! Utilities for detecting and working with line endings
 
-extern crate xi_rope;
-
 use memchr::memchr2;
 use xi_rope::Rope;
 

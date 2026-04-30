@@ -24,20 +24,6 @@
     clippy::wrong_self_convention
 )]
 
-extern crate bytecount;
-extern crate memchr;
-extern crate regex;
-extern crate unicode_segmentation;
-
-#[cfg(feature = "serde")]
-#[macro_use]
-extern crate serde;
-
-#[cfg(test)]
-extern crate serde_json;
-#[cfg(test)]
-extern crate serde_test;
-
 pub mod breaks;
 pub mod compare;
 pub mod delta;

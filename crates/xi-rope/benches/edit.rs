@@ -14,7 +14,6 @@
 #![feature(test)]
 
 extern crate test;
-extern crate xi_rope;
 
 use test::Bencher;
 use xi_rope::rope::Rope;

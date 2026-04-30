@@ -14,18 +14,20 @@
 
 //! Types and helpers used for testing.
 
-use std::io::{self, Cursor, Write};
+use std::io::{self, Cursor};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use serde_json::{self, Value};
 
-use super::{Callback, Error, MessageReader, Peer, ReadError, Response, RpcObject};
+use super::{Callback, Error, MessageReader, NewlineReader, Peer, ReadError, RequestId, Response, RpcObject,
+    WriteTransport};
 
-/// Wraps an instance of `mpsc::Sender`, implementing `Write`.
+/// Wraps an instance of `mpsc::Sender`, implementing [`WriteTransport`].
 ///
-/// This lets the tx side of an mpsc::channel serve as the destination
-/// stream for an RPC loop.
+/// Each `write_message` call sends the raw JSON bytes as a single string to
+/// the channel.  The channel itself provides message framing, so no newline
+/// or Content-Length header is added.
 pub struct DummyWriter(Sender<String>);
 
 /// Wraps an instance of `mpsc::Receiver`, providing convenience methods
@@ -42,10 +44,11 @@ pub fn test_channel() -> (DummyWriter, DummyReader) {
     (DummyWriter(tx), DummyReader(MessageReader::default(), rx))
 }
 
-/// Given a string type, returns a `Cursor<Vec<u8>>`, which implements
-/// `BufRead`.
-pub fn make_reader<S: AsRef<str>>(s: S) -> Cursor<Vec<u8>> {
-    Cursor::new(s.as_ref().as_bytes().to_vec())
+/// Returns a [`NewlineReader`] wrapping a [`Cursor`] over the given string.
+///
+/// Suitable for passing directly to [`RpcLoop::mainloop`].
+pub fn make_reader<S: AsRef<str>>(s: S) -> NewlineReader<Cursor<Vec<u8>>> {
+    NewlineReader::new(Cursor::new(s.as_ref().as_bytes().to_vec()))
 }
 
 impl DummyReader {
@@ -95,17 +98,13 @@ impl DummyReader {
     }
 }
 
-impl Write for DummyWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let s = String::from_utf8(buf.to_vec()).unwrap();
+impl WriteTransport for DummyWriter {
+    fn write_message(&mut self, data: &[u8]) -> io::Result<()> {
+        let s = String::from_utf8(data.to_vec())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         self.0
             .send(s)
             .map_err(|err| io::Error::other(format!("{:?}", err)))
-            .map(|_| buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
     }
 }
 
@@ -114,15 +113,35 @@ impl Peer for DummyPeer {
         Box::new(self.clone())
     }
     fn send_rpc_notification(&self, _method: &str, _params: &Value) {}
-    fn send_rpc_request_async(&self, _method: &str, _params: &Value, f: Box<dyn Callback>) {
-        f.call(Ok("dummy peer".into()))
+    fn send_rpc_request_async(
+        &self,
+        _method: &str,
+        _params: &Value,
+        f: Box<dyn Callback>,
+    ) -> RequestId {
+        f.call(Ok("dummy peer".into()));
+        RequestId::Number(0)
     }
     fn send_rpc_request(&self, _method: &str, _params: &Value) -> Result<Value, Error> {
         Ok("dummy peer".into())
+    }
+    fn send_rpc_request_timeout(
+        &self,
+        _method: &str,
+        _params: &Value,
+        _timeout: std::time::Duration,
+    ) -> Result<Value, Error> {
+        Ok("dummy peer".into())
+    }
+    fn cancel_rpc_request(&self, _id: RequestId) -> bool {
+        false
     }
     fn request_is_pending(&self) -> bool {
         false
     }
     fn schedule_idle(&self, _token: usize) {}
     fn schedule_timer(&self, _time: Instant, _token: usize) {}
+    fn cancel_timer(&self, _token: usize) -> bool {
+        false
+    }
 }

@@ -11,24 +11,15 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#[macro_use]
-extern crate log;
-extern crate chrono;
-extern crate fern;
-
-extern crate dirs;
-
-extern crate xi_core_lib;
-extern crate xi_rpc;
-
 use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process;
 
+use log::{error, info, warn};
 use xi_core_lib::XiCore;
-use xi_rpc::RpcLoop;
+use xi_rpc::{NewlineReader, NewlineWriter, RpcLoop};
 
 const XI_LOG_DIR: &str = "xi-core";
 const XI_LOG_FILE: &str = "xi-core.log";
@@ -208,7 +199,7 @@ fn main() {
     let mut state = XiCore::new();
     let stdin = io::stdin();
     let stdout = io::stdout();
-    let mut rpc_looper = RpcLoop::new(stdout);
+    let mut rpc_looper = RpcLoop::new(NewlineWriter::new(stdout));
 
     let flags = get_flags();
 
@@ -226,7 +217,7 @@ fn main() {
         warn!("Unable to generate the logging path to pass to set up: {}", e)
     }
 
-    match rpc_looper.mainloop(|| stdin.lock(), &mut state) {
+    match rpc_looper.mainloop(|| NewlineReader::new(stdin.lock()), &mut state) {
         Ok(_) => (),
         Err(err) => {
             error!("xi-core exited with error:\n{:?}", err);

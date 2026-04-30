@@ -14,15 +14,27 @@
 
 //! Parsing of raw JSON messages into RPC objects.
 
-use std::io::BufRead;
-
+use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
-use serde_json::{Error as JsonError, Value};
+use serde_json::Value;
+use tracing::trace_span;
 
 use crate::error::{ReadError, RemoteError};
+use crate::transport::ReadTransport;
 
-/// A unique identifier attached to request RPCs.
-type RequestId = u64;
+/// A JSON-RPC 2.0 request identifier, which may be either a number or a string.
+///
+/// Per the JSON-RPC 2.0 specification, `null` identifiers are deliberately
+/// not supported; a `null` id in an incoming message is treated as a
+/// notification.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RequestId {
+    /// A numeric identifier (most common; xi-rpc always generates these).
+    Number(u64),
+    /// A string identifier (accepted for compatibility with other peers).
+    Str(String),
+}
 
 /// An RPC response, received from the peer.
 pub type Response = Result<Value, RemoteError>;
@@ -51,21 +63,25 @@ pub enum Call<N, R> {
     /// A malformed request: the request contained an id, but could
     /// not be parsed. The client will receive an error.
     InvalidRequest(RequestId, RemoteError),
+    /// An incoming notification that could not be deserialized.
+    ///
+    /// The run loop should log this and continue rather than disconnecting.
+    UnknownNotification(String),
 }
 
 impl MessageReader {
-    /// Attempts to read the next line from the stream and parse it as
-    /// an RPC object.
+    /// Attempts to read the next framed message from the transport and
+    /// parse it as an RPC object.
     ///
     /// # Errors
     ///
     /// This function will return an error if there is an underlying
     /// I/O error, if the stream is closed, or if the message is not
     /// a valid JSON object.
-    pub fn next<R: BufRead>(&mut self, reader: &mut R) -> Result<RpcObject, ReadError> {
+    pub fn next<R: ReadTransport>(&mut self, reader: &mut R) -> Result<RpcObject, ReadError> {
         self.0.clear();
-        let _ = reader.read_line(&mut self.0)?;
-        if self.0.is_empty() {
+        let n = reader.read_message(&mut self.0)?;
+        if n == 0 {
             Err(ReadError::Disconnect)
         } else {
             self.parse(&self.0)
@@ -77,9 +93,13 @@ impl MessageReader {
     /// This should not be called directly unless you are writing tests.
     #[doc(hidden)]
     pub fn parse(&self, s: &str) -> Result<RpcObject, ReadError> {
-        let _trace = xi_trace::trace_block("parse", &["rpc"]);
+        let span = trace_span!(target: "xi_rpc", "parse_message");
+        let _entered = span.enter();
         let val = serde_json::from_str::<Value>(s)?;
-        if !val.is_object() {
+        if val.is_array() {
+            // JSON-RPC batch requests are explicitly rejected.
+            Err(ReadError::BatchNotSupported)
+        } else if !val.is_object() {
             Err(ReadError::NotObject)
         } else {
             Ok(val.into())
@@ -88,9 +108,15 @@ impl MessageReader {
 }
 
 impl RpcObject {
-    /// Returns the 'id' of the underlying object, if present.
+    /// Returns the `id` of the underlying object, if present.
+    ///
+    /// Accepts both numeric and string ids per JSON-RPC 2.0.
     pub fn get_id(&self) -> Option<RequestId> {
-        self.0.get("id").and_then(Value::as_u64)
+        match self.0.get("id")? {
+            Value::Number(n) => n.as_u64().map(RequestId::Number),
+            Value::String(s) => Some(RequestId::Str(s.clone())),
+            _ => None,
+        }
     }
 
     /// Returns the 'method' field of the underlying object, if present.
@@ -119,11 +145,26 @@ impl RpcObject {
     pub fn into_response(mut self) -> Result<Response, String> {
         let _ = self.get_id().ok_or("Response requires 'id' field.".to_string())?;
 
-        if self.0.get("result").is_some() == self.0.get("error").is_some() {
-            return Err("RPC response must contain exactly one of\
+        let has_result = self.0.get("result").is_some();
+        let has_error = self.0.get("error").is_some();
+        if has_result == has_error {
+            return Err("RPC response must contain exactly one of \
                         'error' or 'result' fields."
                 .into());
         }
+
+        // Reject any unexpected fields beyond the standard response members.
+        if let Some(obj) = self.0.as_object() {
+            for key in obj.keys() {
+                match key.as_str() {
+                    "id" | "result" | "error" | "jsonrpc" => {}
+                    other => {
+                        return Err(format!("Unexpected field in RPC response: '{}'", other));
+                    }
+                }
+            }
+        }
+
         let result = self.0.as_object_mut().and_then(|obj| obj.remove("result"));
 
         match result {
@@ -145,21 +186,34 @@ impl RpcObject {
     ///
     /// Returns a `serde_json::Error` if the `Value` cannot be converted
     /// to one of the expected types.
-    pub fn into_rpc<N, R>(self) -> Result<Call<N, R>, JsonError>
+    /// Attempts to convert the underlying `Value` into either an RPC
+    /// notification or request.
+    ///
+    /// For requests (objects with an `id`) a deserialization failure produces
+    /// `Call::InvalidRequest` so the peer receives a structured error response.
+    ///
+    /// For notifications (objects without an `id`) a deserialization failure
+    /// returns `Call::UnknownNotification` so the caller can log and continue
+    /// rather than terminating the run loop.
+    pub fn into_rpc<N, R>(self) -> Call<N, R>
     where
         N: DeserializeOwned,
         R: DeserializeOwned,
     {
         let id = self.get_id();
+        let raw = self.0;
         match id {
-            Some(id) => match serde_json::from_value::<R>(self.0) {
-                Ok(resp) => Ok(Call::Request(id, resp)),
-                Err(err) => Ok(Call::InvalidRequest(id, err.into())),
+            Some(id) => match serde_json::from_value::<R>(raw.clone()) {
+                Ok(resp) => Call::Request(id, resp),
+                Err(err) => {
+                    let remote_error = RemoteError::from_request_parse_error(&raw, err);
+                    Call::InvalidRequest(id, remote_error)
+                }
             },
-            None => {
-                let result = serde_json::from_value::<N>(self.0)?;
-                Ok(Call::Notification(result))
-            }
+            None => match serde_json::from_value::<N>(raw) {
+                Ok(notif) => Call::Notification(notif),
+                Err(err) => Call::UnknownNotification(err.to_string()),
+            },
         }
     }
 }
@@ -173,6 +227,7 @@ impl From<Value> for RpcObject {
 #[cfg(test)]
 mod tests {
 
+    use serde_json::json;
     use super::*;
 
     #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -196,8 +251,8 @@ mod tests {
         let json = r#"{"id":0,"method":"new_view","params":{}}"#;
         let p: RpcObject = serde_json::from_str::<Value>(json).unwrap().into();
         assert!(!p.is_response());
-        let req = p.into_rpc::<TestN, TestR>().unwrap();
-        assert_eq!(req, Call::Request(0, TestR::NewView { file_path: None }));
+        let req = p.into_rpc::<TestN, TestR>();
+        assert_eq!(req, Call::Request(RequestId::Number(0), TestR::NewView { file_path: None }));
     }
 
     #[test]
@@ -205,8 +260,11 @@ mod tests {
         // method does not exist
         let json = r#"{"id":0,"method":"new_truth","params":{}}"#;
         let p: RpcObject = serde_json::from_str::<Value>(json).unwrap().into();
-        let req = p.into_rpc::<TestN, TestR>().unwrap();
-        let is_ok = matches!(req, Call::InvalidRequest(0, _));
+        let req = p.into_rpc::<TestN, TestR>();
+        let is_ok = matches!(
+            req,
+            Call::InvalidRequest(RequestId::Number(0), RemoteError::MethodNotFound(_))
+        );
         if !is_ok {
             panic!("{:?}", req);
         }
@@ -217,8 +275,22 @@ mod tests {
         // method is a notification, should not have ID
         let json = r#"{"id":0,"method":"close_view","params":{"view_id": "view-id-1"}}"#;
         let p: RpcObject = serde_json::from_str::<Value>(json).unwrap().into();
-        let req = p.into_rpc::<TestN, TestR>().unwrap();
-        let is_ok = matches!(req, Call::InvalidRequest(0, _));
+        let req = p.into_rpc::<TestN, TestR>();
+        let is_ok = matches!(req, Call::InvalidRequest(RequestId::Number(0), _));
+        if !is_ok {
+            panic!("{:?}", req);
+        }
+    }
+
+    #[test]
+    fn request_invalid_params() {
+        let json = r#"{"id":0,"method":"new_view","params":{"file_path":9}}"#;
+        let p: RpcObject = serde_json::from_str::<Value>(json).unwrap().into();
+        let req = p.into_rpc::<TestN, TestR>();
+        let is_ok = matches!(
+            req,
+            Call::InvalidRequest(RequestId::Number(0), RemoteError::InvalidParams(_))
+        );
         if !is_ok {
             panic!("{:?}", req);
         }
@@ -247,5 +319,16 @@ mod tests {
         let json = r#"{"code": -32600, "message": "Invalid Request"}"#;
         let e = serde_json::from_str::<RemoteError>(json).unwrap();
         assert_eq!(e, RemoteError::InvalidRequest(None));
+    }
+
+    #[test]
+    fn test_unknown_error_value_round_trips_as_unknown_remote_error() {
+        let e = serde_json::from_value::<RemoteError>(json!("boom")).unwrap();
+        assert_eq!(e, RemoteError::Unknown(json!("boom")));
+
+        let serialized = serde_json::to_value(&e).unwrap();
+        assert_eq!(serialized["code"], json!(-32001));
+        assert_eq!(serialized["message"], json!("Unknown remote error"));
+        assert_eq!(serialized["data"], json!("boom"));
     }
 }

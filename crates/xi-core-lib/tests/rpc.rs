@@ -12,18 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[macro_use]
-extern crate serde_json;
-
-extern crate xi_core_lib;
-extern crate xi_rpc;
-
 use std::io;
 
+use serde_json::json;
 use xi_core_lib::test_helpers;
 use xi_core_lib::XiCore;
 use xi_rpc::test_utils::{make_reader, test_channel};
-use xi_rpc::{ReadError, RpcLoop};
+use xi_rpc::{NewlineWriter, ReadError, RpcLoop};
 
 #[test]
 /// Tests that the handler responds to a standard startup sequence as expected.
@@ -56,7 +51,7 @@ fn test_startup() {
 fn test_state() {
     let mut state = XiCore::new();
 
-    let write = io::sink();
+    let write = NewlineWriter::new(io::sink());
     let json = make_reader(
         r#"{"method":"client_started","params":{}}
 {"id":0,"method":"new_view","params":{"file_path":"../Cargo.toml"}}
@@ -187,7 +182,7 @@ fn test_invalidate() {
 /// malformed json.
 fn test_malformed_json() {
     let mut state = XiCore::new();
-    let write = io::sink();
+    let write = NewlineWriter::new(io::sink());
     let mut rpc_looper = RpcLoop::new(write);
     // malformed json: method should be in quotes.
     let read = make_reader(
@@ -213,7 +208,7 @@ fn test_malformed_json() {
 /// Note: this is a test of message parsing, not of editor behaviour.
 fn test_movement_cmds() {
     let mut state = XiCore::new();
-    let write = io::sink();
+    let write = NewlineWriter::new(io::sink());
     let mut rpc_looper = RpcLoop::new(write);
     // init a new view
     let json = make_reader(
@@ -232,7 +227,7 @@ fn test_movement_cmds() {
 /// are handled.
 fn test_text_commands() {
     let mut state = XiCore::new();
-    let write = io::sink();
+    let write = NewlineWriter::new(io::sink());
     let mut rpc_looper = RpcLoop::new(write);
     // init a new view
     let json = make_reader(
@@ -249,7 +244,7 @@ fn test_text_commands() {
 #[test]
 fn test_other_edit_commands() {
     let mut state = XiCore::new();
-    let write = io::sink();
+    let write = NewlineWriter::new(io::sink());
     let mut rpc_looper = RpcLoop::new(write);
     // init a new view
     let json = make_reader(

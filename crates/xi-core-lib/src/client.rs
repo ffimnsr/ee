@@ -16,7 +16,8 @@
 
 use std::time::Instant;
 
-use serde_json::{self, Value};
+use serde::Serialize;
+use serde_json::{self, json, Value};
 use xi_rpc::{self, RpcPeer};
 
 use crate::config::Table;

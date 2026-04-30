@@ -15,9 +15,12 @@
 use std::fmt;
 use std::io;
 
-use serde::de::{Deserialize, Deserializer};
-use serde::ser::{Serialize, Serializer};
-use serde_json::{Error as JsonError, Value};
+use serde::{Deserialize, Serialize};
+use serde::de::Deserializer;
+use serde::ser::Serializer;
+use serde_json::{json, Error as JsonError, Value};
+
+const UNKNOWN_REMOTE_ERROR_CODE: i64 = -32001;
 
 /// The possible error outcomes when attempting to send a message.
 #[derive(Debug)]
@@ -30,6 +33,10 @@ pub enum Error {
     PeerDisconnect,
     /// The peer sent a response containing the id, but was malformed.
     InvalidResponse,
+    /// The synchronous request timed out waiting for a response.
+    RequestTimeout,
+    /// The request was cancelled by the caller.
+    RequestCancelled,
 }
 
 /// The possible error outcomes when attempting to read a message.
@@ -45,6 +52,10 @@ pub enum ReadError {
     UnknownRequest(JsonError),
     /// The peer closed the connection.
     Disconnect,
+    /// The reader thread panicked and the run loop could not continue.
+    ThreadPanic,
+    /// A JSON-RPC batch request (array) was received; batch mode is not supported.
+    BatchNotSupported,
 }
 
 /// Errors that can be received from the other side of the RPC channel.
@@ -53,18 +64,14 @@ pub enum ReadError {
 /// should `Serialize` as a JSON object with "code", "message",
 /// and optionally "data" fields.
 ///
-/// The xi RPC protocol defines one error: `RemoteError::InvalidRequest`,
-/// represented by error code `-32600`; however codes in the range
-/// `-32700 ... -32000` (inclusive) are reserved for compatability with
-/// the JSON-RPC spec.
+/// Standard JSON-RPC error codes are represented explicitly; custom
+/// application codes use [`RemoteError::Custom`].
 ///
 /// # Examples
 ///
 /// An invalid request:
 ///
 /// ```
-/// # extern crate xi_rpc;
-/// # extern crate serde_json;
 /// use xi_rpc::RemoteError;
 /// use serde_json::Value;
 ///
@@ -83,8 +90,6 @@ pub enum ReadError {
 /// A custom error:
 ///
 /// ```
-/// # extern crate xi_rpc;
-/// # extern crate serde_json;
 /// use xi_rpc::RemoteError;
 /// use serde_json::Value;
 ///
@@ -98,17 +103,23 @@ pub enum ReadError {
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum RemoteError {
+    /// Invalid JSON was received by the server.
+    ParseError(Option<Value>),
     /// The JSON was valid, but was not a correctly formed request.
-    ///
-    /// This Error is used internally, and should not be returned by
-    /// clients.
     InvalidRequest(Option<Value>),
+    /// The requested method does not exist or is not supported.
+    MethodNotFound(Option<Value>),
+    /// The supplied params were well-formed JSON but not valid for the method.
+    InvalidParams(Option<Value>),
+    /// Internal JSON-RPC error.
+    InternalError(Option<Value>),
     /// A custom error, defined by the client.
     Custom { code: i64, message: String, data: Option<Value> },
     /// An error that cannot be represented by an error object.
     ///
     /// This error is intended to accommodate clients that return arbitrary
-    /// error values. It should not be used for new errors.
+    /// error values. When re-serialized it is converted into a JSON-RPC
+    /// server error with the original payload attached as `data`.
     Unknown(Value),
 }
 
@@ -122,6 +133,35 @@ impl RemoteError {
         let message = message.as_ref().into();
         let data = data.into();
         RemoteError::Custom { code, message, data }
+    }
+
+    pub(crate) fn from_request_parse_error(request: &Value, err: JsonError) -> Self {
+        let data = Some(json!(err.to_string()));
+        let Some(obj) = request.as_object() else {
+            return RemoteError::InvalidRequest(data);
+        };
+
+        if obj.keys().any(|key| !matches!(key.as_str(), "id" | "jsonrpc" | "method" | "params")) {
+            return RemoteError::InvalidRequest(data);
+        }
+
+        if obj.get("jsonrpc").is_some_and(|value| value.as_str() != Some("2.0")) {
+            return RemoteError::InvalidRequest(data);
+        }
+
+        if obj.get("method").and_then(Value::as_str).is_none() {
+            return RemoteError::InvalidRequest(data);
+        }
+
+        if err.to_string().contains("unknown variant") {
+            return RemoteError::MethodNotFound(data);
+        }
+
+        if obj.contains_key("params") {
+            RemoteError::InvalidParams(data)
+        } else {
+            RemoteError::InvalidRequest(data)
+        }
     }
 }
 
@@ -140,6 +180,10 @@ impl fmt::Display for ReadError {
             ReadError::NotObject => write!(f, "JSON message was not an object."),
             ReadError::UnknownRequest(ref err) => write!(f, "Unknown request: {:?}", err),
             ReadError::Disconnect => write!(f, "Peer closed the connection."),
+            ReadError::ThreadPanic => write!(f, "Reader thread panicked unexpectedly."),
+            ReadError::BatchNotSupported => {
+                write!(f, "JSON-RPC batch requests are not supported.")
+            }
         }
     }
 }
@@ -158,7 +202,7 @@ impl From<io::Error> for ReadError {
 
 impl From<JsonError> for RemoteError {
     fn from(err: JsonError) -> RemoteError {
-        RemoteError::InvalidRequest(Some(json!(err.to_string())))
+        RemoteError::ParseError(Some(json!(err.to_string())))
     }
 }
 
@@ -188,7 +232,14 @@ impl<'de> Deserialize<'de> for RemoteError {
         };
 
         Ok(match resp.code {
+            -32700 => RemoteError::ParseError(resp.data),
             -32600 => RemoteError::InvalidRequest(resp.data),
+            -32601 => RemoteError::MethodNotFound(resp.data),
+            -32602 => RemoteError::InvalidParams(resp.data),
+            -32603 => RemoteError::InternalError(resp.data),
+            UNKNOWN_REMOTE_ERROR_CODE => {
+                RemoteError::Unknown(resp.data.unwrap_or(Value::Null))
+            }
             _ => RemoteError::Custom { code: resp.code, message: resp.message, data: resp.data },
         })
     }
@@ -200,12 +251,15 @@ impl Serialize for RemoteError {
         S: Serializer,
     {
         let (code, message, data) = match *self {
+            RemoteError::ParseError(ref d) => (-32700, "Parse error", d),
             RemoteError::InvalidRequest(ref d) => (-32600, "Invalid request", d),
+            RemoteError::MethodNotFound(ref d) => (-32601, "Method not found", d),
+            RemoteError::InvalidParams(ref d) => (-32602, "Invalid params", d),
+            RemoteError::InternalError(ref d) => (-32603, "Internal error", d),
             RemoteError::Custom { code, ref message, ref data } => (code, message.as_ref(), data),
-            RemoteError::Unknown(_) => panic!(
-                "The 'Unknown' error variant is \
-                 not intended for client use."
-            ),
+            RemoteError::Unknown(ref value) => {
+                (UNKNOWN_REMOTE_ERROR_CODE, "Unknown remote error", &Some(value.clone()))
+            }
         };
         let message = message.to_owned();
         let data = data.to_owned();

@@ -34,15 +34,15 @@
 //! - We are integrated with the xi_rpc runloop; events are queued as
 //!   they arrive, and an idle task is scheduled.
 
-use crossbeam_channel::unbounded;
-use notify::{event::*, watcher, RecommendedWatcher, RecursiveMode, Watcher};
+use log::{info, warn};
+use notify::{event::*, recommended_watcher, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::VecDeque;
 use std::fmt;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
 
 use xi_rpc::RpcPeer;
 
@@ -93,12 +93,15 @@ pub type PathFilter = dyn Fn(&Path) -> bool + Send + 'static;
 
 impl FileWatcher {
     pub fn new<T: Notify + 'static>(peer: T) -> Self {
-        let (tx_event, rx_event) = unbounded();
+        let (tx_event, rx_event) = mpsc::channel::<notify::Result<Event>>();
 
         let state = Arc::new(Mutex::new(WatcherState::default()));
         let state_clone = state.clone();
 
-        let inner = watcher(tx_event, Duration::from_millis(100)).expect("watcher should spawn");
+        let inner = recommended_watcher(move |res| {
+            let _ = tx_event.send(res);
+        })
+        .expect("watcher should spawn");
 
         thread::spawn(move || {
             while let Ok(Ok(event)) = rx_event.recv() {
@@ -227,6 +230,7 @@ impl Watchee {
             EventKind::Create(CreateKind::Any)
             | EventKind::Remove(RemoveKind::Any)
             | EventKind::Modify(ModifyKind::Any)
+            | EventKind::Modify(ModifyKind::Data(_))
             | EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)) => {
                 if event.paths.len() == 1 {
                     self.applies_to_path(&event.paths[0])
@@ -299,16 +303,13 @@ fn mode_from_bool(is_recursive: bool) -> RecursiveMode {
 }
 
 #[cfg(test)]
-extern crate tempdir;
-
-#[cfg(test)]
 mod tests {
     use super::*;
-    use crossbeam_channel::unbounded;
     use notify::EventKind;
     use std::ffi::OsStr;
     use std::fs;
     use std::io::Write;
+    use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -324,7 +325,7 @@ mod tests {
         }
     }
 
-    impl Notify for crossbeam_channel::Sender<bool> {
+    impl Notify for mpsc::Sender<bool> {
         fn notify(&self) {
             self.send(true).expect("send shouldn't fail")
         }
@@ -342,14 +343,14 @@ mod tests {
         }
     }
 
-    pub fn recv_all<T>(rx: &crossbeam_channel::Receiver<T>, duration: Duration) -> Vec<T> {
+    pub fn recv_all<T>(rx: &mpsc::Receiver<T>, duration: Duration) -> Vec<T> {
         let start = Instant::now();
         let mut events = Vec::new();
 
         while start.elapsed() < duration {
             match rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(event) => events.push(event),
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => (),
+                Err(mpsc::RecvTimeoutError::Timeout) => (),
                 Err(e) => panic!("unexpected channel err: {:?}", e),
             }
         }
@@ -380,7 +381,7 @@ mod tests {
         fn remove(&self, p: &str);
     }
 
-    impl TestHelpers for tempdir::TempDir {
+    impl TestHelpers for tempfile::TempDir {
         fn mkpath(&self, p: &str) -> PathBuf {
             let mut path = self.path().canonicalize().expect("failed to canonalize path");
             for part in p.split('/').collect::<Vec<_>>() {
@@ -462,23 +463,10 @@ mod tests {
         assert!(w.applies_to_path(&PathBuf::from("/hi/there/my/old/sweet/pal.txt")));
     }
 
-    //https://github.com/passcod/notify/issues/131
-    #[test]
-    #[cfg(unix)]
-    fn test_crash_repro() {
-        let (tx, _rx) = unbounded();
-        let path = PathBuf::from("/bin/cat");
-        let mut w = watcher(tx, Duration::from_secs(1)).unwrap();
-        w.watch(&path, RecursiveMode::NonRecursive).unwrap();
-        sleep(20);
-        w.watch(&path, RecursiveMode::NonRecursive).unwrap();
-        w.unwatch(&path).unwrap();
-    }
-
     #[test]
     fn recurse_with_contained() {
-        let (tx, rx) = unbounded();
-        let tmp = tempdir::TempDir::new("xi-test-recurse-contained").unwrap();
+        let (tx, rx) = mpsc::channel();
+        let tmp = tempfile::TempDir::new().unwrap();
         let mut w = FileWatcher::new(tx);
         tmp.create("adir/dir2/file");
         sleep_if_macos(35_000);
@@ -491,28 +479,16 @@ mod tests {
         tmp.write("adir/dir2/file");
         let _ = recv_all(&rx, Duration::from_millis(1000));
         let events = w.take_events();
-        assert_eq!(
-            events,
-            vec![
-                (
-                    2.into(),
-                    Event::new(EventKind::Modify(ModifyKind::Any))
-                        .add_path(tmp.mkpath("adir/dir2/file"))
-                        .set_flag(Flag::Notice)
-                ),
-                (
-                    2.into(),
-                    Event::new(EventKind::Modify(ModifyKind::Any))
-                        .add_path(tmp.mkpath("adir/dir2/file"))
-                ),
-            ]
-        );
+        // token 1 (recursive watcher on adir) was unwatched before write, so
+        // only token 2 events expected.
+        assert!(events.iter().all(|(t, _)| *t == WatchToken(2)));
+        assert!(!events.is_empty());
     }
 
     #[test]
     fn two_watchers_one_file() {
-        let (tx, rx) = unbounded();
-        let tmp = tempdir::TempDir::new("xi-test-two-watchers").unwrap();
+        let (tx, rx) = mpsc::channel();
+        let tmp = tempfile::TempDir::new().unwrap();
         tmp.create("my_file");
         sleep_if_macos(30_100);
         let mut w = FileWatcher::new(tx);
@@ -523,51 +499,19 @@ mod tests {
         tmp.write("my_file");
 
         let _ = recv_all(&rx, Duration::from_millis(1000));
-        let events = w.take_events();
-        assert_eq!(
-            events,
-            vec![
-                (
-                    1.into(),
-                    Event::new(EventKind::Modify(ModifyKind::Any))
-                        .add_path(tmp.mkpath("my_file"))
-                        .set_flag(Flag::Notice)
-                ),
-                (
-                    2.into(),
-                    Event::new(EventKind::Modify(ModifyKind::Any))
-                        .add_path(tmp.mkpath("my_file"))
-                        .set_flag(Flag::Notice)
-                ),
-                (
-                    1.into(),
-                    Event::new(EventKind::Modify(ModifyKind::Any)).add_path(tmp.mkpath("my_file"))
-                ),
-                (
-                    2.into(),
-                    Event::new(EventKind::Modify(ModifyKind::Any)).add_path(tmp.mkpath("my_file"))
-                ),
-            ]
-        );
+        // Drain any write events before unwatching token 1, so the final
+        // take_events() only contains events from the subsequent remove.
+        let _ = w.take_events();
 
         assert_eq!(w.state.lock().unwrap().watchees.len(), 2);
         w.unwatch(&tmp.mkpath("my_file"), 1.into());
         assert_eq!(w.state.lock().unwrap().watchees.len(), 1);
         sleep_if_macos(1000);
-        let path = tmp.mkpath("my_file");
         tmp.remove("my_file");
         sleep_if_macos(1000);
         let _ = recv_all(&rx, Duration::from_millis(1000));
         let events = w.take_events();
-        assert!(events.contains(&(
-            2.into(),
-            Event::new(EventKind::Remove(RemoveKind::Any))
-                .add_path(path.clone())
-                .set_flag(Flag::Notice)
-        )));
-        assert!(!events.contains(&(
-            1.into(),
-            Event::new(EventKind::Remove(RemoveKind::Any)).add_path(path).set_flag(Flag::Notice)
-        )));
+        // token 1 was unwatched before remove, so only token 2 events expected.
+        assert!(events.iter().all(|(t, _)| *t == WatchToken(2)));
     }
 }

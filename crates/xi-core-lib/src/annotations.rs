@@ -14,17 +14,18 @@
 
 //! Management of annotations.
 
-use serde::de::{Deserialize, Deserializer};
-use serde::ser::{Serialize, SerializeSeq, Serializer};
-use serde_json::{self, Value};
+use serde::{Deserialize, Serialize};
+use serde::de::Deserializer;
+use serde::ser::{SerializeSeq, Serializer};
+use serde_json::{self, json, Value};
 
 use std::collections::HashMap;
 
 use crate::line_offset::LineOffset;
 use crate::plugins::PluginId;
 use crate::view::View;
-use crate::xi_rope::spans::Spans;
-use crate::xi_rope::{Interval, Rope};
+use xi_rope::spans::Spans;
+use xi_rope::{Interval, Rope};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum AnnotationType {
@@ -220,7 +221,7 @@ mod tests {
     use crate::plugins::PluginPid;
     use crate::tabs::BufferId;
     use crate::view::View;
-    use crate::xi_rope::spans::SpansBuilder;
+    use xi_rope::spans::SpansBuilder;
 
     #[test]
     fn test_annotation_range_serialization() {

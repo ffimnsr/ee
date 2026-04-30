@@ -18,16 +18,18 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use log::{debug, error, trace, warn};
+
 use xi_plugin_lib::{ChunkCache, CoreProxy, Plugin, View};
 use xi_rope::rope::RopeDelta;
 
 use crate::conversion_utils::*;
 use crate::language_server_client::LanguageServerClient;
-use crate::lsp_types::*;
+use lsp_types::*;
 use crate::result_queue::ResultQueue;
 use crate::types::{Config, LanguageResponseError, LspResponse};
 use crate::utils::*;
-use crate::xi_core::{ConfigTable, ViewId};
+use xi_core_lib::{ConfigTable, ViewId};
 
 pub struct ViewInfo {
     version: i32,

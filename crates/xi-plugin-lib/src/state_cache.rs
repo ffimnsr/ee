@@ -14,7 +14,7 @@
 
 //! A more sophisticated cache that manages user state.
 
-use rand::{thread_rng, Rng};
+use rand::Rng;
 
 use xi_rope::interval::IntervalBounds;
 use xi_rope::{LinesMetric, RopeDelta};
@@ -202,9 +202,9 @@ impl<S: Clone + Default> StateCache<S> {
 
     fn choose_victim(&self) -> usize {
         let mut best = None;
-        let mut rng = thread_rng();
+        let mut rng = rand::rng();
         for _ in 0..NUM_PROBES {
-            let ix = rng.gen_range(0, self.state_cache.len());
+            let ix = rng.random_range(0..self.state_cache.len());
             let gap = self.compute_gap(ix);
             if best.map(|(last_gap, _)| gap < last_gap).unwrap_or(true) {
                 best = Some((gap, ix));

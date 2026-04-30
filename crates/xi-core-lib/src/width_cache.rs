@@ -17,6 +17,8 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
+use serde::{Deserialize, Serialize};
+
 use crate::client::Client;
 
 /// A token which can be used to retrieve an actual width value when the

@@ -14,11 +14,6 @@
 
 //! A language syntax coloring and indentation plugin for xi-editor.
 
-extern crate xi_core_lib;
-extern crate xi_plugin_lib;
-extern crate xi_rope;
-extern crate xi_trace;
-
 use std::{collections::HashMap, env, path::Path};
 
 use crate::language::{plaintext::PlaintextParser, rust::RustParser};

@@ -16,6 +16,9 @@
 
 use std::cmp::{max, min};
 
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+
 use crate::annotations::{AnnotationRange, AnnotationSlice, AnnotationType, ToAnnotation};
 use crate::line_offset::LineOffset;
 use crate::selection::{InsertDrift, SelRegion, Selection};

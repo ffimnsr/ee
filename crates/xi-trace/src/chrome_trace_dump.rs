@@ -102,6 +102,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     #[cfg(feature = "json_payload")]
     use crate::TracePayloadT;
     #[cfg(feature = "benchmarks")]

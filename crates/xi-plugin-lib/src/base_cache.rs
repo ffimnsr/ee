@@ -18,7 +18,7 @@
 
 use memchr::memchr;
 
-use crate::xi_core::plugin_rpc::{GetDataResponse, TextUnit};
+use xi_core_lib::plugin_rpc::{GetDataResponse, TextUnit};
 use xi_rope::interval::IntervalBounds;
 use xi_rope::{DeltaElement, Interval, LinesMetric, Rope, RopeDelta};
 use xi_trace::trace_block;
@@ -457,7 +457,7 @@ fn newline_offsets(text: &str, storage: &mut Vec<usize>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xi_core::plugin_rpc::GetDataResponse;
+    use xi_core_lib::plugin_rpc::GetDataResponse;
     use xi_rope::delta::Delta;
     use xi_rope::interval::Interval;
     use xi_rope::rope::{LinesMetric, Rope};

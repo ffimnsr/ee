@@ -16,6 +16,8 @@ use std::borrow::{Borrow, Cow};
 use std::cmp::min;
 use std::collections::BTreeSet;
 
+use log::error;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use xi_rope::diff::{Diff, LineHashDiff};
@@ -255,7 +257,6 @@ impl Editor {
         self.layers.update_all(&delta);
 
         self.last_rev_id = self.engine.get_head_rev_id();
-        self.sync_state_changed();
         Some((delta, last_text, drift))
     }
 

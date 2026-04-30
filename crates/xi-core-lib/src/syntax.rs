@@ -19,6 +19,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
+
 use crate::config::Table;
 
 /// The canonical identifier for a particular `LanguageDefinition`.

@@ -31,6 +31,8 @@
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeSet;
+#[cfg(feature = "serde")]
+use serde::{Deserialize, Serialize};
 
 use crate::delta::{Delta, InsertDelta};
 use crate::interval::Interval;

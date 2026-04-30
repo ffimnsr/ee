@@ -15,6 +15,7 @@
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
+use log::info;
 use serde_json::Value;
 
 use xi_rpc::{Error as RpcError, Handler, ReadError, RemoteError, RpcCtx};

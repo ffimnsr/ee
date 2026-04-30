@@ -9,10 +9,6 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-pom = { workspace = true, optional = true }
-regex = { workspace = true, optional = true }
-nom = { workspace = true, optional = true }
-combine = { workspace = true, optional = true }
 
 [dependencies.xi-plugin-lib]
 workspace = true

@@ -18,6 +18,8 @@
 //! This simplifies code elsewhere, and makes it easier to route events to
 //! the editor or view as appropriate.
 
+use log::warn;
+
 use crate::movement::Movement;
 use crate::rpc::{
     EditNotification, FindQuery, GestureType, LineRange, MouseAction, Position,
