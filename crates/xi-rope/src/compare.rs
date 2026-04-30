@@ -43,6 +43,10 @@ const SSE_STRIDE: usize = 16;
 #[doc(hidden)]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.2")]
+/// # Safety
+///
+/// Caller must ensure `one.len() >= 16` and `two.len() >= 16`.
+/// Caller must also only invoke this function when `sse4.2` support is available.
 pub unsafe fn sse_compare_mask(one: &[u8], two: &[u8]) -> i32 {
     unsafe {
         use std::arch::x86_64::*;
@@ -67,6 +71,10 @@ const AVX_STRIDE: usize = 32;
 #[doc(hidden)]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// Caller must ensure `one.len() >= 32` and `two.len() >= 32`.
+/// Caller must also only invoke this function when `avx2` support is available.
 pub unsafe fn avx_compare_mask(one: &[u8], two: &[u8]) -> i32 {
     unsafe {
         use std::arch::x86_64::*;
@@ -105,6 +113,10 @@ pub fn ne_idx_rev(one: &[u8], two: &[u8]) -> Option<usize> {
 #[doc(hidden)]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+/// # Safety
+///
+/// Caller must ensure `one` and `two` stay valid for unchecked slicing while this
+/// function scans them, and only call it when `avx2` support is available.
 pub unsafe fn ne_idx_avx(one: &[u8], two: &[u8]) -> Option<usize> {
     unsafe {
         let min_len = one.len().min(two.len());
@@ -129,6 +141,10 @@ pub unsafe fn ne_idx_avx(one: &[u8], two: &[u8]) -> Option<usize> {
 #[doc(hidden)]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.2")]
+/// # Safety
+///
+/// Caller must ensure `one` and `two` stay valid for unchecked slicing while this
+/// function scans them, and only call it when `sse4.2` support is available.
 pub unsafe fn ne_idx_sse(one: &[u8], two: &[u8]) -> Option<usize> {
     unsafe {
         let min_len = one.len().min(two.len());
@@ -151,6 +167,11 @@ pub unsafe fn ne_idx_sse(one: &[u8], two: &[u8]) -> Option<usize> {
 #[doc(hidden)]
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse4.2")]
+/// # Safety
+///
+/// Caller must ensure `one` and `two` stay valid for the reverse scans and any
+/// fixed-width SIMD loads performed here, and only call it when `sse4.2` support
+/// is available.
 pub unsafe fn ne_idx_rev_sse(one: &[u8], two: &[u8]) -> Option<usize> {
     unsafe {
         let min_len = one.len().min(two.len());

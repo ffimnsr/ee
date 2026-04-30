@@ -184,11 +184,11 @@
 
 ### crates/xi-rope
 
-- [ ] Replace invariant `panic!()` calls in `crates/xi-rope/src/tree.rs` (L105, L259, L267, L283, L326) with `Result`/`Option` returns or `debug_assert!` plus typed errors.
-- [ ] Add bounds/None handling for boundary unwraps in `crates/xi-rope/src/tree.rs` L731 (`prev_leaf().unwrap()` and metric conversion unwraps).
-- [ ] Add invariant assertions or bounds checks in `TreeBuilder` loop at `crates/xi-rope/src/tree.rs` L503-L517 (`last_mut().unwrap()`, `pop().unwrap()`).
-- [ ] Document formal safety requirements (buffer length ≥ 16/32 bytes) on `pub unsafe fn` SIMD helpers in `crates/xi-rope/src/compare.rs` (L46, L70, L108, L132, L154).
-- [ ] Address tree-walking efficiency TODOs in `crates/xi-rope/src/tree.rs` (L101, L704, L729).
+- [x] Replace invariant `panic!()` calls in `crates/xi-rope/src/tree.rs` (L105, L259, L267, L283, L326) with `Result`/`Option` returns or `debug_assert!` plus typed errors.
+- [x] Add bounds/None handling for boundary unwraps in `crates/xi-rope/src/tree.rs` L731 (`prev_leaf().unwrap()` and metric conversion unwraps).
+- [x] Add invariant assertions or bounds checks in `TreeBuilder` loop at `crates/xi-rope/src/tree.rs` L503-L517 (`last_mut().unwrap()`, `pop().unwrap()`).
+- [x] Document formal safety requirements (buffer length ≥ 16/32 bytes) on `pub unsafe fn` SIMD helpers in `crates/xi-rope/src/compare.rs` (L46, L70, L108, L132, L154).
+- [x] Address tree-walking efficiency TODOs in `crates/xi-rope/src/tree.rs` (L101, L704, L729).
 
 ### crates/xi-unicode
 
