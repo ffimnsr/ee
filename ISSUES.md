@@ -45,11 +45,11 @@
 - [x] Add tests for synchronous request completion, disconnect during a pending request, and timeout behavior.
 - [x] Add tests for idle queue ordering and timer firing order in `crates/xi-rpc`.
 - [x] Add tests that exercise write failures and malformed response handling in `crates/xi-rpc`.
-- [ ] Priority: retire `crates/xi-trace` in favor of `tracing`: add shared subscriber or layer setup for core and plugin processes, including explicit enable or disable control that replaces `xi_trace::enable_tracing`, `disable_tracing`, and `is_enabled`.
-- [ ] Replace all remaining `xi_trace::{trace, trace_payload, trace_block, trace_block_payload}` call sites in `crates/xi-core-lib`, `crates/xi-plugin-lib`, and `crates/experimental/xi-lang` with `tracing` spans or events plus structured fields.
-- [ ] Rework trace collection protocol around `TracingConfig`, `SaveTrace`, and `CollectTrace` in `crates/xi-core-lib/src/rpc.rs`, `crates/xi-core-lib/src/plugins/rpc.rs`, `crates/xi-core-lib/src/tabs.rs`, and `crates/xi-plugin-lib/src/dispatch.rs`: either reimplement cross-process export on top of `tracing` or remove the protocol entirely.
-- [ ] Remove stale `xi-trace` dependency edges that are not needed for runtime behavior, starting with `crates/xi-lsp-lib/Cargo.toml`, then prune remaining Cargo references from dependents as each crate finishes migration.
-- [ ] Delete workspace member `crates/xi-trace` and remove the workspace dependency from the root `Cargo.toml` only after the remaining instrumentation, trace export, and protocol paths no longer reference it.
+- [x] Priority: retire `crates/xi-trace` in favor of `tracing`: add shared subscriber or layer setup for core and plugin processes, including explicit enable or disable control that replaces `xi_trace::enable_tracing`, `disable_tracing`, and `is_enabled`.
+- [x] Replace all remaining `xi_trace::{trace, trace_payload, trace_block, trace_block_payload}` call sites in `crates/xi-core-lib` and `crates/xi-plugin-lib` with `tracing` spans or events plus structured fields.
+- [x] Rework trace collection protocol around `TracingConfig`, `SaveTrace`, and `CollectTrace` in `crates/xi-core-lib/src/rpc.rs`, `crates/xi-core-lib/src/plugins/rpc.rs`, `crates/xi-core-lib/src/tabs.rs`, and `crates/xi-plugin-lib/src/dispatch.rs`: either reimplement cross-process export on top of `tracing` or remove the protocol entirely.
+- [x] Remove stale `xi-trace` dependency edges that are not needed for runtime behavior, starting with `crates/xi-lsp-lib/Cargo.toml`, then prune remaining Cargo references from dependents as each crate finishes migration.
+- [x] Delete workspace member `crates/xi-trace` and remove the workspace dependency from the root `Cargo.toml` only after the remaining instrumentation, trace export, and protocol paths no longer reference it.
 - [x] Add a `manifest_version` field to plugin manifests and reject unsupported manifest schemas during load.
 - [x] Normalize all relative plugin manifest paths against the manifest directory in `crates/xi-core-lib/src/plugins/catalog.rs`, not only paths starting with `./`.
 - [x] Detect duplicate plugin names during catalog load and surface a structured load error instead of silently overwriting entries.
@@ -127,6 +127,9 @@
 ### 4. Display, discoverability, and editing ergonomics
 
 - [ ] Add syntax highlighting integration for `ee-tui`, starting with existing xi syntax support, so code is readable before more advanced IDE features land.
+- [ ] Replace removed `crates/experimental/xi-lang` with direct frontend syntax coloring. Phase 1: use in-tree `syntect` parsing and theming in `crates/ee-tui` for visible highlighting only, no plugin process.
+- [ ] Phase 2: move language-sensitive edit features such as reindent and toggle-comment off hard-coded plugin dispatch in `crates/xi-core-lib/src/event_context.rs` onto typed capabilities backed by `syntect` or tree-sitter queries.
+- [ ] Phase 3: evaluate tree-sitter for incremental parsing, folds, and indentation once viewport rendering and diagnostics transport are stable, instead of reviving xi-lang-style custom parser plugins.
 - [ ] Support relative line numbers, sign column, cursor line, color column, visible whitespace, and configurable statusline content so screen layout matches established terminal-editor workflows.
 - [ ] Implement line wrapping, horizontal scrolling, break indentation, and configurable scroll offsets so navigation remains stable in long and wrapped lines.
 - [ ] Add fold state management and fold commands in `ee-tui`, starting with manual folds and then syntax- or indent-driven folds once parser support is available.
@@ -192,12 +195,6 @@
 - [ ] Replace `panic!("entry already exists")` in `crates/xi-plugin-lib/src/state_cache.rs` L189 with `Result` return.
 - [ ] Bounds-check `cached_offset_of_line()` result in `crates/xi-plugin-lib/src/base_cache.rs` L92 instead of `.unwrap() - self.offset`.
 - [ ] Validate inputs at API boundary in `crates/xi-plugin-lib/src/base_cache.rs` (L270, L390) instead of panicking on "offset greater than content length".
-
-### crates/experimental/xi-lang
-
-- [ ] Replace `stdin().read_to_string(&mut buf).unwrap()` at `crates/experimental/xi-lang/src/language/rust.rs` L355 with structured error handling.
-- [ ] Validate context stack before `self.ctx.pop(state).unwrap()` in `crates/experimental/xi-lang/src/language/rust.rs` (L161, L210).
-- [ ] Address iterator duplication TODO in `crates/experimental/xi-lang/src/main.rs` L228.
 
 ### Cross-cutting
 

@@ -16,13 +16,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use log::{info, warn};
-use serde_json::{self, Value, json};
+use serde_json::{self, Value};
 
 use crate::core_proxy::CoreProxy;
 use xi_core_lib::plugin_rpc::{HostNotification, HostRequest, PluginBufferInfo, PluginUpdate};
+use xi_core_lib::tracing_support;
 use xi_core_lib::{ConfigTable, LanguageId, PluginPid, ViewId};
 use xi_rpc::{Handler as RpcHandler, RemoteError, RpcCtx};
-use xi_trace::{self, trace, trace_block, trace_block_payload};
 
 use super::{Plugin, View};
 
@@ -144,18 +144,17 @@ impl<'a, P: 'a + Plugin> Dispatcher<'a, P> {
 
     fn do_tracing_config(&mut self, enabled: bool) {
         if enabled {
-            xi_trace::enable_tracing();
+            tracing_support::set_enabled(true);
             info!("Enabling tracing in global plugin {:?}", self.pid);
-            trace("enable tracing", &["plugin"]);
+            tracing::trace!(name: "enable tracing", categories = "plugin");
         } else {
-            xi_trace::disable_tracing();
+            tracing_support::set_enabled(false);
             info!("Disabling tracing in global plugin {:?}", self.pid);
-            trace("disable tracing", &["plugin"]);
         }
     }
 
     fn do_update(&mut self, update: PluginUpdate) -> Result<Value, RemoteError> {
-        let _t = trace_block("Dispatcher::do_update", &["plugin"]);
+        let _t = tracing::trace_span!("Dispatcher::do_update", categories = "plugin").entered();
         let PluginUpdate {
             view_id,
             delta,
@@ -174,10 +173,7 @@ impl<'a, P: 'a + Plugin> Dispatcher<'a, P> {
     }
 
     fn do_collect_trace(&self) -> Result<Value, RemoteError> {
-        use xi_trace::chrome_trace_dump;
-
-        let samples = xi_trace::samples_cloned_unsorted();
-        chrome_trace_dump::to_value(&samples).map_err(|e| RemoteError::Custom {
+        tracing_support::collect_json().map_err(|e| RemoteError::Custom {
             code: 0,
             message: format!("Could not serialize trace: {:?}", e),
             data: None,
@@ -191,7 +187,7 @@ impl<'a, P: Plugin> RpcHandler for Dispatcher<'a, P> {
 
     fn handle_notification(&mut self, ctx: &RpcCtx, rpc: Self::Notification) {
         use self::HostNotification::*;
-        let _t = trace_block("Dispatcher::handle_notif", &["plugin"]);
+        let _t = tracing::trace_span!("Dispatcher::handle_notif", categories = "plugin").entered();
         match rpc {
             Initialize { plugin_id, buffer_info } => {
                 self.do_initialize(ctx, plugin_id, buffer_info)
@@ -215,7 +211,8 @@ impl<'a, P: Plugin> RpcHandler for Dispatcher<'a, P> {
 
     fn handle_request(&mut self, _ctx: &RpcCtx, rpc: Self::Request) -> Result<Value, RemoteError> {
         use self::HostRequest::*;
-        let _t = trace_block("Dispatcher::handle_request", &["plugin"]);
+        let _t =
+            tracing::trace_span!("Dispatcher::handle_request", categories = "plugin").entered();
         match rpc {
             Update(params) => self.do_update(params),
             CollectTrace(..) => self.do_collect_trace(),
@@ -223,7 +220,7 @@ impl<'a, P: Plugin> RpcHandler for Dispatcher<'a, P> {
     }
 
     fn idle(&mut self, _ctx: &RpcCtx, token: usize) {
-        let _t = trace_block_payload("Dispatcher::idle", &["plugin"], format!("token: {}", token));
+        let _t = tracing::trace_span!("Dispatcher::idle", categories = "plugin", token).entered();
         let view_id: ViewId = token.into();
         let v = bail!(self.views.get_mut(&view_id), "idle", self.pid, view_id);
         self.plugin.idle(v);

@@ -196,7 +196,9 @@ impl Find {
 
     /// Returns `true` if the search query is a multi-line regex.
     pub(crate) fn is_multiline_regex(&self) -> bool {
-        self.search_string().map(|search| self.regex.is_some() && is_multiline_regex(search)).unwrap_or(false)
+        self.search_string()
+            .map(|search| self.regex.is_some() && is_multiline_regex(search))
+            .unwrap_or(false)
     }
 
     /// Unsets the search and removes all highlights from the view.

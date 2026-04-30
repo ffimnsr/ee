@@ -25,7 +25,6 @@ use xi_rope::engine::{Engine, RevId, RevToken};
 use xi_rope::rope::count_newlines;
 use xi_rope::spans::SpansBuilder;
 use xi_rope::{DeltaBuilder, Interval, LinesMetric, Rope, RopeDelta, Transformer};
-use xi_trace::{trace_block, trace_payload};
 
 use crate::annotations::{AnnotationType, Annotations};
 use crate::config::BufferItems;
@@ -152,7 +151,11 @@ impl Editor {
     /// This is used for things such as recording playback, where you don't want the
     /// individual events to be undoable, but instead the entire playback should be.
     pub(crate) fn set_force_undo_group(&mut self, force_undo_group: bool) {
-        trace_payload("Editor::set_force_undo_group", &["core"], force_undo_group.to_string());
+        tracing::trace!(
+            name: "Editor::set_force_undo_group",
+            categories = "core",
+            force_undo_group
+        );
         self.force_undo_group = force_undo_group;
     }
 
@@ -220,7 +223,7 @@ impl Editor {
 
     /// generates a delta from a plugin's response and applies it to the buffer.
     pub fn apply_plugin_edit(&mut self, edit: PluginEdit) {
-        let _t = trace_block("Editor::apply_plugin_edit", &["core"]);
+        let _t = tracing::trace_span!("Editor::apply_plugin_edit", categories = "core").entered();
         //TODO: get priority working, so that plugin edits don't necessarily move cursor
         let PluginEdit { rev, delta, priority, undo_group, .. } = edit;
         let priority = priority as usize;
@@ -235,7 +238,7 @@ impl Editor {
     /// buffer, and an `InsertDrift` enum describing the correct selection update
     /// behaviour.
     pub(crate) fn commit_delta(&mut self) -> Option<(RopeDelta, Rope, InsertDrift)> {
-        let _t = trace_block("Editor::commit_delta", &["core"]);
+        let _t = tracing::trace_span!("Editor::commit_delta", categories = "core").entered();
 
         if self.engine.get_head_rev_id() == self.last_rev_id {
             return None;
@@ -538,7 +541,7 @@ impl Editor {
         spans: Vec<ScopeSpan>,
         rev: RevToken,
     ) {
-        let _t = trace_block("Editor::update_spans", &["core"]);
+        let _t = tracing::trace_span!("Editor::update_spans", categories = "core").entered();
         // TODO: more protection against invalid input
         let mut start = start;
         let mut end_offset = start + len;
@@ -575,7 +578,7 @@ impl Editor {
         annotation_type: AnnotationType,
         rev: RevToken,
     ) {
-        let _t = trace_block("Editor::update_annotations", &["core"]);
+        let _t = tracing::trace_span!("Editor::update_annotations", categories = "core").entered();
 
         let mut start = start;
         let mut end_offset = start + len;
@@ -621,7 +624,7 @@ impl Editor {
         max_size: usize,
         rev: RevToken,
     ) -> Option<GetDataResponse> {
-        let _t = trace_block("Editor::plugin_get_data", &["core"]);
+        let _t = tracing::trace_span!("Editor::plugin_get_data", categories = "core").entered();
         let text_cow = self.get_rev(rev)?;
         let text = &text_cow;
         // convert our offset into a valid byte offset

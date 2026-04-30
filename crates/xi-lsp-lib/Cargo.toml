@@ -30,6 +30,3 @@ workspace = true
 
 [dependencies.xi-rpc]
 workspace = true
-
-[dependencies.xi-trace]
-workspace = true

@@ -16,8 +16,9 @@ toml.workspace = true
 notify = { workspace = true, optional = true }
 regex.workspace = true
 memchr.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
-xi-trace.workspace = true
 xi-rope = { workspace = true, features = ["serde"] }
 xi-unicode.workspace = true
 xi-rpc.workspace = true

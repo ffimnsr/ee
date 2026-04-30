@@ -38,7 +38,6 @@ use crate::width_cache::WidthCache;
 use crate::word_boundaries::WordCursor;
 use xi_rope::spans::Spans;
 use xi_rope::{Cursor, Interval, LinesMetric, Rope, RopeDelta};
-use xi_trace::trace_block;
 
 type StyleMap = RefCell<ThemeStyleMap>;
 
@@ -960,7 +959,7 @@ impl View {
         client: &Client,
         spans: &Spans<Style>,
     ) {
-        let _t = trace_block("View::rewrap", &["core"]);
+        let _t = tracing::trace_span!("View::rewrap", categories = "core").entered();
         let visible = self.first_line..self.first_line + self.height;
         let inval = self.lines.rewrap_chunk(text, width_cache, client, spans, visible);
         if let Some(InvalLines { start_line, inval_count, new_count }) = inval {

@@ -18,7 +18,6 @@ use rand::Rng;
 
 use xi_rope::interval::IntervalBounds;
 use xi_rope::{LinesMetric, RopeDelta};
-use xi_trace::trace_block;
 
 use super::{Cache, DataSource, Error, View};
 use crate::base_cache::ChunkCache;
@@ -86,7 +85,7 @@ impl<S: Clone + Default> Cache for StateCache<S> {
 
     /// Updates the cache by applying this delta.
     fn update(&mut self, delta: Option<&RopeDelta>, buf_size: usize, num_lines: usize, rev: u64) {
-        let _t = trace_block("StateCache::update", &["plugin"]);
+        let _t = tracing::trace_span!("StateCache::update", categories = "plugin").entered();
 
         if let Some(delta) = delta {
             self.update_line_cache(delta);

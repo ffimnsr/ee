@@ -25,7 +25,6 @@ use serde_json::{self, Value, json};
 
 use xi_rope::{Cursor, Interval, LinesMetric, Rope, RopeDelta};
 use xi_rpc::{Error as RpcError, RemoteError};
-use xi_trace::trace_block;
 
 use crate::plugins::rpc::{
     ClientPluginInfo, Hover, PluginBufferInfo, PluginNotification, PluginRequest, PluginUpdate,
@@ -319,7 +318,7 @@ impl<'a> EventContext<'a> {
     /// Commits any changes to the buffer, updating views and plugins as needed.
     /// This only updates internal state; it does not update the client.
     fn after_edit(&mut self, author: &str) {
-        let _t = trace_block("EventContext::after_edit", &["core"]);
+        let _t = tracing::trace_span!("EventContext::after_edit", categories = "core").entered();
 
         let edit_info = self.editor.borrow_mut().commit_delta();
         let (delta, last_text, drift) = match edit_info {
@@ -413,7 +412,7 @@ impl<'a> EventContext<'a> {
 
     /// Flushes any changes in the views out to the frontend.
     fn render(&mut self) {
-        let _t = trace_block("EventContext::render", &["core"]);
+        let _t = tracing::trace_span!("EventContext::render", categories = "core").entered();
         let ed = self.editor.borrow();
         //TODO: render other views
         self.view.borrow_mut().render_if_dirty(
@@ -626,7 +625,8 @@ impl<'a> EventContext<'a> {
 
     /// Does incremental find.
     pub(crate) fn do_incremental_find(&mut self) {
-        let _t = trace_block("EventContext::do_incremental_find", &["find"]);
+        let _t = tracing::trace_span!("EventContext::do_incremental_find", categories = "find")
+            .entered();
 
         self.find();
         if self.view.borrow().find_in_progress() {
