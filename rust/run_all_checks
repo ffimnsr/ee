@@ -1,0 +1,62 @@
+#!/bin/bash
+
+if !(cargo clippy --version); then
+    printf 'Checks requires clippy; try `rustup component add clippy-preview`.\n'
+    printf "If that doesn't fix things; try `rustup self update`.\n"
+    exit 1
+fi
+
+if !(cargo fmt --version); then
+    printf 'Checks requires rustfmt; try `rustup component add rustfmt-preview`.\n'
+    printf "If that doesn't fix things; try `rustup self update`.\n"
+    exit 1
+fi
+
+printf 'Running rustfmt:\n'
+
+if ! (cargo fmt --all -- --check); then
+    printf '\nRustfmt failed. Please run rustfmt.\n'
+    exit $?
+fi
+
+printf 'Rustfmt check passed.\n'
+
+printf 'Running clippy:\n'
+
+if ! (cargo clippy --all -- -D warnings); then
+    printf '\nClippy has nits. :(\n'
+    exit $?
+fi
+
+printf 'Clippy check passed.\n'
+
+
+printf 'Checking compiler warnings:\n'
+
+if ! (RUSTFLAGS="-D warnings" cargo check --all); then
+    printf '\nCargo check produced errors. Exiting.\n'
+    exit $?
+fi
+
+printf 'Check passed!\n'
+
+printf 'Running "cargo test --all"\n'
+
+if ! (cargo test --all); then
+    exit $?
+fi
+
+printf 'Tests passed!\n'
+printf 'Running benchmarks ("rustup run nightly cargo bench --all"):\n'
+
+if !(rustup run nightly cargo --version); then
+    printf 'Running benchmarks requires a nightly compiler. Try `rustup install nightly`?\n'
+    exit 1
+fi
+
+if !(rustup run nightly cargo bench --all); then
+    printf 'Running benchmarks failed.\n'
+    exit $?
+fi
+
+printf 'All checks passed.\n'
