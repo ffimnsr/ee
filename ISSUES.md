@@ -23,7 +23,7 @@
 
 - [x] Support full JSON-RPC 2.0 request identifiers instead of limiting request ids to `u64`. Fully transition to JSON-RPC 2.0 and remove legacy 1.0 RPC.
 - [x] Add the `jsonrpc: "2.0"` field to outbound requests and responses, or document and enforce the intentional protocol deviation in one place.
-- [x] Evaluate replacing the hand-rolled RPC object parsing in `crates/xi-rpc` with `jsonrpc-lite` to reduce duplicate protocol code. If its good implement it.
+- [x] Evaluate replacing the hand-rolled RPC object parsing in `crates/xi-rpc` with `jsonrpc-lite` to reduce duplicate protocol code; track implementation under New World P1.
 - [x] Add batch request handling support, or explicitly reject batch requests with a well-defined error response.
 - [x] Replace mixed `u64` and `usize` request id handling with a single typed request id abstraction.
 - [x] Tighten response validation in `crates/xi-rpc/src/parse.rs` so malformed objects with extra or missing fields are rejected consistently.
@@ -39,6 +39,17 @@
 - [x] Evaluate migrating `crates/xi-rpc` instrumentation from `xi_trace` to `tracing` for more standard observability.
 
 ## New World
+
+### P1. RPC and LSP protocol modernization
+
+- [ ] Keep xi-specific `Peer`, idle queue, timer, synchronous request, asynchronous callback, cancellation, and transport APIs in `crates/xi-rpc`; do not replace `xi-rpc` wholesale with `lsp-server`, `tower-lsp`, or `jsonrpc-core`.
+- [ ] Replace the hand-rolled JSON-RPC envelope parsing in `crates/xi-rpc/src/parse.rs` with `jsonrpc-lite` while preserving existing `RequestId`, `RemoteError`, `Handler`, `RpcLoop`, `ReadTransport`, and `WriteTransport` behavior.
+- [ ] Migrate `crates/xi-rpc/src/lib.rs` `RpcLoop::mainloop` from the `std::thread::scope` blocking-I/O model to a `tokio` runtime: replace the dedicated reader thread with `tokio::io` or `tokio::task::spawn_blocking` over the existing `ReadTransport` API, drive timers, idle queue, and incoming messages through a single `tokio::select!`, and delete the `MAX_IDLE_WAIT` polling constant.
+- [ ] Replace the single `is_blocked` flag in `crates/xi-rpc/src/lib.rs` `RawPeer` with a `tokio::sync::Semaphore` whose permit count is configurable per peer, so more than one outstanding plugin request can be in flight at once.
+- [ ] Thread a `tokio_util::sync::CancellationToken` through the `Handler::handle_request` signature in `crates/xi-rpc/src/lib.rs` and surface it in `crates/xi-plugin-lib/src/dispatch.rs` so plugin implementations can abort in-flight hover, completion, and diagnostic work when the originating editor request is cancelled.
+- [ ] Keep `crates/xi-lsp-lib` as the xi-specific LSP adapter layer; replace only its hand-rolled LSP framing and dispatch in `crates/xi-lsp-lib/src/parse_helper.rs` and `crates/xi-lsp-lib/src/language_server_client.rs` with `lsp-server`; do not use `tower-lsp` until `xi-lsp-lib` has moved to async; delete `parse_helper.rs` once the `lsp-server` transport is wired in.
+- [ ] Enforce a maximum LSP message body size in the new `lsp-server` transport path before accepting messages; do not keep `crates/xi-lsp-lib/src/parse_helper.rs` solely for body-size checks.
+- [ ] Preserve existing `xi-rpc` coverage and add migration regression tests for each step above: `jsonrpc-lite` request/response parsing, callback dispatch, idle queue ordering, timer ordering, cancellation, timeout behavior, malformed responses, and `xi-lsp-lib` initialize/open/change/save/close/hover/diagnostics flows using a fake language server.
 
 ### 0. Backend and protocol foundations
 
@@ -82,13 +93,11 @@
 - [ ] Track language server process stderr and surface startup or runtime failures from `crates/xi-lsp-lib` to logs or status items.
 - [ ] Add graceful shutdown and restart handling for language server child processes started in `crates/xi-lsp-lib/src/utils.rs`.
 - [ ] Add request timeouts or cancellation plumbing for long-running LSP requests such as hover, completion, and code actions.
-- [ ] Add tests for `Content-Length` message parsing in `crates/xi-lsp-lib/src/parse_helper.rs`, including malformed headers and truncated bodies.
 - [ ] Add tests for incremental sync conversion in `crates/xi-lsp-lib/src/utils.rs`, including insertions, deletions, selections, and full-document fallback cases.
 - [ ] Handle `textDocument/publishDiagnostics` in `crates/xi-lsp-lib/src/language_server_client.rs` and plumb diagnostics through the core/plugin protocol once diagnostic transport exists.
 - [ ] Add completion support to `crates/xi-lsp-lib`, including request/response mapping and result delivery back to the client once completion transport exists in core.
 - [ ] Add definition and reference navigation support to `crates/xi-lsp-lib`, including UTF-8/UTF-16 position conversion and multi-location responses.
 - [ ] Add formatting and code action support to `crates/xi-lsp-lib`, including edit application paths and conflict handling for stale revisions.
-- [ ] Add integration tests that run a fake language server and verify initialize, open/change/save/close, hover, and diagnostics flows in `crates/xi-lsp-lib`.
 
 ### 1. Core frontend architecture
 
@@ -148,10 +157,6 @@
 
 ### 6. Plugin runtime modernization
 
-- [ ] Migrate `crates/xi-rpc/src/lib.rs` `RpcLoop::mainloop` from the `std::thread::scope` blocking-I/O model to a `tokio` runtime: replace the dedicated reader thread with `tokio::io` (or `tokio::task::spawn_blocking` over the existing `Read` impl), drive timers, idle queue, and incoming messages through a single `tokio::select!`, and delete the `MAX_IDLE_WAIT` polling constant.
-- [ ] Replace the single `is_blocked` flag in `crates/xi-rpc/src/lib.rs` `RawPeer` with a `tokio::sync::Semaphore` whose permit count is configurable per peer, so more than one outstanding plugin request can be in flight at once.
-- [ ] Thread a `tokio_util::sync::CancellationToken` through the `Handler::handle_request` signature in `crates/xi-rpc/src/lib.rs` and surface it in `crates/xi-plugin-lib/src/dispatch.rs` so plugin implementations can abort in-flight hover, completion, and diagnostic work when the originating editor request is cancelled.
-- [ ] Replace the hand-rolled LSP framing and dispatch in `crates/xi-lsp-lib/src/parse_helper.rs` and `crates/xi-lsp-lib/src/language_server_client.rs` with the `lsp-server` crate (or `tower-lsp` if the codebase has moved to async by then), and delete `parse_helper.rs` once the new transport is wired in.
 - [ ] Add a `runtime` field to `PluginDescription` in `crates/xi-core-lib/src/plugins/manifest.rs` accepting `"native"` (current subprocess) or `"wasm"`, and add a `wasmtime`-backed plugin host alongside `crates/xi-core-lib/src/plugins/mod.rs::start_plugin_process` that exposes the same `HostNotification`, `HostRequest`, `PluginRequest`, and `PluginNotification` surface over linear-memory buffers instead of stdin/stdout pipes.
 - [ ] Add per-plugin syscall sandboxing in `crates/xi-core-lib/src/plugins/mod.rs::start_plugin_process`: on Linux apply a `seccompiler` filter (allow `read`, `write`, `futex`, `mmap`, `brk`; deny `fork`, `ptrace`, `socket`, raw `open*`); on Windows attach a Job Object with RSS and CPU caps; on macOS document the gap until a stable equivalent exists.
 - [ ] Add manifest-driven per-plugin resource limits (`max_rss_bytes`, `max_cpu_seconds`, `rpc_timeout_ms`) parsed in `crates/xi-core-lib/src/plugins/manifest.rs` and enforced by the supervisor in `crates/xi-core-lib/src/plugins/mod.rs`; on breach, kill the child and emit a structured `plugin_terminated` notification with the breach reason.
@@ -206,7 +211,6 @@
 
 ### Resource limits and DoS hardening
 
-- [ ] Add a max body size constant in `crates/xi-lsp-lib/src/parse_helper.rs` (around L30/L60) and reject `Content-Length` headers exceeding it before allocating `vec![0; content_length]`.
 - [ ] Bound total idle queue size in `crates/xi-rpc/src/lib.rs` (around L547-L550) in addition to token coalescing so distinct tokens cannot accumulate unboundedly.
 - [ ] Cap `recording_buffer` history in `crates/xi-core-lib/src/recorder.rs` (L29) with a max length or circular buffer.
 - [ ] Limit per-plugin annotation storage in `crates/xi-core-lib/src/annotations.rs` (L169-L195) so a misbehaving plugin cannot exhaust memory.
@@ -260,5 +264,5 @@
 ### Tooling and CI
 
 - [ ] Add GitHub Actions workflows under `.github/workflows/` for build, `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check`.
-- [ ] Add `cargo-fuzz` targets for the rope delta/CRDT operations in `crates/xi-rope`, the JSON-RPC parser in `crates/xi-rpc`, and the `Content-Length` framing in `crates/xi-lsp-lib/src/parse_helper.rs`.
+- [ ] Add `cargo-fuzz` targets for the rope delta/CRDT operations in `crates/xi-rope`, the JSON-RPC parser in `crates/xi-rpc`, and the LSP transport wrapper in `crates/xi-lsp-lib`.
 - [ ] Add property-based tests (`proptest` or `quickcheck`) in `crates/xi-rope` for delta application, merging, and CRDT invariants.
