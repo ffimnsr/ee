@@ -6,3 +6,11 @@ build/
 *.pyc
 __pycache__
 .cache/
+
+*/Cargo.lock
+*.rs.bk
+target
+build
+
+.idea/
+.vscode/

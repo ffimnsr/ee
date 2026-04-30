@@ -1,0 +1,18 @@
+[workspace]
+members = [
+  "crates/xi-core-lib",
+  "crates/xi-core",
+  "crates/xi-lsp-lib",
+  "crates/xi-plugin-lib",
+  "crates/xi-rope",
+  "crates/xi-rpc",
+  "crates/xi-trace",
+  "crates/xi-unicode",
+  "crates/experimental/xi-lang",
+  "crates/sample-plugin",
+]
+
+# Avoid libllvm/libclang dep. See https://github.com/rust-onig/rust-onig/pull/108
+[patch.crates-io]
+onig = { git="https://github.com/kornelski/rust-onig", branch="bindgen" }
+onig_sys = { git="https://github.com/kornelski/rust-onig", branch="bindgen" }

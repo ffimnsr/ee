@@ -1,5 +1,0 @@
-source 'https://rubygems.org'
-
-gem 'github-pages'
-gem 'octopress-autoprefixer'
-#gem 'therubyracer' # what did this do? noone knows
