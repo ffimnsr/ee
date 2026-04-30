@@ -199,7 +199,6 @@ fn generate_logfile_config(flags: &HashMap<String, Option<String>>) -> LogfileCo
 
 fn main() {
     let mut state = XiCore::new();
-    let stdin = io::stdin();
     let stdout = io::stdout();
     let mut rpc_looper = RpcLoop::new(NewlineWriter::new(stdout));
 
@@ -219,7 +218,7 @@ fn main() {
         warn!("Unable to generate the logging path to pass to set up: {}", e)
     }
 
-    match rpc_looper.mainloop(|| NewlineReader::new(stdin.lock()), &mut state) {
+    match rpc_looper.mainloop(|| NewlineReader::new(std::io::BufReader::new(io::stdin())), &mut state) {
         Ok(_) => (),
         Err(err) => {
             error!("xi-core exited with error:\n{:?}", err);

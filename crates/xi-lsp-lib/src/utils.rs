@@ -25,9 +25,10 @@ use xi_rope::rope::RopeDelta;
 
 use crate::conversion_utils::*;
 use crate::language_server_client::LanguageServerClient;
-use crate::parse_helper;
 use crate::result_queue::ResultQueue;
 use crate::types::Error;
+
+const MAX_LSP_BODY_BYTES: usize = 16 * 1024 * 1024;
 use lsp_types::Uri;
 use lsp_types::*;
 
@@ -209,11 +210,17 @@ pub fn start_new_server(
                 let stdout = process.stdout.take().unwrap();
                 let mut reader = Box::new(BufReader::new(stdout));
                 loop {
-                    match parse_helper::read_message(&mut reader) {
-                        Ok(message_str) => {
+                    match lsp_server::Message::read(&mut reader) {
+                        Ok(Some(msg)) => {
+                            let message_str = serde_json::to_string(&msg).unwrap();
+                            if message_str.len() > MAX_LSP_BODY_BYTES {
+                                error!("LSP message too large ({} bytes), dropping", message_str.len());
+                                break;
+                            }
                             let mut server_locked = ls_client.lock().unwrap();
                             server_locked.handle_message(message_str.as_ref());
                         }
+                        Ok(None) => break,
                         Err(err) => {
                             error!("Error occurred {:?}", err);
                             break;

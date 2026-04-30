@@ -24,11 +24,6 @@ use xi_rpc::RemoteError;
 use crate::language_server_client::LanguageServerClient;
 use lsp_types::*;
 
-pub enum LspHeader {
-    ContentType,
-    ContentLength(usize),
-}
-
 pub trait Callable: Send {
     fn call(
         self: Box<Self>,
@@ -60,48 +55,6 @@ pub struct LanguageConfig {
 #[derive(Serialize, Deserialize)]
 pub struct Config {
     pub language_config: HashMap<String, LanguageConfig>,
-}
-
-// Error Types
-
-/// Type to represent errors occurred while parsing LSP RPCs
-#[derive(Debug)]
-pub enum ParseError {
-    Io(std::io::Error),
-    ParseInt(std::num::ParseIntError),
-    Utf8(std::string::FromUtf8Error),
-    Json(serde_json::Error),
-    Unknown(String),
-}
-
-impl From<std::io::Error> for ParseError {
-    fn from(err: std::io::Error) -> ParseError {
-        ParseError::Io(err)
-    }
-}
-
-impl From<std::string::FromUtf8Error> for ParseError {
-    fn from(err: std::string::FromUtf8Error) -> ParseError {
-        ParseError::Utf8(err)
-    }
-}
-
-impl From<serde_json::Error> for ParseError {
-    fn from(err: serde_json::Error) -> ParseError {
-        ParseError::Json(err)
-    }
-}
-
-impl From<std::num::ParseIntError> for ParseError {
-    fn from(err: std::num::ParseIntError) -> ParseError {
-        ParseError::ParseInt(err)
-    }
-}
-
-impl From<String> for ParseError {
-    fn from(s: String) -> ParseError {
-        ParseError::Unknown(s)
-    }
 }
 
 // TODO: Improve Error handling in module and add more types as necessary

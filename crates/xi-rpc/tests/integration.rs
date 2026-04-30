@@ -18,6 +18,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 use xi_rpc::test_utils::{make_reader, test_channel};
 use xi_rpc::{
     Error, Handler, NewlineWriter, Peer, ReadError, ReadTransport, RemoteError, RpcCall, RpcCtx,
@@ -32,7 +33,7 @@ impl Handler for EchoHandler {
     type Notification = RpcCall;
     type Request = RpcCall;
     fn handle_notification(&mut self, ctx: &RpcCtx, rpc: Self::Notification) {}
-    fn handle_request(&mut self, ctx: &RpcCtx, rpc: Self::Request) -> Result<Value, RemoteError> {
+    fn handle_request(&mut self, ctx: &RpcCtx, rpc: Self::Request, _cancel: CancellationToken) -> Result<Value, RemoteError> {
         Ok(rpc.params)
     }
 }
@@ -67,7 +68,7 @@ impl Handler for NoopHandler {
 
     fn handle_notification(&mut self, _ctx: &RpcCtx, _rpc: Self::Notification) {}
 
-    fn handle_request(&mut self, _ctx: &RpcCtx, _rpc: Self::Request) -> Result<Value, RemoteError> {
+    fn handle_request(&mut self, _ctx: &RpcCtx, _rpc: Self::Request, _cancel: CancellationToken) -> Result<Value, RemoteError> {
         Ok(json!(null))
     }
 }
@@ -136,6 +137,7 @@ fn test_recv_invalid_params_error() {
             &mut self,
             _ctx: &RpcCtx,
             _rpc: Self::Request,
+            _cancel: CancellationToken,
         ) -> Result<Value, RemoteError> {
             Ok(json!({ "ok": true }))
         }
@@ -371,6 +373,7 @@ fn test_unknown_notification_does_not_disconnect() {
             &mut self,
             _ctx: &RpcCtx,
             rpc: Self::Request,
+            _cancel: CancellationToken,
         ) -> Result<Value, RemoteError> {
             REQ_SEEN.store(true, Ordering::SeqCst);
             Ok(rpc.params)
@@ -421,6 +424,7 @@ fn test_schedule_idle_coalesces_duplicates() {
             &mut self,
             _ctx: &RpcCtx,
             _rpc: Self::Request,
+            _cancel: CancellationToken,
         ) -> Result<Value, RemoteError> {
             Ok(json!(null))
         }
@@ -461,6 +465,7 @@ fn test_idle_queue_preserves_fifo_order() {
             &mut self,
             _ctx: &RpcCtx,
             _rpc: Self::Request,
+            _cancel: CancellationToken,
         ) -> Result<Value, RemoteError> {
             Ok(json!(null))
         }
@@ -515,6 +520,7 @@ fn test_timers_fire_in_deadline_order() {
             &mut self,
             _ctx: &RpcCtx,
             _rpc: Self::Request,
+            _cancel: CancellationToken,
         ) -> Result<Value, RemoteError> {
             Ok(json!(null))
         }

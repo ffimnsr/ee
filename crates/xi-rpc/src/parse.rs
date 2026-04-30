@@ -98,6 +98,11 @@ impl MessageReader {
         } else if !val.is_object() {
             Err(ReadError::NotObject)
         } else {
+            // Use jsonrpc-lite for best-effort envelope validation.
+            // We treat failures as non-fatal because xi-rpc peers may omit "jsonrpc":"2.0".
+            if jsonrpc_lite::JsonRpc::parse(s).is_err() {
+                tracing::trace!(target: "xi_rpc", "message missing jsonrpc 2.0 field, continuing");
+            }
             Ok(val.into())
         }
     }
