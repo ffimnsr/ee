@@ -47,7 +47,7 @@ The current minimum supported version is 1.40.
 To build the xi-editor core from the root directory of this repo:
 
 ```
-> cd rust
+> cd crates
 > cargo build
 ```
 
