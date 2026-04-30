@@ -189,10 +189,9 @@ pub enum Error {
 /// Run `plugin` until it exits, blocking the current thread.
 pub fn mainloop<P: Plugin>(plugin: &mut P) -> Result<(), ReadError> {
     xi_core_lib::tracing_support::install();
-    let stdin = io::stdin();
     let stdout = io::stdout();
     let mut rpc_looper = RpcLoop::new(NewlineWriter::new(stdout));
     let mut dispatcher = Dispatcher::new(plugin);
 
-    rpc_looper.mainloop(|| NewlineReader::new(stdin.lock()), &mut dispatcher)
+    rpc_looper.mainloop(|| NewlineReader::new(std::io::BufReader::new(io::stdin())), &mut dispatcher)
 }

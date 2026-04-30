@@ -40,6 +40,9 @@ tracing-subscriber = "0.3.20"
 syntect = { version = "5.3.0", default-features = false, features = ["default-themes", "parsing", "dump-load", "dump-create", "plist-load", "yaml-load", "regex-fancy"] }
 tempfile = "3"
 toml = "0.8"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7" }
+lsp-server = "0.7"
 unicode-segmentation = "1.13.2"
 url = "2.5.8"
 

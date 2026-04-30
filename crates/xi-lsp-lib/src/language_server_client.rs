@@ -45,13 +45,6 @@ pub struct LanguageServerClient {
     pub file_extensions: Vec<String>,
 }
 
-/// Prepare Language Server Protocol style JSON String from
-/// a serde_json object `Value`
-fn prepare_lsp_json(msg: &Value) -> Result<String, serde_json::error::Error> {
-    let request = serde_json::to_string(&msg)?;
-    Ok(format!("Content-Length: {}\r\n\r\n{}", request.len(), request))
-}
-
 /// Get numeric id from the request id.
 fn number_from_id(id: &Id) -> u64 {
     match *id {
@@ -82,12 +75,6 @@ impl LanguageServerClient {
             opened_documents: HashMap::new(),
             file_extensions,
         }
-    }
-
-    pub fn write(&mut self, msg: &str) {
-        self.writer.write_all(msg.as_bytes()).expect("error writing to stdin");
-
-        self.writer.flush().expect("error flushing child stdin");
     }
 
     pub fn handle_message(&mut self, message: &str) {
@@ -166,13 +153,11 @@ impl LanguageServerClient {
     }
 
     fn send_rpc(&mut self, value: &Value) {
-        let rpc = match prepare_lsp_json(value) {
-            Ok(r) => r,
-            Err(err) => panic!("Encoding Error {:?}", err),
-        };
-
-        trace!("Sending RPC: {:?}", rpc);
-        self.write(rpc.as_ref());
+        let text = serde_json::to_string(value).expect("Encoding Error");
+        trace!("Sending RPC: {:?}", text);
+        write!(self.writer, "Content-Length: {}\r\n\r\n{}", text.len(), text)
+            .expect("error writing to language server");
+        self.writer.flush().expect("error flushing language server stdin");
     }
 
     pub fn send_notification(&mut self, method: &str, params: Params) {

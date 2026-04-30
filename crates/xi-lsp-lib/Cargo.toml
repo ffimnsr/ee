@@ -18,6 +18,7 @@ fern.workspace = true
 log.workspace = true
 chrono.workspace = true
 url.workspace = true
+lsp-server = { workspace = true }
 
 [dependencies.xi-plugin-lib]
 workspace = true

@@ -209,7 +209,7 @@ impl<'a, P: Plugin> RpcHandler for Dispatcher<'a, P> {
         }
     }
 
-    fn handle_request(&mut self, _ctx: &RpcCtx, rpc: Self::Request) -> Result<Value, RemoteError> {
+    fn handle_request(&mut self, _ctx: &RpcCtx, rpc: Self::Request, _cancel: tokio_util::sync::CancellationToken) -> Result<Value, RemoteError> {
         use self::HostRequest::*;
         let _t =
             tracing::trace_span!("Dispatcher::handle_request", categories = "plugin").entered();
