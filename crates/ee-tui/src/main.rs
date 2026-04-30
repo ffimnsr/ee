@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::env;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::OnceLock;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
@@ -18,6 +20,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use xi_core_lib::XiCore;
 use xi_rpc::{ReadTransport, RpcLoop, WriteTransport};
 
@@ -45,9 +48,23 @@ fn run(app: &mut App) -> io::Result<()> {
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> io::Result<()> {
     while !app.should_quit {
-        app.backend.pump()?;
+        // L109: drain xi backend events non-blockingly
+        app.backend.drain_events()?;
+
+        // L106/L107: update viewport to keep cursor visible, then notify xi
+        let size = terminal.size()?;
+        // layout: rows[0]=editor, rows[1]=status, rows[2]=prompt
+        let editor_height = (size.height as usize).saturating_sub(2);
+        app.scroll_into_view(editor_height);
+        app.backend.notify_scroll(
+            app.viewport.top_line,
+            app.viewport.top_line + editor_height,
+        )?;
+
         terminal.draw(|frame| ui(frame, app))?;
-        if event::poll(Duration::from_millis(100))? {
+
+        // L109: use a short poll so the event loop stays responsive
+        if event::poll(Duration::from_millis(16))? {
             app.handle_event(event::read()?);
         }
     }
@@ -81,9 +98,11 @@ fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
 fn render_gutter(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let height = area.height as usize;
     let line_count = app.backend.lines.len().max(1);
+    let top = app.viewport.top_line;
     let lines = (0..height)
         .map(|i| {
-            let number = if i < line_count { i + 1 } else { 0 };
+            let line_idx = top + i;
+            let number = if line_idx < line_count { line_idx + 1 } else { 0 };
             if number == 0 {
                 Line::from(" ")
             } else {
@@ -102,13 +121,27 @@ fn render_gutter(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_buffer(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    let text = if app.backend.lines.is_empty() {
+    let height = area.height as usize;
+    let top = app.viewport.top_line;
+    let left = app.viewport.left_col;
+
+    let text = if app.backend.lines.is_empty() && top == 0 {
         vec![Line::from(Span::styled(
             "empty buffer",
             Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
         ))]
     } else {
-        app.backend.lines.iter().map(|line| Line::from(line.as_str())).collect::<Vec<_>>()
+        app.backend
+            .lines
+            .iter()
+            .skip(top)
+            .take(height)
+            .map(|line| {
+                // L106: skip left_col display columns from the left
+                let byte_start = display_col_to_byte(line, left);
+                Line::from(&line[byte_start..])
+            })
+            .collect::<Vec<_>>()
     };
 
     frame.render_widget(
@@ -174,6 +207,10 @@ struct App {
     mode: Mode,
     command_buffer: String,
     should_quit: bool,
+    // L106: explicit viewport model
+    viewport: Viewport,
+    // L108: input dispatcher state (count digits, prefix key)
+    input_state: InputState,
 }
 
 impl App {
@@ -183,6 +220,8 @@ impl App {
             mode: Mode::Normal,
             command_buffer: String::new(),
             should_quit: false,
+            viewport: Viewport::default(),
+            input_state: InputState::default(),
         })
     }
 
@@ -195,97 +234,95 @@ impl App {
             return;
         }
 
-        match (self.mode, key) {
-            (_, KeyEvent { code: KeyCode::Char('c'), modifiers: KeyModifiers::CONTROL, .. }) => {
-                self.should_quit = true;
-            }
-            (
-                Mode::Insert | Mode::Visual | Mode::CommandLine,
-                KeyEvent { code: KeyCode::Esc, .. },
-            ) => {
-                if self.mode == Mode::Visual {
-                    let _ = self.backend.send_edit("collapse_selections", json!([]));
+        // L108: look up action in the bindings table first
+        let bkey = BindingKey {
+            mode: self.mode,
+            key: key.code,
+            modifiers: key.modifiers,
+            prefix: self.input_state.prefix,
+        };
+        // Try exact modifiers, then fall back to NONE modifiers (acts as "any")
+        let action = bindings()
+            .get(&bkey)
+            .or_else(|| {
+                if key.modifiers != KeyModifiers::NONE {
+                    bindings().get(&BindingKey { modifiers: KeyModifiers::NONE, ..bkey })
+                } else {
+                    None
                 }
-                self.enter_normal_mode();
+            })
+            .cloned();
+
+        if let Some(action) = action {
+            self.dispatch(action, key);
+            // Reset count/prefix after a non-digit binding in normal mode
+            if self.mode == Mode::Normal
+            && !matches!(key.code, KeyCode::Char(c) if c.is_ascii_digit())
+        {
+            self.input_state.reset();
+        }
+        } else {
+            self.handle_default(key);
+        }
+    }
+
+    fn dispatch(&mut self, action: Action, _key: KeyEvent) {
+        match action {
+            Action::Quit => self.should_quit = true,
+            Action::EnterMode(mode) => {
+                if mode == Mode::Normal {
+                    self.enter_normal_mode();
+                } else {
+                    self.mode = mode;
+                }
             }
-            (Mode::Normal, KeyEvent { code: KeyCode::Char('q'), .. }) => {
-                self.should_quit = true;
-            }
-            (Mode::Normal, KeyEvent { code: KeyCode::Char('i'), .. }) => {
-                self.mode = Mode::Insert;
-            }
-            (Mode::Normal, KeyEvent { code: KeyCode::Char('v'), .. }) => {
-                self.mode = Mode::Visual;
-            }
-            (Mode::Normal | Mode::Visual, KeyEvent { code: KeyCode::Char(':'), .. }) => {
+            Action::EnterCommandMode => {
                 self.mode = Mode::CommandLine;
                 self.command_buffer.clear();
             }
-            (Mode::Normal, KeyEvent { code: KeyCode::Left | KeyCode::Char('h'), .. }) => {
-                let _ = self.backend.send_edit("move_left", json!([]));
+            Action::Edit(method) => {
+                let _ = self.backend.send_edit(method, json!([]));
             }
-            (Mode::Normal, KeyEvent { code: KeyCode::Right | KeyCode::Char('l'), .. }) => {
-                let _ = self.backend.send_edit("move_right", json!([]));
-            }
-            (Mode::Normal, KeyEvent { code: KeyCode::Up | KeyCode::Char('k'), .. }) => {
-                let _ = self.backend.send_edit("move_up", json!([]));
-            }
-            (Mode::Normal, KeyEvent { code: KeyCode::Down | KeyCode::Char('j'), .. }) => {
-                let _ = self.backend.send_edit("move_down", json!([]));
-            }
-            (Mode::Visual, KeyEvent { code: KeyCode::Left | KeyCode::Char('h'), .. }) => {
-                let _ = self.backend.send_edit("move_left_and_modify_selection", json!([]));
-            }
-            (Mode::Visual, KeyEvent { code: KeyCode::Right | KeyCode::Char('l'), .. }) => {
-                let _ = self.backend.send_edit("move_right_and_modify_selection", json!([]));
-            }
-            (Mode::Visual, KeyEvent { code: KeyCode::Up | KeyCode::Char('k'), .. }) => {
-                let _ = self.backend.send_edit("move_up_and_modify_selection", json!([]));
-            }
-            (Mode::Visual, KeyEvent { code: KeyCode::Down | KeyCode::Char('j'), .. }) => {
-                let _ = self.backend.send_edit("move_down_and_modify_selection", json!([]));
-            }
-            (Mode::Visual, KeyEvent { code: KeyCode::Char('v'), .. }) => {
+            Action::CollapseAndEnterNormal => {
                 let _ = self.backend.send_edit("collapse_selections", json!([]));
                 self.enter_normal_mode();
             }
-            (Mode::Insert, KeyEvent { code: KeyCode::Left, .. }) => {
-                let _ = self.backend.send_edit("move_left", json!([]));
-            }
-            (Mode::Insert, KeyEvent { code: KeyCode::Right, .. }) => {
-                let _ = self.backend.send_edit("move_right", json!([]));
-            }
-            (Mode::Insert, KeyEvent { code: KeyCode::Up, .. }) => {
-                let _ = self.backend.send_edit("move_up", json!([]));
-            }
-            (Mode::Insert, KeyEvent { code: KeyCode::Down, .. }) => {
-                let _ = self.backend.send_edit("move_down", json!([]));
-            }
-            (Mode::Insert, KeyEvent { code: KeyCode::Enter, .. }) => {
-                let _ = self.backend.send_edit("insert_newline", json!([]));
-            }
-            (Mode::Insert, KeyEvent { code: KeyCode::Backspace, .. }) => {
+            Action::ExecuteCommand => self.execute_command(),
+            Action::DeleteBackward => {
                 let _ = self.backend.send_edit("delete_backward", json!([]));
             }
-            (Mode::Insert, KeyEvent { code: KeyCode::Char(ch), modifiers, .. })
-                if !modifiers.contains(KeyModifiers::CONTROL)
-                    && !modifiers.contains(KeyModifiers::ALT) =>
-            {
-                let _ = self.backend.send_edit("insert", json!({ "chars": ch.to_string() }));
-            }
-            (Mode::CommandLine, KeyEvent { code: KeyCode::Enter, .. }) => {
-                self.execute_command();
-            }
-            (Mode::CommandLine, KeyEvent { code: KeyCode::Backspace, .. }) => {
+            Action::CommandBackspace => {
                 self.command_buffer.pop();
             }
-            (Mode::CommandLine, KeyEvent { code: KeyCode::Char(ch), modifiers, .. })
-                if !modifiers.contains(KeyModifiers::CONTROL)
-                    && !modifiers.contains(KeyModifiers::ALT) =>
+        }
+    }
+
+    /// Default handler for keys not found in the bindings table.
+    fn handle_default(&mut self, key: KeyEvent) {
+        let ch = match key.code {
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
             {
+                c
+            }
+            _ => return,
+        };
+
+        match self.mode {
+            Mode::Insert => {
+                let _ = self.backend.send_edit("insert", json!({ "chars": ch.to_string() }));
+            }
+            Mode::CommandLine => {
                 self.command_buffer.push(ch);
             }
-            _ => {}
+            Mode::Normal => {
+                // Accumulate count digits for future motion repeat
+                if let Some(d) = ch.to_digit(10) {
+                    self.input_state.count_digits.push(d as u8);
+                }
+            }
+            Mode::Visual => {}
         }
     }
 
@@ -298,8 +335,18 @@ impl App {
 
         let max_x = editor_area.right().saturating_sub(1);
         let max_y = editor_area.bottom().saturating_sub(1);
-        let x = (editor_area.x + self.backend.cursor_col as u16).min(max_x);
-        let y = (editor_area.y + self.backend.cursor_line as u16).min(max_y);
+
+        // L105/L110: convert byte column → display column for correct cursor placement
+        let line =
+            self.backend.lines.get(self.backend.cursor_line).map(|s| s.as_str()).unwrap_or("");
+        let display_col = byte_col_to_display_col(line, self.backend.cursor_col);
+
+        // L106: subtract viewport offsets so cursor tracks the visible window
+        let screen_line = self.backend.cursor_line.saturating_sub(self.viewport.top_line);
+        let screen_col = display_col.saturating_sub(self.viewport.left_col);
+
+        let x = (editor_area.x + screen_col as u16).min(max_x);
+        let y = (editor_area.y + screen_line as u16).min(max_y);
         Position::new(x, y)
     }
 
@@ -330,9 +377,26 @@ impl App {
         }
         self.enter_normal_mode();
     }
+
+    /// L106: scroll the viewport so `cursor_line` is visible.
+    fn scroll_into_view(&mut self, editor_height: usize) {
+        if editor_height == 0 {
+            return;
+        }
+        let cursor_line = self.backend.cursor_line;
+        if cursor_line < self.viewport.top_line {
+            self.viewport.top_line = cursor_line;
+        } else if cursor_line >= self.viewport.top_line + editor_height {
+            self.viewport.top_line = cursor_line + 1 - editor_height;
+        }
+        // Update target column from current cursor for vertical navigation
+        let line =
+            self.backend.lines.get(cursor_line).map(|s| s.as_str()).unwrap_or("");
+        self.viewport.target_col = byte_col_to_display_col(line, self.backend.cursor_col);
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Mode {
     Normal,
     Insert,
@@ -349,6 +413,141 @@ impl Mode {
             Mode::CommandLine => "CMD",
         }
     }
+}
+
+/// L106: explicit viewport model tracking visible region of the buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Viewport {
+    /// Index of the first visible line.
+    top_line: usize,
+    /// First visible display column (for horizontal scrolling).
+    left_col: usize,
+    /// Remembered display column used to restore position after vertical navigation.
+    target_col: usize,
+}
+
+/// L108: accumulated state between key presses (count digits and prefix key).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct InputState {
+    /// Digits entered so far for a count prefix (e.g. `3` before `j`).
+    count_digits: Vec<u8>,
+    /// A single-char prefix key held pending the next key (e.g. `g`).
+    prefix: Option<char>,
+}
+
+impl InputState {
+    /// Returns the accumulated count (default 1 when no digits have been entered).
+    #[allow(dead_code)]
+    pub(crate) fn count(&self) -> u32 {
+        if self.count_digits.is_empty() {
+            return 1;
+        }
+        self.count_digits
+            .iter()
+            .fold(0u32, |acc, &d| acc.saturating_mul(10).saturating_add(d as u32))
+    }
+
+    fn reset(&mut self) {
+        self.count_digits.clear();
+        self.prefix = None;
+    }
+}
+
+/// L108: action dispatched by the table-driven input handler.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Action {
+    Quit,
+    EnterMode(Mode),
+    EnterCommandMode,
+    /// Send a named edit command to xi core with empty params.
+    Edit(&'static str),
+    /// Collapse visual selection then return to normal mode.
+    CollapseAndEnterNormal,
+    ExecuteCommand,
+    DeleteBackward,
+    CommandBackspace,
+}
+
+/// L108: lookup key for the flat bindings table.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct BindingKey {
+    mode: Mode,
+    key: KeyCode,
+    modifiers: KeyModifiers,
+    prefix: Option<char>,
+}
+
+/// L108: returns the static, lazily-initialised bindings table.
+fn bindings() -> &'static HashMap<BindingKey, Action> {
+    static BINDINGS: OnceLock<HashMap<BindingKey, Action>> = OnceLock::new();
+    BINDINGS.get_or_init(build_bindings)
+}
+
+fn build_bindings() -> HashMap<BindingKey, Action> {
+    use Action::*;
+    use Mode::*;
+
+    let none = KeyModifiers::NONE;
+    let ctrl = KeyModifiers::CONTROL;
+
+    let mut m: HashMap<BindingKey, Action> = HashMap::new();
+
+    macro_rules! bind {
+        ($mode:expr, $key:expr, $mods:expr, $prefix:expr, $action:expr) => {
+            m.insert(
+                BindingKey { mode: $mode, key: $key, modifiers: $mods, prefix: $prefix },
+                $action,
+            );
+        };
+    }
+
+    // Ctrl-C quits from any mode
+    for &mode in &[Normal, Insert, Visual, CommandLine] {
+        bind!(mode, KeyCode::Char('c'), ctrl, None, Quit);
+    }
+
+    // Normal mode
+    bind!(Normal, KeyCode::Char('q'), none, None, Quit);
+    bind!(Normal, KeyCode::Char('i'), none, None, EnterMode(Insert));
+    bind!(Normal, KeyCode::Char('v'), none, None, EnterMode(Visual));
+    bind!(Normal, KeyCode::Char(':'), none, None, EnterCommandMode);
+    bind!(Normal, KeyCode::Left, none, None, Edit("move_left"));
+    bind!(Normal, KeyCode::Char('h'), none, None, Edit("move_left"));
+    bind!(Normal, KeyCode::Right, none, None, Edit("move_right"));
+    bind!(Normal, KeyCode::Char('l'), none, None, Edit("move_right"));
+    bind!(Normal, KeyCode::Up, none, None, Edit("move_up"));
+    bind!(Normal, KeyCode::Char('k'), none, None, Edit("move_up"));
+    bind!(Normal, KeyCode::Down, none, None, Edit("move_down"));
+    bind!(Normal, KeyCode::Char('j'), none, None, Edit("move_down"));
+
+    // Visual mode
+    bind!(Visual, KeyCode::Esc, none, None, CollapseAndEnterNormal);
+    bind!(Visual, KeyCode::Char('v'), none, None, CollapseAndEnterNormal);
+    bind!(Visual, KeyCode::Char(':'), none, None, EnterCommandMode);
+    bind!(Visual, KeyCode::Left, none, None, Edit("move_left_and_modify_selection"));
+    bind!(Visual, KeyCode::Char('h'), none, None, Edit("move_left_and_modify_selection"));
+    bind!(Visual, KeyCode::Right, none, None, Edit("move_right_and_modify_selection"));
+    bind!(Visual, KeyCode::Char('l'), none, None, Edit("move_right_and_modify_selection"));
+    bind!(Visual, KeyCode::Up, none, None, Edit("move_up_and_modify_selection"));
+    bind!(Visual, KeyCode::Char('k'), none, None, Edit("move_up_and_modify_selection"));
+    bind!(Visual, KeyCode::Down, none, None, Edit("move_down_and_modify_selection"));
+    bind!(Visual, KeyCode::Char('j'), none, None, Edit("move_down_and_modify_selection"));
+
+    // Insert mode
+    bind!(Insert, KeyCode::Esc, none, None, EnterMode(Normal));
+    bind!(Insert, KeyCode::Left, none, None, Edit("move_left"));
+    bind!(Insert, KeyCode::Right, none, None, Edit("move_right"));
+    bind!(Insert, KeyCode::Up, none, None, Edit("move_up"));
+    bind!(Insert, KeyCode::Down, none, None, Edit("move_down"));
+    bind!(Insert, KeyCode::Enter, none, None, Edit("insert_newline"));
+    bind!(Insert, KeyCode::Backspace, none, None, DeleteBackward);
+
+    // CommandLine mode
+    bind!(CommandLine, KeyCode::Esc, none, None, EnterMode(Normal));
+    bind!(CommandLine, KeyCode::Enter, none, None, ExecuteCommand);
+    bind!(CommandLine, KeyCode::Backspace, none, None, CommandBackspace);
+
+    m
 }
 
 struct ChannelReader {
@@ -380,6 +579,15 @@ impl WriteTransport for ChannelWriter {
             .send(message)
             .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))
     }
+}
+
+/// L109: events produced by the xi reader thread and consumed by the main thread.
+#[derive(Debug)]
+enum BackendEvent {
+    Update(CoreUpdate),
+    Alert(String),
+    /// xi hint: scroll viewport so (line, col) is visible.
+    ScrollTo { line: usize, col: usize },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -435,10 +643,11 @@ struct CoreLine {
 #[derive(Debug)]
 struct XiClient {
     path: Option<PathBuf>,
+    /// Sender half for commands going to xi core.
     tx: Sender<String>,
-    rx: Receiver<String>,
+    /// L109: processed backend events from the xi reader thread.
+    backend_rx: Receiver<BackendEvent>,
     view_id: String,
-    next_request_id: u64,
     pending_line_request: bool,
     line_cache: Vec<LineSlot>,
     lines: Vec<String>,
@@ -446,12 +655,15 @@ struct XiClient {
     cursor_col: usize,
     pristine: bool,
     status_message: Option<String>,
+    /// Last scroll range sent to xi, to avoid redundant notifications (L107).
+    last_scroll: Option<(usize, usize)>,
 }
 
 impl XiClient {
     fn new(path: Option<PathBuf>) -> io::Result<Self> {
         let (to_core_tx, to_core_rx) = mpsc::channel::<String>();
         let (from_core_tx, from_core_rx) = mpsc::channel::<String>();
+        let (backend_tx, backend_rx) = mpsc::channel::<BackendEvent>();
 
         thread::spawn(move || {
             let mut core = XiCore::new();
@@ -459,12 +671,39 @@ impl XiClient {
             let _ = rpc_loop.mainloop(|| ChannelReader { rx: to_core_rx }, &mut core);
         });
 
+        // ── Synchronous init: client_started + new_view ──────────────────────
+        send_rpc_notification(&to_core_tx, "client_started", json!({}))?;
+
+        let new_view_id: u64 = 1;
+        send_rpc_request(
+            &to_core_tx,
+            new_view_id,
+            "new_view",
+            json!({ "file_path": path.as_ref().map(|p| p.to_string_lossy().to_string()) }),
+        )?;
+
+        // Block until we get the new_view response; handle any measure_width
+        // requests that arrive first.
+        let view_id = block_for_response(&from_core_rx, &to_core_tx, new_view_id)?;
+        let view_id = view_id
+            .as_str()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "new_view returned non-string id")
+            })?
+            .to_owned();
+
+        // Drain initial update notifications (xi sends them immediately).
+        let init_events = drain_sync_notifications(&from_core_rx, &to_core_tx);
+
+        // ── Hand from_core_rx to the background reader thread (L109) ─────────
+        let tx_clone = to_core_tx.clone();
+        thread::spawn(move || xi_reader_thread(from_core_rx, tx_clone, backend_tx));
+
         let mut client = Self {
             path,
             tx: to_core_tx,
-            rx: from_core_rx,
-            view_id: String::new(),
-            next_request_id: 1,
+            backend_rx,
+            view_id,
             pending_line_request: false,
             line_cache: Vec::new(),
             lines: Vec::new(),
@@ -472,23 +711,15 @@ impl XiClient {
             cursor_col: 0,
             pristine: true,
             status_message: None,
+            last_scroll: None,
         };
 
-        client.send_notification("client_started", json!({}))?;
-        let new_view_params = json!({
-            "file_path": client
-                .path
-                .as_ref()
-                .map(|path| path.to_string_lossy().to_string())
-        });
-        let view_id = client.request("new_view", new_view_params)?;
-        client.view_id = view_id
-            .as_str()
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "new_view returned non-string id")
-            })?
-            .to_owned();
-        client.pump()?;
+        for event in init_events {
+            client.apply_backend_event(event)?;
+        }
+        // Wait for any pending request_lines responses from xi to arrive through
+        // the reader thread. Loop until the cache is fully populated or we time out.
+        client.pump_init()?;
         Ok(client)
     }
 
@@ -517,6 +748,7 @@ impl XiClient {
         Ok(())
     }
 
+    /// L109: send edit command to xi; the response arrives asynchronously via the reader thread.
     fn send_edit(&mut self, method: &str, params: Value) -> io::Result<()> {
         self.send_notification(
             "edit",
@@ -525,17 +757,30 @@ impl XiClient {
                 "method": method,
                 "params": params,
             }),
-        )?;
-        self.pump()
+        )
     }
 
-    fn pump(&mut self) -> io::Result<()> {
+    /// L109: drain all pending backend events; called each frame from the main loop.
+    fn drain_events(&mut self) -> io::Result<()> {
+        while let Ok(event) = self.backend_rx.try_recv() {
+            self.apply_backend_event(event)?;
+        }
+        Ok(())
+    }
+
+    /// Blocking init drain: wait until all invalidated lines are resolved or time out.
+    /// Used once during `new()` to ensure the buffer is fully populated before returning.
+    fn pump_init(&mut self) -> io::Result<()> {
+        use std::sync::mpsc::RecvTimeoutError;
         loop {
-            match self.rx.recv_timeout(Duration::from_millis(5)) {
-                Ok(raw) => {
-                    let _ = self.handle_raw_message(&raw, None)?;
-                    while let Ok(raw) = self.rx.try_recv() {
-                        let _ = self.handle_raw_message(&raw, None)?;
+            if invalid_line_ranges(&self.line_cache).is_empty() {
+                break;
+            }
+            match self.backend_rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(event) => {
+                    self.apply_backend_event(event)?;
+                    while let Ok(event) = self.backend_rx.try_recv() {
+                        self.apply_backend_event(event)?;
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => break,
@@ -543,6 +788,45 @@ impl XiClient {
             }
         }
         Ok(())
+    }
+
+    /// Apply one backend event produced by the xi reader thread.
+    fn apply_backend_event(&mut self, event: BackendEvent) -> io::Result<()> {
+        match event {
+            BackendEvent::Update(update) => {
+                self.pending_line_request = false;
+                self.apply_update(update)?;
+                self.request_invalidated_lines()?;
+            }
+            // L105: xi tells us where the cursor/viewport should be; trust it
+            // and let scroll_into_view (called in run_app) handle the viewport.
+            BackendEvent::ScrollTo { line, col } => {
+                self.cursor_line = line;
+                self.cursor_col = col;
+                self.clamp_cursor();
+            }
+            BackendEvent::Alert(msg) => {
+                self.status_message = Some(msg);
+            }
+        }
+        Ok(())
+    }
+
+    /// L107: notify xi which lines are currently visible so it can prioritise updates.
+    fn notify_scroll(&mut self, first_line: usize, last_line: usize) -> io::Result<()> {
+        let range = (first_line, last_line);
+        if self.last_scroll == Some(range) || self.view_id.is_empty() {
+            return Ok(());
+        }
+        self.last_scroll = Some(range);
+        self.send_notification(
+            "edit",
+            json!({
+                "view_id": self.view_id,
+                "method": "scroll",
+                "params": [first_line, last_line],
+            }),
+        )
     }
 
     fn clamp_cursor(&mut self) {
@@ -562,116 +846,6 @@ impl XiClient {
             "method": method,
             "params": params,
         }))
-    }
-
-    fn request(&mut self, method: &str, params: Value) -> io::Result<Value> {
-        let id = self.next_request_id;
-        self.next_request_id += 1;
-        self.send_message(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        }))?;
-
-        loop {
-            let raw = self
-                .rx
-                .recv()
-                .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))?;
-            if let Some(response) = self.handle_raw_message(&raw, Some(id))? {
-                break response;
-            }
-        }
-    }
-
-    fn handle_raw_message(
-        &mut self,
-        raw: &str,
-        expected_response_id: Option<u64>,
-    ) -> io::Result<Option<io::Result<Value>>> {
-        let message: Value = serde_json::from_str(raw)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-
-        if let Some(method) = message.get("method").and_then(Value::as_str) {
-            if message.get("id").is_some() {
-                self.handle_core_request(
-                    method,
-                    message.get("params").cloned().unwrap_or(Value::Null),
-                    message.get("id").cloned().unwrap_or(Value::Null),
-                )?;
-            } else {
-                self.handle_core_notification(
-                    method,
-                    message.get("params").cloned().unwrap_or(Value::Null),
-                )?;
-            }
-            return Ok(None);
-        }
-
-        let response_id = message.get("id").and_then(Value::as_u64);
-        if response_id == expected_response_id {
-            return Ok(Some(parse_response(message)));
-        }
-
-        Ok(None)
-    }
-
-    fn handle_core_notification(&mut self, method: &str, params: Value) -> io::Result<()> {
-        match method {
-            "update" => {
-                let update = serde_json::from_value::<CoreNotificationParams>(params)
-                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-                self.pending_line_request = false;
-                self.apply_update(update.update)?;
-                self.request_invalidated_lines()?;
-            }
-            "scroll_to" => {}
-            "alert" => {
-                self.status_message =
-                    params.get("msg").and_then(Value::as_str).map(ToOwned::to_owned);
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn handle_core_request(&mut self, method: &str, params: Value, id: Value) -> io::Result<()> {
-        let response = match method {
-            "measure_width" => {
-                let widths = params
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|req| {
-                        req.get("strings")
-                                .and_then(Value::as_array)
-                                .into_iter()
-                                .flatten()
-                                .map(|text| {
-                                    Value::from(
-                                        text.as_str().unwrap_or_default().chars().count() as f64
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                    })
-                    .collect::<Vec<_>>();
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": widths,
-                })
-            }
-            _ => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": {
-                    "code": -32601,
-                    "message": format!("unsupported frontend request: {method}"),
-                }
-            }),
-        };
-        self.send_message(response)
     }
 
     fn send_message(&self, value: Value) -> io::Result<()> {
@@ -767,6 +941,7 @@ impl XiClient {
             };
             if let Some(&cursor_col) = line.cursors.first() {
                 self.cursor_line = line_index;
+                // L105: byte offset from xi payload; display-col conversion happens at render time
                 self.cursor_col = previous_char_boundary(&line.text, cursor_col);
                 self.clamp_cursor();
                 return;
@@ -797,6 +972,25 @@ impl XiClient {
             )?;
         }
         self.pending_line_request = true;
+        Ok(())
+    }
+
+    /// Test helper: sleep briefly then drain all pending events.
+    #[cfg(test)]
+    fn pump(&mut self) -> io::Result<()> {
+        use std::sync::mpsc::RecvTimeoutError;
+        for _ in 0..6 {
+            match self.backend_rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(event) => {
+                    self.apply_backend_event(event)?;
+                    while let Ok(event) = self.backend_rx.try_recv() {
+                        self.apply_backend_event(event)?;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
         Ok(())
     }
 }
@@ -908,6 +1102,189 @@ fn invalid_line_ranges(line_cache: &[LineSlot]) -> Vec<(usize, usize)> {
     }
 
     ranges
+}
+
+// ── L109: Xi reader thread ────────────────────────────────────────────────────
+
+/// Background thread: reads raw JSON from xi core, handles synchronous frontend
+/// requests (measure_width) inline, and forwards notifications as BackendEvents.
+fn xi_reader_thread(rx: Receiver<String>, tx: Sender<String>, backend_tx: Sender<BackendEvent>) {
+    while let Ok(raw) = rx.recv() {
+        let msg: Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let Some(method) = msg.get("method").and_then(Value::as_str) {
+            let params = msg.get("params").cloned().unwrap_or(Value::Null);
+            if let Some(id) = msg.get("id").cloned() {
+                // Core → frontend synchronous request (e.g. measure_width)
+                respond_to_frontend_request(method, params, id, &tx);
+            } else {
+                // Notification → turn into a BackendEvent
+                if let Some(event) = parse_notification(method, params) {
+                    let _ = backend_tx.send(event);
+                }
+            }
+        }
+        // Responses to our own requests are handled in block_for_response before
+        // the reader thread starts, so we never see them here.
+    }
+}
+
+/// Send the JSON-RPC response for a core → frontend request.
+fn respond_to_frontend_request(method: &str, params: Value, id: Value, tx: &Sender<String>) {
+    let response = match method {
+        // L110: use actual display width instead of char count
+        "measure_width" => {
+            let widths = params
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|req| {
+                    req.get("strings")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .map(|text| {
+                            Value::from(
+                                UnicodeWidthStr::width(text.as_str().unwrap_or_default()) as f64,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            json!({ "jsonrpc": "2.0", "id": id, "result": widths })
+        }
+        _ => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32601, "message": format!("unsupported frontend request: {method}") }
+        }),
+    };
+    if let Ok(raw) = serde_json::to_string(&response) {
+        let _ = tx.send(raw);
+    }
+}
+
+/// Parse a xi core notification into a BackendEvent.
+fn parse_notification(method: &str, params: Value) -> Option<BackendEvent> {
+    match method {
+        "update" => {
+            let p = serde_json::from_value::<CoreNotificationParams>(params).ok()?;
+            Some(BackendEvent::Update(p.update))
+        }
+        "scroll_to" => {
+            let line = params.get("line").and_then(Value::as_u64)? as usize;
+            let col = params.get("col").and_then(Value::as_u64)? as usize;
+            Some(BackendEvent::ScrollTo { line, col })
+        }
+        "alert" => {
+            let msg = params.get("msg").and_then(Value::as_str)?.to_owned();
+            Some(BackendEvent::Alert(msg))
+        }
+        _ => None,
+    }
+}
+
+// ── Init helpers (used before the reader thread starts) ──────────────────────
+
+fn send_rpc_notification(tx: &Sender<String>, method: &str, params: Value) -> io::Result<()> {
+    let raw = serde_json::to_string(&json!({
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": params,
+    }))
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    tx.send(raw).map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e.to_string()))
+}
+
+fn send_rpc_request(
+    tx: &Sender<String>,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> io::Result<()> {
+    let raw = serde_json::to_string(&json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": params,
+    }))
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    tx.send(raw).map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e.to_string()))
+}
+
+/// Block until we receive the JSON-RPC response for `expected_id`.
+/// Handles measure_width requests and discards other notifications inline.
+fn block_for_response(
+    rx: &Receiver<String>,
+    tx: &Sender<String>,
+    expected_id: u64,
+) -> io::Result<Value> {
+    loop {
+        let raw = rx.recv().map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e.to_string()))?;
+        let msg: Value = serde_json::from_str(&raw)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+        if let Some(method) = msg.get("method").and_then(Value::as_str) {
+            let params = msg.get("params").cloned().unwrap_or(Value::Null);
+            if let Some(id) = msg.get("id").cloned() {
+                respond_to_frontend_request(method, params, id, tx);
+            }
+            // notifications during init are collected by drain_sync_notifications
+            continue;
+        }
+
+        if msg.get("id").and_then(Value::as_u64) == Some(expected_id) {
+            return parse_response(msg);
+        }
+    }
+}
+
+/// Drain pending notifications from xi right after `new_view`.
+/// Handles measure_width requests inline; returns other events as BackendEvents.
+fn drain_sync_notifications(
+    rx: &Receiver<String>,
+    tx: &Sender<String>,
+) -> Vec<BackendEvent> {
+    let mut events = Vec::new();
+    while let Ok(raw) = rx.recv_timeout(Duration::from_millis(20)) {
+        let msg: Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let Some(method) = msg.get("method").and_then(Value::as_str) {
+            let params = msg.get("params").cloned().unwrap_or(Value::Null);
+            if let Some(id) = msg.get("id").cloned() {
+                respond_to_frontend_request(method, params, id, tx);
+            } else if let Some(event) = parse_notification(method, params) {
+                events.push(event);
+            }
+        }
+    }
+    events
+}
+
+// ── L110: display-width helpers ───────────────────────────────────────────────
+
+/// Convert a byte offset within `line` to the number of display columns
+/// needed to reach that position, using Unicode display widths.
+fn byte_col_to_display_col(line: &str, byte_col: usize) -> usize {
+    let safe = previous_char_boundary(line, byte_col.min(line.len()));
+    UnicodeWidthStr::width(&line[..safe])
+}
+
+/// Convert a display-column offset to the byte offset of the first character
+/// that starts at or after that visual column.
+fn display_col_to_byte(line: &str, display_col: usize) -> usize {
+    let mut col = 0usize;
+    for (byte_idx, ch) in line.char_indices() {
+        if col >= display_col {
+            return byte_idx;
+        }
+        col += UnicodeWidthChar::width(ch).unwrap_or(0);
+    }
+    line.len()
 }
 
 #[cfg(test)]
@@ -1084,13 +1461,13 @@ mod tests {
     }
 
     fn test_client() -> XiClient {
-        let (tx, rx) = mpsc::channel();
+        let (tx, _rx) = mpsc::channel();
+        let (_backend_tx, backend_rx) = mpsc::channel();
         XiClient {
             path: None,
             tx,
-            rx,
+            backend_rx,
             view_id: String::new(),
-            next_request_id: 1,
             pending_line_request: false,
             line_cache: Vec::new(),
             lines: Vec::new(),
@@ -1098,6 +1475,74 @@ mod tests {
             cursor_col: 0,
             pristine: true,
             status_message: None,
+            last_scroll: None,
         }
+    }
+
+    // ── New tests for L106, L108, L110 ──────────────────────────────────────
+
+    #[test]
+    fn byte_col_to_display_col_ascii() {
+        assert_eq!(byte_col_to_display_col("hello", 3), 3);
+    }
+
+    #[test]
+    fn byte_col_to_display_col_wide_char() {
+        // '日' is 3 UTF-8 bytes and 2 display columns
+        let s = "日本";
+        assert_eq!(byte_col_to_display_col(s, 3), 2); // after first kanji
+        assert_eq!(byte_col_to_display_col(s, 6), 4); // after second kanji
+    }
+
+    #[test]
+    fn display_col_to_byte_wide_char() {
+        let s = "日本";
+        assert_eq!(display_col_to_byte(s, 0), 0);
+        assert_eq!(display_col_to_byte(s, 2), 3); // start of second kanji
+        assert_eq!(display_col_to_byte(s, 4), 6); // end of string
+    }
+
+    #[test]
+    fn viewport_scrolls_down_when_cursor_leaves_view() {
+        let mut app = App::from_path(None).unwrap();
+        // Place cursor below visible area
+        app.backend.cursor_line = 25;
+        app.scroll_into_view(20);
+        assert_eq!(app.viewport.top_line, 6); // 25 + 1 - 20
+    }
+
+    #[test]
+    fn viewport_scrolls_up_when_cursor_above_top() {
+        let mut app = App::from_path(None).unwrap();
+        app.viewport.top_line = 10;
+        app.backend.cursor_line = 5;
+        app.scroll_into_view(20);
+        assert_eq!(app.viewport.top_line, 5);
+    }
+
+    #[test]
+    fn bindings_table_has_normal_hjkl() {
+        let b = bindings();
+        let lookup = |key| {
+            b.get(&BindingKey {
+                mode: Mode::Normal,
+                key,
+                modifiers: KeyModifiers::NONE,
+                prefix: None,
+            })
+            .cloned()
+        };
+        assert_eq!(lookup(KeyCode::Char('h')), Some(Action::Edit("move_left")));
+        assert_eq!(lookup(KeyCode::Char('l')), Some(Action::Edit("move_right")));
+        assert_eq!(lookup(KeyCode::Char('k')), Some(Action::Edit("move_up")));
+        assert_eq!(lookup(KeyCode::Char('j')), Some(Action::Edit("move_down")));
+    }
+
+    #[test]
+    fn count_digits_accumulate_in_normal_mode() {
+        let mut app = App::from_path(None).unwrap();
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE)));
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE)));
+        assert_eq!(app.input_state.count(), 35);
     }
 }
