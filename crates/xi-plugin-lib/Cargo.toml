@@ -16,6 +16,7 @@ rand.workspace = true
 memchr.workspace = true
 log.workspace = true
 tracing.workspace = true
+tokio-util = { workspace = true }
 
 [dependencies.xi-rpc]
 workspace = true

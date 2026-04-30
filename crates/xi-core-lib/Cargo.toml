@@ -18,6 +18,7 @@ regex.workspace = true
 memchr.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tokio-util = { workspace = true }
 
 xi-rope = { workspace = true, features = ["serde"] }
 xi-unicode.workspace = true

@@ -17,7 +17,6 @@ use xi_plugin_lib::mainloop;
 pub mod conversion_utils;
 pub mod language_server_client;
 pub mod lsp_plugin;
-pub mod parse_helper;
 mod result_queue;
 pub mod types;
 mod utils;
