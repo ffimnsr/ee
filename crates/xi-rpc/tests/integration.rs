@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 use std::io;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use xi_rpc::test_utils::{make_reader, test_channel};
 use xi_rpc::{
-    Error, Handler, NewlineWriter, Peer, ReadError, RemoteError, RpcCall, RpcCtx, RpcLoop,
-    WriteTransport,
+    Error, Handler, NewlineWriter, Peer, ReadError, ReadTransport, RemoteError, RpcCall, RpcCtx,
+    RpcLoop, WriteTransport,
 };
 
 /// Handler that responds to requests with whatever params they sent.
@@ -32,6 +34,41 @@ impl Handler for EchoHandler {
     fn handle_notification(&mut self, ctx: &RpcCtx, rpc: Self::Notification) {}
     fn handle_request(&mut self, ctx: &RpcCtx, rpc: Self::Request) -> Result<Value, RemoteError> {
         Ok(rpc.params)
+    }
+}
+
+struct ChannelReader {
+    rx: Receiver<String>,
+}
+
+impl ReadTransport for ChannelReader {
+    fn read_message(&mut self, buf: &mut String) -> io::Result<usize> {
+        match self.rx.recv() {
+            Ok(message) => {
+                let len = message.len();
+                buf.push_str(&message);
+                Ok(len)
+            }
+            Err(_) => Ok(0),
+        }
+    }
+}
+
+fn channel_reader() -> (Sender<String>, ChannelReader) {
+    let (tx, rx) = mpsc::channel();
+    (tx, ChannelReader { rx })
+}
+
+struct NoopHandler;
+
+impl Handler for NoopHandler {
+    type Notification = RpcCall;
+    type Request = RpcCall;
+
+    fn handle_notification(&mut self, _ctx: &RpcCtx, _rpc: Self::Notification) {}
+
+    fn handle_request(&mut self, _ctx: &RpcCtx, _rpc: Self::Request) -> Result<Value, RemoteError> {
+        Ok(json!(null))
     }
 }
 
@@ -149,6 +186,42 @@ fn test_sync_request_timeout() {
 }
 
 #[test]
+fn test_sync_request_completion() {
+    let (input_tx, reader) = channel_reader();
+    let (writer, mut written) = test_channel();
+    let mut rpc_loop = RpcLoop::new(writer);
+    let peer = rpc_loop.get_raw_peer();
+
+    let mainloop_thread = thread::spawn(move || {
+        let mut handler = NoopHandler;
+        rpc_loop.mainloop(|| reader, &mut handler)
+    });
+
+    let request_thread = thread::spawn(move || {
+        peer.send_rpc_request_timeout("ping", &json!({ "value": 1 }), Duration::from_secs(1))
+    });
+
+    let outbound = written.expect_object();
+    assert_eq!(outbound.get_method(), Some("ping"));
+    let request_id = outbound.get_id().expect("request id must be present");
+
+    input_tx
+        .send(json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": { "ok": true }
+        })
+        .to_string())
+        .expect("response should be sent");
+
+    let response = request_thread.join().expect("request thread should join");
+    assert_eq!(response.expect("sync request should succeed"), json!({ "ok": true }));
+
+    drop(input_tx);
+    assert!(mainloop_thread.join().expect("mainloop thread should join").is_ok());
+}
+
+#[test]
 fn test_request_cancellation() {
     // Cancelling a pending async request invokes the callback with RequestCancelled.
     let rpc_loop = sink_loop();
@@ -180,8 +253,6 @@ fn test_request_cancellation() {
 fn test_sync_request_is_blocked_reset_after_disconnect() {
     // is_blocked must be reset to false after send_rpc_request completes
     // (even via PeerDisconnect path), so the peer is usable for subsequent calls.
-    use std::thread;
-
     let mut rpc_loop = sink_loop();
     let peer = rpc_loop.get_raw_peer();
 
@@ -371,6 +442,115 @@ fn test_schedule_idle_coalesces_duplicates() {
 }
 
 #[test]
+fn test_idle_queue_preserves_fifo_order() {
+    struct OrderedIdleHandler {
+        seen: Arc<Mutex<Vec<usize>>>,
+        done_tx: Sender<()>,
+        done: bool,
+    }
+
+    impl Handler for OrderedIdleHandler {
+        type Notification = RpcCall;
+        type Request = RpcCall;
+
+        fn handle_notification(&mut self, _ctx: &RpcCtx, _rpc: Self::Notification) {}
+
+        fn handle_request(
+            &mut self,
+            _ctx: &RpcCtx,
+            _rpc: Self::Request,
+        ) -> Result<Value, RemoteError> {
+            Ok(json!(null))
+        }
+
+        fn idle(&mut self, _ctx: &RpcCtx, token: usize) {
+            let mut seen = self.seen.lock().unwrap();
+            seen.push(token);
+            if seen.len() == 3 && !self.done {
+                self.done = true;
+                let _ = self.done_tx.send(());
+            }
+        }
+    }
+
+    let (input_tx, reader) = channel_reader();
+    let mut rpc_loop = sink_loop();
+    let peer = rpc_loop.get_raw_peer();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (done_tx, done_rx) = mpsc::channel();
+
+    peer.schedule_idle(10);
+    peer.schedule_idle(20);
+    peer.schedule_idle(30);
+
+    let stopper = thread::spawn(move || {
+        done_rx.recv().expect("idle sequence should complete");
+        drop(input_tx);
+    });
+
+    let mut handler = OrderedIdleHandler { seen: seen.clone(), done_tx, done: false };
+    assert!(rpc_loop.mainloop(|| reader, &mut handler).is_ok());
+    stopper.join().expect("stopper thread should join");
+
+    assert_eq!(*seen.lock().unwrap(), vec![10, 20, 30]);
+}
+
+#[test]
+fn test_timers_fire_in_deadline_order() {
+    struct OrderedIdleHandler {
+        seen: Arc<Mutex<Vec<usize>>>,
+        done_tx: Sender<()>,
+        done: bool,
+    }
+
+    impl Handler for OrderedIdleHandler {
+        type Notification = RpcCall;
+        type Request = RpcCall;
+
+        fn handle_notification(&mut self, _ctx: &RpcCtx, _rpc: Self::Notification) {}
+
+        fn handle_request(
+            &mut self,
+            _ctx: &RpcCtx,
+            _rpc: Self::Request,
+        ) -> Result<Value, RemoteError> {
+            Ok(json!(null))
+        }
+
+        fn idle(&mut self, _ctx: &RpcCtx, token: usize) {
+            let mut seen = self.seen.lock().unwrap();
+            seen.push(token);
+            if seen.len() == 3 && !self.done {
+                self.done = true;
+                let _ = self.done_tx.send(());
+            }
+        }
+    }
+
+    let (input_tx, reader) = channel_reader();
+    let mut rpc_loop = sink_loop();
+    let peer = rpc_loop.get_raw_peer();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (done_tx, done_rx) = mpsc::channel();
+    let now = Instant::now();
+
+    peer.schedule_timer(now - Duration::from_millis(10), 2);
+    peer.schedule_timer(now - Duration::from_millis(30), 1);
+    peer.schedule_timer(now - Duration::from_millis(20), 3);
+
+    let stopper = thread::spawn(move || {
+        done_rx.recv().expect("timer sequence should complete");
+        drop(input_tx);
+    });
+
+    let mut handler = OrderedIdleHandler { seen: seen.clone(), done_tx, done: false };
+    assert!(rpc_loop.mainloop(|| reader, &mut handler).is_ok());
+    stopper.join().expect("stopper thread should join");
+
+    assert_eq!(*seen.lock().unwrap(), vec![1, 3, 2]);
+}
+
+#[test]
 fn test_cancel_timer() {
     use std::time::{Duration, Instant};
 
@@ -422,4 +602,86 @@ fn test_response_write_failure_propagates_from_mainloop() {
         Err(ReadError::Io(err)) => assert_eq!(err.kind(), io::ErrorKind::Other),
         other => panic!("expected response write failure, got {:?}", other),
     }
+}
+
+#[test]
+fn test_request_write_failure_is_reported_to_caller() {
+    let rpc_loop = RpcLoop::new(FailingWriter);
+    let peer = rpc_loop.get_raw_peer();
+
+    let result = peer.send_rpc_request_timeout("ping", &json!({}), Duration::from_secs(1));
+    match result {
+        Err(Error::Io(err)) => assert_eq!(err.kind(), io::ErrorKind::Other),
+        other => panic!("expected request write failure, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_malformed_response_returns_invalid_response_and_loop_continues() {
+    let (input_tx, reader) = channel_reader();
+    let (writer, mut written) = test_channel();
+    let mut rpc_loop = RpcLoop::new(writer);
+    let peer = rpc_loop.get_raw_peer();
+
+    let mainloop_thread = thread::spawn(move || {
+        let mut handler = NoopHandler;
+        rpc_loop.mainloop(|| reader, &mut handler)
+    });
+
+    let (first_tx, first_rx) = mpsc::channel();
+    peer.send_rpc_request_async(
+        "first",
+        &json!({}),
+        Box::new(move |result| {
+            let _ = first_tx.send(result);
+        }),
+    );
+
+    let first_request = written.expect_object();
+    let first_id = first_request.get_id().expect("request id must be present");
+    input_tx
+        .send(json!({
+            "jsonrpc": "2.0",
+            "id": first_id,
+            "result": { "ok": false },
+            "error": {
+                "code": -32603,
+                "message": "should not coexist with result"
+            }
+        })
+        .to_string())
+        .expect("malformed response should be sent");
+
+    match first_rx.recv_timeout(Duration::from_secs(1)).expect("first callback should fire") {
+        Err(Error::InvalidResponse) => {}
+        other => panic!("expected invalid response error, got {:?}", other),
+    }
+
+    let (second_tx, second_rx) = mpsc::channel();
+    peer.send_rpc_request_async(
+        "second",
+        &json!({}),
+        Box::new(move |result| {
+            let _ = second_tx.send(result);
+        }),
+    );
+
+    let second_request = written.expect_object();
+    let second_id = second_request.get_id().expect("request id must be present");
+    input_tx
+        .send(json!({
+            "jsonrpc": "2.0",
+            "id": second_id,
+            "result": { "ok": true }
+        })
+        .to_string())
+        .expect("valid response should be sent");
+
+    match second_rx.recv_timeout(Duration::from_secs(1)).expect("second callback should fire") {
+        Ok(value) => assert_eq!(value, json!({ "ok": true })),
+        other => panic!("expected successful response after malformed one, got {:?}", other),
+    }
+
+    drop(input_tx);
+    assert!(mainloop_thread.join().expect("mainloop thread should join").is_ok());
 }

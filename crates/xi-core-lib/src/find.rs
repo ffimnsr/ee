@@ -105,6 +105,10 @@ impl Find {
         self.hls_dirty
     }
 
+    fn search_string(&self) -> Option<&str> {
+        self.search_string.as_deref()
+    }
+
     pub fn find_status(&self, view: &View, text: &Rope, matches_only: bool) -> FindStatus {
         if matches_only {
             FindStatus {
@@ -139,7 +143,7 @@ impl Find {
 
     pub fn update_highlights(&mut self, text: &Rope, delta: &RopeDelta) {
         // update search highlights for changed regions
-        if self.search_string.is_some() {
+        if let Some(search_string) = self.search_string.clone() {
             // invalidate occurrences around deletion positions
             for DeltaRegion { old_offset, len, .. } in delta.iter_deletions() {
                 self.occurrences.delete_range(old_offset, old_offset + len, false);
@@ -168,7 +172,7 @@ impl Find {
             };
 
             // invalidate all search results from the point of the last valid search result until ...
-            let is_multiline = LinesMetric::next(self.search_string.as_ref().unwrap(), 0).is_some();
+            let is_multiline = LinesMetric::next(&search_string, 0).is_some();
 
             if is_multiline || self.is_multiline_regex() {
                 // ... the end of the file
@@ -192,7 +196,7 @@ impl Find {
 
     /// Returns `true` if the search query is a multi-line regex.
     pub(crate) fn is_multiline_regex(&self) -> bool {
-        self.regex.is_some() && is_multiline_regex(self.search_string.as_ref().unwrap())
+        self.search_string().map(|search| self.regex.is_some() && is_multiline_regex(search)).unwrap_or(false)
     }
 
     /// Unsets the search and removes all highlights from the view.
@@ -250,15 +254,13 @@ impl Find {
 
     /// Execute the search on the provided text in the range provided by `start` and `end`.
     pub fn update_find(&mut self, text: &Rope, start: usize, end: usize, include_slop: bool) {
-        if self.search_string.is_none() {
+        let Some(search_string) = self.search_string.clone() else {
             return;
-        }
+        };
 
         // extend the search by twice the string length (twice, because case matching may increase
         // the length of an occurrence)
-        let slop = if include_slop { self.search_string.as_ref().unwrap().len() * 2 } else { 0 };
-
-        let search_string = self.search_string.as_ref().unwrap();
+        let slop = if include_slop { search_string.len() * 2 } else { 0 };
 
         // expand region to be able to find occurrences around the region's edges
         let expanded_start = max(start, slop) - slop;
@@ -277,7 +279,7 @@ impl Find {
             &mut find_cursor,
             &mut raw_lines,
             self.case_matching,
-            search_string,
+            &search_string,
             self.regex.as_ref(),
         ) {
             let end = find_cursor.pos();
@@ -514,6 +516,14 @@ mod tests {
         assert!(!find.is_multiline_regex());
         find.set_find("\\n", true, true, false);
         assert!(find.is_multiline_regex());
+    }
+
+    #[test]
+    fn unset_find_state_is_safe_to_query() {
+        let mut find = Find::new(1);
+        assert!(!find.is_multiline_regex());
+        find.update_find(&Rope::from("abc"), 0, 3, true);
+        assert_eq!(find.occurrences().len(), 0);
     }
 
     #[test]

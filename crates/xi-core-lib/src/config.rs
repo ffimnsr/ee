@@ -82,8 +82,7 @@ pub enum ConfigDomain {
 #[serde(rename_all = "snake_case")]
 pub enum ConfigDomainExternal {
     General,
-    //TODO: remove this old name
-    Syntax(LanguageId),
+    #[serde(alias = "syntax")]
     Language(LanguageId),
     UserOverride(ViewId),
 }
@@ -310,7 +309,8 @@ impl ConfigManager {
     pub(crate) fn remove_buffer(&mut self, id: BufferId) {
         self.buffer_tags.remove(&id).expect("remove key must exist");
         self.buffer_configs.remove(&id);
-        // TODO: remove any overrides
+        self.configs.remove(&ConfigDomain::UserOverride(id));
+        self.configs.remove(&ConfigDomain::SysOverride(id));
     }
 
     /// Sets a specific language for the given buffer. This is used if the
@@ -490,11 +490,10 @@ impl ConfigManager {
         }
         match path.file_stem().and_then(|s| s.to_str()) {
             Some("preferences") => Some(ConfigDomain::General),
-            Some(name) if self.languages.language_for_name(name).is_some() => {
-                let lang =
-                    self.languages.language_for_name(name).map(|lang| lang.name.clone()).unwrap();
-                Some(ConfigDomain::Language(lang))
-            }
+            Some(name) => self
+                .languages
+                .language_for_name(name)
+                .map(|lang| ConfigDomain::Language(lang.name.clone())),
             //TODO: plugin configs
             _ => None,
         }
@@ -809,6 +808,33 @@ mod tests {
         assert_eq!(serde_json::to_string(&d).unwrap(), "{\"user_override\":\"view-id-1\"}");
         let d = ConfigDomain::Language("Swift".into());
         assert_eq!(serde_json::to_string(&d).unwrap(), "{\"language\":\"Swift\"}");
+        let d: ConfigDomainExternal = serde_json::from_str("{\"syntax\":\"Swift\"}").unwrap();
+        assert_eq!(d, ConfigDomainExternal::Language("Swift".into()));
+    }
+
+    #[test]
+    fn remove_buffer_clears_buffer_overrides() {
+        let mut manager = ConfigManager::new(None, None);
+        let buf_id = BufferId(7);
+        manager.add_buffer(buf_id, None);
+
+        manager
+            .set_user_config(
+                ConfigDomain::UserOverride(buf_id),
+                json!({"font_size": 12}).as_object().unwrap().to_owned(),
+            )
+            .unwrap();
+        manager
+            .set_user_config(
+                ConfigDomain::SysOverride(buf_id),
+                json!({"tab_size": 2}).as_object().unwrap().to_owned(),
+            )
+            .unwrap();
+
+        manager.remove_buffer(buf_id);
+
+        assert!(!manager.configs.contains_key(&ConfigDomain::UserOverride(buf_id)));
+        assert!(!manager.configs.contains_key(&ConfigDomain::SysOverride(buf_id)));
     }
 
     #[test]

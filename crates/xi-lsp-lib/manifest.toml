@@ -1,3 +1,4 @@
+manifest_version = 1
 name = "xi-lsp-plugin"
 version = "0.0"
 exec_path="./bin/xi-lsp-plugin"

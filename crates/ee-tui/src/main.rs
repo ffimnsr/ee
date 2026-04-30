@@ -16,6 +16,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use xi_core_lib::XiCore;
 use xi_rpc::{ReadTransport, RpcLoop, WriteTransport};
@@ -381,6 +382,56 @@ impl WriteTransport for ChannelWriter {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CachedLine {
+    text: String,
+    cursors: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LineSlot {
+    Known(CachedLine),
+    Invalid,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoreNotificationParams {
+    update: CoreUpdate,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+struct CoreUpdate {
+    ops: Vec<CoreUpdateOp>,
+    pristine: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+struct CoreUpdateOp {
+    op: CoreUpdateKind,
+    n: usize,
+    #[serde(default)]
+    lines: Vec<CoreLine>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum CoreUpdateKind {
+    #[serde(rename = "ins")]
+    Insert,
+    Skip,
+    Invalidate,
+    Copy,
+    Update,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+struct CoreLine {
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    cursor: Vec<usize>,
+}
+
 #[derive(Debug)]
 struct XiClient {
     path: Option<PathBuf>,
@@ -388,8 +439,8 @@ struct XiClient {
     rx: Receiver<String>,
     view_id: String,
     next_request_id: u64,
-    request_depth: usize,
-    pending_refresh: bool,
+    pending_line_request: bool,
+    line_cache: Vec<LineSlot>,
     lines: Vec<String>,
     cursor_line: usize,
     cursor_col: usize,
@@ -414,8 +465,8 @@ impl XiClient {
             rx: from_core_rx,
             view_id: String::new(),
             next_request_id: 1,
-            request_depth: 0,
-            pending_refresh: false,
+            pending_line_request: false,
+            line_cache: Vec::new(),
             lines: Vec::new(),
             cursor_line: 0,
             cursor_col: 0,
@@ -437,7 +488,6 @@ impl XiClient {
                 io::Error::new(io::ErrorKind::InvalidData, "new_view returned non-string id")
             })?
             .to_owned();
-        client.refresh_contents()?;
         client.pump()?;
         Ok(client)
     }
@@ -468,7 +518,6 @@ impl XiClient {
     }
 
     fn send_edit(&mut self, method: &str, params: Value) -> io::Result<()> {
-        self.apply_local_cursor_hint(method, &params);
         self.send_notification(
             "edit",
             json!({
@@ -477,25 +526,6 @@ impl XiClient {
                 "params": params,
             }),
         )?;
-
-        for _ in 0..10 {
-            match self.rx.recv_timeout(Duration::from_millis(5)) {
-                Ok(raw) => {
-                    let _ = self.handle_raw_message(&raw, None)?;
-                    if self.pending_refresh {
-                        break;
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
-            }
-        }
-
-        if self.pending_refresh {
-            self.finish_pending_refresh()?;
-        } else {
-            self.refresh_contents()?;
-        }
         self.pump()
     }
 
@@ -512,25 +542,6 @@ impl XiClient {
                 Err(RecvTimeoutError::Disconnected) => break,
             }
         }
-        self.finish_pending_refresh()
-    }
-
-    fn refresh_contents(&mut self) -> io::Result<()> {
-        if self.view_id.is_empty() {
-            return Ok(());
-        }
-
-        let contents = self.request("debug_get_contents", json!({ "view_id": self.view_id }))?;
-        let text = contents.as_str().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "debug_get_contents returned non-string")
-        })?;
-
-        self.lines = if text.is_empty() {
-            Vec::new()
-        } else {
-            text.split('\n').map(ToOwned::to_owned).collect()
-        };
-        self.clamp_cursor();
         Ok(())
     }
 
@@ -545,14 +556,6 @@ impl XiClient {
         self.cursor_col = previous_char_boundary(&self.lines[self.cursor_line], self.cursor_col);
     }
 
-    fn finish_pending_refresh(&mut self) -> io::Result<()> {
-        while self.pending_refresh && self.request_depth == 0 {
-            self.pending_refresh = false;
-            self.refresh_contents()?;
-        }
-        Ok(())
-    }
-
     fn send_notification(&self, method: &str, params: Value) -> io::Result<()> {
         self.send_message(json!({
             "jsonrpc": "2.0",
@@ -564,7 +567,6 @@ impl XiClient {
     fn request(&mut self, method: &str, params: Value) -> io::Result<Value> {
         let id = self.next_request_id;
         self.next_request_id += 1;
-        self.request_depth += 1;
         self.send_message(json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -572,7 +574,7 @@ impl XiClient {
             "params": params,
         }))?;
 
-        let result = loop {
+        loop {
             let raw = self
                 .rx
                 .recv()
@@ -580,11 +582,7 @@ impl XiClient {
             if let Some(response) = self.handle_raw_message(&raw, Some(id))? {
                 break response;
             }
-        };
-
-        self.request_depth = self.request_depth.saturating_sub(1);
-        self.finish_pending_refresh()?;
-        result
+        }
     }
 
     fn handle_raw_message(
@@ -622,11 +620,11 @@ impl XiClient {
     fn handle_core_notification(&mut self, method: &str, params: Value) -> io::Result<()> {
         match method {
             "update" => {
-                if let Some(update) = params.get("update") {
-                    self.pristine =
-                        update.get("pristine").and_then(Value::as_bool).unwrap_or(self.pristine);
-                }
-                self.pending_refresh = true;
+                let update = serde_json::from_value::<CoreNotificationParams>(params)
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+                self.pending_line_request = false;
+                self.apply_update(update.update)?;
+                self.request_invalidated_lines()?;
             }
             "scroll_to" => {}
             "alert" => {
@@ -685,78 +683,111 @@ impl XiClient {
             .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))
     }
 
-    fn apply_local_cursor_hint(&mut self, method: &str, params: &Value) {
-        let mut should_clamp = true;
-        match method {
-            "insert" => {
-                let chars = params.get("chars").and_then(Value::as_str).unwrap_or_default();
-                self.cursor_col += chars.len();
-                should_clamp = false;
-            }
-            "insert_newline" => {
-                self.cursor_line += 1;
-                self.cursor_col = 0;
-                should_clamp = false;
-            }
-            "delete_backward" => {
-                if self.lines.is_empty() {
-                    self.cursor_line = 0;
-                    self.cursor_col = 0;
-                } else if self.cursor_col > 0 {
-                    self.cursor_col =
-                        previous_char_boundary(&self.lines[self.cursor_line], self.cursor_col - 1);
-                } else if self.cursor_line > 0 {
-                    self.cursor_line -= 1;
-                    self.cursor_col = self.lines[self.cursor_line].len();
-                }
-            }
-            "move_left" => {
-                if self.lines.is_empty() {
-                    self.cursor_col = 0;
-                } else if self.cursor_col > 0 {
-                    self.cursor_col =
-                        previous_char_boundary(&self.lines[self.cursor_line], self.cursor_col - 1);
-                } else if self.cursor_line > 0 {
-                    self.cursor_line -= 1;
-                    self.cursor_col = self.lines[self.cursor_line].len();
-                }
-            }
-            "move_right" => {
-                if self.lines.is_empty() {
-                    self.cursor_col = 0;
-                } else {
-                    let line_len = self.lines[self.cursor_line].len();
-                    if self.cursor_col < line_len {
-                        self.cursor_col =
-                            next_char_boundary(&self.lines[self.cursor_line], self.cursor_col);
-                    } else if self.cursor_line + 1 < self.lines.len() {
-                        self.cursor_line += 1;
-                        self.cursor_col = 0;
+    fn apply_update(&mut self, update: CoreUpdate) -> io::Result<()> {
+        let previous = std::mem::take(&mut self.line_cache);
+        let mut next_cache = Vec::new();
+        let mut source_index = 0;
+
+        self.pristine = update.pristine;
+
+        for op in update.ops {
+            match op.op {
+                CoreUpdateKind::Insert => {
+                    if op.lines.len() != op.n {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("insert op length mismatch: expected {}, got {}", op.n, op.lines.len()),
+                        ));
                     }
+                    next_cache.extend(op.lines.into_iter().map(LineSlot::from));
+                }
+                CoreUpdateKind::Skip => {
+                    source_index = checked_advance(source_index, op.n, previous.len(), "skip")?;
+                }
+                CoreUpdateKind::Invalidate => {
+                    next_cache.extend(std::iter::repeat_n(LineSlot::Invalid, op.n));
+                }
+                CoreUpdateKind::Copy => {
+                    let end = checked_advance(source_index, op.n, previous.len(), "copy")?;
+                    next_cache.extend(previous[source_index..end].iter().cloned());
+                    source_index = end;
+                }
+                CoreUpdateKind::Update => {
+                    if op.lines.len() != op.n {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("update op length mismatch: expected {}, got {}", op.n, op.lines.len()),
+                        ));
+                    }
+
+                    let end = checked_advance(source_index, op.n, previous.len(), "update")?;
+                    for (slot, line) in previous[source_index..end].iter().cloned().zip(op.lines.into_iter()) {
+                        next_cache.push(slot.merge(line)?);
+                    }
+                    source_index = end;
                 }
             }
-            "move_up" | "move_up_and_modify_selection" => {
-                if self.cursor_line > 0 {
-                    self.cursor_line -= 1;
-                }
-            }
-            "move_down" | "move_down_and_modify_selection" => {
-                if self.cursor_line + 1 < self.lines.len() {
-                    self.cursor_line += 1;
-                }
-            }
-            "move_left_and_modify_selection" => {
-                self.apply_local_cursor_hint("move_left", &Value::Null)
-            }
-            "move_right_and_modify_selection" => {
-                self.apply_local_cursor_hint("move_right", &Value::Null)
-            }
-            _ => {}
         }
 
-        if should_clamp {
-            self.clamp_cursor();
+        self.line_cache = next_cache;
+        self.rebuild_lines();
+        self.sync_cursor_from_cache();
+        Ok(())
+    }
+
+    fn rebuild_lines(&mut self) {
+        self.lines = self
+            .line_cache
+            .iter()
+            .map(|slot| match slot {
+                LineSlot::Known(line) => line.text.clone(),
+                LineSlot::Invalid => String::new(),
+            })
+            .collect();
+
+        if matches!(self.line_cache.as_slice(), [LineSlot::Known(CachedLine { text, .. })] if text.is_empty()) {
+            self.lines.clear();
         }
+    }
+
+    fn sync_cursor_from_cache(&mut self) {
+        for (line_index, slot) in self.line_cache.iter().enumerate() {
+            let LineSlot::Known(line) = slot else {
+                continue;
+            };
+            if let Some(&cursor_col) = line.cursors.first() {
+                self.cursor_line = line_index;
+                self.cursor_col = previous_char_boundary(&line.text, cursor_col);
+                self.clamp_cursor();
+                return;
+            }
+        }
+
+        self.clamp_cursor();
+    }
+
+    fn request_invalidated_lines(&mut self) -> io::Result<()> {
+        if self.pending_line_request || self.view_id.is_empty() {
+            return Ok(());
+        }
+
+        let invalid_ranges = invalid_line_ranges(&self.line_cache);
+        if invalid_ranges.is_empty() {
+            return Ok(());
+        }
+
+        for (start, end) in invalid_ranges {
+            self.send_notification(
+                "edit",
+                json!({
+                    "view_id": self.view_id,
+                    "method": "request_lines",
+                    "params": [start, end],
+                }),
+            )?;
+        }
+        self.pending_line_request = true;
+        Ok(())
     }
 }
 
@@ -773,6 +804,38 @@ impl PartialEq for XiClient {
 }
 
 impl Eq for XiClient {}
+
+impl From<CoreLine> for LineSlot {
+    fn from(line: CoreLine) -> Self {
+        LineSlot::Known(CachedLine {
+            text: normalize_line_text(line.text),
+            cursors: line.cursor,
+        })
+    }
+}
+
+impl LineSlot {
+    fn merge(self, update: CoreLine) -> io::Result<Self> {
+        match self {
+            LineSlot::Known(mut line) => {
+                if let Some(text) = update.text {
+                    line.text = text;
+                }
+                line.cursors = update.cursor;
+                Ok(LineSlot::Known(line))
+            }
+            LineSlot::Invalid => {
+                if update.text.is_none() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "update op cannot patch invalid line without text",
+                    ));
+                }
+                Ok(LineSlot::from(update))
+            }
+        }
+    }
+}
 
 fn parse_response(message: Value) -> io::Result<Value> {
     if let Some(result) = message.get("result") {
@@ -796,12 +859,48 @@ fn previous_char_boundary(line: &str, col: usize) -> usize {
     col
 }
 
-fn next_char_boundary(line: &str, col: usize) -> usize {
-    let mut col = (col + 1).min(line.len());
-    while col < line.len() && !line.is_char_boundary(col) {
-        col += 1;
+fn normalize_line_text(text: Option<String>) -> String {
+    let Some(text) = text else {
+        return String::new();
+    };
+    let text = text.strip_suffix('\n').unwrap_or(&text);
+    let text = text.strip_suffix('\r').unwrap_or(text);
+    text.to_owned()
+}
+
+fn checked_advance(current: usize, amount: usize, len: usize, op: &str) -> io::Result<usize> {
+    let next = current.checked_add(amount).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, format!("{op} op overflowed source index"))
+    })?;
+    if next > len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{op} op exceeded cached line count"),
+        ));
     }
-    col
+    Ok(next)
+}
+
+fn invalid_line_ranges(line_cache: &[LineSlot]) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = None;
+
+    for (index, slot) in line_cache.iter().enumerate() {
+        match (slot, start) {
+            (LineSlot::Invalid, None) => start = Some(index),
+            (LineSlot::Known(_), Some(range_start)) => {
+                ranges.push((range_start, index));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(range_start) = start {
+        ranges.push((range_start, line_cache.len()));
+    }
+
+    ranges
 }
 
 #[cfg(test)]
@@ -895,6 +994,62 @@ mod tests {
     }
 
     #[test]
+    fn apply_update_merges_copy_update_insert_and_invalidate() {
+        let mut client = test_client();
+        client.line_cache = vec![
+            LineSlot::Known(CachedLine { text: "alpha".into(), cursors: Vec::new() }),
+            LineSlot::Known(CachedLine { text: "beta".into(), cursors: vec![2] }),
+            LineSlot::Known(CachedLine { text: "gamma".into(), cursors: Vec::new() }),
+        ];
+        client.rebuild_lines();
+
+        client
+            .apply_update(CoreUpdate {
+                pristine: false,
+                ops: vec![
+                    CoreUpdateOp {
+                        op: CoreUpdateKind::Copy,
+                        n: 1,
+                        lines: Vec::new(),
+                    },
+                    CoreUpdateOp {
+                        op: CoreUpdateKind::Update,
+                        n: 1,
+                        lines: vec![CoreLine { text: None, cursor: vec![1] }],
+                    },
+                    CoreUpdateOp {
+                        op: CoreUpdateKind::Insert,
+                        n: 1,
+                        lines: vec![CoreLine { text: Some("delta".into()), cursor: Vec::new() }],
+                    },
+                    CoreUpdateOp {
+                        op: CoreUpdateKind::Invalidate,
+                        n: 2,
+                        lines: Vec::new(),
+                    },
+                ],
+            })
+            .unwrap();
+
+        assert_eq!(client.lines, vec!["alpha", "beta", "delta", "", ""]);
+        assert_eq!((client.cursor_line, client.cursor_col), (1, 1));
+        assert_eq!(invalid_line_ranges(&client.line_cache), vec![(3, 5)]);
+        assert!(!client.pristine);
+    }
+
+    #[test]
+    fn open_file_bootstraps_full_buffer_from_updates() {
+        let path = unique_temp_path("ee-tui-open");
+        let contents = (0..24).map(|i| format!("line-{i}")).collect::<Vec<_>>().join("\n");
+        fs::write(&path, &contents).unwrap();
+
+        let app = App::from_path(Some(path.clone())).unwrap();
+
+        fs::remove_file(&path).unwrap();
+        assert_eq!(app.backend.lines, contents.split('\n').map(ToOwned::to_owned).collect::<Vec<_>>());
+    }
+
+    #[test]
     fn write_command_saves_file() {
         let path = unique_temp_path("ee-tui-save");
         fs::write(&path, "seed").unwrap();
@@ -924,5 +1079,23 @@ mod tests {
     fn unique_temp_path(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         env::temp_dir().join(format!("{prefix}-{nanos}.txt"))
+    }
+
+    fn test_client() -> XiClient {
+        let (tx, rx) = mpsc::channel();
+        XiClient {
+            path: None,
+            tx,
+            rx,
+            view_id: String::new(),
+            next_request_id: 1,
+            pending_line_request: false,
+            line_cache: Vec::new(),
+            lines: Vec::new(),
+            cursor_line: 0,
+            cursor_col: 0,
+            pristine: true,
+            status_message: None,
+        }
     }
 }

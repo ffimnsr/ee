@@ -214,7 +214,9 @@ impl CoreState {
         // instead of having to do this here, config should just own
         // the plugin catalog and reload automatically
         let plugin_paths = self.config_manager.get_plugin_paths();
-        self.plugins.reload_from_paths(&plugin_paths);
+        self.plugins.reload_from_paths(&plugin_paths).into_iter().for_each(|err| {
+            warn!("error loading plugin {:?}", err);
+        });
         let languages = self.plugins.make_languages_map();
         let languages_ids = languages.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
         self.peer.available_languages(languages_ids);
@@ -476,7 +478,6 @@ impl CoreState {
         // the client sends ViewId but we need BufferId so we do a dance
         let domain: ConfigDomain = match domain {
             ConfigDomainExternal::General => ConfigDomain::General,
-            ConfigDomainExternal::Syntax(id) => ConfigDomain::Language(id),
             ConfigDomainExternal::Language(id) => ConfigDomain::Language(id),
             ConfigDomainExternal::UserOverride(view_id) => match self.views.get(&view_id) {
                 Some(v) => ConfigDomain::UserOverride(v.borrow().get_buffer_id()),
@@ -776,7 +777,9 @@ impl CoreState {
         use notify::event::*;
         match event.kind {
             EventKind::Create(CreateKind::Any) | EventKind::Modify(ModifyKind::Any) => {
-                self.plugins.load_from_paths(&[event.paths[0].clone()]);
+                self.plugins.load_from_paths(&[event.paths[0].clone()]).into_iter().for_each(|err| {
+                    warn!("error loading plugin {:?}", err);
+                });
                 if let Some(plugin) = self.plugins.get_from_path(&event.paths[0]) {
                     self.do_start_plugin(ViewId(0), &plugin.name);
                 }
@@ -797,7 +800,9 @@ impl CoreState {
                     self.plugins.remove_named(&old_plugin.name);
                 }
 
-                self.plugins.load_from_paths(std::slice::from_ref(new));
+                self.plugins.load_from_paths(std::slice::from_ref(new)).into_iter().for_each(|err| {
+                    warn!("error loading plugin {:?}", err);
+                });
                 if let Some(new_plugin) = self.plugins.get_from_path(new) {
                     self.do_start_plugin(ViewId(0), &new_plugin.name);
                 }

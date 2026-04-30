@@ -41,7 +41,7 @@ use std::fmt;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 
 use xi_rpc::RpcPeer;
@@ -91,6 +91,16 @@ pub type EventQueue = VecDeque<(WatchToken, Event)>;
 
 pub type PathFilter = dyn Fn(&Path) -> bool + Send + 'static;
 
+fn lock_state(state: &Arc<Mutex<WatcherState>>) -> MutexGuard<'_, WatcherState> {
+    match state.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!("file watcher state poisoned; recovering inner state");
+            poisoned.into_inner()
+        }
+    }
+}
+
 impl FileWatcher {
     pub fn new<T: Notify + 'static>(peer: T) -> Self {
         let (tx_event, rx_event) = mpsc::channel::<notify::Result<Event>>();
@@ -105,7 +115,7 @@ impl FileWatcher {
 
         thread::spawn(move || {
             while let Ok(Ok(event)) = rx_event.recv() {
-                let mut state = state_clone.lock().unwrap();
+                let mut state = lock_state(&state_clone);
                 let WatcherState { ref mut events, ref mut watchees } = *state;
 
                 watchees
@@ -157,7 +167,7 @@ impl FileWatcher {
             }
         };
 
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_state(&self.state);
 
         let w = Watchee { path, recursive, token, filter };
         let mode = mode_from_bool(w.recursive);
@@ -175,7 +185,7 @@ impl FileWatcher {
     /// Does not stop watching this path, if it is associated with
     /// other tokens.
     pub fn unwatch(&mut self, path: &Path, token: WatchToken) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_state(&self.state);
 
         let idx = state.watchees.iter().position(|w| w.token == token && w.path == path);
 
@@ -218,7 +228,7 @@ impl FileWatcher {
 
     /// Takes ownership of this `Watcher`'s current event queue.
     pub fn take_events(&mut self) -> VecDeque<(WatchToken, Event)> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = lock_state(&self.state);
         let WatcherState { ref mut events, .. } = *state;
         mem::take(events)
     }
@@ -297,7 +307,6 @@ fn mode_from_bool(is_recursive: bool) -> RecursiveMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify::EventKind;
     use std::ffi::OsStr;
     use std::fs;
     use std::io::Write;
@@ -496,9 +505,9 @@ mod tests {
         // take_events() only contains events from the subsequent remove.
         let _ = w.take_events();
 
-        assert_eq!(w.state.lock().unwrap().watchees.len(), 2);
+        assert_eq!(lock_state(&w.state).watchees.len(), 2);
         w.unwatch(&tmp.mkpath("my_file"), 1.into());
-        assert_eq!(w.state.lock().unwrap().watchees.len(), 1);
+        assert_eq!(lock_state(&w.state).watchees.len(), 1);
         sleep_if_macos(1000);
         tmp.remove("my_file");
         sleep_if_macos(1000);
