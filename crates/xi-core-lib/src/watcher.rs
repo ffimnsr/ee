@@ -35,13 +35,13 @@
 //!   they arrive, and an idle task is scheduled.
 
 use log::{info, warn};
-use notify::{event::*, recommended_watcher, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher, event::*, recommended_watcher};
 use std::collections::VecDeque;
 use std::fmt;
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use xi_rpc::RpcPeer;
@@ -267,11 +267,7 @@ impl Watchee {
             false
         };
 
-        if let Some(ref filter) = self.filter {
-            general_case && filter(path)
-        } else {
-            general_case
-        }
+        if let Some(ref filter) = self.filter { general_case && filter(path) } else { general_case }
     }
 }
 
@@ -295,11 +291,7 @@ impl fmt::Debug for Watchee {
 }
 
 fn mode_from_bool(is_recursive: bool) -> RecursiveMode {
-    if is_recursive {
-        RecursiveMode::Recursive
-    } else {
-        RecursiveMode::NonRecursive
-    }
+    if is_recursive { RecursiveMode::Recursive } else { RecursiveMode::NonRecursive }
 }
 
 #[cfg(test)]
@@ -394,7 +386,8 @@ mod tests {
 
         fn create(&self, p: &str) {
             let path = self.mkpath(p);
-            if path.components().next_back().unwrap().as_os_str().to_str().unwrap().contains("dir") {
+            if path.components().next_back().unwrap().as_os_str().to_str().unwrap().contains("dir")
+            {
                 fs::create_dir_all(path).expect("failed to create directory");
             } else {
                 let parent = path.parent().expect("failed to get parent directory").to_owned();

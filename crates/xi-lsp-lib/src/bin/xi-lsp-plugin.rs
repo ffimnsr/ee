@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 use serde_json::json;
-use xi_lsp_lib::{start_mainloop, Config, LspPlugin};
+use xi_lsp_lib::{Config, LspPlugin, start_mainloop};
 
 fn init_logger() -> Result<(), fern::InitError> {
     let level_filter = match std::env::var("XI_LOG") {

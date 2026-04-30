@@ -47,8 +47,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 pub use crate::error::{Error, ReadError, RemoteError};
-use crate::parse::{Call, MessageReader, Response, RpcObject};
 pub use crate::parse::RequestId;
+use crate::parse::{Call, MessageReader, Response, RpcObject};
 pub use crate::transport::{
     ContentLengthReader, ContentLengthWriter, NewlineReader, NewlineWriter, ReadTransport,
     WriteTransport,
@@ -408,11 +408,7 @@ impl<W: WriteTransport> RpcLoop<W> {
             ReadError::ThreadPanic
         });
 
-        if exit.is_disconnect() {
-            Ok(())
-        } else {
-            Err(exit)
-        }
+        if exit.is_disconnect() { Ok(()) } else { Err(exit) }
     }
 }
 
@@ -530,8 +526,7 @@ impl<W: WriteTransport> Peer for RawPeer<W> {
 
     fn cancel_rpc_request(&self, id: RequestId) -> bool {
         let handler = {
-            let mut pending =
-                self.0.pending.lock().unwrap_or_else(|e| e.into_inner());
+            let mut pending = self.0.pending.lock().unwrap_or_else(|e| e.into_inner());
             pending.remove(&id)
         };
         match handler {
@@ -560,7 +555,11 @@ impl<W: WriteTransport> Peer for RawPeer<W> {
     }
 
     fn schedule_timer(&self, after: Instant, token: usize) {
-        self.0.timers.lock().unwrap_or_else(|e| e.into_inner()).push(Timer { fire_after: after, token });
+        self.0
+            .timers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(Timer { fire_after: after, token });
         // Wake the main loop to re-evaluate the earliest timer deadline.
         self.0.rx_cvar.notify_one();
     }

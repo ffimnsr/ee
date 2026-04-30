@@ -17,12 +17,12 @@
 use std::time::Instant;
 
 use serde::Serialize;
-use serde_json::{self, json, Value};
+use serde_json::{self, Value, json};
 use xi_rpc::{self, RpcPeer};
 
 use crate::config::Table;
-use crate::plugins::rpc::ClientPluginInfo;
 use crate::plugins::Command;
+use crate::plugins::rpc::ClientPluginInfo;
 use crate::styles::ThemeSettings;
 use crate::syntax::LanguageId;
 use crate::tabs::ViewId;

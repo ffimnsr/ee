@@ -28,15 +28,16 @@ use std::mem;
 use std::path::{Path, PathBuf};
 
 use log::{debug, error, info, warn};
-use serde::{Deserialize, Serialize};
 use serde::de::{self, Deserializer, Unexpected};
 use serde::ser::Serializer;
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use xi_rope::Rope;
 use xi_rpc::{self, ReadError, RemoteError, RpcCtx, RpcPeer};
 use xi_trace::{self, trace_block};
 
+use crate::WeakXiCore;
 use crate::client::Client;
 use crate::config::{self, ConfigDomain, ConfigDomainExternal, ConfigManager, Table};
 use crate::editor::Editor;
@@ -45,18 +46,17 @@ use crate::file::FileManager;
 use crate::line_ending::LineEnding;
 use crate::plugin_rpc::{PluginNotification, PluginRequest};
 use crate::plugins::rpc::ClientPluginInfo;
-use crate::plugins::{start_plugin_process, Plugin, PluginCatalog, PluginPid};
+use crate::plugins::{Plugin, PluginCatalog, PluginPid, start_plugin_process};
 use crate::recorder::Recorder;
 use crate::rpc::{
     CoreNotification, CoreRequest, EditNotification, EditRequest,
     PluginNotification as CorePluginNotification,
 };
-use crate::styles::{ThemeStyleMap, DEFAULT_THEME};
+use crate::styles::{DEFAULT_THEME, ThemeStyleMap};
 use crate::syntax::LanguageId;
 use crate::view::View;
 use crate::whitespace::Indentation;
 use crate::width_cache::WidthCache;
-use crate::WeakXiCore;
 
 #[cfg(feature = "notify")]
 use crate::watcher::{FileWatcher, WatchToken};

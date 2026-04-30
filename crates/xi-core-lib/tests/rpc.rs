@@ -15,8 +15,8 @@
 use std::io;
 
 use serde_json::json;
-use xi_core_lib::test_helpers;
 use xi_core_lib::XiCore;
+use xi_core_lib::test_helpers;
 use xi_rpc::test_utils::{make_reader, test_channel};
 use xi_rpc::{NewlineWriter, ReadError, RpcLoop};
 

@@ -25,10 +25,10 @@ use xi_rope::rope::RopeDelta;
 
 use crate::conversion_utils::*;
 use crate::language_server_client::LanguageServerClient;
-use lsp_types::*;
 use crate::result_queue::ResultQueue;
 use crate::types::{Config, LanguageResponseError, LspResponse};
 use crate::utils::*;
+use lsp_types::*;
 use xi_core_lib::{ConfigTable, ViewId};
 
 pub struct ViewInfo {

@@ -151,11 +151,7 @@ impl Metric<BreaksInfo> for BreaksMetric {
             Err(n) => n,
         };
 
-        if n == l.data.len() {
-            None
-        } else {
-            Some(l.data[n])
-        }
+        if n == l.data.len() { None } else { Some(l.data[n]) }
     }
 
     fn can_fragment() -> bool {

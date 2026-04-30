@@ -26,7 +26,8 @@ pub mod chrome_trace_dump;
 
 use crate::fixed_lifo_deque::FixedLifoDeque;
 use log::warn;
-use serde::{Deserialize, Serialize};use std::borrow::Cow;
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::cmp;
 use std::collections::HashMap;
 use std::fmt;

@@ -21,7 +21,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use log::{debug, error, warn};
-use serde_json::{self, json, Value};
+use serde_json::{self, Value, json};
 
 use xi_rope::{Cursor, Interval, LinesMetric, Rope, RopeDelta};
 use xi_rpc::{Error as RpcError, RemoteError};
@@ -32,6 +32,7 @@ use crate::plugins::rpc::{
 };
 use crate::rpc::{EditNotification, EditRequest, LineRange, Position as ClientPosition};
 
+use crate::WeakXiCore;
 use crate::client::Client;
 use crate::config::{BufferItems, Table};
 use crate::edit_types::{EventDomain, SpecialEvent};
@@ -44,11 +45,10 @@ use crate::selection::InsertDrift;
 use crate::styles::ThemeStyleMap;
 use crate::syntax::LanguageId;
 use crate::tabs::{
-    BufferId, PluginId, ViewId, FIND_VIEW_IDLE_MASK, RENDER_VIEW_IDLE_MASK, REWRAP_VIEW_IDLE_MASK,
+    BufferId, FIND_VIEW_IDLE_MASK, PluginId, RENDER_VIEW_IDLE_MASK, REWRAP_VIEW_IDLE_MASK, ViewId,
 };
 use crate::view::View;
 use crate::width_cache::WidthCache;
-use crate::WeakXiCore;
 
 // Maximum returned result from plugin get_data RPC.
 pub const MAX_SIZE_LIMIT: usize = 1024 * 1024;

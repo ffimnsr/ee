@@ -33,11 +33,7 @@ pub struct OneByte<F>(pub F);
 impl<F: Fn(u8) -> bool> Peg for OneByte<F> {
     #[inline(always)]
     fn p(&self, s: &[u8]) -> Option<usize> {
-        if s.is_empty() || !self.0(s[0]) {
-            None
-        } else {
-            Some(1)
-        }
+        if s.is_empty() || !self.0(s[0]) { None } else { Some(1) }
     }
 }
 
@@ -115,11 +111,7 @@ impl Peg for char {
     #[inline(always)]
     fn p(&self, s: &[u8]) -> Option<usize> {
         let c = *self;
-        if c <= '\x7f' {
-            (c as u8).p(s)
-        } else {
-            char_helper(s, c)
-        }
+        if c <= '\x7f' { (c as u8).p(s) } else { char_helper(s, c) }
     }
 }
 
@@ -149,11 +141,7 @@ impl Peg for &[u8] {
     #[inline(always)]
     fn p(&self, s: &[u8]) -> Option<usize> {
         let len = self.len();
-        if s.len() >= len && &s[..len] == *self {
-            Some(len)
-        } else {
-            None
-        }
+        if s.len() >= len && &s[..len] == *self { Some(len) } else { None }
     }
 }
 
@@ -273,11 +261,7 @@ impl<P: Peg> Peg for Repeat<P, ops::Range<usize>> {
                 break;
             }
         }
-        if count >= start {
-            Some(i)
-        } else {
-            None
-        }
+        if count >= start { Some(i) } else { None }
     }
 }
 
@@ -291,11 +275,7 @@ impl<P: Peg> Peg for Repeat<P, ops::RangeFrom<usize>> {
             i += len;
             count += 1;
         }
-        if count >= start {
-            Some(i)
-        } else {
-            None
-        }
+        if count >= start { Some(i) } else { None }
     }
 }
 

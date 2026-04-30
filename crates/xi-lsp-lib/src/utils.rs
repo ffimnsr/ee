@@ -25,11 +25,11 @@ use xi_rope::rope::RopeDelta;
 
 use crate::conversion_utils::*;
 use crate::language_server_client::LanguageServerClient;
-use lsp_types::Uri;
-use lsp_types::*;
 use crate::parse_helper;
 use crate::result_queue::ResultQueue;
 use crate::types::Error;
+use lsp_types::Uri;
+use lsp_types::*;
 
 pub fn file_path_to_uri(path: &Path) -> Result<Uri, Error> {
     Url::from_file_path(path)

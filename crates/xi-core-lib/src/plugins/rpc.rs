@@ -17,10 +17,10 @@
 use std::borrow::Borrow;
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
 use serde::de::{self, Deserializer};
 use serde::ser::{self, Serializer};
-use serde_json::{self, json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::{self, Value, json};
 
 use super::PluginPid;
 use crate::annotations::AnnotationType;
@@ -341,11 +341,7 @@ impl TextUnit {
             }
             TextUnit::Line => {
                 let max_line_number = text.measure::<LinesMetric>() + 1;
-                if offset > max_line_number {
-                    None
-                } else {
-                    text.offset_of_line(offset).into()
-                }
+                if offset > max_line_number { None } else { text.offset_of_line(offset).into() }
             }
         }
     }

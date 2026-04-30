@@ -17,7 +17,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{self, json, Value};
+use serde_json::{self, Value, json};
 
 use crate::syntax::{LanguageDefinition, LanguageId};
 
@@ -46,11 +46,7 @@ pub struct PluginDescription {
 
 fn platform_exec_path<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
     let exec_path = PathBuf::deserialize(deserializer)?;
-    if cfg!(windows) {
-        Ok(exec_path.with_extension("exe"))
-    } else {
-        Ok(exec_path)
-    }
+    if cfg!(windows) { Ok(exec_path.with_extension("exe")) } else { Ok(exec_path) }
 }
 
 /// `PluginActivation`s represent events that trigger running a plugin.
@@ -224,7 +220,6 @@ impl PluginDescription {
         matches!(self.scope, PluginScope::Global)
     }
 }
-
 
 #[cfg(test)]
 mod tests {

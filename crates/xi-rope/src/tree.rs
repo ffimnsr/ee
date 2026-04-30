@@ -14,7 +14,7 @@
 
 //! A general b-tree structure suitable for ropes and the like.
 
-use std::cmp::{min, Ordering};
+use std::cmp::{Ordering, min};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -325,7 +325,8 @@ impl<N: NodeInfo> Node<N> {
             } else {
                 panic!("merge_leaves called on non-leaf");
             }
-        }; match res {
+        };
+        match res {
             Some(new) => Node::from_nodes(vec![rope1, Node::from_leaf(new)]),
             None => rope1,
         }
@@ -613,11 +614,7 @@ impl<N: NodeInfo> TreeBuilder<N> {
     /// Pop the last vec-of-nodes off the stack, resulting in a node.
     fn pop(&mut self) -> Node<N> {
         let nodes = self.stack.pop().unwrap();
-        if nodes.len() == 1 {
-            nodes.into_iter().next().unwrap()
-        } else {
-            Node::from_nodes(nodes)
-        }
+        if nodes.len() == 1 { nodes.into_iter().next().unwrap() } else { Node::from_nodes(nodes) }
     }
 }
 
@@ -812,11 +809,7 @@ impl<'a, N: NodeInfo> Cursor<'a, N> {
     ///
     /// [`Metric`]: struct.Metric.html
     pub fn at_or_next<M: Metric<N>>(&mut self) -> Option<usize> {
-        if self.is_boundary::<M>() {
-            Some(self.pos())
-        } else {
-            self.next::<M>()
-        }
+        if self.is_boundary::<M>() { Some(self.pos()) } else { self.next::<M>() }
     }
 
     /// Returns the current position if it is a boundary in this [`Metric`],
@@ -824,11 +817,7 @@ impl<'a, N: NodeInfo> Cursor<'a, N> {
     ///
     /// [`Metric`]: struct.Metric.html
     pub fn at_or_prev<M: Metric<N>>(&mut self) -> Option<usize> {
-        if self.is_boundary::<M>() {
-            Some(self.pos())
-        } else {
-            self.prev::<M>()
-        }
+        if self.is_boundary::<M>() { Some(self.pos()) } else { self.prev::<M>() }
     }
 
     /// Returns an iterator with this cursor over the given [`Metric`].

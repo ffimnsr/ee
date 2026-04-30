@@ -15,7 +15,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use xi_rpc::test_utils::{make_reader, test_channel};
 use xi_rpc::{
     Error, Handler, NewlineWriter, Peer, ReadError, RemoteError, RpcCall, RpcCtx, RpcLoop,
@@ -209,8 +209,7 @@ fn test_sync_request_is_blocked_reset_after_disconnect() {
 
     // After the request completes, is_blocked must be false.
     // We verify indirectly: a second timeout call must complete (not hang).
-    let result2 =
-        peer.send_rpc_request_timeout("test2", &json!({}), Duration::from_millis(50));
+    let result2 = peer.send_rpc_request_timeout("test2", &json!({}), Duration::from_millis(50));
     assert!(matches!(result2, Err(Error::RequestTimeout) | Err(Error::PeerDisconnect)));
 }
 
@@ -223,13 +222,19 @@ fn test_outbound_messages_include_jsonrpc_field() {
 
     peer.send_rpc_notification("ping", &json!({}));
     let obj = rx.expect_rpc("ping");
-    assert_eq!(obj.0.get("jsonrpc").and_then(|v| v.as_str()), Some("2.0"),
-        "notification missing jsonrpc field");
+    assert_eq!(
+        obj.0.get("jsonrpc").and_then(|v| v.as_str()),
+        Some("2.0"),
+        "notification missing jsonrpc field"
+    );
 
     peer.send_rpc_request_async("get", &json!({}), Box::new(|_| {}));
     let obj = rx.expect_object();
-    assert_eq!(obj.0.get("jsonrpc").and_then(|v| v.as_str()), Some("2.0"),
-        "request missing jsonrpc field");
+    assert_eq!(
+        obj.0.get("jsonrpc").and_then(|v| v.as_str()),
+        Some("2.0"),
+        "request missing jsonrpc field"
+    );
 }
 
 #[test]
@@ -243,8 +248,11 @@ fn test_response_includes_jsonrpc_field() {
     // expect_response strips and returns the result; check the raw object.
     let raw = rx.next_timeout(Duration::from_secs(1)).expect("response expected");
     let obj = raw.unwrap();
-    assert_eq!(obj.0.get("jsonrpc").and_then(|v| v.as_str()), Some("2.0"),
-        "response missing jsonrpc field");
+    assert_eq!(
+        obj.0.get("jsonrpc").and_then(|v| v.as_str()),
+        Some("2.0"),
+        "response missing jsonrpc field"
+    );
 }
 
 #[test]
@@ -261,8 +269,11 @@ fn test_batch_request_rejected() {
     // A JSON-RPC error response with null id must have been sent.
     let raw = rx.next_timeout(Duration::from_millis(200));
     if let Some(Ok(obj)) = raw {
-        assert_eq!(obj.0.get("id"), Some(&serde_json::Value::Null),
-            "batch error response must have null id");
+        assert_eq!(
+            obj.0.get("id"),
+            Some(&serde_json::Value::Null),
+            "batch error response must have null id"
+        );
         assert!(obj.0.get("error").is_some(), "batch error response must have error field");
     }
 }
@@ -321,7 +332,7 @@ fn test_schedule_idle_coalesces_duplicates() {
     let peer = rpc_loop.get_raw_peer();
 
     peer.schedule_idle(42);
-    peer.schedule_idle(42);  // duplicate — must be dropped
+    peer.schedule_idle(42); // duplicate — must be dropped
 
     // The handler must be called exactly once for token 42.
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -333,7 +344,11 @@ fn test_schedule_idle_coalesces_duplicates() {
         type Notification = RpcCall;
         type Request = RpcCall;
         fn handle_notification(&mut self, _ctx: &RpcCtx, _rpc: Self::Notification) {}
-        fn handle_request(&mut self, _ctx: &RpcCtx, _rpc: Self::Request) -> Result<Value, RemoteError> {
+        fn handle_request(
+            &mut self,
+            _ctx: &RpcCtx,
+            _rpc: Self::Request,
+        ) -> Result<Value, RemoteError> {
             Ok(json!(null))
         }
         fn idle(&mut self, _ctx: &RpcCtx, token: usize) {
@@ -379,8 +394,11 @@ fn test_string_request_id_accepted() {
     rpc_looper.mainloop(|| r, &mut handler).ok();
     let raw = rx.next_timeout(Duration::from_secs(1)).expect("response expected");
     let obj = raw.unwrap();
-    assert_eq!(obj.0.get("id").and_then(|v| v.as_str()), Some("req-abc"),
-        "response id must echo the string request id");
+    assert_eq!(
+        obj.0.get("id").and_then(|v| v.as_str()),
+        Some("req-abc"),
+        "response id must echo the string request id"
+    );
     assert!(obj.0.get("result").is_some(), "response must include result");
 }
 

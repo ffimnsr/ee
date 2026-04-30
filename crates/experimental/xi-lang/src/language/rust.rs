@@ -14,12 +14,12 @@
 
 //! Rust language syntax analysis and highlighting.
 
-use std::io::{stdin, Read};
+use std::io::{Read, stdin};
 
+use crate::ScopeId;
 use crate::parser::Parser;
 use crate::peg::*;
 use crate::statestack::{Context, State};
-use crate::ScopeId;
 
 /// See [this](https://github.com/sublimehq/Packages/blob/master/Rust/Rust.sublime-syntax)
 /// for reference.
@@ -195,11 +195,7 @@ impl Parser for RustParser {
     fn get_scope_id_for_state(&self, state: State) -> ScopeId {
         let offset = self.scope_offset.unwrap_or_default();
 
-        if let Some(element) = self.ctx.tos(state) {
-            element.scope_id() + offset
-        } else {
-            offset
-        }
+        if let Some(element) = self.ctx.tos(state) { element.scope_id() + offset } else { offset }
     }
 
     fn parse(&mut self, text: &str, mut state: State) -> (usize, State, usize, State) {

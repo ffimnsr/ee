@@ -2,8 +2,8 @@
 name = "xi-unicode"
 version = "0.3.0"
 license = "Apache-2.0"
-authors = ["Raph Levien <raph.levien@gmail.com>"]
-repository = "https://github.com/google/xi-editor"
+authors = ["Raph Levien <raph.levien@gmail.com>", "Edward Fitz Abucay <gh:ffimnsr>"]
+repository = "https://github.com/ffimnsr/ee"
 description = "Unicode utilities useful for text editing, including a line breaking iterator."
 edition.workspace = true
 rust-version.workspace = true

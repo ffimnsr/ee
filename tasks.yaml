@@ -1,0 +1,13 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/ffimnsr/mk-rs/main/docs/schema.json
+
+use_cargo: true
+
+tasks:
+  format:
+    commands:
+      - cargo fmt --all
+    description: Format the code using rustfmt.
+  lint:
+    commands:
+      - cargo clippy --all -- -D warnings
+    description: Lint the code using clippy, treating warnings as errors.

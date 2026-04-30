@@ -116,7 +116,9 @@ fn setup_logging(logging_path: Option<&Path>) -> Result<(), fern::InitError> {
     // Either logging the path fern is outputting to or the error from obtaining the path
     match logging_path {
         Some(logging_file_path) => info!("Writing logs to: {}", logging_file_path.display()),
-        None => warn!("No path was supplied for the log file. Not saving logs to disk, falling back to just stderr"),
+        None => warn!(
+            "No path was supplied for the log file. Not saving logs to disk, falling back to just stderr"
+        ),
     }
     Ok(())
 }

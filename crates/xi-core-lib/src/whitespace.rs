@@ -52,11 +52,7 @@ impl Indentation {
             (true, false) => Ok(Some(Indentation::Tabs)),
             (false, true) => {
                 let tab_size = extract_count(spaces);
-                if tab_size > 0 {
-                    Ok(Some(Indentation::Spaces(tab_size)))
-                } else {
-                    Ok(None)
-                }
+                if tab_size > 0 { Ok(Some(Indentation::Spaces(tab_size))) } else { Ok(None) }
             }
             _ => Ok(None),
         }
@@ -76,11 +72,7 @@ impl Indentation {
             }
         }
 
-        if spaces > 0 {
-            Ok(Some(Indentation::Spaces(spaces)))
-        } else {
-            Ok(None)
-        }
+        if spaces > 0 { Ok(Some(Indentation::Spaces(spaces))) } else { Ok(None) }
     }
 }
 
@@ -98,11 +90,7 @@ fn extract_count(spaces: BTreeMap<usize, usize>) -> usize {
     // Fold results using GCD, skipping numbers which result in gcd returning 1
     spaces.iter().take(take_size).fold(0, |a, (b, _)| {
         let d = gcd(a, *b);
-        if d == 1 {
-            a
-        } else {
-            d
-        }
+        if d == 1 { a } else { d }
     })
 }
 

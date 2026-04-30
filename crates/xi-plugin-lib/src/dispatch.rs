@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use log::{info, warn};
-use serde_json::{self, json, Value};
+use serde_json::{self, Value, json};
 
 use crate::core_proxy::CoreProxy;
 use xi_core_lib::plugin_rpc::{HostNotification, HostRequest, PluginBufferInfo, PluginUpdate};

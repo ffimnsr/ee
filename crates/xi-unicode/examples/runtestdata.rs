@@ -20,8 +20,8 @@
 use xi_unicode::{LineBreakIterator, LineBreakLeafIter};
 
 use std::fs::File;
-use std::io::prelude::*;
 use std::io::BufReader;
+use std::io::prelude::*;
 
 fn quote_str(s: &str) -> String {
     let mut result = String::new();

@@ -269,9 +269,9 @@ pub fn is_keycap_base(c: char) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::LineBreakIterator;
     use crate::linebreak_property;
     use crate::linebreak_property_str;
-    use crate::LineBreakIterator;
     use alloc::vec;
     use alloc::vec::*;
 

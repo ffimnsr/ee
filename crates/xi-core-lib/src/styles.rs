@@ -23,10 +23,10 @@ use std::path::{Path, PathBuf};
 use log::error;
 use serde::{Deserialize, Serialize};
 use serde_json::{self, Value};
+use syntect::LoadingError;
 use syntect::dumps::{dump_to_file, from_dump_file};
 use syntect::highlighting::StyleModifier as SynStyleModifier;
 use syntect::highlighting::{Color, Highlighter, Theme, ThemeSet};
-use syntect::LoadingError;
 
 pub use syntect::highlighting::ThemeSettings;
 
@@ -425,11 +425,7 @@ fn validate_theme_file(path: &Path) -> Result<bool, LoadingError> {
 impl fmt::Debug for Style {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fn fmt_color(f: &mut fmt::Formatter, c: Option<u32>) -> fmt::Result {
-            if let Some(c) = c {
-                write!(f, "#{:X}", c)
-            } else {
-                write!(f, "None")
-            }
+            if let Some(c) = c { write!(f, "#{:X}", c) } else { write!(f, "None") }
         }
 
         write!(f, "Style( P{}, fg: ", self.priority)?;

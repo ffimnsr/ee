@@ -14,8 +14,8 @@
 
 //! Parsing of raw JSON messages into RPC objects.
 
-use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::trace_span;
 
@@ -81,11 +81,7 @@ impl MessageReader {
     pub fn next<R: ReadTransport>(&mut self, reader: &mut R) -> Result<RpcObject, ReadError> {
         self.0.clear();
         let n = reader.read_message(&mut self.0)?;
-        if n == 0 {
-            Err(ReadError::Disconnect)
-        } else {
-            self.parse(&self.0)
-        }
+        if n == 0 { Err(ReadError::Disconnect) } else { self.parse(&self.0) }
     }
 
     /// Attempts to parse a &str as an RPC Object.
@@ -227,8 +223,8 @@ impl From<Value> for RpcObject {
 #[cfg(test)]
 mod tests {
 
-    use serde_json::json;
     use super::*;
+    use serde_json::json;
 
     #[derive(Serialize, Deserialize, Debug, PartialEq)]
     #[serde(rename_all = "snake_case")]

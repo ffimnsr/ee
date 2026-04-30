@@ -187,8 +187,8 @@ impl Handler for WeakXiCore {
 #[cfg(test)]
 /// Returns a non-functional `WeakXiRef`, needed to mock other types.
 pub fn dummy_weak_core() -> WeakXiCore {
-    use xi_rpc::test_utils::DummyPeer;
     use xi_rpc::Peer;
+    use xi_rpc::test_utils::DummyPeer;
     let peer = Box::new(DummyPeer);
     let state = CoreState::new(&peer.box_clone(), None, None);
     let core = Arc::new(Mutex::new(state));

@@ -20,14 +20,14 @@ use std::process;
 
 use log::{debug, error, trace, warn};
 
-use lsp_types::Uri;
 use jsonrpc_lite::{Error, Id, JsonRpc, Params};
-use serde_json::{to_value, Value};
+use lsp_types::Uri;
+use serde_json::{Value, to_value};
 use xi_plugin_lib::CoreProxy;
 
-use lsp_types::*;
 use crate::result_queue::ResultQueue;
 use crate::types::Callback;
+use lsp_types::*;
 use xi_core_lib::ViewId;
 
 /// A type to abstract communication with the language server

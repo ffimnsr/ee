@@ -19,8 +19,8 @@ use std::{collections::HashMap, env, path::Path};
 use crate::language::{plaintext::PlaintextParser, rust::RustParser};
 use crate::parser::Parser;
 use crate::statestack::State;
-use xi_core_lib::{plugins::rpc::ScopeSpan, ConfigTable, LanguageId, ViewId};
-use xi_plugin_lib::{mainloop, Cache, Plugin, StateCache, View};
+use xi_core_lib::{ConfigTable, LanguageId, ViewId, plugins::rpc::ScopeSpan};
+use xi_plugin_lib::{Cache, Plugin, StateCache, View, mainloop};
 use xi_rope::RopeDelta;
 use xi_trace::{trace, trace_block, trace_payload};
 
