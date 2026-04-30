@@ -195,8 +195,7 @@ enum WordProperty {
 
 fn get_word_property(codepoint: char) -> WordProperty {
     if codepoint <= ' ' {
-        // TODO: deal with \r
-        if codepoint == '\n' {
+        if matches!(codepoint, '\n' | '\r') {
             return WordProperty::Lf;
         }
         return WordProperty::Space;
@@ -212,4 +211,14 @@ fn get_word_property(codepoint: char) -> WordProperty {
         }
     }
     WordProperty::Other
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn carriage_return_is_treated_as_line_boundary() {
+        assert!(matches!(get_word_property('\r'), WordProperty::Lf));
+    }
 }

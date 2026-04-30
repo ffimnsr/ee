@@ -70,7 +70,11 @@ impl Layers {
         if self.create_if_missing(layer).is_err() {
             return;
         }
-        self.layers.get_mut(&layer).unwrap().add_scopes(scopes, style_map);
+        if let Some(scope_layer) = self.layers.get_mut(&layer) {
+            scope_layer.add_scopes(scopes, style_map);
+        } else {
+            warn!("scope layer {:?} missing after creation", layer);
+        }
     }
 
     /// Applies the delta to all layers, inserting empty intervals
@@ -93,7 +97,11 @@ impl Layers {
         if self.create_if_missing(layer).is_err() {
             return;
         }
-        self.layers.get_mut(&layer).unwrap().update_scopes(iv, &spans);
+        if let Some(scope_layer) = self.layers.get_mut(&layer) {
+            scope_layer.update_scopes(iv, &spans);
+        } else {
+            warn!("scope layer {:?} missing after creation", layer);
+        }
         self.resolve_styles(iv);
     }
 

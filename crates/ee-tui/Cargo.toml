@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 crossterm.workspace = true
 ratatui.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 xi-rpc.workspace = true
 

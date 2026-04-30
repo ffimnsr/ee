@@ -166,7 +166,17 @@ impl FileManager {
             let encoding = self.file_info[&id].encoding;
             try_save(path, text, encoding, self.get_info(id))
                 .map_err(|e| FileError::Io(e, path.to_owned()))?;
-            self.file_info.get_mut(&id).unwrap().mod_time = get_mod_time(path);
+            if let Some(info) = self.file_info.get_mut(&id) {
+                info.mod_time = get_mod_time(path);
+            } else {
+                return Err(FileError::Io(
+                    io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("missing file metadata for buffer {:?}", id),
+                    ),
+                    path.to_owned(),
+                ));
+            }
         }
         Ok(())
     }
@@ -176,7 +186,7 @@ fn try_load_file<P>(path: P) -> Result<(Rope, FileInfo), FileError>
 where
     P: AsRef<Path>,
 {
-    // TODO: support for non-utf8
+    // Non-UTF-8 file contents are rejected with FileError::UnknownEncoding.
     // it's arguable that the rope crate should have file loading functionality
     let mut f =
         File::open(path.as_ref()).map_err(|e| FileError::Io(e, path.as_ref().to_owned()))?;
@@ -276,8 +286,6 @@ fn get_permissions<P: AsRef<Path>>(path: P) -> Option<u32> {
 
 impl From<FileError> for RemoteError {
     fn from(src: FileError) -> RemoteError {
-        //TODO: when we migrate to using the failure crate for error handling,
-        // this should return a better message
         let code = src.error_code();
         let message = src.to_string();
         RemoteError::custom(code, message, None)
@@ -297,13 +305,15 @@ impl FileError {
 impl fmt::Display for FileError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            FileError::Io(e, p) => write!(f, "{}. File path: {:?}", e, p),
-            FileError::UnknownEncoding(p) => write!(f, "Error decoding file: {:?}", p),
+            FileError::Io(e, p) => write!(f, "{}. File path: {}", e, p.display()),
+            FileError::UnknownEncoding(p) => {
+                write!(f, "Error decoding UTF-8 file contents: {}", p.display())
+            }
             FileError::HasChanged(p) => write!(
                 f,
                 "File has changed on disk. \
-                 Please save elsewhere and reload the file. File path: {:?}",
-                p
+                 Please save elsewhere and reload the file. File path: {}",
+                p.display()
             ),
         }
     }

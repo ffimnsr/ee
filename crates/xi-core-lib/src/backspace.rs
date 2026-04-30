@@ -20,6 +20,19 @@ use crate::line_offset::{LineOffset, LogicalLines};
 use crate::selection::SelRegion;
 use xi_unicode::*;
 
+fn codepoint_count_between(text: &Rope, start: usize, end: usize) -> usize {
+    let mut count = 0;
+    let mut offset = end;
+    while offset > start {
+        let Some(prev) = text.prev_codepoint_offset(offset) else {
+            break;
+        };
+        offset = prev;
+        count += 1;
+    }
+    count
+}
+
 #[allow(clippy::cognitive_complexity)]
 pub fn offset_for_delete_backwards(region: &SelRegion, text: &Rope, config: &BufferItems) -> usize {
     if !region.is_caret() {
@@ -149,8 +162,16 @@ pub fn offset_for_delete_backwards(region: &SelRegion, text: &Rope, config: &Buf
                             state = State::BeforeEmoji;
                         } else {
                             if !is_variation_selector(code_point) {
-                                //TODO: UCharacter.getCombiningClass(codePoint) == 0
-                                delete_code_point_count += 1;
+                                if code_point.is_zwj()
+                                    || code_point.is_emoji_combining_enclosing_keycap()
+                                {
+                                    delete_code_point_count += 1;
+                                } else {
+                                    let cluster_start =
+                                        text.prev_grapheme_offset(region.end).unwrap_or(0);
+                                    delete_code_point_count =
+                                        codepoint_count_between(text, cluster_start, region.end);
+                                }
                             }
                             state = State::Finished;
                         }

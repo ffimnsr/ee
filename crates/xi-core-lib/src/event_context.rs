@@ -36,7 +36,7 @@ use crate::WeakXiCore;
 use crate::client::Client;
 use crate::config::{BufferItems, Table};
 use crate::edit_types::{EventDomain, SpecialEvent};
-use crate::editor::Editor;
+use crate::editor::{EditType, Editor};
 use crate::file::FileInfo;
 use crate::line_offset::LineOffset;
 use crate::plugins::Plugin;
@@ -79,6 +79,35 @@ pub struct EventContext<'a> {
     pub(crate) width_cache: &'a RefCell<WidthCache>,
     pub(crate) kill_ring: &'a RefCell<Rope>,
     pub(crate) weak_core: &'a WeakXiCore,
+}
+
+fn edit_type_to_string(edit_type: EditType) -> String {
+    match edit_type {
+        EditType::Other => "other",
+        EditType::InsertChars => "insert",
+        EditType::InsertNewline => "newline",
+        EditType::Indent => "indent",
+        EditType::Delete => "delete",
+        EditType::Undo => "undo",
+        EditType::Redo => "redo",
+        EditType::Transpose => "transpose",
+        EditType::Surround => "surround",
+    }
+    .to_string()
+}
+
+fn buffer_items_to_table(config: &BufferItems) -> Table {
+    match serde_json::to_value(config) {
+        Ok(Value::Object(table)) => table,
+        Ok(other) => {
+            error!("buffer config serialized to non-object value: {:?}", other);
+            Table::new()
+        }
+        Err(err) => {
+            error!("failed to serialize buffer config: {:?}", err);
+            Table::new()
+        }
+    }
 }
 
 impl<'a> EventContext<'a> {
@@ -166,9 +195,12 @@ impl<'a> EventContext<'a> {
                 warn!("debug wrapping methods are removed, use the config system")
             }
             SpecialEvent::DebugPrintSpans => self.with_editor(|ed, view, _, _| {
-                let sel = view.sel_regions().last().unwrap();
-                let iv = Interval::new(sel.min(), sel.max());
-                ed.get_layers().debug_print_spans(iv);
+                if let Some(sel) = view.sel_regions().last() {
+                    let iv = Interval::new(sel.min(), sel.max());
+                    ed.get_layers().debug_print_spans(iv);
+                } else {
+                    warn!("debug_print_spans requested without an active selection");
+                }
             }),
             SpecialEvent::RequestLines(LineRange { first, last }) => {
                 self.do_request_lines(first as usize, last as usize)
@@ -205,8 +237,15 @@ impl<'a> EventContext<'a> {
                 // The action that follows the block must belong to a separate undo group
                 self.editor.borrow_mut().update_edit_type();
 
-                let delta = self.editor.borrow_mut().delta_rev_head(starting_revision).unwrap();
-                self.update_plugins(&mut self.editor.borrow_mut(), delta, "core");
+                let delta = self.editor.borrow_mut().delta_rev_head(starting_revision);
+                if let Some(delta) = delta {
+                    self.update_plugins(&mut self.editor.borrow_mut(), delta, "core");
+                } else {
+                    warn!(
+                        "recording playback could not compute delta from revision {:?}",
+                        starting_revision
+                    );
+                }
             }
             SpecialEvent::ClearRecording(recording_name) => {
                 let mut recorder = self.recorder.borrow_mut();
@@ -240,7 +279,15 @@ impl<'a> EventContext<'a> {
             Edit { edit } => self.with_editor(|ed, _, _, _| ed.apply_plugin_edit(edit)),
             Alert { msg } => self.client.alert(&msg),
             AddStatusItem { key, value, alignment } => {
-                let plugin_name = &self.plugins.iter().find(|p| p.id == plugin).unwrap().name;
+                let plugin_name = self
+                    .plugins
+                    .iter()
+                    .find(|p| p.id == plugin)
+                    .map(|plugin| plugin.name.as_str())
+                    .unwrap_or_else(|| {
+                        warn!("status item update from unknown plugin {:?}", plugin);
+                        "unknown-plugin"
+                    });
                 self.client.add_status_item(self.view_id, plugin_name, &key, &value, &alignment);
             }
             UpdateStatusItem { key, value } => {
@@ -321,8 +368,7 @@ impl<'a> EventContext<'a> {
         let undo_group = ed.get_active_undo_group();
         //TODO: we want to just put EditType on the wire, but don't want
         //to update the plugin lib quite yet.
-        let v: Value = serde_json::to_value(ed.get_edit_type()).unwrap();
-        let edit_type_str = v.as_str().unwrap().to_string();
+        let edit_type_str = edit_type_to_string(ed.get_edit_type());
 
         let update = PluginUpdate::new(
             self.view_id,
@@ -483,7 +529,7 @@ impl<'a> EventContext<'a> {
             .map(|v| v.borrow().get_view_id())
             .collect();
 
-        let changes = serde_json::to_value(self.config).unwrap();
+        let changes = buffer_items_to_table(self.config);
         let path = self.info.map(|info| info.path.to_owned());
         PluginBufferInfo::new(
             self.buffer_id,
@@ -493,7 +539,7 @@ impl<'a> EventContext<'a> {
             nb_lines,
             path,
             self.language.clone(),
-            changes.as_object().unwrap().to_owned(),
+            changes,
         )
     }
 
@@ -538,8 +584,10 @@ impl<'a> EventContext<'a> {
         let cursor = Cursor::new(&rope, rope.len());
         let has_newline_at_eof = match cursor.get_leaf() {
             Some((last_chunk, _)) => last_chunk.ends_with(&self.config.line_ending),
-            // The rope can't be empty, since we would have returned earlier if it was
-            None => unreachable!(),
+            None => {
+                warn!("text_for_save could not inspect final rope chunk at EOF");
+                return rope;
+            }
         };
 
         if !has_newline_at_eof {
@@ -1288,7 +1336,6 @@ mod tests {
         assert_eq!(harness.debug_render(), "\u{2665}\u{FE0F}|");
         ctx.do_edit(EditNotification::DeleteBackward);
         assert_eq!(harness.debug_render(), "|");
-
         // COMBINING ENCLOSING KEYCAP + ending with ZERO WIDTH JOINER
         ctx.do_edit(EditNotification::Insert { chars: "1\u{20E3}\u{200D}".into() });
         ctx.do_edit(EditNotification::DeleteBackward);
@@ -1470,6 +1517,26 @@ mod tests {
         assert_eq!(harness.debug_render(), "\u{1F1E6}|");
         ctx.do_edit(EditNotification::DeleteBackward);
         assert_eq!(harness.debug_render(), "|");
+    }
+
+    #[test]
+    fn delete_variation_selector_with_combining_mark_uses_grapheme_boundary() {
+        use crate::rpc::GestureType::*;
+
+        let harness = ContextHarness::new("e\u{0301}\u{FE0F}");
+        let mut ctx = harness.make_context();
+        ctx.do_edit(EditNotification::Gesture { line: 0, col: 6, ty: PointSelect });
+
+        assert_eq!(harness.debug_render(), "e\u{0301}\u{FE0F}|");
+        ctx.do_edit(EditNotification::DeleteBackward);
+        assert_eq!(harness.debug_render(), "|");
+    }
+
+    #[test]
+    fn edit_type_to_string_matches_wire_names() {
+        assert_eq!(edit_type_to_string(EditType::InsertChars), "insert");
+        assert_eq!(edit_type_to_string(EditType::InsertNewline), "newline");
+        assert_eq!(edit_type_to_string(EditType::Other), "other");
     }
 
     #[test]
