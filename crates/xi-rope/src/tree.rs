@@ -287,6 +287,8 @@ impl<N: NodeInfo> Node<N> {
             v
         } else {
             debug_assert!(false, "{}", TreeInvariantError::GetChildrenOnLeaf);
+            // Keep release builds on a checked path after an invariant violation.
+            // Callers that index children still guard against this empty fallback.
             &[]
         }
     }
@@ -296,6 +298,8 @@ impl<N: NodeInfo> Node<N> {
             l
         } else {
             debug_assert!(false, "{}", TreeInvariantError::GetLeafOnInternal);
+            // Fall back to left-most descendant leaf so callers can keep returning
+            // a valid reference without panicking in release builds.
             let children = self.get_children();
             children[0].get_leaf()
         }
@@ -305,7 +309,7 @@ impl<N: NodeInfo> Node<N> {
     ///
     /// This clones the leaf if the reference is shared. It also recomputes
     /// length and info after the leaf is mutated.
-    fn with_leaf_mut<T>(&mut self, f: impl FnOnce(&mut N::L) -> T) -> Option<T> {
+    fn try_with_leaf_mut<T>(&mut self, f: impl FnOnce(&mut N::L) -> T) -> Option<T> {
         let inner = Arc::make_mut(&mut self.0);
         if let NodeVal::Leaf(ref mut l) = inner.val {
             let result = f(l);
@@ -540,7 +544,7 @@ impl<N: NodeInfo> TreeBuilder<N> {
                         self.stack.push(vec![n]);
                         break;
                     };
-                    if tos.last().is_some_and(Node::is_ok_child) && n.is_ok_child() {
+                    if tos.last().is_some_and(|node| node.is_ok_child()) && n.is_ok_child() {
                         tos.push(n);
                     } else if n.height() == 0 {
                         let iv = Interval::new(0, n.len());
@@ -550,7 +554,7 @@ impl<N: NodeInfo> TreeBuilder<N> {
                             break;
                         };
                         let Some(new_leaf) =
-                            last.with_leaf_mut(|l| l.push_maybe_split(n.get_leaf(), iv))
+                            last.try_with_leaf_mut(|l| l.push_maybe_split(n.get_leaf(), iv))
                         else {
                             tos.push(n);
                             break;
@@ -682,7 +686,15 @@ impl<N: NodeInfo> TreeBuilder<N> {
                 debug_assert!(false, "{}", TreeInvariantError::EmptyBuilderLevel);
                 Node::from_leaf(N::L::default())
             }
-            1 => nodes.into_iter().next().unwrap_or_else(Node::default),
+            1 => {
+                let mut iter = nodes.into_iter();
+                if let Some(node) = iter.next() {
+                    node
+                } else {
+                    debug_assert!(false, "{}", TreeInvariantError::EmptyBuilderLevel);
+                    Node::default()
+                }
+            }
             _ => Node::from_nodes(nodes),
         }
     }
