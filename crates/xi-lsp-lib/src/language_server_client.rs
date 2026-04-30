@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::process;
 
-use log::{debug, error, trace, warn};
+use log::{error, trace, warn};
 
 use jsonrpc_lite::{Error, Id, JsonRpc, Params};
 use lsp_types::Uri;

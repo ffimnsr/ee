@@ -35,6 +35,7 @@ use crate::WeakXiCore;
 use crate::config::Table;
 use crate::syntax::LanguageId;
 use crate::tabs::ViewId;
+use crate::tracing_support;
 
 use self::rpc::{PluginBufferInfo, PluginUpdate};
 
@@ -188,7 +189,7 @@ pub(crate) fn start_plugin_process(
                     let plugin = Plugin { peer, process: child, name, id };
 
                     // set tracing immediately
-                    if xi_trace::is_enabled() {
+                    if tracing_support::is_enabled() {
                         plugin.toggle_tracing(true);
                     }
 

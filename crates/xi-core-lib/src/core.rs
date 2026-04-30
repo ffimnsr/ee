@@ -24,6 +24,7 @@ use crate::plugin_rpc::{PluginCommand, PluginNotification, PluginRequest};
 use crate::plugins::{Plugin, PluginId};
 use crate::rpc::*;
 use crate::tabs::{CoreState, ViewId};
+use crate::tracing_support;
 
 /// A reference to the main core state.
 ///
@@ -46,6 +47,7 @@ pub struct WeakXiCore(Weak<Mutex<CoreState>>);
 #[allow(dead_code)]
 impl XiCore {
     pub fn new() -> Self {
+        tracing_support::install();
         XiCore::Waiting
     }
 
@@ -88,10 +90,7 @@ impl Handler for XiCore {
 
         // We allow tracing to be enabled before event `client_started`
         if let TracingConfig { enabled } = rpc {
-            match enabled {
-                true => xi_trace::enable_tracing(),
-                false => xi_trace::disable_tracing(),
-            }
+            tracing_support::set_enabled(enabled);
             info!("tracing in core = {:?}", enabled);
             if self.is_waiting() {
                 return;
@@ -156,7 +155,8 @@ impl WeakXiCore {
         response: Result<Value, RpcError>,
     ) {
         if let Some(core) = self.upgrade() {
-            let _t = xi_trace::trace_block("WeakXiCore::plugin_update", &["core"]);
+            let _t =
+                tracing::trace_span!("WeakXiCore::plugin_update", categories = "core").entered();
             core.inner().plugin_update(plugin, view, response);
         }
     }

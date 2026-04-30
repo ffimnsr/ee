@@ -43,8 +43,16 @@ pub enum PluginLoadError {
     Io(io::Error),
     /// Malformed manifest
     Parse(toml::de::Error),
-    UnsupportedManifestVersion { path: PathBuf, found: u32, supported: u32 },
-    DuplicatePluginName { name: PluginName, first_path: PathBuf, second_path: PathBuf },
+    UnsupportedManifestVersion {
+        path: PathBuf,
+        found: u32,
+        supported: u32,
+    },
+    DuplicatePluginName {
+        name: PluginName,
+        first_path: PathBuf,
+        second_path: PathBuf,
+    },
 }
 
 impl fmt::Display for PluginLoadError {
@@ -108,7 +116,9 @@ impl<'a> PluginCatalog {
 
                     info!("loaded {}", manifest.name);
                     let manifest = Arc::new(manifest);
-                    if let Some(previous) = self.locations.insert(manifest_path.clone(), manifest.clone()) {
+                    if let Some(previous) =
+                        self.locations.insert(manifest_path.clone(), manifest.clone())
+                    {
                         self.items.remove(&previous.name);
                     }
                     self.items.insert(manifest.name.clone(), manifest.clone());
@@ -295,7 +305,10 @@ mod tests {
 
         let manifest = load_manifest(&manifest_path).unwrap();
 
-        assert_eq!(manifest.exec_path, temp_dir.path().join("bin/test-plugin").canonicalize().unwrap());
+        assert_eq!(
+            manifest.exec_path,
+            temp_dir.path().join("bin/test-plugin").canonicalize().unwrap()
+        );
     }
 
     #[test]
@@ -303,8 +316,10 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let first_dir = temp_dir.path().join("first-plugin");
         let second_dir = temp_dir.path().join("second-plugin");
-        let first_manifest = write_plugin(&first_dir, "dup-plugin", "bin/first", 1).canonicalize().unwrap();
-        let second_manifest = write_plugin(&second_dir, "dup-plugin", "bin/second", 1).canonicalize().unwrap();
+        let first_manifest =
+            write_plugin(&first_dir, "dup-plugin", "bin/first", 1).canonicalize().unwrap();
+        let second_manifest =
+            write_plugin(&second_dir, "dup-plugin", "bin/second", 1).canonicalize().unwrap();
 
         let mut catalog = PluginCatalog::default();
         let errors = catalog.load_from_paths(&[first_dir, second_dir]);

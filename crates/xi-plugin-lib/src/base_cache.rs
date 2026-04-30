@@ -21,7 +21,6 @@ use memchr::memchr;
 use xi_core_lib::plugin_rpc::{GetDataResponse, TextUnit};
 use xi_rope::interval::IntervalBounds;
 use xi_rope::{DeltaElement, Interval, LinesMetric, Rope, RopeDelta};
-use xi_trace::trace_block;
 
 use super::{Cache, DataSource, Error};
 
@@ -202,7 +201,7 @@ impl Cache for ChunkCache {
 
     /// Updates the chunk to reflect changes in this delta.
     fn update(&mut self, delta: Option<&RopeDelta>, new_len: usize, num_lines: usize, rev: u64) {
-        let _t = trace_block("ChunkCache::update", &["plugin"]);
+        let _t = tracing::trace_span!("ChunkCache::update", categories = "plugin").entered();
         let is_empty = self.offset == 0 && self.contents.is_empty();
         let should_clear = match delta {
             Some(delta) if !is_empty => self.should_clear(delta),

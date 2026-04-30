@@ -20,7 +20,6 @@ use std::ops::Range;
 use xi_rope::breaks::{BreakBuilder, Breaks, BreaksInfo, BreaksMetric};
 use xi_rope::spans::Spans;
 use xi_rope::{Cursor, Interval, LinesMetric, Rope, RopeDelta, RopeInfo};
-use xi_trace::trace_block;
 use xi_unicode::LineBreakLeafIter;
 
 use crate::client::Client;
@@ -349,7 +348,7 @@ impl Lines {
         max_lines: Option<usize>,
     ) -> WrapSummary {
         use self::WrapWidth::*;
-        let _t = trace_block("Lines::do_wrap_task", &["core"]);
+        let _t = tracing::trace_span!("Lines::do_wrap_task", categories = "core").entered();
         // 'line' is a poor unit here; could do some fancy Duration thing?
         const MAX_LINES_PER_BATCH: usize = 500;
 

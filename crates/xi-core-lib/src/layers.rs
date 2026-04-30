@@ -26,7 +26,6 @@ use syntect::parsing::Scope;
 
 use xi_rope::spans::{Spans, SpansBuilder};
 use xi_rope::{Interval, RopeDelta};
-use xi_trace::trace_block;
 
 use crate::plugins::PluginPid;
 use crate::styles::{Style, ThemeStyleMap};
@@ -66,7 +65,7 @@ impl Layers {
         scopes: Vec<Vec<String>>,
         style_map: &ThemeStyleMap,
     ) {
-        let _t = trace_block("Layers::AddScopes", &["core"]);
+        let _t = tracing::trace_span!("Layers::AddScopes", categories = "core").entered();
         if self.create_if_missing(layer).is_err() {
             return;
         }

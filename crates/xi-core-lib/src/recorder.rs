@@ -19,7 +19,6 @@
 use std::collections::HashMap;
 
 use log::warn;
-use xi_trace::trace_block;
 
 use crate::edit_types::{BufferEvent, EventDomain};
 
@@ -197,7 +196,8 @@ impl Recording {
     where
         F: FnMut(&EventDomain),
     {
-        let _guard = trace_block("Recording::play", &["core", "recording"]);
+        let _guard =
+            tracing::trace_span!("Recording::play", categories = "core,recording").entered();
         self.events.iter().for_each(action)
     }
 }

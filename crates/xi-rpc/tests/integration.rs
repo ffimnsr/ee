@@ -206,12 +206,14 @@ fn test_sync_request_completion() {
     let request_id = outbound.get_id().expect("request id must be present");
 
     input_tx
-        .send(json!({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": { "ok": true }
-        })
-        .to_string())
+        .send(
+            json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "result": { "ok": true }
+            })
+            .to_string(),
+        )
         .expect("response should be sent");
 
     let response = request_thread.join().expect("request thread should join");
@@ -640,16 +642,18 @@ fn test_malformed_response_returns_invalid_response_and_loop_continues() {
     let first_request = written.expect_object();
     let first_id = first_request.get_id().expect("request id must be present");
     input_tx
-        .send(json!({
-            "jsonrpc": "2.0",
-            "id": first_id,
-            "result": { "ok": false },
-            "error": {
-                "code": -32603,
-                "message": "should not coexist with result"
-            }
-        })
-        .to_string())
+        .send(
+            json!({
+                "jsonrpc": "2.0",
+                "id": first_id,
+                "result": { "ok": false },
+                "error": {
+                    "code": -32603,
+                    "message": "should not coexist with result"
+                }
+            })
+            .to_string(),
+        )
         .expect("malformed response should be sent");
 
     match first_rx.recv_timeout(Duration::from_secs(1)).expect("first callback should fire") {
@@ -669,12 +673,14 @@ fn test_malformed_response_returns_invalid_response_and_loop_continues() {
     let second_request = written.expect_object();
     let second_id = second_request.get_id().expect("request id must be present");
     input_tx
-        .send(json!({
-            "jsonrpc": "2.0",
-            "id": second_id,
-            "result": { "ok": true }
-        })
-        .to_string())
+        .send(
+            json!({
+                "jsonrpc": "2.0",
+                "id": second_id,
+                "result": { "ok": true }
+            })
+            .to_string(),
+        )
         .expect("valid response should be sent");
 
     match second_rx.recv_timeout(Duration::from_secs(1)).expect("second callback should fire") {

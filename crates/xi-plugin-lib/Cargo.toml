@@ -15,9 +15,7 @@ bytecount.workspace = true
 rand.workspace = true
 memchr.workspace = true
 log.workspace = true
-
-[dependencies.xi-trace]
-workspace = true
+tracing.workspace = true
 
 [dependencies.xi-rpc]
 workspace = true

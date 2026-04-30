@@ -22,7 +22,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
-use std::fs::File;
 use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -35,7 +34,6 @@ use serde_json::{Value, json};
 
 use xi_rope::Rope;
 use xi_rpc::{self, ReadError, RemoteError, RpcCtx, RpcPeer};
-use xi_trace::{self, trace_block};
 
 use crate::WeakXiCore;
 use crate::client::Client;
@@ -54,6 +52,7 @@ use crate::rpc::{
 };
 use crate::styles::{DEFAULT_THEME, ThemeStyleMap};
 use crate::syntax::LanguageId;
+use crate::tracing_support;
 use crate::view::View;
 use crate::whitespace::Indentation;
 use crate::width_cache::WidthCache;
@@ -236,7 +235,7 @@ impl CoreState {
 
     /// Attempt to load a config file.
     fn load_file_based_config(&mut self, path: &Path) {
-        let _t = trace_block("CoreState::load_config_file", &["core"]);
+        let _t = tracing::trace_span!("CoreState::load_config_file", categories = "core").entered();
         if let Some(domain) = self.config_manager.domain_for_path(path) {
             match config::try_load_from_file(path) {
                 Ok(table) => self.set_config(domain, table),
@@ -402,7 +401,7 @@ impl CoreState {
     where
         P: AsRef<Path>,
     {
-        let _t = trace_block("CoreState::do_save", &["core"]);
+        let _t = tracing::trace_span!("CoreState::do_save", categories = "core").entered();
         let path = path.as_ref();
         let buffer_id = self.views.get(&view_id).map(|v| v.borrow().get_buffer_id());
         let buffer_id = match buffer_id {
@@ -489,7 +488,7 @@ impl CoreState {
     }
 
     fn do_get_config(&self, view_id: ViewId) -> Result<Table, RemoteError> {
-        let _t = trace_block("CoreState::get_config", &["core"]);
+        let _t = tracing::trace_span!("CoreState::get_config", categories = "core").entered();
         self.views
             .get(&view_id)
             .map(|v| v.borrow().get_buffer_id())
@@ -687,7 +686,7 @@ impl CoreState {
 
     #[cfg(feature = "notify")]
     fn handle_fs_events(&mut self) {
-        let _t = trace_block("CoreState::handle_fs_events", &["core"]);
+        let _t = tracing::trace_span!("CoreState::handle_fs_events", categories = "core").entered();
         let mut events = self.file_manager.watcher().take_events();
 
         for (token, event) in events.drain(..) {
@@ -777,9 +776,11 @@ impl CoreState {
         use notify::event::*;
         match event.kind {
             EventKind::Create(CreateKind::Any) | EventKind::Modify(ModifyKind::Any) => {
-                self.plugins.load_from_paths(&[event.paths[0].clone()]).into_iter().for_each(|err| {
-                    warn!("error loading plugin {:?}", err);
-                });
+                self.plugins.load_from_paths(&[event.paths[0].clone()]).into_iter().for_each(
+                    |err| {
+                        warn!("error loading plugin {:?}", err);
+                    },
+                );
                 if let Some(plugin) = self.plugins.get_from_path(&event.paths[0]) {
                     self.do_start_plugin(ViewId(0), &plugin.name);
                 }
@@ -800,9 +801,11 @@ impl CoreState {
                     self.plugins.remove_named(&old_plugin.name);
                 }
 
-                self.plugins.load_from_paths(std::slice::from_ref(new)).into_iter().for_each(|err| {
-                    warn!("error loading plugin {:?}", err);
-                });
+                self.plugins.load_from_paths(std::slice::from_ref(new)).into_iter().for_each(
+                    |err| {
+                        warn!("error loading plugin {:?}", err);
+                    },
+                );
                 if let Some(new_plugin) = self.plugins.get_from_path(new) {
                     self.do_start_plugin(ViewId(0), &new_plugin.name);
                 }
@@ -858,7 +861,7 @@ impl CoreState {
 
     /// Load a single theme file. Updates if already present.
     fn load_theme_file(&mut self, path: &Path) {
-        let _t = trace_block("CoreState::load_theme_file", &["core"]);
+        let _t = tracing::trace_span!("CoreState::load_theme_file", categories = "core").entered();
 
         let result = self.style_map.borrow_mut().load_theme_info_from_path(path);
         match result {
@@ -893,33 +896,16 @@ impl CoreState {
     where
         P: AsRef<Path>,
     {
-        use xi_trace::chrome_trace_dump;
-        let mut all_traces = xi_trace::samples_cloned_unsorted();
-        if let Ok(mut traces) = chrome_trace_dump::decode(frontend_samples) {
-            all_traces.append(&mut traces);
-        }
-
-        for plugin in &self.running_plugins {
-            match plugin.collect_trace() {
-                Ok(json) => {
-                    let mut trace = chrome_trace_dump::decode(json).unwrap();
-                    all_traces.append(&mut trace);
+        let plugin_samples =
+            self.running_plugins.iter().filter_map(|plugin| match plugin.collect_trace() {
+                Ok(json) => Some(json),
+                Err(err) => {
+                    error!("trace error {:?}", err);
+                    None
                 }
-                Err(e) => error!("trace error {:?}", e),
-            }
-        }
+            });
 
-        all_traces.sort_unstable();
-
-        let mut trace_file = match File::create(path.as_ref()) {
-            Ok(f) => f,
-            Err(e) => {
-                error!("error saving trace {:?}", e);
-                return;
-            }
-        };
-
-        if let Err(e) = chrome_trace_dump::serialize(&all_traces, &mut trace_file) {
+        if let Err(e) = tracing_support::save_to_file(path, frontend_samples, plugin_samples) {
             error!("error saving trace {:?}", e);
         }
     }

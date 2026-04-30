@@ -639,13 +639,12 @@ impl XiClient {
     fn handle_core_request(&mut self, method: &str, params: Value, id: Value) -> io::Result<()> {
         let response = match method {
             "measure_width" => {
-                let widths =
-                    params
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(|req| {
-                            req.get("strings")
+                let widths = params
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|req| {
+                        req.get("strings")
                                 .and_then(Value::as_array)
                                 .into_iter()
                                 .flatten()
@@ -655,8 +654,8 @@ impl XiClient {
                                     )
                                 })
                                 .collect::<Vec<_>>()
-                        })
-                        .collect::<Vec<_>>();
+                    })
+                    .collect::<Vec<_>>();
                 json!({
                     "jsonrpc": "2.0",
                     "id": id,
@@ -696,7 +695,11 @@ impl XiClient {
                     if op.lines.len() != op.n {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
-                            format!("insert op length mismatch: expected {}, got {}", op.n, op.lines.len()),
+                            format!(
+                                "insert op length mismatch: expected {}, got {}",
+                                op.n,
+                                op.lines.len()
+                            ),
                         ));
                     }
                     next_cache.extend(op.lines.into_iter().map(LineSlot::from));
@@ -716,12 +719,18 @@ impl XiClient {
                     if op.lines.len() != op.n {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
-                            format!("update op length mismatch: expected {}, got {}", op.n, op.lines.len()),
+                            format!(
+                                "update op length mismatch: expected {}, got {}",
+                                op.n,
+                                op.lines.len()
+                            ),
                         ));
                     }
 
                     let end = checked_advance(source_index, op.n, previous.len(), "update")?;
-                    for (slot, line) in previous[source_index..end].iter().cloned().zip(op.lines.into_iter()) {
+                    for (slot, line) in
+                        previous[source_index..end].iter().cloned().zip(op.lines.into_iter())
+                    {
                         next_cache.push(slot.merge(line)?);
                     }
                     source_index = end;
@@ -745,7 +754,8 @@ impl XiClient {
             })
             .collect();
 
-        if matches!(self.line_cache.as_slice(), [LineSlot::Known(CachedLine { text, .. })] if text.is_empty()) {
+        if matches!(self.line_cache.as_slice(), [LineSlot::Known(CachedLine { text, .. })] if text.is_empty())
+        {
             self.lines.clear();
         }
     }
@@ -807,10 +817,7 @@ impl Eq for XiClient {}
 
 impl From<CoreLine> for LineSlot {
     fn from(line: CoreLine) -> Self {
-        LineSlot::Known(CachedLine {
-            text: normalize_line_text(line.text),
-            cursors: line.cursor,
-        })
+        LineSlot::Known(CachedLine { text: normalize_line_text(line.text), cursors: line.cursor })
     }
 }
 
@@ -1007,11 +1014,7 @@ mod tests {
             .apply_update(CoreUpdate {
                 pristine: false,
                 ops: vec![
-                    CoreUpdateOp {
-                        op: CoreUpdateKind::Copy,
-                        n: 1,
-                        lines: Vec::new(),
-                    },
+                    CoreUpdateOp { op: CoreUpdateKind::Copy, n: 1, lines: Vec::new() },
                     CoreUpdateOp {
                         op: CoreUpdateKind::Update,
                         n: 1,
@@ -1022,11 +1025,7 @@ mod tests {
                         n: 1,
                         lines: vec![CoreLine { text: Some("delta".into()), cursor: Vec::new() }],
                     },
-                    CoreUpdateOp {
-                        op: CoreUpdateKind::Invalidate,
-                        n: 2,
-                        lines: Vec::new(),
-                    },
+                    CoreUpdateOp { op: CoreUpdateKind::Invalidate, n: 2, lines: Vec::new() },
                 ],
             })
             .unwrap();
@@ -1046,7 +1045,10 @@ mod tests {
         let app = App::from_path(Some(path.clone())).unwrap();
 
         fs::remove_file(&path).unwrap();
-        assert_eq!(app.backend.lines, contents.split('\n').map(ToOwned::to_owned).collect::<Vec<_>>());
+        assert_eq!(
+            app.backend.lines,
+            contents.split('\n').map(ToOwned::to_owned).collect::<Vec<_>>()
+        );
     }
 
     #[test]

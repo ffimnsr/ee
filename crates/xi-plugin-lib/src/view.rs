@@ -22,7 +22,6 @@ use xi_core_lib::plugin_rpc::{GetDataResponse, PluginBufferInfo, PluginEdit, Sco
 use xi_core_lib::{BufferConfig, ConfigTable, LanguageId, PluginPid, ViewId};
 use xi_rope::RopeDelta;
 use xi_rope::interval::IntervalBounds;
-use xi_trace::trace_block;
 
 use xi_rpc::RpcPeer;
 
@@ -263,7 +262,7 @@ impl DataSource for FetchCtx {
         max_size: usize,
         rev: u64,
     ) -> Result<GetDataResponse, Error> {
-        let _t = trace_block("FetchCtx::get_data", &["plugin"]);
+        let _t = tracing::trace_span!("FetchCtx::get_data", categories = "plugin").entered();
         let params = json!({
             "plugin_id": self.plugin_id,
             "view_id": self.view_id,
