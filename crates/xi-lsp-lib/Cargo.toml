@@ -10,9 +10,8 @@ rust-version.workspace = true
 
 [dependencies]
 lsp-types.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-serde_derive.workspace = true
 
 jsonrpc-lite.workspace = true
 fern.workspace = true

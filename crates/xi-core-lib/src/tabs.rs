@@ -27,9 +27,11 @@ use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
 
-use serde::de::{self, Deserialize, Deserializer, Unexpected};
-use serde::ser::{Serialize, Serializer};
-use serde_json::Value;
+use log::{debug, error, info, warn};
+use serde::{Deserialize, Serialize};
+use serde::de::{self, Deserializer, Unexpected};
+use serde::ser::Serializer;
+use serde_json::{json, Value};
 
 use xi_rope::Rope;
 use xi_rpc::{self, ReadError, RemoteError, RpcCtx, RpcPeer};
@@ -1102,6 +1104,7 @@ impl BufferId {
 #[cfg(test)]
 mod tests {
     use serde::Deserialize;
+    use serde_json::json;
 
     use super::ViewId;
 

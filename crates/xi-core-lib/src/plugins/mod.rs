@@ -25,9 +25,11 @@ use std::process::{Child, Command as ProcCommand, Stdio};
 use std::sync::Arc;
 use std::thread;
 
-use serde_json::Value;
+use log::{error, info};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
-use xi_rpc::{self, RpcLoop, RpcPeer};
+use xi_rpc::{self, NewlineReader, NewlineWriter, RpcLoop, RpcPeer};
 
 use crate::config::Table;
 use crate::syntax::LanguageId;
@@ -107,7 +109,7 @@ impl Plugin {
     where
         F: FnOnce(Result<Value, xi_rpc::Error>) + Send + 'static,
     {
-        self.peer.send_rpc_request_async("update", &json!(update), Box::new(callback))
+        self.peer.send_rpc_request_async("update", &json!(update), Box::new(callback));
     }
 
     pub fn toggle_tracing(&self, enabled: bool) {
@@ -179,7 +181,7 @@ pub(crate) fn start_plugin_process(
                 Ok(mut child) => {
                     let child_stdin = child.stdin.take().unwrap();
                     let child_stdout = child.stdout.take().unwrap();
-                    let mut looper = RpcLoop::new(child_stdin);
+                    let mut looper = RpcLoop::new(NewlineWriter::new(child_stdin));
                     let peer: RpcPeer = Box::new(looper.get_raw_peer());
                     let name = plugin_desc.name.clone();
                     peer.send_rpc_notification("ping", &Value::Array(Vec::new()));
@@ -192,7 +194,7 @@ pub(crate) fn start_plugin_process(
 
                     core.plugin_connect(Ok(plugin));
                     let mut core = core;
-                    let err = looper.mainloop(|| BufReader::new(child_stdout), &mut core);
+                    let err = looper.mainloop(|| NewlineReader::new(BufReader::new(child_stdout)), &mut core);
                     core.plugin_exit(id, err);
                 }
                 Err(err) => core.plugin_connect(Err(err)),

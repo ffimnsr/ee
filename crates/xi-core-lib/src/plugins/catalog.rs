@@ -21,6 +21,8 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use log::{error, info, warn};
+
 use super::{PluginDescription, PluginName};
 use crate::config::table_from_toml_str;
 use crate::syntax::Languages;

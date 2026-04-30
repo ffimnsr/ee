@@ -20,6 +20,8 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use log::error;
+use serde::{Deserialize, Serialize};
 use serde_json::{self, Value};
 use syntect::dumps::{dump_to_file, from_dump_file};
 use syntect::highlighting::StyleModifier as SynStyleModifier;

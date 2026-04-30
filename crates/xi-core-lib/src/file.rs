@@ -23,6 +23,8 @@ use std::path::{Path, PathBuf};
 use std::str;
 use std::time::SystemTime;
 
+use log::warn;
+
 use xi_rope::Rope;
 use xi_rpc::RemoteError;
 

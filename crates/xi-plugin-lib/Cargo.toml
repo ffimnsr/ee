@@ -9,9 +9,8 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-serde.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-serde_derive.workspace = true
 bytecount.workspace = true
 rand.workspace = true
 memchr.workspace = true

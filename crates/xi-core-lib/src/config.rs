@@ -20,7 +20,9 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde::de::{self, Deserialize};
+use log::error;
+use serde::{Deserialize, Serialize};
+use serde::de;
 use serde_json::{self, Value};
 
 use crate::syntax::{LanguageId, Languages};
@@ -768,6 +770,7 @@ fn from_toml_value(value: toml::Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
     use super::*;
     use crate::syntax::LanguageDefinition;
 

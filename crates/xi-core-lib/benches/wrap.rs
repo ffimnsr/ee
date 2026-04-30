@@ -15,12 +15,10 @@
 #![feature(test)]
 
 extern crate test;
-extern crate xi_core_lib as xi_core;
-extern crate xi_rope;
 
-use crate::xi_core::line_offset::LineOffset;
-use crate::xi_core::tabs::BufferId;
-use crate::xi_core::view::View;
+use xi_core_lib::line_offset::LineOffset;
+use xi_core_lib::tabs::BufferId;
+use xi_core_lib::view::View;
 use test::Bencher;
 use xi_rope::Rope;
 

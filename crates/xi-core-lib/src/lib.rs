@@ -31,25 +31,6 @@
     clippy::get_unwrap
 )]
 
-#[macro_use]
-extern crate log;
-extern crate regex;
-extern crate serde;
-#[macro_use]
-extern crate serde_json;
-#[macro_use]
-extern crate serde_derive;
-extern crate memchr;
-#[cfg(feature = "notify")]
-extern crate notify;
-extern crate syntect;
-extern crate toml;
-
-extern crate xi_rope;
-extern crate xi_rpc;
-extern crate xi_trace;
-extern crate xi_unicode;
-
 pub mod annotations;
 pub mod backspace;
 pub mod client;

@@ -15,11 +15,12 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use serde_json::{self, Value};
+use log::{info, warn};
+use serde_json::{self, json, Value};
 
 use crate::core_proxy::CoreProxy;
-use crate::xi_core::plugin_rpc::{HostNotification, HostRequest, PluginBufferInfo, PluginUpdate};
-use crate::xi_core::{ConfigTable, LanguageId, PluginPid, ViewId};
+use xi_core_lib::plugin_rpc::{HostNotification, HostRequest, PluginBufferInfo, PluginUpdate};
+use xi_core_lib::{ConfigTable, LanguageId, PluginPid, ViewId};
 use xi_rpc::{Handler as RpcHandler, RemoteError, RpcCtx};
 use xi_trace::{self, trace, trace_block, trace_block_payload};
 

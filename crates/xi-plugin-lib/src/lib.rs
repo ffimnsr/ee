@@ -13,20 +13,6 @@
 // limitations under the License.
 
 //! The library base for implementing xi-editor plugins.
-extern crate xi_core_lib as xi_core;
-extern crate xi_rope;
-extern crate xi_rpc;
-extern crate xi_trace;
-#[macro_use]
-extern crate serde_json;
-extern crate bytecount;
-extern crate memchr;
-extern crate rand;
-extern crate serde;
-
-#[macro_use]
-extern crate log;
-
 mod base_cache;
 mod core_proxy;
 mod dispatch;
@@ -36,12 +22,12 @@ mod view;
 use std::io;
 use std::path::Path;
 
-use crate::xi_core::plugin_rpc::{GetDataResponse, TextUnit};
-use crate::xi_core::{ConfigTable, LanguageId};
+use xi_core_lib::plugin_rpc::{GetDataResponse, TextUnit};
+use xi_core_lib::{ConfigTable, LanguageId};
 use serde_json::Value;
 use xi_rope::interval::IntervalBounds;
 use xi_rope::RopeDelta;
-use xi_rpc::{ReadError, RpcLoop};
+use xi_rpc::{NewlineReader, NewlineWriter, ReadError, RpcLoop};
 
 use self::dispatch::Dispatcher;
 
@@ -49,7 +35,7 @@ pub use crate::base_cache::ChunkCache;
 pub use crate::core_proxy::CoreProxy;
 pub use crate::state_cache::StateCache;
 pub use crate::view::View;
-pub use crate::xi_core::plugin_rpc::{Hover, Range};
+pub use xi_core_lib::plugin_rpc::{Hover, Range};
 
 /// Abstracts getting data from the peer. Mainly exists for mocking in tests.
 pub trait DataSource {
@@ -204,8 +190,8 @@ pub enum Error {
 pub fn mainloop<P: Plugin>(plugin: &mut P) -> Result<(), ReadError> {
     let stdin = io::stdin();
     let stdout = io::stdout();
-    let mut rpc_looper = RpcLoop::new(stdout);
+    let mut rpc_looper = RpcLoop::new(NewlineWriter::new(stdout));
     let mut dispatcher = Dispatcher::new(plugin);
 
-    rpc_looper.mainloop(|| stdin.lock(), &mut dispatcher)
+    rpc_looper.mainloop(|| NewlineReader::new(stdin.lock()), &mut dispatcher)
 }

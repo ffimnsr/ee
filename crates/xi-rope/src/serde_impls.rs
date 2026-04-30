@@ -15,8 +15,9 @@
 use std::fmt;
 use std::str::FromStr;
 
-use serde::de::{self, Deserialize, Deserializer, Visitor};
-use serde::ser::{Serialize, SerializeStruct, SerializeTupleVariant, Serializer};
+use serde::{Deserialize, Serialize};
+use serde::de::{self, Deserializer, Visitor};
+use serde::ser::{SerializeStruct, SerializeTupleVariant, Serializer};
 
 use crate::tree::Node;
 use crate::{Delta, DeltaElement, Rope, RopeInfo};

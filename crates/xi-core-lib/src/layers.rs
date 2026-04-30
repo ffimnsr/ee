@@ -18,6 +18,8 @@
 //! Scope information originating from any number of plugins can be resolved
 //! into styles using a theme, augmented with additional style definitions.
 
+use log::{info, warn};
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use syntect::highlighting::StyleModifier;
 use syntect::parsing::Scope;

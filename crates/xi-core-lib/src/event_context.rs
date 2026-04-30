@@ -20,7 +20,8 @@ use std::ops::Range;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use serde_json::{self, Value};
+use log::{debug, error, warn};
+use serde_json::{self, json, Value};
 
 use xi_rope::{Cursor, Interval, LinesMetric, Rope, RopeDelta};
 use xi_rpc::{Error as RpcError, RemoteError};

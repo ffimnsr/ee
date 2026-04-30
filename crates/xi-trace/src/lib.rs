@@ -14,25 +14,8 @@
 #![cfg_attr(feature = "benchmarks", feature(test))]
 #![allow(clippy::identity_op, clippy::new_without_default, clippy::trivially_copy_pass_by_ref)]
 
-#[macro_use]
-extern crate lazy_static;
-
-#[macro_use]
-extern crate serde_derive;
-
-extern crate serde;
-
-#[macro_use]
-extern crate log;
-
-extern crate libc;
-
 #[cfg(feature = "benchmarks")]
 extern crate test;
-
-#[cfg(any(test, feature = "json_payload", feature = "chrome_trace_event"))]
-#[cfg_attr(any(test), macro_use)]
-extern crate serde_json;
 
 mod fixed_lifo_deque;
 mod sys_pid;
@@ -42,7 +25,8 @@ mod sys_tid;
 pub mod chrome_trace_dump;
 
 use crate::fixed_lifo_deque::FixedLifoDeque;
-use std::borrow::Cow;
+use log::warn;
+use serde::{Deserialize, Serialize};use std::borrow::Cow;
 use std::cmp;
 use std::collections::HashMap;
 use std::fmt;
@@ -52,7 +36,7 @@ use std::mem::size_of;
 use std::path::Path;
 use std::string::ToString;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type StrCow = Cow<'static, str>;
@@ -837,9 +821,7 @@ impl Trace {
     }
 }
 
-lazy_static! {
-    static ref TRACE: Trace = Trace::disabled();
-}
+static TRACE: LazyLock<Trace> = LazyLock::new(Trace::disabled);
 
 /// Enable tracing with the default configuration.  See Config::default.
 /// Tracing is disabled initially on program launch.
@@ -1114,7 +1096,7 @@ mod tests {
 
     #[cfg(feature = "json_payload")]
     fn to_payload(value: &'static str) -> TracePayloadT {
-        json!({"test": value})
+        serde_json::json!({"test": value})
     }
 
     #[test]

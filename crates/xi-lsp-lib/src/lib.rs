@@ -11,24 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#[macro_use]
-extern crate serde_derive;
-extern crate serde_json;
-
-#[macro_use]
-extern crate log;
-extern crate chrono;
-extern crate fern;
-
-extern crate jsonrpc_lite;
-extern crate lsp_types;
-extern crate serde;
-
-extern crate xi_core_lib as xi_core;
-extern crate xi_plugin_lib;
-extern crate xi_rope;
-extern crate xi_rpc;
-
 use xi_plugin_lib::mainloop;
 use xi_plugin_lib::Plugin;
 

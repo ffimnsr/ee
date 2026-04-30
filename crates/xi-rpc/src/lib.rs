@@ -19,29 +19,24 @@
 //! are allowed in both directions, rather than imposing client and server roles.
 //! Further, the batch form is not supported.
 //!
-//! Because these changes make the protocol not fully compliant with the spec,
-//! the `"jsonrpc"` member is omitted from request and response objects.
+//! Requests and responses use JSON-RPC 2.0 envelopes, including the
+//! `"jsonrpc": "2.0"` member.
 #![allow(clippy::boxed_local, clippy::or_fun_call)]
-
-#[macro_use]
-extern crate serde_json;
-#[macro_use]
-extern crate serde_derive;
-extern crate crossbeam_utils;
-extern crate serde;
-extern crate xi_trace;
-
-#[macro_use]
-extern crate log;
 
 mod error;
 mod parse;
+pub mod transport;
 
 pub mod test_utils;
 
+use log::{error, warn};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tracing::{trace, trace_span};
+
 use std::cmp;
-use std::collections::{BTreeMap, BinaryHeap, VecDeque};
-use std::io::{self, BufRead, Write};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::io;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
@@ -51,10 +46,13 @@ use std::time::{Duration, Instant};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use xi_trace::{trace, trace_block, trace_block_payload, trace_payload};
-
 pub use crate::error::{Error, ReadError, RemoteError};
 use crate::parse::{Call, MessageReader, Response, RpcObject};
+pub use crate::parse::RequestId;
+pub use crate::transport::{
+    ContentLengthReader, ContentLengthWriter, NewlineReader, NewlineWriter, ReadTransport,
+    WriteTransport,
+};
 
 /// The maximum duration we will block on a reader before checking for an task.
 const MAX_IDLE_WAIT: Duration = Duration::from_millis(5);
@@ -67,7 +65,7 @@ const MAX_IDLE_WAIT: Duration = Duration::from_millis(5);
 ///
 /// In general, `RawPeer` shouldn't be used directly, but behind a pointer as
 /// the `Peer` trait object.
-pub struct RawPeer<W: Write + 'static>(Arc<RpcState<W>>);
+pub struct RawPeer<W: WriteTransport>(Arc<RpcState<W>>);
 
 /// The `Peer` trait represents the interface for the other side of the RPC
 /// channel. It is intended to be used behind a pointer, a trait object.
@@ -83,9 +81,31 @@ pub trait Peer: Send + 'static {
     ///
     /// `Callback` is an alias for `FnOnce(Result<Value, Error>)`; it must
     /// be boxed because trait objects cannot use generic paramaters.
-    fn send_rpc_request_async(&self, method: &str, params: &Value, f: Box<dyn Callback>);
+    ///
+    /// Returns the request id, which can be passed to `cancel_rpc_request`.
+    fn send_rpc_request_async(
+        &self,
+        method: &str,
+        params: &Value,
+        f: Box<dyn Callback>,
+    ) -> RequestId;
     /// Sends a request (synchronous RPC) to the peer, and waits for the result.
     fn send_rpc_request(&self, method: &str, params: &Value) -> Result<Value, Error>;
+    /// Sends a synchronous request with an explicit timeout.
+    ///
+    /// Returns `Err(Error::RequestTimeout)` if no response arrives within `timeout`.
+    fn send_rpc_request_timeout(
+        &self,
+        method: &str,
+        params: &Value,
+        timeout: Duration,
+    ) -> Result<Value, Error>;
+    /// Cancels a pending request by id (obtained from `send_rpc_request_async`).
+    ///
+    /// If the request is still pending the registered callback is invoked with
+    /// `Err(Error::RequestCancelled)` and the method returns `true`.  Returns
+    /// `false` if no matching pending request was found.
+    fn cancel_rpc_request(&self, id: RequestId) -> bool;
     /// Determines whether an incoming request (or notification) is
     /// pending. This is intended to reduce latency for bulk operations
     /// done in the background.
@@ -93,6 +113,9 @@ pub trait Peer: Send + 'static {
     /// Adds a token to the idle queue. When the runloop is idle and the
     /// queue is not empty, the handler's `idle` fn will be called
     /// with the earliest added token.
+    ///
+    /// Duplicate tokens are coalesced: if the same token is already
+    /// queued, this call is a no-op.
     fn schedule_idle(&self, token: usize);
     /// Like `schedule_idle`, with the guarantee that the handler's `idle`
     /// fn will not be called _before_ the provided `Instant`.
@@ -102,6 +125,11 @@ pub trait Peer: Send + 'static {
     /// This is not intended as a high-fidelity timer. Regular RPC messages
     /// will always take priority over an idle task.
     fn schedule_timer(&self, after: Instant, token: usize);
+    /// Cancels a previously scheduled timer identified by `token`.
+    ///
+    /// Returns `true` if at least one matching timer was found and removed,
+    /// `false` if no timer with that token was pending.
+    fn cancel_timer(&self, token: usize) -> bool;
 }
 
 /// The `Peer` trait object.
@@ -147,9 +175,9 @@ impl<F: Send + FnOnce(Result<Value, Error>)> Callback for F {
 
 /// A helper type which shuts down the runloop if a panic occurs while
 /// handling an RPC.
-struct PanicGuard<'a, W: Write + 'static>(&'a RawPeer<W>);
+struct PanicGuard<'a, W: WriteTransport>(&'a RawPeer<W>);
 
-impl<'a, W: Write + 'static> Drop for PanicGuard<'a, W> {
+impl<'a, W: WriteTransport> Drop for PanicGuard<'a, W> {
     fn drop(&mut self) {
         if thread::panicking() {
             error!("panic guard hit, closing runloop");
@@ -191,12 +219,12 @@ struct Timer {
     token: usize,
 }
 
-struct RpcState<W: Write> {
+struct RpcState<W: WriteTransport> {
     rx_queue: Mutex<VecDeque<Result<RpcObject, ReadError>>>,
     rx_cvar: Condvar,
     writer: Mutex<W>,
     id: AtomicUsize,
-    pending: Mutex<BTreeMap<usize, ResponseHandler>>,
+    pending: Mutex<HashMap<RequestId, ResponseHandler>>,
     idle_queue: Mutex<VecDeque<usize>>,
     timers: Mutex<BinaryHeap<Timer>>,
     needs_exit: AtomicBool,
@@ -204,21 +232,21 @@ struct RpcState<W: Write> {
 }
 
 /// A structure holding the state of a main loop for handling RPC's.
-pub struct RpcLoop<W: Write + 'static> {
+pub struct RpcLoop<W: WriteTransport> {
     reader: MessageReader,
     peer: RawPeer<W>,
 }
 
-impl<W: Write + Send> RpcLoop<W> {
-    /// Creates a new `RpcLoop` with the given output stream (which is used for
-    /// sending requests and notifications, as well as responses).
+impl<W: WriteTransport> RpcLoop<W> {
+    /// Creates a new `RpcLoop` with the given write transport (used for
+    /// sending requests, notifications, and responses).
     pub fn new(writer: W) -> Self {
         let rpc_peer = RawPeer(Arc::new(RpcState {
             rx_queue: Mutex::new(VecDeque::new()),
             rx_cvar: Condvar::new(),
             writer: Mutex::new(writer),
             id: AtomicUsize::new(0),
-            pending: Mutex::new(BTreeMap::new()),
+            pending: Mutex::new(HashMap::new()),
             idle_queue: Mutex::new(VecDeque::new()),
             timers: Mutex::new(BinaryHeap::new()),
             needs_exit: AtomicBool::new(false),
@@ -232,46 +260,49 @@ impl<W: Write + Send> RpcLoop<W> {
         self.peer.clone()
     }
 
-    /// Starts the event loop, reading lines from the reader until EOF,
-    /// or an error occurs.
+    /// Starts the event loop, reading framed messages from the reader until
+    /// EOF or an error occurs.
     ///
-    /// Returns `Ok()` in the EOF case, otherwise returns the
-    /// underlying `ReadError`.
+    /// Returns `Ok(())` on clean EOF, otherwise the underlying `ReadError`.
     ///
-    /// # Note:
-    /// The reader is supplied via a closure, as basically a workaround
-    /// so that the reader doesn't have to be `Send`. Internally, the
-    /// main loop starts a separate thread for I/O, and at startup that
-    /// thread calls the given closure.
+    /// # Note
+    /// The reader is supplied via a closure so that it does not need to be
+    /// `Send`.  Internally the loop starts a scoped thread for I/O; that
+    /// thread calls the closure at start-up.
     ///
-    /// Calls to the handler happen on the caller's thread.
-    ///
-    /// Calls to the handler are guaranteed to preserve the order as
-    /// they appear on on the channel. At the moment, there is no way
-    /// for there to be more than one incoming request to be outstanding.
+    /// Handler calls happen on the caller's thread in the order messages
+    /// arrive.  At most one incoming request is outstanding at a time.
     pub fn mainloop<R, RF, H>(&mut self, rf: RF, handler: &mut H) -> Result<(), ReadError>
     where
-        R: BufRead,
+        R: ReadTransport,
         RF: Send + FnOnce() -> R,
         H: Handler,
     {
-        let exit = crossbeam_utils::thread::scope(|scope| {
+        let exit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        std::thread::scope(|scope| {
             let peer = self.get_raw_peer();
             peer.reset_needs_exit();
 
             let ctx = RpcCtx { peer: Box::new(peer.clone()) };
-            scope.spawn(move |_| {
+            scope.spawn(move || {
                 let mut stream = rf();
                 loop {
                     // The main thread cannot return while this thread is active;
                     // when the main thread wants to exit it sets this flag.
                     if self.peer.needs_exit() {
-                        trace("read loop exit", &["rpc"]);
+                        trace!(target: "xi_rpc", "read loop exit");
                         break;
                     }
 
-                    let json = match self.reader.next(&mut stream) {
+                let json = match self.reader.next(&mut stream) {
                         Ok(json) => json,
+                        Err(ReadError::BatchNotSupported) => {
+                            // Batch requests are rejected non-fatally: queue
+                            // the error so the main thread can send a proper
+                            // error response, then exit the read loop.
+                            self.peer.put_rx(Err(ReadError::BatchNotSupported));
+                            break;
+                        }
                         Err(err) => {
                             if self.peer.0.is_blocked.load(Ordering::Acquire) {
                                 error!("failed to parse response json: {}", err);
@@ -283,8 +314,9 @@ impl<W: Write + Send> RpcLoop<W> {
                     };
                     if json.is_response() {
                         let id = json.get_id().unwrap();
-                        let _resp =
-                            trace_block_payload("read loop response", &["rpc"], format!("{}", id));
+                        let span =
+                            trace_span!(target: "xi_rpc", "read_loop_response", request_id = ?id);
+                        let _entered = span.enter();
                         match json.into_response() {
                             Ok(resp) => {
                                 let resp = resp.map_err(Error::from);
@@ -304,12 +336,30 @@ impl<W: Write + Send> RpcLoop<W> {
             loop {
                 let _guard = PanicGuard(&peer);
                 let read_result = next_read(&peer, handler, &ctx);
-                let _trace = trace_block("main got msg", &["rpc"]);
+                let span = trace_span!(target: "xi_rpc", "mainloop_iteration");
+                let _entered = span.enter();
 
                 let json = match read_result {
                     Ok(json) => json,
+                    Err(ReadError::BatchNotSupported) => {
+                        // Send a well-formed JSON-RPC error with null id, then close.
+                        let batch_err = json!({
+                            "jsonrpc": "2.0",
+                            "id": null,
+                            "error": {
+                                "code": -32600,
+                                "message": "Batch requests are not supported"
+                            }
+                        });
+                        if let Err(e) = peer.send_raw(&batch_err) {
+                            peer.disconnect();
+                            return ReadError::Io(e);
+                        }
+                        peer.disconnect();
+                        return ReadError::BatchNotSupported;
+                    }
                     Err(err) => {
-                        trace_payload("main loop err", &["rpc"], err.to_string());
+                        trace!(target: "xi_rpc", error = %err, "main loop error");
                         // finish idle work before disconnecting;
                         // this is mostly useful for integration tests.
                         if let Some(idle_token) = peer.try_get_idle() {
@@ -322,25 +372,41 @@ impl<W: Write + Send> RpcLoop<W> {
 
                 let method = json.get_method().map(String::from);
                 match json.into_rpc::<H::Notification, H::Request>() {
-                    Ok(Call::Request(id, cmd)) => {
-                        let _t = trace_block_payload("handle request", &["rpc"], method.unwrap());
+                    Call::Request(id, cmd) => {
+                        let method = method.unwrap();
+                        let span =
+                            trace_span!(target: "xi_rpc", "handle_request", method = %method);
+                        let _entered = span.enter();
                         let result = handler.handle_request(&ctx, cmd);
-                        peer.respond(result, id);
+                        if let Err(err) = peer.respond(result, id) {
+                            peer.disconnect();
+                            return ReadError::Io(err);
+                        }
                     }
-                    Ok(Call::Notification(cmd)) => {
-                        let _t = trace_block_payload("handle notif", &["rpc"], method.unwrap());
+                    Call::Notification(cmd) => {
+                        let method = method.unwrap();
+                        let span = trace_span!(target: "xi_rpc", "handle_notification", method = %method);
+                        let _entered = span.enter();
                         handler.handle_notification(&ctx, cmd);
                     }
-                    Ok(Call::InvalidRequest(id, err)) => peer.respond(Err(err), id),
-                    Err(err) => {
-                        trace_payload("read loop exit", &["rpc"], err.to_string());
-                        peer.disconnect();
-                        return ReadError::UnknownRequest(err);
+                    Call::InvalidRequest(id, err) => {
+                        if let Err(io_err) = peer.respond(Err(err), id) {
+                            peer.disconnect();
+                            return ReadError::Io(io_err);
+                        }
+                    }
+                    Call::UnknownNotification(err) => {
+                        // Unknown or malformed notification: log and continue.
+                        // Do not disconnect — unknown notifications are non-fatal.
+                        warn!("ignoring unknown notification: {}", err);
                     }
                 }
             }
         })
-        .unwrap();
+        })).unwrap_or_else(|_| {
+            error!("reader thread panicked; run loop is terminating");
+            ReadError::ThreadPanic
+        });
 
         if exit.is_disconnect() {
             Ok(())
@@ -354,7 +420,7 @@ impl<W: Write + Send> RpcLoop<W> {
 /// result is available.
 fn next_read<W, H>(peer: &RawPeer<W>, handler: &mut H, ctx: &RpcCtx) -> Result<RpcObject, ReadError>
 where
-    W: Write + Send,
+    W: WriteTransport,
     H: Handler,
 {
     loop {
@@ -387,7 +453,8 @@ where
 }
 
 fn do_idle<H: Handler>(handler: &mut H, ctx: &RpcCtx, token: usize) {
-    let _trace = trace_block_payload("do_idle", &["rpc"], format!("token: {}", token));
+    let span = trace_span!(target: "xi_rpc", "do_idle", token = token);
+    let _entered = span.enter();
     handler.idle(ctx, token);
 }
 
@@ -402,14 +469,16 @@ impl RpcCtx {
     }
 }
 
-impl<W: Write + Send + 'static> Peer for RawPeer<W> {
+impl<W: WriteTransport> Peer for RawPeer<W> {
     fn box_clone(&self) -> Box<dyn Peer> {
         Box::new((*self).clone())
     }
 
     fn send_rpc_notification(&self, method: &str, params: &Value) {
-        let _trace = trace_block_payload("send notif", &["rpc"], method.to_owned());
+        let span = trace_span!(target: "xi_rpc", "send_notification", method = %method);
+        let _entered = span.enter();
         if let Err(e) = self.send(&json!({
+            "jsonrpc": "2.0",
             "method": method,
             "params": params,
         })) {
@@ -417,17 +486,61 @@ impl<W: Write + Send + 'static> Peer for RawPeer<W> {
         }
     }
 
-    fn send_rpc_request_async(&self, method: &str, params: &Value, f: Box<dyn Callback>) {
-        let _trace = trace_block_payload("send req async", &["rpc"], method.to_owned());
-        self.send_rpc_request_common(method, params, ResponseHandler::Callback(f));
+    fn send_rpc_request_async(
+        &self,
+        method: &str,
+        params: &Value,
+        f: Box<dyn Callback>,
+    ) -> RequestId {
+        let span = trace_span!(target: "xi_rpc", "send_request_async", method = %method);
+        let _entered = span.enter();
+        self.send_rpc_request_common(method, params, ResponseHandler::Callback(f))
     }
 
     fn send_rpc_request(&self, method: &str, params: &Value) -> Result<Value, Error> {
-        let _trace = trace_block_payload("send req sync", &["rpc"], method.to_owned());
+        let span = trace_span!(target: "xi_rpc", "send_request_sync", method = %method);
+        let _entered = span.enter();
         self.0.is_blocked.store(true, Ordering::Release);
         let (tx, rx) = mpsc::channel();
         self.send_rpc_request_common(method, params, ResponseHandler::Chan(tx));
-        rx.recv().unwrap_or(Err(Error::PeerDisconnect))
+        let result = rx.recv().unwrap_or(Err(Error::PeerDisconnect));
+        self.0.is_blocked.store(false, Ordering::Release);
+        result
+    }
+
+    fn send_rpc_request_timeout(
+        &self,
+        method: &str,
+        params: &Value,
+        timeout: Duration,
+    ) -> Result<Value, Error> {
+        let span = trace_span!(target: "xi_rpc", "send_request_timeout", method = %method);
+        let _entered = span.enter();
+        self.0.is_blocked.store(true, Ordering::Release);
+        let (tx, rx) = mpsc::channel();
+        self.send_rpc_request_common(method, params, ResponseHandler::Chan(tx));
+        let result = match rx.recv_timeout(timeout) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(Error::RequestTimeout),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(Error::PeerDisconnect),
+        };
+        self.0.is_blocked.store(false, Ordering::Release);
+        result
+    }
+
+    fn cancel_rpc_request(&self, id: RequestId) -> bool {
+        let handler = {
+            let mut pending =
+                self.0.pending.lock().unwrap_or_else(|e| e.into_inner());
+            pending.remove(&id)
+        };
+        match handler {
+            Some(rh) => {
+                rh.invoke(Err(Error::RequestCancelled));
+                true
+            }
+            None => false,
+        }
     }
 
     fn request_is_pending(&self) -> bool {
@@ -436,89 +549,119 @@ impl<W: Write + Send + 'static> Peer for RawPeer<W> {
     }
 
     fn schedule_idle(&self, token: usize) {
-        self.0.idle_queue.lock().unwrap().push_back(token);
+        let mut queue = self.0.idle_queue.lock().unwrap_or_else(|e| e.into_inner());
+        // Coalesce: only enqueue if the token is not already waiting.
+        if !queue.contains(&token) {
+            queue.push_back(token);
+            // Wake the main loop so it picks up the new idle task without waiting
+            // for the MAX_IDLE_WAIT polling timeout.
+            self.0.rx_cvar.notify_one();
+        }
     }
 
     fn schedule_timer(&self, after: Instant, token: usize) {
-        self.0.timers.lock().unwrap().push(Timer { fire_after: after, token });
+        self.0.timers.lock().unwrap_or_else(|e| e.into_inner()).push(Timer { fire_after: after, token });
+        // Wake the main loop to re-evaluate the earliest timer deadline.
+        self.0.rx_cvar.notify_one();
+    }
+
+    fn cancel_timer(&self, token: usize) -> bool {
+        let mut timers = self.0.timers.lock().unwrap_or_else(|e| e.into_inner());
+        let before = timers.len();
+        // BinaryHeap has no removal by predicate; rebuild without matching tokens.
+        let remaining: Vec<Timer> = timers.drain().filter(|t| t.token != token).collect();
+        let removed = before - remaining.len();
+        *timers = remaining.into_iter().collect();
+        removed > 0
     }
 }
 
-impl<W: Write> RawPeer<W> {
+impl<W: WriteTransport> RawPeer<W> {
     fn send(&self, v: &Value) -> Result<(), io::Error> {
-        let _trace = trace_block("send", &["rpc"]);
-        let mut s = serde_json::to_string(v).unwrap();
-        s.push('\n');
-        self.0.writer.lock().unwrap().write_all(s.as_bytes())
-        // Technically, maybe we should flush here, but doesn't seem to be required.
+        let span = trace_span!(target: "xi_rpc", "send_raw_message");
+        let _entered = span.enter();
+        // Serialize before acquiring the lock to keep the critical section small.
+        let s = serde_json::to_string(v).unwrap();
+        self.0.writer.lock().unwrap_or_else(|e| e.into_inner()).write_message(s.as_bytes())
+        // Framing and flushing are handled by WriteTransport::write_message.
     }
 
-    fn respond(&self, result: Response, id: u64) {
-        let mut response = json!({ "id": id });
+    /// Like `send` but accessible outside of the `RawPeer` impl block,
+    /// used for sending error responses that are constructed directly.
+    pub(crate) fn send_raw(&self, v: &Value) -> Result<(), io::Error> {
+        self.send(v)
+    }
+
+    fn respond(&self, result: Response, id: RequestId) -> Result<(), io::Error> {
+        let mut response = json!({ "jsonrpc": "2.0", "id": id });
         match result {
             Ok(result) => response["result"] = result,
             Err(error) => response["error"] = json!(error),
         };
-        if let Err(e) = self.send(&response) {
-            error!("error {} sending response to RPC {:?}", e, id);
-        }
+        self.send(&response)
     }
 
-    fn send_rpc_request_common(&self, method: &str, params: &Value, rh: ResponseHandler) {
-        let id = self.0.id.fetch_add(1, Ordering::Relaxed);
+    fn send_rpc_request_common(
+        &self,
+        method: &str,
+        params: &Value,
+        rh: ResponseHandler,
+    ) -> RequestId {
+        let id = RequestId::Number(self.0.id.fetch_add(1, Ordering::Relaxed) as u64);
         {
-            let mut pending = self.0.pending.lock().unwrap();
-            pending.insert(id, rh);
+            let mut pending = self.0.pending.lock().unwrap_or_else(|e| e.into_inner());
+            pending.insert(id.clone(), rh);
         }
         if let Err(e) = self.send(&json!({
+            "jsonrpc": "2.0",
             "id": id,
             "method": method,
             "params": params,
         })) {
-            let mut pending = self.0.pending.lock().unwrap();
+            let mut pending = self.0.pending.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(rh) = pending.remove(&id) {
                 rh.invoke(Err(Error::Io(e)));
             }
         }
+        id
     }
 
-    fn handle_response(&self, id: u64, resp: Result<Value, Error>) {
-        let id = id as usize;
+    fn handle_response(&self, id: RequestId, resp: Result<Value, Error>) {
         let handler = {
-            let mut pending = self.0.pending.lock().unwrap();
+            let mut pending = self.0.pending.lock().unwrap_or_else(|e| e.into_inner());
             pending.remove(&id)
         };
         match handler {
             Some(responsehandler) => responsehandler.invoke(resp),
-            None => warn!("id {} not found in pending", id),
+            None => warn!("id {:?} not found in pending", id),
         }
     }
 
     /// Get a message from the receive queue if available.
     fn try_get_rx(&self) -> Option<Result<RpcObject, ReadError>> {
-        let mut queue = self.0.rx_queue.lock().unwrap();
+        let mut queue = self.0.rx_queue.lock().unwrap_or_else(|e| e.into_inner());
         queue.pop_front()
     }
 
     /// Get a message from the receive queue, waiting for at most `Duration`
     /// and returning `None` if no message is available.
     fn get_rx_timeout(&self, dur: Duration) -> Option<Result<RpcObject, ReadError>> {
-        let mut queue = self.0.rx_queue.lock().unwrap();
-        let result = self.0.rx_cvar.wait_timeout(queue, dur).unwrap();
-        queue = result.0;
+        let queue = self.0.rx_queue.lock().unwrap_or_else(|e| e.into_inner());
+        let result = self.0.rx_cvar.wait_timeout(queue, dur).unwrap_or_else(|e| e.into_inner());
+        let mut queue = result.0;
         queue.pop_front()
     }
 
     /// Adds a message to the receive queue. The message should only
     /// be `None` if the read thread is exiting.
     fn put_rx(&self, json: Result<RpcObject, ReadError>) {
-        let mut queue = self.0.rx_queue.lock().unwrap();
+        let mut queue = self.0.rx_queue.lock().unwrap_or_else(|e| e.into_inner());
         queue.push_back(json);
         self.0.rx_cvar.notify_one();
     }
 
     fn try_get_idle(&self) -> Option<usize> {
-        self.0.idle_queue.lock().unwrap().pop_front()
+        self.0.idle_queue.lock().unwrap_or_else(|e| e.into_inner()).pop_front()
     }
 
     /// Checks status of the most imminent timer. If that timer has expired,
@@ -527,7 +670,7 @@ impl<W: Write> RawPeer<W> {
     /// with the error value being the `Duration` until the timer is ready.
     /// Returns `None` if no timers are registered.
     fn check_timers(&self) -> Option<Result<usize, Duration>> {
-        let mut timers = self.0.timers.lock().unwrap();
+        let mut timers = self.0.timers.lock().unwrap_or_else(|e| e.into_inner());
         match timers.peek() {
             None => return None,
             Some(t) => {
@@ -542,22 +685,25 @@ impl<W: Write> RawPeer<W> {
 
     /// send disconnect error to pending requests.
     fn disconnect(&self) {
-        let mut pending = self.0.pending.lock().unwrap();
+        let mut pending = self.0.pending.lock().unwrap_or_else(|e| e.into_inner());
         let ids = pending.keys().cloned().collect::<Vec<_>>();
-        for id in &ids {
-            let callback = pending.remove(id).unwrap();
+        for id in ids {
+            let callback = pending.remove(&id).unwrap();
             callback.invoke(Err(Error::PeerDisconnect));
         }
-        self.0.needs_exit.store(true, Ordering::Relaxed);
+        // Release ordering ensures all writes above are visible to threads
+        // that subsequently read needs_exit with Acquire ordering.
+        self.0.needs_exit.store(true, Ordering::Release);
     }
 
-    /// Returns `true` if an error has occured in the main thread.
+    /// Returns `true` if a shutdown has been signalled.
     fn needs_exit(&self) -> bool {
-        self.0.needs_exit.load(Ordering::Relaxed)
+        // Acquire pairs with the Release store in disconnect / reset_needs_exit.
+        self.0.needs_exit.load(Ordering::Acquire)
     }
 
     fn reset_needs_exit(&self) {
-        self.0.needs_exit.store(false, Ordering::SeqCst);
+        self.0.needs_exit.store(false, Ordering::Release);
     }
 }
 
@@ -567,7 +713,7 @@ impl Clone for Box<dyn Peer> {
     }
 }
 
-impl<W: Write> Clone for RawPeer<W> {
+impl<W: WriteTransport> Clone for RawPeer<W> {
     fn clone(&self) -> Self {
         RawPeer(self.0.clone())
     }
@@ -596,7 +742,7 @@ mod tests {
         let reader = MessageReader::default();
         let json = reader.parse(r#"{"method": "hi", "params": {"words": "plz"}}"#).unwrap();
         assert!(!json.is_response());
-        let rpc = json.into_rpc::<Value, Value>().unwrap();
+        let rpc = json.into_rpc::<Value, Value>();
         match rpc {
             Call::Notification(_) => (),
             _ => panic!("parse failed"),
@@ -609,7 +755,7 @@ mod tests {
         let json =
             reader.parse(r#"{"id": 5, "method": "hi", "params": {"words": "plz"}}"#).unwrap();
         assert!(!json.is_response());
-        let rpc = json.into_rpc::<Value, Value>().unwrap();
+        let rpc = json.into_rpc::<Value, Value>();
         match rpc {
             Call::Request(..) => (),
             _ => panic!("parse failed"),
@@ -627,11 +773,11 @@ mod tests {
             ReadError::Json(..) => (),
             _ => panic!("parse failed"),
         }
-        // not an object
+        // a JSON array is rejected as a batch request
         let json = reader.parse(r#"[5, "hi", {"arg": "val"}]"#).err().unwrap();
 
         match json {
-            ReadError::NotObject => (),
+            ReadError::BatchNotSupported => (),
             _ => panic!("parse failed"),
         }
     }

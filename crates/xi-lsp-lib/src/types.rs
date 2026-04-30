@@ -16,12 +16,13 @@ use std::collections::HashMap;
 use std::io::Error as IOError;
 
 use jsonrpc_lite::Error as JsonRpcError;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use xi_plugin_lib::Error as PluginLibError;
 use xi_rpc::RemoteError;
 
 use crate::language_server_client::LanguageServerClient;
-use crate::lsp_types::*;
+use lsp_types::*;
 
 pub enum LspHeader {
     ContentType,

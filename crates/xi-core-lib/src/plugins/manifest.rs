@@ -17,7 +17,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{self, Value};
+use serde_json::{self, json, Value};
 
 use crate::syntax::{LanguageDefinition, LanguageId};
 

@@ -18,6 +18,7 @@
 
 use std::collections::HashMap;
 
+use log::warn;
 use xi_trace::trace_block;
 
 use crate::edit_types::{BufferEvent, EventDomain};

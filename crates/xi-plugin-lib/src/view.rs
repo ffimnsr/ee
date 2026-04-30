@@ -13,13 +13,13 @@
 // limitations under the License.
 
 use serde::Deserialize;
-use serde_json::{self, Value};
+use serde_json::{self, json, Value};
 use std::path::{Path, PathBuf};
 
-use crate::xi_core::plugin_rpc::{
+use xi_core_lib::plugin_rpc::{
     GetDataResponse, PluginBufferInfo, PluginEdit, ScopeSpan, TextUnit,
 };
-use crate::xi_core::{BufferConfig, ConfigTable, LanguageId, PluginPid, ViewId};
+use xi_core_lib::{BufferConfig, ConfigTable, LanguageId, PluginPid, ViewId};
 use xi_core_lib::annotations::AnnotationType;
 use xi_core_lib::plugin_rpc::DataSpan;
 use xi_rope::interval::IntervalBounds;

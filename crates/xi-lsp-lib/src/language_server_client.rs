@@ -18,15 +18,17 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::process;
 
-use crate::lsp_types::Uri;
+use log::{debug, error, trace, warn};
+
+use lsp_types::Uri;
 use jsonrpc_lite::{Error, Id, JsonRpc, Params};
 use serde_json::{to_value, Value};
 use xi_plugin_lib::CoreProxy;
 
-use crate::lsp_types::*;
+use lsp_types::*;
 use crate::result_queue::ResultQueue;
 use crate::types::Callback;
-use crate::xi_core::ViewId;
+use xi_core_lib::ViewId;
 
 /// A type to abstract communication with the language server
 pub struct LanguageServerClient {

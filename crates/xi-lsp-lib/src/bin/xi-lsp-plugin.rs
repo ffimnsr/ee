@@ -11,14 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-extern crate xi_lsp_lib;
-#[macro_use]
-extern crate serde_json;
-
-extern crate chrono;
-extern crate fern;
-extern crate log;
-
+use serde_json::json;
 use xi_lsp_lib::{start_mainloop, Config, LspPlugin};
 
 fn init_logger() -> Result<(), fern::InitError> {
