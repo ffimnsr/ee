@@ -58,9 +58,9 @@ impl XiCore {
     /// # Panics
     ///
     /// Panics if core has not yet received the `client_started` message.
-    pub fn inner(&self) -> MutexGuard<CoreState> {
+    pub fn inner(&self) -> MutexGuard<'_, CoreState> {
         match self {
-            XiCore::Running(ref inner) => inner.lock().unwrap(),
+            XiCore::Running(inner) => inner.lock().unwrap(),
             XiCore::Waiting => panic!(
                 "core does not start until client_started \
                  RPC is received"
@@ -71,7 +71,7 @@ impl XiCore {
     /// Returns a new reference to the core state, if core is running.
     fn weak_self(&self) -> Option<WeakXiCore> {
         match self {
-            XiCore::Running(ref inner) => Some(WeakXiCore(Arc::downgrade(inner))),
+            XiCore::Running(inner) => Some(WeakXiCore(Arc::downgrade(inner))),
             XiCore::Waiting => None,
         }
     }

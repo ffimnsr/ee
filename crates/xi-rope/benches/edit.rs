@@ -54,7 +54,7 @@ fn build_few_big_lines(size: usize) -> String {
 fn benchmark_file_load_short_lines(b: &mut Bencher) {
     let text = build_short_lines(50_000);
     b.iter(|| {
-        Rope::from(&text);
+        let _ = Rope::from(&text);
     });
 }
 
@@ -62,7 +62,7 @@ fn benchmark_file_load_short_lines(b: &mut Bencher) {
 fn benchmark_file_load_few_big_lines(b: &mut Bencher) {
     let text = build_few_big_lines(1_000_000);
     b.iter(|| {
-        Rope::from(&text);
+        let _ = Rope::from(&text);
     });
 }
 

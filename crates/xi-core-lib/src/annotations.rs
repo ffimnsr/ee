@@ -38,7 +38,7 @@ impl AnnotationType {
         match self {
             AnnotationType::Find => "find",
             AnnotationType::Selection => "selection",
-            AnnotationType::Other(ref s) => s,
+            AnnotationType::Other(s) => s,
         }
     }
 }

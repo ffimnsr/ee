@@ -287,7 +287,7 @@ impl<N: NodeInfo> Node<N> {
     fn is_ok_child(&self) -> bool {
         match self.0.val {
             NodeVal::Leaf(ref l) => l.is_ok_child(),
-            NodeVal::Internal(ref nodes) => (nodes.len() >= MIN_CHILDREN),
+            NodeVal::Internal(ref nodes) => nodes.len() >= MIN_CHILDREN,
         }
     }
 
@@ -313,7 +313,7 @@ impl<N: NodeInfo> Node<N> {
         if both_ok {
             return Node::from_nodes(vec![rope1, rope2]);
         }
-        match {
+        let res = {
             let node1 = Arc::make_mut(&mut rope1.0);
             let leaf2 = rope2.get_leaf();
             if let NodeVal::Leaf(ref mut leaf1) = node1.val {
@@ -325,7 +325,7 @@ impl<N: NodeInfo> Node<N> {
             } else {
                 panic!("merge_leaves called on non-leaf");
             }
-        } {
+        }; match res {
             Some(new) => Node::from_nodes(vec![rope1, Node::from_leaf(new)]),
             None => rope1,
         }
@@ -1117,7 +1117,7 @@ mod test {
     #[test]
     fn node_is_empty() {
         let text = Rope::from(String::new());
-        assert_eq!(text.is_empty(), true);
+        assert!(text.is_empty());
     }
 
     #[test]

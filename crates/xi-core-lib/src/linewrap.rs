@@ -29,8 +29,10 @@ use crate::width_cache::{CodepointMono, Token, WidthCache, WidthMeasure};
 
 /// The visual width of the buffer for the purpose of word wrapping.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Default)]
 pub(crate) enum WrapWidth {
     /// No wrapping in effect.
+    #[default]
     None,
 
     /// Width in bytes (utf-8 code units).
@@ -42,11 +44,6 @@ pub(crate) enum WrapWidth {
     Width(f64),
 }
 
-impl Default for WrapWidth {
-    fn default() -> Self {
-        WrapWidth::None
-    }
-}
 
 impl WrapWidth {
     fn differs_in_kind(self, other: WrapWidth) -> bool {
@@ -449,7 +446,7 @@ impl Lines {
     #[cfg(test)]
     fn rewrap_all(&mut self, text: &Rope, client: &Client, width_cache: &mut WidthCache) {
         if !self.is_converged() {
-            self.do_wrap_task(text, width_cache, client, 0..10, Some(usize::max_value()));
+            self.do_wrap_task(text, width_cache, client, 0..10, Some(usize::MAX));
         }
     }
 }
@@ -1170,7 +1167,7 @@ mod tests {
 
         // delete everything?
         lines.patchup_tasks(0..200, 0);
-        assert_eq!(make_ranges(&lines.work), vec![]);
+        assert_eq!(make_ranges(&lines.work), Vec::<std::ops::Range<usize>>::new());
 
         lines.add_task(0..110);
         lines.patchup_tasks(0..30, 0);

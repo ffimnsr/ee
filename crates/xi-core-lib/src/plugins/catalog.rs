@@ -15,6 +15,7 @@
 //! Keeping track of available plugins.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -37,6 +38,15 @@ pub enum PluginLoadError {
     Io(io::Error),
     /// Malformed manifest
     Parse(toml::de::Error),
+}
+
+impl fmt::Display for PluginLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PluginLoadError::Io(err) => write!(f, "{err}"),
+            PluginLoadError::Parse(err) => write!(f, "{err}"),
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -124,7 +134,7 @@ fn find_all_manifests(paths: &[PathBuf]) -> Vec<PathBuf> {
 }
 
 fn load_manifest(path: &Path) -> Result<PluginDescription, PluginLoadError> {
-    let mut file = fs::File::open(&path)?;
+    let mut file = fs::File::open(path)?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
     let mut manifest: PluginDescription = toml::from_str(&contents)?;
@@ -135,7 +145,7 @@ fn load_manifest(path: &Path) -> Result<PluginDescription, PluginLoadError> {
 
     for lang in &mut manifest.languages {
         let lang_config_path =
-            path.parent().unwrap().join(&lang.name.as_ref()).with_extension("toml");
+            path.parent().unwrap().join(lang.name.as_ref()).with_extension("toml");
         if !lang_config_path.exists() {
             continue;
         }

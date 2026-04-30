@@ -272,7 +272,7 @@ impl CoreState {
     /// holds references to the `Editor` and `View` backing this `ViewId`,
     /// as well as to sibling views, plugins, and other state necessary
     /// for handling most events.
-    pub(crate) fn make_context(&self, view_id: ViewId) -> Option<EventContext> {
+    pub(crate) fn make_context(&self, view_id: ViewId) -> Option<EventContext<'_>> {
         self.views.get(&view_id).map(|view| {
             let buffer_id = view.borrow().get_buffer_id();
 
@@ -304,7 +304,7 @@ impl CoreState {
 
     /// Produces an iterator over all event contexts, with each view appearing
     /// exactly once.
-    fn iter_groups<'a>(&'a self) -> Iter<'a, Box<dyn Iterator<Item = &ViewId> + 'a>> {
+    fn iter_groups<'a>(&'a self) -> Iter<'a, Box<dyn Iterator<Item = &'a ViewId> + 'a>> {
         Iter { views: Box::new(self.views.keys()), seen: HashSet::new(), inner: self }
     }
 
@@ -795,7 +795,7 @@ impl CoreState {
                     self.plugins.remove_named(&old_plugin.name);
                 }
 
-                self.plugins.load_from_paths(&[new.clone()]);
+                self.plugins.load_from_paths(std::slice::from_ref(new));
                 if let Some(new_plugin) = self.plugins.get_from_path(new) {
                     self.do_start_plugin(ViewId(0), &new_plugin.name);
                 }

@@ -49,6 +49,6 @@ impl Parser for PlaintextParser {
     }
 
     fn parse(&mut self, text: &str, state: State) -> (usize, State, usize, State) {
-        (0, self.ctx.push(state, ()), text.as_bytes().len(), state)
+        (0, self.ctx.push(state, ()), text.len(), state)
     }
 }

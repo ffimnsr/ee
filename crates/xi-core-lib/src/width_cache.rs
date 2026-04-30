@@ -106,7 +106,7 @@ impl WidthCache {
     }
 
     /// Create a new batch of requests.
-    pub fn batch_req(self: &mut WidthCache) -> WidthBatchReq {
+    pub fn batch_req(self: &mut WidthCache) -> WidthBatchReq<'_> {
         let pending_tok = self.widths.len();
         WidthBatchReq {
             cache: self,

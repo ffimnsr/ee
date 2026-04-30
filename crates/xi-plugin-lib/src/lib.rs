@@ -186,7 +186,6 @@ pub trait Plugin {
     fn idle(&mut self, view: &mut View<Self::Cache>) {}
 
     /// Language Plugins specific methods
-
     #[allow(unused_variables)]
     fn get_hover(&mut self, view: &mut View<Self::Cache>, request_id: usize, position: usize) {}
 }

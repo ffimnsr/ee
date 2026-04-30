@@ -223,7 +223,7 @@ pub fn len_utf8_from_first_byte(b: u8) -> usize {
 }
 
 #[derive(Clone, Copy)]
-pub struct LinesMetric(usize); // number of lines
+pub struct LinesMetric; // number of lines
 
 /// Measured unit is newline amount.
 /// Base unit is utf8 code unit.
@@ -272,7 +272,7 @@ impl Metric<RopeInfo> for LinesMetric {
 }
 
 #[derive(Clone, Copy)]
-pub struct Utf16CodeUnitsMetric(usize);
+pub struct Utf16CodeUnitsMetric;
 
 impl Metric<RopeInfo> for Utf16CodeUnitsMetric {
     fn measure(info: &RopeInfo, _: usize) -> usize {
@@ -498,7 +498,7 @@ impl Rope {
     ///
     /// Time complexity: technically O(n log n), but the constant factor is so
     /// tiny it is effectively O(n). This iterator does not allocate.
-    pub fn iter_chunks<T: IntervalBounds>(&self, range: T) -> ChunkIter {
+    pub fn iter_chunks<T: IntervalBounds>(&self, range: T) -> ChunkIter<'_> {
         let Interval { start, end } = range.into_interval(self.len());
 
         ChunkIter { cursor: Cursor::new(self, start), end }
@@ -509,7 +509,7 @@ impl Rope {
     ///
     /// The return type is a `Cow<str>`, and in most cases the lines are slices
     /// borrowed from the rope.
-    pub fn lines_raw<T: IntervalBounds>(&self, range: T) -> LinesRaw {
+    pub fn lines_raw<T: IntervalBounds>(&self, range: T) -> LinesRaw<'_> {
         LinesRaw { inner: self.iter_chunks(range), fragment: "" }
     }
 
@@ -523,7 +523,7 @@ impl Rope {
     /// from the rope.
     ///
     /// The semantics are intended to match `str::lines()`.
-    pub fn lines<T: IntervalBounds>(&self, range: T) -> Lines {
+    pub fn lines<T: IntervalBounds>(&self, range: T) -> Lines<'_> {
         Lines { inner: self.lines_raw(range) }
     }
 
@@ -534,7 +534,7 @@ impl Rope {
         leaf.as_bytes()[pos]
     }
 
-    pub fn slice_to_cow<T: IntervalBounds>(&self, range: T) -> Cow<str> {
+    pub fn slice_to_cow<T: IntervalBounds>(&self, range: T) -> Cow<'_, str> {
         let mut iter = self.iter_chunks(range);
         let first = iter.next();
         let second = iter.next();
@@ -608,7 +608,7 @@ impl From<Rope> for String {
     }
 }
 
-impl<'a> From<&'a Rope> for String {
+impl From<&Rope> for String {
     fn from(r: &Rope) -> String {
         r.slice_to_cow(..).into_owned()
     }

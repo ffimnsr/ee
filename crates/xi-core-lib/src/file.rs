@@ -299,9 +299,9 @@ impl FileError {
 impl fmt::Display for FileError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            FileError::Io(ref e, ref p) => write!(f, "{}. File path: {:?}", e, p),
-            FileError::UnknownEncoding(ref p) => write!(f, "Error decoding file: {:?}", p),
-            FileError::HasChanged(ref p) => write!(
+            FileError::Io(e, p) => write!(f, "{}. File path: {:?}", e, p),
+            FileError::UnknownEncoding(p) => write!(f, "Error decoding file: {:?}", p),
+            FileError::HasChanged(p) => write!(
                 f,
                 "File has changed on disk. \
                  Please save elsewhere and reload the file. File path: {:?}",

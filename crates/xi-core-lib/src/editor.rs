@@ -40,11 +40,6 @@ use crate::selection::{InsertDrift, SelRegion, Selection};
 use crate::styles::ThemeStyleMap;
 use crate::view::{Replace, View};
 
-#[cfg(not(feature = "ledger"))]
-pub struct SyncStore;
-#[cfg(feature = "ledger")]
-use fuchsia::sync::SyncStore;
-
 // TODO This could go much higher without issue but while developing it is
 // better to keep it low to expose bugs in the GC during casual testing.
 const MAX_UNDOS: usize = 20;
@@ -75,12 +70,6 @@ pub struct Editor {
     last_edit_type: EditType,
 
     revs_in_flight: usize,
-
-    /// Used only on Fuchsia for syncing
-    #[allow(dead_code)]
-    sync_store: Option<SyncStore>,
-    #[allow(dead_code)]
-    last_synced_rev: RevId,
 
     layers: Layers,
 }
@@ -115,8 +104,6 @@ impl Editor {
             this_edit_type: EditType::Other,
             layers: Layers::default(),
             revs_in_flight: 0,
-            sync_store: None,
-            last_synced_rev: last_rev_id,
         }
     }
 
@@ -243,7 +230,6 @@ impl Editor {
     }
 
     /// Commits the current delta. If the buffer has changed, returns
-    /// a 3-tuple containing the delta representing the changes, the previous
     /// buffer, and an `InsertDrift` enum describing the correct selection update
     /// behaviour.
     pub(crate) fn commit_delta(&mut self) -> Option<(RopeDelta, Rope, InsertDrift)> {
@@ -280,61 +266,11 @@ impl Editor {
         self.engine.try_delta_rev_head(target_rev_id).ok()
     }
 
-    #[cfg(not(target_os = "fuchsia"))]
     fn gc_undos(&mut self) {
         if self.revs_in_flight == 0 && !self.gc_undos.is_empty() {
             self.engine.gc(&self.gc_undos);
             self.undos = &self.undos - &self.gc_undos;
             self.gc_undos.clear();
-        }
-    }
-
-    #[cfg(target_os = "fuchsia")]
-    fn gc_undos(&mut self) {
-        // Never run GC on Fuchsia so that peers don't invalidate our
-        // last_rev_id and so that merge will work.
-    }
-
-    pub fn merge_new_state(&mut self, new_engine: Engine) {
-        self.engine.merge(&new_engine);
-        self.text = self.engine.get_head().clone();
-        // TODO: better undo semantics. This only implements separate undo
-        // histories for low concurrency.
-        self.undo_group_id = self.engine.max_undo_group_id() + 1;
-        self.last_synced_rev = self.engine.get_head_rev_id();
-        self.commit_delta();
-        //self.render();
-        //FIXME: render after fuchsia sync
-    }
-
-    /// See `Engine::set_session_id`. Only useful for Fuchsia sync.
-    pub fn set_session_id(&mut self, session: (u64, u32)) {
-        self.engine.set_session_id(session);
-    }
-
-    #[cfg(feature = "ledger")]
-    pub fn set_sync_store(&mut self, sync_store: SyncStore) {
-        self.sync_store = Some(sync_store);
-    }
-
-    #[cfg(not(feature = "ledger"))]
-    pub fn sync_state_changed(&mut self) {}
-
-    #[cfg(feature = "ledger")]
-    pub fn sync_state_changed(&mut self) {
-        if let Some(sync_store) = self.sync_store.as_mut() {
-            // we don't want to sync right after recieving a new merge
-            if self.last_synced_rev != self.engine.get_head_rev_id() {
-                self.last_synced_rev = self.engine.get_head_rev_id();
-                sync_store.state_changed();
-            }
-        }
-    }
-
-    #[cfg(feature = "ledger")]
-    pub fn transaction_ready(&mut self) {
-        if let Some(sync_store) = self.sync_store.as_mut() {
-            sync_store.commit_transaction(&self.engine);
         }
     }
 
@@ -664,7 +600,7 @@ impl Editor {
         view.update_annotations(plugin, iv, Annotations { items: spans, annotation_type });
     }
 
-    pub(crate) fn get_rev(&self, rev: RevToken) -> Option<Cow<Rope>> {
+    pub(crate) fn get_rev(&self, rev: RevToken) -> Option<Cow<'_, Rope>> {
         let text_cow = if rev == self.engine.get_head_rev_id().token() {
             Cow::Borrowed(&self.text)
         } else {
@@ -735,12 +671,7 @@ impl EditType {
 }
 
 fn last_selection_region(regions: &[SelRegion]) -> Option<&SelRegion> {
-    for region in regions.iter().rev() {
-        if !region.is_caret() {
-            return Some(region);
-        }
-    }
-    None
+    regions.iter().rev().find(|&region| !region.is_caret()).map(|v| v as _)
 }
 
 /// Counts the number of lines in the string, not including any trailing newline.

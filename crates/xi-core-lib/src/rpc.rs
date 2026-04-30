@@ -348,18 +348,15 @@ pub struct Position {
 /// operations).
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SelectionModifier {
     None,
+    #[default]
     Set,
     Add,
     AddRemovingCurrent,
 }
 
-impl Default for SelectionModifier {
-    fn default() -> SelectionModifier {
-        SelectionModifier::Set
-    }
-}
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -574,8 +571,8 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for EditCommand<T> {
 
         // if params are empty, remove them
         let remove_params = match v.get("params") {
-            Some(&Value::Object(ref obj)) => obj.is_empty() && T::deserialize(v.clone()).is_err(),
-            Some(&Value::Array(ref arr)) => arr.is_empty() && T::deserialize(v.clone()).is_err(),
+            Some(Value::Object(obj)) => obj.is_empty() && T::deserialize(v.clone()).is_err(),
+            Some(Value::Array(arr)) => arr.is_empty() && T::deserialize(v.clone()).is_err(),
             Some(_) => {
                 return Err(de::Error::custom(
                     "'params' field, if present, must be object or array.",

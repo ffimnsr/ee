@@ -16,7 +16,6 @@
 
 #[macro_use]
 extern crate lazy_static;
-extern crate time;
 
 #[macro_use]
 extern crate serde_derive;
@@ -31,7 +30,7 @@ extern crate libc;
 #[cfg(feature = "benchmarks")]
 extern crate test;
 
-#[cfg(any(test, feature = "json_payload", feature = "chroma_trace_dump"))]
+#[cfg(any(test, feature = "json_payload", feature = "chrome_trace_event"))]
 #[cfg_attr(any(test), macro_use)]
 extern crate serde_json;
 
@@ -54,6 +53,7 @@ use std::path::Path;
 use std::string::ToString;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type StrCow = Cow<'static, str>;
 
@@ -212,12 +212,6 @@ impl Config {
         Self { sample_limit_count: limit }
     }
 
-    /// The default amount of storage to allocate for tracing.  Currently 1 MB.
-    pub fn default() -> Self {
-        // 1 MB
-        Self::with_limit_bytes(1 * 1024 * 1024)
-    }
-
     /// The maximum amount of space the tracing data will take up.  This does
     /// not account for any overhead of storing the data itself (i.e. pointer to
     /// the heap, counters, etc); just the data itself.
@@ -229,6 +223,20 @@ impl Config {
     pub fn max_samples(self) -> usize {
         self.sample_limit_count
     }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self::with_limit_bytes(1024 * 1024)
+    }
+}
+
+fn now_ns() -> u64 {
+    let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    since_epoch
+        .as_secs()
+        .saturating_mul(1_000_000_000)
+        .saturating_add(u64::from(since_epoch.subsec_nanos()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -441,7 +449,7 @@ impl Sample {
         Self {
             name: name.into(),
             categories: Some(categories.into()),
-            timestamp_us: ns_to_us(time::precise_time_ns()),
+            timestamp_us: ns_to_us(now_ns()),
             event_type,
             duration_us: None,
             tid: sys_tid::current_tid().unwrap(),
@@ -485,7 +493,7 @@ impl Sample {
         Self {
             name: name.into(),
             categories: Some(categories.into()),
-            timestamp_us: ns_to_us(time::precise_time_ns()),
+            timestamp_us: ns_to_us(now_ns()),
             event_type: SampleEventType::Instant,
             duration_us: None,
             tid: sys_tid::current_tid().unwrap(),
@@ -588,7 +596,7 @@ impl<'a> Drop for SampleGuard<'a> {
     fn drop(&mut self) {
         if let Some(ref mut trace) = self.trace {
             let mut sample = self.sample.take().unwrap();
-            sample.timestamp_us = ns_to_us(time::precise_time_ns());
+            sample.timestamp_us = ns_to_us(now_ns());
             sample.event_type = SampleEventType::DurationEnd;
             trace.record(sample);
         }
@@ -697,7 +705,7 @@ impl Trace {
         }
     }
 
-    pub fn block<S, C>(&self, name: S, categories: C) -> SampleGuard
+    pub fn block<S, C>(&self, name: S, categories: C) -> SampleGuard<'_>
     where
         S: Into<StrCow>,
         C: Into<CategoriesT>,
@@ -709,7 +717,7 @@ impl Trace {
         }
     }
 
-    pub fn block_payload<S, C, P>(&self, name: S, categories: C, payload: P) -> SampleGuard
+    pub fn block_payload<S, C, P>(&self, name: S, categories: C, payload: P) -> SampleGuard<'_>
     where
         S: Into<StrCow>,
         C: Into<CategoriesT>,
@@ -729,9 +737,9 @@ impl Trace {
         F: FnOnce() -> R,
     {
         // TODO: simplify this through the use of scopeguard crate
-        let start = time::precise_time_ns();
+        let start = now_ns();
         let result = closure();
-        let end = time::precise_time_ns();
+        let end = now_ns();
         if self.is_enabled() {
             self.record(Sample::new_duration(name, categories, None, start, end - start));
         }
@@ -752,9 +760,9 @@ impl Trace {
         F: FnOnce() -> R,
     {
         // TODO: simplify this through the use of scopeguard crate
-        let start = time::precise_time_ns();
+        let start = now_ns();
         let result = closure();
-        let end = time::precise_time_ns();
+        let end = now_ns();
         if self.is_enabled() {
             self.record(Sample::new_duration(
                 name,
@@ -823,7 +831,7 @@ impl Trace {
             return Err(chrome_trace_dump::Error::already_exists());
         }
 
-        let mut trace_file = fs::File::create(&path)?;
+        let mut trace_file = fs::File::create(path)?;
 
         chrome_trace_dump::serialize(&traces, &mut trace_file)
     }
@@ -870,12 +878,12 @@ pub fn is_enabled() -> bool {
 /// # Arguments
 ///
 /// * `name` - A string that provides some meaningful name to this sample.
-/// Usage of static strings is encouraged for best performance to avoid copies.
-/// However, anything that can be converted into a Cow string can be passed as
-/// an argument.
+///   Usage of static strings is encouraged for best performance to avoid copies.
+///   However, anything that can be converted into a Cow string can be passed as
+///   an argument.
 ///
 /// * `categories` - A static array of static strings that tags the samples in
-/// some way.
+///   some way.
 ///
 /// # Examples
 ///
@@ -908,12 +916,12 @@ where
 /// # Arguments
 ///
 /// * `name` - A string that provides some meaningful name to this sample.
-/// Usage of static strings is encouraged for best performance to avoid copies.
-/// However, anything that can be converted into a Cow string can be passed as
-/// an argument.
+///   Usage of static strings is encouraged for best performance to avoid copies.
+///   However, anything that can be converted into a Cow string can be passed as
+///   an argument.
 ///
 /// * `categories` - A static array of static strings that tags the samples in
-/// some way.
+///   some way.
 ///
 /// # Examples
 ///
@@ -945,12 +953,12 @@ where
 /// # Arguments
 ///
 /// * `name` - A string that provides some meaningful name to this sample.
-/// Usage of static strings is encouraged for best performance to avoid copies.
-/// However, anything that can be converted into a Cow string can be passed as
-/// an argument.
+///   Usage of static strings is encouraged for best performance to avoid copies.
+///   However, anything that can be converted into a Cow string can be passed as
+///   an argument.
 ///
 /// * `categories` - A static array of static strings that tags the samples in
-/// some way.
+///   some way.
 ///
 /// # Returns
 /// A guard that when dropped will update the Sample with the timestamp & then
@@ -1003,12 +1011,12 @@ where
 /// # Arguments
 ///
 /// * `name` - A string that provides some meaningful name to this sample.
-/// Usage of static strings is encouraged for best performance to avoid copies.
-/// However, anything that can be converted into a Cow string can be passed as
-/// an argument.
+///   Usage of static strings is encouraged for best performance to avoid copies.
+///   However, anything that can be converted into a Cow string can be passed as
+///   an argument.
 ///
 /// * `categories` - A static array of static strings that tags the samples in
-/// some way.
+///   some way.
 ///
 /// # Returns
 /// The result of the closure.
@@ -1062,12 +1070,12 @@ pub fn samples_len() -> usize {
 /// samples are ordered chronologically for several reasons:
 ///
 /// 1. Samples that span sections of code may be inserted on end instead of
-/// beginning.
-/// 2. Performance optimizations might have per-thread buffers.  Keeping all
-/// that sorted would be prohibitively expensive.
+///    beginning.
+/// 2. Performance optimizations might have per-thread buffers. Keeping all
+///    that sorted would be prohibitively expensive.
 /// 3. You may not care about them always being sorted if you're merging samples
-/// from multiple distributed sources (i.e. you want to sort the merged result
-/// rather than just this processe's samples).
+///    from multiple distributed sources (i.e. you want to sort the merged
+///    result rather than just this process's samples).
 #[inline]
 pub fn samples_cloned_unsorted() -> Vec<Sample> {
     TRACE.samples_cloned_unsorted()
@@ -1082,7 +1090,7 @@ pub fn samples_cloned_sorted() -> Vec<Sample> {
     TRACE.samples_cloned_sorted()
 }
 
-/// Save tracing data to to supplied path, using the Trace Viewer format. Trace file can be opened
+/// Save tracing data to supplied path, using the Trace Viewer format. Trace file can be opened
 /// using the Chrome browser by visiting the URL `about:tracing`. If `sorted_chronologically` is
 /// true then sort output traces chronologically by each trace's time of creation.
 #[inline]
@@ -1283,8 +1291,7 @@ mod tests {
 
     #[test]
     fn test_cross_process_samples() {
-        let mut samples = vec![
-            Sample::new_instant("local pid", &[], None),
+        let mut samples = [Sample::new_instant("local pid", &[], None),
             Sample::new_instant("remote pid", &[], None)];
         samples[0].pid = 1;
         samples[0].timestamp_us = 10;
@@ -1378,7 +1385,7 @@ mod tests {
     #[cfg(feature = "benchmarks")]
     #[bench]
     fn bench_single_timestamp(b: &mut Bencher) {
-        b.iter(|| black_box(time::precise_time_ns()));
+        b.iter(|| black_box(now_ns()));
     }
 
     // this is the cost contributed by the timestamp to
@@ -1387,8 +1394,8 @@ mod tests {
     #[bench]
     fn bench_two_timestamps(b: &mut Bencher) {
         b.iter(|| {
-            black_box(time::precise_time_ns());
-            black_box(time::precise_time_ns());
+            black_box(now_ns());
+            black_box(now_ns());
         });
     }
 

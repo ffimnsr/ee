@@ -43,26 +43,12 @@ extern crate memchr;
 #[cfg(feature = "notify")]
 extern crate notify;
 extern crate syntect;
-extern crate time;
 extern crate toml;
 
 extern crate xi_rope;
 extern crate xi_rpc;
 extern crate xi_trace;
 extern crate xi_unicode;
-
-#[cfg(feature = "ledger")]
-mod ledger_includes {
-    extern crate fuchsia_zircon;
-    extern crate fuchsia_zircon_sys;
-    extern crate mxruntime;
-    #[macro_use]
-    extern crate fidl;
-    extern crate apps_ledger_services_public;
-    extern crate sha2;
-}
-#[cfg(feature = "ledger")]
-use ledger_includes::*;
 
 pub mod annotations;
 pub mod backspace;
@@ -75,8 +61,6 @@ pub mod editor;
 pub mod event_context;
 pub mod file;
 pub mod find;
-#[cfg(feature = "ledger")]
-pub mod fuchsia;
 pub mod index_set;
 pub mod layers;
 pub mod line_cache_shadow;
@@ -98,9 +82,6 @@ pub mod width_cache;
 pub mod word_boundaries;
 
 pub mod rpc;
-
-#[cfg(feature = "ledger")]
-use apps_ledger_services_public::Ledger_Proxy;
 
 pub use crate::config::{BufferItems as BufferConfig, Table as ConfigTable};
 pub use crate::core::{WeakXiCore, XiCore};

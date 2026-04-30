@@ -69,7 +69,7 @@ pub fn find(
     pat: &str,
     regex: Option<&Regex>,
 ) -> Option<usize> {
-    match find_progress(cursor, lines, cm, pat, usize::max_value(), regex) {
+    match find_progress(cursor, lines, cm, pat, usize::MAX, regex) {
         FindResult::Found(start) => Some(start),
         FindResult::NotFound => None,
         FindResult::TryAgain => unreachable!("find_progress got stuck"),
@@ -129,7 +129,7 @@ pub fn find_progress(
                         // 0xE2 is first utf-8 byte of u+212A (kelvin sign)
                         let scanner = |s: &str| memchr3(b'k', b'K', 0xE2, s.as_bytes());
                         find_progress_iter(cursor, lines, &pat_lower, scanner, matcher, num_steps)
-                    } else if (b'a'..=b'z').contains(&b) {
+                    } else if b.is_ascii_lowercase() {
                         let scanner = |s: &str| memchr2(b, b - 0x20, s.as_bytes());
                         find_progress_iter(cursor, lines, &pat_lower, scanner, matcher, num_steps)
                     } else if b < 0x80 {
@@ -321,7 +321,7 @@ pub fn compare_cursor_regex(
 pub fn is_multiline_regex(regex: &str) -> bool {
     // regex characters that match line breaks
     // todo: currently multiline mode is ignored
-    let multiline_indicators = vec![r"\n", r"\r", r"[[:space:]]"];
+    let multiline_indicators = [r"\n", r"\r", r"[[:space:]]"];
 
     multiline_indicators.iter().any(|&i| regex.contains(i))
 }

@@ -1319,7 +1319,7 @@ mod tests {
             s += "x";
         }
         s += "aaaaaa";
-        assert_eq!(view.find_in_progress(), false);
+        assert!(!view.find_in_progress());
 
         let text = Rope::from(&s);
         view.do_edit(
@@ -1332,7 +1332,7 @@ mod tests {
             },
         );
         view.do_find(&text);
-        assert_eq!(view.find_in_progress(), true);
+        assert!(view.find_in_progress());
         view.do_find_all(&text);
         assert_eq!(view.sel_regions().len(), 1);
         assert_eq!(
@@ -1340,7 +1340,7 @@ mod tests {
             Some(&SelRegion::new(FIND_BATCH_SIZE - 2, FIND_BATCH_SIZE + 6 - 2))
         );
         view.do_find(&text);
-        assert_eq!(view.find_in_progress(), true);
+        assert!(view.find_in_progress());
         view.do_find_all(&text);
         assert_eq!(view.sel_regions().len(), 2);
     }
@@ -1353,7 +1353,7 @@ mod tests {
             s += "£€äßß";
         }
 
-        assert_eq!(view.find_in_progress(), false);
+        assert!(!view.find_in_progress());
 
         let text = Rope::from(&s);
         view.do_edit(
@@ -1366,7 +1366,7 @@ mod tests {
             },
         );
         view.do_find(&text);
-        assert_eq!(view.find_in_progress(), true);
+        assert!(view.find_in_progress());
         view.do_find_all(&text);
         assert_eq!(view.sel_regions().len(), 1); // cursor
     }

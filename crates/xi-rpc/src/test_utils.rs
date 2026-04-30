@@ -100,7 +100,7 @@ impl Write for DummyWriter {
         let s = String::from_utf8(buf.to_vec()).unwrap();
         self.0
             .send(s)
-            .map_err(|err| io::Error::new(io::ErrorKind::Other, format!("{:?}", err)))
+            .map_err(|err| io::Error::other(format!("{:?}", err)))
             .map(|_| buf.len())
     }
 
