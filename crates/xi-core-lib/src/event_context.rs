@@ -149,6 +149,12 @@ impl<'a> EventContext<'a> {
         }
     }
 
+    /// Dispatches an incoming edit notification from the client, records the
+    /// event if recording is active, and triggers a redraw if needed.
+    ///
+    /// # Preconditions
+    ///
+    /// The `editor` and `view` `RefCell`s must not be borrowed when this is called.
     pub(crate) fn do_edit(&mut self, cmd: EditNotification) {
         let event: EventDomain = cmd.into();
 
@@ -264,6 +270,12 @@ impl<'a> EventContext<'a> {
         }
     }
 
+    /// Handles a synchronous edit request from the client and returns a result
+    /// value (e.g. for cut/copy operations).
+    ///
+    /// # Preconditions
+    ///
+    /// The `editor` and `view` `RefCell`s must not be borrowed when this is called.
     pub(crate) fn do_edit_sync(&mut self, cmd: EditRequest) -> Result<Value, RemoteError> {
         use self::EditRequest::*;
         let result = match cmd {
@@ -275,6 +287,11 @@ impl<'a> EventContext<'a> {
         result
     }
 
+    /// Dispatches an incoming notification from a plugin (fire-and-forget).
+    ///
+    /// # Preconditions
+    ///
+    /// `plugin` must refer to a plugin that is currently running for this buffer.
     pub(crate) fn do_plugin_cmd(&mut self, plugin: PluginId, cmd: PluginNotification) {
         use self::PluginNotification::*;
         match cmd {
@@ -481,6 +498,12 @@ impl<'a> EventContext<'a> {
 /// requires access to particular combinations of state. We isolate such
 /// special cases here.
 impl<'a> EventContext<'a> {
+    /// Initialises view-level wrapping settings.
+    ///
+    /// Must be called once before [`finish_init`] so that wrap state is correct
+    /// before the first render.
+    ///
+    /// [`finish_init`]: Self::finish_init
     pub(crate) fn view_init(&mut self) {
         let wrap_width = self.config.wrap_width;
         let word_wrap = self.config.word_wrap;
@@ -488,6 +511,15 @@ impl<'a> EventContext<'a> {
         self.with_view(|view, text| view.update_wrap_settings(text, wrap_width, word_wrap));
     }
 
+    /// Completes buffer initialisation: notifies plugins, sends initial
+    /// config and language to the client, performs the first rewrap pass,
+    /// and schedules an initial render.
+    ///
+    /// # Preconditions
+    ///
+    /// [`view_init`] must have been called before this method.
+    ///
+    /// [`view_init`]: Self::view_init
     pub(crate) fn finish_init(&mut self, config: &Table) {
         if !self.plugins.is_empty() {
             let info = self.plugin_info();
@@ -521,6 +553,8 @@ impl<'a> EventContext<'a> {
         self.render()
     }
 
+    /// Called after the buffer has been saved to `path`. Notifies plugins,
+    /// marks the buffer as pristine, and schedules a render.
     pub(crate) fn after_save(&mut self, path: &Path) {
         // notify plugins
         self.plugins.iter().for_each(|plugin| plugin.did_save(self.view_id, path));
@@ -538,6 +572,8 @@ impl<'a> EventContext<'a> {
         self.siblings.is_empty()
     }
 
+    /// Notifies all plugins about a configuration change, updates the client,
+    /// and schedules a render when wrap-related settings change.
     pub(crate) fn config_changed(&mut self, changes: &Table) {
         if changes.contains_key("wrap_width") || changes.contains_key("word_wrap") {
             // FIXME: if switching from measurement-based widths to columnar widths,
@@ -558,18 +594,23 @@ impl<'a> EventContext<'a> {
         self.render()
     }
 
+    /// Notifies all plugins and the client that the active language has changed.
     pub(crate) fn language_changed(&mut self, new_language_id: &LanguageId) {
         self.language = new_language_id.clone();
         self.client.language_changed(self.view_id, new_language_id);
         self.plugins.iter().for_each(|plug| plug.language_changed(self.view_id, new_language_id));
     }
 
+    /// Replaces buffer contents with `text`, preserving undo history, and
+    /// triggers plugin updates and a render.
     pub(crate) fn reload(&mut self, text: Rope) {
         self.with_editor(|ed, _, _, _| ed.reload(text));
         self.after_edit("core");
         self.render();
     }
 
+    /// Builds a [`PluginBufferInfo`] snapshot describing the current buffer
+    /// state for delivery to plugins during initialisation or restart.
     pub(crate) fn plugin_info(&mut self) -> PluginBufferInfo {
         let ed = self.editor.borrow();
         let nb_lines = ed.get_buffer().measure::<LinesMetric>() + 1;
@@ -592,10 +633,13 @@ impl<'a> EventContext<'a> {
         )
     }
 
+    /// Notifies the client that `plugin` has started for this view.
     pub(crate) fn plugin_started(&self, plugin: &Plugin) {
         self.client.plugin_started(self.view_id, &plugin.name)
     }
 
+    /// Notifies the client that `plugin` has stopped and removes its style
+    /// layer, scheduling a render if the display changed.
     pub(crate) fn plugin_stopped(&mut self, plugin: &Plugin) {
         self.client.plugin_stopped(self.view_id, &plugin.name, 0);
         let needs_render = self.with_editor(|ed, view, _, _| {
@@ -611,6 +655,8 @@ impl<'a> EventContext<'a> {
         }
     }
 
+    /// Handles the acknowledgement from a plugin after an update was delivered.
+    /// Decrements the in-flight revision counter, enabling CRDT garbage collection.
     pub(crate) fn do_plugin_update(&mut self, update: Result<Value, RpcError>) {
         match update.map(serde_json::from_value::<PluginUpdateAck>) {
             Ok(Ok(_)) => (),
@@ -620,6 +666,8 @@ impl<'a> EventContext<'a> {
         self.editor.borrow_mut().dec_revs_in_flight();
     }
 
+    /// Handles the response to a hover request from a plugin, forwarding the
+    /// result to the client or logging an error on failure.
     pub(crate) fn do_plugin_hover(&mut self, request_id: usize, hover: Result<Value, RpcError>) {
         match hover.map(serde_json::from_value::<Hover>) {
             Ok(Ok(hover)) => self.do_show_hover(request_id, Ok(hover)),

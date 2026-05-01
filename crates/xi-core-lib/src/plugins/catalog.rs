@@ -229,7 +229,12 @@ fn load_manifest(path: &Path) -> Result<PluginDescription, PluginLoadError> {
     manifest
         .validates()
         .map_err(|err| PluginLoadError::InvalidManifest { path: path.to_path_buf(), err })?;
-    let manifest_dir = path.parent().unwrap();
+    let manifest_dir = path.parent().ok_or_else(|| {
+        PluginLoadError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("manifest path has no parent directory: {}", path.display()),
+        ))
+    })?;
     if manifest.exec_path.is_relative() {
         manifest.exec_path = manifest_dir.join(&manifest.exec_path).canonicalize()?;
     }

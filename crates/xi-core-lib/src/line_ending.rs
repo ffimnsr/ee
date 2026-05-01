@@ -28,9 +28,18 @@ pub enum LineEnding {
 #[derive(Debug)]
 pub struct MixedLineEndingError;
 
+/// Errors produced when parsing line endings from a buffer.
+#[derive(Debug, PartialEq, Eq)]
+pub enum LineEndingError {
+    /// The document mixes `\r\n` and `\n` line endings.
+    Mixed,
+    /// The document uses legacy CR-only (`\r`) line endings, which are not supported.
+    LegacyCr,
+}
+
 impl LineEnding {
     /// Breaks a rope down into chunks, and checks each chunk for line endings
-    pub fn parse(rope: &Rope) -> Result<Option<Self>, MixedLineEndingError> {
+    pub fn parse(rope: &Rope) -> Result<Option<Self>, LineEndingError> {
         let mut crlf = false;
         let mut lf = false;
 
@@ -47,12 +56,15 @@ impl LineEnding {
             (true, false) => Ok(Some(LineEnding::CrLf)),
             (false, true) => Ok(Some(LineEnding::Lf)),
             (false, false) => Ok(None),
-            _ => Err(MixedLineEndingError),
+            _ => Err(LineEndingError::Mixed),
         }
     }
 
-    /// Checks a chunk for line endings, assuming \n or \r\n
-    pub fn parse_chunk(chunk: &str) -> Result<Option<Self>, MixedLineEndingError> {
+    /// Checks a chunk for line endings, assuming `\n` or `\r\n`.
+    ///
+    /// Returns `Err(LineEndingError::LegacyCr)` for CR-only (`\r`) line endings
+    /// and `Err(LineEndingError::Mixed)` for malformed sequences like `\r ` before `\n`.
+    pub fn parse_chunk(chunk: &str) -> Result<Option<Self>, LineEndingError> {
         let bytes = chunk.as_bytes();
         let newline = memchr2(b'\n', b'\r', bytes);
         match newline {
@@ -60,7 +72,10 @@ impl LineEnding {
                 Ok(Some(LineEnding::CrLf))
             }
             Some(x) if bytes[x] == b'\n' => Ok(Some(LineEnding::Lf)),
-            Some(_) => Err(MixedLineEndingError),
+            // A bare \r with nothing following (end of chunk) or followed by a non-\n character
+            // is a legacy CR-only line ending.
+            Some(x) if bytes[x] == b'\r' => Err(LineEndingError::LegacyCr),
+            Some(_) => Err(LineEndingError::Mixed),
             _ => Ok(None),
         }
     }
@@ -86,7 +101,7 @@ mod tests {
 
     #[test]
     fn legacy_mac_errors() {
-        assert!(LineEnding::parse_chunk("\r").is_err());
+        assert_eq!(LineEnding::parse_chunk("\r"), Err(LineEndingError::LegacyCr));
     }
 
     #[test]

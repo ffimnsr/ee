@@ -290,7 +290,8 @@ impl CommandArgument {
 impl ArgumentOption {
     pub fn new<S: AsRef<str>, V: Serialize>(title: S, value: V) -> Self {
         let title = title.as_ref().to_owned();
-        let value = serde_json::to_value(value).unwrap();
+        let value =
+            serde_json::to_value(value).expect("ArgumentOption value must be JSON-serializable");
         ArgumentOption { title, value }
     }
 }

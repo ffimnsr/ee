@@ -74,6 +74,10 @@ pub enum ConfigDomain {
     /// The system's overrides for a particular buffer. Only used internally.
     #[serde(skip_deserializing)]
     SysOverride(BufferId),
+    /// Config for a named plugin; not applied to buffer configs.
+    /// Stored so plugins can query their own settings.
+    #[serde(skip)]
+    PluginConfig(String),
 }
 
 /// The external RPC sends `ViewId`s, which we convert to `BufferId`s
@@ -285,7 +289,12 @@ impl ConfigManager {
             path.and_then(|p| self.language_for_path(p)).unwrap_or(LanguageId::from("Plain Text"));
         let lang_tag = LanguageTag::new(lang);
         assert!(self.buffer_tags.insert(id, lang_tag).is_none());
-        self.update_buffer_config(id).expect("new buffer must always have config")
+        self.update_buffer_config(id)
+            .unwrap_or_else(|e| {
+                error!("unexpected config error for new buffer {:?}: {}", id, e);
+                None
+            })
+            .unwrap_or_default()
     }
 
     /// Updates the default language for the given buffer.
@@ -296,9 +305,20 @@ impl ConfigManager {
     pub(crate) fn update_buffer_path(&mut self, id: BufferId, path: &Path) -> Option<Table> {
         assert!(self.buffer_tags.contains_key(&id));
         let lang = self.language_for_path(path).unwrap_or_default();
-        let has_changed = self.buffer_tags.get_mut(&id).map(|tag| tag.set_detected(lang)).unwrap();
+        let has_changed = self
+            .buffer_tags
+            .get_mut(&id)
+            .expect("buffer must be registered before path update")
+            .set_detected(lang);
 
-        if has_changed { self.update_buffer_config(id) } else { None }
+        if has_changed {
+            self.update_buffer_config(id).unwrap_or_else(|e| {
+                error!("config error updating path for buffer {:?}: {}", id, e);
+                None
+            })
+        } else {
+            None
+        }
     }
 
     /// Instructs the `ConfigManager` to stop tracking a given buffer.
@@ -307,7 +327,7 @@ impl ConfigManager {
     ///
     /// Panics if `id` does not exist.
     pub(crate) fn remove_buffer(&mut self, id: BufferId) {
-        self.buffer_tags.remove(&id).expect("remove key must exist");
+        self.buffer_tags.remove(&id).expect("buffer must be registered before removal");
         self.buffer_configs.remove(&id);
         self.configs.remove(&ConfigDomain::UserOverride(id));
         self.configs.remove(&ConfigDomain::SysOverride(id));
@@ -323,16 +343,23 @@ impl ConfigManager {
         let has_changed = self
             .buffer_tags
             .get_mut(&id)
-            .map(|tag| tag.set_user(Some(new_lang)))
-            .expect("buffer must exist");
-        if has_changed { self.update_buffer_config(id) } else { None }
+            .expect("buffer must be registered before overriding language")
+            .set_user(Some(new_lang));
+        if has_changed {
+            self.update_buffer_config(id).unwrap_or_else(|e| {
+                error!("config error overriding language for buffer {:?}: {}", id, e);
+                None
+            })
+        } else {
+            None
+        }
     }
 
-    fn update_buffer_config(&mut self, id: BufferId) -> Option<Table> {
-        let new_config = self.generate_buffer_config(id);
+    fn update_buffer_config(&mut self, id: BufferId) -> Result<Option<Table>, ConfigError> {
+        let new_config = self.generate_buffer_config(id)?;
         let changes = new_config.changes_from(self.buffer_configs.get(&id));
         self.buffer_configs.insert(id, new_config);
-        changes
+        Ok(changes)
     }
 
     fn update_all_buffer_configs(&mut self) -> Vec<(BufferId, Table)> {
@@ -341,11 +368,18 @@ impl ConfigManager {
             .cloned()
             .collect::<Vec<_>>()
             .into_iter()
-            .flat_map(|k| self.update_buffer_config(k).map(|c| (k, c)))
+            .flat_map(|k| {
+                self.update_buffer_config(k)
+                    .unwrap_or_else(|e| {
+                        error!("failed to generate config for buffer {:?}: {}", k, e);
+                        None
+                    })
+                    .map(|c| (k, c))
+            })
             .collect::<Vec<_>>()
     }
 
-    fn generate_buffer_config(&mut self, id: BufferId) -> BufferConfig {
+    fn generate_buffer_config(&mut self, id: BufferId) -> Result<BufferConfig, ConfigError> {
         // it's possible for a buffer to be tagged with since-removed language
         let lang = self
             .buffer_tags
@@ -379,7 +413,9 @@ impl ConfigManager {
     /// Panics if `id` does not exist. The caller is responsible for ensuring
     /// that the `ConfigManager` is kept up to date as buffers are added/removed.
     pub(crate) fn get_buffer_config(&self, id: BufferId) -> &BufferConfig {
-        self.buffer_configs.get(&id).unwrap()
+        self.buffer_configs
+            .get(&id)
+            .expect("buffer must be registered before querying config")
     }
 
     /// Returns the language associated with this buffer.
@@ -388,11 +424,22 @@ impl ConfigManager {
     ///
     /// Panics if `id` does not exist.
     pub(crate) fn get_buffer_language(&self, id: BufferId) -> LanguageId {
-        self.buffer_tags.get(&id).map(LanguageTag::resolve).unwrap()
+        self.buffer_tags
+            .get(&id)
+            .expect("buffer must be registered before querying language")
+            .resolve()
+    }
+
+    /// Returns the raw config `Table` for a plugin, if one has been loaded.
+    #[allow(dead_code)]
+    pub(crate) fn get_plugin_config(&self, plugin_name: &str) -> Option<&Table> {
+        let domain = ConfigDomain::PluginConfig(plugin_name.to_owned());
+        self.configs.get(&domain).and_then(|pair| pair.user.as_deref())
     }
 
     /// Set the available `LanguageDefinition`s. Overrides any previous values.
-    pub fn set_languages(&mut self, languages: Languages) {
+    /// Returns per-buffer config changes caused by language set updates.
+    pub fn set_languages(&mut self, languages: Languages) -> Vec<(BufferId, Table)> {
         // remove base configs for any removed languages
         self.languages.difference(&languages).iter().for_each(|lang| {
             let domain: ConfigDomain = lang.name.clone().into();
@@ -415,10 +462,9 @@ impl ConfigManager {
                 let _ = self.set_user_config(domain, table);
             }
         }
-        //FIXME these changes are happening silently, which won't work once
-        //languages can by dynamically changed
+        // Language config changes are returned to the caller for propagation.
         self.languages = languages;
-        self.update_all_buffer_configs();
+        self.update_all_buffer_configs()
     }
 
     fn load_user_config_file(&self, domain: &ConfigDomain) -> Option<Table> {
@@ -452,7 +498,10 @@ impl ConfigManager {
         domain: ConfigDomain,
         config: Table,
     ) -> Result<Vec<(BufferId, Table)>, ConfigError> {
-        self.check_table(&config)?;
+        // Plugin configs are free-form; skip BufferItems schema validation.
+        if !matches!(domain, ConfigDomain::PluginConfig(_)) {
+            self.check_table(&config)?;
+        }
         self.configs.entry(domain).or_insert_with(|| ConfigPair::with_base(None)).set_table(config);
         Ok(self.update_all_buffer_configs())
     }
@@ -484,27 +533,35 @@ impl ConfigManager {
     }
 
     /// Returns the `ConfigDomain` relevant to a given file, if one exists.
+    /// Returns `None` for paths that are not `.xiconfig` files.
     pub fn domain_for_path(&self, path: &Path) -> Option<ConfigDomain> {
         if path.extension().map(|e| e != "xiconfig").unwrap_or(true) {
             return None;
         }
         match path.file_stem().and_then(|s| s.to_str()) {
-            Some("preferences") => Some(ConfigDomain::General),
-            Some(name) => self
-                .languages
-                .language_for_name(name)
-                .map(|lang| ConfigDomain::Language(lang.name.clone())),
-            //TODO: plugin configs
+            // Accept both "preferences" and legacy "config" as general config.
+            Some("preferences") | Some("config") => Some(ConfigDomain::General),
+            Some(name) => {
+                if let Some(lang) = self.languages.language_for_name(name) {
+                    Some(ConfigDomain::Language(lang.name.clone()))
+                } else {
+                    // Treat unrecognized xiconfig files as plugin configs so
+                    // they are loaded and stored without triggering an alert.
+                    Some(ConfigDomain::PluginConfig(name.to_owned()))
+                }
+            }
             _ => None,
         }
     }
 
     fn check_table(&self, table: &Table) -> Result<(), ConfigError> {
+        // Plugin configs have free-form schemas; skip BufferItems validation.
+        // Validation is performed only for domains that map to buffer settings.
         let defaults = self
             .configs
             .get(&ConfigDomain::General)
             .and_then(|pair| pair.base.clone())
-            .expect("general domain must have defaults");
+            .ok_or_else(|| ConfigError::UnknownDomain("general".to_owned()))?;
         let mut defaults: Table = defaults.as_ref().clone();
         for (k, v) in table.iter() {
             // changes can include 'null', which means clear field
@@ -569,14 +626,14 @@ impl TableStack {
     }
 
     /// Converts the underlying tables into a static `Config` instance.
-    fn into_config<T>(self) -> Config<T>
+    fn into_config<T>(self) -> Result<Config<T>, ConfigError>
     where
         for<'de> T: Deserialize<'de>,
     {
         let out = self.collate();
-        let items: T = serde_json::from_value(out.into()).unwrap();
+        let items: T = serde_json::from_value(out.into())?;
         let source = self;
-        Config { source, items }
+        Ok(Config { source, items })
     }
 
     /// Walks the tables in priority order, returning the first
@@ -627,6 +684,7 @@ impl ConfigDomain {
         match self {
             ConfigDomain::General => "preferences",
             ConfigDomain::Language(lang) => lang.as_ref(),
+            ConfigDomain::PluginConfig(name) => name.as_str(),
             ConfigDomain::UserOverride(_) | ConfigDomain::SysOverride(_) => "we don't have files",
         }
     }
@@ -722,7 +780,11 @@ pub(crate) fn try_load_from_file(path: &Path) -> Result<Table, ConfigError> {
 
 pub(crate) fn table_from_toml_str(s: &str) -> Result<Table, toml::de::Error> {
     let table = toml::from_str(s)?;
-    let table = from_toml_value(table).as_object().unwrap().to_owned();
+    // from_toml_value of a toml::Table always produces a JSON Object
+    let table = from_toml_value(table)
+        .as_object()
+        .expect("toml table must convert to JSON object")
+        .to_owned();
     Ok(table)
 }
 
@@ -932,5 +994,62 @@ translate_tabs_to_spaces = true
 
     fn rust_lang_def<T: Into<Option<Table>>>(defaults: T) -> LanguageDefinition {
         LanguageDefinition::simple("Rust", &["rs"], "source.rust", defaults.into())
+    }
+
+    #[test]
+    fn domain_for_path_preferences_and_legacy_config() {
+        let manager = ConfigManager::new(None, None);
+        let pref = Path::new("/some/dir/preferences.xiconfig");
+        let legacy = Path::new("/some/dir/config.xiconfig");
+        assert_eq!(manager.domain_for_path(pref), Some(ConfigDomain::General));
+        assert_eq!(manager.domain_for_path(legacy), Some(ConfigDomain::General));
+    }
+
+    #[test]
+    fn domain_for_path_plugin_config() {
+        let manager = ConfigManager::new(None, None);
+        let plugin_cfg = Path::new("/some/dir/xi-syntect-plugin.xiconfig");
+        assert_eq!(
+            manager.domain_for_path(plugin_cfg),
+            Some(ConfigDomain::PluginConfig("xi-syntect-plugin".to_owned()))
+        );
+    }
+
+    #[test]
+    fn plugin_config_is_stored_and_retrievable() {
+        let mut manager = ConfigManager::new(None, None);
+        let cfg = json!({"syntax_theme": "Solarized (dark)"}).as_object().cloned().unwrap();
+        manager
+            .set_user_config(
+                ConfigDomain::PluginConfig("xi-syntect-plugin".to_owned()),
+                cfg,
+            )
+            .unwrap();
+        let stored = manager.get_plugin_config("xi-syntect-plugin");
+        assert!(stored.is_some());
+        assert_eq!(
+            stored.unwrap().get("syntax_theme"),
+            Some(&Value::String("Solarized (dark)".to_owned()))
+        );
+    }
+
+    #[test]
+    fn set_languages_returns_changes() {
+        let mut manager = ConfigManager::new(None, None);
+
+        // Register Rust so the buffer detects the language from the path.
+        let lang_def_v1 = rust_lang_def(json!({"font_size": 55}).as_object().cloned());
+        manager.set_languages(Languages::new(&[lang_def_v1]));
+
+        let buf_id = BufferId(1);
+        manager.add_buffer(buf_id, Some(Path::new("file.rs")));
+        assert_eq!(manager.get_buffer_config(buf_id).items.font_size, 55.);
+
+        // Updating the language defaults must return buffered config changes
+        // instead of discarding them silently.
+        let lang_def_v2 = rust_lang_def(json!({"font_size": 99}).as_object().cloned());
+        let changes = manager.set_languages(Languages::new(&[lang_def_v2]));
+        assert!(!changes.is_empty(), "set_languages must return buffered config changes");
+        assert_eq!(manager.get_buffer_config(buf_id).items.font_size, 99.);
     }
 }

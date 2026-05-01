@@ -54,6 +54,7 @@ pub struct ScopeLayer {
 }
 
 impl Layers {
+    /// Returns the merged style spans reflecting all active plugin layers.
     pub fn get_merged(&self) -> &Spans<Style> {
         &self.merged
     }
@@ -118,6 +119,8 @@ impl Layers {
         layer
     }
 
+    /// Propagates a theme change to all layers, recomputing cached styles and
+    /// rebuilding the merged span tree.
     pub fn theme_changed(&mut self, style_map: &ThemeStyleMap) {
         for layer in self.layers.values_mut() {
             layer.theme_changed(style_map);

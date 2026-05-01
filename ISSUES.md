@@ -114,15 +114,15 @@
 
 - [x] Implement count parsing and command composition in normal mode so sequences such as `3j`, `2w`, `d2w`, and `3dw` execute with Vim-compatible order.
 - [x] Add missing core motions in normal mode: word motions, line start and end motions, document motions, character find motions, matching-pair jump, and search result traversal.
-- [ ] Implement operator-pending mode with `delete`, `change`, `yank`, `indent`, `outdent`, `case transform`, and `format` operators that compose with motions and text objects.
-- [ ] Add text objects for words, sentences, paragraphs, quotes, brackets, braces, angle brackets, and tag-like pairs so edit commands can target structured text precisely.
-- [ ] Add full insert-entry variants `a`, `A`, `I`, `o`, `O`, `s`, and `S`, each mapped to the correct cursor movement and selection behavior before entering insert mode.
-- [ ] Expand insert mode editing controls to include word delete, line delete, indent and outdent, literal insertion, register paste, and completion triggers.
-- [ ] Add visual line mode and visual block mode, including anchor swap, last-selection restore, and block insert/append semantics.
-- [ ] Implement registers for unnamed, numbered, named, black-hole, search, expression, and system clipboard targets so yank, delete, change, and paste behave predictably.
-- [ ] Expose xi undo and redo history through Vim-style commands, including repeat-last-change `.` and persistent undo storage once file persistence layer is ready.
-- [ ] Implement marks, jump list, and change list navigation so users can move reliably across files and editing history.
-- [ ] Add macro recording and replay with named registers so repetitive edit workflows do not require custom scripting.
+- [x] Implement operator-pending mode with `delete`, `change`, `yank`, `indent`, `outdent`, `case transform`, and `format` operators that compose with motions and text objects.
+- [x] Add text objects for words, sentences, paragraphs, quotes, brackets, braces, angle brackets, and tag-like pairs so edit commands can target structured text precisely.
+- [x] Add full insert-entry variants `a`, `A`, `I`, `o`, `O`, `s`, and `S`, each mapped to the correct cursor movement and selection behavior before entering insert mode.
+- [x] Expand insert mode editing controls to include word delete, line delete, indent and outdent, literal insertion, register paste, and completion triggers.
+- [x] Add visual line mode and visual block mode, including anchor swap, last-selection restore, and block insert/append semantics.
+- [x] Implement registers for unnamed, numbered, named, black-hole, search, expression, and system clipboard targets so yank, delete, change, and paste behave predictably.
+- [x] Expose xi undo and redo history through Vim-style commands, including repeat-last-change `.` and persistent undo storage once file persistence layer is ready.
+- [x] Implement marks, jump list, and change list navigation so users can move reliably across files and editing history.
+- [x] Add macro recording and replay with named registers so repetitive edit workflows do not require custom scripting.
 
 ### 3. File, buffer, and window workflow
 
@@ -176,11 +176,11 @@
 - [x] Replace `lock().unwrap()` mutex calls in `crates/xi-core-lib/src/watcher.rs` (L108, L160, L178, L221) with explicit poisoning recovery or descriptive `expect` messages.
 - [x] Handle `create_if_missing` failure in `crates/xi-core-lib/src/layers.rs` (L73, L96) instead of `layers.get_mut(&layer).unwrap()`.
 - [x] Replace `unreachable!()` at `crates/xi-core-lib/src/event_context.rs` L542 with structured error or non-exhaustive enum guard.
-- [ ] Audit path handling in `crates/xi-core-lib/src/file.rs` (L179 TODO) for non-UTF-8 paths via `OsStr`/`Path` APIs.
+- [x] Audit path handling in `crates/xi-core-lib/src/file.rs` (L179 TODO) for non-UTF-8 paths via `OsStr`/`Path` APIs.
 - [x] Resolve `\r` line ending TODO in `crates/xi-core-lib/src/word_boundaries.rs` L198.
 - [x] Resolve combining-class TODO in `crates/xi-core-lib/src/backspace.rs` L152 for full Unicode combining char support.
-- [ ] Resolve outstanding config TODOs in `crates/xi-core-lib/src/config.rs` (L85, L313, L418, L498): legacy config name handling, missing plugin configs, incomplete update flow.
-- [ ] Migrate inconsistent error types per TODO in `crates/xi-core-lib/src/file.rs` L279.
+- [x] Resolve outstanding config TODOs in `crates/xi-core-lib/src/config.rs` (L85, L313, L418, L498): legacy config name handling, missing plugin configs, incomplete update flow.
+- [x] Migrate inconsistent error types per TODO in `crates/xi-core-lib/src/file.rs` L279.
 
 ### crates/xi-rope
 
@@ -192,74 +192,74 @@
 
 ### crates/xi-unicode
 
-- [ ] Document the `extern crate alloc;` in `crates/xi-unicode/src/lib.rs` L18 (no_std rationale) or remove if unused.
+- [x] Document the `extern crate alloc;` in `crates/xi-unicode/src/lib.rs` L18 (no_std rationale) or remove if unused.
 
 ### crates/xi-plugin-lib
 
-- [ ] Resolve single-view TODO at `crates/xi-plugin-lib/src/dispatch.rs` L59 with typed multi-view dispatch.
-- [ ] Replace `panic!("entry already exists")` in `crates/xi-plugin-lib/src/state_cache.rs` L189 with `Result` return.
-- [ ] Bounds-check `cached_offset_of_line()` result in `crates/xi-plugin-lib/src/base_cache.rs` L92 instead of `.unwrap() - self.offset`.
-- [ ] Validate inputs at API boundary in `crates/xi-plugin-lib/src/base_cache.rs` (L270, L390) instead of panicking on "offset greater than content length".
+- [x] Resolve single-view TODO at `crates/xi-plugin-lib/src/dispatch.rs` L59 with typed multi-view dispatch.
+- [x] Replace `panic!("entry already exists")` in `crates/xi-plugin-lib/src/state_cache.rs` L189 with `Result` return.
+- [x] Bounds-check `cached_offset_of_line()` result in `crates/xi-plugin-lib/src/base_cache.rs` L92 instead of `.unwrap() - self.offset`.
+- [x] Validate inputs at API boundary in `crates/xi-plugin-lib/src/base_cache.rs` (L270, L390) instead of panicking on "offset greater than content length".
 
 ### Cross-cutting
 
-- [ ] Identify xi-* source files exceeding the 1000-line module guideline from AGENTS.md and split into cohesive submodules.
-- [ ] Add doc comments documenting preconditions on public APIs in `crates/xi-core-lib` (`event_context.rs`, `editor.rs`, `layers.rs`).
+- [x] Add doc comments documenting preconditions on public APIs in `crates/xi-core-lib` (`event_context.rs`, `editor.rs`, `layers.rs`).
 - [ ] Unify error handling across xi-* crates: reduce mix of `FileError`, `RemoteError`, `Option`, and panics via shared error types or conversion traits.
+- [ ] Identify xi-* source files exceeding the 1000-line module guideline from AGENTS.md and split into cohesive submodules.
 
 ## Code quality audit (second pass)
 
 ### Resource limits and DoS hardening
 
-- [ ] Bound total idle queue size in `crates/xi-rpc/src/lib.rs` (around L547-L550) in addition to token coalescing so distinct tokens cannot accumulate unboundedly.
-- [ ] Cap `recording_buffer` history in `crates/xi-core-lib/src/recorder.rs` (L29) with a max length or circular buffer.
-- [ ] Limit per-plugin annotation storage in `crates/xi-core-lib/src/annotations.rs` (L169-L195) so a misbehaving plugin cannot exhaust memory.
-- [ ] Bound or compact `IndexSet` ranges vector in `crates/xi-core-lib/src/index_set.rs` (L25) to prevent unbounded growth.
-- [ ] Validate `u32::try_from(end - start)` ranges in `crates/xi-lsp-lib/src/utils.rs` (L63, L91) instead of `.expect()` on potentially huge offsets from a malicious server.
+- [x] Bound total idle queue size in `crates/xi-rpc/src/lib.rs` (around L547-L550) in addition to token coalescing so distinct tokens cannot accumulate unboundedly.
+- [x] Cap `recording_buffer` history in `crates/xi-core-lib/src/recorder.rs` (L29) with a max length or circular buffer.
+- [x] Limit per-plugin annotation storage in `crates/xi-core-lib/src/annotations.rs` (L169-L195) so a misbehaving plugin cannot exhaust memory.
+- [x] Bound or compact `IndexSet` ranges vector in `crates/xi-core-lib/src/index_set.rs` (L25) to prevent unbounded growth.
+- [x] Validate `u32::try_from(end - start)` ranges in `crates/xi-lsp-lib/src/utils.rs` (L63, L91) instead of `.expect()` on potentially huge offsets from a malicious server.
 
 ### Persistence and durability
 
-- [ ] Add `sync_all()` (fsync) before/after rename in the atomic save path of `crates/xi-core-lib/src/file.rs` (L210-L225) to guarantee durability after crash.
-- [ ] Add an advisory file lock (`fs2::FileExt::try_lock_exclusive` or similar) in `crates/xi-core-lib/src/file.rs` (L100-L160) so concurrent editor instances cannot silently corrupt the same file.
+- [x] Add `sync_all()` (fsync) before/after rename in the atomic save path of `crates/xi-core-lib/src/file.rs` (L210-L225) to guarantee durability after crash.
+- [x] Add an advisory file lock (`fs2::FileExt::try_lock_exclusive` or similar) in `crates/xi-core-lib/src/file.rs` (L100-L160) so concurrent editor instances cannot silently corrupt the same file.
 
 ### Terminal frontend (ee-tui) robustness
 
-- [ ] Install a panic hook in `crates/ee-tui/src/main.rs` (around L30-L43) that disables raw mode and leaves the alternate screen so a panic does not leave the terminal unusable.
-- [ ] Handle `SIGWINCH`, `SIGINT`, and `SIGTERM` in `crates/ee-tui/src/main.rs` (around L46-L55) for clean resize and shutdown via `signal-hook` or crossterm events.
+- [x] Install a panic hook in `crates/ee-tui` that disables raw mode and leaves the alternate screen so a panic does not leave the terminal unusable.
+- [x] Handle `SIGWINCH`, `SIGINT`, and `SIGTERM` in `crates/ee-tui` for clean resize and shutdown via `signal-hook` or crossterm events.
 
 ### Concurrency profile
 
-- [ ] Evaluate replacing `Arc<Mutex<WatcherState>>` in `crates/xi-core-lib/src/watcher.rs` (L57) with `RwLock` for read-heavy paths.
-- [ ] Evaluate replacing `Arc<Mutex<CoreState>>` in `crates/xi-core-lib/src/core.rs` (L39) with `RwLock` for read-heavy paths.
+- [x] Evaluate replacing `Arc<Mutex<WatcherState>>` in `crates/xi-core-lib/src/watcher.rs` (L57) with `RwLock` for read-heavy paths.
+- [x] Evaluate replacing `Arc<Mutex<CoreState>>` in `crates/xi-core-lib/src/core.rs` (L39) with `RwLock` for read-heavy paths.
 
 ### View / selection panics in xi-core-lib
 
-- [ ] Replace `.last().unwrap()` on `sel_regions()` at `crates/xi-core-lib/src/view.rs` L339 with empty-selection handling.
-- [ ] Replace `.first().unwrap()`/`.last().unwrap()` on selection regions at `crates/xi-core-lib/src/view.rs` L404-L405.
-- [ ] Replace `.split_last().unwrap()` on selection regions in selection drag at `crates/xi-core-lib/src/view.rs` L513.
-- [ ] Replace `.last_mut().unwrap()` on find state at `crates/xi-core-lib/src/view.rs` L1036.
+- [x] Replace `.last().unwrap()` on `sel_regions()` at `crates/xi-core-lib/src/view.rs` L339 with empty-selection handling.
+- [x] Replace `.first().unwrap()`/`.last().unwrap()` on selection regions at `crates/xi-core-lib/src/view.rs` L404-L405.
+- [x] Replace `.split_last().unwrap()` on selection regions in selection drag at `crates/xi-core-lib/src/view.rs` L513.
+- [x] Replace `.last_mut().unwrap()` on find state at `crates/xi-core-lib/src/view.rs` L1036.
 
 ### Plugin host edge cases (beyond manifest items)
 
-- [ ] Replace `child.stdin.take().unwrap()` / `child.stdout.take().unwrap()` in `crates/xi-core-lib/src/plugins/mod.rs` (L182-L183) with `ok_or` plus structured startup errors.
-- [ ] Replace `to_str().unwrap()` plugin-path conversions in `crates/xi-core-lib/src/plugins/rpc.rs` (L301-L302) with `OsStr`/`Path` APIs or explicit non-UTF-8 rejection.
-- [ ] Replace `path.parent().unwrap()` in `crates/xi-core-lib/src/plugins/catalog.rs` (L145, L150) with `ok_or` to handle root paths and resolve language config errors cleanly.
-- [ ] Replace `serde_json` and `Into` `.unwrap()` calls in `crates/xi-core-lib/src/plugins/manifest.rs` (L153, L179, L191, L243, L288, L292) with `?` propagation.
+- [x] Replace `child.stdin.take().unwrap()` / `child.stdout.take().unwrap()` in `crates/xi-core-lib/src/plugins/mod.rs` (L182-L183) with `ok_or` plus structured startup errors.
+- [x] Replace `to_str().unwrap()` plugin-path conversions in `crates/xi-core-lib/src/plugins/rpc.rs` (L301-L302) with `OsStr`/`Path` APIs or explicit non-UTF-8 rejection.
+- [x] Replace `path.parent().unwrap()` in `crates/xi-core-lib/src/plugins/catalog.rs` (L145, L150) with `ok_or` to handle root paths and resolve language config errors cleanly.
+- [x] Replace `serde_json` and `Into` `.unwrap()` calls in `crates/xi-core-lib/src/plugins/manifest.rs` (L153, L179, L191, L243, L288, L292) with `?` propagation.
 
 ### LSP host edge cases (beyond items already tracked)
 
-- [ ] Replace `panic!("unexpected value for id: None")` and `.parse().expect()` id handling in `crates/xi-lsp-lib/src/language_server_client.rs` (L59-L60) with structured errors.
-- [ ] Replace `language_config.get_mut(...).unwrap()` and path/URI unwraps in `crates/xi-lsp-lib/src/lsp_plugin.rs` (L116, L119, L122, L135) with explicit failure paths.
-- [ ] Replace `serde_json::from_value(...).unwrap()` for server responses in `crates/xi-lsp-lib/src/lsp_plugin.rs` (L141, L168) with structured errors that surface to the client.
-- [ ] Redesign `process.stdin.take().unwrap()` (and matching stdout) in `crates/xi-lsp-lib/src/utils.rs` (L192) to return `Result` rather than relying on the "unwrap so the thread panics" pattern.
+- [x] Replace `panic!("unexpected value for id: None")` and `.parse().expect()` id handling in `crates/xi-lsp-lib/src/language_server_client.rs` (L59-L60) with structured errors.
+- [x] Replace `language_config.get_mut(...).unwrap()` and path/URI unwraps in `crates/xi-lsp-lib/src/lsp_plugin.rs` (L116, L119, L122, L135) with explicit failure paths.
+- [x] Replace `serde_json::from_value(...).unwrap()` for server responses in `crates/xi-lsp-lib/src/lsp_plugin.rs` (L141, L168) with structured errors that surface to the client.
+- [x] Redesign `process.stdin.take().unwrap()` (and matching stdout) in `crates/xi-lsp-lib/src/utils.rs` (L192) to return `Result` rather than relying on the "unwrap so the thread panics" pattern.
 
 ### Encoding
 
-- [ ] Add support (or explicit rejection with a clear error) for legacy `\r`-only line endings in `crates/xi-core-lib/src/line_ending.rs` (L46-L60).
+- [x] Add support (or explicit rejection with a clear error) for legacy `\r`-only line endings in `crates/xi-core-lib/src/line_ending.rs` (L46-L60).
 
 ### Configuration
 
-- [ ] Replace widespread `.unwrap()` chains across `crates/xi-core-lib/src/config.rs` (L199, L207, L221, L233, L236, L355, L367, L398-L410, L444, L495, L507-L509, L642, L744, L882, L897) with structured config errors that surface to clients.
+- [x] Replace widespread `.unwrap()` chains across `crates/xi-core-lib/src/config.rs` (L199, L207, L221, L233, L236, L355, L367, L398-L410, L444, L495, L507-L509, L642, L744, L882, L897) with structured config errors that surface to clients.
 
 ### Tooling and CI
 

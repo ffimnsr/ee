@@ -355,7 +355,10 @@ impl View {
     }
 
     fn scroll_to_cursor(&mut self, text: &Rope) {
-        let end = self.sel_regions().last().unwrap().end;
+        let end = match self.sel_regions().last() {
+            Some(region) => region.end,
+            None => return,
+        };
         let line = self.line_of_offset(text, end);
         if line < self.first_line {
             self.first_line = line;
@@ -420,8 +423,12 @@ impl View {
     /// method to be fast even when the selection is large.
     fn invalidate_selection(&mut self, text: &Rope) {
         // TODO: refine for upstream (caret appears on prev line)
-        let first_line = self.line_of_offset(text, self.selection.first().unwrap().min());
-        let last_line = self.line_of_offset(text, self.selection.last().unwrap().max()) + 1;
+        let (first, last) = match (self.selection.first(), self.selection.last()) {
+            (Some(f), Some(l)) => (f, l),
+            _ => return,
+        };
+        let first_line = self.line_of_offset(text, first.min());
+        let last_line = self.line_of_offset(text, last.max()) + 1;
         let all_caret = self.selection.iter().all(|region| region.is_caret());
         let invalid = if all_caret {
             line_cache_shadow::CURSOR_VALID
@@ -541,7 +548,8 @@ impl View {
 
         let (base_sel, last) = {
             let mut base = Selection::new();
-            let (last, rest) = self.sel_regions().split_last().unwrap();
+            // is_empty guard above ensures split_last is safe
+            let Some((last, rest)) = self.sel_regions().split_last() else { return };
             for &region in rest {
                 base.add_region(region);
             }
@@ -1064,7 +1072,9 @@ impl View {
             self.add_find();
         }
 
-        self.find.last_mut().unwrap().set_find(&search_query, case_sensitive, false, true);
+        if let Some(find) = self.find.last_mut() {
+            find.set_find(&search_query, case_sensitive, false, true);
+        }
         self.find_progress = FindProgress::Started;
     }
 

@@ -21,11 +21,16 @@ use serde_json::{self, Value, json};
 
 use std::collections::HashMap;
 
+use log::warn;
 use crate::line_offset::LineOffset;
 use crate::plugins::PluginId;
 use crate::view::View;
 use xi_rope::spans::Spans;
 use xi_rope::{Interval, Rope};
+
+/// Maximum number of distinct annotation types a single plugin may register.
+/// Requests that would exceed this limit are dropped with a warning.
+const MAX_ANNOTATION_TYPES_PER_PLUGIN: usize = 64;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum AnnotationType {
@@ -192,6 +197,13 @@ impl AnnotationStore {
         {
             annotation.update(interval, item.items);
         } else {
+            if entry.len() >= MAX_ANNOTATION_TYPES_PER_PLUGIN {
+                warn!(
+                    "plugin {:?} exceeded annotation type limit ({}), dropping update",
+                    source, MAX_ANNOTATION_TYPES_PER_PLUGIN
+                );
+                return;
+            }
             entry.push(item);
         }
     }

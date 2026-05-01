@@ -21,6 +21,12 @@
 use std::cmp::{Ordering, max, min};
 use xi_rope::{RopeDelta, Transformer};
 
+/// Maximum number of disjoint ranges the set will hold.
+/// If adding a new non-overlapping range would exceed this limit the range is
+/// dropped. Overlapping ranges are still merged, so this bound applies only to
+/// distinct, non-adjacent ranges (e.g. produced by a misbehaving caller).
+const MAX_RANGES: usize = 10_000;
+
 pub struct IndexSet {
     ranges: Vec<(usize, usize)>,
 }
@@ -59,6 +65,10 @@ impl IndexSet {
             if start > iend {
                 continue;
             } else if end < istart {
+                if self.ranges.len() >= MAX_RANGES {
+                    // Cannot insert a new non-overlapping range without exceeding the cap.
+                    return;
+                }
                 self.ranges.insert(i, (start, end));
                 return;
             } else {
@@ -71,6 +81,9 @@ impl IndexSet {
                 remove_n_at(&mut self.ranges, i + 1, j - i);
                 return;
             }
+        }
+        if self.ranges.len() >= MAX_RANGES {
+            return;
         }
         self.ranges.push((start, end));
     }
