@@ -193,5 +193,6 @@ pub fn mainloop<P: Plugin>(plugin: &mut P) -> Result<(), ReadError> {
     let mut rpc_looper = RpcLoop::new(NewlineWriter::new(stdout));
     let mut dispatcher = Dispatcher::new(plugin);
 
-    rpc_looper.mainloop(|| NewlineReader::new(std::io::BufReader::new(io::stdin())), &mut dispatcher)
+    rpc_looper
+        .mainloop(|| NewlineReader::new(std::io::BufReader::new(io::stdin())), &mut dispatcher)
 }

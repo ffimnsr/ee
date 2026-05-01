@@ -214,7 +214,10 @@ pub fn start_new_server(
                         Ok(Some(msg)) => {
                             let message_str = serde_json::to_string(&msg).unwrap();
                             if message_str.len() > MAX_LSP_BODY_BYTES {
-                                error!("LSP message too large ({} bytes), dropping", message_str.len());
+                                error!(
+                                    "LSP message too large ({} bytes), dropping",
+                                    message_str.len()
+                                );
                                 break;
                             }
                             let mut server_locked = ls_client.lock().unwrap();

@@ -32,8 +32,8 @@ pub mod test_utils;
 use log::{error, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tracing::{trace, trace_span};
 use tokio_util::sync::CancellationToken;
+use tracing::{trace, trace_span};
 
 use std::cmp;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
@@ -321,11 +321,8 @@ impl<W: WriteTransport> RpcLoop<W> {
                     let _guard = PanicGuard(&peer);
 
                     // Drain all expired timers.
-                    loop {
-                        match peer.check_timers() {
-                            Some(Ok(token)) => do_idle(handler, &ctx, token),
-                            _ => break,
-                        }
+                    while let Some(Ok(token)) = peer.check_timers() {
+                        do_idle(handler, &ctx, token);
                     }
 
                     // Drain the idle queue.
