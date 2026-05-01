@@ -23,6 +23,7 @@ use std::io::BufRead;
 use std::io::BufReader;
 use std::path::Path;
 use std::process::{Child, Command as ProcCommand, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -74,6 +75,12 @@ pub struct Plugin {
     pub(crate) name: String,
     pub(crate) manifest: Arc<PluginDescription>,
     process: Arc<Mutex<Child>>,
+    /// True while an `update` RPC is awaiting a response from the plugin.
+    update_in_flight: Arc<AtomicBool>,
+    /// The latest update that arrived while `update_in_flight` was set.
+    /// Coalesces repeated updates so a slow plugin never accumulates unbounded
+    /// pending work; only the most recent un-acknowledged update is queued.
+    coalesced_update: Arc<Mutex<Option<PluginUpdate>>>,
 }
 
 #[derive(Debug)]
@@ -127,11 +134,31 @@ impl Plugin {
         )
     }
 
-    pub fn update<F>(&self, update: &PluginUpdate, callback: F)
-    where
-        F: FnOnce(Result<Value, xi_rpc::Error>) + Send + 'static,
-    {
-        self.peer.send_rpc_request_async("update", &json!(update), Box::new(callback));
+    /// Delivers an update to the plugin with coalescing backpressure.
+    ///
+    /// If a previous update is still awaiting a response the incoming update is
+    /// stored, replacing any already-queued coalesced update.  When the
+    /// in-flight response arrives the queued update is dispatched immediately,
+    /// keeping plugin state current without accumulating unbounded work.
+    pub fn update(&self, update: &PluginUpdate, weak_core: WeakXiCore, view_id: ViewId) {
+        if self
+            .update_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            // An update is already in-flight; coalesce by keeping only the latest.
+            *self.coalesced_update.lock().expect("coalesced_update lock") = Some(update.clone());
+            return;
+        }
+        drive_plugin_update(
+            &*self.peer,
+            update.clone(),
+            Arc::clone(&self.coalesced_update),
+            Arc::clone(&self.update_in_flight),
+            weak_core,
+            self.id,
+            view_id,
+        );
     }
 
     pub fn toggle_tracing(&self, enabled: bool) {
@@ -204,6 +231,49 @@ impl Plugin {
     }
 }
 
+/// Sends `update` via `peer` and, when the response arrives, either dispatches
+/// the coalesced update (if one arrived while this RPC was in-flight) or clears
+/// the `update_in_flight` flag.
+fn drive_plugin_update(
+    peer: &dyn xi_rpc::Peer,
+    update: PluginUpdate,
+    coalesced: Arc<Mutex<Option<PluginUpdate>>>,
+    in_flight: Arc<AtomicBool>,
+    weak_core: WeakXiCore,
+    id: PluginId,
+    view_id: ViewId,
+) {
+    let in_flight_cb = Arc::clone(&in_flight);
+    let coalesced_cb = Arc::clone(&coalesced);
+    // box_clone() shares the same underlying Arc<RpcState>, so it's cheap.
+    let peer_cb = peer.box_clone();
+    peer.send_rpc_request_async(
+        "update",
+        &json!(update),
+        Box::new(move |resp| {
+            weak_core.handle_plugin_update(id, view_id, resp);
+            let next = coalesced_cb.lock().expect("coalesced_update lock").take();
+            match next {
+                Some(next_update) => {
+                    // Keep in_flight=true and dispatch the coalesced update.
+                    drive_plugin_update(
+                        &*peer_cb,
+                        next_update,
+                        coalesced_cb,
+                        in_flight_cb,
+                        weak_core,
+                        id,
+                        view_id,
+                    );
+                }
+                None => {
+                    in_flight_cb.store(false, Ordering::Release);
+                }
+            }
+        }),
+    );
+}
+
 pub(crate) fn start_plugin_process(
     plugin_desc: Arc<PluginDescription>,
     id: PluginId,
@@ -261,6 +331,8 @@ pub(crate) fn start_plugin_process(
                                 name,
                                 id,
                                 manifest: plugin_desc.clone(),
+                                update_in_flight: Arc::new(AtomicBool::new(false)),
+                                coalesced_update: Arc::new(Mutex::new(None)),
                             };
 
                             if tracing_support::is_enabled() {
@@ -286,6 +358,8 @@ pub(crate) fn start_plugin_process(
                                 name,
                                 id,
                                 manifest: plugin_desc.clone(),
+                                update_in_flight: Arc::new(AtomicBool::new(false)),
+                                coalesced_update: Arc::new(Mutex::new(None)),
                             };
 
                             if tracing_support::is_enabled() {
@@ -351,5 +425,204 @@ fn spawn_stderr_thread(name: String, stderr: std::process::ChildStderr, core: We
 
     if let Err(err) = spawn_result {
         error!("stderr thread spawn failed for {}: {:?}", name, err);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    use serde_json::Value;
+
+    use super::rpc::PluginUpdate;
+    use super::{drive_plugin_update, PluginId};
+    use xi_rpc::{Callback, Error as RpcError, Peer, RequestId};
+
+    /// Minimal mock peer that captures the most-recently registered callback so
+    /// tests can trigger it manually.
+    struct MockPeer {
+        call_count: Arc<AtomicUsize>,
+        pending_cb: Arc<Mutex<Option<Box<dyn Callback>>>>,
+    }
+
+    impl MockPeer {
+        fn new(
+            call_count: Arc<AtomicUsize>,
+            pending_cb: Arc<Mutex<Option<Box<dyn Callback>>>>,
+        ) -> Self {
+            Self { call_count, pending_cb }
+        }
+    }
+
+    impl Peer for MockPeer {
+        fn box_clone(&self) -> Box<dyn Peer> {
+            Box::new(MockPeer {
+                call_count: Arc::clone(&self.call_count),
+                pending_cb: Arc::clone(&self.pending_cb),
+            })
+        }
+
+        fn send_rpc_notification(&self, _method: &str, _params: &Value) {}
+
+        fn send_rpc_request_async(
+            &self,
+            _method: &str,
+            _params: &Value,
+            f: Box<dyn Callback>,
+        ) -> RequestId {
+            self.call_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            *self.pending_cb.lock().unwrap() = Some(f);
+            RequestId::Number(0)
+        }
+
+        fn send_rpc_request(&self, _method: &str, _params: &Value) -> Result<Value, RpcError> {
+            Ok(Value::Null)
+        }
+
+        fn send_rpc_request_timeout(
+            &self,
+            _method: &str,
+            _params: &Value,
+            _timeout: Duration,
+        ) -> Result<Value, RpcError> {
+            Ok(Value::Null)
+        }
+
+        fn cancel_rpc_request(&self, _id: RequestId) -> bool {
+            false
+        }
+
+        fn request_is_pending(&self) -> bool {
+            false
+        }
+
+        fn schedule_idle(&self, _token: usize) {}
+
+        fn schedule_timer(&self, _after: Instant, _token: usize) {}
+
+        fn cancel_timer(&self, _token: usize) -> bool {
+            false
+        }
+
+        fn request_shutdown(&self) {}
+    }
+
+    fn dummy_update(rev: u64) -> PluginUpdate {
+        use crate::tabs::ViewId;
+        PluginUpdate::new(
+            ViewId::from(0usize),
+            rev,
+            None,
+            0,
+            1,
+            None,
+            "edit".into(),
+            "test".into(),
+        )
+    }
+
+    /// When `drive_plugin_update` is called it immediately sends via the peer.
+    #[test]
+    fn coalesce_first_update_goes_directly_to_peer() {
+        use crate::tabs::ViewId;
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let pending_cb: Arc<Mutex<Option<Box<dyn Callback>>>> = Arc::new(Mutex::new(None));
+        let peer = MockPeer::new(Arc::clone(&call_count), Arc::clone(&pending_cb));
+
+        let in_flight = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let coalesced: Arc<Mutex<Option<PluginUpdate>>> = Arc::new(Mutex::new(None));
+        let weak_core = crate::core::dummy_weak_core();
+
+        drive_plugin_update(
+            &peer,
+            dummy_update(1),
+            Arc::clone(&coalesced),
+            Arc::clone(&in_flight),
+            weak_core,
+            PluginId::default(),
+            ViewId::from(0usize),
+        );
+
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(pending_cb.lock().unwrap().is_some());
+        // still in-flight while awaiting the response
+        assert!(in_flight.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    /// When a response arrives with no coalesced update, `in_flight` is cleared.
+    #[test]
+    fn coalesce_clears_in_flight_on_response_when_no_coalesced() {
+        use crate::tabs::ViewId;
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let pending_cb: Arc<Mutex<Option<Box<dyn Callback>>>> = Arc::new(Mutex::new(None));
+        let peer = MockPeer::new(Arc::clone(&call_count), Arc::clone(&pending_cb));
+
+        let in_flight = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let coalesced: Arc<Mutex<Option<PluginUpdate>>> = Arc::new(Mutex::new(None));
+        let weak_core = crate::core::dummy_weak_core();
+
+        drive_plugin_update(
+            &peer,
+            dummy_update(1),
+            Arc::clone(&coalesced),
+            Arc::clone(&in_flight),
+            weak_core,
+            PluginId::default(),
+            ViewId::from(0usize),
+        );
+
+        // Simulate the RPC response arriving.
+        let cb = pending_cb.lock().unwrap().take().expect("callback registered");
+        cb.call(Ok(Value::Null));
+
+        assert!(!in_flight.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(call_count.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+
+    /// When a coalesced update is present at response time, it is sent
+    /// immediately and `in_flight` stays true until that second response arrives.
+    #[test]
+    fn coalesce_dispatches_pending_update_on_response() {
+        use crate::tabs::ViewId;
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let pending_cb: Arc<Mutex<Option<Box<dyn Callback>>>> = Arc::new(Mutex::new(None));
+        let peer = MockPeer::new(Arc::clone(&call_count), Arc::clone(&pending_cb));
+
+        let in_flight = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let coalesced: Arc<Mutex<Option<PluginUpdate>>> =
+            Arc::new(Mutex::new(Some(dummy_update(2))));
+        let weak_core = crate::core::dummy_weak_core();
+
+        drive_plugin_update(
+            &peer,
+            dummy_update(1),
+            Arc::clone(&coalesced),
+            Arc::clone(&in_flight),
+            weak_core,
+            PluginId::default(),
+            ViewId::from(0usize),
+        );
+
+        // After first response, coalesced update should be dispatched immediately.
+        let cb1 = pending_cb.lock().unwrap().take().expect("first callback");
+        cb1.call(Ok(Value::Null));
+
+        assert_eq!(
+            call_count.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "coalesced update sent"
+        );
+        assert!(
+            in_flight.load(std::sync::atomic::Ordering::Acquire),
+            "still in-flight for coalesced update"
+        );
+
+        // Completing the coalesced update's response clears in_flight.
+        let cb2 = pending_cb.lock().unwrap().take().expect("second callback");
+        cb2.call(Ok(Value::Null));
+
+        assert!(!in_flight.load(std::sync::atomic::Ordering::Acquire));
     }
 }

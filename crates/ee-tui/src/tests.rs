@@ -10,9 +10,10 @@ use serde_json::{Value, json};
 use crate::app::{App, Mode, Operator, PendingCharFind};
 use crate::backend::{
     BackendEvent, CachedLine, CompletionSuggestion, CoreLine, CoreUpdate, CoreUpdateKind,
-    CoreUpdateOp, LineSlot, NavigationTarget, XiClient, format_location_message,
+    CoreUpdateOp, LineSlot, NavigationTarget, format_location_message,
     invalid_line_ranges, parse_notification,
 };
+use crate::buffer::{BufState, BufferManager};
 use crate::keymap::{Action, BindingKey, bindings};
 use crate::text::{
     byte_col_to_display_col, display_col_to_byte, find_char_backward, find_char_forward,
@@ -115,7 +116,7 @@ fn backspace_removes_multibyte_char() {
 
 #[test]
 fn apply_update_merges_copy_update_insert_and_invalidate() {
-    let mut client = test_client();
+    let mut client = test_buf_state();
     client.line_cache = vec![
         LineSlot::Known(CachedLine { text: "alpha".into(), cursors: Vec::new() }),
         LineSlot::Known(CachedLine { text: "beta".into(), cursors: vec![2] }),
@@ -215,20 +216,7 @@ fn parse_notification_handles_show_completions() {
 fn send_plugin_rpc_emits_plugin_notification() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
-    let client = XiClient {
-        path: None,
-        tx,
-        backend_rx,
-        view_id: String::from("view-id-1"),
-        pending_line_request: false,
-        line_cache: Vec::new(),
-        lines: Vec::new(),
-        cursor_line: 0,
-        cursor_col: 0,
-        pristine: true,
-        status_message: None,
-        last_scroll: None,
-    };
+    let client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
 
     client
         .send_plugin_rpc("xi-lsp-plugin", "lsp.definition", json!({}))
@@ -502,13 +490,10 @@ fn unique_temp_path(prefix: &str) -> std::path::PathBuf {
     env::temp_dir().join(format!("{prefix}-{nanos}.txt"))
 }
 
-fn test_client() -> XiClient {
-    let (tx, _rx) = mpsc::channel();
-    let (_backend_tx, backend_rx) = mpsc::channel();
-    XiClient {
+fn test_buf_state() -> BufState {
+    BufState {
+        id: 1,
         path: None,
-        tx,
-        backend_rx,
         view_id: String::new(),
         pending_line_request: false,
         line_cache: Vec::new(),

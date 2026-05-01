@@ -453,12 +453,7 @@ impl<'a> EventContext<'a> {
 
         self.plugins.iter().for_each(|plugin| {
             ed.increment_revs_in_flight();
-            let weak_core = self.weak_core.clone();
-            let id = plugin.id;
-            let view_id = self.view_id;
-            plugin.update(&update, move |resp| {
-                weak_core.handle_plugin_update(id, view_id, resp);
-            });
+            plugin.update(&update, self.weak_core.clone(), self.view_id);
         });
         ed.dec_revs_in_flight();
         ed.update_edit_type();
