@@ -1,0 +1,797 @@
+use std::io;
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
+use std::time::Duration;
+
+use serde::Deserialize;
+use serde_json::{Value, json};
+use unicode_width::UnicodeWidthStr;
+use xi_core_lib::XiCore;
+use xi_rpc::{ReadTransport, RpcLoop, WriteTransport};
+
+use crate::text::previous_char_boundary;
+
+pub(crate) struct ChannelReader {
+    pub(crate) rx: Receiver<String>,
+}
+
+impl ReadTransport for ChannelReader {
+    fn read_message(&mut self, buf: &mut String) -> io::Result<usize> {
+        match self.rx.recv() {
+            Ok(message) => {
+                let len = message.len();
+                buf.push_str(&message);
+                Ok(len)
+            }
+            Err(_) => Ok(0),
+        }
+    }
+}
+
+pub(crate) struct ChannelWriter {
+    pub(crate) tx: Sender<String>,
+}
+
+impl WriteTransport for ChannelWriter {
+    fn write_message(&mut self, data: &[u8]) -> io::Result<()> {
+        let message = String::from_utf8(data.to_vec())
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        self.tx
+            .send(message)
+            .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum BackendEvent {
+    Update(CoreUpdate),
+    Alert(String),
+    ShowHover(String),
+    ShowCompletions(Vec<CompletionSuggestion>),
+    ShowLocations { title: String, locations: Vec<NavigationTarget> },
+    ScrollTo { line: usize, col: usize },
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub(crate) struct CompletionSuggestion {
+    pub(crate) label: String,
+    #[serde(default)]
+    pub(crate) detail: Option<String>,
+    #[serde(default)]
+    pub(crate) insert_text: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub(crate) struct NavigationTarget {
+    pub(crate) path: String,
+    pub(crate) line: usize,
+    pub(crate) column: usize,
+    pub(crate) end_line: usize,
+    pub(crate) end_column: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CachedLine {
+    pub(crate) text: String,
+    pub(crate) cursors: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum LineSlot {
+    Known(CachedLine),
+    Invalid,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CoreNotificationParams {
+    pub(crate) update: CoreUpdate,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub(crate) struct CoreUpdate {
+    pub(crate) ops: Vec<CoreUpdateOp>,
+    pub(crate) pristine: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub(crate) struct CoreUpdateOp {
+    pub(crate) op: CoreUpdateKind,
+    pub(crate) n: usize,
+    #[serde(default)]
+    pub(crate) lines: Vec<CoreLine>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum CoreUpdateKind {
+    #[serde(rename = "ins")]
+    Insert,
+    Skip,
+    Invalidate,
+    Copy,
+    Update,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub(crate) struct CoreLine {
+    #[serde(default)]
+    pub(crate) text: Option<String>,
+    #[serde(default)]
+    pub(crate) cursor: Vec<usize>,
+}
+
+#[derive(Debug)]
+pub(crate) struct XiClient {
+    pub(crate) path: Option<PathBuf>,
+    pub(crate) tx: Sender<String>,
+    pub(crate) backend_rx: Receiver<BackendEvent>,
+    pub(crate) view_id: String,
+    pub(crate) pending_line_request: bool,
+    pub(crate) line_cache: Vec<LineSlot>,
+    pub(crate) lines: Vec<String>,
+    pub(crate) cursor_line: usize,
+    pub(crate) cursor_col: usize,
+    pub(crate) pristine: bool,
+    pub(crate) status_message: Option<String>,
+    pub(crate) last_scroll: Option<(usize, usize)>,
+}
+
+impl XiClient {
+    pub(crate) fn new(path: Option<PathBuf>) -> io::Result<Self> {
+        let (to_core_tx, to_core_rx) = mpsc::channel::<String>();
+        let (from_core_tx, from_core_rx) = mpsc::channel::<String>();
+        let (backend_tx, backend_rx) = mpsc::channel::<BackendEvent>();
+
+        thread::spawn(move || {
+            let mut core = XiCore::new();
+            let mut rpc_loop = RpcLoop::new(ChannelWriter { tx: from_core_tx });
+            let _ = rpc_loop.mainloop(|| ChannelReader { rx: to_core_rx }, &mut core);
+        });
+
+        send_rpc_notification(&to_core_tx, "client_started", json!({}))?;
+
+        let new_view_id = 1_u64;
+        send_rpc_request(
+            &to_core_tx,
+            new_view_id,
+            "new_view",
+            json!({ "file_path": path.as_ref().map(|p| p.to_string_lossy().to_string()) }),
+        )?;
+
+        let view_id = block_for_response(&from_core_rx, &to_core_tx, new_view_id)?;
+        let view_id = view_id
+            .as_str()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "new_view returned non-string id")
+            })?
+            .to_owned();
+
+        let init_events = drain_sync_notifications(&from_core_rx, &to_core_tx);
+
+        let tx_clone = to_core_tx.clone();
+        thread::spawn(move || xi_reader_thread(from_core_rx, tx_clone, backend_tx));
+
+        let mut client = Self {
+            path,
+            tx: to_core_tx,
+            backend_rx,
+            view_id,
+            pending_line_request: false,
+            line_cache: Vec::new(),
+            lines: Vec::new(),
+            cursor_line: 0,
+            cursor_col: 0,
+            pristine: true,
+            status_message: None,
+            last_scroll: None,
+        };
+
+        for event in init_events {
+            client.apply_backend_event(event)?;
+        }
+        client.pump_init()?;
+        Ok(client)
+    }
+
+    pub(crate) fn title(&self) -> String {
+        self.path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("[scratch]")
+            .to_owned()
+    }
+
+    pub(crate) fn save(&mut self) -> io::Result<()> {
+        let Some(path) = &self.path else {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "scratch buffer has no path"));
+        };
+
+        self.send_notification(
+            "save",
+            json!({
+                "view_id": self.view_id,
+                "file_path": path.to_string_lossy().to_string(),
+            }),
+        )?;
+        self.status_message = Some(format!("saved {}", path.display()));
+        Ok(())
+    }
+
+    pub(crate) fn send_edit(&mut self, method: &str, params: Value) -> io::Result<()> {
+        self.send_notification(
+            "edit",
+            json!({
+                "view_id": self.view_id,
+                "method": method,
+                "params": params,
+            }),
+        )
+    }
+
+    pub(crate) fn send_plugin_rpc(
+        &self,
+        receiver: &str,
+        method: &str,
+        params: Value,
+    ) -> io::Result<()> {
+        self.send_notification(
+            "plugin",
+            json!({
+                "command": "plugin_rpc",
+                "view_id": self.view_id,
+                "receiver": receiver,
+                "rpc": {
+                    "method": method,
+                    "params": params,
+                    "rpc_type": "notification",
+                },
+            }),
+        )
+    }
+
+    pub(crate) fn drain_events(&mut self) -> io::Result<()> {
+        while let Ok(event) = self.backend_rx.try_recv() {
+            self.apply_backend_event(event)?;
+        }
+        Ok(())
+    }
+
+    fn pump_init(&mut self) -> io::Result<()> {
+        use std::sync::mpsc::RecvTimeoutError;
+
+        loop {
+            if invalid_line_ranges(&self.line_cache).is_empty() {
+                break;
+            }
+            match self.backend_rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(event) => {
+                    self.apply_backend_event(event)?;
+                    while let Ok(event) = self.backend_rx.try_recv() {
+                        self.apply_backend_event(event)?;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn apply_backend_event(&mut self, event: BackendEvent) -> io::Result<()> {
+        match event {
+            BackendEvent::Update(update) => {
+                self.pending_line_request = false;
+                self.apply_update(update)?;
+                self.request_invalidated_lines()?;
+            }
+            BackendEvent::ScrollTo { line, col } => {
+                self.cursor_line = line;
+                self.cursor_col = col;
+                self.clamp_cursor();
+            }
+            BackendEvent::Alert(msg) => {
+                self.status_message = Some(msg);
+            }
+            BackendEvent::ShowHover(result) => {
+                self.status_message = Some(result);
+            }
+            BackendEvent::ShowCompletions(items) => {
+                let preview =
+                    items.iter().take(8).map(|item| item.label.as_str()).collect::<Vec<_>>();
+                self.status_message = Some(if preview.is_empty() {
+                    String::from("no completions")
+                } else if items.len() > preview.len() {
+                    format!(
+                        "completions: {} (+{} more)",
+                        preview.join(", "),
+                        items.len() - preview.len()
+                    )
+                } else {
+                    format!("completions: {}", preview.join(", "))
+                });
+            }
+            BackendEvent::ShowLocations { title, locations } => {
+                let same_file = locations.len() == 1
+                    && self
+                        .path
+                        .as_ref()
+                        .is_some_and(|path| path.to_string_lossy() == locations[0].path);
+                if same_file {
+                    self.send_edit("goto_line", json!({ "line": locations[0].line }))?;
+                }
+                self.status_message = Some(format_location_message(&title, &locations));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn notify_scroll(&mut self, first_line: usize, last_line: usize) -> io::Result<()> {
+        let range = (first_line, last_line);
+        if self.last_scroll == Some(range) || self.view_id.is_empty() {
+            return Ok(());
+        }
+        self.last_scroll = Some(range);
+        self.send_notification(
+            "edit",
+            json!({
+                "view_id": self.view_id,
+                "method": "scroll",
+                "params": [first_line, last_line],
+            }),
+        )
+    }
+
+    fn clamp_cursor(&mut self) {
+        if self.lines.is_empty() {
+            self.cursor_line = 0;
+            self.cursor_col = 0;
+            return;
+        }
+
+        self.cursor_line = self.cursor_line.min(self.lines.len().saturating_sub(1));
+        self.cursor_col = previous_char_boundary(&self.lines[self.cursor_line], self.cursor_col);
+    }
+
+    fn send_notification(&self, method: &str, params: Value) -> io::Result<()> {
+        self.send_message(json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        }))
+    }
+
+    fn send_message(&self, value: Value) -> io::Result<()> {
+        let message = serde_json::to_string(&value)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        self.tx
+            .send(message)
+            .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))
+    }
+
+    pub(crate) fn apply_update(&mut self, update: CoreUpdate) -> io::Result<()> {
+        let previous = std::mem::take(&mut self.line_cache);
+        let mut next_cache = Vec::new();
+        let mut source_index = 0;
+
+        self.pristine = update.pristine;
+
+        for op in update.ops {
+            match op.op {
+                CoreUpdateKind::Insert => {
+                    if op.lines.len() != op.n {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "insert op length mismatch: expected {}, got {}",
+                                op.n,
+                                op.lines.len()
+                            ),
+                        ));
+                    }
+                    next_cache.extend(op.lines.into_iter().map(LineSlot::from));
+                }
+                CoreUpdateKind::Skip => {
+                    source_index = checked_advance(source_index, op.n, previous.len(), "skip")?;
+                }
+                CoreUpdateKind::Invalidate => {
+                    next_cache.extend(std::iter::repeat_n(LineSlot::Invalid, op.n));
+                }
+                CoreUpdateKind::Copy => {
+                    let end = checked_advance(source_index, op.n, previous.len(), "copy")?;
+                    next_cache.extend(previous[source_index..end].iter().cloned());
+                    source_index = end;
+                }
+                CoreUpdateKind::Update => {
+                    if op.lines.len() != op.n {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "update op length mismatch: expected {}, got {}",
+                                op.n,
+                                op.lines.len()
+                            ),
+                        ));
+                    }
+
+                    let end = checked_advance(source_index, op.n, previous.len(), "update")?;
+                    for (slot, line) in
+                        previous[source_index..end].iter().cloned().zip(op.lines.into_iter())
+                    {
+                        next_cache.push(slot.merge(line)?);
+                    }
+                    source_index = end;
+                }
+            }
+        }
+
+        self.line_cache = next_cache;
+        self.rebuild_lines();
+        self.sync_cursor_from_cache();
+        Ok(())
+    }
+
+    pub(crate) fn rebuild_lines(&mut self) {
+        self.lines = self
+            .line_cache
+            .iter()
+            .map(|slot| match slot {
+                LineSlot::Known(line) => line.text.clone(),
+                LineSlot::Invalid => String::new(),
+            })
+            .collect();
+
+        if matches!(self.line_cache.as_slice(), [LineSlot::Known(CachedLine { text, .. })] if text.is_empty())
+        {
+            self.lines.clear();
+        }
+    }
+
+    fn sync_cursor_from_cache(&mut self) {
+        for (line_index, slot) in self.line_cache.iter().enumerate() {
+            let LineSlot::Known(line) = slot else {
+                continue;
+            };
+            if let Some(&cursor_col) = line.cursors.first() {
+                self.cursor_line = line_index;
+                self.cursor_col = previous_char_boundary(&line.text, cursor_col);
+                self.clamp_cursor();
+                return;
+            }
+        }
+
+        self.clamp_cursor();
+    }
+
+    fn request_invalidated_lines(&mut self) -> io::Result<()> {
+        if self.pending_line_request || self.view_id.is_empty() {
+            return Ok(());
+        }
+
+        let invalid_ranges = invalid_line_ranges(&self.line_cache);
+        if invalid_ranges.is_empty() {
+            return Ok(());
+        }
+
+        for (start, end) in invalid_ranges {
+            self.send_notification(
+                "edit",
+                json!({
+                    "view_id": self.view_id,
+                    "method": "request_lines",
+                    "params": [start, end],
+                }),
+            )?;
+        }
+        self.pending_line_request = true;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pump(&mut self) -> io::Result<()> {
+        use std::sync::mpsc::RecvTimeoutError;
+
+        for _ in 0..6 {
+            match self.backend_rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(event) => {
+                    self.apply_backend_event(event)?;
+                    while let Ok(event) = self.backend_rx.try_recv() {
+                        self.apply_backend_event(event)?;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        Ok(())
+    }
+}
+
+impl PartialEq for XiClient {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+            && self.view_id == other.view_id
+            && self.lines == other.lines
+            && self.cursor_line == other.cursor_line
+            && self.cursor_col == other.cursor_col
+            && self.pristine == other.pristine
+            && self.status_message == other.status_message
+    }
+}
+
+impl Eq for XiClient {}
+
+impl From<CoreLine> for LineSlot {
+    fn from(line: CoreLine) -> Self {
+        LineSlot::Known(CachedLine { text: normalize_line_text(line.text), cursors: line.cursor })
+    }
+}
+
+impl LineSlot {
+    fn merge(self, update: CoreLine) -> io::Result<Self> {
+        match self {
+            LineSlot::Known(mut line) => {
+                if let Some(text) = update.text {
+                    line.text = text;
+                }
+                line.cursors = update.cursor;
+                Ok(LineSlot::Known(line))
+            }
+            LineSlot::Invalid => {
+                if update.text.is_none() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "update op cannot patch invalid line without text",
+                    ));
+                }
+                Ok(LineSlot::from(update))
+            }
+        }
+    }
+}
+
+pub(crate) fn parse_response(message: Value) -> io::Result<Value> {
+    if let Some(result) = message.get("result") {
+        return Ok(result.clone());
+    }
+
+    if let Some(error) = message.get("error") {
+        let message =
+            error.get("message").and_then(Value::as_str).unwrap_or("rpc error").to_owned();
+        return Err(io::Error::other(message));
+    }
+
+    Err(io::Error::new(io::ErrorKind::InvalidData, "rpc response missing result and error"))
+}
+
+pub(crate) fn normalize_line_text(text: Option<String>) -> String {
+    let Some(text) = text else {
+        return String::new();
+    };
+    let text = text.strip_suffix('\n').unwrap_or(&text);
+    let text = text.strip_suffix('\r').unwrap_or(text);
+    text.to_owned()
+}
+
+pub(crate) fn checked_advance(
+    current: usize,
+    amount: usize,
+    len: usize,
+    op: &str,
+) -> io::Result<usize> {
+    let next = current.checked_add(amount).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidData, format!("{op} op overflowed source index"))
+    })?;
+    if next > len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{op} op exceeded cached line count"),
+        ));
+    }
+    Ok(next)
+}
+
+pub(crate) fn invalid_line_ranges(line_cache: &[LineSlot]) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = None;
+
+    for (index, slot) in line_cache.iter().enumerate() {
+        match (slot, start) {
+            (LineSlot::Invalid, None) => start = Some(index),
+            (LineSlot::Known(_), Some(range_start)) => {
+                ranges.push((range_start, index));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(range_start) = start {
+        ranges.push((range_start, line_cache.len()));
+    }
+
+    ranges
+}
+
+pub(crate) fn xi_reader_thread(
+    rx: Receiver<String>,
+    tx: Sender<String>,
+    backend_tx: Sender<BackendEvent>,
+) {
+    while let Ok(raw) = rx.recv() {
+        let msg: Value = match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if let Some(method) = msg.get("method").and_then(Value::as_str) {
+            let params = msg.get("params").cloned().unwrap_or(Value::Null);
+            if let Some(id) = msg.get("id").cloned() {
+                respond_to_frontend_request(method, params, id, &tx);
+            } else if let Some(event) = parse_notification(method, params) {
+                let _ = backend_tx.send(event);
+            }
+        }
+    }
+}
+
+pub(crate) fn respond_to_frontend_request(
+    method: &str,
+    params: Value,
+    id: Value,
+    tx: &Sender<String>,
+) {
+    let response = match method {
+        "measure_width" => {
+            let widths = params
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|req| {
+                    req.get("strings")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .map(|text| {
+                            Value::from(
+                                UnicodeWidthStr::width(text.as_str().unwrap_or_default()) as f64
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            json!({ "jsonrpc": "2.0", "id": id, "result": widths })
+        }
+        _ => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32601, "message": format!("unsupported frontend request: {method}") }
+        }),
+    };
+    if let Ok(raw) = serde_json::to_string(&response) {
+        let _ = tx.send(raw);
+    }
+}
+
+pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendEvent> {
+    match method {
+        "update" => {
+            let params = serde_json::from_value::<CoreNotificationParams>(params).ok()?;
+            Some(BackendEvent::Update(params.update))
+        }
+        "scroll_to" => {
+            let line = params.get("line").and_then(Value::as_u64)? as usize;
+            let col = params.get("col").and_then(Value::as_u64)? as usize;
+            Some(BackendEvent::ScrollTo { line, col })
+        }
+        "alert" => {
+            let msg = params.get("msg").and_then(Value::as_str)?.to_owned();
+            Some(BackendEvent::Alert(msg))
+        }
+        "show_hover" => {
+            let result = params.get("result").and_then(Value::as_str)?.to_owned();
+            Some(BackendEvent::ShowHover(result))
+        }
+        "show_completions" => {
+            let items =
+                serde_json::from_value::<Vec<CompletionSuggestion>>(params.get("items")?.clone())
+                    .ok()?;
+            Some(BackendEvent::ShowCompletions(items))
+        }
+        "show_locations" => {
+            let title = params.get("title").and_then(Value::as_str)?.to_owned();
+            let locations =
+                serde_json::from_value::<Vec<NavigationTarget>>(params.get("locations")?.clone())
+                    .ok()?;
+            Some(BackendEvent::ShowLocations { title, locations })
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn format_location_message(title: &str, locations: &[NavigationTarget]) -> String {
+    match locations {
+        [] => format!("{title}: no locations"),
+        [location] => {
+            format!("{title}: {}:{}:{}", location.path, location.line + 1, location.column + 1)
+        }
+        many => format!("{title}: {} locations", many.len()),
+    }
+}
+
+pub(crate) fn send_rpc_notification(
+    tx: &Sender<String>,
+    method: &str,
+    params: Value,
+) -> io::Result<()> {
+    let raw = serde_json::to_string(&json!({
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": params,
+    }))
+    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    tx.send(raw).map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))
+}
+
+pub(crate) fn send_rpc_request(
+    tx: &Sender<String>,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> io::Result<()> {
+    let raw = serde_json::to_string(&json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": params,
+    }))
+    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    tx.send(raw).map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))
+}
+
+pub(crate) fn block_for_response(
+    rx: &Receiver<String>,
+    tx: &Sender<String>,
+    expected_id: u64,
+) -> io::Result<Value> {
+    loop {
+        let raw =
+            rx.recv().map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))?;
+        let msg: Value = serde_json::from_str(&raw)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+
+        if let Some(method) = msg.get("method").and_then(Value::as_str) {
+            let params = msg.get("params").cloned().unwrap_or(Value::Null);
+            if let Some(id) = msg.get("id").cloned() {
+                respond_to_frontend_request(method, params, id, tx);
+            }
+            continue;
+        }
+
+        if msg.get("id").and_then(Value::as_u64) == Some(expected_id) {
+            return parse_response(msg);
+        }
+    }
+}
+
+pub(crate) fn drain_sync_notifications(
+    rx: &Receiver<String>,
+    tx: &Sender<String>,
+) -> Vec<BackendEvent> {
+    let mut events = Vec::new();
+    while let Ok(raw) = rx.recv_timeout(Duration::from_millis(20)) {
+        let msg: Value = match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if let Some(method) = msg.get("method").and_then(Value::as_str) {
+            let params = msg.get("params").cloned().unwrap_or(Value::Null);
+            if let Some(id) = msg.get("id").cloned() {
+                respond_to_frontend_request(method, params, id, tx);
+            } else if let Some(event) = parse_notification(method, params) {
+                events.push(event);
+            }
+        }
+    }
+    events
+}

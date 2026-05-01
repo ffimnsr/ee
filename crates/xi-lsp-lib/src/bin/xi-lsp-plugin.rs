@@ -78,9 +78,21 @@ fn main() {
         }
     });
 
-    init_logger().expect("Failed to start logger for LSP Plugin");
-    let config: Config = serde_json::from_value(config).unwrap();
+    if let Err(err) = init_logger() {
+        eprintln!("Failed to start logger for LSP Plugin: {err}");
+        std::process::exit(1);
+    }
+    let config: Config = match serde_json::from_value(config) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("Failed to parse LSP plugin config: {err}");
+            std::process::exit(1);
+        }
+    };
     let mut plugin = LspPlugin::new(config);
 
-    start_mainloop(&mut plugin);
+    if let Err(err) = start_mainloop(&mut plugin) {
+        eprintln!("LSP plugin mainloop failed: {err}");
+        std::process::exit(1);
+    }
 }

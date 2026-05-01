@@ -15,11 +15,27 @@
 //! Structured representation of a plugin's features and capabilities.
 
 use std::path::PathBuf;
+use std::{
+    collections::{BTreeMap, HashSet},
+    fmt,
+};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{self, Value, json};
 
 use crate::syntax::{LanguageDefinition, LanguageId};
+
+/// Declared permissions and editor features a plugin may use.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginCapability {
+    Edit,
+    Hover,
+    Annotations,
+    StatusItems,
+    Filesystem,
+    Network,
+}
 
 /// Describes attributes and capabilities of a plugin.
 ///
@@ -31,6 +47,10 @@ pub struct PluginDescription {
     pub version: String,
     #[serde(default)]
     pub scope: PluginScope,
+    #[serde(default)]
+    pub capabilities: Vec<PluginCapability>,
+    #[serde(default)]
+    pub launch: PluginLaunchConfig,
     // more metadata ...
     /// path to plugin executable
     #[serde(deserialize_with = "platform_exec_path")]
@@ -42,6 +62,25 @@ pub struct PluginDescription {
     pub commands: Vec<Command>,
     #[serde(default)]
     pub languages: Vec<LanguageDefinition>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct PluginLaunchConfig {
+    #[serde(default)]
+    pub working_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub transport: PluginTransport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginTransport {
+    #[default]
+    StdioNewline,
+    StdioContentLength,
 }
 
 fn platform_exec_path<'de, D: Deserializer<'de>>(deserializer: D) -> Result<PathBuf, D::Error> {
@@ -61,6 +100,15 @@ pub enum PluginActivation {
     /// Run this plugin in response to a given command.
     #[allow(dead_code)]
     OnCommand,
+}
+
+impl PluginActivation {
+    fn matches_language(&self, language: &LanguageId) -> bool {
+        match self {
+            PluginActivation::OnSyntax(active_language) => active_language == language,
+            _ => false,
+        }
+    }
 }
 
 /// Describes the scope of events a plugin receives.
@@ -142,6 +190,36 @@ pub enum RpcType {
     Request,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManifestValidationError {
+    DuplicateCommandArgument { command: String, key: String },
+    MissingCommandArgumentTemplate { command: String, key: String },
+    NonObjectCommandParams { command: String },
+    UndeclaredPlaceholder { command: String, key: String },
+}
+
+impl fmt::Display for ManifestValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ManifestValidationError::DuplicateCommandArgument { command, key } => {
+                write!(f, "command {command:?} declares duplicate argument key {key:?}")
+            }
+            ManifestValidationError::MissingCommandArgumentTemplate { command, key } => {
+                write!(f, "command {command:?} is missing template param for argument {key:?}")
+            }
+            ManifestValidationError::NonObjectCommandParams { command } => {
+                write!(f, "command {command:?} must use an object for rpc_cmd.params")
+            }
+            ManifestValidationError::UndeclaredPlaceholder { command, key } => {
+                write!(
+                    f,
+                    "command {command:?} declares placeholder {key:?} without matching args entry"
+                )
+            }
+        }
+    }
+}
+
 impl Command {
     pub fn new<S, V>(title: S, description: S, rpc_cmd: PlaceholderRpc, args: V) -> Self
     where
@@ -152,6 +230,42 @@ impl Command {
         let description = description.as_ref().to_owned();
         let args = args.into().unwrap_or_default();
         Command { title, description, rpc_cmd, args }
+    }
+
+    pub fn validate(&self) -> Result<(), ManifestValidationError> {
+        let params = self.rpc_cmd.params.as_object().ok_or_else(|| {
+            ManifestValidationError::NonObjectCommandParams { command: self.title.clone() }
+        })?;
+
+        let mut arg_keys = HashSet::new();
+        for arg in &self.args {
+            if !arg_keys.insert(arg.key.as_str()) {
+                return Err(ManifestValidationError::DuplicateCommandArgument {
+                    command: self.title.clone(),
+                    key: arg.key.clone(),
+                });
+            }
+
+            if !params.contains_key(&arg.key) {
+                return Err(ManifestValidationError::MissingCommandArgumentTemplate {
+                    command: self.title.clone(),
+                    key: arg.key.clone(),
+                });
+            }
+        }
+
+        for (key, value) in params {
+            let is_placeholder = value.as_str().is_some_and(str::is_empty);
+            let is_builtin_placeholder = matches!(key.as_str(), "view");
+            if is_placeholder && !arg_keys.contains(key.as_str()) && !is_builtin_placeholder {
+                return Err(ManifestValidationError::UndeclaredPlaceholder {
+                    command: self.title.clone(),
+                    key: key.clone(),
+                });
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -219,6 +333,48 @@ impl PluginDescription {
     pub fn is_global(&self) -> bool {
         matches!(self.scope, PluginScope::Global)
     }
+
+    /// Returns `true` if this plugin declares support for `capability`.
+    pub fn has_capability(&self, capability: PluginCapability) -> bool {
+        self.capabilities.contains(&capability)
+    }
+
+    pub fn validates(&self) -> Result<(), ManifestValidationError> {
+        for command in &self.commands {
+            command.validate()?;
+        }
+        Ok(())
+    }
+
+    pub fn activates_on_command(&self) -> bool {
+        matches!(self.scope, PluginScope::SingleInvocation)
+            || self
+                .activations
+                .iter()
+                .any(|activation| matches!(activation, PluginActivation::OnCommand))
+    }
+
+    pub fn activates_on_startup(&self) -> bool {
+        !matches!(self.scope, PluginScope::SingleInvocation)
+            && (self.activations.is_empty()
+                || self
+                    .activations
+                    .iter()
+                    .any(|activation| matches!(activation, PluginActivation::Autorun)))
+    }
+
+    pub fn activates_for_language(&self, language: &LanguageId) -> bool {
+        self.activations.iter().any(|activation| activation.matches_language(language))
+    }
+
+    pub fn supports_command(&self, method: &str) -> bool {
+        self.commands.iter().any(|command| command.rpc_cmd.method_ref() == method)
+    }
+
+    pub fn receives_updates_for(&self, language: &LanguageId) -> bool {
+        !matches!(self.scope, PluginScope::SingleInvocation)
+            && (self.activates_on_startup() || self.activates_for_language(language))
+    }
 }
 
 #[cfg(test)]
@@ -233,6 +389,12 @@ mod tests {
             "name": "test_plugin",
             "version": "0.0.0",
             "scope": "global",
+            "capabilities": ["hover", "status_items"],
+            "launch": {
+                "working_dir": "plugin-data",
+                "env": { "RUST_LOG": "debug" },
+                "transport": "stdio_content_length"
+            },
             "exec_path": "path/to/binary",
             "activations": [],
             "commands": [],
@@ -246,6 +408,28 @@ mod tests {
         } else {
             assert!(plugin_desc.exec_path.ends_with("binary"));
         }
+        assert!(plugin_desc.has_capability(PluginCapability::Hover));
+        assert!(plugin_desc.has_capability(PluginCapability::StatusItems));
+        assert_eq!(plugin_desc.launch.working_dir, Some(PathBuf::from("plugin-data")));
+        assert_eq!(plugin_desc.launch.env.get("RUST_LOG"), Some(&"debug".to_string()));
+        assert_eq!(plugin_desc.launch.transport, PluginTransport::StdioContentLength);
+    }
+
+    #[test]
+    fn plugin_description_defaults_capabilities_to_empty() {
+        let json = r#"
+        {
+            "name": "test_plugin",
+            "version": "0.0.0",
+            "exec_path": "path/to/binary"
+        }
+        "#;
+
+        let plugin_desc: PluginDescription = serde_json::from_str(json).unwrap();
+
+        assert!(plugin_desc.capabilities.is_empty());
+        assert!(!plugin_desc.has_capability(PluginCapability::Edit));
+        assert_eq!(plugin_desc.launch, PluginLaunchConfig::default());
     }
 
     #[test]
@@ -290,5 +474,139 @@ mod tests {
         assert_eq!(command.args[0].arg_type, ArgumentType::Bool);
         assert_eq!(command.rpc_cmd.params_ref()["non_arg"], "plugin supplied value");
         assert_eq!(command.args[1].options.clone().unwrap()[1].value, json!(10));
+        assert!(command.validate().is_ok());
+    }
+
+    #[test]
+    fn command_validation_rejects_undeclared_placeholders() {
+        let command = Command::new(
+            "Test Command",
+            "desc",
+            PlaceholderRpc::new(
+                "test.cmd",
+                Some(json!({
+                    "view": "",
+                    "arg_one": "",
+                    "mystery": ""
+                })),
+                false,
+            ),
+            Some(vec![CommandArgument::new(
+                "First argument",
+                "desc",
+                "arg_one",
+                ArgumentType::String,
+                None,
+            )]),
+        );
+
+        assert_eq!(
+            command.validate(),
+            Err(ManifestValidationError::UndeclaredPlaceholder {
+                command: "Test Command".to_string(),
+                key: "mystery".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn command_validation_requires_all_declared_arguments() {
+        let command = Command::new(
+            "Test Command",
+            "desc",
+            PlaceholderRpc::new("test.cmd", Some(json!({ "view": "" })), false),
+            Some(vec![CommandArgument::new(
+                "First argument",
+                "desc",
+                "arg_one",
+                ArgumentType::String,
+                None,
+            )]),
+        );
+
+        assert_eq!(
+            command.validate(),
+            Err(ManifestValidationError::MissingCommandArgumentTemplate {
+                command: "Test Command".to_string(),
+                key: "arg_one".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn plugin_activation_helpers_respect_manifest_activation_modes() {
+        let syntax_plugin = PluginDescription {
+            name: "syntax-plugin".into(),
+            version: "0.1.0".into(),
+            scope: PluginScope::BufferLocal,
+            capabilities: Vec::new(),
+            launch: PluginLaunchConfig::default(),
+            exec_path: PathBuf::from("plugin"),
+            activations: vec![PluginActivation::OnSyntax("rust".into())],
+            commands: Vec::new(),
+            languages: Vec::new(),
+        };
+        let command_plugin = PluginDescription {
+            name: "command-plugin".into(),
+            version: "0.1.0".into(),
+            scope: PluginScope::BufferLocal,
+            capabilities: Vec::new(),
+            launch: PluginLaunchConfig::default(),
+            exec_path: PathBuf::from("plugin"),
+            activations: vec![PluginActivation::OnCommand],
+            commands: Vec::new(),
+            languages: Vec::new(),
+        };
+        let single_invocation = PluginDescription {
+            name: "single-plugin".into(),
+            version: "0.1.0".into(),
+            scope: PluginScope::SingleInvocation,
+            capabilities: Vec::new(),
+            launch: PluginLaunchConfig::default(),
+            exec_path: PathBuf::from("plugin"),
+            activations: Vec::new(),
+            commands: Vec::new(),
+            languages: Vec::new(),
+        };
+
+        assert!(syntax_plugin.receives_updates_for(&"rust".into()));
+        assert!(!syntax_plugin.receives_updates_for(&"toml".into()));
+        assert!(command_plugin.activates_on_command());
+        assert!(!command_plugin.receives_updates_for(&"rust".into()));
+        assert!(single_invocation.activates_on_command());
+        assert!(!single_invocation.activates_on_startup());
+        assert!(!single_invocation.receives_updates_for(&"rust".into()));
+    }
+
+    #[test]
+    fn plugin_launch_config_defaults_to_newline_stdio() {
+        let launch = PluginLaunchConfig::default();
+
+        assert_eq!(launch.transport, PluginTransport::StdioNewline);
+        assert!(launch.working_dir.is_none());
+        assert!(launch.env.is_empty());
+    }
+
+    #[test]
+    fn plugin_description_supports_manifest_command_method() {
+        let plugin_desc = PluginDescription {
+            name: "test_plugin".into(),
+            version: "0.0.0".into(),
+            scope: PluginScope::Global,
+            capabilities: Vec::new(),
+            launch: PluginLaunchConfig::default(),
+            exec_path: PathBuf::from("path/to/binary"),
+            activations: Vec::new(),
+            commands: vec![Command::new(
+                "Reindent",
+                "Reindent current selection",
+                PlaceholderRpc::new("reindent", Some(json!({})), false),
+                None,
+            )],
+            languages: Vec::new(),
+        };
+
+        assert!(plugin_desc.supports_command("reindent"));
+        assert!(!plugin_desc.supports_command("toggle_comment"));
     }
 }

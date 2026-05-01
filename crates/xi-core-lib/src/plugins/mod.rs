@@ -19,17 +19,21 @@ pub mod manifest;
 pub mod rpc;
 
 use std::fmt;
+use std::io::BufRead;
 use std::io::BufReader;
 use std::path::Path;
 use std::process::{Child, Command as ProcCommand, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use log::{error, info};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use xi_rpc::{self, NewlineReader, NewlineWriter, RpcLoop, RpcPeer};
+use xi_rpc::{
+    self, ContentLengthReader, ContentLengthWriter, NewlineReader, NewlineWriter, RequestId,
+    RpcLoop, RpcPeer,
+};
 
 use crate::WeakXiCore;
 use crate::config::Table;
@@ -37,10 +41,13 @@ use crate::syntax::LanguageId;
 use crate::tabs::ViewId;
 use crate::tracing_support;
 
-use self::rpc::{PluginBufferInfo, PluginUpdate};
+use self::rpc::{PluginBufferInfo, PluginUpdate, core_protocol_capabilities};
 
 pub(crate) use self::catalog::PluginCatalog;
-pub use self::manifest::{Command, PlaceholderRpc, PluginDescription};
+pub use self::manifest::{
+    Command, ManifestValidationError, PlaceholderRpc, PluginCapability, PluginDescription,
+    PluginTransport,
+};
 
 pub type PluginName = String;
 
@@ -65,8 +72,20 @@ pub struct Plugin {
     peer: RpcPeer,
     pub(crate) id: PluginId,
     pub(crate) name: String,
-    #[allow(dead_code)]
-    process: Child,
+    pub(crate) manifest: Arc<PluginDescription>,
+    process: Arc<Mutex<Child>>,
+}
+
+#[derive(Debug)]
+pub struct PluginStartError {
+    pub(crate) name: String,
+    pub(crate) source: PluginStartErrorKind,
+}
+
+#[derive(Debug)]
+pub enum PluginStartErrorKind {
+    Io(std::io::Error),
+    UnsupportedTransport(PluginTransport),
 }
 
 impl Plugin {
@@ -79,6 +98,8 @@ impl Plugin {
             &json!({
                 "plugin_id": self.id,
                 "buffer_info": info,
+                "protocol_version": crate::plugins::rpc::PLUGIN_PROTOCOL_VERSION,
+                "core_capabilities": core_protocol_capabilities(),
             }),
         )
     }
@@ -141,15 +162,22 @@ impl Plugin {
         )
     }
 
-    pub fn get_hover(&self, view_id: ViewId, request_id: usize, position: usize) {
-        self.peer.send_rpc_notification(
+    pub fn request_hover<F>(&self, view_id: ViewId, position: usize, callback: F) -> RequestId
+    where
+        F: FnOnce(Result<Value, xi_rpc::Error>) + Send + 'static,
+    {
+        self.peer.send_rpc_request_async(
             "get_hover",
             &json!({
                 "view_id": view_id,
-                "request_id": request_id,
                 "position": position,
             }),
+            Box::new(callback),
         )
+    }
+
+    pub fn cancel_request(&self, id: RequestId) -> bool {
+        self.peer.cancel_rpc_request(id)
     }
 
     pub fn dispatch_command(&self, view_id: ViewId, method: &str, params: &Value) {
@@ -162,6 +190,18 @@ impl Plugin {
             }),
         )
     }
+
+    pub fn receives_updates_for(&self, language: &LanguageId) -> bool {
+        self.manifest.receives_updates_for(language)
+    }
+
+    pub fn is_single_invocation(&self) -> bool {
+        matches!(self.manifest.scope, manifest::PluginScope::SingleInvocation)
+    }
+
+    pub fn process_handle(&self) -> Arc<Mutex<Child>> {
+        Arc::clone(&self.process)
+    }
 }
 
 pub(crate) fn start_plugin_process(
@@ -173,37 +213,119 @@ pub(crate) fn start_plugin_process(
         .name(format!("<{}> core host thread", &plugin_desc.name))
         .spawn(move || {
             info!("starting plugin {}", &plugin_desc.name);
-            let child = ProcCommand::new(&plugin_desc.exec_path)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .spawn();
+            let child = spawn_child_process(&plugin_desc);
 
             match child {
                 Ok(mut child) => {
+                    let stderr = child.stderr.take();
                     let child_stdin = child.stdin.take().unwrap();
                     let child_stdout = child.stdout.take().unwrap();
-                    let mut looper = RpcLoop::new(NewlineWriter::new(child_stdin));
-                    let peer: RpcPeer = Box::new(looper.get_raw_peer());
-                    let name = plugin_desc.name.clone();
-                    peer.send_rpc_notification("ping", &Value::Array(Vec::new()));
-                    let plugin = Plugin { peer, process: child, name, id };
-
-                    // set tracing immediately
-                    if tracing_support::is_enabled() {
-                        plugin.toggle_tracing(true);
+                    let process = Arc::new(Mutex::new(child));
+                    if let Some(stderr) = stderr {
+                        spawn_stderr_thread(plugin_desc.name.clone(), stderr, core.clone());
                     }
 
-                    core.plugin_connect(Ok(plugin));
-                    let mut core = core;
-                    let err = looper
-                        .mainloop(|| NewlineReader::new(BufReader::new(child_stdout)), &mut core);
-                    core.plugin_exit(id, err);
+                    match plugin_desc.launch.transport {
+                        PluginTransport::StdioNewline => {
+                            let mut looper = RpcLoop::new(NewlineWriter::new(child_stdin));
+                            let peer: RpcPeer = Box::new(looper.get_raw_peer());
+                            let name = plugin_desc.name.clone();
+                            peer.send_rpc_notification("ping", &Value::Array(Vec::new()));
+                            let plugin = Plugin {
+                                peer,
+                                process: Arc::clone(&process),
+                                name,
+                                id,
+                                manifest: plugin_desc.clone(),
+                            };
+
+                            if tracing_support::is_enabled() {
+                                plugin.toggle_tracing(true);
+                            }
+
+                            core.plugin_connect(Ok(plugin));
+                            let mut core = core;
+                            let err = looper.mainloop(
+                                || NewlineReader::new(BufReader::new(child_stdout)),
+                                &mut core,
+                            );
+                            core.plugin_exit(id, err);
+                        }
+                        PluginTransport::StdioContentLength => {
+                            let mut looper = RpcLoop::new(ContentLengthWriter::new(child_stdin));
+                            let peer: RpcPeer = Box::new(looper.get_raw_peer());
+                            let name = plugin_desc.name.clone();
+                            peer.send_rpc_notification("ping", &Value::Array(Vec::new()));
+                            let plugin = Plugin {
+                                peer,
+                                process: Arc::clone(&process),
+                                name,
+                                id,
+                                manifest: plugin_desc.clone(),
+                            };
+
+                            if tracing_support::is_enabled() {
+                                plugin.toggle_tracing(true);
+                            }
+
+                            core.plugin_connect(Ok(plugin));
+                            let mut core = core;
+                            let err = looper.mainloop(
+                                || ContentLengthReader::new(BufReader::new(child_stdout)),
+                                &mut core,
+                            );
+                            core.plugin_exit(id, err);
+                        }
+                    }
                 }
-                Err(err) => core.plugin_connect(Err(err)),
+                Err(source) => core.plugin_connect(Err(PluginStartError {
+                    name: plugin_desc.name.clone(),
+                    source,
+                })),
             }
         });
 
     if let Err(err) = spawn_result {
         error!("thread spawn failed for {}, {:?}", id, err);
+    }
+}
+
+fn spawn_child_process(plugin_desc: &PluginDescription) -> Result<Child, PluginStartErrorKind> {
+    let mut command = ProcCommand::new(&plugin_desc.exec_path);
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    if let Some(working_dir) = &plugin_desc.launch.working_dir {
+        command.current_dir(working_dir);
+    }
+
+    for (key, value) in &plugin_desc.launch.env {
+        command.env(key, value);
+    }
+
+    command.spawn().map_err(PluginStartErrorKind::Io)
+}
+
+fn spawn_stderr_thread(name: String, stderr: std::process::ChildStderr, core: WeakXiCore) {
+    let thread_name = name.clone();
+    let stderr_name = name.clone();
+    let spawn_result =
+        thread::Builder::new().name(format!("<{}> stderr", thread_name)).spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                match line {
+                    Ok(line) if !line.trim().is_empty() => {
+                        core.plugin_stderr(stderr_name.clone(), line);
+                    }
+                    Ok(_) => (),
+                    Err(err) => {
+                        error!("plugin {} stderr read error: {:?}", stderr_name, err);
+                        break;
+                    }
+                }
+            }
+        });
+
+    if let Err(err) = spawn_result {
+        error!("stderr thread spawn failed for {}: {:?}", name, err);
     }
 }

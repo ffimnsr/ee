@@ -100,6 +100,8 @@ pub trait Peer: Send + 'static {
     fn schedule_timer(&self, after: Instant, token: usize);
     /// Cancels a previously scheduled timer identified by `token`.
     fn cancel_timer(&self, token: usize) -> bool;
+    /// Requests orderly shutdown of the current RPC loop.
+    fn request_shutdown(&self);
 }
 
 /// The `Peer` trait object.
@@ -450,6 +452,11 @@ impl RpcCtx {
     pub fn schedule_idle(&self, token: usize) {
         self.peer.schedule_idle(token)
     }
+
+    /// Requests orderly shutdown of the current RPC loop.
+    pub fn request_shutdown(&self) {
+        self.peer.request_shutdown()
+    }
 }
 
 impl<W: WriteTransport> Peer for RawPeer<W> {
@@ -569,6 +576,10 @@ impl<W: WriteTransport> Peer for RawPeer<W> {
         let removed = before - remaining.len();
         *timers = remaining.into_iter().collect();
         removed > 0
+    }
+
+    fn request_shutdown(&self) {
+        self.disconnect();
     }
 }
 

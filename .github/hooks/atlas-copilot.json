@@ -1,0 +1,52 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": ".atlas/hooks/atlas-hook copilot session-start"
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": ".atlas/hooks/atlas-hook copilot user-prompt"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": ".atlas/hooks/atlas-hook copilot pre-tool-use"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "type": "command",
+        "command": ".atlas/hooks/atlas-hook copilot post-tool-use"
+      }
+    ],
+    "PreCompact": [
+      {
+        "type": "command",
+        "command": ".atlas/hooks/atlas-hook copilot pre-compact"
+      }
+    ],
+    "SubagentStart": [
+      {
+        "type": "command",
+        "command": ".atlas/hooks/atlas-hook copilot subagent-start"
+      }
+    ],
+    "SubagentStop": [
+      {
+        "type": "command",
+        "command": ".atlas/hooks/atlas-hook copilot subagent-stop"
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": ".atlas/hooks/atlas-hook copilot stop"
+      }
+    ]
+  }
+}

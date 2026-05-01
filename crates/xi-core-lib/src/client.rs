@@ -22,7 +22,7 @@ use xi_rpc::{self, RpcPeer};
 
 use crate::config::Table;
 use crate::plugins::Command;
-use crate::plugins::rpc::ClientPluginInfo;
+use crate::plugins::rpc::{ClientPluginInfo, CompletionSuggestion, NavigationTarget};
 use crate::styles::ThemeSettings;
 use crate::syntax::LanguageId;
 use crate::tabs::ViewId;
@@ -225,6 +225,27 @@ impl Client {
                 "view_id": view_id,
                 "request_id": request_id,
                 "result": result,
+            }),
+        )
+    }
+
+    pub fn show_completions(&self, view_id: ViewId, items: &[CompletionSuggestion]) {
+        self.0.send_rpc_notification(
+            "show_completions",
+            &json!({
+                "view_id": view_id,
+                "items": items,
+            }),
+        )
+    }
+
+    pub fn show_locations(&self, view_id: ViewId, title: &str, locations: &[NavigationTarget]) {
+        self.0.send_rpc_notification(
+            "show_locations",
+            &json!({
+                "view_id": view_id,
+                "title": title,
+                "locations": locations,
             }),
         )
     }

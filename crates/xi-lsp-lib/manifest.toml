@@ -1,4 +1,5 @@
 manifest_version = 1
 name = "xi-lsp-plugin"
 version = "0.0"
+capabilities = ["edit", "hover", "status_items", "filesystem", "network"]
 exec_path="./bin/xi-lsp-plugin"

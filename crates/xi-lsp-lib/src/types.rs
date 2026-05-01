@@ -13,11 +13,15 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::io::Error as IOError;
 
 use jsonrpc_lite::Error as JsonRpcError;
+use lsp_types::{Command, TextEdit};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use xi_core_lib::plugin_rpc::{CompletionSuggestion, NavigationTarget};
+use xi_plugin_lib::Diagnostic as CoreDiagnostic;
 use xi_plugin_lib::Error as PluginLibError;
 use xi_rpc::RemoteError;
 
@@ -65,11 +69,37 @@ pub enum Error {
     PathError,
     FileUrlParseError,
     IOError(IOError),
+    ServerStart { context: &'static str, message: String },
+    Protocol(String),
+    Serialization(String),
+    LockPoisoned(&'static str),
 }
 
 impl From<IOError> for Error {
     fn from(err: IOError) -> Error {
         Error::IOError(err)
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(err: serde_json::Error) -> Self {
+        Error::Serialization(err.to_string())
+    }
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::PathError => write!(f, "path error"),
+            Error::FileUrlParseError => write!(f, "file url parse error"),
+            Error::IOError(err) => write!(f, "io error: {err}"),
+            Error::ServerStart { context, message } => {
+                write!(f, "server start failed during {context}: {message}")
+            }
+            Error::Protocol(message) => write!(f, "protocol error: {message}"),
+            Error::Serialization(message) => write!(f, "serialization error: {message}"),
+            Error::LockPoisoned(context) => write!(f, "lock poisoned: {context}"),
+        }
     }
 }
 
@@ -80,6 +110,7 @@ pub enum LanguageResponseError {
     PluginLibError(PluginLibError),
     NullResponse,
     FallbackResponse,
+    Transport(String),
 }
 
 impl From<PluginLibError> for LanguageResponseError {
@@ -105,11 +136,34 @@ impl From<LanguageResponseError> for RemoteError {
                 "Plugin Lib Error",
                 Some(Value::String(format!("{:?}", error))),
             ),
+            LanguageResponseError::Transport(error) => RemoteError::custom(
+                4,
+                "language server transport error",
+                Some(Value::String(error)),
+            ),
         }
     }
+}
+
+impl From<Error> for LanguageResponseError {
+    fn from(error: Error) -> Self {
+        LanguageResponseError::Transport(error.to_string())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LspCodeAction {
+    pub title: String,
+    pub edits: Vec<TextEdit>,
+    pub command: Option<Command>,
 }
 
 #[derive(Debug)]
 pub enum LspResponse {
     Hover(Result<Hover, LanguageResponseError>),
+    Diagnostics(Result<Vec<CoreDiagnostic>, LanguageResponseError>),
+    Completions(Result<Vec<CompletionSuggestion>, LanguageResponseError>),
+    Locations { title: String, result: Result<Vec<NavigationTarget>, LanguageResponseError> },
+    Formatting { title: String, result: Result<Vec<TextEdit>, LanguageResponseError> },
+    CodeActions(Result<Vec<LspCodeAction>, LanguageResponseError>),
 }

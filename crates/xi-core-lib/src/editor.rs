@@ -35,7 +35,9 @@ use crate::layers::Layers;
 use crate::line_offset::{LineOffset, LogicalLines};
 use crate::movement::Movement;
 use crate::plugins::PluginId;
-use crate::plugins::rpc::{DataSpan, GetDataResponse, PluginEdit, ScopeSpan, TextUnit};
+use crate::plugins::rpc::{
+    DataSpan, GetDataResponse, PluginEdit, PluginEditAck, ScopeSpan, TextUnit,
+};
 use crate::rpc::SelectionModifier;
 use crate::selection::{InsertDrift, SelRegion, Selection};
 use crate::styles::ThemeStyleMap;
@@ -222,16 +224,23 @@ impl Editor {
     }
 
     /// generates a delta from a plugin's response and applies it to the buffer.
-    pub fn apply_plugin_edit(&mut self, edit: PluginEdit) {
+    pub fn apply_plugin_edit(&mut self, edit: PluginEdit) -> PluginEditAck {
         let _t = tracing::trace_span!("Editor::apply_plugin_edit", categories = "core").entered();
         //TODO: get priority working, so that plugin edits don't necessarily move cursor
         let PluginEdit { rev, delta, priority, undo_group, .. } = edit;
         let priority = priority as usize;
         let undo_group = undo_group.unwrap_or_else(|| self.calculate_undo_group());
         match self.engine.try_edit_rev(priority, undo_group, rev, delta) {
-            Err(e) => error!("Error applying plugin edit: {}", e),
-            Ok(_) => self.text = self.engine.get_head().clone(),
-        };
+            Err(e) => {
+                let reason = e.to_string();
+                error!("Error applying plugin edit: {}", reason);
+                PluginEditAck { applied: false, rev, reason: Some(reason) }
+            }
+            Ok(_) => {
+                self.text = self.engine.get_head().clone();
+                PluginEditAck { applied: true, rev, reason: None }
+            }
+        }
     }
 
     /// Commits the current delta. If the buffer has changed, returns

@@ -91,12 +91,35 @@ pub struct PluginUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmptyStruct {}
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolCapability {
+    CoreCapabilityNegotiation,
+    GracefulShutdown,
+    RestartBackoff,
+}
+
+pub const PLUGIN_PROTOCOL_VERSION: u32 = 1;
+
+pub fn core_protocol_capabilities() -> Vec<ProtocolCapability> {
+    vec![
+        ProtocolCapability::CoreCapabilityNegotiation,
+        ProtocolCapability::GracefulShutdown,
+        ProtocolCapability::RestartBackoff,
+    ]
+}
+
+fn default_protocol_version() -> u32 {
+    PLUGIN_PROTOCOL_VERSION
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "method", content = "params")]
 /// RPC requests sent from the host
 pub enum HostRequest {
     Update(PluginUpdate),
+    GetHover { view_id: ViewId, position: usize },
     CollectTrace(EmptyStruct),
 }
 
@@ -106,16 +129,41 @@ pub enum HostRequest {
 /// RPC Notifications sent from the host
 pub enum HostNotification {
     Ping(EmptyStruct),
-    Initialize { plugin_id: PluginPid, buffer_info: Vec<PluginBufferInfo> },
-    DidSave { view_id: ViewId, path: PathBuf },
-    ConfigChanged { view_id: ViewId, changes: Table },
-    NewBuffer { buffer_info: Vec<PluginBufferInfo> },
-    DidClose { view_id: ViewId },
-    GetHover { view_id: ViewId, request_id: usize, position: usize },
+    Initialize {
+        plugin_id: PluginPid,
+        buffer_info: Vec<PluginBufferInfo>,
+        #[serde(default = "default_protocol_version")]
+        protocol_version: u32,
+        #[serde(default)]
+        core_capabilities: Vec<ProtocolCapability>,
+    },
+    DidSave {
+        view_id: ViewId,
+        path: PathBuf,
+    },
+    ConfigChanged {
+        view_id: ViewId,
+        changes: Table,
+    },
+    NewBuffer {
+        buffer_info: Vec<PluginBufferInfo>,
+    },
+    DidClose {
+        view_id: ViewId,
+    },
     Shutdown(EmptyStruct),
-    TracingConfig { enabled: bool },
-    LanguageChanged { view_id: ViewId, new_lang: LanguageId },
-    CustomCommand { view_id: ViewId, method: String, params: Value },
+    TracingConfig {
+        enabled: bool,
+    },
+    LanguageChanged {
+        view_id: ViewId,
+        new_lang: LanguageId,
+    },
+    CustomCommand {
+        view_id: ViewId,
+        method: String,
+        params: Value,
+    },
 }
 
 // ====================================================================
@@ -161,6 +209,118 @@ pub struct GetDataResponse {
     pub first_line_offset: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GetSelectionsResponse {
+    pub selections: Vec<SelectionRange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelectionRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticSeverity {
+    Error,
+    Warning,
+    Information,
+    Hint,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Diagnostic {
+    pub range: Range,
+    pub severity: DiagnosticSeverity,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct GetDiagnosticsResponse {
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FormattingOptions {
+    pub tab_size: usize,
+    pub insert_spaces: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TextEdit {
+    pub range: Range,
+    pub new_text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FormatDocumentRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<FormattingOptions>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct FormatDocumentResponse {
+    pub edits: Vec<TextEdit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodeActionRequest {
+    pub range: Range,
+    #[serde(default)]
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodeAction {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edits: Vec<TextEdit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CodeActionResponse {
+    pub actions: Vec<CodeAction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompletionSuggestion {
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub insert_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NavigationTarget {
+    pub path: String,
+    pub line: usize,
+    pub column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginUpdateAck {
+    pub view_id: ViewId,
+    pub rev: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginEditAck {
+    pub applied: bool,
+    pub rev: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// The unit of measure when requesting data.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
@@ -178,9 +338,13 @@ pub enum TextUnit {
 #[serde(tag = "method", content = "params")]
 /// RPC requests sent from plugins.
 pub enum PluginRequest {
+    ApplyEdit { edit: PluginEdit },
     GetData { start: usize, unit: TextUnit, max_size: usize, rev: u64 },
     LineCount,
     GetSelections,
+    GetDiagnostics,
+    FormatDocument(FormatDocumentRequest),
+    GetCodeActions(CodeActionRequest),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -219,6 +383,13 @@ pub enum PluginNotification {
         request_id: usize,
         result: Result<Hover, RemoteError>,
     },
+    ShowCompletions {
+        items: Vec<CompletionSuggestion>,
+    },
+    ShowLocations {
+        title: String,
+        locations: Vec<NavigationTarget>,
+    },
     UpdateAnnotations {
         start: usize,
         len: usize,
@@ -226,11 +397,14 @@ pub enum PluginNotification {
         annotation_type: AnnotationType,
         rev: u64,
     },
+    UpdateDiagnostics {
+        diagnostics: Vec<Diagnostic>,
+    },
 }
 
 /// Range expressed in terms of PluginPosition. Meant to be sent from
 /// plugin to core.
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub struct Range {
     pub start: usize,
@@ -392,6 +566,26 @@ mod tests {
         assert_eq!(val.rev, 1);
         assert_eq!(val.path, Some("some_path".to_owned()));
         assert_eq!(val.syntax, "toml".into());
+    }
+
+    #[test]
+    fn initialize_notification_defaults_protocol_negotiation_fields() {
+        let json = r#"{
+            "method": "initialize",
+            "params": {
+                "plugin_id": 7,
+                "buffer_info": []
+            }
+        }"#;
+
+        let notification: HostNotification = serde_json::from_str(json).unwrap();
+        match notification {
+            HostNotification::Initialize { protocol_version, core_capabilities, .. } => {
+                assert_eq!(protocol_version, PLUGIN_PROTOCOL_VERSION);
+                assert!(core_capabilities.is_empty());
+            }
+            other => panic!("unexpected notification: {other:?}"),
+        }
     }
 
     #[test]

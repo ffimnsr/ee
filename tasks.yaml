@@ -11,3 +11,13 @@ tasks:
     commands:
       - cargo clippy --all -- -D warnings
     description: Lint the code using clippy, treating warnings as errors.
+  install-githooks:
+    commands:
+      - rm -rf .git/hooks
+      - mkdir -p .git/hooks
+      - cp -r .githooks/* .git/hooks/
+    description: Install git hooks from the .githooks directory.
+  uninstall-githooks:
+    commands:
+      - rm -rf .git/hooks
+    description: Uninstall git hooks by removing the .git/hooks directory.

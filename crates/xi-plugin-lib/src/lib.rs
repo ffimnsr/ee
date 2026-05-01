@@ -27,7 +27,7 @@ use xi_core_lib::plugin_rpc::{GetDataResponse, TextUnit};
 use xi_core_lib::{ConfigTable, LanguageId};
 use xi_rope::RopeDelta;
 use xi_rope::interval::IntervalBounds;
-use xi_rpc::{NewlineReader, NewlineWriter, ReadError, RpcLoop};
+use xi_rpc::{NewlineReader, NewlineWriter, ReadError, RemoteError, RpcLoop};
 
 use self::dispatch::Dispatcher;
 
@@ -35,7 +35,10 @@ pub use crate::base_cache::ChunkCache;
 pub use crate::core_proxy::CoreProxy;
 pub use crate::state_cache::StateCache;
 pub use crate::view::View;
-pub use xi_core_lib::plugin_rpc::{Hover, Range};
+pub use xi_core_lib::plugin_rpc::{
+    CodeAction, CodeActionRequest, Diagnostic, DiagnosticSeverity, FormatDocumentRequest,
+    FormattingOptions, Hover, PluginEdit, PluginEditAck, Range, SelectionRange, TextEdit,
+};
 
 /// Abstracts getting data from the peer. Mainly exists for mocking in tests.
 pub trait DataSource {
@@ -171,9 +174,21 @@ pub trait Plugin {
     #[allow(unused_variables)]
     fn idle(&mut self, view: &mut View<Self::Cache>) {}
 
+    /// Called before the plugin RPC loop shuts down in response to a core
+    /// shutdown notification.
+    #[allow(unused_variables)]
+    fn shutdown(&mut self) {}
+
     /// Language Plugins specific methods
     #[allow(unused_variables)]
-    fn get_hover(&mut self, view: &mut View<Self::Cache>, request_id: usize, position: usize) {}
+    fn get_hover(
+        &mut self,
+        view: &mut View<Self::Cache>,
+        position: usize,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Hover, RemoteError> {
+        Err(RemoteError::custom(404, "hover not supported", None))
+    }
 }
 
 #[derive(Debug)]
@@ -182,6 +197,7 @@ pub enum Error {
     WrongReturnType,
     BadRequest,
     PeerDisconnect,
+    ConfigDeserialization { context: &'static str, source: serde_json::Error },
     // Just used in tests
     Other(String),
 }
@@ -195,4 +211,54 @@ pub fn mainloop<P: Plugin>(plugin: &mut P) -> Result<(), ReadError> {
 
     rpc_looper
         .mainloop(|| NewlineReader::new(std::io::BufReader::new(io::stdin())), &mut dispatcher)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    use xi_rpc::test_utils::make_reader;
+
+    struct ShutdownPlugin {
+        shutdown_called: bool,
+    }
+
+    impl Plugin for ShutdownPlugin {
+        type Cache = ChunkCache;
+
+        fn update(
+            &mut self,
+            _view: &mut View<Self::Cache>,
+            _delta: Option<&RopeDelta>,
+            _edit_type: String,
+            _author: String,
+        ) {
+        }
+
+        fn did_save(&mut self, _view: &mut View<Self::Cache>, _old_path: Option<&Path>) {}
+
+        fn did_close(&mut self, _view: &View<Self::Cache>) {}
+
+        fn new_view(&mut self, _view: &mut View<Self::Cache>) {}
+
+        fn config_changed(&mut self, _view: &mut View<Self::Cache>, _changes: &ConfigTable) {}
+
+        fn shutdown(&mut self) {
+            self.shutdown_called = true;
+        }
+    }
+
+    #[test]
+    fn shutdown_notification_exits_plugin_loop_cleanly() {
+        let mut plugin = ShutdownPlugin { shutdown_called: false };
+        let mut dispatcher = Dispatcher::new(&mut plugin);
+        let mut rpc_looper = RpcLoop::new(NewlineWriter::new(io::sink()));
+        let reader = make_reader(r#"{"method":"shutdown","params":{}}"#);
+
+        let result = rpc_looper.mainloop(|| reader, &mut dispatcher);
+
+        assert!(result.is_ok(), "shutdown should end plugin loop cleanly: {:?}", result);
+        assert!(plugin.shutdown_called, "plugin shutdown hook should run before exit");
+    }
 }

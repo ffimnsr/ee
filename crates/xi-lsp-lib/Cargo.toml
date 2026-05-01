@@ -19,6 +19,7 @@ log.workspace = true
 chrono.workspace = true
 url.workspace = true
 lsp-server = { workspace = true }
+tokio-util = { workspace = true }
 
 [dependencies.xi-plugin-lib]
 workspace = true

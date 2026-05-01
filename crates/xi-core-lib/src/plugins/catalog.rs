@@ -24,7 +24,7 @@ use std::sync::Arc;
 use log::{error, info};
 use serde::Deserialize;
 
-use super::{PluginDescription, PluginName};
+use super::{ManifestValidationError, PluginDescription, PluginName};
 use crate::config::table_from_toml_str;
 use crate::syntax::Languages;
 
@@ -53,6 +53,10 @@ pub enum PluginLoadError {
         first_path: PathBuf,
         second_path: PathBuf,
     },
+    InvalidManifest {
+        path: PathBuf,
+        err: ManifestValidationError,
+    },
 }
 
 impl fmt::Display for PluginLoadError {
@@ -73,6 +77,9 @@ impl fmt::Display for PluginLoadError {
                 first_path.display(),
                 second_path.display()
             ),
+            PluginLoadError::InvalidManifest { path, err } => {
+                write!(f, "invalid plugin manifest {}: {err}", path.display())
+            }
         }
     }
 }
@@ -219,13 +226,21 @@ fn load_manifest(path: &Path) -> Result<PluginDescription, PluginLoadError> {
     }
 
     let mut manifest = manifest.plugin;
+    manifest
+        .validates()
+        .map_err(|err| PluginLoadError::InvalidManifest { path: path.to_path_buf(), err })?;
+    let manifest_dir = path.parent().unwrap();
     if manifest.exec_path.is_relative() {
-        manifest.exec_path = path.parent().unwrap().join(&manifest.exec_path).canonicalize()?;
+        manifest.exec_path = manifest_dir.join(&manifest.exec_path).canonicalize()?;
+    }
+    if let Some(working_dir) = manifest.launch.working_dir.as_mut()
+        && working_dir.is_relative()
+    {
+        *working_dir = manifest_dir.join(&*working_dir);
     }
 
     for lang in &mut manifest.languages {
-        let lang_config_path =
-            path.parent().unwrap().join(lang.name.as_ref()).with_extension("toml");
+        let lang_config_path = manifest_dir.join(lang.name.as_ref()).with_extension("toml");
         if !lang_config_path.exists() {
             continue;
         }
@@ -261,6 +276,7 @@ impl From<toml::de::Error> for PluginLoadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::{PluginCapability, PluginTransport};
     use std::fs;
 
     use tempfile::TempDir;
@@ -278,6 +294,36 @@ mod tests {
             &manifest_path,
             format!(
                 "manifest_version = {manifest_version}\nname = \"{name}\"\nversion = \"0.1.0\"\nexec_path = \"{exec_rel}\"\n"
+            ),
+        )
+        .unwrap();
+        manifest_path
+    }
+
+    fn write_plugin_with_capabilities(
+        root: &Path,
+        name: &str,
+        exec_rel: &str,
+        manifest_version: u32,
+        capabilities: &[&str],
+    ) -> PathBuf {
+        fs::create_dir_all(root).unwrap();
+        let exec_path = root.join(exec_rel);
+        if let Some(parent) = exec_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&exec_path, b"#!/bin/sh\n").unwrap();
+
+        let manifest_path = root.join("manifest.toml");
+        let capabilities = capabilities
+            .iter()
+            .map(|capability| format!("\"{capability}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        fs::write(
+            &manifest_path,
+            format!(
+                "manifest_version = {manifest_version}\nname = \"{name}\"\nversion = \"0.1.0\"\nexec_path = \"{exec_rel}\"\ncapabilities = [{capabilities}]\n"
             ),
         )
         .unwrap();
@@ -309,6 +355,105 @@ mod tests {
             manifest.exec_path,
             temp_dir.path().join("bin/test-plugin").canonicalize().unwrap()
         );
+    }
+
+    #[test]
+    fn load_manifest_reads_declared_capabilities() {
+        let temp_dir = TempDir::new().unwrap();
+        let manifest_path = write_plugin_with_capabilities(
+            temp_dir.path(),
+            "test-plugin",
+            "bin/test-plugin",
+            1,
+            &["hover", "status_items", "filesystem"],
+        );
+
+        let manifest = load_manifest(&manifest_path).unwrap();
+
+        assert_eq!(
+            manifest.capabilities,
+            vec![
+                PluginCapability::Hover,
+                PluginCapability::StatusItems,
+                PluginCapability::Filesystem,
+            ]
+        );
+    }
+
+    #[test]
+    fn load_manifest_normalizes_relative_launch_working_dir() {
+        let temp_dir = TempDir::new().unwrap();
+        let manifest_dir = temp_dir.path().join("plugin");
+        let exec_path = manifest_dir.join("bin/test-plugin");
+        fs::create_dir_all(exec_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(manifest_dir.join("runtime-data")).unwrap();
+        fs::write(&exec_path, b"#!/bin/sh\n").unwrap();
+
+        let manifest_path = manifest_dir.join("manifest.toml");
+        fs::write(
+            &manifest_path,
+            r#"manifest_version = 1
+name = "test-plugin"
+version = "0.1.0"
+exec_path = "bin/test-plugin"
+
+[launch]
+working_dir = "runtime-data"
+transport = "stdio_content_length"
+"#,
+        )
+        .unwrap();
+
+        let manifest = load_manifest(&manifest_path).unwrap();
+
+        assert_eq!(manifest.launch.working_dir, Some(manifest_dir.join("runtime-data")));
+        assert_eq!(manifest.launch.transport, PluginTransport::StdioContentLength);
+    }
+
+    #[test]
+    fn load_manifest_rejects_invalid_placeholder_templates() {
+        let temp_dir = TempDir::new().unwrap();
+        let manifest_path = temp_dir.path().join("manifest.toml");
+        let exec_path = temp_dir.path().join("bin/test-plugin");
+        fs::create_dir_all(exec_path.parent().unwrap()).unwrap();
+        fs::write(&exec_path, b"#!/bin/sh\n").unwrap();
+        fs::write(
+            &manifest_path,
+            r#"manifest_version = 1
+name = "test-plugin"
+version = "0.1.0"
+exec_path = "bin/test-plugin"
+
+[[commands]]
+title = "Broken Command"
+description = "broken"
+
+[commands.rpc_cmd]
+rpc_type = "notification"
+method = "test.cmd"
+params = { view = "", missing = "" }
+
+[[commands.args]]
+title = "Declared"
+description = "declared"
+key = "arg_one"
+arg_type = "String"
+"#,
+        )
+        .unwrap();
+
+        match load_manifest(&manifest_path) {
+            Err(PluginLoadError::InvalidManifest { err, .. }) => {
+                assert_eq!(
+                    err,
+                    ManifestValidationError::MissingCommandArgumentTemplate {
+                        command: "Broken Command".to_string(),
+                        key: "arg_one".to_string(),
+                    }
+                );
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
     }
 
     #[test]
