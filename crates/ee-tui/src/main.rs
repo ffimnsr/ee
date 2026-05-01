@@ -56,10 +56,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> 
         // layout: rows[0]=editor, rows[1]=status, rows[2]=prompt
         let editor_height = (size.height as usize).saturating_sub(2);
         app.scroll_into_view(editor_height);
-        app.backend.notify_scroll(
-            app.viewport.top_line,
-            app.viewport.top_line + editor_height,
-        )?;
+        app.backend.notify_scroll(app.viewport.top_line, app.viewport.top_line + editor_height)?;
 
         terminal.draw(|frame| ui(frame, app))?;
 
@@ -257,10 +254,10 @@ impl App {
             self.dispatch(action, key);
             // Reset count/prefix after a non-digit binding in normal mode
             if self.mode == Mode::Normal
-            && !matches!(key.code, KeyCode::Char(c) if c.is_ascii_digit())
-        {
-            self.input_state.reset();
-        }
+                && !matches!(key.code, KeyCode::Char(c) if c.is_ascii_digit())
+            {
+                self.input_state.reset();
+            }
         } else {
             self.handle_default(key);
         }
@@ -390,8 +387,7 @@ impl App {
             self.viewport.top_line = cursor_line + 1 - editor_height;
         }
         // Update target column from current cursor for vertical navigation
-        let line =
-            self.backend.lines.get(cursor_line).map(|s| s.as_str()).unwrap_or("");
+        let line = self.backend.lines.get(cursor_line).map(|s| s.as_str()).unwrap_or("");
         self.viewport.target_col = byte_col_to_display_col(line, self.backend.cursor_col);
     }
 }
@@ -587,7 +583,10 @@ enum BackendEvent {
     Update(CoreUpdate),
     Alert(String),
     /// xi hint: scroll viewport so (line, col) is visible.
-    ScrollTo { line: usize, col: usize },
+    ScrollTo {
+        line: usize,
+        col: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1147,7 +1146,7 @@ fn respond_to_frontend_request(method: &str, params: Value, id: Value, tx: &Send
                         .flatten()
                         .map(|text| {
                             Value::from(
-                                UnicodeWidthStr::width(text.as_str().unwrap_or_default()) as f64,
+                                UnicodeWidthStr::width(text.as_str().unwrap_or_default()) as f64
                             )
                         })
                         .collect::<Vec<_>>()
@@ -1198,12 +1197,7 @@ fn send_rpc_notification(tx: &Sender<String>, method: &str, params: Value) -> io
     tx.send(raw).map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e.to_string()))
 }
 
-fn send_rpc_request(
-    tx: &Sender<String>,
-    id: u64,
-    method: &str,
-    params: Value,
-) -> io::Result<()> {
+fn send_rpc_request(tx: &Sender<String>, id: u64, method: &str, params: Value) -> io::Result<()> {
     let raw = serde_json::to_string(&json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -1222,7 +1216,8 @@ fn block_for_response(
     expected_id: u64,
 ) -> io::Result<Value> {
     loop {
-        let raw = rx.recv().map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e.to_string()))?;
+        let raw =
+            rx.recv().map_err(|e| io::Error::new(io::ErrorKind::BrokenPipe, e.to_string()))?;
         let msg: Value = serde_json::from_str(&raw)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
@@ -1243,10 +1238,7 @@ fn block_for_response(
 
 /// Drain pending notifications from xi right after `new_view`.
 /// Handles measure_width requests inline; returns other events as BackendEvents.
-fn drain_sync_notifications(
-    rx: &Receiver<String>,
-    tx: &Sender<String>,
-) -> Vec<BackendEvent> {
+fn drain_sync_notifications(rx: &Receiver<String>, tx: &Sender<String>) -> Vec<BackendEvent> {
     let mut events = Vec::new();
     while let Ok(raw) = rx.recv_timeout(Duration::from_millis(20)) {
         let msg: Value = match serde_json::from_str(&raw) {

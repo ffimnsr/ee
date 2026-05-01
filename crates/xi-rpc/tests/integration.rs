@@ -33,7 +33,12 @@ impl Handler for EchoHandler {
     type Notification = RpcCall;
     type Request = RpcCall;
     fn handle_notification(&mut self, ctx: &RpcCtx, rpc: Self::Notification) {}
-    fn handle_request(&mut self, ctx: &RpcCtx, rpc: Self::Request, _cancel: CancellationToken) -> Result<Value, RemoteError> {
+    fn handle_request(
+        &mut self,
+        ctx: &RpcCtx,
+        rpc: Self::Request,
+        _cancel: CancellationToken,
+    ) -> Result<Value, RemoteError> {
         Ok(rpc.params)
     }
 }
@@ -68,7 +73,12 @@ impl Handler for NoopHandler {
 
     fn handle_notification(&mut self, _ctx: &RpcCtx, _rpc: Self::Notification) {}
 
-    fn handle_request(&mut self, _ctx: &RpcCtx, _rpc: Self::Request, _cancel: CancellationToken) -> Result<Value, RemoteError> {
+    fn handle_request(
+        &mut self,
+        _ctx: &RpcCtx,
+        _rpc: Self::Request,
+        _cancel: CancellationToken,
+    ) -> Result<Value, RemoteError> {
         Ok(json!(null))
     }
 }

@@ -111,7 +111,12 @@ impl Handler for XiCore {
         self.inner().client_notification(rpc);
     }
 
-    fn handle_request(&mut self, _ctx: &RpcCtx, rpc: Self::Request, _cancel: tokio_util::sync::CancellationToken) -> Result<Value, RemoteError> {
+    fn handle_request(
+        &mut self,
+        _ctx: &RpcCtx,
+        rpc: Self::Request,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Value, RemoteError> {
         self.inner().client_request(rpc)
     }
 
@@ -174,7 +179,12 @@ impl Handler for WeakXiCore {
         }
     }
 
-    fn handle_request(&mut self, ctx: &RpcCtx, rpc: Self::Request, _cancel: tokio_util::sync::CancellationToken) -> Result<Value, RemoteError> {
+    fn handle_request(
+        &mut self,
+        ctx: &RpcCtx,
+        rpc: Self::Request,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Value, RemoteError> {
         let PluginCommand { view_id, plugin_id, cmd } = rpc;
         if let Some(core) = self.upgrade() {
             core.inner().plugin_request(ctx, view_id, plugin_id, cmd)

@@ -218,7 +218,9 @@ fn main() {
         warn!("Unable to generate the logging path to pass to set up: {}", e)
     }
 
-    match rpc_looper.mainloop(|| NewlineReader::new(std::io::BufReader::new(io::stdin())), &mut state) {
+    match rpc_looper
+        .mainloop(|| NewlineReader::new(std::io::BufReader::new(io::stdin())), &mut state)
+    {
         Ok(_) => (),
         Err(err) => {
             error!("xi-core exited with error:\n{:?}", err);

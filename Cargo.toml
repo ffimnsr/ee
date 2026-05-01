@@ -25,6 +25,7 @@ crossterm = "0.28"
 dirs = "6.0.0"
 fern = "0.6.2"
 jsonrpc-lite = "0.7.0"
+lsp-server = "0.7.9"
 lsp-types = "0.97.0"
 libc = "0.2.186"
 log = "0.4.29"
@@ -39,10 +40,9 @@ tracing = "0.1.41"
 tracing-subscriber = "0.3.20"
 syntect = { version = "5.3.0", default-features = false, features = ["default-themes", "parsing", "dump-load", "dump-create", "plist-load", "yaml-load", "regex-fancy"] }
 tempfile = "3"
+tokio = { version = "1.52.1", features = ["macros", "rt", "sync", "time"] }
+tokio-util = "0.7.18"
 toml = "0.8"
-tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7" }
-lsp-server = "0.7"
 unicode-segmentation = "1.13.2"
 url = "2.5.8"
 
