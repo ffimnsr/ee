@@ -218,8 +218,32 @@ pub(crate) fn start_plugin_process(
             match child {
                 Ok(mut child) => {
                     let stderr = child.stderr.take();
-                    let child_stdin = child.stdin.take().unwrap();
-                    let child_stdout = child.stdout.take().unwrap();
+                    let child_stdin = match child.stdin.take() {
+                        Some(s) => s,
+                        None => {
+                            core.plugin_connect(Err(PluginStartError {
+                                name: plugin_desc.name.clone(),
+                                source: PluginStartErrorKind::Io(std::io::Error::new(
+                                    std::io::ErrorKind::BrokenPipe,
+                                    "child stdin was not piped",
+                                )),
+                            }));
+                            return;
+                        }
+                    };
+                    let child_stdout = match child.stdout.take() {
+                        Some(s) => s,
+                        None => {
+                            core.plugin_connect(Err(PluginStartError {
+                                name: plugin_desc.name.clone(),
+                                source: PluginStartErrorKind::Io(std::io::Error::new(
+                                    std::io::ErrorKind::BrokenPipe,
+                                    "child stdout was not piped",
+                                )),
+                            }));
+                            return;
+                        }
+                    };
                     let process = Arc::new(Mutex::new(child));
                     if let Some(stderr) = stderr {
                         spawn_stderr_thread(plugin_desc.name.clone(), stderr, core.clone());

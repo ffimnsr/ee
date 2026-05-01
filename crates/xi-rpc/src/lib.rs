@@ -47,6 +47,11 @@ use std::time::{Duration, Instant};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+/// Maximum number of distinct tokens that may sit in the idle queue at once.
+/// Duplicate tokens are already coalesced; this cap prevents unbounded growth
+/// from many unique tokens sent by a runaway caller.
+const MAX_IDLE_QUEUE_SIZE: usize = 256;
+
 pub use crate::error::{Error, ReadError, RemoteError};
 pub use crate::parse::RequestId;
 use crate::parse::{Call, MessageReader, Response, RpcObject};
@@ -553,6 +558,15 @@ impl<W: WriteTransport> Peer for RawPeer<W> {
     fn schedule_idle(&self, token: usize) {
         let mut queue = self.0.idle_queue.lock().unwrap_or_else(|e| e.into_inner());
         if !queue.contains(&token) {
+            // Bound the idle queue to prevent unbounded accumulation of
+            // distinct tokens from a misbehaving or runaway caller.
+            if queue.len() >= MAX_IDLE_QUEUE_SIZE {
+                warn!(
+                    "idle queue at capacity ({}), dropping token {}",
+                    MAX_IDLE_QUEUE_SIZE, token
+                );
+                return;
+            }
             queue.push_back(token);
             // Wake the main loop so it picks up the new idle task promptly.
             self.0.idle_notify.notify_one();

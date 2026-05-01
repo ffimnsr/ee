@@ -22,6 +22,11 @@ use log::warn;
 
 use crate::edit_types::{BufferEvent, EventDomain};
 
+/// Maximum number of events kept in the in-progress recording buffer.
+/// Once this limit is reached, new events are silently discarded so that
+/// a very long recording session cannot exhaust memory.
+const MAX_RECORDING_BUFFER: usize = 10_000;
+
 /// A container that manages and holds all recordings for the current editing session
 pub(crate) struct Recorder {
     active_recording: Option<String>,
@@ -86,6 +91,13 @@ impl Recorder {
         let recording_buffer = &mut self.recording_buffer;
 
         if recording_buffer.last().is_none() {
+            if recording_buffer.len() >= MAX_RECORDING_BUFFER {
+                warn!(
+                    "recording buffer at capacity ({}), dropping event",
+                    MAX_RECORDING_BUFFER
+                );
+                return;
+            }
             recording_buffer.push(current_event);
             return;
         }
@@ -102,6 +114,10 @@ impl Recorder {
             }
         }
 
+        if recording_buffer.len() >= MAX_RECORDING_BUFFER {
+            warn!("recording buffer at capacity ({}), dropping event", MAX_RECORDING_BUFFER);
+            return;
+        }
         recording_buffer.push(current_event);
     }
 

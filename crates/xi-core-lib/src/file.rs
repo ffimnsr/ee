@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::str;
 use std::time::SystemTime;
 
+use fs2::FileExt;
 use log::warn;
 
 use xi_rope::Rope;
@@ -48,7 +49,6 @@ pub struct FileManager {
     watcher: FileWatcher,
 }
 
-#[derive(Debug)]
 pub struct FileInfo {
     pub encoding: CharacterEncoding,
     pub path: PathBuf,
@@ -56,12 +56,28 @@ pub struct FileInfo {
     pub has_changed: bool,
     #[cfg(target_family = "unix")]
     pub permissions: Option<u32>,
+    /// Advisory exclusive lock held for the lifetime of this open buffer.
+    /// Prevents a second editor instance from silently corrupting the file.
+    _lock: Option<File>,
+}
+
+impl fmt::Debug for FileInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileInfo")
+            .field("encoding", &self.encoding)
+            .field("path", &self.path)
+            .field("mod_time", &self.mod_time)
+            .field("has_changed", &self.has_changed)
+            .finish_non_exhaustive()
+    }
 }
 
 pub enum FileError {
     Io(io::Error, PathBuf),
     UnknownEncoding(PathBuf),
     HasChanged(PathBuf),
+    /// The path contains non-UTF-8 bytes and cannot be used as an RPC string.
+    NonUtf8Path(PathBuf),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -108,6 +124,11 @@ impl FileManager {
     }
 
     pub fn open(&mut self, path: &Path, id: BufferId) -> Result<Rope, FileError> {
+        // Reject non-UTF-8 paths early: they cannot be round-tripped over the
+        // JSON-RPC layer, so any further operations on the buffer would fail.
+        if path.to_str().is_none() {
+            return Err(FileError::NonUtf8Path(path.to_owned()));
+        }
         if !path.exists() {
             return Ok(Rope::from(""));
         }
@@ -131,13 +152,25 @@ impl FileManager {
     }
 
     pub fn save(&mut self, path: &Path, text: &Rope, id: BufferId) -> Result<(), FileError> {
+        if path.to_str().is_none() {
+            return Err(FileError::NonUtf8Path(path.to_owned()));
+        }
         let is_existing = self.file_info.contains_key(&id);
         if is_existing { self.save_existing(path, text, id) } else { self.save_new(path, text, id) }
     }
 
     fn save_new(&mut self, path: &Path, text: &Rope, id: BufferId) -> Result<(), FileError> {
-        try_save(path, text, CharacterEncoding::Utf8, self.get_info(id))
-            .map_err(|e| FileError::Io(e, path.to_owned()))?;
+        try_save(path, text, CharacterEncoding::Utf8, self.get_info(id))?;
+        // Acquire advisory lock on the newly-saved file.
+        let lock = File::open(path).ok().and_then(|lf| {
+            match lf.try_lock_exclusive() {
+                Ok(()) => Some(lf),
+                Err(e) => {
+                    warn!("Could not lock newly saved file {:?}: {}", path, e);
+                    None
+                }
+            }
+        });
         let info = FileInfo {
             encoding: CharacterEncoding::Utf8,
             path: path.to_owned(),
@@ -145,6 +178,7 @@ impl FileManager {
             has_changed: false,
             #[cfg(target_family = "unix")]
             permissions: get_permissions(path),
+            _lock: lock,
         };
         self.open_files.insert(path.to_owned(), id);
         self.file_info.insert(id, info);
@@ -164,8 +198,7 @@ impl FileManager {
             return Err(FileError::HasChanged(path.to_owned()));
         } else {
             let encoding = self.file_info[&id].encoding;
-            try_save(path, text, encoding, self.get_info(id))
-                .map_err(|e| FileError::Io(e, path.to_owned()))?;
+            try_save(path, text, encoding, self.get_info(id))?;
             if let Some(info) = self.file_info.get_mut(&id) {
                 info.mod_time = get_mod_time(path);
             } else {
@@ -193,6 +226,26 @@ where
     let mut bytes = Vec::new();
     f.read_to_end(&mut bytes).map_err(|e| FileError::Io(e, path.as_ref().to_owned()))?;
 
+    // Acquire an advisory exclusive lock so that a second editor instance
+    // cannot open the same file for writing without first detecting the lock.
+    // `try_lock_exclusive` is non-blocking; if another process holds the lock
+    // we warn and proceed without the lock rather than refusing to open the file.
+    let lock_file = File::open(path.as_ref()).ok();
+    let lock = lock_file.and_then(|lf| {
+        match lf.try_lock_exclusive() {
+            Ok(()) => Some(lf),
+            Err(e) => {
+                warn!(
+                    "Could not acquire advisory lock on {:?}: {}. \
+                     Another editor instance may have the file open.",
+                    path.as_ref(),
+                    e
+                );
+                None
+            }
+        }
+    });
+
     let encoding = CharacterEncoding::guess(&bytes);
     let rope = try_decode(bytes, encoding, path.as_ref())?;
     let info = FileInfo {
@@ -202,6 +255,7 @@ where
         permissions: get_permissions(&path),
         path: path.as_ref().to_owned(),
         has_changed: false,
+        _lock: lock,
     };
     Ok((rope, info))
 }
@@ -212,7 +266,7 @@ fn try_save(
     text: &Rope,
     encoding: CharacterEncoding,
     file_info: Option<&FileInfo>,
-) -> io::Result<()> {
+) -> Result<(), FileError> {
     let tmp_extension = path.extension().map_or_else(
         || OsString::from("swp"),
         |ext| {
@@ -223,17 +277,37 @@ fn try_save(
     );
     let tmp_path = &path.with_extension(tmp_extension);
 
-    let mut f = File::create(tmp_path)?;
+    let mut f =
+        File::create(tmp_path).map_err(|e| FileError::Io(e, tmp_path.to_owned()))?;
     match encoding {
-        CharacterEncoding::Utf8WithBom => f.write_all(UTF8_BOM.as_bytes())?,
+        CharacterEncoding::Utf8WithBom => {
+            f.write_all(UTF8_BOM.as_bytes())
+                .map_err(|e| FileError::Io(e, tmp_path.to_owned()))?
+        }
         CharacterEncoding::Utf8 => (),
     }
 
     for chunk in text.iter_chunks(..text.len()) {
-        f.write_all(chunk.as_bytes())?;
+        f.write_all(chunk.as_bytes())
+            .map_err(|e| FileError::Io(e, tmp_path.to_owned()))?;
     }
 
-    fs::rename(tmp_path, path)?;
+    // Flush OS buffers and sync to storage before rename so that a crash
+    // after the rename cannot leave the destination file with stale data.
+    f.sync_all().map_err(|e| FileError::Io(e, tmp_path.to_owned()))?;
+    drop(f);
+
+    fs::rename(tmp_path, path).map_err(|e| FileError::Io(e, path.to_owned()))?;
+
+    // Sync the parent directory entry so the rename itself is durable.
+    #[cfg(target_family = "unix")]
+    {
+        if let Some(parent) = path.parent() {
+            // Best-effort: ignore errors (some fs don't support dir fsync).
+            let _ = std::fs::File::open(parent)
+                .and_then(|d| d.sync_all());
+        }
+    }
 
     #[cfg(target_family = "unix")]
     {
@@ -298,6 +372,7 @@ impl FileError {
             FileError::Io(_, _) => 5,
             FileError::UnknownEncoding(_) => 6,
             FileError::HasChanged(_) => 7,
+            FileError::NonUtf8Path(_) => 8,
         }
     }
 }
@@ -315,6 +390,33 @@ impl fmt::Display for FileError {
                  Please save elsewhere and reload the file. File path: {}",
                 p.display()
             ),
+            FileError::NonUtf8Path(p) => write!(
+                f,
+                "File path contains non-UTF-8 bytes and cannot be used: {}",
+                p.display()
+            ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[cfg(all(target_family = "unix", not(feature = "notify")))]
+    #[test]
+    fn open_rejects_non_utf8_path() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut mgr = FileManager::new();
+        // Construct a path with a raw non-UTF-8 byte sequence.
+        let bad_bytes: &[u8] = b"/tmp/\xff\xfe_bad.txt";
+        let bad_path = PathBuf::from(OsStr::from_bytes(bad_bytes));
+        let result = mgr.open(&bad_path, crate::tabs::BufferId(99));
+        assert!(
+            matches!(result, Err(FileError::NonUtf8Path(_))),
+            "expected NonUtf8Path error, got {:?}",
+            result.err().map(|e| e.to_string())
+        );
     }
 }

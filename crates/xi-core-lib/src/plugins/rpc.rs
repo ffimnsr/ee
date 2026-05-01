@@ -473,7 +473,7 @@ impl PluginBufferInfo {
         config: Table,
     ) -> Self {
         //TODO: do make any current assertions about paths being valid utf-8? do we want to?
-        let path = path.map(|p| p.to_str().unwrap().to_owned());
+        let path = path.map(|p| p.to_string_lossy().into_owned());
         let views = views.to_owned();
         PluginBufferInfo { buffer_id, views, rev, buf_size, nb_lines, path, syntax, config }
     }

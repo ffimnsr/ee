@@ -88,7 +88,12 @@ impl Cache for ChunkCache {
         }
 
         // We now know that the start of this line is contained in self.contents.
-        let mut start_off = self.cached_offset_of_line(line_num).unwrap() - self.offset;
+        let cache_offset =
+            self.cached_offset_of_line(line_num).ok_or(Error::BadRequest)?;
+        if cache_offset < self.offset {
+            return Err(Error::BadRequest);
+        }
+        let mut start_off = cache_offset - self.offset;
 
         // Now we make sure we also contain the end of the line, fetching more
         // of the document as necessary.
@@ -99,7 +104,7 @@ impl Cache for ChunkCache {
             // if we have a chunk and we're fetching more, discard unnecessary
             // portion of our chunk.
             if start_off != 0 {
-                self.clear_up_to(start_off);
+                self.clear_up_to(start_off)?;
                 start_off = 0;
             }
 
@@ -131,7 +136,7 @@ impl Cache for ChunkCache {
             }
 
             if start_off != 0 {
-                self.clear_up_to(start_off);
+                self.clear_up_to(start_off)?;
             }
 
             let chunk_end = self.offset + self.contents.len();
@@ -260,13 +265,17 @@ impl ChunkCache {
     /// Clears anything in the cache up to `offset`, which is indexed relative
     /// to `self.contents`.
     ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BadRequest`] if `offset` exceeds the length of the
+    /// current contents chunk.
+    ///
     /// # Panics
     ///
-    /// Panics if `offset` is not a character boundary, or if `offset` is greater than
-    /// the length of `self.content`.
-    fn clear_up_to(&mut self, offset: usize) {
+    /// Panics if `offset` is not a valid UTF-8 character boundary.
+    fn clear_up_to(&mut self, offset: usize) -> Result<(), Error> {
         if offset > self.contents.len() {
-            panic!("offset greater than content length: {} > {}", offset, self.contents.len())
+            return Err(Error::BadRequest);
         }
 
         let new_contents = self.contents.split_off(offset);
@@ -285,6 +294,7 @@ impl ChunkCache {
 
         self.first_line = new_line;
         self.first_line_offset = new_line_off;
+        Ok(())
     }
 
     /// Discard any existing cache, starting again with the new data.
@@ -386,7 +396,7 @@ impl ChunkCache {
                     x if x <= start => Some(x),
                     x if x > start && x <= end => None,
                     x if x > end => Some(x - del_size),
-                    hmm => panic!("invariant violated {} {} {}?", start, end, hmm),
+                    hmm => unreachable!("invariant violated {} {} {}?", start, end, hmm),
                 })
                 .collect();
         } else {

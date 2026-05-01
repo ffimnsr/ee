@@ -122,11 +122,27 @@ fn render_prompt(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             None => "normal | i insert | v visual | : command | q quit".to_owned(),
         }),
         Mode::Insert => Line::from("insert | esc normal"),
-        Mode::Visual => Line::from("visual | move selects | v/esc normal | : command"),
+        Mode::Visual => Line::from("visual | hjkl/move selects | d/y/c operators | v/esc normal | : command"),
+        Mode::VisualLine => Line::from("visual-line | j/k extends | d/y/c operators | V/esc normal"),
+        Mode::VisualBlock => Line::from("visual-block | hjkl extends block | d/y I/A operators | Ctrl-V/esc normal"),
         Mode::CommandLine => {
             Line::from(vec![Span::raw(":"), Span::raw(app.command_buffer.as_str())])
         }
         Mode::Search => Line::from(vec![Span::raw("/"), Span::raw(app.command_buffer.as_str())]),
+        Mode::OperatorPending => Line::from(
+            match app.input_state.pending_operator {
+                Some(crate::app::Operator::Delete) => "-- DELETE (motion / text-obj) --",
+                Some(crate::app::Operator::Change) => "-- CHANGE (motion / text-obj) --",
+                Some(crate::app::Operator::Yank) => "-- YANK (motion / text-obj) --",
+                Some(crate::app::Operator::Indent) => "-- INDENT (motion) --",
+                Some(crate::app::Operator::Outdent) => "-- OUTDENT (motion) --",
+                Some(crate::app::Operator::Uppercase) => "-- UPPERCASE (motion) --",
+                Some(crate::app::Operator::Lowercase) => "-- LOWERCASE (motion) --",
+                Some(crate::app::Operator::CaseToggle) => "-- CASE TOGGLE (motion) --",
+                None => "-- OPERATOR PENDING --",
+            }
+            .to_owned(),
+        ),
     };
 
     frame.render_widget(

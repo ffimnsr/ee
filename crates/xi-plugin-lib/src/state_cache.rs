@@ -14,6 +14,7 @@
 
 //! A more sophisticated cache that manages user state.
 
+use log::warn;
 use rand::Rng;
 
 use xi_rope::interval::IntervalBounds;
@@ -172,23 +173,38 @@ impl<S: Clone + Default> StateCache<S> {
                         .buf_cache
                         .offset_of_line(source, line_num)
                         .expect("get_entry should validate inputs");
-                    let new_ix = self.insert_entry(line_num, offset, None);
-                    Some(&mut self.state_cache[new_ix])
+                    match self.insert_entry(line_num, offset, None) {
+                        Ok(new_ix) => Some(&mut self.state_cache[new_ix]),
+                        Err(_) => {
+                            warn!("state_cache: duplicate entry for line {}", line_num);
+                            None
+                        }
+                    }
                 }
             }
         }
     }
 
     /// Insert a new entry into the cache, returning its index.
-    fn insert_entry(&mut self, line_num: usize, offset: usize, user_state: Option<S>) -> usize {
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(())` if an entry for `line_num` already exists, which
+    /// indicates a programming error in the caller.
+    fn insert_entry(
+        &mut self,
+        line_num: usize,
+        offset: usize,
+        user_state: Option<S>,
+    ) -> Result<usize, ()> {
         if self.state_cache.len() >= CACHE_SIZE {
             self.evict();
         }
         match self.find_line(line_num) {
-            Ok(_ix) => panic!("entry already exists"),
+            Ok(_ix) => Err(()),
             Err(ix) => {
                 self.state_cache.insert(ix, CacheEntry { line_num, offset, user_state });
-                ix
+                Ok(ix)
             }
         }
     }

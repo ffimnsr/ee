@@ -169,13 +169,23 @@ impl Editor {
         self.set_pristine();
     }
 
-    // each outstanding plugin edit represents a rev_in_flight.
+    /// Increments the count of plugin revisions in flight.
+    ///
+    /// Each outstanding plugin edit holds a reference to the current revision;
+    /// CRDT garbage collection is deferred until all in-flight revisions are
+    /// acknowledged via [`dec_revs_in_flight`].
+    ///
+    /// [`dec_revs_in_flight`]: Self::dec_revs_in_flight
     pub fn increment_revs_in_flight(&mut self) {
         self.revs_in_flight += 1;
     }
 
-    // GC of CRDT engine is deferred until all plugins have acknowledged the new rev,
-    // so when the ack comes back, potentially trigger GC.
+    /// Decrements the count of plugin revisions in flight and triggers CRDT
+    /// garbage collection when the count reaches zero.
+    ///
+    /// Must only be called after a corresponding [`increment_revs_in_flight`].
+    ///
+    /// [`increment_revs_in_flight`]: Self::increment_revs_in_flight
     pub fn dec_revs_in_flight(&mut self) {
         self.revs_in_flight -= 1;
         self.gc_undos();
@@ -533,14 +543,24 @@ impl Editor {
         }
     }
 
+    /// Propagates a theme change to all style layers, recomputing cached styles.
     pub fn theme_changed(&mut self, style_map: &ThemeStyleMap) {
         self.layers.theme_changed(style_map);
     }
 
+    /// Returns the number of lines in the buffer as seen by plugins
+    /// (always at least 1, even for an empty buffer).
     pub fn plugin_n_lines(&self) -> usize {
         self.text.measure::<LinesMetric>() + 1
     }
 
+    /// Applies scope span updates from a plugin to the style layer identified
+    /// by `plugin`, transforming spans if `rev` is stale.
+    ///
+    /// # Preconditions
+    ///
+    /// `start` and `len` must describe a valid byte range within the buffer at
+    /// the revision identified by `rev`.
     pub fn update_spans(
         &mut self,
         view: &mut View,
@@ -577,6 +597,13 @@ impl Editor {
         view.invalidate_styles(&self.text, start, end_offset);
     }
 
+    /// Applies annotation span updates from a plugin, transforming spans if
+    /// `rev` is stale.
+    ///
+    /// # Preconditions
+    ///
+    /// `start` and `len` must describe a valid byte range within the buffer at
+    /// the revision identified by `rev`.
     pub fn update_annotations(
         &mut self,
         view: &mut View,
@@ -626,6 +653,13 @@ impl Editor {
         Some(text_cow)
     }
 
+    /// Returns a contiguous chunk of the buffer at the given `start` position
+    /// for plugin consumption. Returns `None` if the revision or offset is
+    /// invalid.
+    ///
+    /// # Preconditions
+    ///
+    /// `rev` must be a valid revision token issued by this editor's CRDT engine.
     pub fn plugin_get_data(
         &self,
         start: usize,

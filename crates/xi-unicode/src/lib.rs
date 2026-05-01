@@ -15,6 +15,8 @@
 //! Unicode utilities useful for text editing, including a line breaking iterator.
 #![no_std]
 
+// Required by `#![no_std]`: provides heap-allocated types (Vec, String, Box)
+// via the global allocator without linking to the full `std` library.
 extern crate alloc;
 
 mod emoji;

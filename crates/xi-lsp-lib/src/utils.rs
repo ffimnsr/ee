@@ -75,7 +75,7 @@ where
                     end: position_of_offset(end)?,
                 }),
                 range_length: Some(
-                    u32::try_from(end - start).expect("range length should fit in u32"),
+                    u32::try_from(end - start).map_err(|_| PluginLibError::BadRequest)?,
                 ),
                 text,
             }]);
@@ -91,7 +91,7 @@ where
             return Ok(vec![TextDocumentContentChangeEvent {
                 range: Some(Range { start: position_of_offset(start)?, end: end_position }),
                 range_length: Some(
-                    u32::try_from(end - start).expect("range length should fit in u32"),
+                    u32::try_from(end - start).map_err(|_| PluginLibError::BadRequest)?,
                 ),
                 text: String::new(),
             }]);

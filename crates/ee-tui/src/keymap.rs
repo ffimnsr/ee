@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use crate::app::Mode;
+use crate::app::{Mode, Operator};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
@@ -23,6 +23,43 @@ pub(crate) enum Action {
     SetPrefix(char),
     PendingCharFind { forward: bool, inclusive: bool },
     MatchingPair,
+    // Operator-pending mode
+    SetOperator(Operator),
+    // Insert-entry variants
+    AppendAfterCursor,
+    AppendAtEndOfLine,
+    InsertAtLineStart,
+    OpenLineBelow,
+    OpenLineAbove,
+    SubstituteChar,
+    SubstituteLine,
+    // Insert mode editing controls
+    DeleteWordBackward,
+    DeleteToLineStart,
+    IndentLine,
+    OutdentLine,
+    // Undo / Redo
+    Undo,
+    Redo,
+    // Repeat last change
+    RepeatLastChange,
+    // Paste
+    PasteAfter,
+    PasteBefore,
+    // Visual modes
+    EnterVisualLine,
+    EnterVisualBlock,
+    SwapVisualAnchor,
+    RestoreLastVisual,
+    // Visual block insert / append
+    VisualBlockInsert,
+    VisualBlockAppend,
+    // Jump list
+    JumpListOlder,
+    JumpListNewer,
+    // Change list
+    ChangeListOlder,
+    ChangeListNewer,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -60,7 +97,8 @@ fn build_bindings() -> HashMap<BindingKey, Action> {
         bind!(mode, KeyCode::Char('c'), ctrl, None, Quit);
     }
 
-    bind!(Normal, KeyCode::Char('q'), none, None, Quit);
+    // `q` is NOT bound here; it is handled in handle_default for macro recording.
+    // Quit is available via `:q`, `:quit`, `:q!`, `:quit!`, or Ctrl-C.
     bind!(Normal, KeyCode::Char('i'), none, None, EnterMode(Insert));
     bind!(Normal, KeyCode::Char('v'), none, None, EnterMode(Visual));
     bind!(Normal, KeyCode::Char(':'), none, None, EnterCommandMode);
@@ -115,6 +153,33 @@ fn build_bindings() -> HashMap<BindingKey, Action> {
     );
     bind!(Normal, KeyCode::Char('%'), none, None, MatchingPair);
 
+    // Operator-pending mode: operators
+    bind!(Normal, KeyCode::Char('d'), none, None, SetOperator(Operator::Delete));
+    bind!(Normal, KeyCode::Char('c'), none, None, SetOperator(Operator::Change));
+    bind!(Normal, KeyCode::Char('y'), none, None, SetOperator(Operator::Yank));
+    bind!(Normal, KeyCode::Char('>'), none, None, SetOperator(Operator::Indent));
+    bind!(Normal, KeyCode::Char('<'), none, None, SetOperator(Operator::Outdent));
+    // g-prefixed operators: gu (lowercase), gU (uppercase), g~ (case toggle)
+    bind!(Normal, KeyCode::Char('u'), none, Some('g'), SetOperator(Operator::Lowercase));
+    bind!(Normal, KeyCode::Char('U'), none, Some('g'), SetOperator(Operator::Uppercase));
+    bind!(Normal, KeyCode::Char('~'), none, Some('g'), SetOperator(Operator::CaseToggle));
+
+    // Insert-entry variants
+    bind!(Normal, KeyCode::Char('a'), none, None, AppendAfterCursor);
+    bind!(Normal, KeyCode::Char('A'), none, None, AppendAtEndOfLine);
+    bind!(Normal, KeyCode::Char('I'), none, None, InsertAtLineStart);
+    bind!(Normal, KeyCode::Char('o'), none, None, OpenLineBelow);
+    bind!(Normal, KeyCode::Char('O'), none, None, OpenLineAbove);
+    bind!(Normal, KeyCode::Char('s'), none, None, SubstituteChar);
+    bind!(Normal, KeyCode::Char('S'), none, None, SubstituteLine);
+
+    // Insert mode editing controls (bound here for completeness; Ctrl keys
+    // are also handled in handle_default for robustness).
+    bind!(Insert, KeyCode::Char('w'), ctrl, None, DeleteWordBackward);
+    bind!(Insert, KeyCode::Char('u'), ctrl, None, DeleteToLineStart);
+    bind!(Insert, KeyCode::Char('t'), ctrl, None, IndentLine);
+    bind!(Insert, KeyCode::Char('d'), ctrl, None, OutdentLine);
+
     bind!(Visual, KeyCode::Esc, none, None, CollapseAndEnterNormal);
     bind!(Visual, KeyCode::Char('v'), none, None, CollapseAndEnterNormal);
     bind!(Visual, KeyCode::Char(':'), none, None, EnterCommandMode);
@@ -126,6 +191,67 @@ fn build_bindings() -> HashMap<BindingKey, Action> {
     bind!(Visual, KeyCode::Char('k'), none, None, Edit("move_up_and_modify_selection"),);
     bind!(Visual, KeyCode::Down, none, None, Edit("move_down_and_modify_selection"),);
     bind!(Visual, KeyCode::Char('j'), none, None, Edit("move_down_and_modify_selection"),);
+    // Visual char: word motions also extend selection
+    bind!(Visual, KeyCode::Char('w'), none, None, Edit("move_word_right_and_modify_selection"),);
+    bind!(Visual, KeyCode::Char('b'), none, None, Edit("move_word_left_and_modify_selection"),);
+    bind!(Visual, KeyCode::Char('$'), none, None, Edit("move_to_right_end_of_line_and_modify_selection"),);
+    bind!(Visual, KeyCode::Char('^'), none, None, Edit("move_to_beginning_of_paragraph_and_modify_selection"),);
+    // Anchor swap in visual char
+    bind!(Visual, KeyCode::Char('o'), none, None, SwapVisualAnchor);
+
+    // Visual Line mode (V)
+    bind!(Normal, KeyCode::Char('V'), none, None, EnterVisualLine);
+    bind!(VisualLine, KeyCode::Esc, none, None, CollapseAndEnterNormal);
+    bind!(VisualLine, KeyCode::Char('V'), none, None, CollapseAndEnterNormal);
+    bind!(VisualLine, KeyCode::Char('v'), none, None, EnterMode(Visual));
+    bind!(VisualLine, KeyCode::Up, none, None, Edit("move_up_and_modify_selection"),);
+    bind!(VisualLine, KeyCode::Char('k'), none, None, Edit("move_up_and_modify_selection"),);
+    bind!(VisualLine, KeyCode::Down, none, None, Edit("move_down_and_modify_selection"),);
+    bind!(VisualLine, KeyCode::Char('j'), none, None, Edit("move_down_and_modify_selection"),);
+    bind!(VisualLine, KeyCode::Char('G'), none, None, Edit("move_to_end_of_document_and_modify_selection"),);
+    bind!(VisualLine, KeyCode::Char('o'), none, None, SwapVisualAnchor);
+    bind!(VisualLine, KeyCode::Char(':'), none, None, EnterCommandMode);
+
+    // Visual Block mode (Ctrl-V)
+    bind!(Normal, KeyCode::Char('v'), ctrl, None, EnterVisualBlock);
+    bind!(VisualBlock, KeyCode::Esc, none, None, CollapseAndEnterNormal);
+    bind!(VisualBlock, KeyCode::Char('v'), ctrl, None, CollapseAndEnterNormal);
+    bind!(VisualBlock, KeyCode::Left, none, None, Edit("move_left"),);
+    bind!(VisualBlock, KeyCode::Char('h'), none, None, Edit("move_left"),);
+    bind!(VisualBlock, KeyCode::Right, none, None, Edit("move_right"),);
+    bind!(VisualBlock, KeyCode::Char('l'), none, None, Edit("move_right"),);
+    bind!(VisualBlock, KeyCode::Up, none, None, Edit("move_up"),);
+    bind!(VisualBlock, KeyCode::Char('k'), none, None, Edit("move_up"),);
+    bind!(VisualBlock, KeyCode::Down, none, None, Edit("move_down"),);
+    bind!(VisualBlock, KeyCode::Char('j'), none, None, Edit("move_down"),);
+    bind!(VisualBlock, KeyCode::Char('o'), none, None, SwapVisualAnchor);
+    bind!(VisualBlock, KeyCode::Char('I'), none, None, VisualBlockInsert);
+    bind!(VisualBlock, KeyCode::Char('A'), none, None, VisualBlockAppend);
+    bind!(VisualBlock, KeyCode::Char(':'), none, None, EnterCommandMode);
+
+    // Undo / Redo (Normal mode)
+    bind!(Normal, KeyCode::Char('u'), none, None, Undo);
+    bind!(Normal, KeyCode::Char('r'), ctrl, None, Redo);
+
+    // Repeat last change
+    bind!(Normal, KeyCode::Char('.'), none, None, RepeatLastChange);
+
+    // Paste
+    bind!(Normal, KeyCode::Char('p'), none, None, PasteAfter);
+    bind!(Normal, KeyCode::Char('P'), none, None, PasteBefore);
+    bind!(Visual, KeyCode::Char('p'), none, None, PasteAfter);
+
+    // Restore last visual selection
+    bind!(Normal, KeyCode::Char('v'), none, Some('g'), RestoreLastVisual);
+
+    // Jump list navigation (Ctrl-O = older, Ctrl-I = newer)
+    bind!(Normal, KeyCode::Char('o'), ctrl, None, JumpListOlder);
+    bind!(Normal, KeyCode::BackTab, none, None, JumpListNewer);
+    bind!(Normal, KeyCode::Tab, none, None, JumpListNewer);
+
+    // Change list navigation (g; = older, g, = newer)
+    bind!(Normal, KeyCode::Char(';'), none, Some('g'), ChangeListOlder);
+    bind!(Normal, KeyCode::Char(','), none, Some('g'), ChangeListNewer);
 
     bind!(Insert, KeyCode::Esc, none, None, EnterMode(Normal));
     bind!(Insert, KeyCode::Left, none, None, Edit("move_left"));
