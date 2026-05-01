@@ -6,9 +6,10 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Position, Rect};
 use serde_json::json;
 
-use crate::backend::XiClient;
+use crate::buffer::BufferManager;
 use crate::keymap::{Action, BindingKey, bindings};
 use crate::registers::{BlockInsert, LastChange, RegisterName, RegisterStore};
+use crate::window::{SplitDir, WindowLayout};
 use crate::text::{
     byte_col_to_display_col, find_char_backward, find_char_forward, next_char_start,
     prev_char_start,
@@ -93,6 +94,8 @@ pub(crate) struct InputState {
     pub(crate) awaiting_macro_record: bool,
     /// Set when `@` is pressed to replay a macro.
     pub(crate) awaiting_macro_replay: bool,
+    /// Set when `Ctrl-W` is pressed; next char is the window command.
+    pub(crate) awaiting_window_cmd: bool,
 }
 
 impl InputState {
@@ -117,12 +120,15 @@ impl InputState {
         self.awaiting_mark_jump = None;
         self.awaiting_macro_record = false;
         self.awaiting_macro_replay = false;
+        self.awaiting_window_cmd = false;
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct App {
-    pub(crate) backend: XiClient,
+    pub(crate) config: crate::config::EditorSettings,
+    pub(crate) backend: BufferManager,
+    pub(crate) windows: WindowLayout,
     pub(crate) mode: Mode,
     pub(crate) command_buffer: String,
     pub(crate) should_quit: bool,
@@ -173,8 +179,13 @@ pub(crate) struct App {
 
 impl App {
     pub(crate) fn from_path(path: Option<PathBuf>) -> io::Result<Self> {
+        let config = crate::config::load_config(path.as_deref());
+        let backend = BufferManager::new(path)?;
+        let initial_buf_id = backend.active().id;
         Ok(Self {
-            backend: XiClient::new(path)?,
+            config,
+            backend,
+            windows: WindowLayout::new(initial_buf_id),
             mode: Mode::Normal,
             command_buffer: String::new(),
             should_quit: false,
@@ -281,6 +292,14 @@ impl App {
                 if let Some(r) = reg {
                     self.replay_macro(r);
                 }
+            }
+            return;
+        }
+
+        if self.input_state.awaiting_window_cmd {
+            self.input_state.awaiting_window_cmd = false;
+            if let KeyCode::Char(c) = key.code {
+                self.handle_window_cmd(c);
             }
             return;
         }
@@ -522,6 +541,9 @@ impl App {
                         }
                         _ => {}
                     }
+                } else if self.mode == Mode::Normal && c == 'w' {
+                    // Ctrl-W: window command prefix.
+                    self.input_state.awaiting_window_cmd = true;
                 }
                 return;
             }
@@ -1228,6 +1250,105 @@ impl App {
                     self.backend.status_message = Some(format!("code action failed: {err}"));
                 }
             }
+            // ── Buffer management ─────────────────────────────────────────
+            "e" | "edit" => {
+                let path = parts.next().map(PathBuf::from);
+                match self.backend.open_buffer(path) {
+                    Ok(buf_id) => {
+                        let _ = self.backend.switch_to_id(buf_id);
+                        self.windows.set_focused_buffer(buf_id);
+                        self.viewport = Viewport::default();
+                    }
+                    Err(err) => {
+                        self.backend.status_message = Some(format!("open failed: {err}"));
+                    }
+                }
+            }
+            "bn" | "bnext" => {
+                let old = self.backend.active().id;
+                self.backend.next_buffer();
+                let new = self.backend.active().id;
+                if old != new {
+                    self.windows.set_focused_buffer(new);
+                    self.viewport = Viewport::default();
+                }
+            }
+            "bp" | "bprev" | "bprevious" => {
+                let old = self.backend.active().id;
+                self.backend.prev_buffer();
+                let new = self.backend.active().id;
+                if old != new {
+                    self.windows.set_focused_buffer(new);
+                    self.viewport = Viewport::default();
+                }
+            }
+            "b#" => {
+                match self.backend.switch_alternate() {
+                    Ok(()) => {
+                        let new = self.backend.active().id;
+                        self.windows.set_focused_buffer(new);
+                        self.viewport = Viewport::default();
+                    }
+                    Err(err) => {
+                        self.backend.status_message = Some(format!("{err}"));
+                    }
+                }
+            }
+            "bd" | "bdelete" => {
+                let id = self.backend.active().id;
+                if let Err(err) = self.backend.close_buffer(id) {
+                    self.backend.status_message = Some(format!("close failed: {err}"));
+                } else {
+                    let new = self.backend.active().id;
+                    self.windows.set_focused_buffer(new);
+                    self.viewport = Viewport::default();
+                }
+            }
+            "ls" | "buffers" => {
+                let list = self.backend.list_buffers_str();
+                self.backend.status_message = Some(list);
+            }
+            // ── Window splits ─────────────────────────────────────────────
+            "sp" | "split" => {
+                let path = parts.next().map(PathBuf::from);
+                let buf_id = if let Some(p) = path {
+                    match self.backend.open_buffer(Some(p)) {
+                        Ok(id) => id,
+                        Err(err) => {
+                            self.backend.status_message =
+                                Some(format!("open failed: {err}"));
+                            self.enter_normal_mode();
+                            return;
+                        }
+                    }
+                } else {
+                    self.backend.active().id
+                };
+                let (_, new_vp) =
+                    self.windows.split(SplitDir::Horizontal, buf_id, self.viewport);
+                self.viewport = new_vp;
+                let _ = self.backend.switch_to_id(buf_id);
+            }
+            "vs" | "vsplit" => {
+                let path = parts.next().map(PathBuf::from);
+                let buf_id = if let Some(p) = path {
+                    match self.backend.open_buffer(Some(p)) {
+                        Ok(id) => id,
+                        Err(err) => {
+                            self.backend.status_message =
+                                Some(format!("open failed: {err}"));
+                            self.enter_normal_mode();
+                            return;
+                        }
+                    }
+                } else {
+                    self.backend.active().id
+                };
+                let (_, new_vp) =
+                    self.windows.split(SplitDir::Vertical, buf_id, self.viewport);
+                self.viewport = new_vp;
+                let _ = self.backend.switch_to_id(buf_id);
+            }
             other if !other.is_empty() => {
                 self.backend.status_message = Some(format!("unknown command: {other}"));
             }
@@ -1269,6 +1390,51 @@ impl App {
         self.recording = false;
         let cmds = self.recorded_commands.drain(..).collect();
         self.last_change = Some(LastChange::Commands(cmds));
+    }
+
+    // ── Window management ──────────────────────────────────────────────────
+
+    /// Handle a key pressed after `Ctrl-W` in Normal mode.
+    fn handle_window_cmd(&mut self, c: char) {
+        match c {
+            // Horizontal split (same buffer).
+            's' => {
+                let buf_id = self.backend.active().id;
+                let (_, new_vp) =
+                    self.windows.split(SplitDir::Horizontal, buf_id, self.viewport);
+                self.viewport = new_vp;
+            }
+            // Vertical split (same buffer).
+            'v' => {
+                let buf_id = self.backend.active().id;
+                let (_, new_vp) =
+                    self.windows.split(SplitDir::Vertical, buf_id, self.viewport);
+                self.viewport = new_vp;
+            }
+            // Focus next window.
+            'w' => {
+                let new_vp = self.windows.focus_next(self.viewport);
+                self.viewport = new_vp;
+                let new_buf = self.windows.focused_window().buffer_id;
+                let _ = self.backend.switch_to_id(new_buf);
+            }
+            // Focus previous window.
+            'W' | 'p' => {
+                let new_vp = self.windows.focus_prev(self.viewport);
+                self.viewport = new_vp;
+                let new_buf = self.windows.focused_window().buffer_id;
+                let _ = self.backend.switch_to_id(new_buf);
+            }
+            // Close focused window.
+            'c' | 'q' => {
+                if let Some(new_vp) = self.windows.close_focused() {
+                    self.viewport = new_vp;
+                    let new_buf = self.windows.focused_window().buffer_id;
+                    let _ = self.backend.switch_to_id(new_buf);
+                }
+            }
+            _ => {}
+        }
     }
 
     // ── Marks ──────────────────────────────────────────────────────────────

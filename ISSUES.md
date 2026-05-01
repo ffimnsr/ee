@@ -79,7 +79,7 @@
 - [x] Implement `GetSelections` in `crates/xi-core-lib/src/event_context.rs` or remove it from the protocol until supported.
 - [x] Return structured acknowledgements for plugin updates and edits instead of placeholder success values like `1`.
 - [x] Add request cancellation support for long-running plugin features such as hover or analysis requests.
-- [ ] Add backpressure or coalescing for plugin update delivery so slow plugins cannot accumulate unbounded pending work.
+- [x] Add backpressure or coalescing for plugin update delivery so slow plugins cannot accumulate unbounded pending work.
 - [x] Handle `shutdown` properly in `crates/xi-plugin-lib/src/dispatch.rs` so Rust plugins can terminate their main loop cleanly.
 - [x] Replace `unwrap`-based config deserialization paths in `crates/xi-plugin-lib/src/dispatch.rs` and `crates/xi-plugin-lib/src/view.rs` with structured errors.
 - [x] Expand `CoreProxy` in `crates/xi-plugin-lib/src/core_proxy.rs` with typed wrappers for all supported core-facing plugin RPCs, including a `request_is_pending` helper for non-`View` plugin paths.
@@ -126,8 +126,8 @@
 
 ### 3. File, buffer, and window workflow
 
-- [ ] Add a real buffer manager in `ee-tui` with commands for open, alternate buffer, next or previous buffer, list buffers, and close buffer without tearing down the whole process.
-- [ ] Support multiple xi views at once in `ee-tui` so horizontal splits, vertical splits, and focused-window navigation can share one process cleanly.
+- [x] Add a real buffer manager in `ee-tui` with commands for open, alternate buffer, next or previous buffer, list buffers, and close buffer without tearing down the whole process.
+- [x] Support multiple xi views at once in `ee-tui` so horizontal splits, vertical splits, and focused-window navigation can share one process cleanly.
 - [ ] Add tab-page style workspace grouping on top of split windows so users can keep separate editing contexts without losing buffer state.
 - [ ] Implement command-line ranges, command history, and completion in `ee-tui` so ex commands can address lines, selections, buffers, and files unambiguously.
 - [ ] Add file and buffer pickers for open file, recent file, live grep, buffer switch, and symbol jump so common navigation does not depend on raw ex commands alone.
@@ -189,6 +189,7 @@
 - [x] Add invariant assertions or bounds checks in `TreeBuilder` loop at `crates/xi-rope/src/tree.rs` L503-L517 (`last_mut().unwrap()`, `pop().unwrap()`).
 - [x] Document formal safety requirements (buffer length ≥ 16/32 bytes) on `pub unsafe fn` SIMD helpers in `crates/xi-rope/src/compare.rs` (L46, L70, L108, L132, L154).
 - [x] Address tree-walking efficiency TODOs in `crates/xi-rope/src/tree.rs` (L101, L704, L729).
+- [x] Evaluate `rayon` for `crates/xi-rope/src/diff.rs` `LineHashDiff::compute_delta` only: benchmark parallel base-line hashing and target-line match collection on large inputs, keep LIS and match expansion serial, adopt `rayon` only if wall-clock diff time improves materially without regressions on small files or interactive edit latency; otherwise reject and document why.
 
 ### crates/xi-unicode
 

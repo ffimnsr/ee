@@ -14,10 +14,13 @@ use ratatui::backend::CrosstermBackend;
 
 mod app;
 mod backend;
+mod buffer;
+mod config;
 mod keymap;
 mod registers;
 mod text;
 mod ui;
+mod window;
 
 #[cfg(test)]
 mod tests;

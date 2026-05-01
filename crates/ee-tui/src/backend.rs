@@ -43,14 +43,16 @@ impl WriteTransport for ChannelWriter {
     }
 }
 
+pub(crate) type PendingRequests = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, mpsc::SyncSender<Value>>>>;
+
 #[derive(Debug)]
 pub(crate) enum BackendEvent {
-    Update(CoreUpdate),
+    Update { view_id: String, update: CoreUpdate },
     Alert(String),
     ShowHover(String),
     ShowCompletions(Vec<CompletionSuggestion>),
     ShowLocations { title: String, locations: Vec<NavigationTarget> },
-    ScrollTo { line: usize, col: usize },
+    ScrollTo { view_id: String, line: usize, col: usize },
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -85,6 +87,7 @@ pub(crate) enum LineSlot {
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct CoreNotificationParams {
+    pub(crate) view_id: String,
     pub(crate) update: CoreUpdate,
 }
 
@@ -169,8 +172,10 @@ impl XiClient {
 
         let init_events = drain_sync_notifications(&from_core_rx, &to_core_tx);
 
+        let pending: PendingRequests = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let tx_clone = to_core_tx.clone();
-        thread::spawn(move || xi_reader_thread(from_core_rx, tx_clone, backend_tx));
+        let pending_clone = std::sync::Arc::clone(&pending);
+        thread::spawn(move || xi_reader_thread(from_core_rx, tx_clone, backend_tx, pending_clone));
 
         let mut client = Self {
             path,
@@ -281,12 +286,12 @@ impl XiClient {
 
     pub(crate) fn apply_backend_event(&mut self, event: BackendEvent) -> io::Result<()> {
         match event {
-            BackendEvent::Update(update) => {
+            BackendEvent::Update { update, .. } => {
                 self.pending_line_request = false;
                 self.apply_update(update)?;
                 self.request_invalidated_lines()?;
             }
-            BackendEvent::ScrollTo { line, col } => {
+            BackendEvent::ScrollTo { line, col, .. } => {
                 self.cursor_line = line;
                 self.cursor_col = col;
                 self.clamp_cursor();
@@ -529,7 +534,7 @@ impl From<CoreLine> for LineSlot {
 }
 
 impl LineSlot {
-    fn merge(self, update: CoreLine) -> io::Result<Self> {
+    pub(crate) fn merge(self, update: CoreLine) -> io::Result<Self> {
         match self {
             LineSlot::Known(mut line) => {
                 if let Some(text) = update.text {
@@ -618,6 +623,7 @@ pub(crate) fn xi_reader_thread(
     rx: Receiver<String>,
     tx: Sender<String>,
     backend_tx: Sender<BackendEvent>,
+    pending: PendingRequests,
 ) {
     while let Ok(raw) = rx.recv() {
         let msg: Value = match serde_json::from_str(&raw) {
@@ -630,6 +636,12 @@ pub(crate) fn xi_reader_thread(
                 respond_to_frontend_request(method, params, id, &tx);
             } else if let Some(event) = parse_notification(method, params) {
                 let _ = backend_tx.send(event);
+            }
+        } else if let Some(id) = msg.get("id").and_then(Value::as_u64) {
+            // Response to an outstanding RPC request.
+            let mut map = pending.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(resp_tx) = map.remove(&id) {
+                let _ = resp_tx.send(msg);
             }
         }
     }
@@ -676,13 +688,14 @@ pub(crate) fn respond_to_frontend_request(
 pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendEvent> {
     match method {
         "update" => {
-            let params = serde_json::from_value::<CoreNotificationParams>(params).ok()?;
-            Some(BackendEvent::Update(params.update))
+            let p = serde_json::from_value::<CoreNotificationParams>(params).ok()?;
+            Some(BackendEvent::Update { view_id: p.view_id, update: p.update })
         }
         "scroll_to" => {
+            let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
             let line = params.get("line").and_then(Value::as_u64)? as usize;
             let col = params.get("col").and_then(Value::as_u64)? as usize;
-            Some(BackendEvent::ScrollTo { line, col })
+            Some(BackendEvent::ScrollTo { view_id, line, col })
         }
         "alert" => {
             let msg = params.get("msg").and_then(Value::as_str)?.to_owned();

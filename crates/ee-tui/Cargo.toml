@@ -15,10 +15,14 @@ path = "src/main.rs"
 
 [dependencies]
 crossterm.workspace = true
+dirs.workspace = true
+globset.workspace = true
+ignore.workspace = true
 ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
+toml.workspace = true
 unicode-width = "0.2"
 xi-rpc.workspace = true
 
