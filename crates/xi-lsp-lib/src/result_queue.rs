@@ -33,4 +33,21 @@ impl ResultQueue {
         let mut queue = self.0.lock().unwrap();
         queue.pop_front()
     }
+
+    pub fn drain_results_for(&mut self, request_id: usize) -> Vec<LspResponse> {
+        let mut queue = self.0.lock().unwrap();
+        let mut matched = Vec::new();
+        let mut remaining = VecDeque::with_capacity(queue.len());
+
+        while let Some((queued_id, response)) = queue.pop_front() {
+            if queued_id == request_id {
+                matched.push(response);
+            } else {
+                remaining.push_back((queued_id, response));
+            }
+        }
+
+        *queue = remaining;
+        matched
+    }
 }

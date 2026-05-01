@@ -20,11 +20,12 @@
 //! be renamed.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
-use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use log::{debug, error, info, warn};
 use serde::de::{self, Deserializer, Unexpected};
@@ -44,7 +45,10 @@ use crate::file::FileManager;
 use crate::line_ending::LineEnding;
 use crate::plugin_rpc::{PluginNotification, PluginRequest};
 use crate::plugins::rpc::ClientPluginInfo;
-use crate::plugins::{Plugin, PluginCatalog, PluginPid, start_plugin_process};
+use crate::plugins::{
+    Plugin, PluginCatalog, PluginDescription, PluginPid, PluginStartError, PluginStartErrorKind,
+    start_plugin_process,
+};
 use crate::recorder::Recorder;
 use crate::rpc::{
     CoreNotification, CoreRequest, EditNotification, EditRequest,
@@ -88,6 +92,11 @@ const NEW_VIEW_IDLE_TOKEN: usize = 1001;
 /// xi_rpc idle Token for watcher related idle scheduling.
 pub(crate) const WATCH_IDLE_TOKEN: usize = 1002;
 
+const PLUGIN_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const PLUGIN_RESTART_BASE_DELAY_MS: u64 = 250;
+const PLUGIN_RESTART_MAX_DELAY_MS: u64 = 5_000;
+const PLUGIN_STABLE_UPTIME: Duration = Duration::from_secs(30);
+
 #[cfg(feature = "notify")]
 const CONFIG_EVENT_TOKEN: WatchToken = WatchToken(1);
 
@@ -123,8 +132,33 @@ pub struct CoreState {
     peer: Client,
     id_counter: Counter,
     plugins: PluginCatalog,
-    // for the time being we auto-start all plugins we find on launch.
+    launching_plugins: HashSet<String>,
+    scheduled_plugin_restarts: HashSet<String>,
+    stopping_plugins: HashMap<PluginId, StopReason>,
+    plugin_restart_state: HashMap<String, PluginRestartState>,
+    pending_plugin_commands: Vec<PendingPluginCommand>,
     running_plugins: Vec<Plugin>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingPluginCommand {
+    plugin_name: String,
+    view_id: ViewId,
+    method: String,
+    params: Value,
+    shutdown_after_dispatch: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopReason {
+    Manual,
+    SingleInvocation,
+}
+
+#[derive(Debug, Default, Clone)]
+struct PluginRestartState {
+    consecutive_failures: u32,
+    last_start: Option<Instant>,
 }
 
 /// Initial setup and bookkeeping
@@ -184,6 +218,11 @@ impl CoreState {
             peer: Client::new(peer.clone()),
             id_counter: Counter::default(),
             plugins: PluginCatalog::default(),
+            launching_plugins: HashSet::new(),
+            scheduled_plugin_restarts: HashSet::new(),
+            stopping_plugins: HashMap::new(),
+            plugin_restart_state: HashMap::new(),
+            pending_plugin_commands: Vec::new(),
             running_plugins: Vec::new(),
         }
     }
@@ -223,14 +262,7 @@ impl CoreState {
         let theme_names = self.style_map.borrow().get_theme_names();
         self.peer.available_themes(theme_names);
 
-        // FIXME: temporary: we just launch every plugin we find at startup
-        for manifest in self.plugins.iter() {
-            start_plugin_process(
-                manifest.clone(),
-                self.next_plugin_id(),
-                self.self_ref.as_ref().unwrap().clone(),
-            );
-        }
+        self.ensure_manifest_plugins_started();
     }
 
     /// Attempt to load a config file.
@@ -281,9 +313,13 @@ impl CoreState {
 
             let editor = &self.editors[&buffer_id];
             let info = self.file_manager.get_info(buffer_id);
-            let plugins = self.running_plugins.iter().collect::<Vec<_>>();
-            let config = self.config_manager.get_buffer_config(buffer_id);
             let language = self.config_manager.get_buffer_language(buffer_id);
+            let plugins = self
+                .running_plugins
+                .iter()
+                .filter(|plugin| plugin.receives_updates_for(&language))
+                .collect::<Vec<_>>();
+            let config = self.config_manager.get_buffer_config(buffer_id);
 
             EventContext {
                 view_id,
@@ -381,6 +417,8 @@ impl CoreState {
         self.views.insert(view_id, view);
 
         let config = self.config_manager.add_buffer(buffer_id, path.as_deref());
+        let language = self.config_manager.get_buffer_language(buffer_id);
+        self.ensure_plugins_for_language(&language);
 
         // NOTE: because this is a synchronous call, we have to initialize the
         // view and return the view_id before we can send any events to this
@@ -505,7 +543,10 @@ impl CoreState {
     fn do_set_language(&mut self, view_id: ViewId, language_id: LanguageId) {
         if let Some(view) = self.views.get(&view_id) {
             let buffer_id = view.borrow().get_buffer_id();
+            let old_language = self.config_manager.get_buffer_language(buffer_id);
             let changes = self.config_manager.override_language(buffer_id, language_id.clone());
+            self.sync_plugins_for_language_change(view_id, &old_language, &language_id);
+            self.ensure_plugins_for_language(&language_id);
 
             let mut context = self.make_context(view_id).unwrap();
             context.language_changed(&language_id);
@@ -522,40 +563,247 @@ impl CoreState {
         }
 
         if let Some(manifest) = self.plugins.get_named(plugin) {
-            //TODO: lots of races possible here, we need to keep track of
-            //pending launches.
-            start_plugin_process(
-                manifest,
-                self.next_plugin_id(),
-                self.self_ref.as_ref().unwrap().clone(),
-            );
+            self.start_plugin(manifest);
         } else {
             warn!("no plugin found with name '{}'", plugin);
         }
     }
 
     fn do_stop_plugin(&mut self, _view_id: ViewId, plugin: &str) {
-        if let Some(p) = self
-            .running_plugins
-            .iter()
-            .position(|p| p.name == plugin)
-            .map(|ix| self.running_plugins.remove(ix))
-        {
-            //TODO: verify shutdown; kill if necessary
-            p.shutdown();
-            self.after_stop_plugin(&p);
+        if let Some(plugin) = self.running_plugins.iter().find(|running| running.name == plugin) {
+            self.begin_plugin_shutdown(plugin.id, StopReason::Manual);
         }
     }
 
-    fn do_plugin_rpc(&self, view_id: ViewId, receiver: &str, method: &str, params: &Value) {
-        self.running_plugins
-            .iter()
-            .filter(|p| p.name == receiver)
-            .for_each(|p| p.dispatch_command(view_id, method, params))
+    fn do_plugin_rpc(&mut self, view_id: ViewId, receiver: &str, method: &str, params: &Value) {
+        let mut dispatched = false;
+        self.running_plugins.iter().filter(|plugin| plugin.name == receiver).for_each(|plugin| {
+            dispatched = true;
+            plugin.dispatch_command(view_id, method, params);
+        });
+
+        if dispatched {
+            return;
+        }
+
+        let Some(manifest) = self.plugins.get_named(receiver) else {
+            warn!("plugin {} is not available for command {}", receiver, method);
+            return;
+        };
+
+        if !manifest.activates_on_command() {
+            warn!("plugin {} is not running and is not command-activated", receiver);
+            return;
+        }
+
+        self.pending_plugin_commands.push(PendingPluginCommand {
+            plugin_name: manifest.name.clone(),
+            view_id,
+            method: method.to_string(),
+            params: params.clone(),
+            shutdown_after_dispatch: matches!(
+                manifest.scope,
+                crate::plugins::manifest::PluginScope::SingleInvocation
+            ),
+        });
+        self.start_plugin(manifest);
     }
 
     fn after_stop_plugin(&mut self, plugin: &Plugin) {
         self.iter_groups().for_each(|mut cx| cx.plugin_stopped(plugin));
+    }
+}
+
+impl CoreState {
+    fn ensure_manifest_plugins_started(&mut self) {
+        let to_start = self
+            .plugins
+            .iter()
+            .filter(|manifest| {
+                manifest.activates_on_startup()
+                    || self
+                        .views
+                        .values()
+                        .map(|view| {
+                            self.config_manager.get_buffer_language(view.borrow().get_buffer_id())
+                        })
+                        .any(|language| manifest.receives_updates_for(&language))
+            })
+            .collect::<Vec<_>>();
+
+        for manifest in to_start {
+            self.start_plugin(manifest);
+        }
+    }
+
+    fn ensure_plugins_for_language(&mut self, language: &LanguageId) {
+        let to_start = self
+            .plugins
+            .iter()
+            .filter(|manifest| manifest.receives_updates_for(language))
+            .collect::<Vec<_>>();
+
+        for manifest in to_start {
+            self.start_plugin(manifest);
+        }
+    }
+
+    fn start_plugin(&mut self, manifest: Arc<PluginDescription>) {
+        if !self.begin_plugin_launch(&manifest.name) {
+            return;
+        }
+
+        self.scheduled_plugin_restarts.remove(&manifest.name);
+        self.plugin_restart_state.entry(manifest.name.clone()).or_default().last_start =
+            Some(Instant::now());
+        start_plugin_process(
+            manifest,
+            self.next_plugin_id(),
+            self.self_ref.as_ref().unwrap().clone(),
+        );
+    }
+
+    fn begin_plugin_launch(&mut self, plugin_name: &str) -> bool {
+        if self.running_plugins.iter().any(|plugin| plugin.name == plugin_name)
+            || self.launching_plugins.contains(plugin_name)
+        {
+            return false;
+        }
+
+        self.launching_plugins.insert(plugin_name.to_string());
+        true
+    }
+
+    fn begin_plugin_shutdown(&mut self, plugin_id: PluginId, reason: StopReason) {
+        let Some(plugin) = self.running_plugins.iter().find(|plugin| plugin.id == plugin_id) else {
+            return;
+        };
+
+        if self.stopping_plugins.contains_key(&plugin_id) {
+            return;
+        }
+
+        let weak_core = self.self_ref.as_ref().unwrap().clone();
+        let process = plugin.process_handle();
+        let plugin_name = plugin.name.clone();
+        plugin.shutdown();
+        self.stopping_plugins.insert(plugin_id, reason);
+
+        std::thread::spawn(move || {
+            let deadline = Instant::now() + PLUGIN_SHUTDOWN_TIMEOUT;
+            loop {
+                let wait_result =
+                    process.lock().ok().and_then(|mut child| child.try_wait().ok()).flatten();
+                if wait_result.is_some() {
+                    break;
+                }
+
+                if Instant::now() >= deadline {
+                    weak_core.plugin_stderr(
+                        plugin_name.clone(),
+                        format!(
+                            "shutdown timed out after {:?}; terminating plugin",
+                            PLUGIN_SHUTDOWN_TIMEOUT
+                        ),
+                    );
+                    if let Ok(mut child) = process.lock() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    break;
+                }
+
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        });
+    }
+
+    fn should_keep_running(&self, manifest: &PluginDescription) -> bool {
+        manifest.activates_on_startup()
+            || self
+                .views
+                .values()
+                .map(|view| self.config_manager.get_buffer_language(view.borrow().get_buffer_id()))
+                .any(|language| manifest.receives_updates_for(&language))
+            || self
+                .pending_plugin_commands
+                .iter()
+                .any(|command| command.plugin_name == manifest.name)
+    }
+
+    fn next_restart_delay(&mut self, plugin_name: &str) -> Duration {
+        let state = self.plugin_restart_state.entry(plugin_name.to_string()).or_default();
+        if state.last_start.is_some_and(|last_start| last_start.elapsed() >= PLUGIN_STABLE_UPTIME) {
+            state.consecutive_failures = 0;
+        }
+
+        state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+        let factor = 1_u64 << state.consecutive_failures.saturating_sub(1).min(6);
+        Duration::from_millis(
+            (PLUGIN_RESTART_BASE_DELAY_MS * factor).min(PLUGIN_RESTART_MAX_DELAY_MS),
+        )
+    }
+
+    fn schedule_plugin_restart(&mut self, plugin_name: &str) {
+        if self.scheduled_plugin_restarts.contains(plugin_name) {
+            return;
+        }
+
+        let Some(manifest) = self.plugins.get_named(plugin_name) else {
+            return;
+        };
+        if matches!(manifest.scope, crate::plugins::manifest::PluginScope::SingleInvocation)
+            || !self.should_keep_running(&manifest)
+        {
+            return;
+        }
+
+        let delay = self.next_restart_delay(plugin_name);
+        let weak_core = self.self_ref.as_ref().unwrap().clone();
+        let restart_name = plugin_name.to_string();
+        self.scheduled_plugin_restarts.insert(restart_name.clone());
+        warn!("plugin {} exited unexpectedly; restarting in {:?}", restart_name, delay);
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            weak_core.restart_plugin(restart_name);
+        });
+    }
+
+    pub(crate) fn restart_plugin(&mut self, plugin_name: &str) {
+        self.scheduled_plugin_restarts.remove(plugin_name);
+        if self.launching_plugins.contains(plugin_name)
+            || self.running_plugins.iter().any(|plugin| plugin.name == plugin_name)
+        {
+            return;
+        }
+
+        if let Some(manifest) = self.plugins.get_named(plugin_name)
+            && self.should_keep_running(&manifest)
+        {
+            self.start_plugin(manifest);
+        }
+    }
+
+    fn sync_plugins_for_language_change(
+        &self,
+        view_id: ViewId,
+        old_language: &LanguageId,
+        new_language: &LanguageId,
+    ) {
+        let Some(mut context) = self.make_context(view_id) else {
+            return;
+        };
+        let info = context.plugin_info();
+
+        self.running_plugins.iter().for_each(|plugin| {
+            let was_active = plugin.receives_updates_for(old_language);
+            let is_active = plugin.receives_updates_for(new_language);
+            match (was_active, is_active) {
+                (true, false) => plugin.close_view(view_id),
+                (false, true) => plugin.new_buffer(&info),
+                _ => (),
+            }
+        });
     }
 }
 
@@ -782,7 +1030,18 @@ impl CoreState {
                     },
                 );
                 if let Some(plugin) = self.plugins.get_from_path(&event.paths[0]) {
-                    self.do_start_plugin(ViewId(0), &plugin.name);
+                    if plugin.activates_on_startup()
+                        || self
+                            .views
+                            .values()
+                            .map(|view| {
+                                self.config_manager
+                                    .get_buffer_language(view.borrow().get_buffer_id())
+                            })
+                            .any(|language| plugin.receives_updates_for(&language))
+                    {
+                        self.do_start_plugin(ViewId(0), &plugin.name);
+                    }
                 }
             }
             // the way FSEvents on macOS work, we want to verify that this path
@@ -807,14 +1066,36 @@ impl CoreState {
                     },
                 );
                 if let Some(new_plugin) = self.plugins.get_from_path(new) {
-                    self.do_start_plugin(ViewId(0), &new_plugin.name);
+                    if new_plugin.activates_on_startup()
+                        || self
+                            .views
+                            .values()
+                            .map(|view| {
+                                self.config_manager
+                                    .get_buffer_language(view.borrow().get_buffer_id())
+                            })
+                            .any(|language| new_plugin.receives_updates_for(&language))
+                    {
+                        self.do_start_plugin(ViewId(0), &new_plugin.name);
+                    }
                 }
             }
             EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any))
             | EventKind::Remove(RemoveKind::Any) => {
                 if let Some(plugin) = self.plugins.get_from_path(&event.paths[0]) {
                     self.do_stop_plugin(ViewId(0), &plugin.name);
-                    self.do_start_plugin(ViewId(0), &plugin.name);
+                    if plugin.activates_on_startup()
+                        || self
+                            .views
+                            .values()
+                            .map(|view| {
+                                self.config_manager
+                                    .get_buffer_language(view.borrow().get_buffer_id())
+                            })
+                            .any(|language| plugin.receives_updates_for(&language))
+                    {
+                        self.do_start_plugin(ViewId(0), &plugin.name);
+                    }
                 }
             }
             _ => (),
@@ -914,15 +1195,39 @@ impl CoreState {
 /// plugin event handling
 impl CoreState {
     /// Called from a plugin's thread after trying to start the plugin.
-    pub(crate) fn plugin_connect(&mut self, plugin: Result<Plugin, io::Error>) {
+    pub(crate) fn plugin_connect(&mut self, plugin: Result<Plugin, PluginStartError>) {
         match plugin {
             Ok(plugin) => {
-                let init_info =
-                    self.iter_groups().map(|mut ctx| ctx.plugin_info()).collect::<Vec<_>>();
+                self.launching_plugins.remove(&plugin.name);
+                let pending_commands = self.take_pending_plugin_commands(&plugin.name);
+                let init_info = self.plugin_init_info(&plugin, &pending_commands);
+                let should_shutdown =
+                    pending_commands.iter().any(|command| command.shutdown_after_dispatch)
+                        || (plugin.is_single_invocation() && !pending_commands.is_empty());
+                let plugin_id = plugin.id;
                 plugin.initialize(init_info);
+                pending_commands.iter().for_each(|command| {
+                    plugin.dispatch_command(command.view_id, &command.method, &command.params);
+                });
+                self.plugin_restart_state.entry(plugin.name.clone()).or_default().last_start =
+                    Some(Instant::now());
                 self.running_plugins.push(plugin);
+                if should_shutdown {
+                    self.begin_plugin_shutdown(plugin_id, StopReason::SingleInvocation);
+                }
             }
-            Err(e) => error!("failed to start plugin {:?}", e),
+            Err(err) => {
+                self.launching_plugins.remove(&err.name);
+                error!("failed to start plugin {}: {:?}", err.name, err.source);
+                let detail = match err.source {
+                    PluginStartErrorKind::Io(source) => source.to_string(),
+                    PluginStartErrorKind::UnsupportedTransport(transport) => {
+                        format!("unsupported transport {transport:?}")
+                    }
+                };
+                self.peer.alert(format!("failed to start plugin {}: {}", err.name, detail));
+                self.schedule_plugin_restart(&err.name);
+            }
         }
     }
 
@@ -931,7 +1236,15 @@ impl CoreState {
         let running_idx = self.running_plugins.iter().position(|p| p.id == id);
         if let Some(idx) = running_idx {
             let plugin = self.running_plugins.remove(idx);
+            self.launching_plugins.remove(&plugin.name);
+            let stop_reason = self.stopping_plugins.remove(&id);
             self.after_stop_plugin(&plugin);
+            if stop_reason.is_none() {
+                self.schedule_plugin_restart(&plugin.name);
+            } else {
+                self.scheduled_plugin_restarts.remove(&plugin.name);
+                self.plugin_restart_state.remove(&plugin.name);
+            }
         }
     }
 
@@ -944,6 +1257,18 @@ impl CoreState {
     ) {
         if let Some(mut edit_ctx) = self.make_context(view_id) {
             edit_ctx.do_plugin_update(response);
+        }
+    }
+
+    pub(crate) fn plugin_hover(
+        &mut self,
+        _plugin_id: PluginId,
+        view_id: ViewId,
+        request_id: usize,
+        response: Result<Value, xi_rpc::Error>,
+    ) {
+        if let Some(mut edit_ctx) = self.make_context(view_id) {
+            edit_ctx.do_plugin_hover(request_id, response);
         }
     }
 
@@ -967,11 +1292,69 @@ impl CoreState {
         cmd: PluginRequest,
     ) -> Result<Value, RemoteError> {
         if let Some(mut edit_ctx) = self.make_context(view_id) {
-            Ok(edit_ctx.do_plugin_cmd_sync(plugin_id, cmd))
+            edit_ctx.do_plugin_cmd_sync(plugin_id, cmd)
         } else {
             Err(RemoteError::custom(404, "missing view", None))
         }
     }
+
+    pub(crate) fn plugin_stderr(&self, plugin_name: &str, line: &str) {
+        error!("plugin {} stderr: {}", plugin_name, line);
+        if stderr_is_user_visible(line) {
+            self.peer.alert(format!("plugin {}: {}", plugin_name, line));
+        }
+    }
+
+    fn take_pending_plugin_commands(&mut self, plugin_name: &str) -> Vec<PendingPluginCommand> {
+        let mut retained = Vec::with_capacity(self.pending_plugin_commands.len());
+        let mut pending = Vec::new();
+
+        for command in self.pending_plugin_commands.drain(..) {
+            if command.plugin_name == plugin_name {
+                pending.push(command);
+            } else {
+                retained.push(command);
+            }
+        }
+
+        self.pending_plugin_commands = retained;
+        pending
+    }
+
+    fn plugin_init_info(
+        &self,
+        plugin: &Plugin,
+        pending_commands: &[PendingPluginCommand],
+    ) -> Vec<crate::plugins::rpc::PluginBufferInfo> {
+        let mut seen_buffers = HashSet::new();
+        let mut init_info = Vec::new();
+
+        for mut context in self.iter_groups() {
+            if plugin.receives_updates_for(&context.language)
+                && seen_buffers.insert(context.buffer_id)
+            {
+                init_info.push(context.plugin_info());
+            }
+        }
+
+        for command in pending_commands {
+            if let Some(mut context) = self.make_context(command.view_id)
+                && seen_buffers.insert(context.buffer_id)
+            {
+                init_info.push(context.plugin_info());
+            }
+        }
+
+        init_info
+    }
+}
+
+fn stderr_is_user_visible(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("panic")
+        || lower.contains("panicked")
+        || lower.contains("error")
+        || lower.contains("failed")
 }
 
 /// test helpers
@@ -1094,10 +1477,46 @@ impl BufferId {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use serde::Deserialize;
     use serde_json::json;
+    use xi_rpc::Peer;
+    use xi_rpc::test_utils::DummyPeer;
 
-    use super::ViewId;
+    use super::{CoreState, PLUGIN_RESTART_MAX_DELAY_MS, ViewId, stderr_is_user_visible};
+
+    #[test]
+    fn begin_plugin_launch_blocks_duplicate_starts() {
+        let peer = Box::new(DummyPeer);
+        let mut state = CoreState::new(&peer.box_clone(), None, None);
+
+        assert!(state.begin_plugin_launch("test-plugin"));
+        assert!(!state.begin_plugin_launch("test-plugin"));
+        assert!(state.launching_plugins.contains("test-plugin"));
+    }
+
+    #[test]
+    fn stderr_visibility_filters_noise() {
+        assert!(stderr_is_user_visible("plugin panicked at line 7"));
+        assert!(stderr_is_user_visible("ERROR: broken transport"));
+        assert!(stderr_is_user_visible("request failed"));
+        assert!(!stderr_is_user_visible("info: warming cache"));
+    }
+
+    #[test]
+    fn restart_delay_backs_off_for_repeated_crashes() {
+        let peer = Box::new(DummyPeer);
+        let mut state = CoreState::new(&peer.box_clone(), None, None);
+
+        let first = state.next_restart_delay("test-plugin");
+        let second = state.next_restart_delay("test-plugin");
+        let third = state.next_restart_delay("test-plugin");
+
+        assert!(first < second);
+        assert!(second <= third);
+        assert!(third <= Duration::from_millis(PLUGIN_RESTART_MAX_DELAY_MS));
+    }
 
     #[test]
     fn test_deserialize_view_id() {

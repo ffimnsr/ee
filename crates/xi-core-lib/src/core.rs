@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use log::info;
@@ -21,7 +20,7 @@ use serde_json::Value;
 use xi_rpc::{Error as RpcError, Handler, ReadError, RemoteError, RpcCtx};
 
 use crate::plugin_rpc::{PluginCommand, PluginNotification, PluginRequest};
-use crate::plugins::{Plugin, PluginId};
+use crate::plugins::{Plugin, PluginId, PluginStartError};
 use crate::rpc::*;
 use crate::tabs::{CoreState, ViewId};
 use crate::tracing_support;
@@ -134,7 +133,7 @@ impl WeakXiCore {
 
     /// Called immediately after attempting to start a plugin,
     /// from the plugin's thread.
-    pub fn plugin_connect(&self, plugin: Result<Plugin, io::Error>) {
+    pub fn plugin_connect(&self, plugin: Result<Plugin, PluginStartError>) {
         if let Some(core) = self.upgrade() {
             core.inner().plugin_connect(plugin)
         }
@@ -144,6 +143,18 @@ impl WeakXiCore {
     pub fn plugin_exit(&self, plugin: PluginId, error: Result<(), ReadError>) {
         if let Some(core) = self.upgrade() {
             core.inner().plugin_exit(plugin, error)
+        }
+    }
+
+    pub fn plugin_stderr(&self, plugin_name: String, line: String) {
+        if let Some(core) = self.upgrade() {
+            core.inner().plugin_stderr(&plugin_name, &line)
+        }
+    }
+
+    pub fn restart_plugin(&self, plugin_name: String) {
+        if let Some(core) = self.upgrade() {
+            core.inner().restart_plugin(&plugin_name)
         }
     }
 
@@ -163,6 +174,20 @@ impl WeakXiCore {
             let _t =
                 tracing::trace_span!("WeakXiCore::plugin_update", categories = "core").entered();
             core.inner().plugin_update(plugin, view, response);
+        }
+    }
+
+    pub fn handle_plugin_hover(
+        &self,
+        plugin: PluginId,
+        view: ViewId,
+        request_id: usize,
+        response: Result<Value, RpcError>,
+    ) {
+        if let Some(core) = self.upgrade() {
+            let _t =
+                tracing::trace_span!("WeakXiCore::plugin_hover", categories = "core").entered();
+            core.inner().plugin_hover(plugin, view, request_id, response);
         }
     }
 }

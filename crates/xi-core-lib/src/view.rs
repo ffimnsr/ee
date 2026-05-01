@@ -14,6 +14,7 @@
 
 use std::cell::RefCell;
 use std::cmp::{max, min};
+use std::collections::HashMap;
 use std::iter;
 use std::ops::Range;
 
@@ -38,6 +39,7 @@ use crate::width_cache::WidthCache;
 use crate::word_boundaries::WordCursor;
 use xi_rope::spans::Spans;
 use xi_rope::{Cursor, Interval, LinesMetric, Rope, RopeDelta};
+use xi_rpc::RequestId;
 
 type StyleMap = RefCell<ThemeStyleMap>;
 
@@ -102,6 +104,10 @@ pub struct View {
 
     /// Annotations provided by plugins.
     annotations: AnnotationStore,
+
+    diagnostics: HashMap<PluginId, Vec<crate::plugins::rpc::Diagnostic>>,
+
+    pending_hover_requests: HashMap<PluginId, RequestId>,
 }
 
 /// Indicates what changed in the find state.
@@ -182,6 +188,8 @@ impl View {
             replace: None,
             replace_changed: false,
             annotations: AnnotationStore::new(),
+            diagnostics: HashMap::new(),
+            pending_hover_requests: HashMap::new(),
         }
     }
 
@@ -207,6 +215,18 @@ impl View {
 
     pub(crate) fn has_pending_render(&self) -> bool {
         self.pending_render
+    }
+
+    pub(crate) fn replace_pending_hover_request(
+        &mut self,
+        plugin_id: PluginId,
+        request_id: RequestId,
+    ) -> Option<RequestId> {
+        self.pending_hover_requests.insert(plugin_id, request_id)
+    }
+
+    pub(crate) fn take_pending_hover_request(&mut self, plugin_id: PluginId) -> Option<RequestId> {
+        self.pending_hover_requests.remove(&plugin_id)
     }
 
     pub(crate) fn update_wrap_settings(&mut self, text: &Rope, wrap_cols: usize, word_wrap: bool) {
@@ -439,6 +459,18 @@ impl View {
         annotations: Annotations,
     ) {
         self.annotations.update(plugin, interval, annotations)
+    }
+
+    pub fn update_diagnostics(
+        &mut self,
+        plugin: PluginId,
+        diagnostics: Vec<crate::plugins::rpc::Diagnostic>,
+    ) {
+        self.diagnostics.insert(plugin, diagnostics);
+    }
+
+    pub fn get_diagnostics(&self) -> Vec<crate::plugins::rpc::Diagnostic> {
+        self.diagnostics.values().flat_map(|diagnostics| diagnostics.iter().cloned()).collect()
     }
 
     /// Select entire buffer.

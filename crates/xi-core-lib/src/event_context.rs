@@ -27,7 +27,8 @@ use xi_rope::{Cursor, Interval, LinesMetric, Rope, RopeDelta};
 use xi_rpc::{Error as RpcError, RemoteError};
 
 use crate::plugins::rpc::{
-    ClientPluginInfo, Hover, PluginBufferInfo, PluginNotification, PluginRequest, PluginUpdate,
+    ClientPluginInfo, GetDiagnosticsResponse, GetSelectionsResponse, Hover, PluginBufferInfo,
+    PluginNotification, PluginRequest, PluginUpdate, PluginUpdateAck, SelectionRange,
 };
 use crate::rpc::{EditNotification, EditRequest, LineRange, Position as ClientPosition};
 
@@ -38,7 +39,7 @@ use crate::edit_types::{EventDomain, SpecialEvent};
 use crate::editor::{EditType, Editor};
 use crate::file::FileInfo;
 use crate::line_offset::LineOffset;
-use crate::plugins::Plugin;
+use crate::plugins::{Plugin, PluginCapability};
 use crate::recorder::Recorder;
 use crate::selection::InsertDrift;
 use crate::styles::ThemeStyleMap;
@@ -134,8 +135,18 @@ impl<'a> EventContext<'a> {
         f(&mut view, editor.get_buffer())
     }
 
-    fn with_each_plugin<F: FnMut(&&Plugin)>(&self, f: F) {
-        self.plugins.iter().for_each(f)
+    fn dispatch_command_to_plugins(&self, method: &str, params: &Value) {
+        let mut dispatched = false;
+        self.plugins.iter().filter(|plugin| plugin.manifest.supports_command(method)).for_each(
+            |plugin| {
+                dispatched = true;
+                plugin.dispatch_command(self.view_id, method, params);
+            },
+        );
+
+        if !dispatched {
+            warn!("no running plugin registered command {:?}", method);
+        }
     }
 
     pub(crate) fn do_edit(&mut self, cmd: EditNotification) {
@@ -275,7 +286,12 @@ impl<'a> EventContext<'a> {
             UpdateSpans { start, len, spans, rev } => self.with_editor(|ed, view, _, _| {
                 ed.update_spans(view, plugin, start, len, spans, rev)
             }),
-            Edit { edit } => self.with_editor(|ed, _, _, _| ed.apply_plugin_edit(edit)),
+            Edit { edit } => {
+                let ack = self.with_editor(|ed, _, _, _| ed.apply_plugin_edit(edit));
+                if !ack.applied {
+                    warn!("plugin edit rejected at revision {}: {:?}", ack.rev, ack.reason);
+                }
+            }
             Alert { msg } => self.client.alert(&msg),
             AddStatusItem { key, value, alignment } => {
                 let plugin_name = self
@@ -297,21 +313,55 @@ impl<'a> EventContext<'a> {
                     ed.update_annotations(view, plugin, start, len, spans, annotation_type, rev)
                 })
             }
+            UpdateDiagnostics { diagnostics } => {
+                self.with_view(|view, _| view.update_diagnostics(plugin, diagnostics))
+            }
             RemoveStatusItem { key } => self.client.remove_status_item(self.view_id, &key),
             ShowHover { request_id, result } => self.do_show_hover(request_id, result),
+            ShowCompletions { items } => self.client.show_completions(self.view_id, &items),
+            ShowLocations { title, locations } => {
+                self.client.show_locations(self.view_id, &title, &locations)
+            }
         };
         self.after_edit(&plugin.to_string());
         self.render_if_needed();
     }
 
-    pub(crate) fn do_plugin_cmd_sync(&mut self, _plugin: PluginId, cmd: PluginRequest) -> Value {
+    pub(crate) fn do_plugin_cmd_sync(
+        &mut self,
+        _plugin: PluginId,
+        cmd: PluginRequest,
+    ) -> Result<Value, RemoteError> {
         use self::PluginRequest::*;
         match cmd {
-            LineCount => json!(self.editor.borrow().plugin_n_lines()),
-            GetData { start, unit, max_size, rev } => {
-                json!(self.editor.borrow().plugin_get_data(start, unit, max_size, rev))
+            ApplyEdit { edit } => {
+                Ok(json!(self.with_editor(|ed, _, _, _| ed.apply_plugin_edit(edit))))
             }
-            GetSelections => json!("not implemented"),
+            LineCount => Ok(json!(self.editor.borrow().plugin_n_lines())),
+            GetData { start, unit, max_size, rev } => {
+                Ok(json!(self.editor.borrow().plugin_get_data(start, unit, max_size, rev)))
+            }
+            GetSelections => {
+                let selections = self
+                    .view
+                    .borrow()
+                    .sel_regions()
+                    .iter()
+                    .map(|region| SelectionRange { start: region.start, end: region.end })
+                    .collect();
+                Ok(json!(GetSelectionsResponse { selections }))
+            }
+            GetDiagnostics => Ok(json!(GetDiagnosticsResponse {
+                diagnostics: self.view.borrow().get_diagnostics(),
+            })),
+            FormatDocument(..) => Err(RemoteError::custom(
+                501,
+                "document formatting is not implemented for plugins",
+                None,
+            )),
+            GetCodeActions(..) => {
+                Err(RemoteError::custom(501, "code actions are not implemented for plugins", None))
+            }
         }
     }
 
@@ -562,12 +612,22 @@ impl<'a> EventContext<'a> {
     }
 
     pub(crate) fn do_plugin_update(&mut self, update: Result<Value, RpcError>) {
-        match update.map(serde_json::from_value::<u64>) {
+        match update.map(serde_json::from_value::<PluginUpdateAck>) {
             Ok(Ok(_)) => (),
             Ok(Err(err)) => error!("plugin response json err: {:?}", err),
             Err(err) => error!("plugin shutdown, do something {:?}", err),
         }
         self.editor.borrow_mut().dec_revs_in_flight();
+    }
+
+    pub(crate) fn do_plugin_hover(&mut self, request_id: usize, hover: Result<Value, RpcError>) {
+        match hover.map(serde_json::from_value::<Hover>) {
+            Ok(Ok(hover)) => self.do_show_hover(request_id, Ok(hover)),
+            Ok(Err(err)) => error!("hover response json err: {:?}", err),
+            Err(RpcError::RequestCancelled) => debug!("hover request {} cancelled", request_id),
+            Err(RpcError::RemoteError(err)) => self.do_show_hover(request_id, Err(err)),
+            Err(err) => warn!("hover request {} failed: {:?}", request_id, err),
+        }
     }
 
     /// Returns the text to be saved, appending a newline if necessary.
@@ -716,24 +776,40 @@ impl<'a> EventContext<'a> {
 
     fn do_reindent(&mut self) {
         let line_ranges = self.selected_line_ranges();
-        // this is handled by syntect only; this is definitely not the long-term solution.
-        if let Some(plug) = self.plugins.iter().find(|p| p.name == "xi-syntect-plugin") {
-            plug.dispatch_command(self.view_id, "reindent", &json!(line_ranges));
-        }
+        self.dispatch_command_to_plugins("reindent", &json!(line_ranges));
     }
 
     fn do_debug_toggle_comment(&mut self) {
         let line_ranges = self.selected_line_ranges();
-
-        // this is handled by syntect only; this is definitely not the long-term solution.
-        if let Some(plug) = self.plugins.iter().find(|p| p.name == "xi-syntect-plugin") {
-            plug.dispatch_command(self.view_id, "toggle_comment", &json!(line_ranges));
-        }
+        self.dispatch_command_to_plugins("toggle_comment", &json!(line_ranges));
     }
 
     fn do_request_hover(&mut self, request_id: usize, position: Option<ClientPosition>) {
         if let Some(position) = self.get_resolved_position(position) {
-            self.with_each_plugin(|p| p.get_hover(self.view_id, request_id, position))
+            let hover_plugins = self
+                .plugins
+                .iter()
+                .filter(|plugin| plugin.manifest.has_capability(PluginCapability::Hover))
+                .copied()
+                .collect::<Vec<_>>();
+
+            hover_plugins.into_iter().for_each(|plugin| {
+                if let Some(previous_request) =
+                    self.with_view(|view, _| view.take_pending_hover_request(plugin.id))
+                {
+                    plugin.cancel_request(previous_request);
+                }
+
+                let weak_core = self.weak_core.clone();
+                let plugin_id = plugin.id;
+                let view_id = self.view_id;
+                let hover_request = plugin.request_hover(view_id, position, move |resp| {
+                    weak_core.handle_plugin_hover(plugin_id, view_id, request_id, resp);
+                });
+                self.with_view(|view, _| {
+                    view.replace_pending_hover_request(plugin_id, hover_request)
+                });
+            })
         }
     }
 
@@ -763,6 +839,10 @@ mod tests {
     use super::*;
     use crate::config::ConfigManager;
     use crate::core::dummy_weak_core;
+    use crate::plugins::rpc::{
+        CodeActionRequest, Diagnostic, DiagnosticSeverity, FormatDocumentRequest,
+        GetDiagnosticsResponse, GetSelectionsResponse, SelectionRange,
+    };
     use crate::tabs::BufferId;
     use xi_rpc::test_utils::DummyPeer;
 
@@ -863,6 +943,83 @@ mod tests {
         assert_eq!(harness.debug_render(), "hello \n[world|]!");
         ctx.do_edit(EditNotification::Insert { chars: "friends".into() });
         assert_eq!(harness.debug_render(), "hello \nfriends|!");
+    }
+
+    #[test]
+    fn get_selections_returns_current_selection_ranges() {
+        let harness = ContextHarness::new("hello world");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::MoveToRightEndOfLineAndModifySelection);
+
+        let response: GetSelectionsResponse = serde_json::from_value(
+            ctx.do_plugin_cmd_sync(crate::plugins::PluginPid(9), PluginRequest::GetSelections)
+                .expect("selection request should succeed"),
+        )
+        .expect("selection response should deserialize");
+
+        assert_eq!(response.selections, vec![SelectionRange { start: 0, end: 11 }]);
+    }
+
+    #[test]
+    fn typed_plugin_requests_return_structured_results_or_errors() {
+        let harness = ContextHarness::new("hello world");
+        let mut ctx = harness.make_context();
+
+        let diagnostics = ctx
+            .do_plugin_cmd_sync(crate::plugins::PluginPid(9), PluginRequest::GetDiagnostics)
+            .expect("diagnostics request should succeed");
+        let format_err = ctx
+            .do_plugin_cmd_sync(
+                crate::plugins::PluginPid(9),
+                PluginRequest::FormatDocument(FormatDocumentRequest { options: None }),
+            )
+            .expect_err("formatting should be unsupported");
+        let code_actions_err = ctx
+            .do_plugin_cmd_sync(
+                crate::plugins::PluginPid(9),
+                PluginRequest::GetCodeActions(CodeActionRequest {
+                    range: crate::plugins::rpc::Range { start: 0, end: 5 },
+                    diagnostics: Vec::new(),
+                }),
+            )
+            .expect_err("code actions should be unsupported");
+
+        let diagnostics: GetDiagnosticsResponse =
+            serde_json::from_value(diagnostics).expect("diagnostics response should deserialize");
+
+        assert!(diagnostics.diagnostics.is_empty());
+        assert!(matches!(format_err, RemoteError::Custom { code: 501, .. }));
+        assert!(matches!(code_actions_err, RemoteError::Custom { code: 501, .. }));
+    }
+
+    #[test]
+    fn plugin_diagnostics_round_trip_through_view_state() {
+        let harness = ContextHarness::new("hello world");
+        let mut ctx = harness.make_context();
+
+        ctx.do_plugin_cmd(
+            crate::plugins::PluginPid(9),
+            PluginNotification::UpdateDiagnostics {
+                diagnostics: vec![Diagnostic {
+                    range: crate::plugins::rpc::Range { start: 1, end: 4 },
+                    severity: DiagnosticSeverity::Warning,
+                    message: String::from("warn"),
+                    source: Some(String::from("lsp")),
+                    code: Some(String::from("W1")),
+                }],
+            },
+        );
+
+        let diagnostics: GetDiagnosticsResponse = serde_json::from_value(
+            ctx.do_plugin_cmd_sync(crate::plugins::PluginPid(9), PluginRequest::GetDiagnostics)
+                .expect("diagnostics request should succeed"),
+        )
+        .expect("diagnostics response should deserialize");
+
+        assert_eq!(diagnostics.diagnostics.len(), 1);
+        assert_eq!(diagnostics.diagnostics[0].message, "warn");
+        assert_eq!(diagnostics.diagnostics[0].severity, DiagnosticSeverity::Warning);
     }
 
     #[test]

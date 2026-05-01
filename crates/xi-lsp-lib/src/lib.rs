@@ -23,6 +23,6 @@ mod utils;
 pub use crate::lsp_plugin::LspPlugin;
 pub use crate::types::Config;
 
-pub fn start_mainloop<P: Plugin>(plugin: &mut P) {
-    mainloop(plugin).unwrap();
+pub fn start_mainloop<P: Plugin>(plugin: &mut P) -> Result<(), xi_rpc::ReadError> {
+    mainloop(plugin)
 }

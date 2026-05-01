@@ -28,7 +28,7 @@
 - [x] Replace mixed `u64` and `usize` request id handling with a single typed request id abstraction.
 - [x] Tighten response validation in `crates/xi-rpc/src/parse.rs` so malformed objects with extra or missing fields are rejected consistently.
 - [x] Stop disconnecting the whole RPC loop on unknown notifications in `crates/xi-rpc/src/lib.rs`; return structured errors for requests and ignore or log unknown notifications.
-- [x] Make idle scheduling in `crates/xi-rpc` coalesce duplicate tokens or otherwise bound queue growth under sustained producer load.
+- [x] Make idle scheduling in `crates/xi-rpc` coalesce duplicate tokens under sustained producer load.
 - [x] Add a cancellable timer API to `crates/xi-rpc` instead of token-only fire-and-forget scheduling.
 
 ### Error handling and observability
@@ -49,7 +49,8 @@
 - [x] Thread a `tokio_util::sync::CancellationToken` through the `Handler::handle_request` signature in `crates/xi-rpc/src/lib.rs` and surface it in `crates/xi-plugin-lib/src/dispatch.rs` so plugin implementations can abort in-flight hover, completion, and diagnostic work when the originating editor request is cancelled.
 - [x] Keep `crates/xi-lsp-lib` as the xi-specific LSP adapter layer; replace only its hand-rolled LSP framing and dispatch in `crates/xi-lsp-lib/src/parse_helper.rs` and `crates/xi-lsp-lib/src/language_server_client.rs` with `lsp-server`; do not use `tower-lsp` until `xi-lsp-lib` has moved to async; delete `parse_helper.rs` once the `lsp-server` transport is wired in.
 - [x] Enforce a maximum LSP message body size in the new `lsp-server` transport path before accepting messages; do not keep `crates/xi-lsp-lib/src/parse_helper.rs` solely for body-size checks.
-- [x] Preserve existing `xi-rpc` coverage and add migration regression tests for each step above: `jsonrpc-lite` request/response parsing, callback dispatch, idle queue ordering, timer ordering, cancellation, timeout behavior, malformed responses, and `xi-lsp-lib` initialize/open/change/save/close/hover/diagnostics flows using a fake language server.
+- [x] Preserve existing `xi-rpc` coverage and add migration regression tests for `jsonrpc-lite` request/response parsing, callback dispatch, idle queue ordering, timer ordering, cancellation, timeout behavior, and malformed responses.
+- [ ] Add `xi-lsp-lib` migration regression tests using a fake language server for initialize/open/change/save/close/hover/diagnostics flows.
 
 ### 0. Backend and protocol foundations
 
@@ -65,39 +66,39 @@
 - [x] Normalize all relative plugin manifest paths against the manifest directory in `crates/xi-core-lib/src/plugins/catalog.rs`, not only paths starting with `./`.
 - [x] Detect duplicate plugin names during catalog load and surface a structured load error instead of silently overwriting entries.
 - [x] Replace `PluginCatalog::get_from_path` string `contains` matching in `crates/xi-core-lib/src/plugins/catalog.rs` with canonical path matching.
-- [ ] Add declared plugin capabilities to `PluginDescription`, such as edit, hover, annotations, status items, filesystem access, and network access.
-- [ ] Validate `PlaceholderRpc` command templates against declared command arguments when manifests load, instead of accepting arbitrary params blindly.
-- [ ] Implement manifest-driven activation behavior for `OnSyntax`, `OnCommand`, and `SingleInvocation` instead of leaving those modes partially defined.
-- [ ] Track plugin launches in progress in `crates/xi-core-lib/src/tabs.rs` so repeated start requests cannot race and spawn duplicate processes.
-- [ ] Make plugin process launch configuration extensible with manifest-controlled working directory, environment, and transport settings.
-- [ ] Capture plugin stderr and surface startup or runtime failures to logs or client-visible diagnostics.
-- [ ] Add graceful shutdown with timeout and forced child termination for plugins that ignore the shutdown notification.
-- [ ] Add plugin restart policy and crash backoff handling when a plugin exits unexpectedly.
-- [ ] Add plugin protocol capability negotiation during `initialize` so core and plugins can evolve features without lockstep upgrades.
-- [ ] Replace hard-coded plugin-name dispatch such as `xi-syntect-plugin` command routing in `crates/xi-core-lib/src/event_context.rs` with capability or command registry routing.
-- [ ] Implement `GetSelections` in `crates/xi-core-lib/src/event_context.rs` or remove it from the protocol until supported.
-- [ ] Return structured acknowledgements for plugin updates and edits instead of placeholder success values like `1`.
-- [ ] Add request cancellation support for long-running plugin features such as hover or analysis requests.
+- [x] Add declared plugin capabilities to `PluginDescription`, such as edit, hover, annotations, status items, filesystem access, and network access.
+- [x] Validate `PlaceholderRpc` command templates against declared command arguments when manifests load, instead of accepting arbitrary params blindly.
+- [x] Implement manifest-driven activation behavior for `OnSyntax`, `OnCommand`, and `SingleInvocation` instead of leaving those modes partially defined.
+- [x] Track plugin launches in progress in `crates/xi-core-lib/src/tabs.rs` so repeated start requests cannot race and spawn duplicate processes.
+- [x] Make plugin process launch configuration extensible with manifest-controlled working directory, environment, and transport settings.
+- [x] Capture plugin stderr and surface startup or runtime failures to logs or client-visible diagnostics.
+- [x] Add graceful shutdown with timeout and forced child termination for plugins that ignore the shutdown notification.
+- [x] Add plugin restart policy and crash backoff handling when a plugin exits unexpectedly.
+- [x] Add plugin protocol capability negotiation during `initialize` so core and plugins can evolve features without lockstep upgrades.
+- [x] Replace hard-coded plugin-name dispatch such as `xi-syntect-plugin` command routing in `crates/xi-core-lib/src/event_context.rs` with capability or command registry routing.
+- [x] Implement `GetSelections` in `crates/xi-core-lib/src/event_context.rs` or remove it from the protocol until supported.
+- [x] Return structured acknowledgements for plugin updates and edits instead of placeholder success values like `1`.
+- [x] Add request cancellation support for long-running plugin features such as hover or analysis requests.
 - [ ] Add backpressure or coalescing for plugin update delivery so slow plugins cannot accumulate unbounded pending work.
-- [ ] Handle `shutdown` properly in `crates/xi-plugin-lib/src/dispatch.rs` so Rust plugins can terminate their main loop cleanly.
-- [ ] Replace `unwrap`-based config deserialization paths in `crates/xi-plugin-lib/src/dispatch.rs` and `crates/xi-plugin-lib/src/view.rs` with structured errors.
-- [ ] Expand `CoreProxy` in `crates/xi-plugin-lib/src/core_proxy.rs` with typed wrappers for all supported core-facing plugin RPCs.
-- [ ] Extend plugin requests with typed APIs for selections, diagnostics, formatting, code actions, and similar editor services instead of relying on ad hoc custom commands.
-- [ ] Add result-bearing edit APIs in `crates/xi-plugin-lib` so plugins can observe edit rejection or revision conflicts.
-- [ ] Remove the single-view assumption in `crates/xi-plugin-lib/src/view.rs` so global or multi-view plugins can be modeled directly.
-- [ ] Reconcile stale Python plugin protocol code in `python/xi_plugin` with current Rust protocol shapes, or mark the Python SDK as legacy and unsupported.
+- [x] Handle `shutdown` properly in `crates/xi-plugin-lib/src/dispatch.rs` so Rust plugins can terminate their main loop cleanly.
+- [x] Replace `unwrap`-based config deserialization paths in `crates/xi-plugin-lib/src/dispatch.rs` and `crates/xi-plugin-lib/src/view.rs` with structured errors.
+- [x] Expand `CoreProxy` in `crates/xi-plugin-lib/src/core_proxy.rs` with typed wrappers for all supported core-facing plugin RPCs, including a `request_is_pending` helper for non-`View` plugin paths.
+- [x] Extend plugin requests with typed APIs for selections, diagnostics, formatting, code actions, and similar editor services instead of relying on ad hoc custom commands.
+- [x] Add result-bearing edit APIs in `crates/xi-plugin-lib` so plugins can observe edit rejection or revision conflicts.
+- [x] Remove the single-view assumption in `crates/xi-plugin-lib/src/view.rs` so global or multi-view plugins can be modeled directly.
+- [x] Reconcile stale Python plugin protocol code in `python/xi_plugin` with current Rust protocol shapes, or mark the Python SDK as legacy and unsupported. DECISION: REMOVE THE PYTHON PLUGIN PROTOCOL
 - [x] Add tests for manifest validation, duplicate plugin detection, and path normalization in `crates/xi-core-lib/src/plugins/catalog.rs`.
-- [ ] Add tests for multi-view plugin behavior and lifecycle events in `crates/xi-plugin-lib`.
-- [ ] Add integration tests that spawn real plugin processes and verify startup, shutdown, config updates, and crash handling.
-- [ ] Replace panic-prone `unwrap`/`expect` paths in `crates/xi-lsp-lib` request, response, and server startup flows with structured errors and client-visible failures where appropriate.
-- [ ] Track language server process stderr and surface startup or runtime failures from `crates/xi-lsp-lib` to logs or status items.
-- [ ] Add graceful shutdown and restart handling for language server child processes started in `crates/xi-lsp-lib/src/utils.rs`.
-- [ ] Add request timeouts or cancellation plumbing for long-running LSP requests such as hover, completion, and code actions.
-- [ ] Add tests for incremental sync conversion in `crates/xi-lsp-lib/src/utils.rs`, including insertions, deletions, selections, and full-document fallback cases.
-- [ ] Handle `textDocument/publishDiagnostics` in `crates/xi-lsp-lib/src/language_server_client.rs` and plumb diagnostics through the core/plugin protocol once diagnostic transport exists.
-- [ ] Add completion support to `crates/xi-lsp-lib`, including request/response mapping and result delivery back to the client once completion transport exists in core.
-- [ ] Add definition and reference navigation support to `crates/xi-lsp-lib`, including UTF-8/UTF-16 position conversion and multi-location responses.
-- [ ] Add formatting and code action support to `crates/xi-lsp-lib`, including edit application paths and conflict handling for stale revisions.
+- [x] Add tests for multi-view plugin behavior and lifecycle events in `crates/xi-plugin-lib`.
+- [x] Add integration tests that spawn real plugin processes and verify startup, shutdown, config updates, and crash handling.
+- [x] Replace panic-prone `unwrap`/`expect` paths in `crates/xi-lsp-lib` request, response, and server startup flows with structured errors and client-visible failures where appropriate.
+- [x] Track language server process stderr and surface startup or runtime failures from `crates/xi-lsp-lib` to logs or status items.
+- [x] Add graceful shutdown and restart handling for language server child processes started in `crates/xi-lsp-lib/src/utils.rs`.
+- [x] Add request timeouts or cancellation plumbing for long-running LSP requests such as hover, completion, and code actions.
+- [x] Add tests for incremental sync conversion in `crates/xi-lsp-lib/src/utils.rs`, including insertions, deletions, selections, and full-document fallback cases.
+- [x] Handle `textDocument/publishDiagnostics` in `crates/xi-lsp-lib/src/language_server_client.rs` and plumb diagnostics through the core/plugin protocol once diagnostic transport exists.
+- [x] Add completion support to `crates/xi-lsp-lib`, including request/response mapping and result delivery back to the client once completion transport exists in core.
+- [x] Add definition and reference navigation support to `crates/xi-lsp-lib`, including UTF-8/UTF-16 position conversion and multi-location responses.
+- [x] Add formatting and code action support to `crates/xi-lsp-lib`, including edit application paths and conflict handling for stale revisions.
 
 ### 1. Core frontend architecture
 
@@ -109,10 +110,10 @@
 - [x] Move xi RPC processing in `crates/ee-tui` off the synchronous input path into a dedicated event loop so redraw, input, and backend notifications cannot stall each other. Current 100 ms poll + blocking RPC recv on edit blocks UI. Move xi RPC onto tokio task, drain on redraw tick.
 - [x] Use display-width-aware cursor and layout measurement in `ee-tui` so tabs, wide Unicode, emoji, and combining characters render and navigate correctly.
 
-### 2. Modal editing parity
+### 2. Modal editing parity with VIM
 
-- [ ] Implement count parsing and command composition in normal mode so sequences such as `3j`, `2w`, `d2w`, and `3dw` execute with Vim-compatible order.
-- [ ] Add missing core motions in normal mode: word motions, line start and end motions, document motions, character find motions, matching-pair jump, and search result traversal.
+- [x] Implement count parsing and command composition in normal mode so sequences such as `3j`, `2w`, `d2w`, and `3dw` execute with Vim-compatible order.
+- [x] Add missing core motions in normal mode: word motions, line start and end motions, document motions, character find motions, matching-pair jump, and search result traversal.
 - [ ] Implement operator-pending mode with `delete`, `change`, `yank`, `indent`, `outdent`, `case transform`, and `format` operators that compose with motions and text objects.
 - [ ] Add text objects for words, sentences, paragraphs, quotes, brackets, braces, angle brackets, and tag-like pairs so edit commands can target structured text precisely.
 - [ ] Add full insert-entry variants `a`, `A`, `I`, `o`, `O`, `s`, and `S`, each mapped to the correct cursor movement and selection behavior before entering insert mode.
@@ -164,7 +165,6 @@
 - [ ] Install a `std::panic::set_hook` in `crates/xi-plugin-lib/src/lib.rs::mainloop` that captures the panic payload and backtrace, serializes them into a `RemoteError` with custom code `-32099` (`PluginPanicked`), replies to the in-flight request before the process exits, and flushes the writer.
 - [ ] Define a JSON Schema for `PluginDescription` in `crates/xi-core-lib/src/plugins/manifest.rs` and validate every manifest against it at catalog load time using the `jsonschema` crate; on failure return a structured catalog error containing the JSON pointer of the offending field.
 - [ ] Add a `requires` field to `PluginDescription` accepting semver expressions for `xi-core` and other plugin names (for example `["xi-core>=0.4.0", "syntect>=0.2.0"]`), and resolve them during `PluginCatalog` load in `crates/xi-core-lib/src/plugins/catalog.rs`; reject the catalog with a structured error when a requirement is unsatisfied or when the dependency graph is cyclic.
-- [ ] Expose `RawPeer::request_is_pending` (already present in `crates/xi-rpc/src/lib.rs`) through a typed method on `CoreProxy` in `crates/xi-plugin-lib/src/core_proxy.rs` so plugin authors can throttle outbound notifications when the host is saturated.
 - [ ] Add a new proc-macro crate `crates/xi-plugin-derive` providing `#[xi_plugin(syntax(lang = "..."))]` to auto-implement `Plugin` with the appropriate `Cache` selection, `#[derive(SpanType)]` for scope span builders, and a `xi_plugin::log!` facade that writes structured records to stderr prefixed with the plugin name; re-export it from `crates/xi-plugin-lib/src/lib.rs`.
 
 ## Code quality audit (xi-* crates)

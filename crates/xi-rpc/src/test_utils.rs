@@ -144,4 +144,6 @@ impl Peer for DummyPeer {
     fn cancel_timer(&self, _token: usize) -> bool {
         false
     }
+
+    fn request_shutdown(&self) {}
 }
