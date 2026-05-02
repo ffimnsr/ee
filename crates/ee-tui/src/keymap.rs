@@ -22,6 +22,8 @@ pub(crate) enum Action {
     FindNext,
     FindPrevious,
     RequestHover,
+    RequestDocumentSymbols,
+    RequestWorkspaceSymbols,
     SetPrefix(char),
     PendingCharFind {
         forward: bool,
@@ -158,6 +160,9 @@ fn build_bindings() -> HashMap<BindingKey, Action> {
     bind!(Normal, KeyCode::Char('Q'), none, Some('['), LocPrev);
     bind!(Normal, KeyCode::Char('g'), none, Some('g'), Edit("move_to_beginning_of_document"),);
     bind!(Normal, KeyCode::Char('d'), none, Some('g'), Edit("duplicate_line"));
+    // g+o — document symbols; g+O — workspace symbols
+    bind!(Normal, KeyCode::Char('o'), none, Some('g'), RequestDocumentSymbols);
+    bind!(Normal, KeyCode::Char('O'), none, Some('g'), RequestWorkspaceSymbols);
     bind!(Normal, KeyCode::Char('d'), ctrl, None, Edit("scroll_page_down"));
     bind!(Normal, KeyCode::Char('u'), ctrl, None, Edit("scroll_page_up"));
     bind!(Normal, KeyCode::Char('/'), none, None, EnterSearch);

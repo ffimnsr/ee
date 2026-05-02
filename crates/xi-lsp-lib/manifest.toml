@@ -48,3 +48,21 @@ description = "Request or apply code actions"
 rpc_type = "notification"
 method = "request_code_actions"
 params = {}
+
+[[commands]]
+title = "Document Symbols"
+description = "Request symbol outline for current file"
+
+[commands.rpc_cmd]
+rpc_type = "notification"
+method = "request_document_symbols"
+params = {}
+
+[[commands]]
+title = "Workspace Symbols"
+description = "Search symbols across the workspace"
+
+[commands.rpc_cmd]
+rpc_type = "notification"
+method = "request_workspace_symbols"
+params = { query = "" }

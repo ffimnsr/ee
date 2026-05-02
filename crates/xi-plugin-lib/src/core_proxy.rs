@@ -24,7 +24,8 @@ use xi_core_lib::plugin_rpc::{
     CodeAction, CodeActionDescriptor, CodeActionRequest, CodeActionResponse,
     CompletionSuggestion, DataSpan, Diagnostic, FormatDocumentRequest, FormatDocumentResponse,
     GetDataResponse, GetDiagnosticsResponse, GetSelectionsResponse, Hover, NavigationTarget,
-    PluginEdit, PluginEditAck, ProtocolCapability, ScopeSpan, SelectionRange, TextEdit, TextUnit,
+    PluginEdit, PluginEditAck, ProtocolCapability, ScopeSpan, SelectionRange, SymbolItem,
+    TextEdit, TextUnit,
 };
 use xi_core_lib::plugins::PluginId;
 use xi_rpc::{RemoteError, RpcCtx, RpcPeer};
@@ -341,6 +342,18 @@ impl CoreProxy {
                 "view_id": view_id,
                 "title": title,
                 "locations": locations,
+            }),
+        );
+    }
+
+    pub fn show_symbols(&self, view_id: ViewId, title: &str, symbols: &[SymbolItem]) {
+        self.send_rpc_notification(
+            "show_symbols",
+            json!({
+                "plugin_id": self.plugin_id,
+                "view_id": view_id,
+                "title": title,
+                "symbols": symbols,
             }),
         );
     }

@@ -299,6 +299,9 @@ impl<'a> EventContext<'a> {
             ShowLocations { title, locations } => {
                 self.client.locations(self.view_id, &title, &locations)
             }
+            ShowSymbols { title, symbols } => {
+                self.client.symbols(self.view_id, &title, &symbols)
+            }
         };
         self.after_edit(&plugin.to_string());
         self.render_if_needed();

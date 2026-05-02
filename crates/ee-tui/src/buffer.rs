@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
 use xi_core_lib::XiCore;
-use xi_core_lib::plugin_rpc::Diagnostic;
+use xi_core_lib::plugin_rpc::{Diagnostic, SymbolItem};
 use xi_core_lib::rpc::LineReplacement;
 use xi_rpc::RpcLoop;
 
@@ -236,6 +236,8 @@ pub(crate) struct BufferManager {
     /// Locations reported by the backend (definition, references, …) awaiting
     /// dispatch to the App-level quickfix list.
     pub(crate) pending_locations: Vec<(String, String, Vec<NavigationTarget>)>,
+    /// Symbol results awaiting dispatch to the App-level picker.
+    pub(crate) pending_symbols: Vec<(String, String, Vec<SymbolItem>)>,
     pub(crate) pending_ui_actions: Vec<PendingUiAction>,
 }
 
@@ -325,6 +327,7 @@ impl BufferManager {
             next_rpc_id: 2,
             pending,
             pending_locations: Vec::new(),
+            pending_symbols: Vec::new(),
             pending_ui_actions: Vec::new(),
         };
 
@@ -423,6 +426,14 @@ impl BufferManager {
 
     pub(crate) fn request_references(&mut self) -> io::Result<()> {
         self.send_edit("request_references", json!({}))
+    }
+
+    pub(crate) fn request_document_symbols(&mut self) -> io::Result<()> {
+        self.send_edit("request_document_symbols", json!({}))
+    }
+
+    pub(crate) fn request_workspace_symbols(&mut self, query: &str) -> io::Result<()> {
+        self.send_edit("request_workspace_symbols", json!({ "query": query }))
     }
 
     pub(crate) fn format_document(&mut self) -> io::Result<()> {
@@ -640,6 +651,10 @@ impl BufferManager {
             BackendEvent::Locations { view_id, title, locations } => {
                 // Collect for the App to dispatch to the quickfix list.
                 self.pending_locations.push((view_id, title, locations));
+            }
+            BackendEvent::Symbols { view_id, title, symbols } => {
+                // Collect for the App to dispatch to the symbols picker.
+                self.pending_symbols.push((view_id, title, symbols));
             }
             BackendEvent::Diagnostics { view_id, diagnostics } => {
                 let idx = self.view_to_idx.get(&view_id).copied().unwrap_or(current);
@@ -884,6 +899,7 @@ impl BufferManager {
             next_rpc_id: 2,
             pending: Arc::new(Mutex::new(HashMap::new())),
             pending_locations: Vec::new(),
+            pending_symbols: Vec::new(),
             pending_ui_actions: Vec::new(),
         }
     }
@@ -893,6 +909,10 @@ impl BufferManager {
     /// Drain accumulated location results for App-level dispatch.
     pub(crate) fn drain_pending_locations(&mut self) -> Vec<(String, String, Vec<NavigationTarget>)> {
         std::mem::take(&mut self.pending_locations)
+    }
+
+    pub(crate) fn drain_pending_symbols(&mut self) -> Vec<(String, String, Vec<SymbolItem>)> {
+        std::mem::take(&mut self.pending_symbols)
     }
 
     pub(crate) fn drain_pending_ui_actions(&mut self) -> Vec<PendingUiAction> {

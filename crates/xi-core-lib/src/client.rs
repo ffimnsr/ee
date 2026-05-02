@@ -24,6 +24,7 @@ use crate::config::Table;
 use crate::plugins::Command;
 use crate::plugins::rpc::{
     ClientPluginInfo, CodeActionDescriptor, CompletionSuggestion, Diagnostic, NavigationTarget,
+    SymbolItem,
 };
 use crate::styles::ThemeSettings;
 use crate::syntax::LanguageId;
@@ -268,6 +269,17 @@ impl Client {
                 "view_id": view_id,
                 "title": title,
                 "locations": locations,
+            }),
+        )
+    }
+
+    pub fn symbols(&self, view_id: ViewId, title: &str, symbols: &[SymbolItem]) {
+        self.0.send_rpc_notification(
+            "symbols",
+            &json!({
+                "view_id": view_id,
+                "title": title,
+                "symbols": symbols,
             }),
         )
     }

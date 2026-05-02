@@ -593,6 +593,16 @@ impl App {
                     self.backend.status_message = Some(format!("hover failed: {err}"));
                 }
             }
+            Action::RequestDocumentSymbols => {
+                if let Err(err) = self.backend.request_document_symbols() {
+                    self.backend.status_message = Some(format!("symbols failed: {err}"));
+                }
+            }
+            Action::RequestWorkspaceSymbols => {
+                if let Err(err) = self.backend.request_workspace_symbols("") {
+                    self.backend.status_message = Some(format!("workspace symbols failed: {err}"));
+                }
+            }
             Action::SearchWordUnderCursor { forward } => {
                 // Use word under cursor (or visual selection) as search pattern via xi's
                 // selection_for_find RPC, then navigate forward or backward.
@@ -1668,6 +1678,17 @@ impl App {
                     self.backend.status_message = Some(format!("references failed: {err}"));
                 }
             }
+            "symbols" | "outline" => {
+                if let Err(err) = self.backend.request_document_symbols() {
+                    self.backend.status_message = Some(format!("symbols failed: {err}"));
+                }
+            }
+            "wsymbols" | "wsymbol" => {
+                let query = parts.collect::<Vec<_>>().join(" ");
+                if let Err(err) = self.backend.request_workspace_symbols(&query) {
+                    self.backend.status_message = Some(format!("workspace symbols failed: {err}"));
+                }
+            }
             "codeaction" | "codeactions" => {
                 let action_index = parts.next().and_then(|part| part.parse::<usize>().ok());
                 if let Err(err) = self.backend.request_code_actions(action_index) {
@@ -2623,6 +2644,21 @@ impl App {
         self.picker = Some(PickerState::new_completions(items));
     }
 
+    pub(crate) fn handle_pending_symbols(&mut self) {
+        let pending = self.backend.drain_pending_symbols();
+        let active_view_id = self.backend.active().view_id.clone();
+        for (view_id, title, symbols) in pending {
+            if view_id != active_view_id {
+                continue;
+            }
+            if symbols.is_empty() {
+                self.backend.status_message = Some(format!("{title}: no symbols found"));
+                continue;
+            }
+            self.picker = Some(PickerState::new_symbols(title, symbols));
+        }
+    }
+
     fn open_code_action_picker(&mut self, actions: &[CodeActionDescriptor]) {
         self.hover_popup = None;
         if actions.is_empty() {
@@ -2811,10 +2847,26 @@ impl App {
                 }
             }
             crate::picker::PickerKind::Help => {}
+            crate::picker::PickerKind::Symbols => {
+                let Some(path) = item.path else { return };
+                match self.backend.open_buffer(Some(path)) {
+                    Ok(buf_id) => {
+                        let _ = self.backend.switch_to_id(buf_id);
+                        self.tabs.focused_windows_mut().set_focused_buffer(buf_id);
+                        self.viewport = Viewport::default();
+                        if let Some(line) = item.line {
+                            self.jump_to_line(line);
+                        }
+                    }
+                    Err(err) => {
+                        self.backend.status_message = Some(format!("open failed: {err}"));
+                    }
+                }
+            }
         }
     }
 
-    pub(crate) fn scroll_into_view(&mut self, editor_height: usize) {
+    pub(crate) fn scroll_into_view(&mut self, editor_height: usize, editor_width: usize) {
         if editor_height == 0 {
             return;
         }
@@ -2835,7 +2887,20 @@ impl App {
             self.viewport.top_line = max_top;
         }
         let line = self.backend.lines.get(cursor_line).map(|s| s.as_str()).unwrap_or("");
-        self.viewport.target_col = byte_col_to_display_col(line, self.backend.cursor_col);
+        let cursor_display_col = byte_col_to_display_col(line, self.backend.cursor_col);
+        self.viewport.target_col = cursor_display_col;
+
+        // Horizontal scroll: keep cursor within the visible column range.
+        // In wrap mode all content is visible at left_col=0; reset any stale offset.
+        if self.config.wrap_lines {
+            self.viewport.left_col = 0;
+        } else if editor_width > 0 {
+            if cursor_display_col < self.viewport.left_col {
+                self.viewport.left_col = cursor_display_col;
+            } else if cursor_display_col >= self.viewport.left_col + editor_width {
+                self.viewport.left_col = cursor_display_col + 1 - editor_width;
+            }
+        }
     }
 
     // ── Recording helpers ──────────────────────────────────────────────────

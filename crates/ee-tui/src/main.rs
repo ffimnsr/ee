@@ -100,6 +100,8 @@ fn run_app(
         // Dispatch pending location results (definition, references, …) to the
         // quickfix list before drawing so the panel opens in the same frame.
         app.handle_pending_locations();
+        // Dispatch pending symbol results (document/workspace symbols) to picker.
+        app.handle_pending_symbols();
         // Periodically check for external file changes.
         app.backend.check_external_changes();
         // Warn the user when a backing file has been modified externally.
@@ -120,7 +122,8 @@ fn run_app(
         let term_rect =
             ratatui::layout::Rect { x: 0, y: 0, width: size.width, height: size.height };
         let editor_height = ui::compute_editor_height(term_rect, app);
-        app.scroll_into_view(editor_height);
+        let editor_width = ui::compute_editor_width(term_rect, app);
+        app.scroll_into_view(editor_height, editor_width);
         app.backend.notify_scroll(app.viewport.top_line, app.viewport.top_line + editor_height)?;
 
         terminal.draw(|frame| ui(frame, app))?;

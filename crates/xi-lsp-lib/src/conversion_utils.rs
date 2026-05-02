@@ -20,7 +20,7 @@ use std::fs;
 use crate::types::{LanguageResponseError, LspCodeAction, PendingCompletionItem};
 use lsp_types::*;
 use url::Url;
-use xi_core_lib::plugin_rpc::{CompletionSuggestion, NavigationTarget};
+use xi_core_lib::plugin_rpc::{CompletionSuggestion, NavigationTarget, SymbolItem};
 use xi_plugin_lib::{
     Cache, Diagnostic as CoreDiagnostic, DiagnosticSeverity as CoreDiagnosticSeverity,
     Error as PluginLibError, Hover as CoreHover, Range as CoreRange, View,
@@ -495,6 +495,89 @@ pub(crate) fn core_diagnostic_from_lsp_document(
             NumberOrString::Number(value) => value.to_string(),
         }),
     })
+}
+
+/// Convert an LSP `SymbolKind` number to a short human-readable string.
+fn symbol_kind_name(kind: SymbolKind) -> &'static str {
+    match kind {
+        SymbolKind::FILE => "file",
+        SymbolKind::MODULE => "module",
+        SymbolKind::NAMESPACE => "namespace",
+        SymbolKind::PACKAGE => "package",
+        SymbolKind::CLASS => "class",
+        SymbolKind::METHOD => "method",
+        SymbolKind::PROPERTY => "property",
+        SymbolKind::FIELD => "field",
+        SymbolKind::CONSTRUCTOR => "constructor",
+        SymbolKind::ENUM => "enum",
+        SymbolKind::INTERFACE => "interface",
+        SymbolKind::FUNCTION => "function",
+        SymbolKind::VARIABLE => "variable",
+        SymbolKind::CONSTANT => "constant",
+        SymbolKind::STRING => "string",
+        SymbolKind::NUMBER => "number",
+        SymbolKind::BOOLEAN => "boolean",
+        SymbolKind::ARRAY => "array",
+        SymbolKind::OBJECT => "object",
+        SymbolKind::KEY => "key",
+        SymbolKind::NULL => "null",
+        SymbolKind::ENUM_MEMBER => "enum_member",
+        SymbolKind::STRUCT => "struct",
+        SymbolKind::EVENT => "event",
+        SymbolKind::OPERATOR => "operator",
+        SymbolKind::TYPE_PARAMETER => "type_param",
+        _ => "symbol",
+    }
+}
+
+/// Convert a flat list of `DocumentSymbol` (from `textDocument/documentSymbol`)
+/// to `SymbolItem`s, resolving locations against `document_uri`.
+pub(crate) fn symbol_items_from_document_symbols(
+    document_uri: &Uri,
+    symbols: Vec<DocumentSymbol>,
+    file_path: &str,
+) -> Vec<SymbolItem> {
+    let _ = document_uri;
+    let mut result = Vec::new();
+    flatten_document_symbols(symbols, file_path, &mut result);
+    result
+}
+
+fn flatten_document_symbols(symbols: Vec<DocumentSymbol>, file_path: &str, out: &mut Vec<SymbolItem>) {
+    for sym in symbols {
+        out.push(SymbolItem {
+            name: sym.name,
+            kind: symbol_kind_name(sym.kind).to_owned(),
+            path: file_path.to_owned(),
+            line: sym.range.start.line as usize,
+            column: sym.range.start.character as usize,
+        });
+        if let Some(children) = sym.children {
+            flatten_document_symbols(children, file_path, out);
+        }
+    }
+}
+
+/// Convert `SymbolInformation` items (from `workspace/symbol`) to `SymbolItem`s.
+pub(crate) fn symbol_items_from_workspace_symbols(
+    symbols: Vec<SymbolInformation>,
+) -> Vec<SymbolItem> {
+    symbols
+        .into_iter()
+        .filter_map(|sym| {
+            let path = Url::parse(sym.location.uri.as_str())
+                .ok()?
+                .to_file_path()
+                .ok()?;
+            Some(SymbolItem {
+                name: sym.name,
+                kind: symbol_kind_name(sym.kind).to_owned(),
+                path: path.to_string_lossy().to_string(),
+                line: sym.location.range.start.line as usize,
+                column: sym.location.range.start.character as usize,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
