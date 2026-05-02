@@ -327,9 +327,17 @@ impl App {
             _ => {}
         }
 
-        let Event::Key(key) = event else {
+        let Event::Key(mut key) = event else {
             return;
         };
+
+        if matches!(key.code, KeyCode::Char('\r' | '\n'))
+            || (key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('m' | 'j')))
+        {
+            key.code = KeyCode::Enter;
+            key.modifiers.remove(KeyModifiers::CONTROL);
+        }
 
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return;
@@ -2818,6 +2826,13 @@ impl App {
             self.viewport.top_line = cursor_line.saturating_sub(off);
         } else if cursor_line + off + 1 > self.viewport.top_line + editor_height {
             self.viewport.top_line = cursor_line + off + 1 - editor_height;
+        }
+        // Clamp top_line so we never show blank rows at the bottom when there
+        // are enough lines above to fill the editor area.
+        let total_lines = self.backend.lines.len().max(1);
+        let max_top = total_lines.saturating_sub(editor_height);
+        if self.viewport.top_line > max_top {
+            self.viewport.top_line = max_top;
         }
         let line = self.backend.lines.get(cursor_line).map(|s| s.as_str()).unwrap_or("");
         self.viewport.target_col = byte_col_to_display_col(line, self.backend.cursor_col);

@@ -16,7 +16,8 @@ use crate::backend::{
     BackendEvent, CachedLine, ChannelReader, ChannelWriter, CoreUpdate, CoreUpdateKind, LineSlot,
     NavigationTarget, PendingRequests, PendingUiAction, block_for_response, checked_advance,
     drain_sync_notifications, invalid_line_ranges, normalize_line_text, parse_response,
-    send_rpc_notification, send_rpc_request, xi_reader_thread,
+    send_rpc_notification, send_rpc_request,
+    xi_reader_thread,
 };
 use crate::text::previous_char_boundary;
 
@@ -85,7 +86,18 @@ impl BufState {
                 }
                 CoreUpdateKind::Copy => {
                     let end = checked_advance(source_index, op.n, previous.len(), "copy")?;
-                    next_cache.extend(previous[source_index..end].iter().cloned());
+                    // Clear cursor data from copied slots: Copy op means content is
+                    // unchanged from xi-core's perspective, but cursor positions may
+                    // have moved. Only Insert/Update ops carry authoritative cursor data.
+                    for slot in &previous[source_index..end] {
+                        match slot.clone() {
+                            LineSlot::Known(mut line) => {
+                                line.cursors.clear();
+                                next_cache.push(LineSlot::Known(line));
+                            }
+                            invalid => next_cache.push(invalid),
+                        }
+                    }
                     source_index = end;
                 }
                 CoreUpdateKind::Update => {
@@ -511,6 +523,7 @@ impl BufferManager {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn paste_register(&mut self, chars: &str, before: bool) -> io::Result<()> {
         self.send_edit("paste_register", json!({ "chars": chars, "before": before }))
     }

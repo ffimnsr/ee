@@ -81,6 +81,12 @@ fn split_root_areas(area: Rect, app: &App) -> RootAreas {
     RootAreas { tab_bar_area, editor_area, qf_area, status_area, prompt_area }
 }
 
+/// Return the visible editor row count for the current app state and terminal
+/// size. Use this wherever xi-core must be told how many lines fit on screen.
+pub(crate) fn compute_editor_height(terminal_size: ratatui::layout::Rect, app: &App) -> usize {
+    split_root_areas(terminal_size, app).editor_area.height as usize
+}
+
 fn window_chunks(app: &App, win_rect: Rect, line_count: usize) -> [Rect; 2] {
     let gw = gutter_width(app, line_count);
     let editor = Layout::default()
@@ -411,9 +417,10 @@ fn render_gutter(
 
     let mut lines: Vec<Line> = Vec::with_capacity(height);
     let mut li = top;
+    let tilde_style = Style::default().fg(Color::Rgb(65, 72, 95)).bg(Color::Rgb(30, 32, 39));
     for _ in 0..height {
         if li >= line_count {
-            lines.push(Line::from(" "));
+            lines.push(Line::from(Span::styled("~", tilde_style)));
             continue;
         }
         let is_cursor = li == cursor_line;

@@ -117,7 +117,9 @@ fn run_app(
         app.write_recovery_if_due();
 
         let size = terminal.size()?;
-        let editor_height = (size.height as usize).saturating_sub(2);
+        let term_rect =
+            ratatui::layout::Rect { x: 0, y: 0, width: size.width, height: size.height };
+        let editor_height = ui::compute_editor_height(term_rect, app);
         app.scroll_into_view(editor_height);
         app.backend.notify_scroll(app.viewport.top_line, app.viewport.top_line + editor_height)?;
 
