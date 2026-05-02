@@ -131,8 +131,8 @@
 - [x] Add tab-page style workspace grouping on top of split windows so users can keep separate editing contexts without losing buffer state.
 - [x] Implement command-line ranges, command history, and completion in `ee-tui` so ex commands can address lines, selections, buffers, and files unambiguously.
 - [x] Add file and buffer pickers for open file, recent file, live grep, buffer switch, and symbol jump so common navigation does not depend on raw ex commands alone.
-- [ ] Add quickfix and location-list views in `ee-tui` and make them navigable from keyboard commands so search results, diagnostics, and build errors share one workflow.
-- [ ] Implement safe file reload, external-change detection, unsaved-change prompts, and crash recovery artifacts so file workflows do not lose user work.
+- [x] Add quickfix and location-list views in `ee-tui` and make them navigable from keyboard commands so search results, diagnostics, and build errors share one workflow.
+- [x] Implement safe file reload, external-change detection, unsaved-change prompts, and crash recovery artifacts so file workflows do not lose user work.
 
 ### 4. Display, discoverability, and editing ergonomics
 

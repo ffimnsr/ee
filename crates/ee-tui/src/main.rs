@@ -18,6 +18,7 @@ mod buffer;
 mod config;
 mod keymap;
 mod picker;
+mod quickfix;
 mod registers;
 mod text;
 mod ui;
@@ -80,6 +81,24 @@ fn run_app(
 ) -> io::Result<()> {
     while !app.should_quit && !shutdown.load(Ordering::Relaxed) {
         app.backend.drain_events()?;
+        // Dispatch pending location results (definition, references, …) to the
+        // quickfix list before drawing so the panel opens in the same frame.
+        app.handle_pending_locations();
+        // Periodically check for external file changes.
+        app.backend.check_external_changes();
+        // Warn the user when a backing file has been modified externally.
+        for buf in app.backend.all_bufs() {
+            if buf.externally_modified {
+                let title = buf.title();
+                app.backend.status_message = Some(format!(
+                    "'{title}' changed on disk — use :e! to reload or continue editing"
+                ));
+                // Only show one warning per frame; the flag stays set until reload.
+                break;
+            }
+        }
+        // Write crash-recovery artifacts every ~30 s for modified buffers.
+        app.write_recovery_if_due();
 
         let size = terminal.size()?;
         let editor_height = (size.height as usize).saturating_sub(2);

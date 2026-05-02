@@ -66,6 +66,12 @@ pub(crate) enum Action {
     // Command-line history
     CommandHistoryOlder,
     CommandHistoryNewer,
+    // Quickfix list navigation
+    QfNext,
+    QfPrev,
+    // Location list navigation
+    LocNext,
+    LocPrev,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -123,6 +129,15 @@ fn build_bindings() -> HashMap<BindingKey, Action> {
     bind!(Normal, KeyCode::Char('$'), none, None, Edit("move_to_right_end_of_line"));
     bind!(Normal, KeyCode::Char('G'), none, None, Edit("move_to_end_of_document"));
     bind!(Normal, KeyCode::Char('g'), none, None, SetPrefix('g'));
+    // `]` / `[` prefix for list navigation (e.g. ]q / [q).
+    bind!(Normal, KeyCode::Char(']'), none, None, SetPrefix(']'));
+    bind!(Normal, KeyCode::Char('['), none, None, SetPrefix('['));
+    // ]q / [q — quickfix next / prev
+    bind!(Normal, KeyCode::Char('q'), none, Some(']'), QfNext);
+    bind!(Normal, KeyCode::Char('q'), none, Some('['), QfPrev);
+    // ]Q / [Q — location list next / prev
+    bind!(Normal, KeyCode::Char('Q'), none, Some(']'), LocNext);
+    bind!(Normal, KeyCode::Char('Q'), none, Some('['), LocPrev);
     bind!(Normal, KeyCode::Char('g'), none, Some('g'), Edit("move_to_beginning_of_document"),);
     bind!(Normal, KeyCode::Char('d'), ctrl, None, Edit("scroll_page_down"));
     bind!(Normal, KeyCode::Char('u'), ctrl, None, Edit("scroll_page_up"));

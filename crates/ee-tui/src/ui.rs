@@ -5,6 +5,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 
 use crate::app::{App, Mode, Viewport};
 use crate::buffer::BufState;
+use crate::quickfix::QfList;
 use crate::text::{byte_col_to_display_col, display_col_to_byte};
 use crate::picker::PickerKind;
 
@@ -14,12 +15,41 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
     frame.render_widget(Block::default().style(Style::default().bg(Color::Rgb(22, 24, 31))), area);
 
     let tab_count = app.tabs.tab_count();
+
+    // Determine whether a list panel (quickfix or location list) is visible.
+    let qf_panel_visible = (app.quickfix_open && app.quickfix.is_some())
+        || (app.location_list_open && app.location_list.is_some());
+    const QF_HEIGHT: u16 = 8;
+
     let rows = if tab_count > 1 {
+        if qf_panel_visible {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                    Constraint::Length(QF_HEIGHT),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                ])
+                .split(area)
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                    Constraint::Length(1),
+                ])
+                .split(area)
+        }
+    } else if qf_panel_visible {
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
                 Constraint::Min(1),
+                Constraint::Length(QF_HEIGHT),
                 Constraint::Length(1),
                 Constraint::Length(1),
             ])
@@ -31,11 +61,16 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
             .split(area)
     };
 
-    let (tab_bar_area, editor_area, status_area, prompt_area) = if tab_count > 1 {
-        (Some(rows[0]), rows[1], rows[2], rows[3])
-    } else {
-        (None, rows[0], rows[1], rows[2])
-    };
+    let (tab_bar_area, editor_area, qf_area, status_area, prompt_area) =
+        if tab_count > 1 && qf_panel_visible {
+            (Some(rows[0]), rows[1], Some(rows[2]), rows[3], rows[4])
+        } else if tab_count > 1 {
+            (Some(rows[0]), rows[1], None, rows[2], rows[3])
+        } else if qf_panel_visible {
+            (None, rows[0], Some(rows[1]), rows[2], rows[3])
+        } else {
+            (None, rows[0], None, rows[1], rows[2])
+        };
 
     // Tab bar (only when more than one tab is open).
     if let Some(tab_area) = tab_bar_area {
@@ -67,6 +102,19 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
 
     render_status(frame, status_area, app);
     render_prompt(frame, prompt_area, app);
+
+    // Quickfix / location-list panel (drawn before picker overlay).
+    if let Some(qf_rect) = qf_area {
+        if app.quickfix_open {
+            if let Some(qf) = &app.quickfix {
+                render_qf_panel(frame, qf_rect, qf, app.quickfix_focused, false);
+            }
+        } else if app.location_list_open {
+            if let Some(ll) = &app.location_list {
+                render_qf_panel(frame, qf_rect, ll, app.location_list_focused, true);
+            }
+        }
+    }
 
     // Picker overlay (drawn last so it floats above everything).
     if app.picker.is_some() {
@@ -164,8 +212,15 @@ fn render_buffer(frame: &mut ratatui::Frame<'_>, area: Rect, buf: &BufState, vp:
 }
 
 fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
+    let mode_label = if app.quickfix_focused {
+        "QFX"
+    } else if app.location_list_focused {
+        "LOC"
+    } else {
+        app.mode.label()
+    };
     let mode = Span::styled(
-        format!(" {} ", app.mode.label()),
+        format!(" {} ", mode_label),
         Style::default().fg(Color::Rgb(22, 24, 31)).bg(Color::Rgb(137, 220, 235)),
     );
     let file = Span::styled(
@@ -265,6 +320,74 @@ fn cursor_position_for(
     Position::new(x, y)
 }
 
+/// Render the quickfix or location-list panel.
+///
+/// `is_location_list` controls the title prefix only; both lists share
+/// the same layout.
+fn render_qf_panel(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    list: &QfList,
+    focused: bool,
+    is_location_list: bool,
+) {
+    let border_style = if focused {
+        Style::default().fg(Color::Rgb(137, 220, 235))
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let kind = if is_location_list { "Location List" } else { "Quickfix" };
+    let title = format!(
+        " {} [{}/{}] ",
+        if list.title.is_empty() { kind.to_owned() } else { list.title.clone() },
+        if list.is_empty() { 0 } else { list.selected + 1 },
+        list.len()
+    );
+    let block = Block::default()
+        .title(title.as_str())
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .style(Style::default().bg(Color::Rgb(24, 25, 38)));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.height == 0 || list.is_empty() {
+        return;
+    }
+
+    let height = inner.height as usize;
+    let selected = list.selected;
+    let scroll_off = if selected >= height { selected + 1 - height } else { 0 };
+
+    let items: Vec<ListItem> = list
+        .entries
+        .iter()
+        .enumerate()
+        .skip(scroll_off)
+        .take(height)
+        .map(|(i, entry)| {
+            let is_sel = i == selected;
+            let style = if is_sel {
+                Style::default()
+                    .fg(Color::Rgb(22, 24, 31))
+                    .bg(Color::Rgb(137, 220, 235))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Rgb(213, 216, 224))
+            };
+            ListItem::new(Line::from(Span::styled(
+                format!(" {:>3}  {}", i + 1, entry.display_label()),
+                style,
+            )))
+        })
+        .collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(selected.saturating_sub(scroll_off)));
+    frame.render_stateful_widget(List::new(items), inner, &mut list_state);
+}
+
 /// Render the floating picker overlay centered in `area`.
 fn render_picker(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let Some(picker) = &app.picker else { return };
@@ -359,4 +482,3 @@ fn render_picker(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         &mut list_state,
     );
 }
-
