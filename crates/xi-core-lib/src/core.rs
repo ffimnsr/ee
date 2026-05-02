@@ -14,7 +14,6 @@
 
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
-use log::info;
 use serde_json::Value;
 
 use xi_rpc::{Error as RpcError, Handler, ReadError, RemoteError, RpcCtx};
@@ -86,15 +85,6 @@ impl Handler for XiCore {
 
     fn handle_notification(&mut self, ctx: &RpcCtx, rpc: Self::Notification) {
         use self::CoreNotification::*;
-
-        // We allow tracing to be enabled before event `client_started`
-        if let TracingConfig { enabled } = rpc {
-            tracing_support::set_enabled(enabled);
-            info!("tracing in core = {:?}", enabled);
-            if self.is_waiting() {
-                return;
-            }
-        }
 
         // wait for client_started before setting up inner
         if let ClientStarted { ref config_dir, ref client_extras_dir } = rpc {

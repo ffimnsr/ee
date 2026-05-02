@@ -25,12 +25,8 @@ pub(crate) struct QfEntry {
 impl QfEntry {
     /// Short label suitable for the quickfix panel list.
     pub(crate) fn display_label(&self) -> String {
-        let path_part = self
-            .path
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .unwrap_or("?");
+        let path_part =
+            self.path.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("?");
         format!("{}:{}: {}", path_part, self.line + 1, self.message)
     }
 }

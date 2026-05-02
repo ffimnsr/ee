@@ -437,7 +437,7 @@ mod tests {
     use serde_json::Value;
 
     use super::rpc::PluginUpdate;
-    use super::{drive_plugin_update, PluginId};
+    use super::{PluginId, drive_plugin_update};
     use xi_rpc::{Callback, Error as RpcError, Peer, RequestId};
 
     /// Minimal mock peer that captures the most-recently registered callback so
@@ -511,16 +511,7 @@ mod tests {
 
     fn dummy_update(rev: u64) -> PluginUpdate {
         use crate::tabs::ViewId;
-        PluginUpdate::new(
-            ViewId::from(0usize),
-            rev,
-            None,
-            0,
-            1,
-            None,
-            "edit".into(),
-            "test".into(),
-        )
+        PluginUpdate::new(ViewId::from(0usize), rev, None, 0, 1, None, "edit".into(), "test".into())
     }
 
     /// When `drive_plugin_update` is called it immediately sends via the peer.

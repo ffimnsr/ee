@@ -1,20 +1,22 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
 use xi_core_lib::XiCore;
+use xi_core_lib::plugin_rpc::Diagnostic;
+use xi_core_lib::rpc::LineReplacement;
 use xi_rpc::RpcLoop;
 
 use crate::backend::{
-    BackendEvent, ChannelReader, ChannelWriter, CachedLine, CoreUpdate, CoreUpdateKind,
-    LineSlot, NavigationTarget, PendingRequests, invalid_line_ranges,
-    normalize_line_text, checked_advance, parse_response, block_for_response,
-    drain_sync_notifications, send_rpc_notification, send_rpc_request, xi_reader_thread,
+    BackendEvent, CachedLine, ChannelReader, ChannelWriter, CoreUpdate, CoreUpdateKind, LineSlot,
+    NavigationTarget, PendingRequests, PendingUiAction, block_for_response, checked_advance,
+    drain_sync_notifications, invalid_line_ranges, normalize_line_text, parse_response,
+    send_rpc_notification, send_rpc_request, xi_reader_thread,
 };
 use crate::text::previous_char_boundary;
 
@@ -40,6 +42,7 @@ pub(crate) struct BufState {
     pub(crate) mtime: Option<SystemTime>,
     /// Set when the backing file has been modified by another process.
     pub(crate) externally_modified: bool,
+    pub(crate) diagnostics: Vec<Diagnostic>,
 }
 
 impl BufState {
@@ -220,7 +223,8 @@ pub(crate) struct BufferManager {
     pending: PendingRequests,
     /// Locations reported by the backend (definition, references, …) awaiting
     /// dispatch to the App-level quickfix list.
-    pub(crate) pending_locations: Vec<(String, Vec<NavigationTarget>)>,
+    pub(crate) pending_locations: Vec<(String, String, Vec<NavigationTarget>)>,
+    pub(crate) pending_ui_actions: Vec<PendingUiAction>,
 }
 
 impl std::ops::Deref for BufferManager {
@@ -287,8 +291,12 @@ impl BufferManager {
             pristine: true,
             status_message: None,
             last_scroll: None,
-            mtime: path.as_ref().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok()),
+            mtime: path
+                .as_ref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .and_then(|m| m.modified().ok()),
             externally_modified: false,
+            diagnostics: Vec::new(),
         };
 
         let mut view_to_idx = HashMap::new();
@@ -305,6 +313,7 @@ impl BufferManager {
             next_rpc_id: 2,
             pending,
             pending_locations: Vec::new(),
+            pending_ui_actions: Vec::new(),
         };
 
         for event in init_events {
@@ -318,10 +327,6 @@ impl BufferManager {
         &self.bufs[self.current]
     }
 
-    pub(crate) fn active_mut(&mut self) -> &mut BufState {
-        &mut self.bufs[self.current]
-    }
-
     /// Slice of all open buffers (for window/UI enumeration).
     pub(crate) fn all_bufs(&self) -> &[BufState] {
         &self.bufs
@@ -333,10 +338,6 @@ impl BufferManager {
 
     pub(crate) fn current_idx(&self) -> usize {
         self.current
-    }
-
-    pub(crate) fn alternate_idx(&self) -> Option<usize> {
-        self.alternate
     }
 
     // ── Connection methods ────────────────────────────────────────────────
@@ -354,13 +355,28 @@ impl BufferManager {
         )
     }
 
+    fn send_request(&mut self, method: &str, params: Value) -> io::Result<Value> {
+        let rpc_id = self.next_rpc_id;
+        self.next_rpc_id = self.next_rpc_id.saturating_add(1);
+
+        let (resp_tx, resp_rx) = mpsc::sync_channel::<Value>(1);
+        {
+            let mut map = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            map.insert(rpc_id, resp_tx);
+        }
+
+        send_rpc_request(&self.tx, rpc_id, method, params)?;
+
+        let response = resp_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, format!("{method} timed out")))?;
+        parse_response(response)
+    }
+
     pub(crate) fn save(&mut self) -> io::Result<()> {
         let buf = &self.bufs[self.current];
         let Some(path) = buf.path.clone() else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "scratch buffer has no path",
-            ));
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "scratch buffer has no path"));
         };
         let view_id = buf.view_id.clone();
         send_xi_notification(
@@ -385,24 +401,139 @@ impl BufferManager {
         Ok(())
     }
 
-    pub(crate) fn send_plugin_rpc(
-        &self,
-        receiver: &str,
-        method: &str,
-        params: Value,
+    pub(crate) fn request_completion(&mut self, index: Option<usize>) -> io::Result<()> {
+        self.send_edit("request_completion", json!({ "index": index }))
+    }
+
+    pub(crate) fn request_definition(&mut self) -> io::Result<()> {
+        self.send_edit("request_definition", json!({}))
+    }
+
+    pub(crate) fn request_references(&mut self) -> io::Result<()> {
+        self.send_edit("request_references", json!({}))
+    }
+
+    pub(crate) fn format_document(&mut self) -> io::Result<()> {
+        self.send_edit("format_document", json!({}))
+    }
+
+    pub(crate) fn request_code_actions(&mut self, index: Option<usize>) -> io::Result<()> {
+        self.send_edit("request_code_actions", json!({ "index": index }))
+    }
+
+    pub(crate) fn request_rename(&mut self, new_name: &str) -> io::Result<()> {
+        self.send_edit("request_rename", json!({ "new_name": new_name }))
+    }
+
+    pub(crate) fn delete_line_range(
+        &mut self,
+        start_line: usize,
+        end_line: usize,
     ) -> io::Result<()> {
+        self.send_edit(
+            "delete_line_range",
+            json!({
+                "start_line": start_line,
+                "end_line": end_line,
+            }),
+        )
+    }
+
+    pub(crate) fn delete_block(
+        &mut self,
+        start_line: usize,
+        end_line: usize,
+        left_col: usize,
+        right_col: usize,
+    ) -> io::Result<()> {
+        self.send_edit(
+            "delete_block",
+            json!({
+                "start_line": start_line,
+                "end_line": end_line,
+                "left_col": left_col,
+                "right_col": right_col,
+            }),
+        )
+    }
+
+    pub(crate) fn replay_block_insert(
+        &mut self,
+        start_line: usize,
+        end_line: usize,
+        column: usize,
+        text: &str,
+        append: bool,
+    ) -> io::Result<()> {
+        self.send_edit(
+            "replay_block_insert",
+            json!({
+                "start_line": start_line,
+                "end_line": end_line,
+                "column": column,
+                "text": text,
+                "append": append,
+            }),
+        )
+    }
+
+    pub(crate) fn substitute_preview(
+        &mut self,
+        start_line: usize,
+        end_line: usize,
+        pattern: &str,
+        replacement: &str,
+        global: bool,
+        case_sensitive: bool,
+    ) -> io::Result<Vec<LineReplacement>> {
+        let view_id = self.bufs[self.current].view_id.clone();
+        let response = self.send_request(
+            "substitute_preview",
+            json!({
+                "view_id": view_id,
+                "start_line": start_line,
+                "end_line": end_line,
+                "pattern": pattern,
+                "replacement": replacement,
+                "global": global,
+                "case_sensitive": case_sensitive,
+            }),
+        )?;
+        serde_json::from_value(response)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    }
+
+    pub(crate) fn apply_line_replacements(
+        &mut self,
+        replacements: &[LineReplacement],
+    ) -> io::Result<()> {
+        self.send_edit("apply_line_replacements", json!({ "replacements": replacements }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn paste_register(&mut self, chars: &str, before: bool) -> io::Result<()> {
+        self.send_edit("paste_register", json!({ "chars": chars, "before": before }))
+    }
+
+    pub(crate) fn request_hover(&mut self, position: Option<(usize, usize)>) -> io::Result<()> {
         let view_id = &self.bufs[self.current].view_id;
+        let request_id = usize::try_from(self.next_rpc_id).unwrap_or(usize::MAX);
+        self.next_rpc_id = self.next_rpc_id.saturating_add(1);
+        let position = position.map(|(line, column)| {
+            json!({
+                "line": line,
+                "column": column,
+            })
+        });
         send_xi_notification(
             &self.tx,
-            "plugin",
+            "edit",
             json!({
-                "command": "plugin_rpc",
                 "view_id": view_id,
-                "receiver": receiver,
-                "rpc": {
-                    "method": method,
-                    "params": params,
-                    "rpc_type": "notification",
+                "method": "request_hover",
+                "params": {
+                    "request_id": request_id,
+                    "position": position,
                 },
             }),
         )
@@ -457,7 +588,8 @@ impl BufferManager {
         let tx = self.tx.clone();
         let current = self.current;
         match event {
-            BackendEvent::Update { ref view_id, .. } | BackendEvent::ScrollTo { ref view_id, .. } => {
+            BackendEvent::Update { ref view_id, .. }
+            | BackendEvent::ScrollTo { ref view_id, .. } => {
                 let idx = self.view_to_idx.get(view_id).copied().unwrap_or(current);
                 let buf = &mut self.bufs[idx];
                 match event {
@@ -477,27 +609,44 @@ impl BufferManager {
             BackendEvent::Alert(msg) => {
                 self.bufs[current].status_message = Some(msg);
             }
-            BackendEvent::ShowHover(result) => {
-                self.bufs[current].status_message = Some(result);
+            BackendEvent::Hover { view_id, content } => {
+                let idx = self.view_to_idx.get(&view_id).copied().unwrap_or(current);
+                self.pending_ui_actions.push(PendingUiAction::Hover { view_id, content });
+                self.bufs[idx].status_message = Some(String::from("hover ready"));
             }
-            BackendEvent::ShowCompletions(items) => {
-                let preview =
-                    items.iter().take(8).map(|item| item.label.as_str()).collect::<Vec<_>>();
-                self.bufs[current].status_message = Some(if preview.is_empty() {
+            BackendEvent::Completions { view_id, items } => {
+                let idx = self.view_to_idx.get(&view_id).copied().unwrap_or(current);
+                let count = items.len();
+                self.pending_ui_actions.push(PendingUiAction::Completions { view_id, items });
+                self.bufs[idx].status_message = Some(if count == 0 {
                     String::from("no completions")
-                } else if items.len() > preview.len() {
-                    format!(
-                        "completions: {} (+{} more)",
-                        preview.join(", "),
-                        items.len() - preview.len()
-                    )
                 } else {
-                    format!("completions: {}", preview.join(", "))
+                    format!("completions: {count}")
                 });
             }
-            BackendEvent::ShowLocations { title, locations } => {
+            BackendEvent::Locations { view_id, title, locations } => {
                 // Collect for the App to dispatch to the quickfix list.
-                self.pending_locations.push((title, locations));
+                self.pending_locations.push((view_id, title, locations));
+            }
+            BackendEvent::Diagnostics { view_id, diagnostics } => {
+                let idx = self.view_to_idx.get(&view_id).copied().unwrap_or(current);
+                let count = diagnostics.len();
+                self.bufs[idx].diagnostics = diagnostics;
+                self.bufs[idx].status_message = Some(if count == 0 {
+                    String::from("diagnostics cleared")
+                } else {
+                    format!("diagnostics: {count}")
+                });
+            }
+            BackendEvent::CodeActions { view_id, actions } => {
+                let idx = self.view_to_idx.get(&view_id).copied().unwrap_or(current);
+                let count = actions.len();
+                self.pending_ui_actions.push(PendingUiAction::CodeActions { view_id, actions });
+                self.bufs[idx].status_message = Some(if count == 0 {
+                    String::from("no code actions")
+                } else {
+                    format!("code actions: {count}")
+                });
             }
         }
         Ok(())
@@ -541,7 +690,8 @@ impl BufferManager {
         let idx = self.bufs.len();
 
         self.view_to_idx.insert(view_id.clone(), idx);
-        let mtime = path.as_ref().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok());
+        let mtime =
+            path.as_ref().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok());
         self.bufs.push(BufState {
             id: buf_id,
             path,
@@ -556,6 +706,7 @@ impl BufferManager {
             last_scroll: None,
             mtime,
             externally_modified: false,
+            diagnostics: Vec::new(),
         });
         Ok(buf_id)
     }
@@ -563,7 +714,7 @@ impl BufferManager {
     /// Close a buffer.  Fails if it would leave no open buffers.
     pub(crate) fn close_buffer(&mut self, id: BufferId) -> io::Result<()> {
         if self.bufs.len() <= 1 {
-            return Err(io::Error::new(io::ErrorKind::Other, "cannot close last buffer"));
+            return Err(io::Error::other("cannot close last buffer"));
         }
         let pos = self
             .bufs
@@ -572,11 +723,7 @@ impl BufferManager {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "buffer not found"))?;
 
         let view_id = self.bufs[pos].view_id.clone();
-        let _ = send_xi_notification(
-            &self.tx,
-            "close_view",
-            json!({ "view_id": view_id }),
-        );
+        let _ = send_xi_notification(&self.tx, "close_view", json!({ "view_id": view_id }));
 
         self.bufs.remove(pos);
 
@@ -629,9 +776,7 @@ impl BufferManager {
 
     /// Switch to the alternate buffer (`:b#` / Ctrl-^).
     pub(crate) fn switch_alternate(&mut self) -> io::Result<()> {
-        let alt = self
-            .alternate
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no alternate buffer"))?;
+        let alt = self.alternate.ok_or_else(|| io::Error::other("no alternate buffer"))?;
         self.switch_to_idx(alt);
         Ok(())
     }
@@ -711,6 +856,7 @@ impl BufferManager {
             last_scroll: None,
             mtime: None,
             externally_modified: false,
+            diagnostics: Vec::new(),
         };
         let mut view_to_idx = HashMap::new();
         view_to_idx.insert(view_id, 0);
@@ -725,14 +871,19 @@ impl BufferManager {
             next_rpc_id: 2,
             pending: Arc::new(Mutex::new(HashMap::new())),
             pending_locations: Vec::new(),
+            pending_ui_actions: Vec::new(),
         }
     }
 
     // ── External change detection ─────────────────────────────────────────
 
     /// Drain accumulated location results for App-level dispatch.
-    pub(crate) fn drain_pending_locations(&mut self) -> Vec<(String, Vec<NavigationTarget>)> {
+    pub(crate) fn drain_pending_locations(&mut self) -> Vec<(String, String, Vec<NavigationTarget>)> {
         std::mem::take(&mut self.pending_locations)
+    }
+
+    pub(crate) fn drain_pending_ui_actions(&mut self) -> Vec<PendingUiAction> {
+        std::mem::take(&mut self.pending_ui_actions)
     }
 
     /// Check all buffers for filesystem changes since last open/save.
@@ -764,11 +915,7 @@ impl BufferManager {
         let old_view_id = self.bufs[idx].view_id.clone();
 
         // Close the old xi view.
-        let _ = send_xi_notification(
-            &self.tx,
-            "close_view",
-            json!({ "view_id": old_view_id }),
-        );
+        let _ = send_xi_notification(&self.tx, "close_view", json!({ "view_id": old_view_id }));
         self.view_to_idx.remove(&old_view_id);
 
         // Open a new xi view for the same path.
@@ -798,10 +945,8 @@ impl BufferManager {
             })?
             .to_owned();
 
-        let mtime = path
-            .as_ref()
-            .and_then(|p| std::fs::metadata(p).ok())
-            .and_then(|m| m.modified().ok());
+        let mtime =
+            path.as_ref().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok());
 
         let buf = &mut self.bufs[idx];
         buf.view_id = new_view_id.clone();
@@ -832,10 +977,7 @@ impl BufferManager {
 pub(crate) fn recovery_file_path(original: &std::path::Path) -> Option<PathBuf> {
     let data_dir = dirs::data_dir()?;
     let recovery_dir = data_dir.join("ee").join("recovery");
-    let name = original
-        .to_string_lossy()
-        .replace('/', "%2F")
-        .replace('\\', "%5C");
+    let name = original.to_string_lossy().replace('/', "%2F").replace('\\', "%5C");
     Some(recovery_dir.join(name))
 }
 

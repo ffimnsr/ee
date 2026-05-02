@@ -18,7 +18,6 @@ use std::collections::BTreeSet;
 
 use log::error;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use xi_rope::diff::{Diff, LineHashDiff};
 use xi_rope::engine::{Engine, RevId, RevToken};
@@ -145,20 +144,6 @@ impl Editor {
 
     pub(crate) fn is_pristine(&self) -> bool {
         self.engine.is_equivalent_revision(self.pristine_rev_id, self.engine.get_head_rev_id())
-    }
-
-    /// Set whether or not edits are forced into the same undo group rather than being split by
-    /// their EditType.
-    ///
-    /// This is used for things such as recording playback, where you don't want the
-    /// individual events to be undoable, but instead the entire playback should be.
-    pub(crate) fn set_force_undo_group(&mut self, force_undo_group: bool) {
-        tracing::trace!(
-            name: "Editor::set_force_undo_group",
-            categories = "core",
-            force_undo_group
-        );
-        self.force_undo_group = force_undo_group;
     }
 
     /// Applies `delta` directly with the given `edit_type`.
@@ -291,13 +276,6 @@ impl Editor {
         Some((delta, last_text, drift))
     }
 
-    /// Attempts to find the delta from head for the given `RevToken`. Returns
-    /// `None` if the revision is not found, so this result should be checked if
-    /// the revision is coming from a plugin.
-    pub(crate) fn delta_rev_head(&self, target_rev_id: RevToken) -> Option<RopeDelta> {
-        self.engine.try_delta_rev_head(target_rev_id).ok()
-    }
-
     fn gc_undos(&mut self) {
         if self.revs_in_flight == 0 && !self.gc_undos.is_empty() {
             self.engine.gc(&self.gc_undos);
@@ -333,24 +311,6 @@ impl Editor {
                 builder.replace(iv, line.into());
             }
             self.add_delta(builder.build());
-        }
-    }
-
-    pub(crate) fn do_cut(&mut self, view: &mut View) -> Value {
-        let result = self.do_copy(view);
-        let delta = edit_ops::delete_sel_regions(&self.text, view.sel_regions());
-        if !delta.is_identity() {
-            self.this_edit_type = EditType::Delete;
-            self.add_delta(delta);
-        }
-        result
-    }
-
-    pub(crate) fn do_copy(&self, view: &View) -> Value {
-        if let Some(val) = edit_ops::extract_sel_regions(&self.text, view.sel_regions()) {
-            Value::String(val.into_owned())
-        } else {
-            Value::Null
         }
     }
 
@@ -543,6 +503,16 @@ impl Editor {
             InsertTab => self.do_insert_tab(view, config),
             Insert(chars) => self.do_insert(view, config, &chars),
             Paste(chars) => self.do_paste(view, &chars),
+            PasteRegister { chars, before } => {
+                self.this_edit_type = EditType::Other;
+                self.add_delta(edit_ops::paste_register(
+                    &self.text,
+                    view.sel_regions(),
+                    &chars,
+                    before,
+                    &config.line_ending,
+                ));
+            }
             Yank => self.do_yank(view, kill_ring),
             ReplaceNext => self.do_replace(view, false),
             ReplaceAll => self.do_replace(view, true),

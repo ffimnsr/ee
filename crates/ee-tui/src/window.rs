@@ -51,15 +51,6 @@ impl WindowLayout {
         &self.windows[self.focused]
     }
 
-    pub(crate) fn focused_window_mut(&mut self) -> &mut Window {
-        &mut self.windows[self.focused]
-    }
-
-    /// Number of open windows.
-    pub(crate) fn window_count(&self) -> usize {
-        self.windows.len()
-    }
-
     /// Split the focused window, assigning `buffer_id` to the new pane.
     /// The new window becomes focused.  `dir` overrides the layout direction.
     ///
@@ -115,8 +106,7 @@ impl WindowLayout {
             return active_viewport;
         }
         self.windows[self.focused].saved_viewport = active_viewport;
-        self.focused =
-            if self.focused == 0 { self.windows.len() - 1 } else { self.focused - 1 };
+        self.focused = if self.focused == 0 { self.windows.len() - 1 } else { self.focused - 1 };
         self.windows[self.focused].saved_viewport
     }
 
@@ -154,10 +144,7 @@ impl WindowLayout {
     }
 
     /// Returns a map of `WindowId -> (buffer_id, rect, is_focused)` for the UI.
-    pub(crate) fn layout_for_area(
-        &self,
-        area: Rect,
-    ) -> Vec<(WindowId, BufferId, Rect, bool)> {
+    pub(crate) fn layout_for_area(&self, area: Rect) -> Vec<(WindowId, BufferId, Rect, bool)> {
         self.compute_rects(area)
             .into_iter()
             .map(|(id, rect)| {
@@ -172,11 +159,6 @@ impl WindowLayout {
     /// given window without splitting).
     pub(crate) fn set_focused_buffer(&mut self, buffer_id: BufferId) {
         self.windows[self.focused].buffer_id = buffer_id;
-    }
-
-    /// Return all (window_id, buffer_id) pairs.
-    pub(crate) fn all_windows(&self) -> impl Iterator<Item = (WindowId, BufferId)> + '_ {
-        self.windows.iter().map(|w| (w.id, w.buffer_id))
     }
 
     /// Get the effective viewport for a window: the live `active_viewport` for
@@ -196,11 +178,6 @@ impl WindowLayout {
                 .map(|w| w.saved_viewport)
                 .unwrap_or_default()
         }
-    }
-
-    /// Id lookup: given a buffer_id return the first window showing it.
-    pub(crate) fn window_for_buffer(&self, buf_id: BufferId) -> Option<WindowId> {
-        self.windows.iter().find(|w| w.buffer_id == buf_id).map(|w| w.id)
     }
 }
 

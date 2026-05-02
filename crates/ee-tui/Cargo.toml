@@ -19,6 +19,7 @@ dirs.workspace = true
 globset.workspace = true
 ignore.workspace = true
 ratatui.workspace = true
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true

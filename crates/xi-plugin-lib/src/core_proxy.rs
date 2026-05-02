@@ -21,10 +21,10 @@ use serde_json::json;
 use xi_core_lib::ViewId;
 use xi_core_lib::annotations::AnnotationType;
 use xi_core_lib::plugin_rpc::{
-    CodeAction, CodeActionRequest, CodeActionResponse, CompletionSuggestion, DataSpan, Diagnostic,
-    FormatDocumentRequest, FormatDocumentResponse, GetDataResponse, GetDiagnosticsResponse,
-    GetSelectionsResponse, Hover, NavigationTarget, PluginEdit, PluginEditAck, ProtocolCapability,
-    ScopeSpan, SelectionRange, TextEdit, TextUnit,
+    CodeAction, CodeActionDescriptor, CodeActionRequest, CodeActionResponse,
+    CompletionSuggestion, DataSpan, Diagnostic, FormatDocumentRequest, FormatDocumentResponse,
+    GetDataResponse, GetDiagnosticsResponse, GetSelectionsResponse, Hover, NavigationTarget,
+    PluginEdit, PluginEditAck, ProtocolCapability, ScopeSpan, SelectionRange, TextEdit, TextUnit,
 };
 use xi_core_lib::plugins::PluginId;
 use xi_rpc::{RemoteError, RpcCtx, RpcPeer};
@@ -320,6 +320,17 @@ impl CoreProxy {
                 "items": items,
             }),
         );
+    }
+
+    pub fn show_code_actions(&self, view_id: ViewId, actions: &[CodeActionDescriptor]) {
+        self.send_rpc_notification(
+            "show_code_actions",
+            json!({
+                "plugin_id": self.plugin_id,
+                "view_id": view_id,
+                "actions": actions,
+            }),
+        )
     }
 
     pub fn show_locations(&self, view_id: ViewId, title: &str, locations: &[NavigationTarget]) {

@@ -51,6 +51,7 @@ pub mod line_offset;
 pub mod linewrap;
 pub mod movement;
 pub mod plugins;
+#[cfg(test)]
 pub mod recorder;
 pub mod selection;
 pub mod styles;

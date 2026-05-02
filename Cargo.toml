@@ -9,6 +9,7 @@ members = [
   "crates/xi-rope",
   "crates/xi-rpc",
   "crates/xi-unicode",
+  "fuzz",
 ]
 default-members = ["crates/ee-tui"]
 

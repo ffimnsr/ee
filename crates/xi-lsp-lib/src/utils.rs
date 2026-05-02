@@ -21,6 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use log::{error, warn};
+use lsp_server::Message as LspServerMessage;
 use url::Url;
 use xi_plugin_lib::{Cache, ChunkCache, CoreProxy, Error as PluginLibError, PluginEditAck, View};
 use xi_rope::rope::RopeDelta;
@@ -42,6 +43,25 @@ fn stderr_is_user_visible(line: &str) -> bool {
         || lower.contains("panicked")
         || lower.contains("error")
         || lower.contains("failed")
+}
+
+#[doc(hidden)]
+pub fn read_transport_message<R: BufRead>(
+    reader: &mut R,
+) -> Result<Option<LspServerMessage>, Error> {
+    let Some(message) = lsp_server::Message::read(reader)? else {
+        return Ok(None);
+    };
+
+    let message_bytes = serde_json::to_vec(&message)?;
+    if message_bytes.len() > MAX_LSP_BODY_BYTES {
+        return Err(Error::Protocol(format!(
+            "LSP message too large ({} bytes)",
+            message_bytes.len()
+        )));
+    }
+
+    Ok(Some(message))
 }
 
 pub fn file_path_to_uri(path: &Path) -> Result<Uri, Error> {
@@ -218,37 +238,14 @@ fn spawn_stdout_thread(
         .spawn(move || {
             let mut reader = BufReader::new(stdout);
             loop {
-                match lsp_server::Message::read(&mut reader) {
-                    Ok(Some(msg)) => match serde_json::to_string(&msg) {
-                        Ok(message_str) if message_str.len() <= MAX_LSP_BODY_BYTES => {
-                            let Ok(mut server_locked) = ls_client.lock() else {
-                                error!("language server {} client lock poisoned", language_id);
-                                break;
-                            };
-                            server_locked.handle_message(message_str.as_ref());
-                        }
-                        Ok(message_str) => {
-                            let Ok(mut server_locked) = ls_client.lock() else {
-                                error!("language server {} client lock poisoned", language_id);
-                                break;
-                            };
-                            server_locked.record_server_failure(format!(
-                                "LSP message too large ({} bytes), dropping",
-                                message_str.len()
-                            ));
+                match read_transport_message(&mut reader) {
+                    Ok(Some(msg)) => {
+                        let Ok(mut server_locked) = ls_client.lock() else {
+                            error!("language server {} client lock poisoned", language_id);
                             break;
-                        }
-                        Err(err) => {
-                            let Ok(mut server_locked) = ls_client.lock() else {
-                                error!("language server {} client lock poisoned", language_id);
-                                break;
-                            };
-                            server_locked.record_server_failure(format!(
-                                "failed to serialize server message: {err}"
-                            ));
-                            break;
-                        }
-                    },
+                        };
+                        server_locked.handle_lsp_message(msg);
+                    }
                     Ok(None) => {
                         let Ok(mut server_locked) = ls_client.lock() else {
                             error!("language server {} client lock poisoned", language_id);
@@ -437,6 +434,7 @@ pub fn start_new_server(
 #[cfg(test)]
 mod tests {
     use std::io;
+    use std::io::Cursor;
     use std::thread;
 
     use xi_rope::{DeltaBuilder, Interval, Rope};
@@ -541,6 +539,38 @@ mod tests {
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].text, ",");
         assert_eq!(changes[0].range, Some(Range::new(Position::new(0, 5), Position::new(0, 5))));
+    }
+
+    #[test]
+    fn read_transport_message_parses_valid_frame() {
+        let body =
+            r#"{"jsonrpc":"2.0","method":"window/logMessage","params":{"type":3,"message":"ok"}}"#;
+        let framed = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        let mut reader = Cursor::new(framed.into_bytes());
+
+        let message = read_transport_message(&mut reader)
+            .expect("frame should parse")
+            .expect("frame should contain message");
+
+        match message {
+            lsp_server::Message::Notification(notification) => {
+                assert_eq!(notification.method, "window/logMessage");
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_transport_message_rejects_oversized_frame() {
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","method":"window/logMessage","params":{{"type":3,"message":"{}"}}}}"#,
+            "a".repeat(MAX_LSP_BODY_BYTES + 1)
+        );
+        let framed = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        let mut reader = Cursor::new(framed.into_bytes());
+
+        let err = read_transport_message(&mut reader).expect_err("oversized frame should fail");
+        assert!(err.to_string().contains("LSP message too large"));
     }
 
     #[test]

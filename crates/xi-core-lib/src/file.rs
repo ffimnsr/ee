@@ -162,13 +162,11 @@ impl FileManager {
     fn save_new(&mut self, path: &Path, text: &Rope, id: BufferId) -> Result<(), FileError> {
         try_save(path, text, CharacterEncoding::Utf8, self.get_info(id))?;
         // Acquire advisory lock on the newly-saved file.
-        let lock = File::open(path).ok().and_then(|lf| {
-            match lf.try_lock_exclusive() {
-                Ok(()) => Some(lf),
-                Err(e) => {
-                    warn!("Could not lock newly saved file {:?}: {}", path, e);
-                    None
-                }
+        let lock = File::open(path).ok().and_then(|lf| match lf.try_lock_exclusive() {
+            Ok(()) => Some(lf),
+            Err(e) => {
+                warn!("Could not lock newly saved file {:?}: {}", path, e);
+                None
             }
         });
         let info = FileInfo {
@@ -231,18 +229,16 @@ where
     // `try_lock_exclusive` is non-blocking; if another process holds the lock
     // we warn and proceed without the lock rather than refusing to open the file.
     let lock_file = File::open(path.as_ref()).ok();
-    let lock = lock_file.and_then(|lf| {
-        match lf.try_lock_exclusive() {
-            Ok(()) => Some(lf),
-            Err(e) => {
-                warn!(
-                    "Could not acquire advisory lock on {:?}: {}. \
+    let lock = lock_file.and_then(|lf| match lf.try_lock_exclusive() {
+        Ok(()) => Some(lf),
+        Err(e) => {
+            warn!(
+                "Could not acquire advisory lock on {:?}: {}. \
                      Another editor instance may have the file open.",
-                    path.as_ref(),
-                    e
-                );
-                None
-            }
+                path.as_ref(),
+                e
+            );
+            None
         }
     });
 
@@ -277,19 +273,16 @@ fn try_save(
     );
     let tmp_path = &path.with_extension(tmp_extension);
 
-    let mut f =
-        File::create(tmp_path).map_err(|e| FileError::Io(e, tmp_path.to_owned()))?;
+    let mut f = File::create(tmp_path).map_err(|e| FileError::Io(e, tmp_path.to_owned()))?;
     match encoding {
         CharacterEncoding::Utf8WithBom => {
-            f.write_all(UTF8_BOM.as_bytes())
-                .map_err(|e| FileError::Io(e, tmp_path.to_owned()))?
+            f.write_all(UTF8_BOM.as_bytes()).map_err(|e| FileError::Io(e, tmp_path.to_owned()))?
         }
         CharacterEncoding::Utf8 => (),
     }
 
     for chunk in text.iter_chunks(..text.len()) {
-        f.write_all(chunk.as_bytes())
-            .map_err(|e| FileError::Io(e, tmp_path.to_owned()))?;
+        f.write_all(chunk.as_bytes()).map_err(|e| FileError::Io(e, tmp_path.to_owned()))?;
     }
 
     // Flush OS buffers and sync to storage before rename so that a crash
@@ -304,8 +297,7 @@ fn try_save(
     {
         if let Some(parent) = path.parent() {
             // Best-effort: ignore errors (some fs don't support dir fsync).
-            let _ = std::fs::File::open(parent)
-                .and_then(|d| d.sync_all());
+            let _ = std::fs::File::open(parent).and_then(|d| d.sync_all());
         }
     }
 
@@ -390,11 +382,9 @@ impl fmt::Display for FileError {
                  Please save elsewhere and reload the file. File path: {}",
                 p.display()
             ),
-            FileError::NonUtf8Path(p) => write!(
-                f,
-                "File path contains non-UTF-8 bytes and cannot be used: {}",
-                p.display()
-            ),
+            FileError::NonUtf8Path(p) => {
+                write!(f, "File path contains non-UTF-8 bytes and cannot be used: {}", p.display())
+            }
         }
     }
 }

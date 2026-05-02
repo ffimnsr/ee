@@ -30,18 +30,9 @@ impl Highlighter {
         let theme_set = ThemeSet::load_defaults();
         // "base16-ocean.dark" ships with syntect's default theme set and works
         // well on a dark terminal background.
-        let theme = theme_set
-            .themes
-            .get("base16-ocean.dark")
-            .cloned()
-            .unwrap_or_else(|| {
-                theme_set
-                    .themes
-                    .values()
-                    .next()
-                    .cloned()
-                    .expect("syntect default themes are empty")
-            });
+        let theme = theme_set.themes.get("base16-ocean.dark").cloned().unwrap_or_else(|| {
+            theme_set.themes.values().next().cloned().expect("syntect default themes are empty")
+        });
         Self { syntax_set, theme }
     }
 
@@ -122,8 +113,8 @@ impl Highlighter {
     /// the visible viewport begins (as returned by `display_col_to_byte`).
     /// Spans that fall entirely to the left of `byte_start` are discarded;
     /// spans that straddle `byte_start` are sliced at the boundary.
-    pub(crate) fn spans_with_offset<'a>(
-        hl_spans: &'a [HlSpan],
+    pub(crate) fn spans_with_offset(
+        hl_spans: &[HlSpan],
         byte_start: usize,
     ) -> Vec<ratatui::text::Span<'static>> {
         use ratatui::style::Style;
@@ -138,16 +129,13 @@ impl Highlighter {
                 offset = end;
                 continue;
             }
-            let slice_start = if offset < byte_start { byte_start - offset } else { 0 };
+            let slice_start = byte_start.saturating_sub(offset);
             // Safety: `byte_start` is a char boundary in the full line, and
             // `offset` tracks exact byte positions of syntect span boundaries
             // (which are also char boundaries), so `slice_start` is valid.
             let visible = &text[slice_start..];
             if !visible.is_empty() {
-                out.push(Span::styled(
-                    visible.to_owned(),
-                    Style::default().fg(*color),
-                ));
+                out.push(Span::styled(visible.to_owned(), Style::default().fg(*color)));
             }
             offset = end;
         }
@@ -167,11 +155,7 @@ mod tests {
     #[test]
     fn highlight_visible_rust_basic() {
         let hl = make_highlighter();
-        let lines = vec![
-            "fn main() {".to_owned(),
-            "    let x = 42;".to_owned(),
-            "}".to_owned(),
-        ];
+        let lines = vec!["fn main() {".to_owned(), "    let x = 42;".to_owned(), "}".to_owned()];
         let result = hl.highlight_visible(&lines, Some("rs"), 0, 3);
         assert_eq!(result.len(), 3);
         // Each visible line must produce at least one span.

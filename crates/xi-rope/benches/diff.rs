@@ -207,8 +207,7 @@ fn simple_deletion(b: &mut Bencher) {
 fn hash_diff_xlarge(b: &mut Bencher) {
     // ~4x the size of `hash_diff_big`; representative of a large source file.
     let big_base: String = [EDITOR_STR, VIEW_STR, INTERVAL_STR, BREAKS_STR].concat();
-    let big_target: String =
-        [VIEW_STR, INTERVAL_STR, BREAKS_STR, EDITOR_STR].concat();
+    let big_target: String = [VIEW_STR, INTERVAL_STR, BREAKS_STR, EDITOR_STR].concat();
     let one: Rope = big_base.as_str().into();
     let two: Rope = big_target.as_str().into();
     let mut delta: Option<RopeDelta> = None;

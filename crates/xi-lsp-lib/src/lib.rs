@@ -21,7 +21,9 @@ mod result_queue;
 pub mod types;
 mod utils;
 pub use crate::lsp_plugin::LspPlugin;
+pub use crate::result_queue::ResultQueue;
 pub use crate::types::Config;
+pub use crate::utils::{read_transport_message, shutdown_language_server, start_new_server};
 
 pub fn start_mainloop<P: Plugin>(plugin: &mut P) -> Result<(), xi_rpc::ReadError> {
     mainloop(plugin)

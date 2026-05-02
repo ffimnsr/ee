@@ -17,7 +17,7 @@ use std::fmt;
 use std::io::Error as IOError;
 
 use jsonrpc_lite::Error as JsonRpcError;
-use lsp_types::{Command, TextEdit};
+use lsp_types::{Command, CompletionItem, TextEdit, WorkspaceEdit};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use xi_core_lib::plugin_rpc::{CompletionSuggestion, NavigationTarget};
@@ -158,12 +158,19 @@ pub struct LspCodeAction {
     pub command: Option<Command>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingCompletionItem {
+    pub suggestion: CompletionSuggestion,
+    pub item: CompletionItem,
+}
+
 #[derive(Debug)]
 pub enum LspResponse {
     Hover(Result<Hover, LanguageResponseError>),
     Diagnostics(Result<Vec<CoreDiagnostic>, LanguageResponseError>),
-    Completions(Result<Vec<CompletionSuggestion>, LanguageResponseError>),
+    Completions(Result<Vec<PendingCompletionItem>, LanguageResponseError>),
     Locations { title: String, result: Result<Vec<NavigationTarget>, LanguageResponseError> },
     Formatting { title: String, result: Result<Vec<TextEdit>, LanguageResponseError> },
     CodeActions(Result<Vec<LspCodeAction>, LanguageResponseError>),
+    Rename { title: String, result: Result<Option<WorkspaceEdit>, LanguageResponseError> },
 }

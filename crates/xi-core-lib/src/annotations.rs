@@ -21,10 +21,10 @@ use serde_json::{self, Value, json};
 
 use std::collections::HashMap;
 
-use log::warn;
 use crate::line_offset::LineOffset;
 use crate::plugins::PluginId;
 use crate::view::View;
+use log::warn;
 use xi_rope::spans::Spans;
 use xi_rope::{Interval, Rope};
 

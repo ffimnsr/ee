@@ -333,28 +333,6 @@ impl ConfigManager {
         self.configs.remove(&ConfigDomain::SysOverride(id));
     }
 
-    /// Sets a specific language for the given buffer. This is used if the
-    /// user selects a specific language in the frontend, for instance.
-    pub(crate) fn override_language(
-        &mut self,
-        id: BufferId,
-        new_lang: LanguageId,
-    ) -> Option<Table> {
-        let has_changed = self
-            .buffer_tags
-            .get_mut(&id)
-            .expect("buffer must be registered before overriding language")
-            .set_user(Some(new_lang));
-        if has_changed {
-            self.update_buffer_config(id).unwrap_or_else(|e| {
-                error!("config error overriding language for buffer {:?}: {}", id, e);
-                None
-            })
-        } else {
-            None
-        }
-    }
-
     fn update_buffer_config(&mut self, id: BufferId) -> Result<Option<Table>, ConfigError> {
         let new_config = self.generate_buffer_config(id)?;
         let changes = new_config.changes_from(self.buffer_configs.get(&id));
@@ -413,9 +391,7 @@ impl ConfigManager {
     /// Panics if `id` does not exist. The caller is responsible for ensuring
     /// that the `ConfigManager` is kept up to date as buffers are added/removed.
     pub(crate) fn get_buffer_config(&self, id: BufferId) -> &BufferConfig {
-        self.buffer_configs
-            .get(&id)
-            .expect("buffer must be registered before querying config")
+        self.buffer_configs.get(&id).expect("buffer must be registered before querying config")
     }
 
     /// Returns the language associated with this buffer.
@@ -1020,10 +996,7 @@ translate_tabs_to_spaces = true
         let mut manager = ConfigManager::new(None, None);
         let cfg = json!({"syntax_theme": "Solarized (dark)"}).as_object().cloned().unwrap();
         manager
-            .set_user_config(
-                ConfigDomain::PluginConfig("xi-syntect-plugin".to_owned()),
-                cfg,
-            )
+            .set_user_config(ConfigDomain::PluginConfig("xi-syntect-plugin".to_owned()), cfg)
             .unwrap();
         let stored = manager.get_plugin_config("xi-syntect-plugin");
         assert!(stored.is_some());

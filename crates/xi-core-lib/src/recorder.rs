@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // Copyright 2018 The xi-editor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -92,10 +93,7 @@ impl Recorder {
 
         if recording_buffer.last().is_none() {
             if recording_buffer.len() >= MAX_RECORDING_BUFFER {
-                warn!(
-                    "recording buffer at capacity ({}), dropping event",
-                    MAX_RECORDING_BUFFER
-                );
+                warn!("recording buffer at capacity ({}), dropping event", MAX_RECORDING_BUFFER);
                 return;
             }
             recording_buffer.push(current_event);

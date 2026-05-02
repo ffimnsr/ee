@@ -17,11 +17,16 @@ pub(crate) enum Action {
     CommandBackspace,
     SearchBackspace,
     EnterSearch,
+    EnterSearchBackward,
     ExecuteSearch,
     FindNext,
     FindPrevious,
+    RequestHover,
     SetPrefix(char),
-    PendingCharFind { forward: bool, inclusive: bool },
+    PendingCharFind {
+        forward: bool,
+        inclusive: bool,
+    },
     MatchingPair,
     // Operator-pending mode
     SetOperator(Operator),
@@ -78,6 +83,13 @@ pub(crate) enum Action {
     FoldClose,
     FoldOpenAll,
     FoldCloseAll,
+    // Find-related
+    /// Use word under cursor (or selection) as search pattern and jump forward.
+    SearchWordUnderCursor {
+        forward: bool,
+    },
+    /// Select all occurrences of current search pattern.
+    FindAll,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -145,11 +157,22 @@ fn build_bindings() -> HashMap<BindingKey, Action> {
     bind!(Normal, KeyCode::Char('Q'), none, Some(']'), LocNext);
     bind!(Normal, KeyCode::Char('Q'), none, Some('['), LocPrev);
     bind!(Normal, KeyCode::Char('g'), none, Some('g'), Edit("move_to_beginning_of_document"),);
+    bind!(Normal, KeyCode::Char('d'), none, Some('g'), Edit("duplicate_line"));
     bind!(Normal, KeyCode::Char('d'), ctrl, None, Edit("scroll_page_down"));
     bind!(Normal, KeyCode::Char('u'), ctrl, None, Edit("scroll_page_up"));
     bind!(Normal, KeyCode::Char('/'), none, None, EnterSearch);
+    bind!(Normal, KeyCode::Char('?'), none, None, EnterSearchBackward);
     bind!(Normal, KeyCode::Char('n'), none, None, FindNext);
     bind!(Normal, KeyCode::Char('N'), none, None, FindPrevious);
+    bind!(Normal, KeyCode::Char('K'), none, None, RequestHover);
+    bind!(Normal, KeyCode::Up, ctrl, None, Edit("add_selection_above"));
+    bind!(Normal, KeyCode::Down, ctrl, None, Edit("add_selection_below"));
+    // * / # — search word under cursor forward / backward
+    bind!(Normal, KeyCode::Char('*'), none, None, SearchWordUnderCursor { forward: true });
+    bind!(Normal, KeyCode::Char('#'), none, None, SearchWordUnderCursor { forward: false });
+    // Visual mode: * / # use selection as search pattern
+    bind!(Visual, KeyCode::Char('*'), none, None, SearchWordUnderCursor { forward: true });
+    bind!(Visual, KeyCode::Char('#'), none, None, SearchWordUnderCursor { forward: false });
     bind!(
         Normal,
         KeyCode::Char('f'),
@@ -201,7 +224,9 @@ fn build_bindings() -> HashMap<BindingKey, Action> {
     bind!(Normal, KeyCode::Char('S'), none, None, SubstituteLine);
 
     // Insert mode editing controls (bound here for completeness; Ctrl keys
-    // are also handled in handle_default for robustness).
+    bind!(Normal, KeyCode::Char('K'), none, None, RequestHover);
+    bind!(Normal, KeyCode::Char('a'), ctrl, None, Edit("increase_number"));
+    bind!(Normal, KeyCode::Char('x'), ctrl, None, Edit("decrease_number"));
     bind!(Insert, KeyCode::Char('w'), ctrl, None, DeleteWordBackward);
     bind!(Insert, KeyCode::Char('u'), ctrl, None, DeleteToLineStart);
     bind!(Insert, KeyCode::Char('t'), ctrl, None, IndentLine);
@@ -221,8 +246,20 @@ fn build_bindings() -> HashMap<BindingKey, Action> {
     // Visual char: word motions also extend selection
     bind!(Visual, KeyCode::Char('w'), none, None, Edit("move_word_right_and_modify_selection"),);
     bind!(Visual, KeyCode::Char('b'), none, None, Edit("move_word_left_and_modify_selection"),);
-    bind!(Visual, KeyCode::Char('$'), none, None, Edit("move_to_right_end_of_line_and_modify_selection"),);
-    bind!(Visual, KeyCode::Char('^'), none, None, Edit("move_to_beginning_of_paragraph_and_modify_selection"),);
+    bind!(
+        Visual,
+        KeyCode::Char('$'),
+        none,
+        None,
+        Edit("move_to_right_end_of_line_and_modify_selection"),
+    );
+    bind!(
+        Visual,
+        KeyCode::Char('^'),
+        none,
+        None,
+        Edit("move_to_beginning_of_paragraph_and_modify_selection"),
+    );
     // Anchor swap in visual char
     bind!(Visual, KeyCode::Char('o'), none, None, SwapVisualAnchor);
 
@@ -235,7 +272,13 @@ fn build_bindings() -> HashMap<BindingKey, Action> {
     bind!(VisualLine, KeyCode::Char('k'), none, None, Edit("move_up_and_modify_selection"),);
     bind!(VisualLine, KeyCode::Down, none, None, Edit("move_down_and_modify_selection"),);
     bind!(VisualLine, KeyCode::Char('j'), none, None, Edit("move_down_and_modify_selection"),);
-    bind!(VisualLine, KeyCode::Char('G'), none, None, Edit("move_to_end_of_document_and_modify_selection"),);
+    bind!(
+        VisualLine,
+        KeyCode::Char('G'),
+        none,
+        None,
+        Edit("move_to_end_of_document_and_modify_selection"),
+    );
     bind!(VisualLine, KeyCode::Char('o'), none, None, SwapVisualAnchor);
     bind!(VisualLine, KeyCode::Char(':'), none, None, EnterCommandMode);
 
@@ -301,6 +344,8 @@ fn build_bindings() -> HashMap<BindingKey, Action> {
     bind!(Search, KeyCode::Esc, none, None, EnterMode(Normal));
     bind!(Search, KeyCode::Enter, none, None, ExecuteSearch);
     bind!(Search, KeyCode::Backspace, none, None, SearchBackspace);
+    // Alt+Enter in search mode: select all occurrences (find_all) and return to Normal.
+    bind!(Search, KeyCode::Enter, KeyModifiers::ALT, None, FindAll);
 
     // z-prefix: fold commands
     bind!(Normal, KeyCode::Char('z'), none, None, SetPrefix('z'));

@@ -1,0 +1,39 @@
+[package]
+name = "ee-fuzz"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1.4.2", features = ["derive"] }
+libfuzzer-sys = "0.4.10"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+xi-rope.workspace = true
+xi-rpc.workspace = true
+xi-lsp-lib = { path = "../crates/xi-lsp-lib", version = "0.1.0" }
+
+[[bin]]
+name = "xi_rope_crdt"
+path = "fuzz_targets/xi_rope_crdt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xi_rpc_parse"
+path = "fuzz_targets/xi_rpc_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xi_lsp_transport"
+path = "fuzz_targets/xi_lsp_transport.rs"
+test = false
+doc = false
+bench = false

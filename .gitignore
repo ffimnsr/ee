@@ -17,6 +17,8 @@ build
 
 *.md
 !/README.md
+!/RULE.md
 !/.github/copilot-instructions.md
 
 .atlas/
+.codex/

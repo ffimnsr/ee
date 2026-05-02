@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use unicode_width::UnicodeWidthStr;
 use xi_core_lib::XiCore;
+use xi_core_lib::plugin_rpc::{CodeActionDescriptor, Diagnostic};
 use xi_rpc::{ReadTransport, RpcLoop, WriteTransport};
 
 use crate::text::previous_char_boundary;
@@ -43,16 +44,26 @@ impl WriteTransport for ChannelWriter {
     }
 }
 
-pub(crate) type PendingRequests = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, mpsc::SyncSender<Value>>>>;
+pub(crate) type PendingRequests =
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, mpsc::SyncSender<Value>>>>;
 
 #[derive(Debug)]
 pub(crate) enum BackendEvent {
     Update { view_id: String, update: CoreUpdate },
     Alert(String),
-    ShowHover(String),
-    ShowCompletions(Vec<CompletionSuggestion>),
-    ShowLocations { title: String, locations: Vec<NavigationTarget> },
+    Hover { view_id: String, content: String },
+    Completions { view_id: String, items: Vec<CompletionSuggestion> },
+    Locations { view_id: String, title: String, locations: Vec<NavigationTarget> },
+    Diagnostics { view_id: String, diagnostics: Vec<Diagnostic> },
+    CodeActions { view_id: String, actions: Vec<CodeActionDescriptor> },
     ScrollTo { view_id: String, line: usize, col: usize },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PendingUiAction {
+    Hover { view_id: String, content: String },
+    Completions { view_id: String, items: Vec<CompletionSuggestion> },
+    CodeActions { view_id: String, actions: Vec<CodeActionDescriptor> },
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -124,6 +135,7 @@ pub(crate) struct CoreLine {
     pub(crate) cursor: Vec<usize>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct XiClient {
     pub(crate) path: Option<PathBuf>,
@@ -138,8 +150,10 @@ pub(crate) struct XiClient {
     pub(crate) pristine: bool,
     pub(crate) status_message: Option<String>,
     pub(crate) last_scroll: Option<(usize, usize)>,
+    pub(crate) diagnostics: Vec<Diagnostic>,
 }
 
+#[allow(dead_code)]
 impl XiClient {
     pub(crate) fn new(path: Option<PathBuf>) -> io::Result<Self> {
         let (to_core_tx, to_core_rx) = mpsc::channel::<String>();
@@ -172,7 +186,8 @@ impl XiClient {
 
         let init_events = drain_sync_notifications(&from_core_rx, &to_core_tx);
 
-        let pending: PendingRequests = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let pending: PendingRequests =
+            std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let tx_clone = to_core_tx.clone();
         let pending_clone = std::sync::Arc::clone(&pending);
         thread::spawn(move || xi_reader_thread(from_core_rx, tx_clone, backend_tx, pending_clone));
@@ -190,6 +205,7 @@ impl XiClient {
             pristine: true,
             status_message: None,
             last_scroll: None,
+            diagnostics: Vec::new(),
         };
 
         for event in init_events {
@@ -235,23 +251,74 @@ impl XiClient {
         )
     }
 
-    pub(crate) fn send_plugin_rpc(
-        &self,
-        receiver: &str,
-        method: &str,
-        params: Value,
+    pub(crate) fn request_completion(&mut self) -> io::Result<()> {
+        self.send_edit("request_completion", json!({}))
+    }
+
+    pub(crate) fn request_definition(&mut self) -> io::Result<()> {
+        self.send_edit("request_definition", json!({}))
+    }
+
+    pub(crate) fn request_references(&mut self) -> io::Result<()> {
+        self.send_edit("request_references", json!({}))
+    }
+
+    pub(crate) fn format_document(&mut self) -> io::Result<()> {
+        self.send_edit("format_document", json!({}))
+    }
+
+    pub(crate) fn request_code_actions(&mut self, index: Option<usize>) -> io::Result<()> {
+        self.send_edit("request_code_actions", json!({ "index": index }))
+    }
+
+    pub(crate) fn delete_line_range(
+        &mut self,
+        start_line: usize,
+        end_line: usize,
     ) -> io::Result<()> {
-        self.send_notification(
-            "plugin",
+        self.send_edit(
+            "delete_line_range",
             json!({
-                "command": "plugin_rpc",
-                "view_id": self.view_id,
-                "receiver": receiver,
-                "rpc": {
-                    "method": method,
-                    "params": params,
-                    "rpc_type": "notification",
-                },
+                "start_line": start_line,
+                "end_line": end_line,
+            }),
+        )
+    }
+
+    pub(crate) fn delete_block(
+        &mut self,
+        start_line: usize,
+        end_line: usize,
+        left_col: usize,
+        right_col: usize,
+    ) -> io::Result<()> {
+        self.send_edit(
+            "delete_block",
+            json!({
+                "start_line": start_line,
+                "end_line": end_line,
+                "left_col": left_col,
+                "right_col": right_col,
+            }),
+        )
+    }
+
+    pub(crate) fn replay_block_insert(
+        &mut self,
+        start_line: usize,
+        end_line: usize,
+        column: usize,
+        text: &str,
+        append: bool,
+    ) -> io::Result<()> {
+        self.send_edit(
+            "replay_block_insert",
+            json!({
+                "start_line": start_line,
+                "end_line": end_line,
+                "column": column,
+                "text": text,
+                "append": append,
             }),
         )
     }
@@ -299,10 +366,10 @@ impl XiClient {
             BackendEvent::Alert(msg) => {
                 self.status_message = Some(msg);
             }
-            BackendEvent::ShowHover(result) => {
-                self.status_message = Some(result);
+            BackendEvent::Hover { content, .. } => {
+                self.status_message = Some(content);
             }
-            BackendEvent::ShowCompletions(items) => {
+            BackendEvent::Completions { items, .. } => {
                 let preview =
                     items.iter().take(8).map(|item| item.label.as_str()).collect::<Vec<_>>();
                 self.status_message = Some(if preview.is_empty() {
@@ -317,7 +384,7 @@ impl XiClient {
                     format!("completions: {}", preview.join(", "))
                 });
             }
-            BackendEvent::ShowLocations { title, locations } => {
+            BackendEvent::Locations { title, locations, .. } => {
                 let same_file = locations.len() == 1
                     && self
                         .path
@@ -327,6 +394,22 @@ impl XiClient {
                     self.send_edit("goto_line", json!({ "line": locations[0].line }))?;
                 }
                 self.status_message = Some(format_location_message(&title, &locations));
+            }
+            BackendEvent::Diagnostics { diagnostics, .. } => {
+                let count = diagnostics.len();
+                self.diagnostics = diagnostics;
+                self.status_message = Some(if count == 0 {
+                    String::from("diagnostics cleared")
+                } else {
+                    format!("diagnostics: {count}")
+                });
+            }
+            BackendEvent::CodeActions { actions, .. } => {
+                self.status_message = Some(if actions.is_empty() {
+                    String::from("no code actions")
+                } else {
+                    format!("code actions: {}", actions.len())
+                });
             }
         }
         Ok(())
@@ -701,22 +784,39 @@ pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendE
             let msg = params.get("msg").and_then(Value::as_str)?.to_owned();
             Some(BackendEvent::Alert(msg))
         }
-        "show_hover" => {
-            let result = params.get("result").and_then(Value::as_str)?.to_owned();
-            Some(BackendEvent::ShowHover(result))
+        "hover" => {
+            let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
+            let content = params.get("content").and_then(Value::as_str)?.to_owned();
+            Some(BackendEvent::Hover { view_id, content })
         }
-        "show_completions" => {
+        "completions" => {
+            let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
             let items =
                 serde_json::from_value::<Vec<CompletionSuggestion>>(params.get("items")?.clone())
                     .ok()?;
-            Some(BackendEvent::ShowCompletions(items))
+            Some(BackendEvent::Completions { view_id, items })
         }
-        "show_locations" => {
+        "locations" => {
+            let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
             let title = params.get("title").and_then(Value::as_str)?.to_owned();
             let locations =
                 serde_json::from_value::<Vec<NavigationTarget>>(params.get("locations")?.clone())
                     .ok()?;
-            Some(BackendEvent::ShowLocations { title, locations })
+            Some(BackendEvent::Locations { view_id, title, locations })
+        }
+        "diagnostics" => {
+            let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
+            let diagnostics =
+                serde_json::from_value::<Vec<Diagnostic>>(params.get("diagnostics")?.clone())
+                    .ok()?;
+            Some(BackendEvent::Diagnostics { view_id, diagnostics })
+        }
+        "code_actions" => {
+            let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
+            let actions =
+                serde_json::from_value::<Vec<CodeActionDescriptor>>(params.get("actions")?.clone())
+                    .ok()?;
+            Some(BackendEvent::CodeActions { view_id, actions })
         }
         _ => None,
     }

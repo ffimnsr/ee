@@ -21,28 +21,29 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use log::{debug, error, warn};
+use regex::RegexBuilder;
 use serde_json::{self, Value, json};
 
-use xi_rope::{Cursor, Interval, LinesMetric, Rope, RopeDelta};
+use xi_rope::{Cursor, DeltaBuilder, Interval, LinesMetric, Rope, RopeDelta};
 use xi_rpc::{Error as RpcError, RemoteError};
 
 use crate::plugins::rpc::{
     ClientPluginInfo, GetDiagnosticsResponse, GetSelectionsResponse, Hover, PluginBufferInfo,
     PluginNotification, PluginRequest, PluginUpdate, PluginUpdateAck, SelectionRange,
 };
-use crate::rpc::{EditNotification, EditRequest, LineRange, Position as ClientPosition};
+use crate::rpc::{EditNotification, LineRange, LineReplacement, Position as ClientPosition};
 
 use crate::WeakXiCore;
 use crate::client::Client;
 use crate::config::{BufferItems, Table};
+use crate::edit_ops;
 use crate::edit_types::{EventDomain, SpecialEvent};
 use crate::editor::{EditType, Editor};
 use crate::file::FileInfo;
-use crate::line_offset::LineOffset;
 use crate::lang_features;
+use crate::line_offset::LineOffset;
 use crate::plugins::{Plugin, PluginCapability};
-use crate::recorder::Recorder;
-use crate::selection::InsertDrift;
+use crate::selection::{InsertDrift, SelRegion};
 use crate::styles::ThemeStyleMap;
 use crate::syntax::LanguageId;
 use crate::tabs::{
@@ -70,7 +71,6 @@ pub struct EventContext<'a> {
     pub(crate) editor: &'a RefCell<Editor>,
     pub(crate) info: Option<&'a FileInfo>,
     pub(crate) config: &'a BufferItems,
-    pub(crate) recorder: &'a RefCell<Recorder>,
     pub(crate) language: LanguageId,
     pub(crate) view: &'a RefCell<View>,
     pub(crate) siblings: Vec<&'a RefCell<View>>,
@@ -159,22 +159,6 @@ impl<'a> EventContext<'a> {
     pub(crate) fn do_edit(&mut self, cmd: EditNotification) {
         let event: EventDomain = cmd.into();
 
-        {
-            // Handle recording-- clone every non-toggle and play event into the recording buffer
-            let mut recorder = self.recorder.borrow_mut();
-            match (recorder.is_recording(), &event) {
-                (_, EventDomain::Special(SpecialEvent::ToggleRecording(recording_name))) => {
-                    recorder.toggle_recording(recording_name.clone());
-                }
-                // Don't save special events
-                (true, EventDomain::Special(_)) => {
-                    warn!("Special events cannot be recorded-- ignoring event {:?}", event)
-                }
-                (true, event) => recorder.record(event.clone()),
-                _ => {}
-            }
-        }
-
         self.dispatch_event(event);
         self.after_edit("core");
         self.render_if_needed();
@@ -208,84 +192,52 @@ impl<'a> EventContext<'a> {
                     self.update_wrap_settings(false);
                 }
             }
-            SpecialEvent::DebugRewrap | SpecialEvent::DebugWrapWidth => {
-                warn!("debug wrapping methods are removed, use the config system")
-            }
-            SpecialEvent::DebugPrintSpans => self.with_editor(|ed, view, _, _| {
-                if let Some(sel) = view.sel_regions().last() {
-                    let iv = Interval::new(sel.min(), sel.max());
-                    ed.get_layers().debug_print_spans(iv);
-                } else {
-                    warn!("debug_print_spans requested without an active selection");
-                }
-            }),
             SpecialEvent::RequestLines(LineRange { first, last }) => {
                 self.do_request_lines(first as usize, last as usize)
             }
             SpecialEvent::RequestHover { request_id, position } => {
                 self.do_request_hover(request_id, position)
             }
-            SpecialEvent::DebugToggleComment => self.do_debug_toggle_comment(),
+            SpecialEvent::DispatchPluginCommand { capability, method, params } => {
+                self.dispatch_capability_command(capability, method, &params)
+            }
+            SpecialEvent::DeleteLineRange { start_line, end_line } => {
+                self.do_delete_line_range(start_line, end_line)
+            }
+            SpecialEvent::DeleteBlock { start_line, end_line, left_col, right_col } => {
+                self.do_delete_block(start_line, end_line, left_col, right_col)
+            }
+            SpecialEvent::ReplayBlockInsert { start_line, end_line, column, text, append } => {
+                self.do_replay_block_insert(start_line, end_line, column, &text, append)
+            }
+            SpecialEvent::ApplyLineReplacements { replacements } => {
+                self.do_apply_line_replacements(&replacements)
+            }
             SpecialEvent::Reindent => self.do_reindent(),
-            SpecialEvent::ToggleRecording(_) => {}
-            SpecialEvent::PlayRecording(recording_name) => {
-                let recorder = self.recorder.borrow();
-
-                let starting_revision = self.editor.borrow_mut().get_head_rev_token();
-
-                // Don't group with the previous action
-                self.editor.borrow_mut().update_edit_type();
-                self.editor.borrow_mut().calculate_undo_group();
-
-                // No matter what, our entire block must belong to the same undo group
-                self.editor.borrow_mut().set_force_undo_group(true);
-                recorder.play(&recording_name, |event| {
-                    self.dispatch_event(event.clone());
-
-                    let mut editor = self.editor.borrow_mut();
-                    let (delta, last_text, drift) = match editor.commit_delta() {
-                        Some(edit_info) => edit_info,
-                        None => return,
-                    };
-                    self.update_views(&editor, &delta, &last_text, drift);
-                });
-                self.editor.borrow_mut().set_force_undo_group(false);
-
-                // The action that follows the block must belong to a separate undo group
-                self.editor.borrow_mut().update_edit_type();
-
-                let delta = self.editor.borrow_mut().delta_rev_head(starting_revision);
-                if let Some(delta) = delta {
-                    self.update_plugins(&mut self.editor.borrow_mut(), delta, "core");
-                } else {
-                    warn!(
-                        "recording playback could not compute delta from revision {:?}",
-                        starting_revision
-                    );
-                }
-            }
-            SpecialEvent::ClearRecording(recording_name) => {
-                let mut recorder = self.recorder.borrow_mut();
-                recorder.clear(&recording_name);
-            }
         }
     }
 
-    /// Handles a synchronous edit request from the client and returns a result
-    /// value (e.g. for cut/copy operations).
-    ///
-    /// # Preconditions
-    ///
-    /// The `editor` and `view` `RefCell`s must not be borrowed when this is called.
-    pub(crate) fn do_edit_sync(&mut self, cmd: EditRequest) -> Result<Value, RemoteError> {
-        use self::EditRequest::*;
-        let result = match cmd {
-            Cut => Ok(self.with_editor(|ed, view, _, _| ed.do_cut(view))),
-            Copy => Ok(self.with_editor(|ed, view, _, _| ed.do_copy(view))),
-        };
-        self.after_edit("core");
-        self.render_if_needed();
-        result
+    fn dispatch_capability_command(
+        &self,
+        capability: PluginCapability,
+        method: &str,
+        params: &Value,
+    ) {
+        let mut dispatched = false;
+        self.plugins
+            .iter()
+            .filter(|plugin| {
+                plugin.manifest.has_capability(capability)
+                    && plugin.manifest.supports_command(method)
+            })
+            .for_each(|plugin| {
+                dispatched = true;
+                plugin.dispatch_command(self.view_id, method, params);
+            });
+
+        if !dispatched {
+            warn!("no running plugin registered {:?} command", method);
+        }
     }
 
     /// Dispatches an incoming notification from a plugin (fire-and-forget).
@@ -332,13 +284,20 @@ impl<'a> EventContext<'a> {
                 })
             }
             UpdateDiagnostics { diagnostics } => {
-                self.with_view(|view, _| view.update_diagnostics(plugin, diagnostics))
+                let client = self.client;
+                let view_id = self.view_id;
+                self.with_view(|view, _| {
+                    view.update_diagnostics(plugin, diagnostics);
+                    let diagnostics = view.get_diagnostics();
+                    client.diagnostics(view_id, &diagnostics);
+                })
             }
             RemoveStatusItem { key } => self.client.remove_status_item(self.view_id, &key),
             ShowHover { request_id, result } => self.do_show_hover(request_id, result),
-            ShowCompletions { items } => self.client.show_completions(self.view_id, &items),
+            ShowCompletions { items } => self.client.completions(self.view_id, &items),
+            ShowCodeActions { actions } => self.client.code_actions(self.view_id, &actions),
             ShowLocations { title, locations } => {
-                self.client.show_locations(self.view_id, &title, &locations)
+                self.client.locations(self.view_id, &title, &locations)
             }
         };
         self.after_edit(&plugin.to_string());
@@ -838,19 +797,100 @@ impl<'a> EventContext<'a> {
         }
     }
 
-    fn do_debug_toggle_comment(&mut self) {
-        let line_ranges = self.selected_line_ranges();
-        let lang_name = self.language.as_ref();
-        let maybe_delta = {
-            let ed = self.editor.borrow();
-            lang_features::toggle_comment(ed.get_buffer(), &line_ranges, lang_name)
+    fn do_delete_line_range(&mut self, start_line: usize, end_line: usize) {
+        let start_offset = {
+            let editor = self.editor.borrow();
+            let text = editor.get_buffer();
+            let total_lines = text.measure::<LinesMetric>() + 1;
+            let line = start_line.min(total_lines.saturating_sub(1));
+            text.offset_of_line(line)
         };
-        if let Some(delta) = maybe_delta {
+        self.with_view(|view, text| view.set_selection(text, SelRegion::caret(start_offset)));
+        let delta = {
+            let editor = self.editor.borrow();
+            edit_ops::delete_line_range(editor.get_buffer(), start_line, end_line)
+        };
+        if !delta.is_identity() {
+            self.editor.borrow_mut().apply_direct_delta(EditType::Delete, delta);
+        }
+    }
+
+    fn do_delete_block(
+        &mut self,
+        start_line: usize,
+        end_line: usize,
+        left_col: usize,
+        right_col: usize,
+    ) {
+        let delta = {
+            let editor = self.editor.borrow();
+            edit_ops::delete_block(editor.get_buffer(), start_line, end_line, left_col, right_col)
+        };
+        if !delta.is_identity() {
+            self.editor.borrow_mut().apply_direct_delta(EditType::Delete, delta);
+        }
+    }
+
+    fn do_replay_block_insert(
+        &mut self,
+        start_line: usize,
+        end_line: usize,
+        column: usize,
+        text: &str,
+        append: bool,
+    ) {
+        let delta = {
+            let editor = self.editor.borrow();
+            edit_ops::replay_block_insert(
+                editor.get_buffer(),
+                start_line,
+                end_line,
+                column,
+                text,
+                append,
+            )
+        };
+        if !delta.is_identity() {
+            self.editor.borrow_mut().apply_direct_delta(EditType::InsertChars, delta);
+        }
+    }
+
+    pub(crate) fn preview_substitute(
+        &self,
+        start_line: usize,
+        end_line: usize,
+        pattern: &str,
+        replacement: &str,
+        global: bool,
+        case_sensitive: bool,
+    ) -> Result<Vec<LineReplacement>, RemoteError> {
+        if pattern.is_empty() {
+            return Err(RemoteError::custom(400, "substitute: empty pattern", None));
+        }
+
+        let editor = self.editor.borrow();
+        compute_line_replacements(
+            editor.get_buffer(),
+            start_line,
+            end_line,
+            pattern,
+            replacement,
+            global,
+            case_sensitive,
+        )
+    }
+
+    fn do_apply_line_replacements(&mut self, replacements: &[LineReplacement]) {
+        if replacements.is_empty() {
+            return;
+        }
+
+        let delta = {
+            let editor = self.editor.borrow();
+            apply_line_replacements(editor.get_buffer(), replacements)
+        };
+        if !delta.is_identity() {
             self.editor.borrow_mut().apply_direct_delta(EditType::Other, delta);
-        } else {
-            // Fall back to plugin dispatch for block-only languages (HTML, CSS, etc.)
-            // or when the language has no known comment token.
-            self.dispatch_command_to_plugins("toggle_comment", &json!(line_ranges));
         }
     }
 
@@ -887,7 +927,7 @@ impl<'a> EventContext<'a> {
         match hover {
             Ok(hover) => {
                 // TODO: Get Range from hover here and use it to highlight text
-                self.client.show_hover(self.view_id, request_id, hover.content)
+                self.client.hover(self.view_id, request_id, hover.content)
             }
             Err(err) => warn!("Hover Response from Client Error {:?}", err),
         }
@@ -903,6 +943,86 @@ impl<'a> EventContext<'a> {
     }
 }
 
+fn compute_line_replacements(
+    text: &Rope,
+    start_line: usize,
+    end_line: usize,
+    pattern: &str,
+    replacement: &str,
+    global: bool,
+    case_sensitive: bool,
+) -> Result<Vec<LineReplacement>, RemoteError> {
+    let regex = RegexBuilder::new(&regex::escape(pattern))
+        .case_insensitive(!case_sensitive)
+        .build()
+        .map_err(|err| RemoteError::custom(400, format!("substitute: bad pattern: {err}"), None))?;
+
+    let total_lines = text.measure::<LinesMetric>() + 1;
+    let start_line = start_line.min(total_lines.saturating_sub(1));
+    let end_line = end_line.min(total_lines.saturating_sub(1));
+    if start_line > end_line {
+        return Ok(Vec::new());
+    }
+
+    let mut replacements = Vec::new();
+    for line in start_line..=end_line {
+        let current = line_text(text, line);
+        let next = if global {
+            regex.replace_all(&current, replacement).into_owned()
+        } else {
+            regex.replace(&current, replacement).into_owned()
+        };
+        if current != next {
+            replacements.push(LineReplacement { line, text: next });
+        }
+    }
+    Ok(replacements)
+}
+
+fn apply_line_replacements(text: &Rope, replacements: &[LineReplacement]) -> RopeDelta {
+    let mut sorted = replacements.to_vec();
+    sorted.sort_by_key(|replacement| replacement.line);
+
+    let mut builder = DeltaBuilder::new(text.len());
+    for replacement in sorted {
+        builder.replace(line_content_interval(text, replacement.line), replacement.text.into());
+    }
+    builder.build()
+}
+
+fn line_text(text: &Rope, line: usize) -> String {
+    let interval = line_with_ending_interval(text, line);
+    let mut line_text = text.slice_to_cow(interval).into_owned();
+    if line_text.ends_with('\n') {
+        line_text.pop();
+        if line_text.ends_with('\r') {
+            line_text.pop();
+        }
+    }
+    line_text
+}
+
+fn line_content_interval(text: &Rope, line: usize) -> Interval {
+    let interval = line_with_ending_interval(text, line);
+    let start = interval.start();
+    let mut end = interval.end();
+    let line_text = text.slice_to_cow(interval).into_owned();
+    if line_text.ends_with("\r\n") {
+        end = end.saturating_sub(2);
+    } else if line_text.ends_with('\n') {
+        end = end.saturating_sub(1);
+    }
+    Interval::new(start, end)
+}
+
+fn line_with_ending_interval(text: &Rope, line: usize) -> Interval {
+    let total_lines = text.measure::<LinesMetric>() + 1;
+    let line = line.min(total_lines.saturating_sub(1));
+    let start = text.offset_of_line(line);
+    let end = if line + 1 < total_lines { text.offset_of_line(line + 1) } else { text.len() };
+    Interval::new(start, end)
+}
+
 #[cfg(test)]
 #[rustfmt::skip]
 mod tests {
@@ -914,6 +1034,7 @@ mod tests {
         GetDiagnosticsResponse, GetSelectionsResponse, SelectionRange,
     };
     use crate::tabs::BufferId;
+    use xi_rope::Interval;
     use xi_rpc::test_utils::DummyPeer;
 
     struct ContextHarness {
@@ -925,7 +1046,6 @@ mod tests {
         style_map: RefCell<ThemeStyleMap>,
         width_cache: RefCell<WidthCache>,
         config_manager: ConfigManager,
-        recorder: RefCell<Recorder>,
     }
 
     impl ContextHarness {
@@ -943,9 +1063,8 @@ mod tests {
             let kill_ring = RefCell::new(Rope::from(""));
             let style_map = RefCell::new(ThemeStyleMap::new(None));
             let width_cache = RefCell::new(WidthCache::new());
-            let recorder = RefCell::new(Recorder::new());
             let harness = ContextHarness { view, editor, client, core_ref, kill_ring,
-                             style_map, width_cache, config_manager, recorder };
+                             style_map, width_cache, config_manager };
             harness.make_context().view_init();
             harness.make_context().finish_init(&config);
             harness
@@ -987,7 +1106,6 @@ mod tests {
                 info: None,
                 siblings: Vec::new(),
                 plugins: Vec::new(),
-                recorder: &self.recorder,
                 client: &self.client,
                 kill_ring: &self.kill_ring,
                 style_map: &self.style_map,
@@ -1061,6 +1179,113 @@ mod tests {
         assert!(diagnostics.diagnostics.is_empty());
         assert!(matches!(format_err, RemoteError::Custom { code: 501, .. }));
         assert!(matches!(code_actions_err, RemoteError::Custom { code: 501, .. }));
+    }
+
+    #[test]
+    fn delete_line_range_uses_authoritative_buffer_offsets() {
+        let harness = ContextHarness::new("zero\none\ntwo\nthree");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::DeleteLineRange { start_line: 1, end_line: 2 });
+
+        assert_eq!(harness.debug_render(), "zero\n|three");
+    }
+
+    #[test]
+    fn delete_block_removes_rectangular_slice_in_core() {
+        let harness = ContextHarness::new("abcd\nefgh\nijkl");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::DeleteBlock {
+            start_line: 0,
+            end_line: 2,
+            left_col: 1,
+            right_col: 3,
+        });
+
+        assert_eq!(harness.debug_render(), "|ad\neh\nil");
+    }
+
+    #[test]
+    fn replay_block_insert_reuses_core_buffer_geometry() {
+        let harness = ContextHarness::new("zero\none\ntwo");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::ReplayBlockInsert {
+            start_line: 1,
+            end_line: 2,
+            column: 1,
+            text: String::from("X"),
+            append: false,
+        });
+
+        assert_eq!(harness.debug_render(), "|zero\noXne\ntXwo");
+    }
+
+    #[test]
+    fn substitute_preview_uses_authoritative_buffer_lines() {
+        let harness = ContextHarness::new("alpha\nbeta\nalpha");
+        let ctx = harness.make_context();
+
+        let replacements = ctx
+            .preview_substitute(1, 2, "a", "A", false, true)
+            .expect("substitute preview should succeed");
+
+        assert_eq!(
+            replacements,
+            vec![
+                LineReplacement { line: 1, text: String::from("betA") },
+                LineReplacement { line: 2, text: String::from("Alpha") },
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_line_replacements_reuses_authoritative_buffer_offsets() {
+        let harness = ContextHarness::new("zero\none\ntwo");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::ApplyLineReplacements {
+            replacements: vec![LineReplacement { line: 1, text: String::from("ONE") }],
+        });
+
+        assert_eq!(harness.debug_render(), "|zero\nONE\ntwo");
+    }
+
+    #[test]
+    fn paste_register_characterwise_after_cursor_stays_backend_owned() {
+        let harness = ContextHarness::new("one");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::Gesture {
+            line: 0,
+            col: 0,
+            ty: crate::rpc::GestureType::PointSelect,
+        });
+        ctx.do_edit(EditNotification::PasteRegister {
+            chars: String::from("X"),
+            before: false,
+        });
+
+        assert_eq!(harness.debug_render().replace('|', ""), "oXne");
+    }
+
+    #[test]
+    fn paste_register_linewise_after_cursor_inserts_full_line() {
+        let harness = ContextHarness::new("one\ntwo");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::Gesture {
+            line: 0,
+            col: 0,
+            ty: crate::rpc::GestureType::PointSelect,
+        });
+        ctx.do_edit(EditNotification::PasteRegister {
+            chars: String::from("X\n"),
+            before: false,
+        });
+
+        assert_eq!(harness.debug_render().replace('|', ""), "one\nX\ntwo");
     }
 
     #[test]
@@ -2109,105 +2334,6 @@ mod tests {
         Done.");
     }
 
-    #[test]
-    fn text_recording() {
-        use crate::rpc::GestureType::*;
-        let initial_text = "";
-        let harness = ContextHarness::new(initial_text);
-        let mut ctx = harness.make_context();
-
-        let recording_name = String::new();
-
-        ctx.do_edit(EditNotification::Gesture { line: 0, col: 0, ty: PointSelect });
-        assert_eq!(harness.debug_render(), "|");
-
-        ctx.do_edit(EditNotification::ToggleRecording { recording_name: Some(recording_name.clone()) });
-
-        ctx.do_edit(EditNotification::Insert { chars: "Foo ".to_owned() });
-        ctx.do_edit(EditNotification::Insert { chars: "B".to_owned() });
-        ctx.do_edit(EditNotification::Insert { chars: "A".to_owned() });
-        ctx.do_edit(EditNotification::Insert { chars: "R".to_owned() });
-        assert_eq!(harness.debug_render(), "Foo BAR|");
-
-        ctx.do_edit(EditNotification::ToggleRecording { recording_name: Some(recording_name.clone())});
-        ctx.do_edit(EditNotification::Insert { chars: " ".to_owned() });
-
-        ctx.do_edit(EditNotification::PlayRecording { recording_name });
-        assert_eq!(harness.debug_render(), "Foo BAR Foo BAR|");
-    }
-
-    #[test]
-    fn movement_recording() {
-        use crate::rpc::GestureType::*;
-        let initial_text = "\
-        this is a string\n\
-        that has about\n\
-        four really nice\n\
-        lines to see.";
-        let harness = ContextHarness::new(initial_text);
-        let mut ctx = harness.make_context();
-
-        let recording_name = String::new();
-
-        ctx.do_edit(EditNotification::Gesture { line: 0, col: 5, ty: PointSelect });
-        assert_eq!(harness.debug_render(),"\
-        this |is a string\n\
-        that has about\n\
-        four really nice\n\
-        lines to see." );
-
-        ctx.do_edit(EditNotification::ToggleRecording { recording_name: Some(recording_name.clone()) });
-
-        // Swap last word of the current line and the line below
-        ctx.do_edit(EditNotification::AddSelectionBelow);
-        ctx.do_edit(EditNotification::MoveToRightEndOfLine);
-        ctx.do_edit(EditNotification::MoveWordLeftAndModifySelection);
-        ctx.do_edit(EditNotification::Transpose);
-        ctx.do_edit(EditNotification::CollapseSelections);
-        ctx.do_edit(EditNotification::MoveToRightEndOfLine);
-        assert_eq!(harness.debug_render(),"\
-        this is a about|\n\
-        that has string\n\
-        four really nice\n\
-        lines to see." );
-
-        ctx.do_edit(EditNotification::ToggleRecording { recording_name: Some(recording_name.clone())});
-
-        ctx.do_edit(EditNotification::Gesture { line: 2, col: 5, ty: PointSelect });
-        ctx.do_edit(EditNotification::PlayRecording { recording_name: recording_name.clone() });
-        assert_eq!(harness.debug_render(),"\
-        this is a about\n\
-        that has string\n\
-        four really see.|\n\
-        lines to nice" );
-
-        // Undo entire playback in a single command
-        ctx.do_edit(EditNotification::Undo);
-        assert_eq!(harness.debug_render(),"\
-        this is a about\n\
-        that has string\n\
-        four really nice|\n\
-        lines to see." );
-
-        // Make sure we can redo in a single command as well
-        ctx.do_edit(EditNotification::Redo);
-        assert_eq!(harness.debug_render(),"\
-        this is a about\n\
-        that has string\n\
-        four really see.|\n\
-        lines to nice" );
-
-        // We shouldn't be able to use cleared recordings
-        ctx.do_edit(EditNotification::Undo);
-        ctx.do_edit(EditNotification::Undo);
-        ctx.do_edit(EditNotification::ClearRecording { recording_name: recording_name.clone() });
-        ctx.do_edit(EditNotification::PlayRecording { recording_name });
-        assert_eq!(harness.debug_render(),"\
-        this is a string\n\
-        that has about\n\
-        four really nice|\n\
-        lines to see." );
-    }
 
     #[test]
     fn test_exact_position() {

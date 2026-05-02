@@ -34,6 +34,7 @@ static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_
 ///
 /// Only scopes with a well-defined single-character line comment are covered.
 /// Block-only languages (HTML, CSS) return `None`.
+#[allow(dead_code)]
 fn scope_to_line_comment(scope_root: &str) -> Option<&'static str> {
     // Match on the leading component so sub-scopes (e.g. `source.rust.embedded`)
     // are covered by the same rule.
@@ -126,6 +127,7 @@ fn scope_to_line_comment(scope_root: &str) -> Option<&'static str> {
 /// Returns the line-comment token for `language_name` using the bundled
 /// syntect syntax definitions, or `None` if the language is unknown or has
 /// no single-line comment form.
+#[allow(dead_code)]
 pub(crate) fn line_comment_token(language_name: &str) -> Option<&'static str> {
     let syntax = SYNTAX_SET.find_syntax_by_name(language_name)?;
     let scope_root = syntax.scope.to_string();
@@ -145,6 +147,7 @@ pub(crate) fn line_comment_token(language_name: &str) -> Option<&'static str> {
 /// Returns `None` when:
 /// - `language_name` has no known line-comment token, or
 /// - the text would not change (e.g. all lines are blank).
+#[allow(dead_code)]
 pub(crate) fn toggle_comment(
     text: &Rope,
     line_ranges: &[(usize, usize)],
@@ -184,9 +187,9 @@ pub(crate) fn toggle_comment(
             // Remove the comment token (and an optional trailing space).
             let ws_len = content.len() - trimmed.len();
             let ws_end = line_start + ws_len;
-            let after_token = trimmed.strip_prefix(&token_sp).unwrap_or_else(|| {
-                trimmed.strip_prefix(token).unwrap_or(trimmed)
-            });
+            let after_token = trimmed
+                .strip_prefix(&token_sp)
+                .unwrap_or_else(|| trimmed.strip_prefix(token).unwrap_or(trimmed));
             let remove_end = ws_end + (trimmed.len() - after_token.len());
             if ws_end < remove_end {
                 builder.delete(Interval::new(ws_end, remove_end));
@@ -345,10 +348,7 @@ pub(crate) fn reindent(
 /// Collect sorted, deduplicated line indices from a set of `(start, end)` ranges
 /// (both inclusive) as returned by `EventContext::selected_line_ranges`.
 fn collect_lines(line_ranges: &[(usize, usize)]) -> Vec<usize> {
-    let mut lines: Vec<usize> = line_ranges
-        .iter()
-        .flat_map(|&(start, end)| start..=end)
-        .collect();
+    let mut lines: Vec<usize> = line_ranges.iter().flat_map(|&(start, end)| start..=end).collect();
     lines.sort_unstable();
     lines.dedup();
     lines
@@ -372,13 +372,10 @@ fn line_content(text: &Rope, ln: usize) -> String {
 /// Returns `true` if the current scope stack indicates we are inside a string
 /// literal or a comment.
 fn in_string_or_comment(stack: &ScopeStack) -> bool {
-    stack
-        .as_slice()
-        .iter()
-        .any(|scope| {
-            let s = scope.to_string();
-            s.starts_with("string") || s.starts_with("comment")
-        })
+    stack.as_slice().iter().any(|scope| {
+        let s = scope.to_string();
+        s.starts_with("string") || s.starts_with("comment")
+    })
 }
 
 // ---------------------------------------------------------------------------

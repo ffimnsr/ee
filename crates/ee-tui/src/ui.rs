@@ -2,22 +2,27 @@ use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use xi_core_lib::plugin_rpc::DiagnosticSeverity;
 
-use crate::app::{App, Mode, Viewport};
+use crate::app::{App, Mode, Viewport, smart_case_sensitive};
 use crate::buffer::BufState;
 use crate::config::{NumberStyle, StatuslineFormat};
+use crate::picker::PickerKind;
 use crate::quickfix::QfList;
 use crate::text::{byte_col_to_display_col, display_col_to_byte};
-use crate::picker::PickerKind;
 
-pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
-    let area = frame.area();
-    frame.render_widget(Clear, area);
-    frame.render_widget(Block::default().style(Style::default().bg(Color::Rgb(22, 24, 31))), area);
+#[derive(Clone, Copy)]
+struct RootAreas {
+    tab_bar_area: Option<Rect>,
+    editor_area: Rect,
+    qf_area: Option<Rect>,
+    status_area: Rect,
+    prompt_area: Rect,
+}
 
+fn split_root_areas(area: Rect, app: &App) -> RootAreas {
     let tab_count = app.tabs.tab_count();
 
-    // Determine whether a list panel (quickfix or location list) is visible.
     let qf_panel_visible = (app.quickfix_open && app.quickfix.is_some())
         || (app.location_list_open && app.location_list.is_some());
     const QF_HEIGHT: u16 = 8;
@@ -73,40 +78,87 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
             (None, rows[0], None, rows[1], rows[2])
         };
 
+    RootAreas { tab_bar_area, editor_area, qf_area, status_area, prompt_area }
+}
+
+fn window_chunks(app: &App, win_rect: Rect, line_count: usize) -> [Rect; 2] {
+    let gw = gutter_width(app, line_count);
+    let editor = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(gw), Constraint::Min(1)])
+        .split(win_rect);
+    [editor[0], editor[1]]
+}
+
+fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
+    column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
+}
+
+pub(crate) fn hit_test_buffer_cell(
+    area: Rect,
+    app: &App,
+    column: u16,
+    row: u16,
+) -> Option<(usize, usize)> {
+    let root = split_root_areas(area, app);
+    let (win_id, buf_id, win_rect, _) = app
+        .tabs
+        .focused_windows()
+        .layout_for_area(root.editor_area)
+        .into_iter()
+        .find(|(_, _, _, is_focused)| *is_focused)?;
+
+    if !rect_contains(win_rect, column, row) {
+        return None;
+    }
+
+    let buf = app.backend.all_bufs().iter().find(|b| b.id == buf_id)?;
+    let vp = app.tabs.focused_windows().viewport_for_window(win_id, app.viewport);
+    let [_, buffer_area] = window_chunks(app, win_rect, buf.lines.len());
+    let line = vp.top_line + usize::from(row.saturating_sub(buffer_area.y));
+    let display_col = if column < buffer_area.x {
+        0
+    } else {
+        vp.left_col + usize::from(column - buffer_area.x)
+    };
+    Some((line, display_col))
+}
+
+pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
+    let area = frame.area();
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().style(Style::default().bg(Color::Rgb(22, 24, 31))), area);
+    let root = split_root_areas(area, app);
+
     // Tab bar (only when more than one tab is open).
-    if let Some(tab_area) = tab_bar_area {
+    if let Some(tab_area) = root.tab_bar_area {
         render_tab_bar(frame, tab_area, app);
     }
 
     // Render each window in the focused tab.
     for (win_id, buf_id, win_rect, is_focused) in
-        app.tabs.focused_windows().layout_for_area(editor_area)
+        app.tabs.focused_windows().layout_for_area(root.editor_area)
     {
         let Some(buf) = app.backend.all_bufs().iter().find(|b| b.id == buf_id) else {
             continue;
         };
         let vp = app.tabs.focused_windows().viewport_for_window(win_id, app.viewport);
-        let gw = gutter_width(app, buf.lines.len());
-
-        let editor = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(gw), Constraint::Min(1)])
-            .split(win_rect);
+        let editor = window_chunks(app, win_rect, buf.lines.len());
 
         render_gutter(frame, editor[0], buf, vp, app);
         render_buffer(frame, editor[1], buf, vp, app);
 
         if is_focused {
-            let cursor = cursor_position_for(buf, vp, app, editor[1], prompt_area);
+            let cursor = cursor_position_for(buf, vp, app, editor[1], root.prompt_area);
             frame.set_cursor_position(cursor);
         }
     }
 
-    render_status(frame, status_area, app);
-    render_prompt(frame, prompt_area, app);
+    render_status(frame, root.status_area, app);
+    render_prompt(frame, root.prompt_area, app);
 
     // Quickfix / location-list panel (drawn before picker overlay).
-    if let Some(qf_rect) = qf_area {
+    if let Some(qf_rect) = root.qf_area {
         if app.quickfix_open {
             if let Some(qf) = &app.quickfix {
                 render_qf_panel(frame, qf_rect, qf, app.quickfix_focused, false);
@@ -119,6 +171,10 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
     }
 
     // Picker overlay (drawn last so it floats above everything).
+    if app.hover_popup.is_some() {
+        render_hover_popup(frame, area, app);
+    }
+
     if app.picker.is_some() {
         render_picker(frame, area, app);
     }
@@ -221,6 +277,90 @@ fn apply_color_column(spans: Vec<Span<'static>>, screen_col: usize) -> Vec<Span<
     out
 }
 
+/// Overlay search match highlighting on an already-rendered span list.
+///
+/// `line` is the full line byte string, `pattern` is the raw search query,
+/// `left` is the horizontal scroll offset (bytes already skipped), `bg` is
+/// the background colour inherited from the cursor-line flag.
+fn apply_search_highlights(
+    spans: Vec<Span<'static>>,
+    line: &str,
+    pattern: &str,
+    left: usize,
+    bg: Color,
+) -> Vec<Span<'static>> {
+    // Build case-aware regex from the plain-text pattern.
+    let case_insensitive = !smart_case_sensitive(pattern);
+    let re_src = if case_insensitive {
+        format!("(?i){}", regex::escape(pattern))
+    } else {
+        regex::escape(pattern)
+    };
+    let re = match regex::Regex::new(&re_src) {
+        Ok(r) => r,
+        Err(_) => return spans,
+    };
+
+    // Collect all match byte ranges over the full line.
+    let matches: Vec<(usize, usize)> = re.find_iter(line).map(|m| (m.start(), m.end())).collect();
+    if matches.is_empty() {
+        return spans;
+    }
+
+    let match_hl = Style::default()
+        .fg(Color::Rgb(22, 24, 31))
+        .bg(Color::Rgb(250, 179, 135)) // warm orange highlight
+        .add_modifier(Modifier::BOLD);
+
+    // Re-build spans, splitting on match boundaries (byte offsets relative to
+    // the displayed slice starting at `left`).
+    let mut out: Vec<Span<'static>> = Vec::new();
+    // Accumulate raw bytes across all input spans so we can apply match ranges.
+    // Build a flat (byte_offset, char_group, style) representation first.
+    let mut flat: Vec<(String, Style)> = Vec::new();
+    let _cursor = left; // current byte position in `line` (unused but documents intent)
+    for span in &spans {
+        let content = span.content.as_ref();
+        let style = span.style;
+        flat.push((content.to_owned(), style));
+    }
+
+    // Re-emit spans split by match ranges.
+    let mut byte_pos = left; // position in `line` of the start of the current flat span
+    for (content, base_style) in flat {
+        let span_start = byte_pos;
+        let span_end = byte_pos + content.len();
+        byte_pos = span_end;
+
+        // Find matches that overlap this span.
+        let mut local_pos = 0usize; // position within `content` (bytes)
+        for &(ms, me) in &matches {
+            if me <= span_start || ms >= span_end {
+                continue; // no overlap
+            }
+            let rel_start = ms.saturating_sub(span_start);
+            let rel_end = me.min(span_end) - span_start;
+            // Emit text before the match.
+            if rel_start > local_pos {
+                let s = content[local_pos..rel_start].to_owned();
+                out.push(Span::styled(s, base_style.bg(bg)));
+            }
+            // Emit the match.
+            let s = content[rel_start.min(content.len())..rel_end.min(content.len())].to_owned();
+            if !s.is_empty() {
+                out.push(Span::styled(s, match_hl));
+            }
+            local_pos = rel_end;
+        }
+        // Emit remainder.
+        if local_pos < content.len() {
+            out.push(Span::styled(content[local_pos..].to_owned(), base_style.bg(bg)));
+        }
+    }
+
+    if out.is_empty() { spans } else { out }
+}
+
 fn render_tab_bar(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let focused_idx = app.tabs.focused_idx();
     let spans: Vec<Span> = app
@@ -249,8 +389,7 @@ fn render_tab_bar(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         .collect();
 
     frame.render_widget(
-        Paragraph::new(Line::from(spans))
-            .style(Style::default().bg(Color::Rgb(22, 24, 31))),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(22, 24, 31))),
         area,
     );
 }
@@ -278,16 +417,27 @@ fn render_gutter(
             continue;
         }
         let is_cursor = li == cursor_line;
-        let bg = if is_cursor && app.config.cursor_line { cursor_line_bg } else { Color::Rgb(30, 32, 39) };
+        let bg = if is_cursor && app.config.cursor_line {
+            cursor_line_bg
+        } else {
+            Color::Rgb(30, 32, 39)
+        };
 
         // Sign column: show fold markers when applicable.
         let sign_span = if sign_col {
-            let marker = if app.folds.fold_at(buf.id, li).is_some() {
-                "▸ "
+            let (marker, fg) = if let Some(severity) = diagnostic_marker_for_line(buf, li) {
+                match severity {
+                    DiagnosticSeverity::Error => ("E ", Color::Rgb(243, 139, 168)),
+                    DiagnosticSeverity::Warning => ("W ", Color::Rgb(250, 179, 135)),
+                    DiagnosticSeverity::Information => ("I ", Color::Rgb(137, 220, 235)),
+                    DiagnosticSeverity::Hint => ("H ", Color::Rgb(166, 227, 161)),
+                }
+            } else if app.folds.fold_at(buf.id, li).is_some() {
+                ("▸ ", Color::Rgb(100, 130, 160))
             } else {
-                "  "
+                ("  ", Color::Rgb(100, 130, 160))
             };
-            Span::styled(marker, Style::default().fg(Color::Rgb(100, 130, 160)).bg(bg))
+            Span::styled(marker, Style::default().fg(fg).bg(bg))
         } else {
             Span::raw("")
         };
@@ -362,11 +512,7 @@ fn render_buffer(
         return;
     }
 
-    let extension = buf
-        .path
-        .as_ref()
-        .and_then(|p| p.extension())
-        .and_then(|e| e.to_str());
+    let extension = buf.path.as_ref().and_then(|p| p.extension()).and_then(|e| e.to_str());
 
     // Collect visible logical lines (fold-aware).
     let mut visible: Vec<usize> = Vec::with_capacity(height);
@@ -395,7 +541,7 @@ fn render_buffer(
                 // Show fold marker line (abbreviated first line + fold indicator).
                 let preview: String = line.chars().take(40).collect();
                 vec![Span::styled(
-                    format!("{preview}  ··· (folded)", ),
+                    format!("{preview}  ··· (folded)",),
                     Style::default()
                         .fg(Color::Rgb(100, 130, 160))
                         .bg(bg)
@@ -406,10 +552,7 @@ fn render_buffer(
                 let raw = hl_lines.get(log_idx.saturating_sub(top));
                 if let Some(spans_ref) = raw {
                     if spans_ref.is_empty() {
-                        vec![Span::styled(
-                            line[byte_start..].to_owned(),
-                            Style::default().bg(bg),
-                        )]
+                        vec![Span::styled(line[byte_start..].to_owned(), Style::default().bg(bg))]
                     } else {
                         crate::highlight::Highlighter::spans_with_offset(spans_ref, byte_start)
                             .into_iter()
@@ -424,16 +567,21 @@ fn render_buffer(
                             .collect()
                     }
                 } else {
-                    vec![Span::styled(
-                        line[byte_start..].to_owned(),
-                        Style::default().bg(bg),
-                    )]
+                    vec![Span::styled(line[byte_start..].to_owned(), Style::default().bg(bg))]
                 }
             };
 
             // Apply visible-whitespace substitution when enabled.
             if app.config.show_visible_whitespace && !is_fold_header {
                 spans = apply_visible_whitespace(spans);
+            }
+
+            // Apply search match highlighting over the rendered spans.
+            if let Some(ref pat) = app.search_pattern {
+                if !is_fold_header {
+                    let full_line = buf.lines.get(log_idx).map(|s| s.as_str()).unwrap_or("");
+                    spans = apply_search_highlights(spans, full_line, pat, left, bg);
+                }
             }
 
             // Apply color column highlight.
@@ -501,9 +649,7 @@ fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             let buf_indicator = if buf_count > 1 {
                 Span::styled(
                     format!("  [{}/{}]", app.backend.current_idx() + 1, buf_count),
-                    Style::default()
-                        .fg(Color::Rgb(166, 173, 200))
-                        .bg(Color::Rgb(49, 54, 68)),
+                    Style::default().fg(Color::Rgb(166, 173, 200)).bg(Color::Rgb(49, 54, 68)),
                 )
             } else {
                 Span::raw("")
@@ -511,8 +657,12 @@ fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             // Show wrap/list/number indicators on the right.
             let flags = {
                 let mut f = String::new();
-                if app.config.wrap_lines { f.push_str(" wrap"); }
-                if app.config.show_visible_whitespace { f.push_str(" list"); }
+                if app.config.wrap_lines {
+                    f.push_str(" wrap");
+                }
+                if app.config.show_visible_whitespace {
+                    f.push_str(" list");
+                }
                 f
             };
             let flag_span = if flags.is_empty() {
@@ -528,8 +678,7 @@ fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     };
 
     frame.render_widget(
-        Paragraph::new(Line::from(spans))
-            .style(Style::default().bg(Color::Rgb(49, 54, 68))),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(49, 54, 68))),
         area,
     );
 }
@@ -538,16 +687,29 @@ fn render_prompt(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let prompt = match app.mode {
         Mode::Normal => Line::from(match app.backend.status_message.as_deref() {
             Some(message) => message.to_owned(),
-            None => "normal | i insert | v visual | : command | q quit".to_owned(),
+            None => "normal | i insert | v visual | : command | :help discovery".to_owned(),
         }),
         Mode::Insert => Line::from("insert | esc normal"),
-        Mode::Visual => Line::from("visual | hjkl/move selects | d/y/c operators | v/esc normal | : command"),
-        Mode::VisualLine => Line::from("visual-line | j/k extends | d/y/c operators | V/esc normal"),
-        Mode::VisualBlock => Line::from("visual-block | hjkl extends block | d/y I/A operators | Ctrl-V/esc normal"),
+        Mode::Visual => {
+            Line::from("visual | hjkl/move selects | d/y/c operators | v/esc normal | : command")
+        }
+        Mode::VisualLine => {
+            Line::from("visual-line | j/k extends | d/y/c operators | V/esc normal")
+        }
+        Mode::VisualBlock => {
+            Line::from("visual-block | hjkl extends block | d/y I/A operators | Ctrl-V/esc normal")
+        }
         Mode::CommandLine => {
             Line::from(vec![Span::raw(":"), Span::raw(app.command_buffer.as_str())])
         }
-        Mode::Search => Line::from(vec![Span::raw("/"), Span::raw(app.command_buffer.as_str())]),
+        Mode::Search => {
+            let prefix = if app.search_backward { "?" } else { "/" };
+            Line::from(vec![Span::raw(prefix), Span::raw(app.command_buffer.as_str())])
+        }
+        Mode::SubstituteConfirm => Line::from(match app.backend.status_message.as_deref() {
+            Some(msg) => msg.to_owned(),
+            None => "substitute — replace? [y]es [n]o [a]ll [q]uit".to_owned(),
+        }),
         Mode::OperatorPending => Line::from(
             match app.input_state.pending_operator {
                 Some(crate::app::Operator::Delete) => "-- DELETE (motion / text-obj) --",
@@ -680,14 +842,8 @@ fn render_picker(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     // Clear the region behind the popup.
     frame.render_widget(Clear, popup_rect);
 
-    let title = match picker.kind {
-        PickerKind::Files => " Files ",
-        PickerKind::Buffers => " Buffers ",
-        PickerKind::LiveGrep => " Live Grep ",
-    };
-
     let block = Block::default()
-        .title(title)
+        .title(format!(" {} ", picker.title))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Rgb(137, 220, 235)))
         .style(Style::default().bg(Color::Rgb(22, 24, 31)));
@@ -725,11 +881,7 @@ fn render_picker(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let list_height = chunks[1].height as usize;
     let selected = picker.selected;
     // Scroll offset so the selected item stays visible.
-    let scroll_off = if selected >= list_height {
-        selected + 1 - list_height
-    } else {
-        0
-    };
+    let scroll_off = if selected >= list_height { selected + 1 - list_height } else { 0 };
 
     let visible = picker.visible_items_range(scroll_off, list_height);
     let list_items: Vec<ListItem> = visible
@@ -754,9 +906,58 @@ fn render_picker(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     if !picker.filtered.is_empty() {
         list_state.select(Some(selected.saturating_sub(scroll_off)));
     }
-    frame.render_stateful_widget(
-        List::new(list_items),
-        chunks[1],
-        &mut list_state,
+    frame.render_stateful_widget(List::new(list_items), chunks[1], &mut list_state);
+}
+
+fn render_hover_popup(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
+    let Some(popup) = &app.hover_popup else { return };
+    let popup_w = ((area.width as f32 * 0.65) as u16).max(24).min(area.width);
+    let popup_h = ((area.height as f32 * 0.4) as u16).max(6).min(area.height);
+    let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
+    let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
+    let popup_rect = Rect::new(popup_x, popup_y, popup_w, popup_h);
+
+    frame.render_widget(Clear, popup_rect);
+    frame.render_widget(
+        Paragraph::new(popup.content.as_str())
+            .block(
+                Block::default()
+                    .title(format!(" {} ", popup.title))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Rgb(137, 220, 235)))
+                    .style(Style::default().bg(Color::Rgb(22, 24, 31))),
+            )
+            .style(Style::default().fg(Color::Rgb(213, 216, 224)).bg(Color::Rgb(22, 24, 31)))
+            .wrap(Wrap { trim: false }),
+        popup_rect,
     );
+}
+
+fn diagnostic_marker_for_line(buf: &BufState, line_index: usize) -> Option<DiagnosticSeverity> {
+    let (line_start, line_end) = line_byte_range(&buf.lines, line_index)?;
+    buf.diagnostics.iter().filter_map(|diagnostic| {
+        let overlaps = diagnostic.range.start <= line_end && diagnostic.range.end >= line_start;
+        overlaps.then_some(diagnostic.severity.clone())
+    }).min_by_key(diagnostic_rank)
+}
+
+fn line_byte_range(lines: &[String], target_line: usize) -> Option<(usize, usize)> {
+    if target_line >= lines.len() {
+        return None;
+    }
+    let start = lines
+        .iter()
+        .take(target_line)
+        .fold(0usize, |acc, line| acc + line.len() + 1);
+    let end = start + lines[target_line].len();
+    Some((start, end))
+}
+
+fn diagnostic_rank(severity: &DiagnosticSeverity) -> u8 {
+    match severity {
+        DiagnosticSeverity::Error => 0,
+        DiagnosticSeverity::Warning => 1,
+        DiagnosticSeverity::Information => 2,
+        DiagnosticSeverity::Hint => 3,
+    }
 }

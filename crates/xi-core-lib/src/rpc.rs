@@ -26,9 +26,7 @@ use serde::ser::{self, Serializer};
 use serde::{Deserialize, Serialize};
 use serde_json::{self, Value, json};
 
-use crate::config::{ConfigDomainExternal, Table};
 use crate::plugins::PlaceholderRpc;
-use crate::syntax::LanguageId;
 use crate::tabs::ViewId;
 use crate::view::Size;
 
@@ -39,6 +37,12 @@ use crate::view::Size;
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 #[doc(hidden)]
 pub struct EmptyStruct {}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
+pub struct LineReplacement {
+    pub line: usize,
+    pub text: String,
+}
 
 /// The notifications which make up the base of the protocol.
 ///
@@ -100,11 +104,9 @@ pub enum CoreNotification {
     /// inner params object a `view_id` field. On the xi-core side, we
     /// pull out this value during parsing, and use it for routing.
     ///
-    /// For more on the edit commands, see [`EditNotification`] and
-    /// [`EditRequest`].
+    /// For more on the edit commands, see [`EditNotification`].
     ///
     /// [`EditNotification`]: enum.EditNotification.html
-    /// [`EditRequest`]: enum.EditRequest.html
     ///
     /// # Examples
     ///
@@ -176,8 +178,6 @@ pub enum CoreNotification {
     /// Tells `xi-core` to save the contents of the specified view's
     /// buffer to the specified path.
     Save { view_id: ViewId, file_path: String },
-    /// Tells `xi-core` to set the theme.
-    SetTheme { theme_name: String },
     /// Notifies `xi-core` that the client has started.
     ClientStarted {
         #[serde(default)]
@@ -186,25 +186,6 @@ pub enum CoreNotification {
         #[serde(default)]
         client_extras_dir: Option<PathBuf>,
     },
-    /// Updates the user's config for the given domain. Where keys in
-    /// `changes` are `null`, those keys are cleared in the user config
-    /// for that domain; otherwise the config is updated with the new
-    /// value.
-    ///
-    /// Note: If the client is using file-based config, the only valid
-    /// domain argument is `ConfigDomain::UserOverride(_)`, which
-    /// represents non-persistent view-specific settings, such as when
-    /// a user manually changes whitespace settings for a given view.
-    ModifyUserConfig { domain: ConfigDomainExternal, changes: Table },
-    /// Control whether the tracing infrastructure is enabled.
-    /// This propagates to all peers that should respond by toggling its own
-    /// infrastructure on/off.
-    TracingConfig { enabled: bool },
-    /// Save trace data to the given path.  The core will first send
-    /// CoreRequest::CollectTrace to all peers to collect the samples.
-    SaveTrace { destination: PathBuf, frontend_samples: Value },
-    /// Tells `xi-core` to set the language id for the view.
-    SetLanguage { view_id: ViewId, language_id: LanguageId },
 }
 
 /// The requests which make up the base of the protocol.
@@ -235,8 +216,6 @@ pub enum CoreNotification {
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "method", content = "params")]
 pub enum CoreRequest {
-    /// The 'edit' namespace, for view-specific requests.
-    Edit(EditCommand<EditRequest>),
     /// Tells `xi-core` to create a new view. If the `file_path`
     /// argument is present, `xi-core` should attempt to open the file
     /// at that location.
@@ -244,12 +223,15 @@ pub enum CoreRequest {
     /// Returns the view identifier that should be used to interact
     /// with the newly created view.
     NewView { file_path: Option<String> },
-    /// Returns the current collated config object for the given view.
-    GetConfig { view_id: ViewId },
-    /// Returns the contents of the buffer for a given `ViewId`.
-    /// In the future this might also be used to return structured data (such
-    /// as for printing).
-    DebugGetContents { view_id: ViewId },
+    SubstitutePreview {
+        view_id: ViewId,
+        start_line: usize,
+        end_line: usize,
+        pattern: String,
+        replacement: String,
+        global: bool,
+        case_sensitive: bool,
+    },
 }
 
 /// A helper type, which extracts the `view_id` field from edit
@@ -384,6 +366,11 @@ pub enum EditNotification {
     Paste {
         chars: String,
     },
+    PasteRegister {
+        chars: String,
+        #[serde(default)]
+        before: bool,
+    },
     DeleteForward,
     DeleteBackward,
     DeleteWordForward,
@@ -472,11 +459,6 @@ pub enum EditNotification {
         modify_selection: SelectionModifier,
     },
     FindAll,
-    DebugRewrap,
-    DebugWrapWidth,
-    /// Prints the style spans present in the active selection.
-    DebugPrintSpans,
-    DebugToggleComment,
     Uppercase,
     Lowercase,
     Capitalize,
@@ -503,33 +485,46 @@ pub enum EditNotification {
         request_id: usize,
         position: Option<Position>,
     },
+    RequestCompletion {
+        #[serde(default)]
+        index: Option<usize>,
+    },
+    RequestDefinition,
+    RequestReferences,
+    FormatDocument,
+    RequestCodeActions {
+        #[serde(default)]
+        index: Option<usize>,
+    },
+    RequestRename {
+        new_name: String,
+    },
+    DeleteLineRange {
+        start_line: usize,
+        end_line: usize,
+    },
+    DeleteBlock {
+        start_line: usize,
+        end_line: usize,
+        left_col: usize,
+        right_col: usize,
+    },
+    ReplayBlockInsert {
+        start_line: usize,
+        end_line: usize,
+        column: usize,
+        text: String,
+        #[serde(default)]
+        append: bool,
+    },
+    ApplyLineReplacements {
+        replacements: Vec<LineReplacement>,
+    },
     SelectionIntoLines,
     DuplicateLine,
     IncreaseNumber,
     DecreaseNumber,
-    ToggleRecording {
-        recording_name: Option<String>,
-    },
-    PlayRecording {
-        recording_name: String,
-    },
-    ClearRecording {
-        recording_name: String,
-    },
     CollapseSelections,
-}
-
-/// The edit related requests.
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-#[serde(rename_all = "snake_case")]
-#[serde(tag = "method", content = "params")]
-pub enum EditRequest {
-    /// Cuts the active selection, returning their contents,
-    /// or `Null` if the selection was empty.
-    Cut,
-    /// Copies the active selection, returning their contents or
-    /// or `Null` if the selection was empty.
-    Copy,
 }
 
 /// The plugin related notifications.

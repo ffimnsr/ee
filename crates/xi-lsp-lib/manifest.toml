@@ -3,3 +3,48 @@ name = "xi-lsp-plugin"
 version = "0.0"
 capabilities = ["edit", "hover", "status_items", "filesystem", "network"]
 exec_path="./bin/xi-lsp-plugin"
+
+[[commands]]
+title = "Completion"
+description = "Request editor completions"
+
+[commands.rpc_cmd]
+rpc_type = "notification"
+method = "request_completion"
+params = {}
+
+[[commands]]
+title = "Definition"
+description = "Request definition locations"
+
+[commands.rpc_cmd]
+rpc_type = "notification"
+method = "request_definition"
+params = {}
+
+[[commands]]
+title = "References"
+description = "Request reference locations"
+
+[commands.rpc_cmd]
+rpc_type = "notification"
+method = "request_references"
+params = {}
+
+[[commands]]
+title = "Format Document"
+description = "Format active document"
+
+[commands.rpc_cmd]
+rpc_type = "notification"
+method = "format_document"
+params = {}
+
+[[commands]]
+title = "Code Actions"
+description = "Request or apply code actions"
+
+[commands.rpc_cmd]
+rpc_type = "notification"
+method = "request_code_actions"
+params = {}
