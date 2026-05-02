@@ -122,11 +122,8 @@ pub(crate) fn hit_test_buffer_cell(
     let vp = app.tabs.focused_windows().viewport_for_window(win_id, app.viewport);
     let [_, buffer_area] = window_chunks(app, win_rect, buf.lines.len());
     let line = vp.top_line + usize::from(row.saturating_sub(buffer_area.y));
-    let display_col = if column < buffer_area.x {
-        0
-    } else {
-        vp.left_col + usize::from(column - buffer_area.x)
-    };
+    let display_col =
+        if column < buffer_area.x { 0 } else { vp.left_col + usize::from(column - buffer_area.x) };
     Some((line, display_col))
 }
 
@@ -293,6 +290,101 @@ fn apply_color_column(spans: Vec<Span<'static>>, screen_col: usize) -> Vec<Span<
     out
 }
 
+/// Overlay visual-mode selection highlight on a rendered span list.
+///
+/// `col_start`/`col_end` are display-column bounds (inclusive); pass `None`
+/// for `col_end` to highlight the entire line (VisualLine / whole-line block
+/// rows).  `left` is the horizontal scroll offset already applied.  The
+/// visual background replaces each span's background in the selected range
+/// while preserving foreground colours.
+fn apply_visual_highlight(
+    spans: Vec<Span<'static>>,
+    col_start: Option<usize>,
+    col_end: Option<usize>,
+    left: usize,
+) -> Vec<Span<'static>> {
+    let vis_bg = Color::Rgb(68, 71, 90); // muted purple-grey selection
+    let vis_fg = Color::Rgb(205, 214, 244);
+
+    // Whole-line highlight (VisualLine): just paint every span.
+    if col_start.is_none() {
+        let mut out = Vec::with_capacity(spans.len());
+        for sp in spans {
+            out.push(Span::styled(sp.content.into_owned(), sp.style.bg(vis_bg).fg(vis_fg)));
+        }
+        // Ensure at least one space so the highlight is visible on empty lines.
+        if out.is_empty() {
+            out.push(Span::styled(" ", Style::default().bg(vis_bg)));
+        }
+        return out;
+    }
+
+    let sel_start = col_start.unwrap().saturating_sub(left);
+    // None col_end already handled above; here it means "to EOL" within block mode.
+    let sel_end = col_end.map(|e| e.saturating_sub(left));
+
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut col = 0usize; // display column cursor
+
+    for sp in spans {
+        let style = sp.style;
+        let chars: Vec<char> = sp.content.chars().collect();
+        let sp_len = chars.len();
+
+        // Fast path: entire span is outside the selection.
+        let sp_end = col + sp_len;
+        if sp_end <= sel_start || sel_end.is_some_and(|e| col > e) {
+            col = sp_end;
+            out.push(Span::styled(chars.iter().collect::<String>(), style));
+            continue;
+        }
+
+        // The span overlaps the selection — split into up to three parts.
+        let mut i = 0usize; // index into `chars`
+        // Part before selection.
+        let before = sel_start.saturating_sub(col);
+        if before > 0 && i < chars.len() {
+            let end = before.min(chars.len());
+            out.push(Span::styled(chars[i..end].iter().collect::<String>(), style));
+            i = end;
+        }
+        // Selected part.
+        let sel_end_in_span = sel_end.map(|e| (e + 1).saturating_sub(col)).unwrap_or(sp_len);
+        if i < chars.len() {
+            let end = sel_end_in_span.min(chars.len());
+            if i < end {
+                out.push(Span::styled(
+                    chars[i..end].iter().collect::<String>(),
+                    style.bg(vis_bg).fg(vis_fg),
+                ));
+                i = end;
+            }
+        }
+        // Part after selection.
+        if i < chars.len() {
+            out.push(Span::styled(chars[i..].iter().collect::<String>(), style));
+        }
+
+        col = sp_end;
+    }
+
+    // If the selection extends past the end of the line content, append a
+    // trailing highlighted space so the block is always visible.
+    let line_end = col;
+    if sel_end.is_none() || sel_end.is_some_and(|e| e >= line_end) {
+        if line_end <= sel_start {
+            // Selection starts beyond line end — pad with spaces.
+            let pad = sel_start - line_end;
+            if pad > 0 {
+                out.push(Span::raw(" ".repeat(pad)));
+            }
+        }
+        out.push(Span::styled(" ", Style::default().bg(vis_bg)));
+    }
+
+    out
+}
+
 /// Overlay search match highlighting on an already-rendered span list.
 ///
 /// `line` is the full line byte string, `pattern` is the raw search query,
@@ -424,6 +516,18 @@ fn render_gutter(
     let sign_col = app.config.sign_column;
     let num_digits = line_count.to_string().len().max(3);
     let cursor_line_bg = Color::Rgb(35, 38, 50);
+    let vis_sel_bg = Color::Rgb(68, 71, 90);
+
+    // Pre-compute visual selection line range for gutter highlight.
+    let visual_line_range: Option<(usize, usize)> = if app.mode.is_visual() {
+        let (al, _) = app.visual_anchor.unwrap_or((cursor_line, buf.cursor_col));
+        let cl = cursor_line;
+        let lo = al.min(cl);
+        let hi = al.max(cl);
+        Some((lo, hi))
+    } else {
+        None
+    };
 
     let mut lines: Vec<Line> = Vec::with_capacity(height);
     let mut li = top;
@@ -434,7 +538,10 @@ fn render_gutter(
             continue;
         }
         let is_cursor = li == cursor_line;
-        let bg = if is_cursor && app.config.cursor_line {
+        let in_visual = visual_line_range.is_some_and(|(lo, hi)| li >= lo && li <= hi);
+        let bg = if in_visual {
+            vis_sel_bg
+        } else if is_cursor && app.config.cursor_line {
             cursor_line_bg
         } else {
             Color::Rgb(30, 32, 39)
@@ -514,6 +621,16 @@ fn render_buffer(
     let cursor_line = buf.cursor_line;
     let cursor_line_bg = Color::Rgb(35, 38, 50);
     let buf_bg = Color::Rgb(22, 24, 31);
+
+    // Pre-compute visual selection bounds for this buffer.
+    // Returns (anchor_line, anchor_col, cursor_line, cursor_col) in natural order.
+    let visual_sel = if app.mode.is_visual() {
+        let (al, ac) = app.visual_anchor.unwrap_or((cursor_line, buf.cursor_col));
+        let (cl, cc) = (cursor_line, buf.cursor_col);
+        Some((al, ac, cl, cc))
+    } else {
+        None
+    };
 
     if buf.lines.is_empty() && top == 0 {
         let text = vec![Line::from(Span::styled(
@@ -606,6 +723,35 @@ fn render_buffer(
                 if cc >= left {
                     let screen_col = cc - left;
                     spans = apply_color_column(spans, screen_col);
+                }
+            }
+
+            // Apply visual-mode selection highlight (drawn last so it wins).
+            if let Some((al, ac, cl, cc)) = visual_sel {
+                let (sel_top_line, sel_top_col) =
+                    if al < cl || (al == cl && ac <= cc) { (al, ac) } else { (cl, cc) };
+                let (sel_bot_line, sel_bot_col) =
+                    if al < cl || (al == cl && ac <= cc) { (cl, cc) } else { (al, ac) };
+
+                let in_sel = log_idx >= sel_top_line && log_idx <= sel_bot_line;
+                if in_sel {
+                    let (col_start, col_end) = match app.mode {
+                        crate::app::Mode::VisualLine => (None, None),
+                        crate::app::Mode::VisualBlock => {
+                            let c1 = sel_top_col.min(sel_bot_col);
+                            let c2 = sel_top_col.max(sel_bot_col);
+                            (Some(c1), Some(c2))
+                        }
+                        _ => {
+                            // Characterwise: first line starts at anchor col,
+                            // last line ends at cursor col, middle lines full.
+                            let cs =
+                                if log_idx == sel_top_line { Some(sel_top_col) } else { Some(0) };
+                            let ce = if log_idx == sel_bot_line { Some(sel_bot_col) } else { None };
+                            (cs, ce)
+                        }
+                    };
+                    spans = apply_visual_highlight(spans, col_start, col_end, left);
                 }
             }
 
@@ -952,20 +1098,20 @@ fn render_hover_popup(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
 
 fn diagnostic_marker_for_line(buf: &BufState, line_index: usize) -> Option<DiagnosticSeverity> {
     let (line_start, line_end) = line_byte_range(&buf.lines, line_index)?;
-    buf.diagnostics.iter().filter_map(|diagnostic| {
-        let overlaps = diagnostic.range.start <= line_end && diagnostic.range.end >= line_start;
-        overlaps.then_some(diagnostic.severity.clone())
-    }).min_by_key(diagnostic_rank)
+    buf.diagnostics
+        .iter()
+        .filter_map(|diagnostic| {
+            let overlaps = diagnostic.range.start <= line_end && diagnostic.range.end >= line_start;
+            overlaps.then_some(diagnostic.severity.clone())
+        })
+        .min_by_key(diagnostic_rank)
 }
 
 fn line_byte_range(lines: &[String], target_line: usize) -> Option<(usize, usize)> {
     if target_line >= lines.len() {
         return None;
     }
-    let start = lines
-        .iter()
-        .take(target_line)
-        .fold(0usize, |acc, line| acc + line.len() + 1);
+    let start = lines.iter().take(target_line).fold(0usize, |acc, line| acc + line.len() + 1);
     let end = start + lines[target_line].len();
     Some((start, end))
 }

@@ -8,11 +8,11 @@ use crossterm::event::{
 };
 use ratatui::layout::Rect;
 use serde_json::json;
-use xi_core_lib::rpc::LineReplacement;
 use xi_core_lib::plugin_rpc::CodeActionDescriptor;
+use xi_core_lib::rpc::LineReplacement;
 
-use crate::buffer::BufferManager;
 use crate::backend::{CompletionSuggestion, PendingUiAction};
+use crate::buffer::BufferManager;
 use crate::folds::{FoldStore, indent_fold_extent};
 use crate::keymap::{Action, BindingKey, bindings};
 use crate::picker::PickerState;
@@ -1698,7 +1698,8 @@ impl App {
             "rename" => {
                 let new_name = parts.collect::<Vec<_>>().join(" ");
                 if new_name.is_empty() {
-                    self.backend.status_message = Some(String::from("rename: usage: :rename new_name"));
+                    self.backend.status_message =
+                        Some(String::from("rename: usage: :rename new_name"));
                 } else if let Err(err) = self.backend.request_rename(&new_name) {
                     self.backend.status_message = Some(format!("rename failed: {err}"));
                 }
@@ -2563,10 +2564,7 @@ impl App {
         for action in self.backend.drain_pending_ui_actions() {
             match action {
                 PendingUiAction::Hover { view_id, content } if view_id == active_view_id => {
-                    self.hover_popup = Some(HoverPopup {
-                        title: String::from("Hover"),
-                        content,
-                    });
+                    self.hover_popup = Some(HoverPopup { title: String::from("Hover"), content });
                 }
                 PendingUiAction::Completions { view_id, items } if view_id == active_view_id => {
                     self.open_completion_picker(&items);

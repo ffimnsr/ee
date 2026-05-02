@@ -16,8 +16,7 @@ use crate::backend::{
     BackendEvent, CachedLine, ChannelReader, ChannelWriter, CoreUpdate, CoreUpdateKind, LineSlot,
     NavigationTarget, PendingRequests, PendingUiAction, block_for_response, checked_advance,
     drain_sync_notifications, invalid_line_ranges, normalize_line_text, parse_response,
-    send_rpc_notification, send_rpc_request,
-    xi_reader_thread,
+    send_rpc_notification, send_rpc_request, xi_reader_thread,
 };
 use crate::text::previous_char_boundary;
 
@@ -907,7 +906,9 @@ impl BufferManager {
     // ── External change detection ─────────────────────────────────────────
 
     /// Drain accumulated location results for App-level dispatch.
-    pub(crate) fn drain_pending_locations(&mut self) -> Vec<(String, String, Vec<NavigationTarget>)> {
+    pub(crate) fn drain_pending_locations(
+        &mut self,
+    ) -> Vec<(String, String, Vec<NavigationTarget>)> {
         std::mem::take(&mut self.pending_locations)
     }
 
