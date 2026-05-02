@@ -250,10 +250,9 @@ pub(crate) fn completion_text_edits<C: Cache>(
     if let Some(text_edit) = item.text_edit.clone() {
         let text_edit = match text_edit {
             CompletionTextEdit::Edit(edit) => edit,
-            CompletionTextEdit::InsertAndReplace(edit) => TextEdit {
-                range: edit.insert,
-                new_text: edit.new_text,
-            },
+            CompletionTextEdit::InsertAndReplace(edit) => {
+                TextEdit { range: edit.insert, new_text: edit.new_text }
+            }
         };
         edits.push(text_edit);
     }
@@ -271,10 +270,7 @@ pub(crate) fn completion_text_edits<C: Cache>(
             .unwrap_or(xi_plugin_lib::SelectionRange { start: 0, end: 0 });
         let start = selection.start.min(selection.end);
         let end = selection.start.max(selection.end);
-        let new_text = item
-            .insert_text
-            .clone()
-            .unwrap_or_else(|| item.label.clone());
+        let new_text = item.insert_text.clone().unwrap_or_else(|| item.label.clone());
         edits.push(TextEdit {
             range: Range {
                 start: get_position_of_offset(view, start).map_err(LanguageResponseError::from)?,
@@ -543,7 +539,11 @@ pub(crate) fn symbol_items_from_document_symbols(
     result
 }
 
-fn flatten_document_symbols(symbols: Vec<DocumentSymbol>, file_path: &str, out: &mut Vec<SymbolItem>) {
+fn flatten_document_symbols(
+    symbols: Vec<DocumentSymbol>,
+    file_path: &str,
+    out: &mut Vec<SymbolItem>,
+) {
     for sym in symbols {
         out.push(SymbolItem {
             name: sym.name,
@@ -565,10 +565,7 @@ pub(crate) fn symbol_items_from_workspace_symbols(
     symbols
         .into_iter()
         .filter_map(|sym| {
-            let path = Url::parse(sym.location.uri.as_str())
-                .ok()?
-                .to_file_path()
-                .ok()?;
+            let path = Url::parse(sym.location.uri.as_str()).ok()?.to_file_path().ok()?;
             Some(SymbolItem {
                 name: sym.name,
                 kind: symbol_kind_name(sym.kind).to_owned(),

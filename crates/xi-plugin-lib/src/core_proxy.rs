@@ -21,11 +21,10 @@ use serde_json::json;
 use xi_core_lib::ViewId;
 use xi_core_lib::annotations::AnnotationType;
 use xi_core_lib::plugin_rpc::{
-    CodeAction, CodeActionDescriptor, CodeActionRequest, CodeActionResponse,
-    CompletionSuggestion, DataSpan, Diagnostic, FormatDocumentRequest, FormatDocumentResponse,
-    GetDataResponse, GetDiagnosticsResponse, GetSelectionsResponse, Hover, NavigationTarget,
-    PluginEdit, PluginEditAck, ProtocolCapability, ScopeSpan, SelectionRange, SymbolItem,
-    TextEdit, TextUnit,
+    CodeAction, CodeActionDescriptor, CodeActionRequest, CodeActionResponse, CompletionSuggestion,
+    DataSpan, Diagnostic, FormatDocumentRequest, FormatDocumentResponse, GetDataResponse,
+    GetDiagnosticsResponse, GetSelectionsResponse, Hover, NavigationTarget, PluginEdit,
+    PluginEditAck, ProtocolCapability, ScopeSpan, SelectionRange, SymbolItem, TextEdit, TextUnit,
 };
 use xi_core_lib::plugins::PluginId;
 use xi_rpc::{RemoteError, RpcCtx, RpcPeer};

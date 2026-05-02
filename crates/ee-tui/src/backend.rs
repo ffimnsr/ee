@@ -408,8 +408,7 @@ impl XiClient {
                 self.status_message = Some(format_location_message(&title, &locations));
             }
             BackendEvent::Symbols { view_id, title, symbols } => {
-                self.status_message =
-                    Some(format!("{}: {} symbols", title, symbols.len()));
+                self.status_message = Some(format!("{}: {} symbols", title, symbols.len()));
                 self.pending_symbols.push((view_id, title, symbols));
             }
             BackendEvent::Diagnostics { diagnostics, .. } => {

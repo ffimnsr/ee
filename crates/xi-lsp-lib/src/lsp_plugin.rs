@@ -198,8 +198,7 @@ impl Plugin for LspPlugin {
                 self.request_document_symbols(view);
             }
             "request_workspace_symbols" | "lsp.workspace_symbols" => {
-                let query =
-                    params.get("query").and_then(Value::as_str).unwrap_or("").to_owned();
+                let query = params.get("query").and_then(Value::as_str).unwrap_or("").to_owned();
                 self.request_workspace_symbols(view, query);
             }
             "format_document" | "lsp.format_document" => self.request_document_formatting(view),
@@ -463,10 +462,9 @@ impl LspPlugin {
                                             .unwrap_or_default()
                                     })
                             });
-                        ls_client.result_queue.push_result(
-                            view_id.into(),
-                            LspResponse::Completions(response),
-                        );
+                        ls_client
+                            .result_queue
+                            .push_result(view_id.into(), LspResponse::Completions(response));
                         ls_client.core.schedule_idle(view_id);
                     })
                     .map_err(|err| err.to_string())
@@ -666,11 +664,11 @@ impl LspPlugin {
                             })
                             .and_then(|value| {
                                 // LSP returns either DocumentSymbol[] or SymbolInformation[].
-                                if let Ok(Some(syms)) =
-                                    serde_json::from_value::<Option<Vec<lsp_types::DocumentSymbol>>>(
-                                        value.clone(),
-                                    )
-                                {
+                                if let Ok(Some(syms)) = serde_json::from_value::<
+                                    Option<Vec<lsp_types::DocumentSymbol>>,
+                                >(
+                                    value.clone()
+                                ) {
                                     let items = symbol_items_from_document_symbols(
                                         &current_document_uri,
                                         syms,
@@ -683,9 +681,7 @@ impl LspPlugin {
                                 )
                                 .map_err(|err| LanguageResponseError::Transport(err.to_string()))
                                 .map(|opt| {
-                                    symbol_items_from_workspace_symbols(
-                                        opt.unwrap_or_default(),
-                                    )
+                                    symbol_items_from_workspace_symbols(opt.unwrap_or_default())
                                 })
                             });
                         ls_client.result_queue.push_result(
@@ -835,10 +831,9 @@ impl LspPlugin {
                                     .transpose()
                                     .map(|response| response.unwrap_or_default())
                             });
-                        ls_client.result_queue.push_result(
-                            view_id.into(),
-                            LspResponse::CodeActions(response),
-                        );
+                        ls_client
+                            .result_queue
+                            .push_result(view_id.into(), LspResponse::CodeActions(response));
                         ls_client.core.schedule_idle(view_id);
                     })
                     .map_err(|err| err.to_string())
@@ -910,17 +905,13 @@ impl LspPlugin {
                                 LanguageResponseError::LanguageServerError(format!("{err:?}"))
                             })
                             .and_then(|value| {
-                                serde_json::from_value::<Option<WorkspaceEdit>>(value)
-                                    .map_err(|err| {
-                                        LanguageResponseError::Transport(err.to_string())
-                                    })
+                                serde_json::from_value::<Option<WorkspaceEdit>>(value).map_err(
+                                    |err| LanguageResponseError::Transport(err.to_string()),
+                                )
                             });
                         ls_client.result_queue.push_result(
                             view_id.into(),
-                            LspResponse::Rename {
-                                title: String::from("rename"),
-                                result: response,
-                            },
+                            LspResponse::Rename { title: String::from("rename"), result: response },
                         );
                         ls_client.core.schedule_idle(view_id);
                     })

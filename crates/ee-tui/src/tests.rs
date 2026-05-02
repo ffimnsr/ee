@@ -11,7 +11,9 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use serde_json::{Value, json};
-use xi_core_lib::plugin_rpc::{CodeActionDescriptor, Diagnostic, DiagnosticSeverity, Range, SymbolItem};
+use xi_core_lib::plugin_rpc::{
+    CodeActionDescriptor, Diagnostic, DiagnosticSeverity, Range, SymbolItem,
+};
 use xi_core_lib::rpc::LineReplacement;
 
 use crate::app::{App, Mode, Operator, PendingCharFind};
@@ -175,12 +177,9 @@ fn ui_render_shows_scrolled_gutter_after_many_enters() {
     terminal.draw(|frame| ui(frame, &app)).unwrap();
 
     let buffer = terminal.backend().buffer();
-    let top_gutter = (0..6)
-        .map(|x| buffer.cell((x, 0)).unwrap().symbol())
-        .collect::<String>();
-    let status = (0..40)
-        .map(|x| buffer.cell((x, height - 2)).unwrap().symbol())
-        .collect::<String>();
+    let top_gutter = (0..6).map(|x| buffer.cell((x, 0)).unwrap().symbol()).collect::<String>();
+    let status =
+        (0..40).map(|x| buffer.cell((x, height - 2)).unwrap().symbol()).collect::<String>();
 
     // With the gap-fix, top_line is clamped so the last line fills the screen:
     // total_lines(51) - editor_height(47) = 4.
@@ -216,11 +215,7 @@ fn apply_update_merges_copy_update_insert_and_invalidate() {
         .apply_update(CoreUpdate {
             pristine: false,
             ops: vec![
-                CoreUpdateOp {
-                    op: CoreUpdateKind::Copy,
-                    n: 1,
-                    lines: Vec::new(),
-                },
+                CoreUpdateOp { op: CoreUpdateKind::Copy, n: 1, lines: Vec::new() },
                 CoreUpdateOp {
                     op: CoreUpdateKind::Update,
                     n: 1,
@@ -231,11 +226,7 @@ fn apply_update_merges_copy_update_insert_and_invalidate() {
                     n: 1,
                     lines: vec![CoreLine { text: Some("delta".into()), cursor: Vec::new() }],
                 },
-                CoreUpdateOp {
-                    op: CoreUpdateKind::Invalidate,
-                    n: 2,
-                    lines: Vec::new(),
-                },
+                CoreUpdateOp { op: CoreUpdateKind::Invalidate, n: 2, lines: Vec::new() },
             ],
         })
         .unwrap();
@@ -979,11 +970,7 @@ fn viewport_scrolls_up_when_cursor_above_top() {
 fn horizontal_scroll_tracks_cursor_right() {
     let mut app = App::from_path(None).unwrap();
     // Three lines: short, short, long. Cursor on the long line past viewport width.
-    app.backend.lines = vec![
-        "a".to_string(),
-        "bc".to_string(),
-        "x".repeat(200),
-    ];
+    app.backend.lines = vec!["a".to_string(), "bc".to_string(), "x".repeat(200)];
     app.backend.cursor_line = 2;
     // Place cursor byte-col 150, which is display col 150 for ASCII.
     app.backend.cursor_col = 150;
@@ -2057,4 +2044,88 @@ fn symbols_notification_populates_picker() {
 
     // Verify the rx channel is empty (no RPC was emitted by the notification).
     assert!(rx.try_recv().is_err(), "no RPC should be emitted for symbols notification");
+}
+
+// ── Visual-mode rendering ──────────────────────────────────────────────────
+
+#[test]
+fn visual_line_mode_highlights_selected_lines_in_render() {
+    let mut app = App::from_path(None).unwrap();
+
+    // Write three lines.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    for ch in "abc\ndef\nghi".chars() {
+        let kc = if ch == '\n' { KeyCode::Enter } else { KeyCode::Char(ch) };
+        app.handle_event(Event::Key(KeyEvent::new(kc, KeyModifiers::NONE)));
+        app.backend.pump().unwrap();
+    }
+    // Return to normal, move to line 0.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+    app.backend.pump().unwrap(); // wait for cursor-at-line-0 update from xi-core
+
+    // Enter visual-line mode and extend down one line.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT)));
+    assert_eq!(app.mode, Mode::VisualLine);
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+    app.backend.pump().unwrap(); // wait for move_down_and_modify_selection update
+
+    let width: u16 = 40;
+    let height: u16 = 10;
+    app.scroll_into_view(height as usize - 2, width as usize);
+
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let buf = terminal.backend().buffer();
+
+    // Rows 0 and 1 should carry the visual selection background (Rgb(68,71,90)).
+    let vis_bg = ratatui::style::Color::Rgb(68, 71, 90);
+    let row0_has_vis = (0..width).any(|x| buf.cell((x, 0)).unwrap().bg == vis_bg);
+    let row1_has_vis = (0..width).any(|x| buf.cell((x, 1)).unwrap().bg == vis_bg);
+    // Row 2 (line "ghi") is outside the selection — should NOT be highlighted.
+    let row2_has_vis = (0..width).any(|x| buf.cell((x, 2)).unwrap().bg == vis_bg);
+
+    assert!(row0_has_vis, "row 0 should be highlighted in visual-line mode");
+    assert!(row1_has_vis, "row 1 should be highlighted in visual-line mode");
+    assert!(!row2_has_vis, "row 2 should not be highlighted outside selection");
+}
+
+#[test]
+fn visual_char_mode_highlights_single_line_selection() {
+    let mut app = App::from_path(None).unwrap();
+
+    // Write one line with several characters.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    for ch in "hello world".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+        app.backend.pump().unwrap();
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+
+    // Move to col 0, enter charwise visual, extend 4 chars.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Visual);
+    for _ in 0..3 {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+    }
+
+    let width: u16 = 40;
+    let height: u16 = 10;
+    app.scroll_into_view(height as usize - 2, width as usize);
+
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let buf = terminal.backend().buffer();
+
+    let vis_bg = ratatui::style::Color::Rgb(68, 71, 90);
+    // Gutter occupies ~4 cols; text starts at col 4.
+    // Columns 4..8 (display cols 0..3) should be highlighted.
+    let gutter_width: u16 = 4;
+    let row_has_vis =
+        (gutter_width..gutter_width + 4).any(|x| buf.cell((x, 0)).unwrap().bg == vis_bg);
+    assert!(row_has_vis, "selected chars should carry visual-selection background");
 }
