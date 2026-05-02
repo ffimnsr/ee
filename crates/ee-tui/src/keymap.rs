@@ -60,6 +60,12 @@ pub(crate) enum Action {
     // Change list
     ChangeListOlder,
     ChangeListNewer,
+    // Tab navigation
+    TabNext,
+    TabPrev,
+    // Command-line history
+    CommandHistoryOlder,
+    CommandHistoryNewer,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -253,6 +259,10 @@ fn build_bindings() -> HashMap<BindingKey, Action> {
     bind!(Normal, KeyCode::Char(';'), none, Some('g'), ChangeListOlder);
     bind!(Normal, KeyCode::Char(','), none, Some('g'), ChangeListNewer);
 
+    // Tab navigation (gt = next tab, gT = prev tab)
+    bind!(Normal, KeyCode::Char('t'), none, Some('g'), TabNext);
+    bind!(Normal, KeyCode::Char('T'), none, Some('g'), TabPrev);
+
     bind!(Insert, KeyCode::Esc, none, None, EnterMode(Normal));
     bind!(Insert, KeyCode::Left, none, None, Edit("move_left"));
     bind!(Insert, KeyCode::Right, none, None, Edit("move_right"));
@@ -264,6 +274,8 @@ fn build_bindings() -> HashMap<BindingKey, Action> {
     bind!(CommandLine, KeyCode::Esc, none, None, EnterMode(Normal));
     bind!(CommandLine, KeyCode::Enter, none, None, ExecuteCommand);
     bind!(CommandLine, KeyCode::Backspace, none, None, CommandBackspace);
+    bind!(CommandLine, KeyCode::Up, none, None, CommandHistoryOlder);
+    bind!(CommandLine, KeyCode::Down, none, None, CommandHistoryNewer);
 
     bind!(Search, KeyCode::Esc, none, None, EnterMode(Normal));
     bind!(Search, KeyCode::Enter, none, None, ExecuteSearch);

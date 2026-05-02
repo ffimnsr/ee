@@ -1063,3 +1063,95 @@ fn at_at_replays_last_macro() {
     // No crash; macro_register is None (not recording).
     assert!(app.macro_register.is_none());
 }
+
+// ── Tab page tests ────────────────────────────────────────────────────────────
+
+#[test]
+fn tabnew_command_opens_second_tab() {
+    let mut app = App::from_path(None).unwrap();
+    assert_eq!(app.tabs.tab_count(), 1);
+
+    // :tabnew opens a new tab.
+    for ch in [':'] {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    for ch in "tabnew".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    assert_eq!(app.tabs.tab_count(), 2);
+    assert_eq!(app.tabs.focused_idx(), 1);
+}
+
+#[test]
+fn tabc_command_closes_tab() {
+    let mut app = App::from_path(None).unwrap();
+
+    // Open two more tabs so there are 3 total.
+    for cmd in [":tabnew", ":tabnew"] {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)));
+        for ch in cmd[1..].chars() {
+            app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+        }
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    }
+    assert_eq!(app.tabs.tab_count(), 3);
+
+    // :tabc closes current tab.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)));
+    for ch in "tabc".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    assert_eq!(app.tabs.tab_count(), 2);
+}
+
+#[test]
+fn tabn_cycles_to_next_tab() {
+    let mut app = App::from_path(None).unwrap();
+
+    // Open a second tab.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)));
+    for ch in "tabnew".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    assert_eq!(app.tabs.focused_idx(), 1);
+
+    // :tabn wraps around to tab 0.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)));
+    for ch in "tabn".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    assert_eq!(app.tabs.focused_idx(), 0);
+}
+
+#[test]
+fn gt_binding_moves_to_next_tab() {
+    let mut app = App::from_path(None).unwrap();
+
+    // Open a second tab via ex command.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)));
+    for ch in "tabnew".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    assert_eq!(app.tabs.focused_idx(), 1);
+
+    // `gt` (g prefix then t) should wrap to tab 0.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE)));
+
+    assert_eq!(app.tabs.focused_idx(), 0);
+}
+
+#[test]
+fn tabmanager_starts_with_one_tab() {
+    let app = App::from_path(None).unwrap();
+    assert_eq!(app.tabs.tab_count(), 1);
+    assert_eq!(app.tabs.focused_idx(), 0);
+}
