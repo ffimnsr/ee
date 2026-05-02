@@ -8,8 +8,9 @@ use serde_json::json;
 
 use crate::buffer::BufferManager;
 use crate::keymap::{Action, BindingKey, bindings};
+use crate::picker::PickerState;
 use crate::registers::{BlockInsert, LastChange, RegisterName, RegisterStore};
-use crate::window::{SplitDir, WindowLayout};
+use crate::window::{SplitDir, TabManager};
 use crate::text::{
     byte_col_to_display_col, find_char_backward, find_char_forward, next_char_start,
     prev_char_start,
@@ -128,7 +129,7 @@ impl InputState {
 pub(crate) struct App {
     pub(crate) config: crate::config::EditorSettings,
     pub(crate) backend: BufferManager,
-    pub(crate) windows: WindowLayout,
+    pub(crate) tabs: TabManager,
     pub(crate) mode: Mode,
     pub(crate) command_buffer: String,
     pub(crate) should_quit: bool,
@@ -175,6 +176,16 @@ pub(crate) struct App {
     pub(crate) last_macro: Option<char>,
     /// `true` while a macro is replaying to suppress nested recording.
     macro_replaying: bool,
+    // ── Ex command history ─────────────────────────────────────────────────
+    /// Previously executed ex commands, oldest first.  Capped at 100.
+    command_history: Vec<String>,
+    /// Current index while navigating history with Up/Down; `None` = off.
+    history_idx: Option<usize>,
+    /// Saved `command_buffer` snapshot taken before history navigation began.
+    history_draft: String,
+    // ── Picker overlay ─────────────────────────────────────────────────────
+    /// Active picker overlay (file picker, buffer picker, live grep).
+    pub(crate) picker: Option<PickerState>,
 }
 
 impl App {
@@ -185,7 +196,7 @@ impl App {
         Ok(Self {
             config,
             backend,
-            windows: WindowLayout::new(initial_buf_id),
+            tabs: TabManager::new(initial_buf_id),
             mode: Mode::Normal,
             command_buffer: String::new(),
             should_quit: false,
@@ -209,6 +220,10 @@ impl App {
             macros: HashMap::new(),
             last_macro: None,
             macro_replaying: false,
+            command_history: Vec::new(),
+            history_idx: None,
+            history_draft: String::new(),
+            picker: None,
         })
     }
 
@@ -218,6 +233,12 @@ impl App {
         };
 
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return;
+        }
+
+        // Picker overlay intercepts all keys while active.
+        if self.picker.is_some() {
+            self.handle_picker_event(key);
             return;
         }
 
@@ -504,6 +525,21 @@ impl App {
             // ── Change list ──────────────────────────────────────────────────
             Action::ChangeListOlder => self.change_list_older(),
             Action::ChangeListNewer => self.change_list_newer(),
+            // ── Tab navigation ───────────────────────────────────────────────
+            Action::TabNext => {
+                let new_vp = self.tabs.focus_next(self.viewport);
+                self.viewport = new_vp;
+                let new_buf = self.tabs.focused_windows().focused_window().buffer_id;
+                let _ = self.backend.switch_to_id(new_buf);
+            }
+            Action::TabPrev => {
+                let new_vp = self.tabs.focus_prev(self.viewport);
+                self.viewport = new_vp;
+                let new_buf = self.tabs.focused_windows().focused_window().buffer_id;
+                let _ = self.backend.switch_to_id(new_buf);
+            }
+            Action::CommandHistoryOlder => self.history_older(),
+            Action::CommandHistoryNewer => self.history_newer(),
         }
     }
 
@@ -512,6 +548,12 @@ impl App {
         if key.code == KeyCode::Esc && self.mode == Mode::OperatorPending {
             self.enter_normal_mode();
             self.input_state.reset();
+            return;
+        }
+
+        // Tab completion in command-line mode.
+        if key.code == KeyCode::Tab && self.mode == Mode::CommandLine {
+            self.complete_command();
             return;
         }
 
@@ -560,6 +602,8 @@ impl App {
                 let _ = self.backend.send_edit("insert", json!({ "chars": s }));
             }
             Mode::CommandLine => {
+                // Any typed char resets history navigation.
+                self.history_idx = None;
                 self.command_buffer.push(ch);
             }
             Mode::Normal => {
@@ -1196,7 +1240,35 @@ impl App {
     }
 
     fn execute_command(&mut self) {
-        let command = self.command_buffer.trim();
+        let raw = self.command_buffer.trim().to_owned();
+
+        // Push non-empty commands to history (deduplicate consecutive duplicates).
+        if !raw.is_empty() && self.command_history.last().map(|s| s.as_str()) != Some(&raw) {
+            self.command_history.push(raw.clone());
+            const HISTORY_MAX: usize = 100;
+            if self.command_history.len() > HISTORY_MAX {
+                self.command_history.remove(0);
+            }
+        }
+        self.history_idx = None;
+
+        // Parse an optional line-address range from the front of the command.
+        let cursor_line = self.backend.cursor_line;
+        let line_count = self.backend.lines.len().max(1);
+        let (range, rest) = parse_ex_range(&raw, cursor_line, line_count, &self.marks);
+        let command = rest.trim_start();
+
+        // Bare range (e.g. `:5`, `:.`, `:%`) with no following command → jump.
+        if command.is_empty() {
+            if let Some((start, _end)) = range {
+                self.jump_to_line(start);
+                self.enter_normal_mode();
+                return;
+            }
+            self.enter_normal_mode();
+            return;
+        }
+
         let mut parts = command.split_whitespace();
         match parts.next().unwrap_or_default() {
             "q" | "quit" | "q!" | "quit!" => self.should_quit = true,
@@ -1211,6 +1283,15 @@ impl App {
                 } else {
                     self.should_quit = true;
                 }
+            }
+            // ── Range-aware line operations ───────────────────────────────
+            "d" | "delete" => {
+                let (start, end) = range.unwrap_or((cursor_line, cursor_line));
+                self.delete_line_range(start, end);
+            }
+            "y" | "yank" => {
+                let (start, end) = range.unwrap_or((cursor_line, cursor_line));
+                self.yank_line_range(start, end);
             }
             "format" => {
                 if let Err(err) =
@@ -1256,7 +1337,7 @@ impl App {
                 match self.backend.open_buffer(path) {
                     Ok(buf_id) => {
                         let _ = self.backend.switch_to_id(buf_id);
-                        self.windows.set_focused_buffer(buf_id);
+                        self.tabs.focused_windows_mut().set_focused_buffer(buf_id);
                         self.viewport = Viewport::default();
                     }
                     Err(err) => {
@@ -1269,7 +1350,7 @@ impl App {
                 self.backend.next_buffer();
                 let new = self.backend.active().id;
                 if old != new {
-                    self.windows.set_focused_buffer(new);
+                    self.tabs.focused_windows_mut().set_focused_buffer(new);
                     self.viewport = Viewport::default();
                 }
             }
@@ -1278,7 +1359,7 @@ impl App {
                 self.backend.prev_buffer();
                 let new = self.backend.active().id;
                 if old != new {
-                    self.windows.set_focused_buffer(new);
+                    self.tabs.focused_windows_mut().set_focused_buffer(new);
                     self.viewport = Viewport::default();
                 }
             }
@@ -1286,7 +1367,7 @@ impl App {
                 match self.backend.switch_alternate() {
                     Ok(()) => {
                         let new = self.backend.active().id;
-                        self.windows.set_focused_buffer(new);
+                        self.tabs.focused_windows_mut().set_focused_buffer(new);
                         self.viewport = Viewport::default();
                     }
                     Err(err) => {
@@ -1300,11 +1381,11 @@ impl App {
                     self.backend.status_message = Some(format!("close failed: {err}"));
                 } else {
                     let new = self.backend.active().id;
-                    self.windows.set_focused_buffer(new);
+                    self.tabs.focused_windows_mut().set_focused_buffer(new);
                     self.viewport = Viewport::default();
                 }
             }
-            "ls" | "buffers" => {
+            "ls" | "buffers" | "Buffers" => {
                 let list = self.backend.list_buffers_str();
                 self.backend.status_message = Some(list);
             }
@@ -1325,7 +1406,7 @@ impl App {
                     self.backend.active().id
                 };
                 let (_, new_vp) =
-                    self.windows.split(SplitDir::Horizontal, buf_id, self.viewport);
+                    self.tabs.focused_windows_mut().split(SplitDir::Horizontal, buf_id, self.viewport);
                 self.viewport = new_vp;
                 let _ = self.backend.switch_to_id(buf_id);
             }
@@ -1345,9 +1426,81 @@ impl App {
                     self.backend.active().id
                 };
                 let (_, new_vp) =
-                    self.windows.split(SplitDir::Vertical, buf_id, self.viewport);
+                    self.tabs.focused_windows_mut().split(SplitDir::Vertical, buf_id, self.viewport);
                 self.viewport = new_vp;
                 let _ = self.backend.switch_to_id(buf_id);
+            }
+            // ── Tab pages ─────────────────────────────────────────────────
+            "tabnew" | "tabe" | "tabedit" => {
+                let path = parts.next().map(PathBuf::from);
+                let buf_id = match self.backend.open_buffer(path) {
+                    Ok(id) => id,
+                    Err(err) => {
+                        self.backend.status_message = Some(format!("open failed: {err}"));
+                        self.enter_normal_mode();
+                        return;
+                    }
+                };
+                let new_vp = self.tabs.new_tab(buf_id, self.viewport);
+                self.viewport = new_vp;
+                let _ = self.backend.switch_to_id(buf_id);
+            }
+            "tabc" | "tabclose" => {
+                if let Some(new_vp) = self.tabs.close_tab(self.viewport) {
+                    self.viewport = new_vp;
+                    let new_buf = self.tabs.focused_windows().focused_window().buffer_id;
+                    let _ = self.backend.switch_to_id(new_buf);
+                } else {
+                    // Only one tab: just quit.
+                    self.should_quit = true;
+                }
+            }
+            "tabn" | "tabnext" => {
+                let new_vp = self.tabs.focus_next(self.viewport);
+                self.viewport = new_vp;
+                let new_buf = self.tabs.focused_windows().focused_window().buffer_id;
+                let _ = self.backend.switch_to_id(new_buf);
+            }
+            "tabp" | "tabprev" | "tabprevious" => {
+                let new_vp = self.tabs.focus_prev(self.viewport);
+                self.viewport = new_vp;
+                let new_buf = self.tabs.focused_windows().focused_window().buffer_id;
+                let _ = self.backend.switch_to_id(new_buf);
+            }
+            "tabs" => {
+                let info = (0..self.tabs.tab_count())
+                    .map(|i| {
+                        let marker = if i == self.tabs.focused_idx() { '>' } else { ' ' };
+                        format!("{marker} Tab {}", i + 1)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("  ");
+                self.backend.status_message = Some(info);
+            }
+            // ── Pickers ───────────────────────────────────────────────────
+            "files" | "Files" => {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                self.picker = Some(PickerState::new_files(cwd));
+                self.enter_normal_mode();
+                return;
+            }
+            "bpick" => {
+                let entries: Vec<_> = self
+                    .backend
+                    .all_bufs()
+                    .iter()
+                    .map(|b| (b.id, b.title(), b.path.clone()))
+                    .collect();
+                self.picker = Some(PickerState::new_buffers(entries));
+                self.enter_normal_mode();
+                return;
+            }
+            "grep" | "Grep" => {
+                let query = parts.collect::<Vec<_>>().join(" ");
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                self.picker = Some(PickerState::new_grep(query, cwd));
+                self.enter_normal_mode();
+                return;
             }
             other if !other.is_empty() => {
                 self.backend.status_message = Some(format!("unknown command: {other}"));
@@ -1355,6 +1508,196 @@ impl App {
             _ => {}
         }
         self.enter_normal_mode();
+    }
+
+    // ── Ex command history ──────────────────────────────────────────────────
+
+    /// Navigate to the previous (older) command in history.
+    fn history_older(&mut self) {
+        if self.command_history.is_empty() {
+            return;
+        }
+        let new_idx = match self.history_idx {
+            None => {
+                // Save whatever the user was typing before browsing history.
+                self.history_draft = self.command_buffer.clone();
+                self.command_history.len().saturating_sub(1)
+            }
+            Some(i) if i > 0 => i - 1,
+            Some(i) => i,
+        };
+        self.history_idx = Some(new_idx);
+        self.command_buffer = self.command_history[new_idx].clone();
+    }
+
+    /// Navigate to the next (newer) command in history, or back to the draft.
+    fn history_newer(&mut self) {
+        let Some(idx) = self.history_idx else { return };
+        if idx + 1 >= self.command_history.len() {
+            self.history_idx = None;
+            self.command_buffer = self.history_draft.clone();
+        } else {
+            let new_idx = idx + 1;
+            self.history_idx = Some(new_idx);
+            self.command_buffer = self.command_history[new_idx].clone();
+        }
+    }
+
+    // ── Tab completion ──────────────────────────────────────────────────────
+
+    /// Complete `command_buffer` to the first matching command name.
+    fn complete_command(&mut self) {
+        const COMMANDS: &[&str] = &[
+            "b#", "bd", "bdelete", "bn", "bnext", "bp", "bprev", "bprevious",
+            "buffers", "Buffers", "codeaction", "codeactions", "complete",
+            "d", "def", "definition", "delete", "e", "edit",
+            "files", "Files", "format", "grep", "Grep",
+            "ls", "q", "q!", "quit", "quit!", "references", "refs",
+            "sp", "split",
+            "tabc", "tabclose", "tabe", "tabedit", "tabn", "tabnext",
+            "tabnew", "tabp", "tabprev", "tabprevious", "tabs",
+            "vs", "vsplit", "w", "wq", "write", "x", "y", "yank",
+        ];
+        let prefix = self.command_buffer.clone();
+        let candidates: Vec<&&str> =
+            COMMANDS.iter().filter(|c| c.starts_with(&*prefix)).collect();
+        if let Some(&&first) = candidates.first() {
+            self.command_buffer = first.to_owned();
+        }
+    }
+
+    // ── Range-based line operations ─────────────────────────────────────────
+
+    /// Delete lines `start..=end` (0-based, inclusive).
+    fn delete_line_range(&mut self, start: usize, end: usize) {
+        let line_count = self.backend.lines.len();
+        if line_count == 0 {
+            return;
+        }
+        let start = start.min(line_count.saturating_sub(1));
+        let end = end.min(line_count.saturating_sub(1));
+        let end_col = self.backend.lines.get(end).map(|l| l.len()).unwrap_or(0);
+        let _ = self.backend.send_edit(
+            "gesture",
+            json!({
+                "line": start as u64, "col": 0u64,
+                "ty": { "select": { "granularity": "point", "multi": false } }
+            }),
+        );
+        let _ = self.backend.send_edit(
+            "gesture",
+            json!({
+                "line": end as u64, "col": end_col as u64,
+                "ty": { "select_extend": { "granularity": "point" } }
+            }),
+        );
+        let _ = self.backend.send_edit("delete_forward", json!([]));
+        // Delete the trailing newline unless this was the last line.
+        if end < line_count.saturating_sub(1) {
+            let _ = self.backend.send_edit("delete_forward", json!([]));
+        }
+        self.push_change();
+    }
+
+    /// Yank lines `start..=end` (0-based, inclusive) into the active register.
+    fn yank_line_range(&mut self, start: usize, end: usize) {
+        let line_count = self.backend.lines.len();
+        if line_count == 0 {
+            return;
+        }
+        let start = start.min(line_count.saturating_sub(1));
+        let end = end.min(line_count.saturating_sub(1));
+        let mut text = String::new();
+        for line in &self.backend.lines[start..=end] {
+            text.push_str(line);
+            text.push('\n');
+        }
+        let reg = self.take_register();
+        self.registers.yank(&reg, text, false);
+        let count = end.saturating_sub(start) + 1;
+        self.backend.status_message = Some(format!("{count} line(s) yanked"));
+    }
+
+    // ── Cursor jump ────────────────────────────────────────────────────────
+
+    /// Jump the cursor to `line` (0-based), clamped to the buffer length.
+    fn jump_to_line(&mut self, line: usize) {
+        let clamped = line.min(self.backend.lines.len().saturating_sub(1));
+        self.push_jump();
+        let _ = self.backend.send_edit(
+            "gesture",
+            json!({ "line": clamped as u64, "col": 0u64, "ty": "point_select" }),
+        );
+    }
+
+    // ── Picker overlay ──────────────────────────────────────────────────────
+
+    /// Route a key event to the active picker overlay.
+    fn handle_picker_event(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.picker = None;
+            }
+            KeyCode::Enter => {
+                self.handle_picker_confirm();
+            }
+            KeyCode::Up => {
+                if let Some(p) = self.picker.as_mut() {
+                    p.move_up();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(p) = self.picker.as_mut() {
+                    p.move_down();
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(p) = self.picker.as_mut() {
+                    p.pop_char();
+                }
+            }
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                if let Some(p) = self.picker.as_mut() {
+                    p.push_char(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Confirm the currently selected picker item and close the overlay.
+    fn handle_picker_confirm(&mut self) {
+        let Some(picker) = self.picker.take() else { return };
+        let Some(item) = picker.selected_item().cloned() else { return };
+
+        match picker.kind {
+            crate::picker::PickerKind::Files | crate::picker::PickerKind::LiveGrep => {
+                let Some(path) = item.path else { return };
+                match self.backend.open_buffer(Some(path)) {
+                    Ok(buf_id) => {
+                        let _ = self.backend.switch_to_id(buf_id);
+                        self.tabs.focused_windows_mut().set_focused_buffer(buf_id);
+                        self.viewport = Viewport::default();
+                        if let Some(line) = item.line {
+                            self.jump_to_line(line);
+                        }
+                    }
+                    Err(err) => {
+                        self.backend.status_message = Some(format!("open failed: {err}"));
+                    }
+                }
+            }
+            crate::picker::PickerKind::Buffers => {
+                let Some(buf_id) = item.buf_id else { return };
+                if self.backend.switch_to_id(buf_id).is_ok() {
+                    self.tabs.focused_windows_mut().set_focused_buffer(buf_id);
+                    self.viewport = Viewport::default();
+                }
+            }
+        }
     }
 
     pub(crate) fn scroll_into_view(&mut self, editor_height: usize) {
@@ -1401,35 +1744,35 @@ impl App {
             's' => {
                 let buf_id = self.backend.active().id;
                 let (_, new_vp) =
-                    self.windows.split(SplitDir::Horizontal, buf_id, self.viewport);
+                    self.tabs.focused_windows_mut().split(SplitDir::Horizontal, buf_id, self.viewport);
                 self.viewport = new_vp;
             }
             // Vertical split (same buffer).
             'v' => {
                 let buf_id = self.backend.active().id;
                 let (_, new_vp) =
-                    self.windows.split(SplitDir::Vertical, buf_id, self.viewport);
+                    self.tabs.focused_windows_mut().split(SplitDir::Vertical, buf_id, self.viewport);
                 self.viewport = new_vp;
             }
             // Focus next window.
             'w' => {
-                let new_vp = self.windows.focus_next(self.viewport);
+                let new_vp = self.tabs.focused_windows_mut().focus_next(self.viewport);
                 self.viewport = new_vp;
-                let new_buf = self.windows.focused_window().buffer_id;
+                let new_buf = self.tabs.focused_windows_mut().focused_window().buffer_id;
                 let _ = self.backend.switch_to_id(new_buf);
             }
             // Focus previous window.
             'W' | 'p' => {
-                let new_vp = self.windows.focus_prev(self.viewport);
+                let new_vp = self.tabs.focused_windows_mut().focus_prev(self.viewport);
                 self.viewport = new_vp;
-                let new_buf = self.windows.focused_window().buffer_id;
+                let new_buf = self.tabs.focused_windows_mut().focused_window().buffer_id;
                 let _ = self.backend.switch_to_id(new_buf);
             }
             // Close focused window.
             'c' | 'q' => {
-                if let Some(new_vp) = self.windows.close_focused() {
+                if let Some(new_vp) = self.tabs.focused_windows_mut().close_focused() {
                     self.viewport = new_vp;
-                    let new_buf = self.windows.focused_window().buffer_id;
+                    let new_buf = self.tabs.focused_windows_mut().focused_window().buffer_id;
                     let _ = self.backend.switch_to_id(new_buf);
                 }
             }
@@ -2202,3 +2545,192 @@ pub(crate) fn text_obj_tag(line: &str, cursor: usize, inclusive: bool) -> Option
         Some((content_start, close_start))
     }
 }
+
+// ── Ex command range parser ───────────────────────────────────────────────────
+
+/// Parse a vim-style address range from the start of `input`.
+///
+/// Returns `(resolved_range, remaining_command_text)`.  The range is a pair of
+/// 0-based line indices `(start, end)`.  Returns `None` for the range when no
+/// valid address is found at the start of `input`.
+///
+/// Supported addresses: number (1-based), `.` (current), `$` (last), `%`
+/// (whole file), `'c` (mark), with optional `+N`/`-N` offsets.
+/// A single address without a `,` separator resolves to `(addr, addr)`.
+pub(crate) fn parse_ex_range<'a>(
+    input: &'a str,
+    cursor_line: usize,
+    line_count: usize,
+    marks: &HashMap<char, (usize, usize)>,
+) -> (Option<(usize, usize)>, &'a str) {
+    let mut pos = 0;
+    let bytes = input.as_bytes();
+
+    // `%` shorthand for the whole file.
+    if bytes.first() == Some(&b'%') {
+        let end = line_count.saturating_sub(1);
+        return (Some((0, end)), &input[1..]);
+    }
+
+    let Some(a1) = parse_addr(input, &mut pos, cursor_line, line_count, marks) else {
+        return (None, input);
+    };
+
+    // Optional `,` separator for a second address.
+    if bytes.get(pos) == Some(&b',') {
+        pos += 1;
+        let start_pos = pos;
+        if let Some(a2) = parse_addr(input, &mut pos, cursor_line, line_count, marks) {
+            return (Some((a1, a2)), &input[pos..]);
+        }
+        // Comma with no valid second address — treat first address as range.
+        let _ = start_pos;
+    }
+
+    (Some((a1, a1)), &input[pos..])
+}
+
+/// Parse a single vim address (number / `.` / `$` / `'c`) with optional
+/// `+N`/`-N` offsets at `bytes[*pos..]`.  Advances `*pos` past the address.
+fn parse_addr(
+    input: &str,
+    pos: &mut usize,
+    cursor_line: usize,
+    line_count: usize,
+    marks: &HashMap<char, (usize, usize)>,
+) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let base: usize = match bytes.get(*pos)? {
+        b'.' => {
+            *pos += 1;
+            cursor_line
+        }
+        b'$' => {
+            *pos += 1;
+            line_count.saturating_sub(1)
+        }
+        b'\'' => {
+            *pos += 1;
+            let ch = input[*pos..].chars().next()?;
+            *pos += ch.len_utf8();
+            marks.get(&ch).map(|&(l, _)| l)?
+        }
+        b if b.is_ascii_digit() => {
+            let start = *pos;
+            while *pos < input.len() && input.as_bytes()[*pos].is_ascii_digit() {
+                *pos += 1;
+            }
+            let n: usize = input[start..*pos].parse().ok()?;
+            // Vim line numbers are 1-based; convert to 0-based.
+            n.saturating_sub(1).min(line_count.saturating_sub(1))
+        }
+        _ => return None,
+    };
+
+    // Optional `+N` / `-N` offset.
+    let mut val = base;
+    loop {
+        match bytes.get(*pos) {
+            Some(b'+') => {
+                *pos += 1;
+                let n = parse_number(input, pos).unwrap_or(1);
+                val = val.saturating_add(n);
+            }
+            Some(b'-') => {
+                *pos += 1;
+                let n = parse_number(input, pos).unwrap_or(1);
+                val = val.saturating_sub(n);
+            }
+            _ => break,
+        }
+    }
+
+    Some(val.min(line_count.saturating_sub(1)))
+}
+
+fn parse_number(input: &str, pos: &mut usize) -> Option<usize> {
+    let start = *pos;
+    while *pos < input.len() && input.as_bytes()[*pos].is_ascii_digit() {
+        *pos += 1;
+    }
+    if *pos == start {
+        return None;
+    }
+    input[start..*pos].parse().ok()
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod range_tests {
+    use std::collections::HashMap;
+    use super::parse_ex_range;
+
+    fn no_marks() -> HashMap<char, (usize, usize)> {
+        HashMap::new()
+    }
+
+    #[test]
+    fn bare_number_jumps_to_line() {
+        let (range, rest) = parse_ex_range("5", 0, 10, &no_marks());
+        assert_eq!(range, Some((4, 4))); // 1-based → 0-based
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn number_with_command() {
+        let (range, rest) = parse_ex_range("3d", 0, 10, &no_marks());
+        assert_eq!(range, Some((2, 2)));
+        assert_eq!(rest, "d");
+    }
+
+    #[test]
+    fn percent_is_whole_file() {
+        let (range, rest) = parse_ex_range("%d", 0, 10, &no_marks());
+        assert_eq!(range, Some((0, 9)));
+        assert_eq!(rest, "d");
+    }
+
+    #[test]
+    fn comma_range() {
+        let (range, rest) = parse_ex_range("1,5d", 0, 10, &no_marks());
+        assert_eq!(range, Some((0, 4)));
+        assert_eq!(rest, "d");
+    }
+
+    #[test]
+    fn dot_is_current_line() {
+        let (range, rest) = parse_ex_range(".d", 3, 10, &no_marks());
+        assert_eq!(range, Some((3, 3)));
+        assert_eq!(rest, "d");
+    }
+
+    #[test]
+    fn dollar_is_last_line() {
+        let (range, rest) = parse_ex_range("$", 0, 10, &no_marks());
+        assert_eq!(range, Some((9, 9)));
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn dot_comma_dollar() {
+        let (range, rest) = parse_ex_range(".,$ d", 2, 10, &no_marks());
+        assert_eq!(range, Some((2, 9)));
+        assert_eq!(rest, " d");
+    }
+
+    #[test]
+    fn offset_plus() {
+        let (range, rest) = parse_ex_range(".+2d", 3, 10, &no_marks());
+        assert_eq!(range, Some((5, 5)));
+        assert_eq!(rest, "d");
+    }
+
+    #[test]
+    fn no_range_returns_none() {
+        let (range, rest) = parse_ex_range("w", 0, 10, &no_marks());
+        assert_eq!(range, None);
+        assert_eq!(rest, "w");
+    }
+}
+

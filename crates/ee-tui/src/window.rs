@@ -204,6 +204,129 @@ impl WindowLayout {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tab page and tab manager
+// ---------------------------------------------------------------------------
+
+/// One tab page: owns a `WindowLayout` plus the saved viewport of its active
+/// window.  When this tab is the active one `App.viewport` is the live value;
+/// `saved_viewport` is only up-to-date while the tab is inactive.
+#[derive(Debug)]
+pub(crate) struct TabPage {
+    pub(crate) windows: WindowLayout,
+    /// Viewport preserved when this tab is not focused.
+    pub(crate) saved_viewport: Viewport,
+}
+
+impl TabPage {
+    fn new(buffer_id: BufferId) -> Self {
+        Self { windows: WindowLayout::new(buffer_id), saved_viewport: Viewport::default() }
+    }
+}
+
+/// Manages multiple tab pages.
+#[derive(Debug)]
+pub(crate) struct TabManager {
+    tabs: Vec<TabPage>,
+    /// Index of the currently active tab.
+    focused: usize,
+}
+
+impl TabManager {
+    pub(crate) fn new(buffer_id: BufferId) -> Self {
+        Self { tabs: vec![TabPage::new(buffer_id)], focused: 0 }
+    }
+
+    pub(crate) fn tab_count(&self) -> usize {
+        self.tabs.len()
+    }
+
+    pub(crate) fn focused_idx(&self) -> usize {
+        self.focused
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn focused_tab(&self) -> &TabPage {
+        &self.tabs[self.focused]
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn focused_tab_mut(&mut self) -> &mut TabPage {
+        &mut self.tabs[self.focused]
+    }
+
+    pub(crate) fn focused_windows(&self) -> &WindowLayout {
+        &self.tabs[self.focused].windows
+    }
+
+    pub(crate) fn focused_windows_mut(&mut self) -> &mut WindowLayout {
+        &mut self.tabs[self.focused].windows
+    }
+
+    /// Open a new tab showing `buffer_id`.  Saves `active_viewport` into the
+    /// current tab, then focuses the new one.  Returns the new tab's viewport
+    /// (always blank).
+    pub(crate) fn new_tab(&mut self, buffer_id: BufferId, active_viewport: Viewport) -> Viewport {
+        self.tabs[self.focused].saved_viewport = active_viewport;
+        let page = TabPage::new(buffer_id);
+        self.focused += 1;
+        self.tabs.insert(self.focused, page);
+        Viewport::default()
+    }
+
+    /// Close the focused tab.  Returns `Some(viewport)` with the viewport to
+    /// restore if at least one tab remains; `None` if this is the only tab
+    /// (caller should quit or refuse).
+    pub(crate) fn close_tab(&mut self, active_viewport: Viewport) -> Option<Viewport> {
+        if self.tabs.len() <= 1 {
+            return None;
+        }
+        // Discard the current tab's active viewport (we're removing it).
+        let _ = active_viewport;
+        self.tabs.remove(self.focused);
+        if self.focused >= self.tabs.len() {
+            self.focused = self.tabs.len() - 1;
+        }
+        Some(self.tabs[self.focused].saved_viewport)
+    }
+
+    /// Move to the next tab (wrapping).  Returns the viewport to restore.
+    pub(crate) fn focus_next(&mut self, active_viewport: Viewport) -> Viewport {
+        if self.tabs.len() <= 1 {
+            return active_viewport;
+        }
+        self.tabs[self.focused].saved_viewport = active_viewport;
+        self.focused = (self.focused + 1) % self.tabs.len();
+        self.tabs[self.focused].saved_viewport
+    }
+
+    /// Move to the previous tab (wrapping).  Returns the viewport to restore.
+    pub(crate) fn focus_prev(&mut self, active_viewport: Viewport) -> Viewport {
+        if self.tabs.len() <= 1 {
+            return active_viewport;
+        }
+        self.tabs[self.focused].saved_viewport = active_viewport;
+        self.focused = if self.focused == 0 { self.tabs.len() - 1 } else { self.focused - 1 };
+        self.tabs[self.focused].saved_viewport
+    }
+
+    /// Jump to tab at 0-based `idx`.  Returns viewport to restore.
+    #[allow(dead_code)]
+    pub(crate) fn focus_idx(&mut self, idx: usize, active_viewport: Viewport) -> Viewport {
+        if idx >= self.tabs.len() || idx == self.focused {
+            return active_viewport;
+        }
+        self.tabs[self.focused].saved_viewport = active_viewport;
+        self.focused = idx;
+        self.tabs[self.focused].saved_viewport
+    }
+
+    /// Iterator over all tabs for UI rendering: yields `(index, &TabPage)`.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (usize, &TabPage)> {
+        self.tabs.iter().enumerate()
+    }
+}
+
 // Keep HashMap available via the unused helper below so the import doesn't
 // get removed; in practice the module only uses Vec.
 #[allow(dead_code)]

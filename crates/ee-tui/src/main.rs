@@ -17,6 +17,7 @@ mod backend;
 mod buffer;
 mod config;
 mod keymap;
+mod picker;
 mod registers;
 mod text;
 mod ui;
