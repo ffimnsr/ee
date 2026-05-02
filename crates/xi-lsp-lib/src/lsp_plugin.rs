@@ -194,6 +194,14 @@ impl Plugin for LspPlugin {
             }
             "request_definition" | "lsp.definition" => self.request_definition(view),
             "request_references" | "lsp.references" => self.request_references(view),
+            "request_document_symbols" | "lsp.document_symbols" => {
+                self.request_document_symbols(view);
+            }
+            "request_workspace_symbols" | "lsp.workspace_symbols" => {
+                let query =
+                    params.get("query").and_then(Value::as_str).unwrap_or("").to_owned();
+                self.request_workspace_symbols(view, query);
+            }
             "format_document" | "lsp.format_document" => self.request_document_formatting(view),
             "request_code_actions" | "lsp.code_action" => {
                 let index = params
@@ -264,6 +272,14 @@ impl Plugin for LspPlugin {
                     Ok(locations) => {
                         if let Some(core) = &self.core {
                             core.show_locations(view.get_id(), &title, &locations);
+                        }
+                    }
+                    Err(err) => self.record_view_failure(view, format!("{title} failed: {err:?}")),
+                },
+                LspResponse::Symbols { title, result } => match result {
+                    Ok(symbols) => {
+                        if let Some(core) = &self.core {
+                            core.show_symbols(view.get_id(), &title, &symbols);
                         }
                     }
                     Err(err) => self.record_view_failure(view, format!("{title} failed: {err:?}")),
@@ -606,6 +622,125 @@ impl LspPlugin {
             });
         if let Err(err) = request {
             self.record_view_failure(view, format!("references failed: {err}"));
+        }
+    }
+
+    fn request_document_symbols(&mut self, view: &mut View<ChunkCache>) {
+        let view_id = view.get_id();
+        let file_path = match view.get_path() {
+            Some(path) => path.to_string_lossy().to_string(),
+            None => {
+                self.record_view_failure(
+                    view,
+                    String::from("document symbols failed: missing file path"),
+                );
+                return;
+            }
+        };
+        let current_document_uri = match view.get_path().map(file_path_to_uri) {
+            Some(Ok(uri)) => uri,
+            Some(Err(err)) => {
+                self.record_view_failure(view, format!("document symbols failed: {err}"));
+                return;
+            }
+            None => {
+                self.record_view_failure(
+                    view,
+                    String::from("document symbols failed: missing file path"),
+                );
+                return;
+            }
+        };
+        let Ok(ls_client_arc) = self.client_for_view(view) else {
+            return;
+        };
+        let request = ls_client_arc
+            .lock()
+            .map_err(|_| String::from("language server client lock poisoned"))
+            .and_then(|mut ls_client| {
+                ls_client
+                    .request_document_symbols(view_id, move |ls_client, result| {
+                        let response = result
+                            .map_err(|err| {
+                                LanguageResponseError::LanguageServerError(format!("{err:?}"))
+                            })
+                            .and_then(|value| {
+                                // LSP returns either DocumentSymbol[] or SymbolInformation[].
+                                if let Ok(Some(syms)) =
+                                    serde_json::from_value::<Option<Vec<lsp_types::DocumentSymbol>>>(
+                                        value.clone(),
+                                    )
+                                {
+                                    let items = symbol_items_from_document_symbols(
+                                        &current_document_uri,
+                                        syms,
+                                        &file_path,
+                                    );
+                                    return Ok(items);
+                                }
+                                serde_json::from_value::<Option<Vec<lsp_types::SymbolInformation>>>(
+                                    value,
+                                )
+                                .map_err(|err| LanguageResponseError::Transport(err.to_string()))
+                                .map(|opt| {
+                                    symbol_items_from_workspace_symbols(
+                                        opt.unwrap_or_default(),
+                                    )
+                                })
+                            });
+                        ls_client.result_queue.push_result(
+                            view_id.into(),
+                            LspResponse::Symbols {
+                                title: String::from("symbols"),
+                                result: response,
+                            },
+                        );
+                        ls_client.core.schedule_idle(view_id);
+                    })
+                    .map_err(|err| err.to_string())
+            });
+        if let Err(err) = request {
+            self.record_view_failure(view, format!("document symbols failed: {err}"));
+        }
+    }
+
+    fn request_workspace_symbols(&mut self, view: &mut View<ChunkCache>, query: String) {
+        let view_id = view.get_id();
+        let Ok(ls_client_arc) = self.client_for_view(view) else {
+            return;
+        };
+        let request = ls_client_arc
+            .lock()
+            .map_err(|_| String::from("language server client lock poisoned"))
+            .and_then(|mut ls_client| {
+                ls_client
+                    .request_workspace_symbols(view_id, &query, move |ls_client, result| {
+                        let response = result
+                            .map_err(|err| {
+                                LanguageResponseError::LanguageServerError(format!("{err:?}"))
+                            })
+                            .and_then(|value| {
+                                serde_json::from_value::<Option<Vec<lsp_types::SymbolInformation>>>(
+                                    value,
+                                )
+                                .map_err(|err| LanguageResponseError::Transport(err.to_string()))
+                                .map(|opt| {
+                                    symbol_items_from_workspace_symbols(opt.unwrap_or_default())
+                                })
+                            });
+                        ls_client.result_queue.push_result(
+                            view_id.into(),
+                            LspResponse::Symbols {
+                                title: String::from("workspace symbols"),
+                                result: response,
+                            },
+                        );
+                        ls_client.core.schedule_idle(view_id);
+                    })
+                    .map_err(|err| err.to_string())
+            });
+        if let Err(err) = request {
+            self.record_view_failure(view, format!("workspace symbols failed: {err}"));
         }
     }
 

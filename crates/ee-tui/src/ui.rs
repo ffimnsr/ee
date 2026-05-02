@@ -196,6 +196,16 @@ fn gutter_width(app: &App, line_count: usize) -> u16 {
     (num_cols + sign_cols) as u16
 }
 
+/// Return the visible editor column count (buffer text area width, excluding
+/// the gutter) for the current app state and terminal size. Pass this to
+/// `scroll_into_view` so the horizontal viewport is clamped correctly.
+pub(crate) fn compute_editor_width(terminal_size: ratatui::layout::Rect, app: &App) -> usize {
+    let area = split_root_areas(terminal_size, app).editor_area;
+    let line_count = app.backend.lines.len().max(1);
+    let gw = gutter_width(app, line_count);
+    area.width.saturating_sub(gw) as usize
+}
+
 // ── Visible-whitespace substitution ──────────────────────────────────────────
 
 /// Substitute space `' '` → `'·'` and tab `'\t'` → `'→'` in rendered spans,

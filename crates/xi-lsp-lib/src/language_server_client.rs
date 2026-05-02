@@ -793,6 +793,56 @@ impl LanguageServerClient {
             _ => TextDocumentSyncKind::FULL,
         }
     }
+
+    /// Request document symbols (`textDocument/documentSymbol`) for the given view.
+    pub fn request_document_symbols<CB>(
+        &mut self,
+        view_id: ViewId,
+        on_result: CB,
+    ) -> Result<u64, LspError>
+    where
+        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
+    {
+        let Some(state) = self.opened_documents.get(&view_id) else {
+            return Err(LspError::Protocol(format!("missing open document for view {view_id}")));
+        };
+        if !self.is_initialized {
+            return Err(LspError::Protocol(format!(
+                "language server {} not initialized",
+                self.language_id
+            )));
+        }
+        self.try_send_request(
+            "textDocument/documentSymbol",
+            Params::from(json!({ "textDocument": { "uri": state.uri.clone() } })),
+            Box::new(on_result),
+        )
+    }
+
+    /// Request workspace symbols (`workspace/symbol`) for the given query string.
+    pub fn request_workspace_symbols<CB>(
+        &mut self,
+        view_id: ViewId,
+        query: &str,
+        on_result: CB,
+    ) -> Result<u64, LspError>
+    where
+        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
+    {
+        if !self.is_initialized {
+            return Err(LspError::Protocol(format!(
+                "language server {} not initialized",
+                self.language_id
+            )));
+        }
+        // Store view_id so the callback can route the result back.
+        let _ = view_id;
+        self.try_send_request(
+            "workspace/symbol",
+            Params::from(json!({ "query": query })),
+            Box::new(on_result),
+        )
+    }
 }
 
 /// Language Specific Notification handling implementations

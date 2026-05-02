@@ -11,7 +11,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use serde_json::{Value, json};
-use xi_core_lib::plugin_rpc::{CodeActionDescriptor, Diagnostic, DiagnosticSeverity, Range};
+use xi_core_lib::plugin_rpc::{CodeActionDescriptor, Diagnostic, DiagnosticSeverity, Range, SymbolItem};
 use xi_core_lib::rpc::LineReplacement;
 
 use crate::app::{App, Mode, Operator, PendingCharFind};
@@ -168,7 +168,7 @@ fn ui_render_shows_scrolled_gutter_after_many_enters() {
     let width = 80;
     let height = 49;
     let editor_height = (height as usize).saturating_sub(2);
-    app.scroll_into_view(editor_height);
+    app.scroll_into_view(editor_height, width as usize);
 
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -960,7 +960,7 @@ fn viewport_scrolls_down_when_cursor_leaves_view() {
     // 40 lines, height 20: max_top = 20, cursor scroll gives 11 < 20, no clamp.
     app.backend.lines = (0..40).map(|i| format!("line {i}")).collect();
     app.backend.cursor_line = 25;
-    app.scroll_into_view(20);
+    app.scroll_into_view(20, 80);
     // scroll_offset=5: top = cursor(25) + off(5) + 1 - height(20) = 11
     assert_eq!(app.viewport.top_line, 11);
 }
@@ -970,9 +970,61 @@ fn viewport_scrolls_up_when_cursor_above_top() {
     let mut app = App::from_path(None).unwrap();
     app.viewport.top_line = 10;
     app.backend.cursor_line = 5;
-    app.scroll_into_view(20);
+    app.scroll_into_view(20, 80);
     // scroll_offset=5: top = cursor(5).saturating_sub(off(5)) = 0
     assert_eq!(app.viewport.top_line, 0);
+}
+
+#[test]
+fn horizontal_scroll_tracks_cursor_right() {
+    let mut app = App::from_path(None).unwrap();
+    // Three lines: short, short, long. Cursor on the long line past viewport width.
+    app.backend.lines = vec![
+        "a".to_string(),
+        "bc".to_string(),
+        "x".repeat(200),
+    ];
+    app.backend.cursor_line = 2;
+    // Place cursor byte-col 150, which is display col 150 for ASCII.
+    app.backend.cursor_col = 150;
+    app.scroll_into_view(20, 80);
+    // Cursor at display col 150 must be visible in 80-wide view.
+    assert!(app.viewport.left_col <= 150);
+    assert!(150 < app.viewport.left_col + 80);
+}
+
+#[test]
+fn horizontal_scroll_resets_when_cursor_moves_left() {
+    let mut app = App::from_path(None).unwrap();
+    app.backend.lines = vec!["a".to_string(), "bc".to_string(), "x".repeat(200)];
+    app.backend.cursor_line = 2;
+    app.backend.cursor_col = 150;
+    app.scroll_into_view(20, 80);
+    let scrolled = app.viewport.left_col;
+    assert!(scrolled > 0, "should have scrolled right");
+
+    // Now move cursor back to column 0 on a short line.
+    app.backend.cursor_line = 0;
+    app.backend.cursor_col = 0;
+    app.scroll_into_view(20, 80);
+    assert_eq!(app.viewport.left_col, 0, "left_col should reset when cursor at col 0");
+}
+
+#[test]
+fn wrap_mode_resets_left_col_to_zero() {
+    let mut app = App::from_path(None).unwrap();
+    app.backend.lines = vec!["a".to_string(), "bc".to_string(), "x".repeat(200)];
+    app.backend.cursor_line = 2;
+    app.backend.cursor_col = 150;
+    // Scroll right in non-wrap mode first.
+    app.config.wrap_lines = false;
+    app.scroll_into_view(20, 80);
+    assert!(app.viewport.left_col > 0, "should have scrolled right in no-wrap mode");
+
+    // Enable wrap mode — left_col must be clamped back to 0.
+    app.config.wrap_lines = true;
+    app.scroll_into_view(20, 80);
+    assert_eq!(app.viewport.left_col, 0, "wrap mode must reset left_col to 0");
 }
 
 #[test]
@@ -1897,4 +1949,112 @@ fn tabmanager_starts_with_one_tab() {
     let app = App::from_path(None).unwrap();
     assert_eq!(app.tabs.tab_count(), 1);
     assert_eq!(app.tabs.focused_idx(), 0);
+}
+
+#[test]
+fn parse_notification_handles_symbols() {
+    let event = parse_notification(
+        "symbols",
+        json!({
+            "view_id": "view-id-1",
+            "title": "Document Symbols",
+            "symbols": [{
+                "name": "my_func",
+                "kind": "function",
+                "path": "/src/lib.rs",
+                "line": 10,
+                "column": 0
+            }]
+        }),
+    )
+    .expect("symbols notification should parse");
+
+    match event {
+        BackendEvent::Symbols { view_id, title, symbols } => {
+            assert_eq!(view_id, "view-id-1");
+            assert_eq!(title, "Document Symbols");
+            assert_eq!(symbols.len(), 1);
+            assert_eq!(symbols[0].name, "my_func");
+            assert_eq!(symbols[0].kind, "function");
+            assert_eq!(symbols[0].line, 10);
+        }
+        other => panic!("unexpected event: {:?}", other),
+    }
+}
+
+#[test]
+fn request_document_symbols_emits_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.request_document_symbols().expect("document symbols request should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "request_document_symbols");
+}
+
+#[test]
+fn request_workspace_symbols_emits_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.request_workspace_symbols("Foo").expect("workspace symbols request should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "request_workspace_symbols");
+    assert_eq!(value["params"]["params"]["query"], "Foo");
+}
+
+#[test]
+fn symbols_command_sends_document_symbols_request() {
+    let mut app = App::from_path(None).unwrap();
+    // Drain initial events so tests start clean.
+    let _ = app.backend.drain_events();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)));
+    for ch in "symbols".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    // Executing the command should not panic; LSP may not be active in test env.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+}
+
+#[test]
+fn symbols_notification_populates_picker() {
+    let (tx, rx) = mpsc::channel();
+    let (backend_tx, backend_rx) = mpsc::channel();
+    let mut mgr = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    backend_tx
+        .send(BackendEvent::Symbols {
+            view_id: String::from("view-id-1"),
+            title: String::from("Document Symbols"),
+            symbols: vec![SymbolItem {
+                name: String::from("do_thing"),
+                kind: String::from("function"),
+                path: String::from("/src/lib.rs"),
+                line: 5,
+                column: 0,
+            }],
+        })
+        .expect("send should succeed");
+
+    mgr.drain_events().expect("drain should not fail");
+
+    let pending = mgr.drain_pending_symbols();
+    assert_eq!(pending.len(), 1);
+    let (vid, title, syms) = &pending[0];
+    assert_eq!(vid, "view-id-1");
+    assert_eq!(title, "Document Symbols");
+    assert_eq!(syms.len(), 1);
+    assert_eq!(syms[0].name, "do_thing");
+
+    // Verify the rx channel is empty (no RPC was emitted by the notification).
+    assert!(rx.try_recv().is_err(), "no RPC should be emitted for symbols notification");
 }

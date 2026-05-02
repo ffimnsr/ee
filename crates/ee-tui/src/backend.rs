@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use unicode_width::UnicodeWidthStr;
 use xi_core_lib::XiCore;
-use xi_core_lib::plugin_rpc::{CodeActionDescriptor, Diagnostic};
+use xi_core_lib::plugin_rpc::{CodeActionDescriptor, Diagnostic, SymbolItem};
 use xi_rpc::{ReadTransport, RpcLoop, WriteTransport};
 
 use crate::text::previous_char_boundary;
@@ -54,6 +54,7 @@ pub(crate) enum BackendEvent {
     Hover { view_id: String, content: String },
     Completions { view_id: String, items: Vec<CompletionSuggestion> },
     Locations { view_id: String, title: String, locations: Vec<NavigationTarget> },
+    Symbols { view_id: String, title: String, symbols: Vec<SymbolItem> },
     Diagnostics { view_id: String, diagnostics: Vec<Diagnostic> },
     CodeActions { view_id: String, actions: Vec<CodeActionDescriptor> },
     ScrollTo { view_id: String, line: usize, col: usize },
@@ -151,6 +152,8 @@ pub(crate) struct XiClient {
     pub(crate) status_message: Option<String>,
     pub(crate) last_scroll: Option<(usize, usize)>,
     pub(crate) diagnostics: Vec<Diagnostic>,
+    /// Pending symbol results waiting to be opened in a picker.
+    pub(crate) pending_symbols: Vec<(String, String, Vec<SymbolItem>)>,
 }
 
 #[allow(dead_code)]
@@ -206,6 +209,7 @@ impl XiClient {
             status_message: None,
             last_scroll: None,
             diagnostics: Vec::new(),
+            pending_symbols: Vec::new(),
         };
 
         for event in init_events {
@@ -261,6 +265,14 @@ impl XiClient {
 
     pub(crate) fn request_references(&mut self) -> io::Result<()> {
         self.send_edit("request_references", json!({}))
+    }
+
+    pub(crate) fn request_document_symbols(&mut self) -> io::Result<()> {
+        self.send_edit("request_document_symbols", json!({}))
+    }
+
+    pub(crate) fn request_workspace_symbols(&mut self, query: &str) -> io::Result<()> {
+        self.send_edit("request_workspace_symbols", json!({ "query": query }))
     }
 
     pub(crate) fn format_document(&mut self) -> io::Result<()> {
@@ -394,6 +406,11 @@ impl XiClient {
                     self.send_edit("goto_line", json!({ "line": locations[0].line }))?;
                 }
                 self.status_message = Some(format_location_message(&title, &locations));
+            }
+            BackendEvent::Symbols { view_id, title, symbols } => {
+                self.status_message =
+                    Some(format!("{}: {} symbols", title, symbols.len()));
+                self.pending_symbols.push((view_id, title, symbols));
             }
             BackendEvent::Diagnostics { diagnostics, .. } => {
                 let count = diagnostics.len();
@@ -803,6 +820,13 @@ pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendE
                 serde_json::from_value::<Vec<NavigationTarget>>(params.get("locations")?.clone())
                     .ok()?;
             Some(BackendEvent::Locations { view_id, title, locations })
+        }
+        "symbols" => {
+            let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
+            let title = params.get("title").and_then(Value::as_str)?.to_owned();
+            let symbols =
+                serde_json::from_value::<Vec<SymbolItem>>(params.get("symbols")?.clone()).ok()?;
+            Some(BackendEvent::Symbols { view_id, title, symbols })
         }
         "diagnostics" => {
             let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();

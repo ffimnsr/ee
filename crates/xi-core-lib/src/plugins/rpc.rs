@@ -312,6 +312,16 @@ pub struct NavigationTarget {
     pub end_column: usize,
 }
 
+/// A symbol entry returned by document-symbol or workspace-symbol queries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SymbolItem {
+    pub name: String,
+    pub kind: String,
+    pub path: String,
+    pub line: usize,
+    pub column: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PluginUpdateAck {
     pub view_id: ViewId,
@@ -397,6 +407,10 @@ pub enum PluginNotification {
     ShowLocations {
         title: String,
         locations: Vec<NavigationTarget>,
+    },
+    ShowSymbols {
+        title: String,
+        symbols: Vec<SymbolItem>,
     },
     UpdateAnnotations {
         start: usize,

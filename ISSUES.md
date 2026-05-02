@@ -138,7 +138,7 @@
 ### 5. IDE and ecosystem workflow integration
 
 - [x] Priority P0: integrate `ee-tui` UI surfaces for diagnostics, completion menus, hover popups, references, rename prompts, formatting actions, and code actions through backend-owned, frontend-agnostic editor RPCs and notifications. Completion criteria: feature entrypoints in `ee-tui` use backend protocol only, and direct `xi-lsp-plugin` / `plugin_rpc` routing is removed from interactive IDE flows.
-- [ ] Add symbol outline, workspace symbol jump, and definition or reference navigation UI in `ee-tui` so language navigation is usable without leaving terminal workflow.
+- [x] Add symbol outline, workspace symbol jump, and definition or reference navigation UI in `ee-tui` so language navigation is usable without leaving terminal workflow.
 - [ ] Add git-aware gutter signs, hunk navigation, blame display, and diff views so common source-control tasks are available without shelling out.
 - [ ] Add embedded terminal buffers and shell-command execution flows so users can run builds, tests, and one-off commands without leaving the editor session.
 - [ ] Add session persistence for open buffers, window layout, cursor positions, marks, jump history, and command history so longer-lived workflows restore cleanly.

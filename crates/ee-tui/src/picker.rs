@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use ignore::WalkBuilder;
-use xi_core_lib::plugin_rpc::CodeActionDescriptor;
+use xi_core_lib::plugin_rpc::{CodeActionDescriptor, SymbolItem};
 
 use crate::backend::CompletionSuggestion;
 
@@ -25,6 +25,7 @@ pub(crate) enum PickerKind {
     Help,
     Completions,
     CodeActions,
+    Symbols,
 }
 
 /// A single entry in a picker list.
@@ -191,6 +192,32 @@ impl PickerState {
         Self {
             kind: PickerKind::CodeActions,
             title: String::from("Code Actions"),
+            query: String::new(),
+            cwd: PathBuf::from("."),
+            items,
+            filtered,
+            selected: 0,
+        }
+    }
+
+    /// Open a symbol picker from LSP document/workspace symbol results.
+    pub(crate) fn new_symbols(title: impl Into<String>, symbols: Vec<SymbolItem>) -> Self {
+        let items: Vec<PickerItem> = symbols
+            .into_iter()
+            .map(|sym| PickerItem {
+                label: format!("{} ({})", sym.name, sym.kind),
+                detail: Some(sym.path.clone()),
+                path: Some(PathBuf::from(&sym.path)),
+                buf_id: None,
+                // 0-based line for navigation
+                line: Some(sym.line.saturating_sub(1)),
+                choice_index: None,
+            })
+            .collect();
+        let filtered = (0..items.len()).collect();
+        Self {
+            kind: PickerKind::Symbols,
+            title: title.into(),
             query: String::new(),
             cwd: PathBuf::from("."),
             items,
