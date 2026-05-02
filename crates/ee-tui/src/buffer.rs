@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
 use xi_core_lib::XiCore;
@@ -12,7 +12,7 @@ use xi_rpc::RpcLoop;
 
 use crate::backend::{
     BackendEvent, ChannelReader, ChannelWriter, CachedLine, CoreUpdate, CoreUpdateKind,
-    LineSlot, NavigationTarget, PendingRequests, format_location_message, invalid_line_ranges,
+    LineSlot, NavigationTarget, PendingRequests, invalid_line_ranges,
     normalize_line_text, checked_advance, parse_response, block_for_response,
     drain_sync_notifications, send_rpc_notification, send_rpc_request, xi_reader_thread,
 };
@@ -36,6 +36,10 @@ pub(crate) struct BufState {
     pub(crate) pristine: bool,
     pub(crate) status_message: Option<String>,
     pub(crate) last_scroll: Option<(usize, usize)>,
+    /// Last-known mtime of the backing file; `None` for scratch buffers.
+    pub(crate) mtime: Option<SystemTime>,
+    /// Set when the backing file has been modified by another process.
+    pub(crate) externally_modified: bool,
 }
 
 impl BufState {
@@ -184,6 +188,7 @@ impl PartialEq for BufState {
             && self.cursor_col == other.cursor_col
             && self.pristine == other.pristine
             && self.status_message == other.status_message
+            && self.externally_modified == other.externally_modified
     }
 }
 
@@ -213,6 +218,9 @@ pub(crate) struct BufferManager {
     next_rpc_id: u64,
     /// Pending synchronous RPC responses keyed by request id.
     pending: PendingRequests,
+    /// Locations reported by the backend (definition, references, …) awaiting
+    /// dispatch to the App-level quickfix list.
+    pub(crate) pending_locations: Vec<(String, Vec<NavigationTarget>)>,
 }
 
 impl std::ops::Deref for BufferManager {
@@ -269,7 +277,7 @@ impl BufferManager {
 
         let buf = BufState {
             id: 1,
-            path,
+            path: path.clone(),
             view_id: view_id.clone(),
             pending_line_request: false,
             line_cache: Vec::new(),
@@ -279,6 +287,8 @@ impl BufferManager {
             pristine: true,
             status_message: None,
             last_scroll: None,
+            mtime: path.as_ref().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok()),
+            externally_modified: false,
         };
 
         let mut view_to_idx = HashMap::new();
@@ -294,6 +304,7 @@ impl BufferManager {
             next_buf_id: 2,
             next_rpc_id: 2,
             pending,
+            pending_locations: Vec::new(),
         };
 
         for event in init_events {
@@ -361,7 +372,16 @@ impl BufferManager {
             }),
         )?;
         let display = path.display().to_string();
-        self.bufs[self.current].status_message = Some(format!("saved {display}"));
+        // Refresh mtime after the save so external-change detection stays accurate.
+        let new_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+        let buf = &mut self.bufs[self.current];
+        buf.mtime = new_mtime;
+        buf.externally_modified = false;
+        buf.status_message = Some(format!("saved {display}"));
+        // Remove crash-recovery artifact now that the file is persisted.
+        if let Some(rp) = recovery_file_path(&path) {
+            let _ = std::fs::remove_file(rp);
+        }
         Ok(())
     }
 
@@ -476,16 +496,8 @@ impl BufferManager {
                 });
             }
             BackendEvent::ShowLocations { title, locations } => {
-                let same_file = locations.len() == 1
-                    && self.bufs[current]
-                        .path
-                        .as_ref()
-                        .is_some_and(|p| p.to_string_lossy() == locations[0].path);
-                if same_file {
-                    self.send_edit("goto_line", json!({ "line": locations[0].line }))?;
-                }
-                self.bufs[current].status_message =
-                    Some(format_location_message(&title, &locations));
+                // Collect for the App to dispatch to the quickfix list.
+                self.pending_locations.push((title, locations));
             }
         }
         Ok(())
@@ -529,6 +541,7 @@ impl BufferManager {
         let idx = self.bufs.len();
 
         self.view_to_idx.insert(view_id.clone(), idx);
+        let mtime = path.as_ref().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok());
         self.bufs.push(BufState {
             id: buf_id,
             path,
@@ -541,6 +554,8 @@ impl BufferManager {
             pristine: true,
             status_message: None,
             last_scroll: None,
+            mtime,
+            externally_modified: false,
         });
         Ok(buf_id)
     }
@@ -694,6 +709,8 @@ impl BufferManager {
             pristine: true,
             status_message: None,
             last_scroll: None,
+            mtime: None,
+            externally_modified: false,
         };
         let mut view_to_idx = HashMap::new();
         view_to_idx.insert(view_id, 0);
@@ -707,8 +724,119 @@ impl BufferManager {
             next_buf_id: 2,
             next_rpc_id: 2,
             pending: Arc::new(Mutex::new(HashMap::new())),
+            pending_locations: Vec::new(),
         }
     }
+
+    // ── External change detection ─────────────────────────────────────────
+
+    /// Drain accumulated location results for App-level dispatch.
+    pub(crate) fn drain_pending_locations(&mut self) -> Vec<(String, Vec<NavigationTarget>)> {
+        std::mem::take(&mut self.pending_locations)
+    }
+
+    /// Check all buffers for filesystem changes since last open/save.
+    /// Sets `BufState::externally_modified` when a newer mtime is detected.
+    pub(crate) fn check_external_changes(&mut self) {
+        for buf in &mut self.bufs {
+            let Some(path) = &buf.path else { continue };
+            if buf.externally_modified {
+                continue; // already notified
+            }
+            let current_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+            if let (Some(stored), Some(current)) = (buf.mtime, current_mtime) {
+                if current > stored {
+                    buf.externally_modified = true;
+                }
+            }
+        }
+    }
+
+    /// Reload the buffer identified by `id` from its backing file, discarding
+    /// local edits.  Closes the current xi view and opens a fresh one.
+    pub(crate) fn reload_buffer(&mut self, id: BufferId) -> io::Result<()> {
+        let idx = self
+            .bufs
+            .iter()
+            .position(|b| b.id == id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "buffer not found"))?;
+        let path = self.bufs[idx].path.clone();
+        let old_view_id = self.bufs[idx].view_id.clone();
+
+        // Close the old xi view.
+        let _ = send_xi_notification(
+            &self.tx,
+            "close_view",
+            json!({ "view_id": old_view_id }),
+        );
+        self.view_to_idx.remove(&old_view_id);
+
+        // Open a new xi view for the same path.
+        let rpc_id = self.next_rpc_id;
+        self.next_rpc_id += 1;
+
+        let (resp_tx, resp_rx) = mpsc::sync_channel::<Value>(1);
+        {
+            let mut map = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+            map.insert(rpc_id, resp_tx);
+        }
+
+        send_rpc_request(
+            &self.tx,
+            rpc_id,
+            "new_view",
+            json!({ "file_path": path.as_ref().map(|p| p.to_string_lossy().to_string()) }),
+        )?;
+
+        let response = resp_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "new_view timed out"))?;
+        let new_view_id = parse_response(response)?
+            .as_str()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "new_view returned non-string id")
+            })?
+            .to_owned();
+
+        let mtime = path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .and_then(|m| m.modified().ok());
+
+        let buf = &mut self.bufs[idx];
+        buf.view_id = new_view_id.clone();
+        buf.line_cache = Vec::new();
+        buf.lines = Vec::new();
+        buf.cursor_line = 0;
+        buf.cursor_col = 0;
+        buf.pristine = true;
+        buf.pending_line_request = false;
+        buf.last_scroll = None;
+        buf.status_message = Some("reloaded".to_owned());
+        buf.mtime = mtime;
+        buf.externally_modified = false;
+
+        self.view_to_idx.insert(new_view_id, idx);
+        Ok(())
+    }
+}
+
+// ── Recovery helpers ──────────────────────────────────────────────────────────
+
+/// Compute the crash-recovery file path for `original`.
+///
+/// Recovery files are stored under `{data_dir}/ee/recovery/` with the original
+/// path encoded by replacing `/` with `%2F` so the whole path becomes a single
+/// filename component.  Returns `None` when the platform data directory cannot
+/// be determined.
+pub(crate) fn recovery_file_path(original: &std::path::Path) -> Option<PathBuf> {
+    let data_dir = dirs::data_dir()?;
+    let recovery_dir = data_dir.join("ee").join("recovery");
+    let name = original
+        .to_string_lossy()
+        .replace('/', "%2F")
+        .replace('\\', "%5C");
+    Some(recovery_dir.join(name))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

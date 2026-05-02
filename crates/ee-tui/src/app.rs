@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Position, Rect};
@@ -9,6 +10,7 @@ use serde_json::json;
 use crate::buffer::BufferManager;
 use crate::keymap::{Action, BindingKey, bindings};
 use crate::picker::PickerState;
+use crate::quickfix::{QfEntry, QfList};
 use crate::registers::{BlockInsert, LastChange, RegisterName, RegisterStore};
 use crate::window::{SplitDir, TabManager};
 use crate::text::{
@@ -186,13 +188,46 @@ pub(crate) struct App {
     // ── Picker overlay ─────────────────────────────────────────────────────
     /// Active picker overlay (file picker, buffer picker, live grep).
     pub(crate) picker: Option<PickerState>,
+    // ── Quickfix list ───────────────────────────────────────────────────────
+    /// Global quickfix list, shared across windows.
+    pub(crate) quickfix: Option<QfList>,
+    /// Whether the quickfix panel is visible.
+    pub(crate) quickfix_open: bool,
+    /// Whether keyboard focus is inside the quickfix panel.
+    pub(crate) quickfix_focused: bool,
+    // ── Location list ─────────────────────────────────────────────────────────
+    /// Per-instance location list (location-list variant of quickfix).
+    pub(crate) location_list: Option<QfList>,
+    /// Whether the location-list panel is visible.
+    pub(crate) location_list_open: bool,
+    /// Whether keyboard focus is inside the location-list panel.
+    pub(crate) location_list_focused: bool,
+    // ── Crash recovery ──────────────────────────────────────────────────────────
+    /// Timestamp of the last crash-recovery write.
+    recovery_last_check: Instant,
 }
 
 impl App {
     pub(crate) fn from_path(path: Option<PathBuf>) -> io::Result<Self> {
         let config = crate::config::load_config(path.as_deref());
-        let backend = BufferManager::new(path)?;
+        let mut backend = BufferManager::new(path)?;
         let initial_buf_id = backend.active().id;
+
+        // Notify user if a crash-recovery artifact exists for this file.
+        if let Some(rp) = backend
+            .active()
+            .path
+            .as_ref()
+            .and_then(|p| crate::buffer::recovery_file_path(p))
+        {
+            if rp.exists() {
+                backend.status_message = Some(format!(
+                    "Recovery file found: {} — use :recover to restore or :recoverdel to discard",
+                    rp.display()
+                ));
+            }
+        }
+
         Ok(Self {
             config,
             backend,
@@ -224,6 +259,13 @@ impl App {
             history_idx: None,
             history_draft: String::new(),
             picker: None,
+            quickfix: None,
+            quickfix_open: false,
+            quickfix_focused: false,
+            location_list: None,
+            location_list_open: false,
+            location_list_focused: false,
+            recovery_last_check: Instant::now(),
         })
     }
 
@@ -239,6 +281,17 @@ impl App {
         // Picker overlay intercepts all keys while active.
         if self.picker.is_some() {
             self.handle_picker_event(key);
+            return;
+        }
+
+        // Quickfix panel focus intercepts all keys while focused.
+        if self.quickfix_focused {
+            self.handle_qf_focused_event(key, true);
+            return;
+        }
+        // Location-list panel focus intercepts all keys while focused.
+        if self.location_list_focused {
+            self.handle_qf_focused_event(key, false);
             return;
         }
 
@@ -540,6 +593,11 @@ impl App {
             }
             Action::CommandHistoryOlder => self.history_older(),
             Action::CommandHistoryNewer => self.history_newer(),
+            // ── Quickfix / location-list navigation ─────────────────────────────
+            Action::QfNext => self.qf_next(true),
+            Action::QfPrev => self.qf_prev(true),
+            Action::LocNext => self.qf_next(false),
+            Action::LocPrev => self.qf_prev(false),
         }
     }
 
@@ -1271,7 +1329,17 @@ impl App {
 
         let mut parts = command.split_whitespace();
         match parts.next().unwrap_or_default() {
-            "q" | "quit" | "q!" | "quit!" => self.should_quit = true,
+            "q" | "quit" => {
+                // Guard against unsaved changes.
+                if !self.backend.pristine {
+                    self.backend.status_message =
+                        Some("unsaved changes (use :w to save or :q! to force)".to_owned());
+                    self.enter_normal_mode();
+                    return;
+                }
+                self.should_quit = true;
+            }
+            "q!" | "quit!" => self.should_quit = true,
             "w" | "write" => {
                 if let Err(err) = self.backend.save() {
                     self.backend.status_message = Some(format!("save failed: {err}"));
@@ -1342,6 +1410,165 @@ impl App {
                     }
                     Err(err) => {
                         self.backend.status_message = Some(format!("open failed: {err}"));
+                    }
+                }
+            }
+            // Force-reload the current buffer from disk, discarding unsaved edits.
+            "e!" | "edit!" => {
+                let id = self.backend.active().id;
+                match self.backend.reload_buffer(id) {
+                    Ok(()) => {
+                        self.viewport = Viewport::default();
+                    }
+                    Err(err) => {
+                        self.backend.status_message = Some(format!("reload failed: {err}"));
+                    }
+                }
+            }
+            // Restore the crash-recovery artifact for the current buffer.
+            "recover" => {
+                let recovery_path = self
+                    .backend
+                    .active()
+                    .path
+                    .as_ref()
+                    .and_then(|p| crate::buffer::recovery_file_path(p));
+                match recovery_path {
+                    Some(rp) if rp.exists() => match self.backend.open_buffer(Some(rp)) {
+                        Ok(buf_id) => {
+                            let _ = self.backend.switch_to_id(buf_id);
+                            self.tabs.focused_windows_mut().set_focused_buffer(buf_id);
+                            self.viewport = Viewport::default();
+                        }
+                        Err(err) => {
+                            self.backend.status_message = Some(format!("recover failed: {err}"));
+                        }
+                    },
+                    Some(_) => {
+                        self.backend.status_message =
+                            Some("no recovery file found".to_owned());
+                    }
+                    None => {
+                        self.backend.status_message =
+                            Some("current buffer has no backing file".to_owned());
+                    }
+                }
+            }
+            // Delete the crash-recovery artifact for the current buffer.
+            "recoverdel" => {
+                let recovery_path = self
+                    .backend
+                    .active()
+                    .path
+                    .as_ref()
+                    .and_then(|p| crate::buffer::recovery_file_path(p));
+                match recovery_path {
+                    Some(rp) if rp.exists() => match std::fs::remove_file(&rp) {
+                        Ok(()) => {
+                            self.backend.status_message =
+                                Some(format!("deleted {}", rp.display()));
+                        }
+                        Err(err) => {
+                            self.backend.status_message =
+                                Some(format!("recoverdel failed: {err}"));
+                        }
+                    },
+                    _ => {
+                        self.backend.status_message =
+                            Some("no recovery file found".to_owned());
+                    }
+                }
+            }
+            // ── Quickfix list ───────────────────────────────────────────────
+            "copen" | "cope" => {
+                self.quickfix_open = true;
+                if self.quickfix.as_ref().is_some_and(|q| !q.is_empty()) {
+                    self.quickfix_focused = true;
+                }
+            }
+            "cclose" | "ccl" => {
+                self.quickfix_open = false;
+                self.quickfix_focused = false;
+            }
+            "cn" | "cnext" => self.qf_next(true),
+            "cp" | "cprev" | "cprevious" => self.qf_prev(true),
+            "cfirst" => {
+                if let Some(qf) = self.quickfix.as_mut() {
+                    let entry = qf.first_entry().cloned();
+                    if let Some(e) = entry {
+                        self.navigate_to_qf_entry(e);
+                    }
+                }
+            }
+            "clast" => {
+                if let Some(qf) = self.quickfix.as_mut() {
+                    let entry = qf.last_entry().cloned();
+                    if let Some(e) = entry {
+                        self.navigate_to_qf_entry(e);
+                    }
+                }
+            }
+            "cc" => {
+                let n = parts.next().and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
+                if let Some(qf) = self.quickfix.as_mut() {
+                    let entry = qf.select_one_based(n).cloned();
+                    if let Some(e) = entry {
+                        self.navigate_to_qf_entry(e);
+                    }
+                }
+            }
+            "clist" | "cl" => {
+                let msg = match &self.quickfix {
+                    None => "no quickfix list".to_owned(),
+                    Some(qf) if qf.is_empty() => "quickfix list is empty".to_owned(),
+                    Some(qf) => qf
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .map(|(i, e)| {
+                            let marker = if i == qf.selected { ">" } else { " " };
+                            format!("{marker}{}: {}", i + 1, e.display_label())
+                        })
+                        .collect::<Vec<_>>()
+                        .join("  "),
+                };
+                self.backend.status_message = Some(msg);
+            }
+            // ── Location list ──────────────────────────────────────────────
+            "lopen" | "lop" => {
+                self.location_list_open = true;
+                if self.location_list.as_ref().is_some_and(|l| !l.is_empty()) {
+                    self.location_list_focused = true;
+                }
+            }
+            "lclose" | "lcl" => {
+                self.location_list_open = false;
+                self.location_list_focused = false;
+            }
+            "lnext" | "ln" => self.qf_next(false),
+            "lprev" | "lp" | "lprevious" => self.qf_prev(false),
+            "lfirst" => {
+                if let Some(ll) = self.location_list.as_mut() {
+                    let entry = ll.first_entry().cloned();
+                    if let Some(e) = entry {
+                        self.navigate_to_qf_entry(e);
+                    }
+                }
+            }
+            "llast" => {
+                if let Some(ll) = self.location_list.as_mut() {
+                    let entry = ll.last_entry().cloned();
+                    if let Some(e) = entry {
+                        self.navigate_to_qf_entry(e);
+                    }
+                }
+            }
+            "ll" => {
+                let n = parts.next().and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
+                if let Some(ll) = self.location_list.as_mut() {
+                    let entry = ll.select_one_based(n).cloned();
+                    if let Some(e) = entry {
+                        self.navigate_to_qf_entry(e);
                     }
                 }
             }
@@ -1549,10 +1776,16 @@ impl App {
     fn complete_command(&mut self) {
         const COMMANDS: &[&str] = &[
             "b#", "bd", "bdelete", "bn", "bnext", "bp", "bprev", "bprevious",
-            "buffers", "Buffers", "codeaction", "codeactions", "complete",
-            "d", "def", "definition", "delete", "e", "edit",
+            "buffers", "Buffers",
+            "cc", "ccl", "cclose", "cfirst", "cl", "clast", "clist", "cn", "cnext", "cope",
+            "copen", "cp", "cprev", "cprevious",
+            "codeaction", "codeactions", "complete",
+            "d", "def", "definition", "delete", "e", "e!", "edit", "edit!",
             "files", "Files", "format", "grep", "Grep",
-            "ls", "q", "q!", "quit", "quit!", "references", "refs",
+            "lcl", "lclose", "lfirst", "llast", "ln", "lnext", "lop", "lopen",
+            "lp", "lprev", "lprevious",
+            "ls", "q", "q!", "quit", "quit!", "recover", "recoverdel",
+            "references", "refs",
             "sp", "split",
             "tabc", "tabclose", "tabe", "tabedit", "tabn", "tabnext",
             "tabnew", "tabp", "tabprev", "tabprevious", "tabs",
@@ -1628,6 +1861,192 @@ impl App {
             "gesture",
             json!({ "line": clamped as u64, "col": 0u64, "ty": "point_select" }),
         );
+    }
+
+    // ── Quickfix and location list ──────────────────────────────────────────
+
+    /// Handle key events when the quickfix or location-list panel is focused.
+    /// `is_quickfix=true` for the quickfix list, `false` for the location list.
+    fn handle_qf_focused_event(&mut self, key: KeyEvent, is_quickfix: bool) {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                if is_quickfix {
+                    self.quickfix_focused = false;
+                } else {
+                    self.location_list_focused = false;
+                }
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                if is_quickfix {
+                    if let Some(qf) = self.quickfix.as_mut() { qf.move_down(); }
+                } else if let Some(ll) = self.location_list.as_mut() {
+                    ll.move_down();
+                }
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                if is_quickfix {
+                    if let Some(qf) = self.quickfix.as_mut() { qf.move_up(); }
+                } else if let Some(ll) = self.location_list.as_mut() {
+                    ll.move_up();
+                }
+            }
+            KeyCode::Enter => {
+                let entry = if is_quickfix {
+                    self.quickfix.as_ref().and_then(|q| q.current()).cloned()
+                } else {
+                    self.location_list.as_ref().and_then(|l| l.current()).cloned()
+                };
+                if let Some(e) = entry {
+                    self.navigate_to_qf_entry(e);
+                }
+                // Return focus to the editor after navigation.
+                if is_quickfix { self.quickfix_focused = false; } else { self.location_list_focused = false; }
+            }
+            _ => {}
+        }
+    }
+
+    /// Navigate the quickfix list (is_quickfix=true) or location list forward.
+    fn qf_next(&mut self, is_quickfix: bool) {
+        let entry = if is_quickfix {
+            self.quickfix.as_mut().and_then(|q| q.next_entry()).cloned()
+        } else {
+            self.location_list.as_mut().and_then(|l| l.next_entry()).cloned()
+        };
+        if let Some(e) = entry {
+            self.navigate_to_qf_entry(e);
+        }
+    }
+
+    /// Navigate the quickfix list (is_quickfix=true) or location list backward.
+    fn qf_prev(&mut self, is_quickfix: bool) {
+        let entry = if is_quickfix {
+            self.quickfix.as_mut().and_then(|q| q.prev_entry()).cloned()
+        } else {
+            self.location_list.as_mut().and_then(|l| l.prev_entry()).cloned()
+        };
+        if let Some(e) = entry {
+            self.navigate_to_qf_entry(e);
+        }
+    }
+
+    /// Open the file for `entry` and jump to the recorded line/column.
+    fn navigate_to_qf_entry(&mut self, entry: QfEntry) {
+        let Some(path) = entry.path.clone() else {
+            self.backend.status_message = Some(format!("quickfix: line {}", entry.line + 1));
+            return;
+        };
+        // Reuse an already-open buffer if possible.
+        let existing_id = self
+            .backend
+            .all_bufs()
+            .iter()
+            .find(|b| b.path.as_ref().is_some_and(|p| *p == path))
+            .map(|b| b.id);
+        let buf_id = if let Some(id) = existing_id {
+            let _ = self.backend.switch_to_id(id);
+            id
+        } else {
+            match self.backend.open_buffer(Some(path)) {
+                Ok(id) => {
+                    let _ = self.backend.switch_to_id(id);
+                    id
+                }
+                Err(err) => {
+                    self.backend.status_message = Some(format!("quickfix: {err}"));
+                    return;
+                }
+            }
+        };
+        self.tabs.focused_windows_mut().set_focused_buffer(buf_id);
+        self.viewport = Viewport::default();
+        self.jump_to_line(entry.line);
+    }
+
+    /// Drain pending location results from the backend and populate the
+    /// quickfix list.  Called each frame from the main loop.
+    pub(crate) fn handle_pending_locations(&mut self) {
+        let locations = self.backend.drain_pending_locations();
+        for (title, targets) in locations {
+            if targets.is_empty() {
+                continue;
+            }
+            // Single same-file result: jump directly and skip opening quickfix.
+            if targets.len() == 1 {
+                let t = &targets[0];
+                let same_file = self
+                    .backend
+                    .active()
+                    .path
+                    .as_ref()
+                    .is_some_and(|p| p.to_string_lossy() == t.path);
+                if same_file {
+                    let _ = self.backend.send_edit("goto_line", json!({ "line": t.line }));
+                    continue;
+                }
+                // Different file with one result: navigate and skip panel.
+                let path = PathBuf::from(&t.path);
+                let line = t.line;
+                match self.backend.open_buffer(Some(path)) {
+                    Ok(buf_id) => {
+                        let _ = self.backend.switch_to_id(buf_id);
+                        self.tabs.focused_windows_mut().set_focused_buffer(buf_id);
+                        self.viewport = Viewport::default();
+                        self.jump_to_line(line);
+                    }
+                    Err(err) => {
+                        self.backend.status_message = Some(format!("{title}: {err}"));
+                    }
+                }
+                continue;
+            }
+            // Multiple results: populate quickfix and open the panel.
+            let entries: Vec<QfEntry> = targets
+                .iter()
+                .map(|t| QfEntry {
+                    path: Some(PathBuf::from(&t.path)),
+                    line: t.line,
+                    col: t.column,
+                    message: format!("line {}", t.line + 1),
+                })
+                .collect();
+            self.quickfix = Some(QfList::new(title, entries));
+            self.quickfix_open = true;
+            self.quickfix_focused = true;
+        }
+    }
+
+    // ── Crash recovery ──────────────────────────────────────────────────────
+
+    /// Write crash-recovery artifacts for all modified buffers with a backing
+    /// file.  Called periodically from the main loop (every ~30 s).
+    pub(crate) fn write_recovery_if_due(&mut self) {
+        const INTERVAL_SECS: u64 = 30;
+        let now = Instant::now();
+        if now.duration_since(self.recovery_last_check).as_secs() < INTERVAL_SECS {
+            return;
+        }
+        self.recovery_last_check = now;
+
+        for buf in self.backend.all_bufs() {
+            // Skip clean buffers and scratch buffers.
+            if buf.pristine || buf.path.is_none() || buf.lines.is_empty() {
+                continue;
+            }
+            let path = buf.path.as_ref().unwrap();
+            let Some(recovery_path) = crate::buffer::recovery_file_path(path) else {
+                continue;
+            };
+            if let Some(parent) = recovery_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let content: String = buf
+                .lines
+                .iter()
+                .flat_map(|l| [l.as_str(), "\n"])
+                .collect();
+            let _ = std::fs::write(&recovery_path, content);
+        }
     }
 
     // ── Picker overlay ──────────────────────────────────────────────────────
@@ -2733,4 +3152,3 @@ mod range_tests {
         assert_eq!(rest, "w");
     }
 }
-

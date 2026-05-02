@@ -503,6 +503,8 @@ fn test_buf_state() -> BufState {
         pristine: true,
         status_message: None,
         last_scroll: None,
+        mtime: None,
+        externally_modified: false,
     }
 }
 
