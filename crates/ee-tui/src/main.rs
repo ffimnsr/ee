@@ -16,6 +16,8 @@ mod app;
 mod backend;
 mod buffer;
 mod config;
+mod folds;
+mod highlight;
 mod keymap;
 mod picker;
 mod quickfix;

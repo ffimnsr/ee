@@ -1,10 +1,11 @@
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::app::{App, Mode, Viewport};
 use crate::buffer::BufState;
+use crate::config::{NumberStyle, StatuslineFormat};
 use crate::quickfix::QfList;
 use crate::text::{byte_col_to_display_col, display_col_to_byte};
 use crate::picker::PickerKind;
@@ -85,14 +86,15 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
             continue;
         };
         let vp = app.tabs.focused_windows().viewport_for_window(win_id, app.viewport);
+        let gw = gutter_width(app, buf.lines.len());
 
         let editor = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(6), Constraint::Min(1)])
+            .constraints([Constraint::Length(gw), Constraint::Min(1)])
             .split(win_rect);
 
-        render_gutter(frame, editor[0], buf, vp);
-        render_buffer(frame, editor[1], buf, vp);
+        render_gutter(frame, editor[0], buf, vp, app);
+        render_buffer(frame, editor[1], buf, vp, app);
 
         if is_focused {
             let cursor = cursor_position_for(buf, vp, app, editor[1], prompt_area);
@@ -120,6 +122,103 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
     if app.picker.is_some() {
         render_picker(frame, area, app);
     }
+}
+
+// ── Layout helpers ────────────────────────────────────────────────────────────
+
+/// Compute the gutter column width based on display settings and line count.
+fn gutter_width(app: &App, line_count: usize) -> u16 {
+    let digits = line_count.max(1).to_string().len().max(3);
+    let num_cols = digits + 1; // trailing space
+    let sign_cols: usize = if app.config.sign_column { 2 } else { 0 };
+    (num_cols + sign_cols) as u16
+}
+
+// ── Visible-whitespace substitution ──────────────────────────────────────────
+
+/// Substitute space `' '` → `'·'` and tab `'\t'` → `'→'` in rendered spans,
+/// applying a dimmed style to the replaced characters.
+fn apply_visible_whitespace(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
+    let dim = Style::default().fg(Color::Rgb(70, 80, 100));
+    let mut out: Vec<Span<'static>> = Vec::new();
+    for span in spans {
+        let style = span.style;
+        let mut current = String::new();
+        let mut current_is_ws = false;
+        for ch in span.content.chars() {
+            let is_ws = ch == ' ' || ch == '\t';
+            let disp = match ch {
+                ' ' => '·',
+                '\t' => '→',
+                c => c,
+            };
+            if is_ws != current_is_ws && !current.is_empty() {
+                let s = if current_is_ws { dim } else { style };
+                out.push(Span::styled(current.clone(), s));
+                current.clear();
+            }
+            current_is_ws = is_ws;
+            current.push(disp);
+        }
+        if !current.is_empty() {
+            let s = if current_is_ws { dim } else { style };
+            out.push(Span::styled(current, s));
+        }
+    }
+    out
+}
+
+// ── Color column injection ────────────────────────────────────────────────────
+
+/// Inject a distinct background color at display column `screen_col` within
+/// the given span list.  Characters at that column keep their foreground but
+/// get the color-column background.  When the line is shorter than `screen_col`,
+/// a trailing colored space is appended.
+fn apply_color_column(spans: Vec<Span<'static>>, screen_col: usize) -> Vec<Span<'static>> {
+    let col_bg = Color::Rgb(55, 35, 35);
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut col = 0usize;
+    let mut injected = false;
+
+    for span in spans {
+        if injected {
+            out.push(span);
+            continue;
+        }
+        let style = span.style;
+        let content: Vec<char> = span.content.chars().collect();
+        let span_cols = content.len();
+        if col + span_cols <= screen_col {
+            // Color column is beyond this span.
+            col += span_cols;
+            out.push(span);
+        } else {
+            // Color column falls within this span.
+            let offset = screen_col - col;
+            let before: String = content[..offset].iter().collect();
+            let at_ch: String = content[offset..offset + 1].iter().collect();
+            let after: String = content[offset + 1..].iter().collect();
+            if !before.is_empty() {
+                out.push(Span::styled(before, style));
+            }
+            out.push(Span::styled(at_ch, style.bg(col_bg)));
+            if !after.is_empty() {
+                out.push(Span::styled(after, style));
+            }
+            col += span_cols;
+            injected = true;
+        }
+    }
+
+    // If the line was shorter than the color column, append a trailing marker.
+    if !injected {
+        let pad = screen_col.saturating_sub(col);
+        if pad > 0 {
+            out.push(Span::raw(" ".repeat(pad)));
+        }
+        out.push(Span::styled(" ", Style::default().bg(col_bg)));
+    }
+    out
 }
 
 fn render_tab_bar(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
@@ -156,24 +255,78 @@ fn render_tab_bar(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     );
 }
 
-fn render_gutter(frame: &mut ratatui::Frame<'_>, area: Rect, buf: &BufState, vp: Viewport) {
+fn render_gutter(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    buf: &BufState,
+    vp: Viewport,
+    app: &App,
+) {
     let height = area.height as usize;
     let line_count = buf.lines.len().max(1);
+    let cursor_line = buf.cursor_line;
     let top = vp.top_line;
-    let lines = (0..height)
-        .map(|i| {
-            let line_idx = top + i;
-            let number = if line_idx < line_count { line_idx + 1 } else { 0 };
-            if number == 0 {
-                Line::from(" ")
+    let sign_col = app.config.sign_column;
+    let num_digits = line_count.to_string().len().max(3);
+    let cursor_line_bg = Color::Rgb(35, 38, 50);
+
+    let mut lines: Vec<Line> = Vec::with_capacity(height);
+    let mut li = top;
+    for _ in 0..height {
+        if li >= line_count {
+            lines.push(Line::from(" "));
+            continue;
+        }
+        let is_cursor = li == cursor_line;
+        let bg = if is_cursor && app.config.cursor_line { cursor_line_bg } else { Color::Rgb(30, 32, 39) };
+
+        // Sign column: show fold markers when applicable.
+        let sign_span = if sign_col {
+            let marker = if app.folds.fold_at(buf.id, li).is_some() {
+                "▸ "
             } else {
-                Line::from(Span::styled(
-                    format!("{number:>4} "),
-                    Style::default().fg(Color::DarkGray),
-                ))
+                "  "
+            };
+            Span::styled(marker, Style::default().fg(Color::Rgb(100, 130, 160)).bg(bg))
+        } else {
+            Span::raw("")
+        };
+
+        let num_text = match app.config.number_style {
+            NumberStyle::Absolute => format!("{:>width$} ", li + 1, width = num_digits),
+            NumberStyle::Relative => {
+                let dist = li.abs_diff(cursor_line);
+                if dist == 0 {
+                    format!("{:>width$} ", li + 1, width = num_digits)
+                } else {
+                    format!("{:>width$} ", dist, width = num_digits)
+                }
             }
-        })
-        .collect::<Vec<_>>();
+            NumberStyle::RelativeAbsolute => {
+                let dist = li.abs_diff(cursor_line);
+                if is_cursor {
+                    format!("{:>width$} ", li + 1, width = num_digits)
+                } else {
+                    format!("{:>width$} ", dist, width = num_digits)
+                }
+            }
+        };
+        let num_fg = if is_cursor { Color::Rgb(205, 214, 244) } else { Color::DarkGray };
+        let num_span = Span::styled(num_text, Style::default().fg(num_fg).bg(bg));
+
+        // Fold-aware: advance past fold body.
+        if let Some((_, end)) = app.folds.fold_at(buf.id, li) {
+            li = end + 1;
+        } else {
+            li += 1;
+        }
+
+        if sign_col {
+            lines.push(Line::from(vec![sign_span, num_span]));
+        } else {
+            lines.push(Line::from(num_span));
+        }
+    }
 
     frame.render_widget(
         Paragraph::new(lines).style(Style::default().bg(Color::Rgb(30, 32, 39))),
@@ -181,34 +334,133 @@ fn render_gutter(frame: &mut ratatui::Frame<'_>, area: Rect, buf: &BufState, vp:
     );
 }
 
-fn render_buffer(frame: &mut ratatui::Frame<'_>, area: Rect, buf: &BufState, vp: Viewport) {
+fn render_buffer(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    buf: &BufState,
+    vp: Viewport,
+    app: &App,
+) {
     let height = area.height as usize;
     let top = vp.top_line;
     let left = vp.left_col;
+    let cursor_line = buf.cursor_line;
+    let cursor_line_bg = Color::Rgb(35, 38, 50);
+    let buf_bg = Color::Rgb(22, 24, 31);
 
-    let text = if buf.lines.is_empty() && top == 0 {
-        vec![Line::from(Span::styled(
+    if buf.lines.is_empty() && top == 0 {
+        let text = vec![Line::from(Span::styled(
             "empty buffer",
             Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-        ))]
-    } else {
-        buf.lines
-            .iter()
-            .skip(top)
-            .take(height)
-            .map(|line| {
-                let byte_start = display_col_to_byte(line, left);
-                Line::from(&line[byte_start..])
-            })
-            .collect::<Vec<_>>()
-    };
+        ))];
+        frame.render_widget(
+            Paragraph::new(text)
+                .block(Block::default().borders(Borders::NONE))
+                .style(Style::default().fg(Color::Rgb(213, 216, 224)).bg(buf_bg)),
+            area,
+        );
+        return;
+    }
 
-    frame.render_widget(
-        Paragraph::new(text)
-            .block(Block::default().borders(Borders::NONE))
-            .style(Style::default().fg(Color::Rgb(213, 216, 224)).bg(Color::Rgb(22, 24, 31))),
-        area,
-    );
+    let extension = buf
+        .path
+        .as_ref()
+        .and_then(|p| p.extension())
+        .and_then(|e| e.to_str());
+
+    // Collect visible logical lines (fold-aware).
+    let mut visible: Vec<usize> = Vec::with_capacity(height);
+    let mut li = top;
+    while visible.len() < height && li < buf.lines.len() {
+        visible.push(li);
+        if let Some((_, end)) = app.folds.fold_at(buf.id, li) {
+            li = end + 1;
+        } else {
+            li += 1;
+        }
+    }
+
+    let hl_span = visible.last().copied().unwrap_or(top).saturating_sub(top) + 1;
+    let hl_lines = app.highlighter.highlight_visible(&buf.lines, extension, top, hl_span);
+
+    let text: Vec<Line> = visible
+        .iter()
+        .map(|&log_idx| {
+            let is_cursor = log_idx == cursor_line;
+            let is_fold_header = app.folds.fold_at(buf.id, log_idx).is_some();
+            let line = buf.lines.get(log_idx).map(|s| s.as_str()).unwrap_or("");
+            let bg = if is_cursor && app.config.cursor_line { cursor_line_bg } else { buf_bg };
+
+            let mut spans: Vec<Span<'static>> = if is_fold_header {
+                // Show fold marker line (abbreviated first line + fold indicator).
+                let preview: String = line.chars().take(40).collect();
+                vec![Span::styled(
+                    format!("{preview}  ··· (folded)", ),
+                    Style::default()
+                        .fg(Color::Rgb(100, 130, 160))
+                        .bg(bg)
+                        .add_modifier(Modifier::ITALIC),
+                )]
+            } else {
+                let byte_start = display_col_to_byte(line, left);
+                let raw = hl_lines.get(log_idx.saturating_sub(top));
+                if let Some(spans_ref) = raw {
+                    if spans_ref.is_empty() {
+                        vec![Span::styled(
+                            line[byte_start..].to_owned(),
+                            Style::default().bg(bg),
+                        )]
+                    } else {
+                        crate::highlight::Highlighter::spans_with_offset(spans_ref, byte_start)
+                            .into_iter()
+                            .map(|s| {
+                                let style = if is_cursor && app.config.cursor_line {
+                                    s.style.bg(bg)
+                                } else {
+                                    s.style
+                                };
+                                Span::styled(s.content.into_owned(), style)
+                            })
+                            .collect()
+                    }
+                } else {
+                    vec![Span::styled(
+                        line[byte_start..].to_owned(),
+                        Style::default().bg(bg),
+                    )]
+                }
+            };
+
+            // Apply visible-whitespace substitution when enabled.
+            if app.config.show_visible_whitespace && !is_fold_header {
+                spans = apply_visible_whitespace(spans);
+            }
+
+            // Apply color column highlight.
+            if let Some(cc) = app.config.color_column {
+                if cc >= left {
+                    let screen_col = cc - left;
+                    spans = apply_color_column(spans, screen_col);
+                }
+            }
+
+            let mut l = Line::from(spans);
+            if is_cursor && app.config.cursor_line {
+                l = l.style(Style::default().bg(bg));
+            }
+            l
+        })
+        .collect();
+
+    let mut widget = Paragraph::new(text)
+        .block(Block::default().borders(Borders::NONE))
+        .style(Style::default().fg(Color::Rgb(213, 216, 224)).bg(buf_bg));
+
+    if app.config.wrap_lines {
+        widget = widget.wrap(Wrap { trim: false });
+    }
+
+    frame.render_widget(widget, area);
 }
 
 fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
@@ -235,22 +487,48 @@ fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             Style::default().fg(Color::Rgb(250, 179, 135)).bg(Color::Rgb(49, 54, 68)),
         )
     };
-    let buf_count = app.backend.buf_count();
-    let buf_indicator = if buf_count > 1 {
-        Span::styled(
-            format!("  [{}/{}]", app.backend.current_idx() + 1, buf_count),
-            Style::default().fg(Color::Rgb(166, 173, 200)).bg(Color::Rgb(49, 54, 68)),
-        )
-    } else {
-        Span::raw("")
-    };
     let position = Span::styled(
         format!("  Ln {}, Col {} ", app.backend.cursor_line + 1, app.backend.cursor_col + 1),
         Style::default().fg(Color::Rgb(186, 194, 222)).bg(Color::Rgb(49, 54, 68)),
     );
 
+    let spans = match app.config.statusline_format {
+        StatuslineFormat::Minimal => {
+            vec![mode, file, modified, position]
+        }
+        StatuslineFormat::Default => {
+            let buf_count = app.backend.buf_count();
+            let buf_indicator = if buf_count > 1 {
+                Span::styled(
+                    format!("  [{}/{}]", app.backend.current_idx() + 1, buf_count),
+                    Style::default()
+                        .fg(Color::Rgb(166, 173, 200))
+                        .bg(Color::Rgb(49, 54, 68)),
+                )
+            } else {
+                Span::raw("")
+            };
+            // Show wrap/list/number indicators on the right.
+            let flags = {
+                let mut f = String::new();
+                if app.config.wrap_lines { f.push_str(" wrap"); }
+                if app.config.show_visible_whitespace { f.push_str(" list"); }
+                f
+            };
+            let flag_span = if flags.is_empty() {
+                Span::raw("")
+            } else {
+                Span::styled(
+                    format!(" │{}", flags),
+                    Style::default().fg(Color::Rgb(100, 120, 150)).bg(Color::Rgb(49, 54, 68)),
+                )
+            };
+            vec![mode, file, modified, buf_indicator, flag_span, position]
+        }
+    };
+
     frame.render_widget(
-        Paragraph::new(Line::from(vec![mode, file, modified, buf_indicator, position]))
+        Paragraph::new(Line::from(spans))
             .style(Style::default().bg(Color::Rgb(49, 54, 68))),
         area,
     );

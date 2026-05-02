@@ -43,6 +43,7 @@ pub mod event_context;
 pub mod file;
 pub mod find;
 pub mod index_set;
+pub mod lang_features;
 pub mod layers;
 pub mod line_cache_shadow;
 pub mod line_ending;
@@ -56,6 +57,7 @@ pub mod styles;
 pub mod syntax;
 pub mod tabs;
 pub mod tracing_support;
+pub mod tree_sitter_support;
 pub mod view;
 #[cfg(feature = "notify")]
 pub mod watcher;

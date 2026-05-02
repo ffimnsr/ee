@@ -136,13 +136,13 @@
 
 ### 4. Display, discoverability, and editing ergonomics
 
-- [ ] Add syntax highlighting integration for `ee-tui`, starting with existing xi syntax support, so code is readable before more advanced IDE features land.
-- [ ] Replace removed `crates/experimental/xi-lang` with direct frontend syntax coloring. Phase 1: use in-tree `syntect` parsing and theming in `crates/ee-tui` for visible highlighting only, no plugin process.
-- [ ] Phase 2: move language-sensitive edit features such as reindent and toggle-comment off hard-coded plugin dispatch in `crates/xi-core-lib/src/event_context.rs` onto typed capabilities backed by `syntect` or tree-sitter queries.
-- [ ] Phase 3: evaluate tree-sitter for incremental parsing, folds, and indentation once viewport rendering and diagnostics transport are stable, instead of reviving xi-lang-style custom parser plugins.
-- [ ] Support relative line numbers, sign column, cursor line, color column, visible whitespace, and configurable statusline content so screen layout matches established terminal-editor workflows.
-- [ ] Implement line wrapping, horizontal scrolling, break indentation, and configurable scroll offsets so navigation remains stable in long and wrapped lines.
-- [ ] Add fold state management and fold commands in `ee-tui`, starting with manual folds and then syntax- or indent-driven folds once parser support is available.
+- [x] Add syntax highlighting integration for `ee-tui`, starting with existing xi syntax support, so code is readable before more advanced IDE features land.
+- [x] Replace removed `crates/experimental/xi-lang` with direct frontend syntax coloring. Phase 1: use in-tree `syntect` parsing and theming in `crates/ee-tui` for visible highlighting only, no plugin process.
+- [x] Phase 2: move language-sensitive edit features such as reindent and toggle-comment off hard-coded plugin dispatch in `crates/xi-core-lib/src/event_context.rs` onto typed capabilities backed by `syntect` or tree-sitter queries.
+- [x] Phase 3: evaluate tree-sitter for incremental parsing, folds, and indentation once viewport rendering and diagnostics transport are stable, instead of reviving xi-lang-style custom parser plugins.
+- [x] Support relative line numbers, sign column, cursor line, color column, visible whitespace, and configurable statusline content so screen layout matches established terminal-editor workflows.
+- [x] Implement line wrapping, horizontal scrolling, break indentation, and configurable scroll offsets so navigation remains stable in long and wrapped lines.
+- [x] Add fold state management and fold commands in `ee-tui`, starting with manual folds and then syntax- or indent-driven folds once parser support is available.
 - [ ] Add search UI with incremental preview, highlighted matches, smart-case behavior, and repeat navigation so text discovery feels immediate and accurate.
 - [ ] Implement substitution UX for `:s` with range support, flags, and optional confirmation so batch edits are safe and inspectable.
 - [ ] Add mouse support, bracketed paste handling, and OSC 52 clipboard integration so terminal interaction works correctly both locally and over SSH.

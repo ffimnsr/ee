@@ -255,7 +255,8 @@ fn viewport_scrolls_down_when_cursor_leaves_view() {
     let mut app = App::from_path(None).unwrap();
     app.backend.cursor_line = 25;
     app.scroll_into_view(20);
-    assert_eq!(app.viewport.top_line, 6);
+    // scroll_offset=5: top = cursor(25) + off(5) + 1 - height(20) = 11
+    assert_eq!(app.viewport.top_line, 11);
 }
 
 #[test]
@@ -264,7 +265,8 @@ fn viewport_scrolls_up_when_cursor_above_top() {
     app.viewport.top_line = 10;
     app.backend.cursor_line = 5;
     app.scroll_into_view(20);
-    assert_eq!(app.viewport.top_line, 5);
+    // scroll_offset=5: top = cursor(5).saturating_sub(off(5)) = 0
+    assert_eq!(app.viewport.top_line, 0);
 }
 
 #[test]

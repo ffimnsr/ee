@@ -72,6 +72,12 @@ pub(crate) enum Action {
     // Location list navigation
     LocNext,
     LocPrev,
+    // Fold commands (z-prefix)
+    FoldToggle,
+    FoldOpen,
+    FoldClose,
+    FoldOpenAll,
+    FoldCloseAll,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -295,6 +301,14 @@ fn build_bindings() -> HashMap<BindingKey, Action> {
     bind!(Search, KeyCode::Esc, none, None, EnterMode(Normal));
     bind!(Search, KeyCode::Enter, none, None, ExecuteSearch);
     bind!(Search, KeyCode::Backspace, none, None, SearchBackspace);
+
+    // z-prefix: fold commands
+    bind!(Normal, KeyCode::Char('z'), none, None, SetPrefix('z'));
+    bind!(Normal, KeyCode::Char('a'), none, Some('z'), FoldToggle);
+    bind!(Normal, KeyCode::Char('o'), none, Some('z'), FoldOpen);
+    bind!(Normal, KeyCode::Char('c'), none, Some('z'), FoldClose);
+    bind!(Normal, KeyCode::Char('R'), none, Some('z'), FoldOpenAll);
+    bind!(Normal, KeyCode::Char('M'), none, Some('z'), FoldCloseAll);
 
     map
 }

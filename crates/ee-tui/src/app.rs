@@ -8,6 +8,7 @@ use ratatui::layout::{Position, Rect};
 use serde_json::json;
 
 use crate::buffer::BufferManager;
+use crate::folds::{FoldStore, indent_fold_extent};
 use crate::keymap::{Action, BindingKey, bindings};
 use crate::picker::PickerState;
 use crate::quickfix::{QfEntry, QfList};
@@ -205,6 +206,12 @@ pub(crate) struct App {
     // ── Crash recovery ──────────────────────────────────────────────────────────
     /// Timestamp of the last crash-recovery write.
     recovery_last_check: Instant,
+    // ── Syntax highlighting ─────────────────────────────────────────────────────
+    /// Syntect-backed in-process syntax highlighter (Phase 1).
+    pub(crate) highlighter: crate::highlight::Highlighter,
+    // ── Fold state ───────────────────────────────────────────────────────────────
+    /// Manual fold state keyed by buffer ID.
+    pub(crate) folds: FoldStore,
 }
 
 impl App {
@@ -266,6 +273,8 @@ impl App {
             location_list_open: false,
             location_list_focused: false,
             recovery_last_check: Instant::now(),
+            highlighter: crate::highlight::Highlighter::new(),
+            folds: FoldStore::new(),
         })
     }
 
@@ -598,6 +607,12 @@ impl App {
             Action::QfPrev => self.qf_prev(true),
             Action::LocNext => self.qf_next(false),
             Action::LocPrev => self.qf_prev(false),
+            // ── Fold commands ────────────────────────────────────────────────────
+            Action::FoldToggle => self.fold_toggle(),
+            Action::FoldOpen => self.fold_open(),
+            Action::FoldClose => self.fold_close(),
+            Action::FoldOpenAll => self.fold_open_all(),
+            Action::FoldCloseAll => self.fold_close_all(),
         }
     }
 
@@ -1729,12 +1744,78 @@ impl App {
                 self.enter_normal_mode();
                 return;
             }
+            // ── :set option[=value] ──────────────────────────────────────────
+            "set" => {
+                let opt = parts.next().unwrap_or_default();
+                self.apply_set_option(opt);
+            }
             other if !other.is_empty() => {
                 self.backend.status_message = Some(format!("unknown command: {other}"));
             }
             _ => {}
         }
         self.enter_normal_mode();
+    }
+
+    /// Parse and apply a single `:set` option string (e.g. `"wrap"`, `"nowrap"`,
+    /// `"scrolloff=5"`, `"colorcolumn=80"`, `"colorcolumn="`).
+    fn apply_set_option(&mut self, opt: &str) {
+        use crate::config::{NumberStyle, StatuslineFormat};
+
+        // Split on `=` for options that take a value.
+        if let Some((key, val)) = opt.split_once('=') {
+            match key {
+                "scrolloff" | "so" => {
+                    if let Ok(n) = val.parse::<usize>() {
+                        self.config.scroll_offset = n;
+                    }
+                }
+                "colorcolumn" | "cc" => {
+                    self.config.color_column =
+                        val.parse::<usize>().ok().filter(|&n| n > 0);
+                }
+                "statusline" | "stl" => match val {
+                    "default" => self.config.statusline_format = StatuslineFormat::Default,
+                    "minimal" => self.config.statusline_format = StatuslineFormat::Minimal,
+                    _ => {}
+                },
+                "number" | "nu" | "nonu" | "nonumber" => {} // handled below
+                _ => {
+                    self.backend.status_message =
+                        Some(format!("unknown option: {key}"));
+                    return;
+                }
+            }
+        } else {
+            // Boolean / enum options (no `=`).
+            match opt {
+                "number" | "nu" => self.config.number_style = NumberStyle::Absolute,
+                "nonumber" | "nonu" => self.config.number_style = NumberStyle::Absolute,
+                "relativenumber" | "rnu" => {
+                    self.config.number_style = NumberStyle::Relative;
+                }
+                "norelativenumber" | "nornu" => {
+                    self.config.number_style = NumberStyle::Absolute;
+                }
+                "relativenumberabsolute" | "rnua" => {
+                    self.config.number_style = NumberStyle::RelativeAbsolute;
+                }
+                "wrap" => self.config.wrap_lines = true,
+                "nowrap" => self.config.wrap_lines = false,
+                "cursorline" | "cul" => self.config.cursor_line = true,
+                "nocursorline" | "nocul" => self.config.cursor_line = false,
+                "list" => self.config.show_visible_whitespace = true,
+                "nolist" => self.config.show_visible_whitespace = false,
+                "signcolumn" | "smc" => self.config.sign_column = true,
+                "nosigncolumn" | "nosmc" => self.config.sign_column = false,
+                other => {
+                    self.backend.status_message =
+                        Some(format!("unknown option: {other}"));
+                    return;
+                }
+            }
+        }
+        self.backend.status_message = Some(format!("set: {opt}"));
     }
 
     // ── Ex command history ──────────────────────────────────────────────────
@@ -2016,6 +2097,44 @@ impl App {
         }
     }
 
+    // ── Fold commands ─────────────────────────────────────────────────────────
+
+    fn fold_extent_at_cursor(&self) -> Option<(usize, usize)> {
+        indent_fold_extent(&self.backend.lines, self.backend.cursor_line)
+    }
+
+    fn fold_toggle(&mut self) {
+        let line = self.backend.cursor_line;
+        let extent = self.fold_extent_at_cursor().unwrap_or((line, line));
+        let buf_id = self.backend.active().id;
+        self.folds.toggle(buf_id, line, extent);
+    }
+
+    fn fold_open(&mut self) {
+        let line = self.backend.cursor_line;
+        let buf_id = self.backend.active().id;
+        self.folds.open(buf_id, line);
+    }
+
+    fn fold_close(&mut self) {
+        let line = self.backend.cursor_line;
+        let buf_id = self.backend.active().id;
+        if let Some(extent) = self.fold_extent_at_cursor() {
+            self.folds.close(buf_id, line, extent);
+        }
+    }
+
+    fn fold_open_all(&mut self) {
+        let buf_id = self.backend.active().id;
+        self.folds.open_all(buf_id);
+    }
+
+    fn fold_close_all(&mut self) {
+        let buf_id = self.backend.active().id;
+        let lines: Vec<String> = self.backend.lines.clone();
+        self.folds.close_all(buf_id, &lines);
+    }
+
     // ── Crash recovery ──────────────────────────────────────────────────────
 
     /// Write crash-recovery artifacts for all modified buffers with a backing
@@ -2124,10 +2243,13 @@ impl App {
             return;
         }
         let cursor_line = self.backend.cursor_line;
-        if cursor_line < self.viewport.top_line {
-            self.viewport.top_line = cursor_line;
-        } else if cursor_line >= self.viewport.top_line + editor_height {
-            self.viewport.top_line = cursor_line + 1 - editor_height;
+        // Clamp scroll_offset to half the editor height to avoid pathological cases.
+        let off = self.config.scroll_offset.min(editor_height / 2);
+
+        if cursor_line < self.viewport.top_line + off {
+            self.viewport.top_line = cursor_line.saturating_sub(off);
+        } else if cursor_line + off + 1 > self.viewport.top_line + editor_height {
+            self.viewport.top_line = cursor_line + off + 1 - editor_height;
         }
         let line = self.backend.lines.get(cursor_line).map(|s| s.as_str()).unwrap_or("");
         self.viewport.target_col = byte_col_to_display_col(line, self.backend.cursor_col);
