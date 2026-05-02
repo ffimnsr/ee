@@ -42,11 +42,14 @@ serde = "1.0.228"
 serde_json = "1.0.149"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.20"
-syntect = { version = "5.3.0", default-features = false, features = ["default-themes", "parsing", "dump-load", "dump-create", "plist-load", "yaml-load", "regex-fancy"] }
+syntect = { version = "5.3.0", default-features = false, features = ["default-themes", "default-syntaxes", "parsing", "dump-load", "dump-create", "plist-load", "yaml-load", "regex-fancy"] }
 tempfile = "3"
 tokio = { version = "1.52.1", features = ["macros", "rt", "sync", "time"] }
 tokio-util = "0.7.18"
 toml = "0.8"
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
 unicode-segmentation = "1.13.2"
 url = "2.5.8"
 

@@ -17,6 +17,28 @@ use serde::Deserialize;
 
 // ── Public settings ───────────────────────────────────────────────────────────
 
+/// Line-number display style in the gutter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum NumberStyle {
+    /// Always show the absolute 1-based line number.
+    #[default]
+    Absolute,
+    /// Show distance from cursor; cursor line shows `0`.
+    Relative,
+    /// Show absolute number on cursor line, relative distance on all others.
+    RelativeAbsolute,
+}
+
+/// Statusline format variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum StatuslineFormat {
+    /// Full statusline: mode, file, modified flag, buffer indicator, position.
+    #[default]
+    Default,
+    /// Minimal: mode + filename + position only (no buffer counter).
+    Minimal,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum IndentStyle {
     #[default]
@@ -45,6 +67,23 @@ pub(crate) struct EditorSettings {
     pub charset: String,
     pub trim_trailing_whitespace: bool,
     pub insert_final_newline: bool,
+    // ── Display options ───────────────────────────────────────────────────
+    /// How line numbers are displayed in the gutter.
+    pub number_style: NumberStyle,
+    /// Highlight the column at this position (e.g. 80) when `Some`.  Disabled when `None`.
+    pub color_column: Option<usize>,
+    /// Show whitespace characters (spaces as `·`, tabs as `→`) in the buffer.
+    pub show_visible_whitespace: bool,
+    /// Minimum number of screen rows to keep between cursor and the top/bottom edge.
+    pub scroll_offset: usize,
+    /// Soft-wrap long lines instead of truncating at the viewport right edge.
+    pub wrap_lines: bool,
+    /// Show a sign column to the left of line numbers (used for fold and diagnostic markers).
+    pub sign_column: bool,
+    /// Highlight the row containing the cursor with a distinct background.
+    pub cursor_line: bool,
+    /// Statusline layout variant.
+    pub statusline_format: StatuslineFormat,
 }
 
 impl Default for EditorSettings {
@@ -57,6 +96,14 @@ impl Default for EditorSettings {
             charset: "utf-8".to_owned(),
             trim_trailing_whitespace: false,
             insert_final_newline: false,
+            number_style: NumberStyle::Absolute,
+            color_column: None,
+            show_visible_whitespace: false,
+            scroll_offset: 5,
+            wrap_lines: false,
+            sign_column: true,
+            cursor_line: false,
+            statusline_format: StatuslineFormat::Default,
         }
     }
 }
@@ -79,6 +126,19 @@ pub(crate) struct EeToml {
     pub charset: Option<String>,
     pub trim_trailing_whitespace: Option<bool>,
     pub insert_final_newline: Option<bool>,
+    // ── Display options ───────────────────────────────────────────────────
+    /// `"absolute"`, `"relative"`, or `"relative_absolute"`.
+    pub number_style: Option<String>,
+    /// Column position for the color column guide (e.g. `80`).  Omit to disable.
+    pub color_column: Option<usize>,
+    pub show_visible_whitespace: Option<bool>,
+    /// Minimum rows between cursor and screen top/bottom edge.
+    pub scroll_offset: Option<usize>,
+    pub wrap_lines: Option<bool>,
+    pub sign_column: Option<bool>,
+    pub cursor_line: Option<bool>,
+    /// `"default"` or `"minimal"`.
+    pub statusline_format: Option<String>,
 }
 
 // ── Merging ───────────────────────────────────────────────────────────────────
@@ -115,6 +175,41 @@ impl EditorSettings {
         }
         if let Some(v) = patch.insert_final_newline {
             self.insert_final_newline = v;
+        }
+        if let Some(s) = &patch.number_style {
+            match s.to_lowercase().as_str() {
+                "absolute" => self.number_style = NumberStyle::Absolute,
+                "relative" => self.number_style = NumberStyle::Relative,
+                "relative_absolute" | "relativenumber" => {
+                    self.number_style = NumberStyle::RelativeAbsolute;
+                }
+                _ => {}
+            }
+        }
+        if let Some(v) = patch.color_column {
+            self.color_column = if v == 0 { None } else { Some(v) };
+        }
+        if let Some(v) = patch.show_visible_whitespace {
+            self.show_visible_whitespace = v;
+        }
+        if let Some(v) = patch.scroll_offset {
+            self.scroll_offset = v;
+        }
+        if let Some(v) = patch.wrap_lines {
+            self.wrap_lines = v;
+        }
+        if let Some(v) = patch.sign_column {
+            self.sign_column = v;
+        }
+        if let Some(v) = patch.cursor_line {
+            self.cursor_line = v;
+        }
+        if let Some(s) = &patch.statusline_format {
+            match s.to_lowercase().as_str() {
+                "default" => self.statusline_format = StatuslineFormat::Default,
+                "minimal" => self.statusline_format = StatuslineFormat::Minimal,
+                _ => {}
+            }
         }
     }
 }

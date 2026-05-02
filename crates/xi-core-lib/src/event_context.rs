@@ -39,6 +39,7 @@ use crate::edit_types::{EventDomain, SpecialEvent};
 use crate::editor::{EditType, Editor};
 use crate::file::FileInfo;
 use crate::line_offset::LineOffset;
+use crate::lang_features;
 use crate::plugins::{Plugin, PluginCapability};
 use crate::recorder::Recorder;
 use crate::selection::InsertDrift;
@@ -819,12 +820,38 @@ impl<'a> EventContext<'a> {
 
     fn do_reindent(&mut self) {
         let line_ranges = self.selected_line_ranges();
-        self.dispatch_command_to_plugins("reindent", &json!(line_ranges));
+        let lang_name = self.language.as_ref();
+        let indent_str = if self.config.translate_tabs_to_spaces {
+            " ".repeat(self.config.tab_size)
+        } else {
+            "\t".to_string()
+        };
+        let maybe_delta = {
+            let ed = self.editor.borrow();
+            lang_features::reindent(ed.get_buffer(), &line_ranges, lang_name, &indent_str)
+        };
+        if let Some(delta) = maybe_delta {
+            self.editor.borrow_mut().apply_direct_delta(EditType::Other, delta);
+        } else {
+            // Fall back to plugin dispatch for unsupported or unknown languages.
+            self.dispatch_command_to_plugins("reindent", &json!(line_ranges));
+        }
     }
 
     fn do_debug_toggle_comment(&mut self) {
         let line_ranges = self.selected_line_ranges();
-        self.dispatch_command_to_plugins("toggle_comment", &json!(line_ranges));
+        let lang_name = self.language.as_ref();
+        let maybe_delta = {
+            let ed = self.editor.borrow();
+            lang_features::toggle_comment(ed.get_buffer(), &line_ranges, lang_name)
+        };
+        if let Some(delta) = maybe_delta {
+            self.editor.borrow_mut().apply_direct_delta(EditType::Other, delta);
+        } else {
+            // Fall back to plugin dispatch for block-only languages (HTML, CSS, etc.)
+            // or when the language has no known comment token.
+            self.dispatch_command_to_plugins("toggle_comment", &json!(line_ranges));
+        }
     }
 
     fn do_request_hover(&mut self, request_id: usize, position: Option<ClientPosition>) {

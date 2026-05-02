@@ -25,6 +25,9 @@ xi-rope = { workspace = true, features = ["serde"] }
 xi-unicode.workspace = true
 xi-rpc.workspace = true
 syntect.workspace = true
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-python.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

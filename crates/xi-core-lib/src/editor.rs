@@ -161,6 +161,15 @@ impl Editor {
         self.force_undo_group = force_undo_group;
     }
 
+    /// Applies `delta` directly with the given `edit_type`.
+    ///
+    /// Use this when core (not a plugin) computes a delta for language-aware
+    /// features such as toggle-comment or reindent.
+    pub(crate) fn apply_direct_delta(&mut self, edit_type: EditType, delta: RopeDelta) {
+        self.this_edit_type = edit_type;
+        self.add_delta(delta);
+    }
+
     /// Sets this Editor's contents to `text`, preserving undo state and cursor
     /// position when possible.
     pub fn reload(&mut self, text: Rope) {
