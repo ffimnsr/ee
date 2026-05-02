@@ -22,7 +22,9 @@ use xi_rpc::{self, RpcPeer};
 
 use crate::config::Table;
 use crate::plugins::Command;
-use crate::plugins::rpc::{ClientPluginInfo, CompletionSuggestion, NavigationTarget};
+use crate::plugins::rpc::{
+    ClientPluginInfo, CodeActionDescriptor, CompletionSuggestion, Diagnostic, NavigationTarget,
+};
 use crate::styles::ThemeSettings;
 use crate::syntax::LanguageId;
 use crate::tabs::ViewId;
@@ -218,20 +220,20 @@ impl Client {
         );
     }
 
-    pub fn show_hover(&self, view_id: ViewId, request_id: usize, result: String) {
+    pub fn hover(&self, view_id: ViewId, request_id: usize, content: String) {
         self.0.send_rpc_notification(
-            "show_hover",
+            "hover",
             &json!({
                 "view_id": view_id,
                 "request_id": request_id,
-                "result": result,
+                "content": content,
             }),
         )
     }
 
-    pub fn show_completions(&self, view_id: ViewId, items: &[CompletionSuggestion]) {
+    pub fn completions(&self, view_id: ViewId, items: &[CompletionSuggestion]) {
         self.0.send_rpc_notification(
-            "show_completions",
+            "completions",
             &json!({
                 "view_id": view_id,
                 "items": items,
@@ -239,9 +241,29 @@ impl Client {
         )
     }
 
-    pub fn show_locations(&self, view_id: ViewId, title: &str, locations: &[NavigationTarget]) {
+    pub fn code_actions(&self, view_id: ViewId, actions: &[CodeActionDescriptor]) {
         self.0.send_rpc_notification(
-            "show_locations",
+            "code_actions",
+            &json!({
+                "view_id": view_id,
+                "actions": actions,
+            }),
+        )
+    }
+
+    pub fn diagnostics(&self, view_id: ViewId, diagnostics: &[Diagnostic]) {
+        self.0.send_rpc_notification(
+            "diagnostics",
+            &json!({
+                "view_id": view_id,
+                "diagnostics": diagnostics,
+            }),
+        )
+    }
+
+    pub fn locations(&self, view_id: ViewId, title: &str, locations: &[NavigationTarget]) {
+        self.0.send_rpc_notification(
+            "locations",
             &json!({
                 "view_id": view_id,
                 "title": title,

@@ -88,8 +88,7 @@ impl Cache for ChunkCache {
         }
 
         // We now know that the start of this line is contained in self.contents.
-        let cache_offset =
-            self.cached_offset_of_line(line_num).ok_or(Error::BadRequest)?;
+        let cache_offset = self.cached_offset_of_line(line_num).ok_or(Error::BadRequest)?;
         if cache_offset < self.offset {
             return Err(Error::BadRequest);
         }

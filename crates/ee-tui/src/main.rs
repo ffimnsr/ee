@@ -4,7 +4,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use crossterm::event::{self, Event};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -39,7 +42,12 @@ fn install_panic_hook() {
     let original = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(io::stderr(), LeaveAlternateScreen);
+        let _ = execute!(
+            io::stderr(),
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        );
         original(info);
     }));
 }
@@ -51,9 +59,9 @@ fn main() -> io::Result<()> {
     // exit cleanly instead of being killed mid-draw.
     let shutdown = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown))
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown))
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
 
     let path = env::args_os().nth(1).map(Into::into);
     let mut app = App::from_path(path)?;
@@ -63,14 +71,19 @@ fn main() -> io::Result<()> {
 fn run(app: &mut App, shutdown: Arc<AtomicBool>) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
     terminal.clear()?;
 
     let result = run_app(&mut terminal, app, shutdown);
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
 
     result
@@ -83,6 +96,7 @@ fn run_app(
 ) -> io::Result<()> {
     while !app.should_quit && !shutdown.load(Ordering::Relaxed) {
         app.backend.drain_events()?;
+        app.handle_pending_ui_actions();
         // Dispatch pending location results (definition, references, …) to the
         // quickfix list before drawing so the panel opens in the same frame.
         app.handle_pending_locations();

@@ -38,7 +38,7 @@ use xi_rpc::{self, ReadError, RemoteError, RpcCtx, RpcPeer};
 
 use crate::WeakXiCore;
 use crate::client::Client;
-use crate::config::{self, ConfigDomain, ConfigDomainExternal, ConfigManager, Table};
+use crate::config::{self, ConfigDomain, ConfigManager, Table};
 use crate::editor::Editor;
 use crate::event_context::EventContext;
 use crate::file::FileManager;
@@ -49,14 +49,11 @@ use crate::plugins::{
     Plugin, PluginCatalog, PluginDescription, PluginPid, PluginStartError, PluginStartErrorKind,
     start_plugin_process,
 };
-use crate::recorder::Recorder;
 use crate::rpc::{
-    CoreNotification, CoreRequest, EditNotification, EditRequest,
-    PluginNotification as CorePluginNotification,
+    CoreNotification, CoreRequest, EditNotification, PluginNotification as CorePluginNotification,
 };
 use crate::styles::{DEFAULT_THEME, ThemeStyleMap};
 use crate::syntax::LanguageId;
-use crate::tracing_support;
 use crate::view::View;
 use crate::whitespace::Indentation;
 use crate::width_cache::WidthCache;
@@ -122,8 +119,6 @@ pub struct CoreState {
     width_cache: RefCell<WidthCache>,
     /// User and platform specific settings
     config_manager: ConfigManager,
-    /// Recorded editor actions
-    recorder: RefCell<Recorder>,
     /// A weak reference to the main state container, stashed so that
     /// it can be passed to plugins.
     self_ref: Option<WeakXiCore>,
@@ -212,7 +207,6 @@ impl CoreState {
             style_map: RefCell::new(ThemeStyleMap::new(themes_dir)),
             width_cache: RefCell::new(WidthCache::new()),
             config_manager,
-            recorder: RefCell::new(Recorder::new()),
             self_ref: None,
             pending_views: Vec::new(),
             peer: Client::new(peer.clone()),
@@ -328,7 +322,6 @@ impl CoreState {
                 view,
                 editor,
                 config: &config.items,
-                recorder: &self.recorder,
                 language,
                 info,
                 siblings: Vec::new(),
@@ -355,11 +348,6 @@ impl CoreState {
             Edit(crate::rpc::EditCommand { view_id, cmd }) => self.do_edit(view_id, cmd),
             Save { view_id, file_path } => self.do_save(view_id, file_path),
             CloseView { view_id } => self.do_close_view(view_id),
-            ModifyUserConfig { domain, changes } => self.do_modify_user_config(domain, changes),
-            SetTheme { theme_name } => self.do_set_theme(&theme_name),
-            SaveTrace { destination, frontend_samples } => {
-                self.save_trace(&destination, frontend_samples)
-            }
             Plugin(cmd) => match cmd {
                 PN::Start { view_id, plugin_name } => self.do_start_plugin(view_id, &plugin_name),
                 PN::Stop { view_id, plugin_name } => self.do_stop_plugin(view_id, &plugin_name),
@@ -367,10 +355,8 @@ impl CoreState {
                     self.do_plugin_rpc(view_id, &receiver, &rpc.method, &rpc.params)
                 }
             },
-            TracingConfig { enabled } => self.toggle_tracing(enabled),
             // handled at the top level
             ClientStarted { .. } => (),
-            SetLanguage { view_id, language_id } => self.do_set_language(view_id, language_id),
         }
     }
 
@@ -380,25 +366,29 @@ impl CoreState {
             //TODO: make file_path be an Option<PathBuf>
             //TODO: make this a notification
             NewView { file_path } => self.do_new_view(file_path.map(PathBuf::from)),
-            Edit(crate::rpc::EditCommand { view_id, cmd }) => self.do_edit_sync(view_id, cmd),
-            //TODO: why is this a request?? make a notification?
-            GetConfig { view_id } => self.do_get_config(view_id).map(|c| json!(c)),
-            DebugGetContents { view_id } => self.do_get_contents(view_id).map(|c| json!(c)),
+            SubstitutePreview {
+                view_id,
+                start_line,
+                end_line,
+                pattern,
+                replacement,
+                global,
+                case_sensitive,
+            } => self.do_substitute_preview(
+                view_id,
+                start_line,
+                end_line,
+                &pattern,
+                &replacement,
+                global,
+                case_sensitive,
+            ),
         }
     }
 
     fn do_edit(&mut self, view_id: ViewId, cmd: EditNotification) {
         if let Some(mut edit_ctx) = self.make_context(view_id) {
             edit_ctx.do_edit(cmd);
-        }
-    }
-
-    fn do_edit_sync(&mut self, view_id: ViewId, cmd: EditRequest) -> Result<Value, RemoteError> {
-        if let Some(mut edit_ctx) = self.make_context(view_id) {
-            edit_ctx.do_edit_sync(cmd)
-        } else {
-            // TODO: some custom error tpye that can Into<RemoteError>
-            Err(RemoteError::custom(404, format!("missing view {:?}", view_id), None))
         }
     }
 
@@ -434,6 +424,29 @@ impl CoreState {
         self.peer.schedule_idle(NEW_VIEW_IDLE_TOKEN);
 
         Ok(json!(view_id))
+    }
+
+    fn do_substitute_preview(
+        &mut self,
+        view_id: ViewId,
+        start_line: usize,
+        end_line: usize,
+        pattern: &str,
+        replacement: &str,
+        global: bool,
+        case_sensitive: bool,
+    ) -> Result<Value, RemoteError> {
+        let ctx = self
+            .make_context(view_id)
+            .ok_or_else(|| RemoteError::custom(404, "view not found", None))?;
+        Ok(json!(ctx.preview_substitute(
+            start_line,
+            end_line,
+            pattern,
+            replacement,
+            global,
+            case_sensitive,
+        )?))
     }
 
     fn do_save<P>(&mut self, view_id: ViewId, path: P)
@@ -509,52 +522,6 @@ impl CoreState {
             });
             edit_ctx.render_if_needed();
         });
-    }
-
-    /// Updates the config for a given domain.
-    fn do_modify_user_config(&mut self, domain: ConfigDomainExternal, changes: Table) {
-        // the client sends ViewId but we need BufferId so we do a dance
-        let domain: ConfigDomain = match domain {
-            ConfigDomainExternal::General => ConfigDomain::General,
-            ConfigDomainExternal::Language(id) => ConfigDomain::Language(id),
-            ConfigDomainExternal::UserOverride(view_id) => match self.views.get(&view_id) {
-                Some(v) => ConfigDomain::UserOverride(v.borrow().get_buffer_id()),
-                None => return,
-            },
-        };
-        let new_config = self.config_manager.table_for_update(domain.clone(), changes);
-        self.set_config(domain, new_config);
-    }
-
-    fn do_get_config(&self, view_id: ViewId) -> Result<Table, RemoteError> {
-        let _t = tracing::trace_span!("CoreState::get_config", categories = "core").entered();
-        self.views
-            .get(&view_id)
-            .map(|v| v.borrow().get_buffer_id())
-            .map(|id| self.config_manager.get_buffer_config(id).to_table())
-            .ok_or(RemoteError::custom(404, format!("missing {}", view_id), None))
-    }
-
-    fn do_get_contents(&self, view_id: ViewId) -> Result<Rope, RemoteError> {
-        self.make_context(view_id)
-            .map(|ctx| ctx.editor.borrow().get_buffer().to_owned())
-            .ok_or_else(|| RemoteError::custom(404, format!("No view for id {}", view_id), None))
-    }
-
-    fn do_set_language(&mut self, view_id: ViewId, language_id: LanguageId) {
-        if let Some(view) = self.views.get(&view_id) {
-            let buffer_id = view.borrow().get_buffer_id();
-            let old_language = self.config_manager.get_buffer_language(buffer_id);
-            let changes = self.config_manager.override_language(buffer_id, language_id.clone());
-            self.sync_plugins_for_language_change(view_id, &old_language, &language_id);
-            self.ensure_plugins_for_language(&language_id);
-
-            let mut context = self.make_context(view_id).unwrap();
-            context.language_changed(&language_id);
-            if let Some(changes) = changes {
-                context.config_changed(&changes);
-            }
-        }
     }
 
     fn do_start_plugin(&mut self, _view_id: ViewId, plugin: &str) {
@@ -783,28 +750,6 @@ impl CoreState {
         {
             self.start_plugin(manifest);
         }
-    }
-
-    fn sync_plugins_for_language_change(
-        &self,
-        view_id: ViewId,
-        old_language: &LanguageId,
-        new_language: &LanguageId,
-    ) {
-        let Some(mut context) = self.make_context(view_id) else {
-            return;
-        };
-        let info = context.plugin_info();
-
-        self.running_plugins.iter().for_each(|plugin| {
-            let was_active = plugin.receives_updates_for(old_language);
-            let is_active = plugin.receives_updates_for(new_language);
-            match (was_active, is_active) {
-                (true, false) => plugin.close_view(view_id),
-                (false, true) => plugin.new_buffer(&info),
-                _ => (),
-            }
-        });
     }
 }
 
@@ -1167,28 +1112,6 @@ impl CoreState {
             if theme_name == self.style_map.borrow().get_theme_name() {
                 self.do_set_theme(DEFAULT_THEME);
             }
-        }
-    }
-
-    fn toggle_tracing(&self, enabled: bool) {
-        self.running_plugins.iter().for_each(|plugin| plugin.toggle_tracing(enabled))
-    }
-
-    fn save_trace<P>(&self, path: P, frontend_samples: Value)
-    where
-        P: AsRef<Path>,
-    {
-        let plugin_samples =
-            self.running_plugins.iter().filter_map(|plugin| match plugin.collect_trace() {
-                Ok(json) => Some(json),
-                Err(err) => {
-                    error!("trace error {:?}", err);
-                    None
-                }
-            });
-
-        if let Err(e) = tracing_support::save_to_file(path, frontend_samples, plugin_samples) {
-            error!("error saving trace {:?}", e);
         }
     }
 }

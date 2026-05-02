@@ -145,22 +145,19 @@ impl RegisterStore {
     }
 
     /// Update the search register (`/`).  Does not touch unnamed.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn set_search(&mut self, pattern: String) {
         self.search = pattern;
     }
 }
 
-// ── Clipboard helpers (best-effort subprocess on Linux/X11) ─────────────────
+// ── Clipboard helpers ────────────────────────────────────────────────────────
 
 fn read_clipboard() -> String {
     // Try xclip first, then xsel.
     let try_read = |cmd: &str, args: &[&str]| -> Option<String> {
         let out = Command::new(cmd).args(args).output().ok()?;
-        if out.status.success() {
-            String::from_utf8(out.stdout).ok()
-        } else {
-            None
-        }
+        if out.status.success() { String::from_utf8(out.stdout).ok() } else { None }
     };
     try_read("xclip", &["-selection", "clipboard", "-o"])
         .or_else(|| try_read("xsel", &["--clipboard", "--output"]))
@@ -168,6 +165,12 @@ fn read_clipboard() -> String {
 }
 
 fn write_clipboard(text: &str) {
+    // OSC 52: write to the terminal emulator clipboard.  Works over SSH without
+    // needing xclip/xsel on the remote host.  Terminals that do not support
+    // OSC 52 simply ignore the escape sequence, so this is always safe to emit.
+    write_clipboard_osc52(text);
+
+    // Also try xclip / xsel for X11/Wayland local sessions.
     let try_write = |cmd: &str, args: &[&str]| -> bool {
         let Ok(mut child) = Command::new(cmd).args(args).stdin(Stdio::piped()).spawn() else {
             return false;
@@ -181,6 +184,52 @@ fn write_clipboard(text: &str) {
     if !try_write("xclip", &["-selection", "clipboard"]) {
         let _ = try_write("xsel", &["--clipboard", "--input"]);
     }
+}
+
+/// Write `text` to the terminal emulator clipboard via OSC 52.
+///
+/// The escape sequence is `ESC ] 52 ; c ; <base64> BEL`.  The `c` parameter
+/// selects the clipboard selection; most terminal emulators map it to the
+/// system clipboard.  Terminals that do not support OSC 52 silently ignore it.
+fn write_clipboard_osc52(text: &str) {
+    use std::io::Write as _;
+    let encoded = base64_encode(text.as_bytes());
+    // Write directly to /dev/tty when available so the sequence is not
+    // swallowed by ratatui's alternate-screen buffering.
+    let mut out: Box<dyn Write> =
+        if let Ok(tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+            Box::new(tty)
+        } else {
+            Box::new(std::io::stdout())
+        };
+    // ESC ] 52 ; c ; <base64> BEL
+    let _ = write!(out, "\x1b]52;c;{}\x07", encoded);
+    let _ = out.flush();
+}
+
+/// Minimal base64 encoder — avoids adding the `base64` crate dependency.
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(n & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
 }
 
 // ── LastChange ───────────────────────────────────────────────────────────────

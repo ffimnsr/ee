@@ -44,10 +44,6 @@
 //! APIs in this module are evaluation scaffolding; dead-code warnings are
 //! suppressed until each item is wired into the editor pipeline.
 #![allow(dead_code)]
-//!
-//! APIs in this module are evaluation scaffolding; dead-code warnings are
-//! suppressed until each item is wired into the editor pipeline.
-#![allow(dead_code)]
 
 use tree_sitter::{InputEdit, Language, Node, Parser, Point, Tree};
 
@@ -356,13 +352,7 @@ mod tests {
         state.update(src_before, None);
 
         // Simulate inserting " let x = 1;" at byte 11 (inside the braces).
-        let edit = make_input_edit(
-            11,
-            11,
-            11 + " let x = 1;".len(),
-            src_before,
-            src_after,
-        );
+        let edit = make_input_edit(11, 11, 11 + " let x = 1;".len(), src_before, src_after);
         let tree = state.update(src_after, Some(&edit)).unwrap();
         assert!(!tree.root_node().has_error());
     }

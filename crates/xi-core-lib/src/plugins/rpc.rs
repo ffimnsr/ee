@@ -299,6 +299,11 @@ pub struct CompletionSuggestion {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodeActionDescriptor {
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NavigationTarget {
     pub path: String,
     pub line: usize,
@@ -385,6 +390,9 @@ pub enum PluginNotification {
     },
     ShowCompletions {
         items: Vec<CompletionSuggestion>,
+    },
+    ShowCodeActions {
+        actions: Vec<CodeActionDescriptor>,
     },
     ShowLocations {
         title: String,

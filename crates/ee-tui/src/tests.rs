@@ -4,21 +4,30 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use ratatui::layout::Rect;
 use serde_json::{Value, json};
+use xi_core_lib::plugin_rpc::{CodeActionDescriptor, Diagnostic, DiagnosticSeverity, Range};
+use xi_core_lib::rpc::LineReplacement;
 
 use crate::app::{App, Mode, Operator, PendingCharFind};
 use crate::backend::{
     BackendEvent, CachedLine, CompletionSuggestion, CoreLine, CoreUpdate, CoreUpdateKind,
-    CoreUpdateOp, LineSlot, NavigationTarget, format_location_message,
-    invalid_line_ranges, parse_notification,
+    CoreUpdateOp, LineSlot, NavigationTarget, format_location_message, invalid_line_ranges,
+    parse_notification,
 };
 use crate::buffer::{BufState, BufferManager};
 use crate::keymap::{Action, BindingKey, bindings};
+use crate::picker::PickerKind;
 use crate::text::{
     byte_col_to_display_col, display_col_to_byte, find_char_backward, find_char_forward,
     next_char_start, prev_char_start,
 };
+use crate::ui::ui;
 
 #[test]
 fn scratch_title_is_default() {
@@ -99,6 +108,53 @@ fn enter_splits_line_and_backspace_joins_it() {
 
     assert_eq!(app.backend.lines, vec!["a"]);
     assert_eq!((app.backend.cursor_line, app.backend.cursor_col), (0, 1));
+}
+
+#[test]
+fn repeated_enter_tracks_cursor_beyond_visible_rows() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    for _ in 0..50 {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        app.backend.pump().unwrap();
+    }
+
+    assert_eq!(app.backend.cursor_line, 50);
+    assert_eq!(app.backend.cursor_col, 0);
+    assert_eq!(app.backend.lines.len(), 51);
+}
+
+#[test]
+fn ui_render_shows_scrolled_gutter_after_many_enters() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    for _ in 0..50 {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        app.backend.pump().unwrap();
+    }
+
+    let width = 80;
+    let height = 49;
+    let editor_height = (height as usize).saturating_sub(2);
+    app.scroll_into_view(editor_height);
+
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let top_gutter = (0..6)
+        .map(|x| buffer.cell((x, 0)).unwrap().symbol())
+        .collect::<String>();
+    let status = (0..40)
+        .map(|x| buffer.cell((x, height - 2)).unwrap().symbol())
+        .collect::<String>();
+
+    assert_eq!(app.viewport.top_line, 9);
+    assert!(top_gutter.contains("10"), "top gutter row was {top_gutter:?}");
+    assert!(status.contains("Ln 51, Col 1"), "status row was {status:?}");
 }
 
 #[test]
@@ -190,10 +246,11 @@ fn write_command_saves_file() {
 }
 
 #[test]
-fn parse_notification_handles_show_completions() {
+fn parse_notification_handles_completions() {
     let event = parse_notification(
-        "show_completions",
+        "completions",
         json!({
+            "view_id": "view-id-1",
             "items": [{
                 "label": "println!",
                 "detail": "macro",
@@ -204,7 +261,8 @@ fn parse_notification_handles_show_completions() {
     .expect("completion notification should parse");
 
     match event {
-        BackendEvent::ShowCompletions(items) => {
+        BackendEvent::Completions { view_id, items } => {
+            assert_eq!(view_id, "view-id-1");
             assert_eq!(items.len(), 1);
             assert_eq!(items[0].label, "println!");
         }
@@ -213,21 +271,626 @@ fn parse_notification_handles_show_completions() {
 }
 
 #[test]
-fn send_plugin_rpc_emits_plugin_notification() {
+fn parse_notification_handles_diagnostics() {
+    let event = parse_notification(
+        "diagnostics",
+        json!({
+            "view_id": "view-id-1",
+            "diagnostics": [{
+                "range": { "start": 2, "end": 5 },
+                "severity": "warning",
+                "message": "watch this",
+                "source": "lsp",
+                "code": "W1"
+            }]
+        }),
+    )
+    .expect("diagnostics notification should parse");
+
+    match event {
+        BackendEvent::Diagnostics { view_id, diagnostics } => {
+            assert_eq!(view_id, "view-id-1");
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(diagnostics[0].message, "watch this");
+        }
+        other => panic!("unexpected event: {:?}", other),
+    }
+}
+
+#[test]
+fn parse_notification_handles_code_actions() {
+    let event = parse_notification(
+        "code_actions",
+        json!({
+            "view_id": "view-id-1",
+            "actions": [{ "title": "Extract variable" }]
+        }),
+    )
+    .expect("code action notification should parse");
+
+    match event {
+        BackendEvent::CodeActions { view_id, actions } => {
+            assert_eq!(view_id, "view-id-1");
+            assert_eq!(actions[0].title, "Extract variable");
+        }
+        other => panic!("unexpected event: {:?}", other),
+    }
+}
+
+#[test]
+fn request_completion_emits_edit_notification() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
-    let client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
 
-    client
-        .send_plugin_rpc("xi-lsp-plugin", "lsp.definition", json!({}))
-        .expect("plugin rpc should send");
+    client.request_completion(Some(2)).expect("completion request should send");
 
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");
-    assert_eq!(value["method"], "plugin");
-    assert_eq!(value["params"]["command"], "plugin_rpc");
-    assert_eq!(value["params"]["receiver"], "xi-lsp-plugin");
-    assert_eq!(value["params"]["rpc"]["method"], "lsp.definition");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "request_completion");
+    assert_eq!(value["params"]["params"]["index"], 2);
+}
+
+#[test]
+fn request_definition_emits_backend_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.request_definition().expect("definition request should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "request_definition");
+}
+
+#[test]
+fn request_hover_emits_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.request_hover(Some((3, 7))).expect("hover request should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "request_hover");
+    assert_eq!(value["params"]["params"]["position"]["line"], 3);
+    assert_eq!(value["params"]["params"]["position"]["column"], 7);
+}
+
+#[test]
+fn request_code_actions_emits_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.request_code_actions(Some(2)).expect("code action request should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "request_code_actions");
+    assert_eq!(value["params"]["params"]["index"], 2);
+}
+
+#[test]
+fn request_rename_emits_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.request_rename("renamed_symbol").expect("rename request should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "request_rename");
+    assert_eq!(value["params"]["params"]["new_name"], "renamed_symbol");
+}
+
+#[test]
+fn delete_line_range_emits_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.delete_line_range(3, 5).expect("line delete should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "delete_line_range");
+    assert_eq!(value["params"]["params"]["start_line"], 3);
+    assert_eq!(value["params"]["params"]["end_line"], 5);
+}
+
+#[test]
+fn replay_block_insert_emits_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.replay_block_insert(2, 4, 6, "abc", true).expect("block insert replay should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "replay_block_insert");
+    assert_eq!(value["params"]["params"]["start_line"], 2);
+    assert_eq!(value["params"]["params"]["end_line"], 4);
+    assert_eq!(value["params"]["params"]["column"], 6);
+    assert_eq!(value["params"]["params"]["text"], "abc");
+    assert_eq!(value["params"]["params"]["append"], true);
+}
+
+#[test]
+fn paste_register_emits_backend_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.paste_register("hello", false).expect("register paste should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "paste_register");
+    assert_eq!(value["params"]["params"]["chars"], "hello");
+    assert_eq!(value["params"]["params"]["before"], false);
+}
+
+#[test]
+fn apply_line_replacements_emits_backend_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client
+        .apply_line_replacements(&[LineReplacement { line: 2, text: String::from("beta") }])
+        .expect("line replacements should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "apply_line_replacements");
+    assert_eq!(value["params"]["params"]["replacements"][0]["line"], 2);
+    assert_eq!(value["params"]["params"]["replacements"][0]["text"], "beta");
+}
+
+#[test]
+fn definition_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in [':', 'd', 'e', 'f'] {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "request_definition");
+}
+
+#[test]
+fn codeaction_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in ":codeaction 3".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "request_code_actions");
+    assert_eq!(value["params"]["params"]["index"], 3);
+}
+
+#[test]
+fn complete_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in ":complete".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "request_completion");
+    assert!(value["params"]["params"]["index"].is_null());
+}
+
+#[test]
+fn rename_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in ":rename fresh_name".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "request_rename");
+    assert_eq!(value["params"]["params"]["new_name"], "fresh_name");
+}
+
+#[test]
+fn diagnostics_command_opens_location_list() {
+    let mut app = App::from_path(None).unwrap();
+    app.backend.diagnostics = vec![Diagnostic {
+        range: Range { start: 0, end: 3 },
+        severity: DiagnosticSeverity::Warning,
+        message: String::from("warn"),
+        source: Some(String::from("lsp")),
+        code: None,
+    }];
+
+    for ch in ":diagnostics".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    assert!(app.location_list_open);
+    assert_eq!(app.location_list.as_ref().map(|list| list.len()), Some(1));
+}
+
+#[test]
+fn pending_completion_notification_opens_picker() {
+    let mut app = App::from_path(None).unwrap();
+    app.backend.pending_ui_actions.push(crate::backend::PendingUiAction::Completions {
+        view_id: app.backend.view_id.clone(),
+        items: vec![CompletionSuggestion {
+            label: String::from("println!"),
+            detail: Some(String::from("macro")),
+            insert_text: None,
+        }],
+    });
+
+    app.handle_pending_ui_actions();
+
+    assert_eq!(app.picker.as_ref().map(|picker| picker.kind), Some(PickerKind::Completions));
+}
+
+#[test]
+fn pending_code_actions_notification_opens_picker() {
+    let mut app = App::from_path(None).unwrap();
+    app.backend.pending_ui_actions.push(crate::backend::PendingUiAction::CodeActions {
+        view_id: app.backend.view_id.clone(),
+        actions: vec![CodeActionDescriptor { title: String::from("Extract variable") }],
+    });
+
+    app.handle_pending_ui_actions();
+
+    assert_eq!(app.picker.as_ref().map(|picker| picker.kind), Some(PickerKind::CodeActions));
+}
+
+#[test]
+fn pending_hover_notification_opens_popup() {
+    let mut app = App::from_path(None).unwrap();
+    app.backend.pending_ui_actions.push(crate::backend::PendingUiAction::Hover {
+        view_id: app.backend.view_id.clone(),
+        content: String::from("hover text"),
+    });
+
+    app.handle_pending_ui_actions();
+
+    assert_eq!(app.hover_popup.as_ref().map(|popup| popup.content.as_str()), Some("hover text"));
+}
+
+#[test]
+fn ee_tui_sources_do_not_use_raw_lsp_or_plugin_routes() {
+    let app_src = include_str!("app.rs");
+    let buffer_src = include_str!("buffer.rs");
+    let backend_src = include_str!("backend.rs");
+
+    assert!(!app_src.contains("xi-lsp-plugin"));
+    assert!(!app_src.contains("lsp."));
+    assert!(!app_src.contains("line_cache"));
+
+    assert!(!buffer_src.contains("xi-lsp-plugin"));
+    assert!(!buffer_src.contains("lsp."));
+
+    assert!(!backend_src.contains("show_hover"));
+    assert!(!backend_src.contains("show_completions"));
+    assert!(!backend_src.contains("show_locations"));
+}
+
+#[test]
+fn transpose_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in [':', 't', 'r', 'a', 'n', 's', 'p', 'o', 's', 'e'] {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "transpose");
+}
+
+#[test]
+fn selection_for_replace_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in [
+        ':', 's', 'e', 'l', 'e', 'c', 't', 'i', 'o', 'n', 'f', 'o', 'r', 'r', 'e', 'p', 'l', 'a',
+        'c', 'e',
+    ] {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "selection_for_replace");
+}
+
+#[test]
+fn substitute_range_uses_backend_authoritative_path() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    for ch in "alpha\nbeta\nalpha".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    app.backend.pump().unwrap();
+
+    app.execute_substitute(1, 2, "a", "A", "");
+    app.backend.pump().unwrap();
+
+    assert_eq!(app.backend.lines, vec!["alpha", "betA", "Alpha"]);
+}
+
+#[test]
+fn substitute_confirm_uses_backend_preview_and_apply() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    for ch in "alpha\nbeta\nalpha".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    app.backend.pump().unwrap();
+
+    app.execute_substitute(0, 2, "a", "A", "c");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)));
+    app.backend.pump().unwrap();
+
+    assert_eq!(app.backend.lines, vec!["Alpha", "beta", "alpha"]);
+}
+
+#[test]
+fn normal_mode_paste_uses_backend_register_paste() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.registers.yank(&crate::registers::RegisterName::Unnamed, String::from("hello"), false);
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "paste_register");
+    assert_eq!(value["params"]["params"]["chars"], "hello");
+    assert_eq!(value["params"]["params"]["before"], false);
+}
+
+#[test]
+fn duplicate_line_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in [':', 'd', 'u', 'p', 'l', 'i', 'c', 'a', 't', 'e', 'l', 'i', 'n', 'e'] {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "duplicate_line");
+}
+
+#[test]
+fn reindent_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in [':', 'r', 'e', 'i', 'n', 'd', 'e', 'n', 't'] {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "reindent");
+}
+
+#[test]
+fn multifind_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in ":multifind alpha beta".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "multi_find");
+    assert_eq!(value["params"]["params"]["queries"].as_array().map(Vec::len), Some(2));
+}
+
+#[test]
+fn help_command_opens_help_picker() {
+    let mut app = App::from_path(None).unwrap();
+
+    for ch in [':', 'h', 'e', 'l', 'p'] {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let picker = app.picker.as_ref().expect("help picker should open");
+    assert_eq!(picker.kind, PickerKind::Help);
+    assert_eq!(picker.title, "Help");
+    assert!(picker.visible_items_range(0, 8).iter().any(|line| line.contains(":protocol")));
+}
+
+#[test]
+fn protocol_command_lists_quarantined_core_surface() {
+    let mut app = App::from_path(None).unwrap();
+
+    for ch in [':', 'p', 'r', 'o', 't', 'o', 'c', 'o', 'l'] {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let picker = app.picker.as_ref().expect("protocol picker should open");
+    assert_eq!(picker.kind, PickerKind::Help);
+    assert!(picker.visible_items_range(0, 8).iter().any(|line| line.contains("get_config")));
+    assert!(picker.visible_items_range(0, 8).iter().any(|line| line.contains("set_theme")));
+}
+
+#[test]
+fn mouse_click_uses_canonical_select_gesture() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.lines = vec![String::from("hello")];
+
+    app.handle_mouse_event_in_area(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 1,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        },
+        Rect { x: 0, y: 0, width: 80, height: 24 },
+    );
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "gesture");
+    assert_eq!(value["params"]["params"]["ty"]["select"]["granularity"], "point");
+    assert_eq!(value["params"]["params"]["ty"]["select"]["multi"], false);
+}
+
+#[test]
+fn mouse_click_accounts_for_gutter_and_viewport_offsets() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.lines = (0..120).map(|idx| format!("line {idx:03}")).collect();
+    app.viewport.top_line = 50;
+    app.viewport.left_col = 7;
+
+    app.handle_mouse_event_in_area(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 6,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        },
+        Rect { x: 0, y: 0, width: 80, height: 44 },
+    );
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["params"]["params"]["line"], 55);
+    assert_eq!(value["params"]["params"]["col"], 7);
+}
+
+#[test]
+fn mouse_click_in_gutter_targets_line_start() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.lines = (0..120).map(|idx| format!("line {idx:03}")).collect();
+    app.viewport.top_line = 50;
+    app.viewport.left_col = 7;
+
+    app.handle_mouse_event_in_area(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        },
+        Rect { x: 0, y: 0, width: 80, height: 44 },
+    );
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["params"]["params"]["line"], 55);
+    assert_eq!(value["params"]["params"]["col"], 0);
+}
+
+#[test]
+fn mouse_click_outside_editor_rows_is_ignored() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.lines = (0..120).map(|idx| format!("line {idx:03}")).collect();
+
+    app.handle_mouse_event_in_area(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 6,
+            row: 42,
+            modifiers: KeyModifiers::NONE,
+        },
+        Rect { x: 0, y: 0, width: 80, height: 44 },
+    );
+
+    assert!(rx.try_recv().is_err());
 }
 
 #[test]
@@ -280,6 +943,80 @@ fn bindings_table_has_normal_hjkl() {
     assert_eq!(lookup(KeyCode::Char('l')), Some(Action::Edit("move_right")));
     assert_eq!(lookup(KeyCode::Char('k')), Some(Action::Edit("move_up")));
     assert_eq!(lookup(KeyCode::Char('j')), Some(Action::Edit("move_down")));
+}
+
+#[test]
+fn k_binding_requests_hover() {
+    let b = bindings();
+    let lookup = b
+        .get(&BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('K'),
+            modifiers: KeyModifiers::NONE,
+            prefix: None,
+        })
+        .cloned();
+    assert_eq!(lookup, Some(Action::RequestHover));
+}
+
+#[test]
+fn ctrl_up_and_down_bind_multi_cursor_actions() {
+    let b = bindings();
+    let up = b
+        .get(&BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Up,
+            modifiers: KeyModifiers::CONTROL,
+            prefix: None,
+        })
+        .cloned();
+    let down = b
+        .get(&BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Down,
+            modifiers: KeyModifiers::CONTROL,
+            prefix: None,
+        })
+        .cloned();
+    assert_eq!(up, Some(Action::Edit("add_selection_above")));
+    assert_eq!(down, Some(Action::Edit("add_selection_below")));
+}
+
+#[test]
+fn ctrl_a_and_x_bind_number_adjustments() {
+    let b = bindings();
+    let up = b
+        .get(&BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('a'),
+            modifiers: KeyModifiers::CONTROL,
+            prefix: None,
+        })
+        .cloned();
+    let down = b
+        .get(&BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('x'),
+            modifiers: KeyModifiers::CONTROL,
+            prefix: None,
+        })
+        .cloned();
+    assert_eq!(up, Some(Action::Edit("increase_number")));
+    assert_eq!(down, Some(Action::Edit("decrease_number")));
+}
+
+#[test]
+fn gd_binds_duplicate_line() {
+    let b = bindings();
+    let lookup = b
+        .get(&BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('d'),
+            modifiers: KeyModifiers::NONE,
+            prefix: Some('g'),
+        })
+        .cloned();
+    assert_eq!(lookup, Some(Action::Edit("duplicate_line")));
 }
 
 #[test]
@@ -507,6 +1244,7 @@ fn test_buf_state() -> BufState {
         last_scroll: None,
         mtime: None,
         externally_modified: false,
+        diagnostics: Vec::new(),
     }
 }
 
@@ -764,10 +1502,7 @@ fn ctrl_w_in_insert_sends_delete_word_backward() {
     let mut app = App::from_path(None).unwrap();
     // Enter insert mode, then Ctrl+W
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
-    app.handle_event(Event::Key(KeyEvent::new(
-        KeyCode::Char('w'),
-        KeyModifiers::CONTROL,
-    )));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)));
     // Still in insert mode
     assert_eq!(app.mode, Mode::Insert);
 }
@@ -776,10 +1511,7 @@ fn ctrl_w_in_insert_sends_delete_word_backward() {
 fn ctrl_u_in_insert_sends_delete_to_line_start() {
     let mut app = App::from_path(None).unwrap();
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
-    app.handle_event(Event::Key(KeyEvent::new(
-        KeyCode::Char('u'),
-        KeyModifiers::CONTROL,
-    )));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)));
     assert_eq!(app.mode, Mode::Insert);
 }
 
@@ -788,30 +1520,21 @@ fn ctrl_u_in_insert_sends_delete_to_line_start() {
 #[test]
 fn capital_v_enters_visual_line_mode() {
     let mut app = App::from_path(None).unwrap();
-    app.handle_event(Event::Key(KeyEvent::new(
-        KeyCode::Char('V'),
-        KeyModifiers::NONE,
-    )));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::NONE)));
     assert_eq!(app.mode, Mode::VisualLine);
 }
 
 #[test]
 fn ctrl_v_enters_visual_block_mode() {
     let mut app = App::from_path(None).unwrap();
-    app.handle_event(Event::Key(KeyEvent::new(
-        KeyCode::Char('v'),
-        KeyModifiers::CONTROL,
-    )));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)));
     assert_eq!(app.mode, Mode::VisualBlock);
 }
 
 #[test]
 fn esc_from_visual_line_returns_to_normal() {
     let mut app = App::from_path(None).unwrap();
-    app.handle_event(Event::Key(KeyEvent::new(
-        KeyCode::Char('V'),
-        KeyModifiers::NONE,
-    )));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::NONE)));
     assert_eq!(app.mode, Mode::VisualLine);
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
     assert_eq!(app.mode, Mode::Normal);
@@ -820,10 +1543,7 @@ fn esc_from_visual_line_returns_to_normal() {
 #[test]
 fn esc_from_visual_block_returns_to_normal() {
     let mut app = App::from_path(None).unwrap();
-    app.handle_event(Event::Key(KeyEvent::new(
-        KeyCode::Char('v'),
-        KeyModifiers::CONTROL,
-    )));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)));
     assert_eq!(app.mode, Mode::VisualBlock);
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
     assert_eq!(app.mode, Mode::Normal);
@@ -831,23 +1551,16 @@ fn esc_from_visual_block_returns_to_normal() {
 
 #[test]
 fn u_dispatches_undo() {
-    use crate::registers::RegisterName;
     let mut app = App::from_path(None).unwrap();
     // Drive `u` — should send undo edit without crashing.
-    app.handle_event(Event::Key(KeyEvent::new(
-        KeyCode::Char('u'),
-        KeyModifiers::NONE,
-    )));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE)));
     assert_eq!(app.mode, Mode::Normal);
 }
 
 #[test]
 fn ctrl_r_dispatches_redo() {
     let mut app = App::from_path(None).unwrap();
-    app.handle_event(Event::Key(KeyEvent::new(
-        KeyCode::Char('r'),
-        KeyModifiers::CONTROL,
-    )));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
     assert_eq!(app.mode, Mode::Normal);
 }
 
@@ -855,10 +1568,7 @@ fn ctrl_r_dispatches_redo() {
 fn dot_with_no_last_change_is_noop() {
     let mut app = App::from_path(None).unwrap();
     // `.` should not crash when no last_change is recorded.
-    app.handle_event(Event::Key(KeyEvent::new(
-        KeyCode::Char('.'),
-        KeyModifiers::NONE,
-    )));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE)));
     assert_eq!(app.mode, Mode::Normal);
 }
 
@@ -877,27 +1587,15 @@ fn register_prefix_sets_pending_register() {
     use crate::registers::RegisterName;
     let mut app = App::from_path(None).unwrap();
     // `"` then `a` should set pending register to Named('a').
-    app.handle_event(Event::Key(KeyEvent::new(
-        KeyCode::Char('"'),
-        KeyModifiers::NONE,
-    )));
-    app.handle_event(Event::Key(KeyEvent::new(
-        KeyCode::Char('a'),
-        KeyModifiers::NONE,
-    )));
-    assert_eq!(
-        app.input_state.pending_register,
-        Some(RegisterName::Named('a'))
-    );
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('"'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
+    assert_eq!(app.input_state.pending_register, Some(RegisterName::Named('a')));
 }
 
 #[test]
 fn visual_anchor_set_on_visual_enter() {
     let mut app = App::from_path(None).unwrap();
-    app.handle_event(Event::Key(KeyEvent::new(
-        KeyCode::Char('v'),
-        KeyModifiers::NONE,
-    )));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)));
     assert!(app.visual_anchor.is_some());
 }
 
@@ -920,7 +1618,7 @@ fn uppercase_mark_is_ignored() {
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE)));
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE)));
     // Only lowercase marks are supported; 'A' should not be stored.
-    assert!(app.marks.get(&'A').is_none());
+    assert!(!app.marks.contains_key(&'A'));
 }
 
 #[test]
@@ -1076,9 +1774,7 @@ fn tabnew_command_opens_second_tab() {
     assert_eq!(app.tabs.tab_count(), 1);
 
     // :tabnew opens a new tab.
-    for ch in [':'] {
-        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
-    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)));
     for ch in "tabnew".chars() {
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
     }

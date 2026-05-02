@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use log::{error, trace, warn};
 
 use jsonrpc_lite::{Error, Id, JsonRpc, Params};
+use lsp_server::Message as LspServerMessage;
 use lsp_types::Uri;
 use serde_json::{Value, json, to_value};
 use xi_plugin_lib::CoreProxy;
@@ -69,6 +70,18 @@ fn number_from_id(id: Option<&Id>) -> Result<u64, LspError> {
             .map_err(|_| LspError::Protocol(format!("failed to convert string id {s:?} to u64"))),
         Some(other) => Err(LspError::Protocol(format!("unexpected id value: {other:?}"))),
         None => Err(LspError::Protocol(String::from("missing id field"))),
+    }
+}
+
+fn number_from_lsp_request_id(id: &lsp_server::RequestId) -> Result<u64, LspError> {
+    match serde_json::to_value(id).map_err(|err| LspError::Serialization(err.to_string()))? {
+        Value::Number(number) => number
+            .as_u64()
+            .ok_or_else(|| LspError::Protocol(format!("unexpected id value: {number}"))),
+        Value::String(value) => value.parse().map_err(|_| {
+            LspError::Protocol(format!("failed to convert string id {value:?} to u64"))
+        }),
+        other => Err(LspError::Protocol(format!("unexpected id value: {other:?}"))),
     }
 }
 
@@ -174,6 +187,44 @@ impl LanguageServerClient {
                 }
             }
             Err(err) => self.record_server_failure(format!("error parsing incoming string: {err}")),
+        }
+    }
+
+    pub(crate) fn handle_lsp_message(&mut self, message: LspServerMessage) {
+        match message {
+            LspServerMessage::Request(request) => {
+                trace!("client received unexpected request: {:?}", request)
+            }
+            LspServerMessage::Notification(notification) => {
+                self.handle_notification(&notification.method, Params::from(notification.params));
+            }
+            LspServerMessage::Response(response) => {
+                let Ok(id) = number_from_lsp_request_id(&response.id) else {
+                    self.record_server_failure(format!(
+                        "unexpected response id: {:?}",
+                        response.id
+                    ));
+                    return;
+                };
+
+                match (response.result, response.error) {
+                    (Some(result), None) => self.handle_response(id, Ok(result)),
+                    (None, Some(error)) => self.handle_response(
+                        id,
+                        Err(Error {
+                            code: i64::from(error.code),
+                            message: error.message,
+                            data: error.data,
+                        }),
+                    ),
+                    (None, None) => {
+                        self.record_server_failure("response missing result and error fields")
+                    }
+                    (Some(_), Some(_)) => {
+                        self.record_server_failure("response contained both result and error")
+                    }
+                }
+            }
         }
     }
 
@@ -690,6 +741,37 @@ impl LanguageServerClient {
                 "context": {
                     "diagnostics": state.diagnostics,
                 },
+            })),
+            Box::new(on_result),
+        )
+    }
+
+    pub fn request_rename<CB>(
+        &mut self,
+        view_id: ViewId,
+        position: Position,
+        new_name: String,
+        on_result: CB,
+    ) -> Result<u64, LspError>
+    where
+        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
+    {
+        let Some(state) = self.opened_documents.get(&view_id) else {
+            return Err(LspError::Protocol(format!("missing open document for view {view_id}")));
+        };
+        if !self.is_initialized {
+            return Err(LspError::Protocol(format!(
+                "language server {} not initialized",
+                self.language_id
+            )));
+        }
+
+        self.try_send_request(
+            "textDocument/rename",
+            Params::from(json!({
+                "textDocument": { "uri": state.uri.clone() },
+                "position": position,
+                "newName": new_name,
             })),
             Box::new(on_result),
         )

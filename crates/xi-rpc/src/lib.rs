@@ -561,10 +561,7 @@ impl<W: WriteTransport> Peer for RawPeer<W> {
             // Bound the idle queue to prevent unbounded accumulation of
             // distinct tokens from a misbehaving or runaway caller.
             if queue.len() >= MAX_IDLE_QUEUE_SIZE {
-                warn!(
-                    "idle queue at capacity ({}), dropping token {}",
-                    MAX_IDLE_QUEUE_SIZE, token
-                );
+                warn!("idle queue at capacity ({}), dropping token {}", MAX_IDLE_QUEUE_SIZE, token);
                 return;
             }
             queue.push_back(token);

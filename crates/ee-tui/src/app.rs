@@ -3,21 +3,26 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Position, Rect};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::Rect;
 use serde_json::json;
+use xi_core_lib::rpc::LineReplacement;
+use xi_core_lib::plugin_rpc::CodeActionDescriptor;
 
 use crate::buffer::BufferManager;
+use crate::backend::{CompletionSuggestion, PendingUiAction};
 use crate::folds::{FoldStore, indent_fold_extent};
 use crate::keymap::{Action, BindingKey, bindings};
 use crate::picker::PickerState;
 use crate::quickfix::{QfEntry, QfList};
 use crate::registers::{BlockInsert, LastChange, RegisterName, RegisterStore};
-use crate::window::{SplitDir, TabManager};
 use crate::text::{
     byte_col_to_display_col, find_char_backward, find_char_forward, next_char_start,
     prev_char_start,
 };
+use crate::window::{SplitDir, TabManager};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Operator {
@@ -44,6 +49,8 @@ pub(crate) enum Mode {
     OperatorPending,
     CommandLine,
     Search,
+    /// Awaiting `y`/`n`/`a`/`q` confirmation for a `:s///c` substitute.
+    SubstituteConfirm,
 }
 
 impl Mode {
@@ -57,6 +64,7 @@ impl Mode {
             Mode::OperatorPending => "OPR",
             Mode::CommandLine => "CMD",
             Mode::Search => "SRC",
+            Mode::SubstituteConfirm => "SUB",
         }
     }
 
@@ -64,6 +72,23 @@ impl Mode {
     pub(crate) fn is_visual(self) -> bool {
         matches!(self, Mode::Visual | Mode::VisualLine | Mode::VisualBlock)
     }
+}
+
+/// Pending substitution state for `:s///c` confirm mode.
+#[derive(Debug)]
+pub(crate) struct SubstitutePending {
+    /// Backend-computed line replacements pending confirmation, in order.
+    pub(crate) matches: Vec<LineReplacement>,
+    /// Index into `matches` for the current confirmation prompt.
+    pub(crate) current: usize,
+    /// Count of replacements applied so far.
+    pub(crate) applied: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HoverPopup {
+    pub(crate) title: String,
+    pub(crate) content: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -212,6 +237,16 @@ pub(crate) struct App {
     // ── Fold state ───────────────────────────────────────────────────────────────
     /// Manual fold state keyed by buffer ID.
     pub(crate) folds: FoldStore,
+    // ── Search state ─────────────────────────────────────────────────────────────
+    /// Last executed search pattern (for highlight and repeat navigation).
+    pub(crate) search_pattern: Option<String>,
+    /// `true` when the current search was initiated with `?` (backward).
+    pub(crate) search_backward: bool,
+    /// Active hover popup for the focused editor surface.
+    pub(crate) hover_popup: Option<HoverPopup>,
+    // ── Substitute confirm state ──────────────────────────────────────────────────
+    /// Pending substitutions awaiting `y`/`n`/`a`/`q` confirmation.
+    pub(crate) substitute_pending: Option<SubstitutePending>,
 }
 
 impl App {
@@ -221,11 +256,8 @@ impl App {
         let initial_buf_id = backend.active().id;
 
         // Notify user if a crash-recovery artifact exists for this file.
-        if let Some(rp) = backend
-            .active()
-            .path
-            .as_ref()
-            .and_then(|p| crate::buffer::recovery_file_path(p))
+        if let Some(rp) =
+            backend.active().path.as_ref().and_then(|p| crate::buffer::recovery_file_path(p))
         {
             if rp.exists() {
                 backend.status_message = Some(format!(
@@ -275,10 +307,26 @@ impl App {
             recovery_last_check: Instant::now(),
             highlighter: crate::highlight::Highlighter::new(),
             folds: FoldStore::new(),
+            search_pattern: None,
+            search_backward: false,
+            hover_popup: None,
+            substitute_pending: None,
         })
     }
 
     pub(crate) fn handle_event(&mut self, event: Event) {
+        match event {
+            Event::Mouse(m) => {
+                self.handle_mouse_event(m);
+                return;
+            }
+            Event::Paste(text) => {
+                self.handle_paste(text);
+                return;
+            }
+            _ => {}
+        }
+
         let Event::Key(key) = event else {
             return;
         };
@@ -293,6 +341,11 @@ impl App {
             return;
         }
 
+        if self.hover_popup.is_some() && key.code == KeyCode::Esc {
+            self.hover_popup = None;
+            return;
+        }
+
         // Quickfix panel focus intercepts all keys while focused.
         if self.quickfix_focused {
             self.handle_qf_focused_event(key, true);
@@ -301,6 +354,12 @@ impl App {
         // Location-list panel focus intercepts all keys while focused.
         if self.location_list_focused {
             self.handle_qf_focused_event(key, false);
+            return;
+        }
+
+        // SubstituteConfirm mode: y/n/a/q consume all keys.
+        if self.mode == Mode::SubstituteConfirm {
+            self.handle_substitute_confirm(key.code);
             return;
         }
 
@@ -371,7 +430,13 @@ impl App {
         if self.input_state.awaiting_macro_replay {
             self.input_state.awaiting_macro_replay = false;
             if let KeyCode::Char(c) = key.code {
-                let reg = if c == '@' { self.last_macro } else if c.is_ascii_lowercase() { Some(c) } else { None };
+                let reg = if c == '@' {
+                    self.last_macro
+                } else if c.is_ascii_lowercase() {
+                    Some(c)
+                } else {
+                    None
+                };
                 if let Some(r) = reg {
                     self.replay_macro(r);
                 }
@@ -430,6 +495,7 @@ impl App {
             }
             Action::EnterSearch => {
                 self.mode = Mode::Search;
+                self.search_backward = false;
                 self.command_buffer.clear();
                 let _ = self.backend.send_edit(
                     "find",
@@ -440,6 +506,22 @@ impl App {
                         "whole_words": false
                     }),
                 );
+                let _ = self.backend.send_edit("highlight_find", json!({ "visible": true }));
+            }
+            Action::EnterSearchBackward => {
+                self.mode = Mode::Search;
+                self.search_backward = true;
+                self.command_buffer.clear();
+                let _ = self.backend.send_edit(
+                    "find",
+                    json!({
+                        "chars": "",
+                        "case_sensitive": false,
+                        "regex": false,
+                        "whole_words": false
+                    }),
+                );
+                let _ = self.backend.send_edit("highlight_find", json!({ "visible": true }));
             }
             Action::ExecuteSearch => self.execute_search(),
             Action::Edit(method) => {
@@ -473,11 +555,12 @@ impl App {
             Action::SearchBackspace => {
                 self.command_buffer.pop();
                 let chars = self.command_buffer.clone();
+                let case_sensitive = smart_case_sensitive(&chars);
                 let _ = self.backend.send_edit(
                     "find",
                     json!({
                         "chars": chars,
-                        "case_sensitive": false,
+                        "case_sensitive": case_sensitive,
                         "regex": false,
                         "whole_words": false
                     }),
@@ -495,6 +578,61 @@ impl App {
                     "find_previous",
                     json!({ "wrap_around": true, "allow_same": false }),
                 );
+            }
+            Action::RequestHover => {
+                let position = Some((self.backend.cursor_line, self.backend.cursor_col));
+                if let Err(err) = self.backend.request_hover(position) {
+                    self.backend.status_message = Some(format!("hover failed: {err}"));
+                }
+            }
+            Action::SearchWordUnderCursor { forward } => {
+                // Use word under cursor (or visual selection) as search pattern via xi's
+                // selection_for_find RPC, then navigate forward or backward.
+                let _ =
+                    self.backend.send_edit("selection_for_find", json!({ "case_sensitive": true }));
+                let _ = self.backend.send_edit("highlight_find", json!({ "visible": true }));
+                self.push_jump();
+                if forward {
+                    let _ = self.backend.send_edit(
+                        "find_next",
+                        json!({ "wrap_around": true, "allow_same": false }),
+                    );
+                } else {
+                    let _ = self.backend.send_edit(
+                        "find_previous",
+                        json!({ "wrap_around": true, "allow_same": false }),
+                    );
+                }
+                // Mirror search_pattern from word under cursor for frontend highlighting.
+                if let Some(line) = self.backend.lines.get(self.backend.cursor_line) {
+                    let col = self.backend.cursor_col;
+                    let ch = line[col..].chars().next();
+                    if ch.map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) {
+                        let start = line[..col]
+                            .char_indices()
+                            .rev()
+                            .take_while(|(_, c)| c.is_alphanumeric() || *c == '_')
+                            .last()
+                            .map(|(i, _)| i)
+                            .unwrap_or(col);
+                        let end = col
+                            + line[col..]
+                                .char_indices()
+                                .take_while(|(_, c)| c.is_alphanumeric() || *c == '_')
+                                .last()
+                                .map(|(i, c)| i + c.len_utf8())
+                                .unwrap_or(0);
+                        self.search_pattern = Some(line[start..end].to_owned());
+                    }
+                }
+                if matches!(self.mode, Mode::Visual | Mode::VisualLine | Mode::VisualBlock) {
+                    self.enter_normal_mode();
+                }
+            }
+            Action::FindAll => {
+                // Select all occurrences of the current search pattern in the buffer.
+                let _ = self.backend.send_edit("find_all", json!([]));
+                self.mode = Mode::Visual;
             }
             Action::SetPrefix(c) => {
                 self.input_state.prefix = Some(c);
@@ -738,11 +876,12 @@ impl App {
             Mode::Search => {
                 self.command_buffer.push(ch);
                 let chars = self.command_buffer.clone();
+                let case_sensitive = smart_case_sensitive(&chars);
                 let _ = self.backend.send_edit(
                     "find",
                     json!({
                         "chars": chars,
-                        "case_sensitive": false,
+                        "case_sensitive": case_sensitive,
                         "regex": false,
                         "whole_words": false
                     }),
@@ -751,29 +890,113 @@ impl App {
             Mode::Visual | Mode::VisualLine | Mode::VisualBlock => {
                 self.handle_visual_char(ch);
             }
+            // SubstituteConfirm only accepts key codes (handled before we reach here);
+            // any stray char is a no-op.
+            Mode::SubstituteConfirm => {}
         }
     }
 
-    pub(crate) fn cursor_position(&self, editor_area: Rect, prompt_area: Rect) -> Position {
-        if matches!(self.mode, Mode::CommandLine | Mode::Search) {
-            let max_x = prompt_area.right().saturating_sub(1);
-            let x = (prompt_area.x + 1 + self.command_buffer.len() as u16).min(max_x);
-            return Position::new(x, prompt_area.y);
+    // ── Mouse and bracketed-paste handling ────────────────────────────────────
+
+    fn handle_mouse_event(&mut self, m: MouseEvent) {
+        let Ok((width, height)) = crossterm::terminal::size() else {
+            return;
+        };
+        self.handle_mouse_event_in_area(m, Rect { x: 0, y: 0, width, height });
+    }
+
+    pub(crate) fn handle_mouse_event_in_area(&mut self, m: MouseEvent, area: Rect) {
+        match m.kind {
+            MouseEventKind::ScrollUp => {
+                let _ = self.backend.send_edit("scroll_up", json!([]));
+            }
+            MouseEventKind::ScrollDown => {
+                let _ = self.backend.send_edit("scroll_down", json!([]));
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some((row, col)) = crate::ui::hit_test_buffer_cell(area, self, m.column, m.row)
+                else {
+                    return;
+                };
+                let line_count = self.backend.lines.len();
+                if row < line_count {
+                    let line = &self.backend.lines[row];
+                    // Convert display column back to a byte offset.
+                    let byte_col = crate::text::display_col_to_byte(line, col);
+                    let _ = self.backend.send_edit(
+                        "gesture",
+                        json!({
+                            "line": row as u64,
+                            "col": byte_col as u64,
+                            "ty": {
+                                "select": {
+                                    "granularity": "point",
+                                    "multi": false
+                                }
+                            }
+                        }),
+                    );
+                    // Exit any special mode on click.
+                    if !matches!(self.mode, Mode::Normal | Mode::Insert) {
+                        self.enter_normal_mode();
+                    }
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some((row, col)) = crate::ui::hit_test_buffer_cell(area, self, m.column, m.row)
+                else {
+                    return;
+                };
+                let line_count = self.backend.lines.len();
+                if row < line_count {
+                    let line = &self.backend.lines[row];
+                    let byte_col = crate::text::display_col_to_byte(line, col);
+                    let _ = self.backend.send_edit(
+                        "gesture",
+                        json!({
+                            "line": row as u64,
+                            "col": byte_col as u64,
+                            "ty": "drag"
+                        }),
+                    );
+                }
+            }
+            _ => {}
         }
+    }
 
-        let max_x = editor_area.right().saturating_sub(1);
-        let max_y = editor_area.bottom().saturating_sub(1);
-
-        let line =
-            self.backend.lines.get(self.backend.cursor_line).map(|s| s.as_str()).unwrap_or("");
-        let display_col = byte_col_to_display_col(line, self.backend.cursor_col);
-
-        let screen_line = self.backend.cursor_line.saturating_sub(self.viewport.top_line);
-        let screen_col = display_col.saturating_sub(self.viewport.left_col);
-
-        let x = (editor_area.x + screen_col as u16).min(max_x);
-        let y = (editor_area.y + screen_line as u16).min(max_y);
-        Position::new(x, y)
+    fn handle_paste(&mut self, text: String) {
+        match self.mode {
+            Mode::Insert => {
+                // Bracketed paste stays backend-owned for undo grouping and multicursor behavior.
+                self.insert_buffer.push_str(&text);
+                let _ = self.backend.send_edit("paste", json!({ "chars": text }));
+            }
+            Mode::CommandLine | Mode::Search => {
+                // Paste into the command/search buffer.
+                self.command_buffer.push_str(&text);
+                if self.mode == Mode::Search {
+                    let chars = self.command_buffer.clone();
+                    let case_sensitive = smart_case_sensitive(&chars);
+                    let _ = self.backend.send_edit(
+                        "find",
+                        json!({
+                            "chars": chars,
+                            "case_sensitive": case_sensitive,
+                            "regex": false,
+                            "whole_words": false
+                        }),
+                    );
+                }
+            }
+            Mode::Normal => {
+                // In normal mode enter insert and paste the text, like pressing `i` then typing.
+                self.mode = Mode::Insert;
+                self.insert_buffer.push_str(&text);
+                let _ = self.backend.send_edit("paste", json!({ "chars": text }));
+            }
+            _ => {}
+        }
     }
 
     fn enter_normal_mode(&mut self) {
@@ -1021,9 +1244,8 @@ impl App {
 
         // Priority 7: '0' as line-start motion when no count is active.
         if ch == '0' && self.input_state.count_digits.is_empty() {
-            let _ = self
-                .backend
-                .send_edit("move_to_left_end_of_line_and_modify_selection", json!([]));
+            let _ =
+                self.backend.send_edit("move_to_left_end_of_line_and_modify_selection", json!([]));
             self.apply_operator(op);
             return;
         }
@@ -1034,8 +1256,7 @@ impl App {
                 let forward = matches!(ch, 'f' | 't');
                 let inclusive = matches!(ch, 'f' | 'F');
                 self.input_state.prefix = None;
-                self.input_state.pending_find =
-                    Some(PendingCharFind { forward, inclusive });
+                self.input_state.pending_find = Some(PendingCharFind { forward, inclusive });
                 return;
             }
             _ => {}
@@ -1157,13 +1378,10 @@ impl App {
             '<' | '>' => text_obj_bracket(&line, cursor_byte, '<', '>', inclusive),
             'p' => {
                 // Paragraph: use xi's paragraph motions instead of byte range.
+                let _ = self.backend.send_edit("move_to_beginning_of_paragraph", json!([]));
                 let _ = self
                     .backend
-                    .send_edit("move_to_beginning_of_paragraph", json!([]));
-                let _ = self.backend.send_edit(
-                    "move_to_end_of_paragraph_and_modify_selection",
-                    json!([]),
-                );
+                    .send_edit("move_to_end_of_paragraph_and_modify_selection", json!([]));
                 self.apply_operator(op);
                 return;
             }
@@ -1194,18 +1412,27 @@ impl App {
 
     fn execute_search(&mut self) {
         let chars = self.command_buffer.clone();
+        let case_sensitive = smart_case_sensitive(&chars);
         let _ = self.backend.send_edit(
             "find",
             json!({
                 "chars": chars,
-                "case_sensitive": false,
+                "case_sensitive": case_sensitive,
                 "regex": false,
                 "whole_words": false
             }),
         );
-        let _ = self
-            .backend
-            .send_edit("find_next", json!({ "wrap_around": true, "allow_same": false }));
+        if self.search_backward {
+            let _ = self
+                .backend
+                .send_edit("find_previous", json!({ "wrap_around": true, "allow_same": false }));
+        } else {
+            let _ = self
+                .backend
+                .send_edit("find_next", json!({ "wrap_around": true, "allow_same": false }));
+        }
+        // Store for repeated n/N navigation and buffer highlighting.
+        self.search_pattern = if chars.is_empty() { None } else { Some(chars) };
         self.enter_normal_mode();
     }
 
@@ -1367,6 +1594,43 @@ impl App {
                     self.should_quit = true;
                 }
             }
+            // ── Substitute (s/pattern/replacement/flags) ─────────────────
+            cmd if cmd == "s"
+                || cmd == "substitute"
+                || cmd.starts_with("s/")
+                || cmd.starts_with("s!")
+                || cmd.starts_with("s|")
+                || cmd.starts_with("s,") =>
+            {
+                // Strip the leading command name, leaving the delimiter and body.
+                let body = if cmd == "s" || cmd == "substitute" {
+                    // delimiter and body are the next token (rest of command line).
+                    let leftover = parts.collect::<Vec<_>>().join(" ");
+                    if leftover.is_empty() {
+                        self.backend.status_message =
+                            Some("substitute: usage: s/pattern/replacement/[flags]".to_owned());
+                        self.enter_normal_mode();
+                        return;
+                    }
+                    leftover
+                } else {
+                    // cmd is like "s/pattern/..." — strip the leading "s".
+                    cmd[1..].to_owned()
+                };
+                // Determine range: default current line, `%` already parsed.
+                let (start, end) = range.unwrap_or((cursor_line, cursor_line));
+                match parse_substitute_cmd(&body) {
+                    Some((pattern, replacement, flags)) => {
+                        self.execute_substitute(start, end, &pattern, &replacement, &flags);
+                    }
+                    None => {
+                        self.backend.status_message =
+                            Some("substitute: usage: s/pattern/replacement/[flags]".to_owned());
+                    }
+                }
+                self.enter_normal_mode();
+                return;
+            }
             // ── Range-aware line operations ───────────────────────────────
             "d" | "delete" => {
                 let (start, end) = range.unwrap_or((cursor_line, cursor_line));
@@ -1377,42 +1641,120 @@ impl App {
                 self.yank_line_range(start, end);
             }
             "format" => {
-                if let Err(err) =
-                    self.backend.send_plugin_rpc("xi-lsp-plugin", "lsp.format_document", json!({}))
-                {
+                if let Err(err) = self.backend.format_document() {
                     self.backend.status_message = Some(format!("format failed: {err}"));
                 }
             }
             "complete" => {
-                if let Err(err) =
-                    self.backend.send_plugin_rpc("xi-lsp-plugin", "lsp.completion", json!({}))
-                {
+                if let Err(err) = self.backend.request_completion(None) {
                     self.backend.status_message = Some(format!("completion failed: {err}"));
                 }
             }
             "definition" | "def" => {
-                if let Err(err) =
-                    self.backend.send_plugin_rpc("xi-lsp-plugin", "lsp.definition", json!({}))
-                {
+                if let Err(err) = self.backend.request_definition() {
                     self.backend.status_message = Some(format!("definition failed: {err}"));
                 }
             }
             "references" | "refs" => {
-                if let Err(err) =
-                    self.backend.send_plugin_rpc("xi-lsp-plugin", "lsp.references", json!({}))
-                {
+                if let Err(err) = self.backend.request_references() {
                     self.backend.status_message = Some(format!("references failed: {err}"));
                 }
             }
             "codeaction" | "codeactions" => {
                 let action_index = parts.next().and_then(|part| part.parse::<usize>().ok());
-                if let Err(err) = self.backend.send_plugin_rpc(
-                    "xi-lsp-plugin",
-                    "lsp.code_action",
-                    json!({ "index": action_index }),
-                ) {
+                if let Err(err) = self.backend.request_code_actions(action_index) {
                     self.backend.status_message = Some(format!("code action failed: {err}"));
                 }
+            }
+            "rename" => {
+                let new_name = parts.collect::<Vec<_>>().join(" ");
+                if new_name.is_empty() {
+                    self.backend.status_message = Some(String::from("rename: usage: :rename new_name"));
+                } else if let Err(err) = self.backend.request_rename(&new_name) {
+                    self.backend.status_message = Some(format!("rename failed: {err}"));
+                }
+            }
+            "diagnostics" => {
+                self.open_diagnostics_location_list();
+            }
+            "hover" => {
+                let position = Some((self.backend.cursor_line, self.backend.cursor_col));
+                if let Err(err) = self.backend.request_hover(position) {
+                    self.backend.status_message = Some(format!("hover failed: {err}"));
+                }
+            }
+            "reindent" => {
+                let _ = self.backend.send_edit("reindent", json!([]));
+            }
+            "help" => {
+                self.open_help_picker("Help", Self::help_items());
+                return;
+            }
+            "commands" => {
+                self.open_help_picker("Commands", Self::command_help_items());
+                return;
+            }
+            "keymap" => {
+                self.open_help_picker("Keymap", Self::keymap_help_items());
+                return;
+            }
+            "protocol" => {
+                self.open_help_picker("Protocol", Self::protocol_help_items());
+                return;
+            }
+            "selectionforfind" => {
+                let _ =
+                    self.backend.send_edit("selection_for_find", json!({ "case_sensitive": true }));
+                let _ = self.backend.send_edit("highlight_find", json!({ "visible": true }));
+            }
+            "selectionforreplace" => {
+                let _ = self.backend.send_edit("selection_for_replace", json!([]));
+            }
+            "transpose" => {
+                let _ = self.backend.send_edit("transpose", json!([]));
+            }
+            "duplicateline" => {
+                let _ = self.backend.send_edit("duplicate_line", json!([]));
+            }
+            "increasenumber" => {
+                let _ = self.backend.send_edit("increase_number", json!([]));
+            }
+            "decreasenumber" => {
+                let _ = self.backend.send_edit("decrease_number", json!([]));
+            }
+            "multifind" => {
+                let terms = parts.collect::<Vec<_>>();
+                if terms.is_empty() {
+                    self.backend.status_message =
+                        Some("multifind: usage: :multifind term [term ...]".to_owned());
+                } else {
+                    let queries = terms
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, term)| {
+                            json!({
+                                "id": index,
+                                "chars": term,
+                                "case_sensitive": smart_case_sensitive(term),
+                                "regex": false,
+                                "whole_words": false,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let _ = self.backend.send_edit("multi_find", json!({ "queries": queries }));
+                }
+            }
+            "selectionintolines" | "splitselection" => {
+                let _ = self.backend.send_edit("selection_into_lines", json!([]));
+            }
+            "addselabove" => {
+                let _ = self.backend.send_edit("add_selection_above", json!([]));
+            }
+            "addselbelow" => {
+                let _ = self.backend.send_edit("add_selection_below", json!([]));
+            }
+            "inserttab" => {
+                let _ = self.backend.send_edit("insert_tab", json!([]));
             }
             // ── Buffer management ─────────────────────────────────────────
             "e" | "edit" => {
@@ -1460,8 +1802,7 @@ impl App {
                         }
                     },
                     Some(_) => {
-                        self.backend.status_message =
-                            Some("no recovery file found".to_owned());
+                        self.backend.status_message = Some("no recovery file found".to_owned());
                     }
                     None => {
                         self.backend.status_message =
@@ -1480,17 +1821,14 @@ impl App {
                 match recovery_path {
                     Some(rp) if rp.exists() => match std::fs::remove_file(&rp) {
                         Ok(()) => {
-                            self.backend.status_message =
-                                Some(format!("deleted {}", rp.display()));
+                            self.backend.status_message = Some(format!("deleted {}", rp.display()));
                         }
                         Err(err) => {
-                            self.backend.status_message =
-                                Some(format!("recoverdel failed: {err}"));
+                            self.backend.status_message = Some(format!("recoverdel failed: {err}"));
                         }
                     },
                     _ => {
-                        self.backend.status_message =
-                            Some("no recovery file found".to_owned());
+                        self.backend.status_message = Some("no recovery file found".to_owned());
                     }
                 }
             }
@@ -1605,18 +1943,16 @@ impl App {
                     self.viewport = Viewport::default();
                 }
             }
-            "b#" => {
-                match self.backend.switch_alternate() {
-                    Ok(()) => {
-                        let new = self.backend.active().id;
-                        self.tabs.focused_windows_mut().set_focused_buffer(new);
-                        self.viewport = Viewport::default();
-                    }
-                    Err(err) => {
-                        self.backend.status_message = Some(format!("{err}"));
-                    }
+            "b#" => match self.backend.switch_alternate() {
+                Ok(()) => {
+                    let new = self.backend.active().id;
+                    self.tabs.focused_windows_mut().set_focused_buffer(new);
+                    self.viewport = Viewport::default();
                 }
-            }
+                Err(err) => {
+                    self.backend.status_message = Some(format!("{err}"));
+                }
+            },
             "bd" | "bdelete" => {
                 let id = self.backend.active().id;
                 if let Err(err) = self.backend.close_buffer(id) {
@@ -1638,8 +1974,7 @@ impl App {
                     match self.backend.open_buffer(Some(p)) {
                         Ok(id) => id,
                         Err(err) => {
-                            self.backend.status_message =
-                                Some(format!("open failed: {err}"));
+                            self.backend.status_message = Some(format!("open failed: {err}"));
                             self.enter_normal_mode();
                             return;
                         }
@@ -1647,8 +1982,11 @@ impl App {
                 } else {
                     self.backend.active().id
                 };
-                let (_, new_vp) =
-                    self.tabs.focused_windows_mut().split(SplitDir::Horizontal, buf_id, self.viewport);
+                let (_, new_vp) = self.tabs.focused_windows_mut().split(
+                    SplitDir::Horizontal,
+                    buf_id,
+                    self.viewport,
+                );
                 self.viewport = new_vp;
                 let _ = self.backend.switch_to_id(buf_id);
             }
@@ -1658,8 +1996,7 @@ impl App {
                     match self.backend.open_buffer(Some(p)) {
                         Ok(id) => id,
                         Err(err) => {
-                            self.backend.status_message =
-                                Some(format!("open failed: {err}"));
+                            self.backend.status_message = Some(format!("open failed: {err}"));
                             self.enter_normal_mode();
                             return;
                         }
@@ -1667,8 +2004,11 @@ impl App {
                 } else {
                     self.backend.active().id
                 };
-                let (_, new_vp) =
-                    self.tabs.focused_windows_mut().split(SplitDir::Vertical, buf_id, self.viewport);
+                let (_, new_vp) = self.tabs.focused_windows_mut().split(
+                    SplitDir::Vertical,
+                    buf_id,
+                    self.viewport,
+                );
                 self.viewport = new_vp;
                 let _ = self.backend.switch_to_id(buf_id);
             }
@@ -1749,6 +2089,12 @@ impl App {
                 let opt = parts.next().unwrap_or_default();
                 self.apply_set_option(opt);
             }
+            // ── :noh — clear search highlight ────────────────────────────────
+            "noh" | "nohlsearch" => {
+                self.search_pattern = None;
+                let _ = self.backend.send_edit("highlight_find", json!({ "visible": false }));
+                self.backend.status_message = Some("search highlight cleared".to_owned());
+            }
             other if !other.is_empty() => {
                 self.backend.status_message = Some(format!("unknown command: {other}"));
             }
@@ -1771,8 +2117,7 @@ impl App {
                     }
                 }
                 "colorcolumn" | "cc" => {
-                    self.config.color_column =
-                        val.parse::<usize>().ok().filter(|&n| n > 0);
+                    self.config.color_column = val.parse::<usize>().ok().filter(|&n| n > 0);
                 }
                 "statusline" | "stl" => match val {
                     "default" => self.config.statusline_format = StatuslineFormat::Default,
@@ -1781,8 +2126,7 @@ impl App {
                 },
                 "number" | "nu" | "nonu" | "nonumber" => {} // handled below
                 _ => {
-                    self.backend.status_message =
-                        Some(format!("unknown option: {key}"));
+                    self.backend.status_message = Some(format!("unknown option: {key}"));
                     return;
                 }
             }
@@ -1809,8 +2153,7 @@ impl App {
                 "signcolumn" | "smc" => self.config.sign_column = true,
                 "nosigncolumn" | "nosmc" => self.config.sign_column = false,
                 other => {
-                    self.backend.status_message =
-                        Some(format!("unknown option: {other}"));
+                    self.backend.status_message = Some(format!("unknown option: {other}"));
                     return;
                 }
             }
@@ -1856,60 +2199,192 @@ impl App {
     /// Complete `command_buffer` to the first matching command name.
     fn complete_command(&mut self) {
         const COMMANDS: &[&str] = &[
-            "b#", "bd", "bdelete", "bn", "bnext", "bp", "bprev", "bprevious",
-            "buffers", "Buffers",
-            "cc", "ccl", "cclose", "cfirst", "cl", "clast", "clist", "cn", "cnext", "cope",
-            "copen", "cp", "cprev", "cprevious",
-            "codeaction", "codeactions", "complete",
-            "d", "def", "definition", "delete", "e", "e!", "edit", "edit!",
-            "files", "Files", "format", "grep", "Grep",
-            "lcl", "lclose", "lfirst", "llast", "ln", "lnext", "lop", "lopen",
-            "lp", "lprev", "lprevious",
-            "ls", "q", "q!", "quit", "quit!", "recover", "recoverdel",
-            "references", "refs",
-            "sp", "split",
-            "tabc", "tabclose", "tabe", "tabedit", "tabn", "tabnext",
-            "tabnew", "tabp", "tabprev", "tabprevious", "tabs",
-            "vs", "vsplit", "w", "wq", "write", "x", "y", "yank",
+            "b#",
+            "bd",
+            "bdelete",
+            "bn",
+            "bnext",
+            "bp",
+            "bprev",
+            "bprevious",
+            "buffers",
+            "Buffers",
+            "cc",
+            "ccl",
+            "cclose",
+            "cfirst",
+            "cl",
+            "clast",
+            "clist",
+            "cn",
+            "cnext",
+            "cope",
+            "copen",
+            "cp",
+            "cprev",
+            "cprevious",
+            "codeaction",
+            "codeactions",
+            "complete",
+            "d",
+            "def",
+            "definition",
+            "delete",
+            "diagnostics",
+            "e",
+            "e!",
+            "edit",
+            "edit!",
+            "commands",
+            "decreasenumber",
+            "duplicateline",
+            "files",
+            "Files",
+            "format",
+            "grep",
+            "Grep",
+            "help",
+            "hover",
+            "increasenumber",
+            "inserttab",
+            "keymap",
+            "lcl",
+            "lclose",
+            "lfirst",
+            "llast",
+            "ln",
+            "lnext",
+            "lop",
+            "lopen",
+            "lp",
+            "lprev",
+            "lprevious",
+            "ls",
+            "multifind",
+            "protocol",
+            "q",
+            "q!",
+            "quit",
+            "quit!",
+            "recover",
+            "recoverdel",
+            "reindent",
+            "rename",
+            "references",
+            "refs",
+            "selectionforfind",
+            "selectionforreplace",
+            "selectionintolines",
+            "splitselection",
+            "sp",
+            "split",
+            "tabc",
+            "tabclose",
+            "tabe",
+            "tabedit",
+            "tabn",
+            "tabnext",
+            "tabnew",
+            "tabp",
+            "tabprev",
+            "tabprevious",
+            "tabs",
+            "transpose",
+            "addselabove",
+            "addselbelow",
+            "vs",
+            "vsplit",
+            "w",
+            "wq",
+            "write",
+            "x",
+            "y",
+            "yank",
         ];
         let prefix = self.command_buffer.clone();
-        let candidates: Vec<&&str> =
-            COMMANDS.iter().filter(|c| c.starts_with(&*prefix)).collect();
+        let candidates: Vec<&&str> = COMMANDS.iter().filter(|c| c.starts_with(&*prefix)).collect();
         if let Some(&&first) = candidates.first() {
             self.command_buffer = first.to_owned();
         }
+    }
+
+    fn open_help_picker(&mut self, title: &str, items: Vec<String>) {
+        self.picker = Some(PickerState::new_help(title, items));
+        self.enter_normal_mode();
+    }
+
+    fn help_items() -> Vec<String> {
+        vec![
+            "Discovery: :commands | :keymap | :protocol".to_owned(),
+            "Modes: i insert | v visual | V visual-line | Ctrl-V visual-block | : command".to_owned(),
+            "Move: h j k l | w b e | gg G | % | * # | n N".to_owned(),
+            "Edit: d c y operators | p/P register paste | u undo | Ctrl-R redo | . repeat".to_owned(),
+            "IDE: :hover :complete :codeaction :definition :references :rename :diagnostics".to_owned(),
+            "Backend ops: :transpose :duplicateline :increasenumber :decreasenumber :reindent".to_owned(),
+            "Selections: :selectionforfind :selectionforreplace :selectionintolines :addselabove :addselbelow".to_owned(),
+            "Search sets: :multifind term [term ...]".to_owned(),
+            "Workspace: :files :bpick :grep :buffers :split :vsplit :tabnew".to_owned(),
+        ]
+    }
+
+    fn command_help_items() -> Vec<String> {
+        vec![
+            ":help open searchable editor help".to_owned(),
+            ":commands list ex commands and features".to_owned(),
+            ":keymap list high-value normal-mode bindings".to_owned(),
+            ":protocol show exposed vs retired xi-core protocol surface".to_owned(),
+            ":hover request LSP hover at cursor".to_owned(),
+            ":complete open completion picker from backend suggestions".to_owned(),
+            ":codeaction open backend code-action picker".to_owned(),
+            ":rename new_name request backend rename at cursor".to_owned(),
+            ":diagnostics open location list for active-buffer diagnostics".to_owned(),
+            ":reindent run core reindent on current selection or line".to_owned(),
+            ":transpose backend transpose at cursor".to_owned(),
+            ":duplicateline backend duplicate current selection line(s)".to_owned(),
+            ":increasenumber / :decreasenumber adjust number under cursor".to_owned(),
+            ":selectionforfind / :selectionforreplace lift selection into find or replace"
+                .to_owned(),
+            ":selectionintolines split selection into per-line cursors".to_owned(),
+            ":addselabove / :addselbelow grow multi-cursor set".to_owned(),
+            ":multifind term [term ...] run backend multi-find queries".to_owned(),
+        ]
+    }
+
+    fn keymap_help_items() -> Vec<String> {
+        vec![
+            "K request hover".to_owned(),
+            "Ctrl-A increase number under cursor".to_owned(),
+            "Ctrl-X decrease number under cursor".to_owned(),
+            "Ctrl-Up add selection above".to_owned(),
+            "Ctrl-Down add selection below".to_owned(),
+            "gd duplicate current line or selection".to_owned(),
+            "* / # selection-for-find forward/backward".to_owned(),
+            "gt / gT next and previous tab".to_owned(),
+            "]q / [q quickfix next and previous".to_owned(),
+            "]Q / [Q location list next and previous".to_owned(),
+            "z a o c R M fold toggle/open/close/open-all/close-all".to_owned(),
+            "Ctrl-O / Tab jump list older/newer".to_owned(),
+            "g; / g, change list older/newer".to_owned(),
+        ]
+    }
+
+    fn protocol_help_items() -> Vec<String> {
+        vec![
+            "Exposed backend edits: request_hover transpose duplicate_line increase_number decrease_number multi_find reindent".to_owned(),
+            "Exposed selection edits: selection_for_find selection_for_replace selection_into_lines add_selection_above add_selection_below insert_tab".to_owned(),
+            "Canonical mouse path: gesture.select and gesture.drag; legacy click/drag shims avoided in ee-tui".to_owned(),
+            "Frontend-owned by design: paste, cut, copy, registers, clipboard, viewport resize".to_owned(),
+            "Removed from frontend protocol: get_config debug_get_contents set_theme modify_user_config tracing_config save_trace set_language cut copy".to_owned(),
+            "Removed legacy edit protocol commands no longer supported by xi crates".to_owned(),
+            "Intentional remaining legacy exposure: reindent via :reindent only".to_owned(),
+        ]
     }
 
     // ── Range-based line operations ─────────────────────────────────────────
 
     /// Delete lines `start..=end` (0-based, inclusive).
     fn delete_line_range(&mut self, start: usize, end: usize) {
-        let line_count = self.backend.lines.len();
-        if line_count == 0 {
-            return;
-        }
-        let start = start.min(line_count.saturating_sub(1));
-        let end = end.min(line_count.saturating_sub(1));
-        let end_col = self.backend.lines.get(end).map(|l| l.len()).unwrap_or(0);
-        let _ = self.backend.send_edit(
-            "gesture",
-            json!({
-                "line": start as u64, "col": 0u64,
-                "ty": { "select": { "granularity": "point", "multi": false } }
-            }),
-        );
-        let _ = self.backend.send_edit(
-            "gesture",
-            json!({
-                "line": end as u64, "col": end_col as u64,
-                "ty": { "select_extend": { "granularity": "point" } }
-            }),
-        );
-        let _ = self.backend.send_edit("delete_forward", json!([]));
-        // Delete the trailing newline unless this was the last line.
-        if end < line_count.saturating_sub(1) {
-            let _ = self.backend.send_edit("delete_forward", json!([]));
-        }
+        let _ = self.backend.delete_line_range(start, end);
         self.push_change();
     }
 
@@ -1959,14 +2434,18 @@ impl App {
             }
             KeyCode::Char('j') | KeyCode::Down => {
                 if is_quickfix {
-                    if let Some(qf) = self.quickfix.as_mut() { qf.move_down(); }
+                    if let Some(qf) = self.quickfix.as_mut() {
+                        qf.move_down();
+                    }
                 } else if let Some(ll) = self.location_list.as_mut() {
                     ll.move_down();
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
                 if is_quickfix {
-                    if let Some(qf) = self.quickfix.as_mut() { qf.move_up(); }
+                    if let Some(qf) = self.quickfix.as_mut() {
+                        qf.move_up();
+                    }
                 } else if let Some(ll) = self.location_list.as_mut() {
                     ll.move_up();
                 }
@@ -1981,7 +2460,11 @@ impl App {
                     self.navigate_to_qf_entry(e);
                 }
                 // Return focus to the editor after navigation.
-                if is_quickfix { self.quickfix_focused = false; } else { self.location_list_focused = false; }
+                if is_quickfix {
+                    self.quickfix_focused = false;
+                } else {
+                    self.location_list_focused = false;
+                }
             }
             _ => {}
         }
@@ -2046,9 +2529,34 @@ impl App {
 
     /// Drain pending location results from the backend and populate the
     /// quickfix list.  Called each frame from the main loop.
+    pub(crate) fn handle_pending_ui_actions(&mut self) {
+        let active_view_id = self.backend.active().view_id.clone();
+        for action in self.backend.drain_pending_ui_actions() {
+            match action {
+                PendingUiAction::Hover { view_id, content } if view_id == active_view_id => {
+                    self.hover_popup = Some(HoverPopup {
+                        title: String::from("Hover"),
+                        content,
+                    });
+                }
+                PendingUiAction::Completions { view_id, items } if view_id == active_view_id => {
+                    self.open_completion_picker(&items);
+                }
+                PendingUiAction::CodeActions { view_id, actions } if view_id == active_view_id => {
+                    self.open_code_action_picker(&actions);
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub(crate) fn handle_pending_locations(&mut self) {
         let locations = self.backend.drain_pending_locations();
-        for (title, targets) in locations {
+        let active_view_id = self.backend.active().view_id.clone();
+        for (view_id, title, targets) in locations {
+            if view_id != active_view_id {
+                continue;
+            }
             if targets.is_empty() {
                 continue;
             }
@@ -2095,6 +2603,57 @@ impl App {
             self.quickfix_open = true;
             self.quickfix_focused = true;
         }
+    }
+
+    fn open_completion_picker(&mut self, items: &[CompletionSuggestion]) {
+        self.hover_popup = None;
+        if items.is_empty() {
+            self.picker = None;
+            self.backend.status_message = Some(String::from("no completions"));
+            return;
+        }
+        self.picker = Some(PickerState::new_completions(items));
+    }
+
+    fn open_code_action_picker(&mut self, actions: &[CodeActionDescriptor]) {
+        self.hover_popup = None;
+        if actions.is_empty() {
+            self.picker = None;
+            self.backend.status_message = Some(String::from("no code actions"));
+            return;
+        }
+        self.picker = Some(PickerState::new_code_actions(actions));
+    }
+
+    fn open_diagnostics_location_list(&mut self) {
+        let buf = self.backend.active();
+        if buf.diagnostics.is_empty() {
+            self.backend.status_message = Some(String::from("no diagnostics"));
+            return;
+        }
+
+        let entries = buf
+            .diagnostics
+            .iter()
+            .map(|diagnostic| {
+                let (line, col) = line_col_for_offset(&buf.lines, diagnostic.range.start);
+                let severity = match diagnostic.severity {
+                    xi_core_lib::plugin_rpc::DiagnosticSeverity::Error => "error",
+                    xi_core_lib::plugin_rpc::DiagnosticSeverity::Warning => "warning",
+                    xi_core_lib::plugin_rpc::DiagnosticSeverity::Information => "info",
+                    xi_core_lib::plugin_rpc::DiagnosticSeverity::Hint => "hint",
+                };
+                QfEntry {
+                    path: buf.path.clone(),
+                    line,
+                    col,
+                    message: format!("[{severity}] {}", diagnostic.message),
+                }
+            })
+            .collect::<Vec<_>>();
+        self.location_list = Some(QfList::new("Diagnostics", entries));
+        self.location_list_open = true;
+        self.location_list_focused = true;
     }
 
     // ── Fold commands ─────────────────────────────────────────────────────────
@@ -2159,11 +2718,7 @@ impl App {
             if let Some(parent) = recovery_path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let content: String = buf
-                .lines
-                .iter()
-                .flat_map(|l| [l.as_str(), "\n"])
-                .collect();
+            let content: String = buf.lines.iter().flat_map(|l| [l.as_str(), "\n"]).collect();
             let _ = std::fs::write(&recovery_path, content);
         }
     }
@@ -2235,6 +2790,19 @@ impl App {
                     self.viewport = Viewport::default();
                 }
             }
+            crate::picker::PickerKind::Completions => {
+                let Some(index) = item.choice_index else { return };
+                if let Err(err) = self.backend.request_completion(Some(index)) {
+                    self.backend.status_message = Some(format!("completion failed: {err}"));
+                }
+            }
+            crate::picker::PickerKind::CodeActions => {
+                let Some(index) = item.choice_index else { return };
+                if let Err(err) = self.backend.request_code_actions(Some(index)) {
+                    self.backend.status_message = Some(format!("code action failed: {err}"));
+                }
+            }
+            crate::picker::PickerKind::Help => {}
         }
     }
 
@@ -2284,15 +2852,21 @@ impl App {
             // Horizontal split (same buffer).
             's' => {
                 let buf_id = self.backend.active().id;
-                let (_, new_vp) =
-                    self.tabs.focused_windows_mut().split(SplitDir::Horizontal, buf_id, self.viewport);
+                let (_, new_vp) = self.tabs.focused_windows_mut().split(
+                    SplitDir::Horizontal,
+                    buf_id,
+                    self.viewport,
+                );
                 self.viewport = new_vp;
             }
             // Vertical split (same buffer).
             'v' => {
                 let buf_id = self.backend.active().id;
-                let (_, new_vp) =
-                    self.tabs.focused_windows_mut().split(SplitDir::Vertical, buf_id, self.viewport);
+                let (_, new_vp) = self.tabs.focused_windows_mut().split(
+                    SplitDir::Vertical,
+                    buf_id,
+                    self.viewport,
+                );
                 self.viewport = new_vp;
             }
             // Focus next window.
@@ -2518,11 +3092,8 @@ impl App {
             None => return String::new(),
         };
         // Normalise so (start_line, start_col) ≤ (end_line, end_col).
-        let ((sl, sc), (el, ec)) = if (al, ac) <= (cl, cc) {
-            ((al, ac), (cl, cc))
-        } else {
-            ((cl, cc), (al, ac))
-        };
+        let ((sl, sc), (el, ec)) =
+            if (al, ac) <= (cl, cc) { ((al, ac), (cl, cc)) } else { ((cl, cc), (al, ac)) };
         let lines = &self.backend.lines;
         if sl >= lines.len() {
             return String::new();
@@ -2557,11 +3128,8 @@ impl App {
         if text.is_empty() {
             return;
         }
-        if !before {
-            // Move cursor right one position so insert lands after cursor.
-            let _ = self.backend.send_edit("move_right", json!([]));
-        }
-        let _ = self.backend.send_edit("insert", json!({ "chars": text }));
+        self.record_edit("paste_register", json!({ "chars": text, "before": before }));
+        self.push_change();
     }
 
     // ── Repeat last change ──────────────────────────────────────────────────
@@ -2591,9 +3159,7 @@ impl App {
         self.mode = Mode::VisualLine;
         // Immediately select the whole current line.
         let _ = self.backend.send_edit("move_to_left_end_of_line", json!([]));
-        let _ = self
-            .backend
-            .send_edit("move_to_right_end_of_line_and_modify_selection", json!([]));
+        let _ = self.backend.send_edit("move_to_right_end_of_line_and_modify_selection", json!([]));
     }
 
     fn enter_visual_block(&mut self) {
@@ -2620,12 +3186,7 @@ impl App {
                 "ty": { "select": { "granularity": "point", "multi": false } }
             }),
         );
-        let bottom_len = self
-            .backend
-            .lines
-            .get(bottom)
-            .map(|s| s.len())
-            .unwrap_or(0);
+        let bottom_len = self.backend.lines.get(bottom).map(|s| s.len()).unwrap_or(0);
         let _ = self.backend.send_edit(
             "gesture",
             json!({
@@ -2799,7 +3360,8 @@ impl App {
 
     /// Apply an operator to each line in the block visual selection.
     fn apply_visual_block_op(&mut self, op: Operator) {
-        let (al, ac) = self.visual_anchor.unwrap_or((self.backend.cursor_line, self.backend.cursor_col));
+        let (al, ac) =
+            self.visual_anchor.unwrap_or((self.backend.cursor_line, self.backend.cursor_col));
         let cl = self.backend.cursor_line;
         let cc = self.backend.cursor_col;
         let (top, bottom) = if al <= cl { (al, cl) } else { (cl, al) };
@@ -2821,32 +3383,8 @@ impl App {
             return;
         }
         // For delete/change: iterate lines from bottom to top to preserve offsets.
-        for li in (top..=bottom.min(lines.len().saturating_sub(1))).rev() {
-            let line_len = lines[li].len();
-            let s = left_col.min(line_len);
-            let e = right_col.min(line_len);
-            if s >= e {
-                continue;
-            }
-            // Select the column range on this line and delete.
-            let _ = self.backend.send_edit(
-                "gesture",
-                json!({
-                    "line": li as u64,
-                    "col": s as u64,
-                    "ty": { "select": { "granularity": "point", "multi": false } }
-                }),
-            );
-            let _ = self.backend.send_edit(
-                "gesture",
-                json!({
-                    "line": li as u64,
-                    "col": e as u64,
-                    "ty": { "select_extend": { "granularity": "point" } }
-                }),
-            );
-            self.record_edit("delete_forward", json!([]));
-        }
+        let _ = self.backend.delete_block(top, bottom, left_col, right_col);
+        self.push_change();
         let reg = self.take_register();
         self.registers.delete(&reg, extracted, false);
         self.enter_normal_mode();
@@ -2860,7 +3398,8 @@ impl App {
     /// Set up a block-insert (`I`) or block-append (`A`) for the current block
     /// visual selection.  Actual text is applied on leaving insert mode.
     fn visual_block_insert(&mut self, append: bool) {
-        let (al, ac) = self.visual_anchor.unwrap_or((self.backend.cursor_line, self.backend.cursor_col));
+        let (al, ac) =
+            self.visual_anchor.unwrap_or((self.backend.cursor_line, self.backend.cursor_col));
         let cl = self.backend.cursor_line;
         let cc = self.backend.cursor_col;
         let (top, bottom) = if al <= cl { (al, cl) } else { (cl, al) };
@@ -2893,23 +3432,173 @@ impl App {
         if text.is_empty() {
             return;
         }
-        // Apply to each line in the block range (skip first – it already has it).
-        let lines = self.backend.lines.clone();
-        let range = (bi.line_start + 1)..=bi.line_end.min(lines.len().saturating_sub(1));
-        for (idx, line) in lines[range.clone()].iter().enumerate() {
-            let li = bi.line_start + 1 + idx;
-            let col = bi.col.min(line.len());
-            let _ = self.backend.send_edit(
-                "gesture",
-                json!({ "line": li as u64, "col": col as u64, "ty": "point_select" }),
+        if bi.line_start < bi.line_end {
+            let _ = self.backend.replay_block_insert(
+                bi.line_start + 1,
+                bi.line_end,
+                bi.col,
+                &text,
+                bi.append,
             );
-            let _ = self.backend.send_edit("insert", json!({ "chars": text }));
         }
     }
 
+    // ── Substitute confirm mode ───────────────────────────────────────────
+
+    /// Handle a key event while in `SubstituteConfirm` mode.
+    pub(crate) fn handle_substitute_confirm(&mut self, key: crossterm::event::KeyCode) {
+        use crossterm::event::KeyCode;
+        match key {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                self.apply_substitute_current();
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                self.advance_substitute_confirm();
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                // Apply all remaining.
+                while self.substitute_pending.as_ref().is_some_and(|s| s.current < s.matches.len())
+                {
+                    self.apply_substitute_current();
+                }
+            }
+            KeyCode::Char('q') | KeyCode::Esc => {
+                let applied = self.substitute_pending.as_ref().map(|s| s.applied).unwrap_or(0);
+                self.substitute_pending = None;
+                self.mode = Mode::Normal;
+                self.backend.status_message = Some(format!("{applied} substitution(s) applied"));
+            }
+            _ => {}
+        }
+    }
+
+    /// Apply the current pending substitution match and advance.
+    fn apply_substitute_current(&mut self) {
+        let Some(state) = self.substitute_pending.as_mut() else {
+            return;
+        };
+        let idx = state.current;
+        if idx >= state.matches.len() {
+            return;
+        }
+        let replacement = state.matches[idx].clone();
+        let _ = self.backend.apply_line_replacements(&[replacement]);
+        state.applied += 1;
+        state.current += 1;
+        self.advance_substitute_confirm_inner();
+    }
+
+    /// Skip the current pending match and advance.
+    fn advance_substitute_confirm(&mut self) {
+        let Some(state) = self.substitute_pending.as_mut() else {
+            return;
+        };
+        state.current += 1;
+        self.advance_substitute_confirm_inner();
+    }
+
+    /// Finish confirmation if all matches exhausted, otherwise jump to next.
+    fn advance_substitute_confirm_inner(&mut self) {
+        let done = self.substitute_pending.as_ref().is_none_or(|s| s.current >= s.matches.len());
+        if done {
+            let applied = self.substitute_pending.as_ref().map(|s| s.applied).unwrap_or(0);
+            self.substitute_pending = None;
+            self.mode = Mode::Normal;
+            self.backend.status_message = Some(format!("{applied} substitution(s) applied"));
+        } else {
+            let li = self.substitute_pending.as_ref().unwrap().matches
+                [self.substitute_pending.as_ref().unwrap().current]
+                .line;
+            self.jump_to_line(li);
+            let total = self.substitute_pending.as_ref().unwrap().matches.len();
+            let current = self.substitute_pending.as_ref().unwrap().current;
+            self.backend.status_message =
+                Some(format!("substitute ({}/{total}) replace? [y/n/a/q]", current + 1));
+        }
+    }
+
+    // ── Substitute helper ─────────────────────────────────────────────────
+
+    /// Execute a `:s/pattern/replacement/flags` command on `lines[start..=end]`.
+    ///
+    /// Flags: `g` = replace all occurrences per line (default: first only),
+    ///        `i` = case-insensitive (default: smart-case),
+    ///        `c` = confirm each change interactively.
+    ///
+    /// Delegates substitute preview and apply work to xi-core so range and
+    /// confirm semantics always operate on the authoritative rope.
+    pub(crate) fn execute_substitute(
+        &mut self,
+        start: usize,
+        end: usize,
+        pattern: &str,
+        replacement: &str,
+        flags: &str,
+    ) {
+        if pattern.is_empty() {
+            self.backend.status_message = Some("substitute: empty pattern".to_owned());
+            return;
+        }
+        let global = flags.contains('g');
+        let case_insensitive =
+            flags.contains('i') || (!flags.contains('I') && !smart_case_sensitive(pattern));
+        let confirm = flags.contains('c');
+        let changes = match self.backend.substitute_preview(
+            start,
+            end,
+            pattern,
+            replacement,
+            global,
+            !case_insensitive,
+        ) {
+            Ok(changes) => changes,
+            Err(err) => {
+                self.backend.status_message = Some(format!("substitute: {err}"));
+                return;
+            }
+        };
+
+        if changes.is_empty() {
+            self.backend.status_message = Some("substitute: pattern not found".to_owned());
+            return;
+        }
+
+        if confirm {
+            // Enter confirm mode.
+            let total = changes.len();
+            let first_line = changes[0].line;
+            self.substitute_pending =
+                Some(SubstitutePending { matches: changes, current: 0, applied: 0 });
+            self.mode = Mode::SubstituteConfirm;
+            self.jump_to_line(first_line);
+            self.backend.status_message =
+                Some(format!("substitute (1/{total}) replace? [y/n/a/q]"));
+        } else {
+            // Apply authoritative replacements in one backend-owned edit.
+            let count = changes.len();
+            let _ = self.backend.apply_line_replacements(&changes);
+            self.push_change();
+            self.backend.status_message =
+                Some(format!("{count} substitution(s) on {count} line(s)"));
+        }
+    }
 }
 
 // ── Text object helpers (free functions) ─────────────────────────────────────
+
+fn line_col_for_offset(lines: &[String], offset: usize) -> (usize, usize) {
+    let mut remaining = offset;
+    for (line_index, line) in lines.iter().enumerate() {
+        let line_len = line.len();
+        if remaining <= line_len {
+            return (line_index, remaining);
+        }
+        remaining = remaining.saturating_sub(line_len + 1);
+    }
+    let line = lines.len().saturating_sub(1);
+    let col = lines.get(line).map(|line| line.len()).unwrap_or(0);
+    (line, col)
+}
 
 fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
@@ -2988,11 +3677,7 @@ pub(crate) fn text_obj_quote(
                 Some((open, close + quote.len_utf8()))
             } else {
                 let inner_start = open + quote.len_utf8();
-                if inner_start <= close {
-                    Some((inner_start, close))
-                } else {
-                    None
-                }
+                if inner_start <= close { Some((inner_start, close)) } else { None }
             };
         }
         i += 2;
@@ -3051,11 +3736,7 @@ pub(crate) fn text_obj_bracket(
         Some((open_pos, close_pos + close.len_utf8()))
     } else {
         let inner_start = open_pos + open.len_utf8();
-        if inner_start <= close_pos {
-            Some((inner_start, close_pos))
-        } else {
-            None
-        }
+        if inner_start <= close_pos { Some((inner_start, close_pos)) } else { None }
     }
 }
 
@@ -3078,7 +3759,8 @@ pub(crate) fn text_obj_tag(line: &str, cursor: usize, inclusive: bool) -> Option
     // Find matching closing tag `</tag>` after the opening tag.
     let content_start = open_close_angle + 1;
     let close_tag = format!("</{}>", tag_name);
-    let close_start = line[content_start..].find(close_tag.as_str()).map(|off| content_start + off)?;
+    let close_start =
+        line[content_start..].find(close_tag.as_str()).map(|off| content_start + off)?;
 
     if inclusive {
         Some((open_angle, close_start + close_tag.len()))
@@ -3088,6 +3770,57 @@ pub(crate) fn text_obj_tag(line: &str, cursor: usize, inclusive: bool) -> Option
 }
 
 // ── Ex command range parser ───────────────────────────────────────────────────
+
+/// Returns `true` if `query` should be treated as case-sensitive (smart-case:
+/// treat as case-sensitive only when the query contains at least one uppercase
+/// character).
+pub(crate) fn smart_case_sensitive(query: &str) -> bool {
+    query.chars().any(|c| c.is_uppercase())
+}
+
+/// Parse a `:s/pattern/replacement/flags` command body (everything after the
+/// command name / whitespace). The delimiter is the first character after the
+/// optional leading whitespace. Returns `(pattern, replacement, flags)` or
+/// `None` when the syntax is invalid.
+pub(crate) fn parse_substitute_cmd(body: &str) -> Option<(String, String, String)> {
+    let delim = body.chars().next()?;
+    if delim.is_alphanumeric() || delim == ' ' {
+        return None; // delimiter must be a punctuation char
+    }
+    let rest = &body[delim.len_utf8()..];
+    // Split on the unescaped delimiter (max 3 parts: pattern / replacement / flags).
+    let mut parts: Vec<String> = Vec::with_capacity(3);
+    let mut current = String::new();
+    let mut chars = rest.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&nc) = chars.peek() {
+                if nc == delim {
+                    chars.next();
+                    current.push(nc);
+                    continue;
+                }
+            }
+            current.push(c);
+        } else if c == delim {
+            parts.push(std::mem::take(&mut current));
+            if parts.len() == 3 {
+                break;
+            }
+        } else {
+            current.push(c);
+        }
+    }
+    // Remaining chars after the last delimiter (or the flags if only 2 delimiters seen).
+    if parts.len() < 3 {
+        parts.push(current);
+    }
+
+    let pattern = parts.first().cloned().unwrap_or_default();
+    let replacement = parts.get(1).cloned().unwrap_or_default();
+    let flags = parts.get(2).cloned().unwrap_or_default();
+    Some((pattern, replacement, flags))
+}
 
 /// Parse a vim-style address range from the start of `input`.
 ///
@@ -3204,8 +3937,8 @@ fn parse_number(input: &str, pos: &mut usize) -> Option<usize> {
 
 #[cfg(test)]
 mod range_tests {
-    use std::collections::HashMap;
     use super::parse_ex_range;
+    use std::collections::HashMap;
 
     fn no_marks() -> HashMap<char, (usize, usize)> {
         HashMap::new()

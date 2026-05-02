@@ -17,8 +17,7 @@
 
 use std::fs;
 
-use crate::types::LanguageResponseError;
-use crate::types::LspCodeAction;
+use crate::types::{LanguageResponseError, LspCodeAction, PendingCompletionItem};
 use lsp_types::*;
 use url::Url;
 use xi_core_lib::plugin_rpc::{CompletionSuggestion, NavigationTarget};
@@ -206,26 +205,86 @@ fn navigation_target_from_uri_and_range(
     })
 }
 
-pub(crate) fn completion_suggestions_from_response(
-    response: CompletionResponse,
-) -> Vec<CompletionSuggestion> {
-    let items = match response {
+pub(crate) fn completion_items_from_response(response: CompletionResponse) -> Vec<CompletionItem> {
+    match response {
         CompletionResponse::Array(items) => items,
         CompletionResponse::List(list) => list.items,
-    };
+    }
+}
 
+pub(crate) fn completion_suggestions_from_items(
+    items: &[CompletionItem],
+) -> Vec<CompletionSuggestion> {
     items
-        .into_iter()
+        .iter()
         .map(|item| CompletionSuggestion {
-            label: item.label,
-            detail: item.detail,
-            insert_text: item.insert_text.or(match item.text_edit {
-                Some(CompletionTextEdit::Edit(edit)) => Some(edit.new_text),
-                Some(CompletionTextEdit::InsertAndReplace(edit)) => Some(edit.new_text),
+            label: item.label.clone(),
+            detail: item.detail.clone(),
+            insert_text: item.insert_text.clone().or_else(|| match &item.text_edit {
+                Some(CompletionTextEdit::Edit(edit)) => Some(edit.new_text.clone()),
+                Some(CompletionTextEdit::InsertAndReplace(edit)) => Some(edit.new_text.clone()),
                 None => None,
             }),
         })
         .collect()
+}
+
+pub(crate) fn pending_completions_from_response(
+    response: CompletionResponse,
+) -> Vec<PendingCompletionItem> {
+    let items = completion_items_from_response(response);
+    let suggestions = completion_suggestions_from_items(&items);
+    items
+        .into_iter()
+        .zip(suggestions)
+        .map(|(item, suggestion)| PendingCompletionItem { suggestion, item })
+        .collect()
+}
+
+pub(crate) fn completion_text_edits<C: Cache>(
+    view: &mut View<C>,
+    item: &CompletionItem,
+) -> Result<Vec<TextEdit>, LanguageResponseError> {
+    let mut edits = Vec::new();
+
+    if let Some(text_edit) = item.text_edit.clone() {
+        let text_edit = match text_edit {
+            CompletionTextEdit::Edit(edit) => edit,
+            CompletionTextEdit::InsertAndReplace(edit) => TextEdit {
+                range: edit.insert,
+                new_text: edit.new_text,
+            },
+        };
+        edits.push(text_edit);
+    }
+
+    if let Some(additional_text_edits) = &item.additional_text_edits {
+        edits.extend(additional_text_edits.iter().cloned());
+    }
+
+    if edits.is_empty() {
+        let selection = view
+            .get_selections()
+            .map_err(LanguageResponseError::from)?
+            .into_iter()
+            .next()
+            .unwrap_or(xi_plugin_lib::SelectionRange { start: 0, end: 0 });
+        let start = selection.start.min(selection.end);
+        let end = selection.start.max(selection.end);
+        let new_text = item
+            .insert_text
+            .clone()
+            .unwrap_or_else(|| item.label.clone());
+        edits.push(TextEdit {
+            range: Range {
+                start: get_position_of_offset(view, start).map_err(LanguageResponseError::from)?,
+                end: get_position_of_offset(view, end).map_err(LanguageResponseError::from)?,
+            },
+            new_text,
+        });
+    }
+
+    Ok(edits)
 }
 
 pub(crate) fn navigation_targets_from_definition_response(
@@ -322,6 +381,41 @@ pub(crate) fn extract_document_edits_for_uri(
     }
 
     Ok(edits)
+}
+
+pub(crate) fn workspace_edit_changes_only_document(
+    edit: &WorkspaceEdit,
+    document_uri: &Uri,
+) -> Result<bool, LanguageResponseError> {
+    if let Some(changes) = &edit.changes
+        && changes.keys().any(|uri| uri != document_uri)
+    {
+        return Ok(false);
+    }
+
+    if let Some(document_changes) = &edit.document_changes {
+        match document_changes {
+            DocumentChanges::Edits(documents) => {
+                if documents.iter().any(|doc| doc.text_document.uri != *document_uri) {
+                    return Ok(false);
+                }
+                for document_edit in documents {
+                    if document_edit.edits.iter().any(|edit| matches!(edit, OneOf::Right(_))) {
+                        return Err(LanguageResponseError::Transport(String::from(
+                            "annotated text edits are not supported",
+                        )));
+                    }
+                }
+            }
+            DocumentChanges::Operations(_) => {
+                return Err(LanguageResponseError::Transport(String::from(
+                    "resource operations in workspace edits are not supported",
+                )));
+            }
+        }
+    }
+
+    Ok(true)
 }
 
 pub(crate) fn code_actions_from_response(
@@ -427,8 +521,8 @@ mod tests {
 
     #[test]
     fn completion_response_flattens_completion_list() {
-        let items =
-            completion_suggestions_from_response(CompletionResponse::List(CompletionList {
+        let items = completion_suggestions_from_items(&completion_items_from_response(
+            CompletionResponse::List(CompletionList {
                 is_incomplete: false,
                 items: vec![CompletionItem {
                     label: String::from("println!"),
@@ -436,7 +530,8 @@ mod tests {
                     insert_text: Some(String::from("println!($0)")),
                     ..CompletionItem::default()
                 }],
-            }));
+            }),
+        ));
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "println!");

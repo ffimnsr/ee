@@ -26,14 +26,10 @@ fn test_startup() {
     let mut state = XiCore::new();
     let (tx, mut rx) = test_channel();
     let mut rpc_looper = RpcLoop::new(tx);
-    let json = make_reader(
-        r#"{"method":"client_started","params":{}}
-{"method":"set_theme","params":{"theme_name":"InspiredGitHub"}}"#,
-    );
+    let json = make_reader(r#"{"method":"client_started","params":{}}"#);
     assert!(rpc_looper.mainloop(|| json, &mut state).is_ok());
     rx.expect_rpc("available_languages");
     rx.expect_rpc("available_themes");
-    rx.expect_rpc("theme_changed");
 
     let json = make_reader(r#"{"id":0,"method":"new_view","params":{}}"#);
     assert!(rpc_looper.mainloop(|| json, &mut state).is_ok());
@@ -54,8 +50,7 @@ fn test_state() {
     let write = NewlineWriter::new(io::sink());
     let json = make_reader(
         r#"{"method":"client_started","params":{}}
-{"id":0,"method":"new_view","params":{"file_path":"../Cargo.toml"}}
-{"method":"set_theme","params":{"theme_name":"InspiredGitHub"}}"#,
+{"id":0,"method":"new_view","params":{"file_path":"../Cargo.toml"}}"#,
     );
     let mut rpc_looper = RpcLoop::new(write);
     rpc_looper.mainloop(|| json, &mut state).unwrap();
@@ -213,7 +208,6 @@ fn test_movement_cmds() {
     // init a new view
     let json = make_reader(
         r#"{"method":"client_started","params":{}}
-{"method":"set_theme","params":{"theme_name":"InspiredGitHub"}}
 {"id":0,"method":"new_view","params":{}}"#,
     );
     assert!(rpc_looper.mainloop(|| json, &mut state).is_ok());
@@ -232,7 +226,6 @@ fn test_text_commands() {
     // init a new view
     let json = make_reader(
         r#"{"method":"client_started","params":{}}
-{"method":"set_theme","params":{"theme_name":"InspiredGitHub"}}
 {"id":0,"method":"new_view","params":{}}"#,
     );
     assert!(rpc_looper.mainloop(|| json, &mut state).is_ok());
@@ -256,60 +249,6 @@ fn test_other_edit_commands() {
 
     let json = make_reader(OTHER_EDIT_RPCS);
     rpc_looper.mainloop(|| json, &mut state).unwrap();
-}
-
-#[test]
-fn test_settings_commands() {
-    let mut state = XiCore::new();
-    let (tx, mut rx) = test_channel();
-    let mut rpc_looper = RpcLoop::new(tx);
-    // init a new view
-    let json = make_reader(
-        r#"{"method":"client_started","params":{}}
-{"method":"set_theme","params":{"theme_name":"InspiredGitHub"}}
-{"id":0,"method":"new_view","params":{}}"#,
-    );
-    assert!(rpc_looper.mainloop(|| json, &mut state).is_ok());
-    rx.expect_rpc("available_languages");
-    rx.expect_rpc("available_themes");
-    rx.expect_rpc("theme_changed");
-    rx.expect_response().unwrap();
-    rx.expect_rpc("available_plugins");
-    rx.expect_rpc("config_changed");
-    rx.expect_rpc("language_changed");
-    rx.expect_rpc("update");
-    rx.expect_rpc("scroll_to");
-
-    let json = make_reader(r#"{"method":"get_config","id":1,"params":{"view_id":"view-id-1"}}"#);
-    rpc_looper.mainloop(|| json, &mut state).unwrap();
-    let resp = rx.expect_response().unwrap();
-    assert_eq!(resp["tab_size"], json!(4));
-
-    let json = make_reader(
-        r#"{"method":"modify_user_config","params":{"domain":{"user_override":"view-id-1"},"changes":{"font_face": "Comic Sans"}}}
-{"method":"modify_user_config","params":{"domain":{"syntax":"rust"},"changes":{"font_size":42}}}
-{"method":"modify_user_config","params":{"domain":"general","changes":{"tab_size":13,"font_face":"Papyrus"}}}"#,
-    );
-    rpc_looper.mainloop(|| json, &mut state).unwrap();
-    // discard config_changed
-    rx.expect_rpc("config_changed");
-    rx.expect_rpc("update");
-    rx.expect_rpc("config_changed");
-    rx.expect_rpc("update");
-
-    let json = make_reader(r#"{"method":"get_config","id":2,"params":{"view_id":"view-id-1"}}"#);
-    rpc_looper.mainloop(|| json, &mut state).unwrap();
-    let resp = rx.expect_response().unwrap();
-    assert_eq!(resp["tab_size"], json!(13));
-    assert_eq!(resp["font_face"], json!("Comic Sans"));
-
-    // null value should clear entry from this config
-    let json = make_reader(
-        r#"{"method":"modify_user_config","params":{"domain":{"user_override":"view-id-1"},"changes":{"font_face": null}}}"#,
-    );
-    rpc_looper.mainloop(|| json, &mut state).unwrap();
-    let resp = rx.expect_rpc("config_changed");
-    assert_eq!(resp.0["params"]["changes"]["font_face"], json!("Papyrus"));
 }
 
 //TODO: test saving rpc
@@ -366,8 +305,7 @@ const TEXT_EDIT_RPCS: &str = r#"{"method":"edit","params":{"view_id":"view-id-1"
 {"method":"edit","params":{"view_id":"view-id-1","method":"outdent","params":[]}}
 {"method":"edit","params":{"view_id":"view-id-1","method":"duplicate_line","params":[]}}
 {"method":"edit","params":{"view_id":"view-id-1","method":"replace_next","params":[]}}
-{"method":"edit","params":{"view_id":"view-id-1","method":"replace_all","params":[]}}
-{"id":2,"method":"edit","params":{"view_id":"view-id-1","method":"cut","params":[]}}"#;
+{"method":"edit","params":{"view_id":"view-id-1","method":"replace_all","params":[]}}"#;
 
 const OTHER_EDIT_RPCS: &str = r#"{"method":"edit","params":{"view_id":"view-id-1","method":"scroll","params":[0,1]}}
 {"method":"edit","params":{"view_id":"view-id-1","method":"goto_line","params":{"line":1}}}
@@ -388,7 +326,4 @@ const OTHER_EDIT_RPCS: &str = r#"{"method":"edit","params":{"view_id":"view-id-1
 {"method":"edit","params":{"view_id":"view-id-1","method":"highlight_find","params":{"visible":true}}}
 {"method":"edit","params":{"view_id":"view-id-1","method":"selection_for_find","params":{"case_sensitive":true}}}
 {"method":"edit","params":{"view_id":"view-id-1","method":"replace","params":{"chars":"a"}}}
-{"method":"edit","params":{"view_id":"view-id-1","method":"selection_for_replace","params":[]}}
-{"method":"edit","params":{"view_id":"view-id-1","method":"debug_rewrap","params":[]}}
-{"method":"edit","params":{"view_id":"view-id-1","method":"debug_print_spans","params":[]}}
-{"id":3,"method":"edit","params":{"view_id":"view-id-1","method":"copy","params":[]}}"#;
+{"method":"edit","params":{"view_id":"view-id-1","method":"selection_for_replace","params":[]}}"#;

@@ -508,5 +508,4 @@ tab_width = 4
         assert!(glob_match("**/*.rs", "src/main.rs"));
         assert!(glob_match("**/*.rs", "a/b/c/lib.rs"));
     }
-
 }

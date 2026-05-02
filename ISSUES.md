@@ -1,43 +1,5 @@
 # Issues
 
-## xi-rpc improvements
-
-### Transport and framing
-
-- [x] Introduce a transport abstraction in `crates/xi-rpc` so the RPC layer is not hard-wired to stdio.
-- [x] Replace newline-delimited message framing in `crates/xi-rpc/src/parse.rs` with explicit framing such as `Content-Length`, or implement that framing behind the new transport abstraction.
-- [x] Flush the writer after each outbound RPC message in `crates/xi-rpc/src/lib.rs`.
-- [x] Reduce writer lock scope in `RawPeer::send` by serializing the message before locking the writer.
-
-### Runtime and concurrency
-
-- [x] Fix `RawPeer::send_rpc_request` so `is_blocked` is always reset after a synchronous request completes.
-- [x] Add a timeout-enabled synchronous request path so callers are not forced to block forever waiting for a response.
-- [x] Add request cancellation support for pending RPCs and wire it through the pending response map.
-- [x] Replace the `MAX_IDLE_WAIT` polling loop with a wake-up mechanism that does not require periodic 5 ms polling.
-- [x] Review `needs_exit` atomic ordering and use stronger ordering where cross-thread shutdown visibility matters.
-- [x] Replace panic-prone `lock().unwrap()` and similar synchronization unwraps with explicit error handling or clearer failure messages.
-- [x] Surface scoped thread failures from `RpcLoop::mainloop` instead of unwrapping the scoped thread result.
-
-### Protocol compliance and API cleanup
-
-- [x] Support full JSON-RPC 2.0 request identifiers instead of limiting request ids to `u64`. Fully transition to JSON-RPC 2.0 and remove legacy 1.0 RPC.
-- [x] Add the `jsonrpc: "2.0"` field to outbound requests and responses, or document and enforce the intentional protocol deviation in one place.
-- [x] Evaluate replacing the hand-rolled RPC object parsing in `crates/xi-rpc` with `jsonrpc-lite` to reduce duplicate protocol code; track implementation under New World P1.
-- [x] Add batch request handling support, or explicitly reject batch requests with a well-defined error response.
-- [x] Replace mixed `u64` and `usize` request id handling with a single typed request id abstraction.
-- [x] Tighten response validation in `crates/xi-rpc/src/parse.rs` so malformed objects with extra or missing fields are rejected consistently.
-- [x] Stop disconnecting the whole RPC loop on unknown notifications in `crates/xi-rpc/src/lib.rs`; return structured errors for requests and ignore or log unknown notifications.
-- [x] Make idle scheduling in `crates/xi-rpc` coalesce duplicate tokens under sustained producer load.
-- [x] Add a cancellable timer API to `crates/xi-rpc` instead of token-only fire-and-forget scheduling.
-
-### Error handling and observability
-
-- [x] Review `RemoteError` mappings so invalid params, malformed requests, and unknown remote errors use consistent JSON-RPC error semantics.
-- [x] Propagate outbound response write failures in a way callers can observe, instead of only logging them.
-- [x] Replace legacy `extern crate` and `#[macro_use]` patterns in `crates/xi-rpc` with idiomatic Rust 2021 imports.
-- [x] Evaluate migrating `crates/xi-rpc` instrumentation from `xi_trace` to `tracing` for more standard observability.
-
 ## New World
 
 ### P1. RPC and LSP protocol modernization
@@ -50,7 +12,7 @@
 - [x] Keep `crates/xi-lsp-lib` as the xi-specific LSP adapter layer; replace only its hand-rolled LSP framing and dispatch in `crates/xi-lsp-lib/src/parse_helper.rs` and `crates/xi-lsp-lib/src/language_server_client.rs` with `lsp-server`; do not use `tower-lsp` until `xi-lsp-lib` has moved to async; delete `parse_helper.rs` once the `lsp-server` transport is wired in.
 - [x] Enforce a maximum LSP message body size in the new `lsp-server` transport path before accepting messages; do not keep `crates/xi-lsp-lib/src/parse_helper.rs` solely for body-size checks.
 - [x] Preserve existing `xi-rpc` coverage and add migration regression tests for `jsonrpc-lite` request/response parsing, callback dispatch, idle queue ordering, timer ordering, cancellation, timeout behavior, and malformed responses.
-- [ ] Add `xi-lsp-lib` migration regression tests using a fake language server for initialize/open/change/save/close/hover/diagnostics flows.
+- [x] Add `xi-lsp-lib` migration regression tests using a fake language server for initialize/open/change/save/close/hover/diagnostics flows.
 
 ### 0. Backend and protocol foundations
 
@@ -109,6 +71,8 @@
 - [x] Replace ad hoc key handling match arms in `crates/ee-tui/src/main.rs` with a table-driven input dispatcher keyed by mode, prefix state, and count so advanced Vim-style commands can be added safely.
 - [x] Move xi RPC processing in `crates/ee-tui` off the synchronous input path into a dedicated event loop so redraw, input, and backend notifications cannot stall each other. Current 100 ms poll + blocking RPC recv on edit blocks UI. Move xi RPC onto tokio task, drain on redraw tick.
 - [x] Use display-width-aware cursor and layout measurement in `ee-tui` so tabs, wide Unicode, emoji, and combining characters render and navigate correctly.
+- [x] Priority P0: remove direct frontend `plugin_rpc` dispatch from `crates/ee-tui/src/app.rs` and `crates/ee-tui/src/buffer.rs`. Completion criteria: `ee-tui` no longer names `xi-lsp-plugin`, no longer emits raw `lsp.*` method strings, and uses backend-owned editor RPCs for hover, completion, formatting, code actions, definition, and references. If needed be update backend to support the frontend.
+- [x] Priority P0: replace frontend-owned line and block edit semantics in `crates/ee-tui/src/app.rs` (`delete_line_range`, visual-block delete/change, block insert replay) with backend editor operations. Completion criteria: no `ee-tui` edit path computes replacement text or delete ranges from cached lines for these features. If needed update the backend rpc or add to support the frontend.
 
 ### 2. Modal editing parity with VIM
 
@@ -143,18 +107,46 @@
 - [x] Support relative line numbers, sign column, cursor line, color column, visible whitespace, and configurable statusline content so screen layout matches established terminal-editor workflows.
 - [x] Implement line wrapping, horizontal scrolling, break indentation, and configurable scroll offsets so navigation remains stable in long and wrapped lines.
 - [x] Add fold state management and fold commands in `ee-tui`, starting with manual folds and then syntax- or indent-driven folds once parser support is available.
-- [ ] Add search UI with incremental preview, highlighted matches, smart-case behavior, and repeat navigation so text discovery feels immediate and accurate.
-- [ ] Implement substitution UX for `:s` with range support, flags, and optional confirmation so batch edits are safe and inspectable.
-- [ ] Add mouse support, bracketed paste handling, and OSC 52 clipboard integration so terminal interaction works correctly both locally and over SSH.
-- [ ] Provide built-in keymap and command discovery for supported motions, operators, and ex commands so new functionality remains learnable as parity grows.
+- [x] Add search UI with incremental preview, highlighted matches, smart-case behavior, and repeat navigation so text discovery feels immediate and accurate.
+- [x] Implement substitution UX for `:s` with range support, flags, and optional confirmation so batch edits are safe and inspectable.
+- [x] Priority P0: move range-restricted and confirm-mode substitute semantics out of `crates/ee-tui/src/app.rs::execute_substitute` and into backend-owned find or replace operations. Completion criteria: `ee-tui` no longer runs regex replacement over cached buffer lines to apply substitutions. If needed be update the backend to support frontend for missing functions.
+- [x] Add mouse support, bracketed paste handling, and OSC 52 clipboard integration so terminal interaction works correctly both locally and over SSH.
+- [x] Provide built-in keymap and command discovery for supported motions, operators, and ex commands so new functionality remains learnable as parity grows.
+- [x] Audit and either expose or deliberately retire currently unused `xi-core` frontend protocol surface:
+  `get_config`, `debug_get_contents`, edit requests `cut`/`copy`, `set_theme`,
+  `modify_user_config`, `tracing_config`, `save_trace`, and `set_language`.
+  Result: removed from frontend protocol. ee-tui discovery now documents removal via
+  `:protocol`; frontend keeps ownership of registers/clipboard and local cache paths instead.
+- [x] Wire or remove unused `xi-core` edit notifications that still have plausible TUI value:
+  `add_selection_above`, `add_selection_below`, `click`, `drag`, `resize`,
+  `insert_tab`, `paste`, `transpose`, `duplicate_line`, `increase_number`,
+  `decrease_number`, `request_hover`, `multi_find`, `selection_for_replace`,
+  and `selection_into_lines`.
+  Progress: ee-tui now wires `add_selection_above`, `add_selection_below`, `click`
+  via canonical `gesture.select`, `drag` via canonical `gesture.drag`, `insert_tab`,
+  `transpose`, `request_hover`, `selection_for_find`, `selection_for_replace`,
+  `selection_into_lines`, `duplicate_line`, `increase_number`, `decrease_number`, and
+  `multi_find` through ex commands or direct keybindings. `paste` remains frontend-owned
+  because ee-tui owns registers and clipboard integration; `resize` remains frontend-driven
+  because terminal layout and viewport sizing originate in ee-tui.
+- [x] Retire or quarantine debug and legacy `xi-core` edit notifications that should not be user-facing.
+  Result: removed debug-only and recorder-specific items from frontend protocol. `reindent`
+  stays intentionally exposed at command level via `:reindent`; no direct ee-tui UI was added
+  for removed debug or legacy macro commands.
+- [x] Priority P0: move paste edit semantics out of `crates/ee-tui` and into backend-owned RPC. Completion criteria: `ee-tui` no longer synthesizes paste via cursor motion plus `insert`; frontend sends paste source or placement intent only, and backend applies characterwise or linewise paste, before or after placement, multicursor behavior, undo grouping, and selection updates.
 
 ### 5. IDE and ecosystem workflow integration
 
-- [ ] Integrate `ee-tui` UI surfaces for diagnostics, completion menus, hover popups, references, rename prompts, formatting actions, and code actions once corresponding `xi-lsp-lib` backend support is available.
+- [x] Priority P0: integrate `ee-tui` UI surfaces for diagnostics, completion menus, hover popups, references, rename prompts, formatting actions, and code actions through backend-owned, frontend-agnostic editor RPCs and notifications. Completion criteria: feature entrypoints in `ee-tui` use backend protocol only, and direct `xi-lsp-plugin` / `plugin_rpc` routing is removed from interactive IDE flows.
 - [ ] Add symbol outline, workspace symbol jump, and definition or reference navigation UI in `ee-tui` so language navigation is usable without leaving terminal workflow.
 - [ ] Add git-aware gutter signs, hunk navigation, blame display, and diff views so common source-control tasks are available without shelling out.
 - [ ] Add embedded terminal buffers and shell-command execution flows so users can run builds, tests, and one-off commands without leaving the editor session.
 - [ ] Add session persistence for open buffers, window layout, cursor positions, marks, jump history, and command history so longer-lived workflows restore cleanly.
+
+### 5a. RULE.md boundary follow-up
+
+- [x] Priority P0: replace presentation-named backend client RPCs `show_hover`, `show_completions`, and `show_locations` in `crates/xi-core-lib/src/client.rs` and `crates/xi-core-lib/src/event_context.rs` with frontend-agnostic data notifications that describe editor state, not UI actions. Completion criteria: protocol names stop using `show_*` presentation verbs for these features.
+- [x] Priority P1: add regression tests that fail if `crates/ee-tui` reintroduces hard-coded plugin names, raw `lsp.*` method strings, or cached-line edit reconstruction for backend-owned editing features. Cover command paths and keymap-triggered paths.
 
 ### 6. Plugin runtime modernization
 
@@ -169,101 +161,14 @@
 
 ## Code quality audit (xi-* crates)
 
-### crates/xi-core-lib
-
-- [x] Replace panic-prone unwraps in `crates/xi-core-lib/src/event_context.rs` (`sel_regions().last().unwrap()` at L169, `delta_rev_head().unwrap()` at L208, plugin lookup `unwrap()` at L243, `serde_json::to_value().unwrap()` chains at L324-325, config serialization unwraps at L486/L496) with explicit error handling.
-- [x] Validate `Find` state at API boundary in `crates/xi-core-lib/src/find.rs` (L171, L195, L259, L261) instead of `search_string.as_ref().unwrap()`.
-- [x] Replace `lock().unwrap()` mutex calls in `crates/xi-core-lib/src/watcher.rs` (L108, L160, L178, L221) with explicit poisoning recovery or descriptive `expect` messages.
-- [x] Handle `create_if_missing` failure in `crates/xi-core-lib/src/layers.rs` (L73, L96) instead of `layers.get_mut(&layer).unwrap()`.
-- [x] Replace `unreachable!()` at `crates/xi-core-lib/src/event_context.rs` L542 with structured error or non-exhaustive enum guard.
-- [x] Audit path handling in `crates/xi-core-lib/src/file.rs` (L179 TODO) for non-UTF-8 paths via `OsStr`/`Path` APIs.
-- [x] Resolve `\r` line ending TODO in `crates/xi-core-lib/src/word_boundaries.rs` L198.
-- [x] Resolve combining-class TODO in `crates/xi-core-lib/src/backspace.rs` L152 for full Unicode combining char support.
-- [x] Resolve outstanding config TODOs in `crates/xi-core-lib/src/config.rs` (L85, L313, L418, L498): legacy config name handling, missing plugin configs, incomplete update flow.
-- [x] Migrate inconsistent error types per TODO in `crates/xi-core-lib/src/file.rs` L279.
-
-### crates/xi-rope
-
-- [x] Replace invariant `panic!()` calls in `crates/xi-rope/src/tree.rs` (L105, L259, L267, L283, L326) with `Result`/`Option` returns or `debug_assert!` plus typed errors.
-- [x] Add bounds/None handling for boundary unwraps in `crates/xi-rope/src/tree.rs` L731 (`prev_leaf().unwrap()` and metric conversion unwraps).
-- [x] Add invariant assertions or bounds checks in `TreeBuilder` loop at `crates/xi-rope/src/tree.rs` L503-L517 (`last_mut().unwrap()`, `pop().unwrap()`).
-- [x] Document formal safety requirements (buffer length ≥ 16/32 bytes) on `pub unsafe fn` SIMD helpers in `crates/xi-rope/src/compare.rs` (L46, L70, L108, L132, L154).
-- [x] Address tree-walking efficiency TODOs in `crates/xi-rope/src/tree.rs` (L101, L704, L729).
-- [x] Evaluate `rayon` for `crates/xi-rope/src/diff.rs` `LineHashDiff::compute_delta` only: benchmark parallel base-line hashing and target-line match collection on large inputs, keep LIS and match expansion serial, adopt `rayon` only if wall-clock diff time improves materially without regressions on small files or interactive edit latency; otherwise reject and document why.
-
-### crates/xi-unicode
-
-- [x] Document the `extern crate alloc;` in `crates/xi-unicode/src/lib.rs` L18 (no_std rationale) or remove if unused.
-
-### crates/xi-plugin-lib
-
-- [x] Resolve single-view TODO at `crates/xi-plugin-lib/src/dispatch.rs` L59 with typed multi-view dispatch.
-- [x] Replace `panic!("entry already exists")` in `crates/xi-plugin-lib/src/state_cache.rs` L189 with `Result` return.
-- [x] Bounds-check `cached_offset_of_line()` result in `crates/xi-plugin-lib/src/base_cache.rs` L92 instead of `.unwrap() - self.offset`.
-- [x] Validate inputs at API boundary in `crates/xi-plugin-lib/src/base_cache.rs` (L270, L390) instead of panicking on "offset greater than content length".
-
 ### Cross-cutting
 
 - [x] Add doc comments documenting preconditions on public APIs in `crates/xi-core-lib` (`event_context.rs`, `editor.rs`, `layers.rs`).
 - [ ] Unify error handling across xi-* crates: reduce mix of `FileError`, `RemoteError`, `Option`, and panics via shared error types or conversion traits.
 - [ ] Identify xi-* source files exceeding the 1000-line module guideline from AGENTS.md and split into cohesive submodules.
 
-## Code quality audit (second pass)
-
-### Resource limits and DoS hardening
-
-- [x] Bound total idle queue size in `crates/xi-rpc/src/lib.rs` (around L547-L550) in addition to token coalescing so distinct tokens cannot accumulate unboundedly.
-- [x] Cap `recording_buffer` history in `crates/xi-core-lib/src/recorder.rs` (L29) with a max length or circular buffer.
-- [x] Limit per-plugin annotation storage in `crates/xi-core-lib/src/annotations.rs` (L169-L195) so a misbehaving plugin cannot exhaust memory.
-- [x] Bound or compact `IndexSet` ranges vector in `crates/xi-core-lib/src/index_set.rs` (L25) to prevent unbounded growth.
-- [x] Validate `u32::try_from(end - start)` ranges in `crates/xi-lsp-lib/src/utils.rs` (L63, L91) instead of `.expect()` on potentially huge offsets from a malicious server.
-
-### Persistence and durability
-
-- [x] Add `sync_all()` (fsync) before/after rename in the atomic save path of `crates/xi-core-lib/src/file.rs` (L210-L225) to guarantee durability after crash.
-- [x] Add an advisory file lock (`fs2::FileExt::try_lock_exclusive` or similar) in `crates/xi-core-lib/src/file.rs` (L100-L160) so concurrent editor instances cannot silently corrupt the same file.
-
-### Terminal frontend (ee-tui) robustness
-
-- [x] Install a panic hook in `crates/ee-tui` that disables raw mode and leaves the alternate screen so a panic does not leave the terminal unusable.
-- [x] Handle `SIGWINCH`, `SIGINT`, and `SIGTERM` in `crates/ee-tui` for clean resize and shutdown via `signal-hook` or crossterm events.
-
-### Concurrency profile
-
-- [x] Evaluate replacing `Arc<Mutex<WatcherState>>` in `crates/xi-core-lib/src/watcher.rs` (L57) with `RwLock` for read-heavy paths.
-- [x] Evaluate replacing `Arc<Mutex<CoreState>>` in `crates/xi-core-lib/src/core.rs` (L39) with `RwLock` for read-heavy paths.
-
-### View / selection panics in xi-core-lib
-
-- [x] Replace `.last().unwrap()` on `sel_regions()` at `crates/xi-core-lib/src/view.rs` L339 with empty-selection handling.
-- [x] Replace `.first().unwrap()`/`.last().unwrap()` on selection regions at `crates/xi-core-lib/src/view.rs` L404-L405.
-- [x] Replace `.split_last().unwrap()` on selection regions in selection drag at `crates/xi-core-lib/src/view.rs` L513.
-- [x] Replace `.last_mut().unwrap()` on find state at `crates/xi-core-lib/src/view.rs` L1036.
-
-### Plugin host edge cases (beyond manifest items)
-
-- [x] Replace `child.stdin.take().unwrap()` / `child.stdout.take().unwrap()` in `crates/xi-core-lib/src/plugins/mod.rs` (L182-L183) with `ok_or` plus structured startup errors.
-- [x] Replace `to_str().unwrap()` plugin-path conversions in `crates/xi-core-lib/src/plugins/rpc.rs` (L301-L302) with `OsStr`/`Path` APIs or explicit non-UTF-8 rejection.
-- [x] Replace `path.parent().unwrap()` in `crates/xi-core-lib/src/plugins/catalog.rs` (L145, L150) with `ok_or` to handle root paths and resolve language config errors cleanly.
-- [x] Replace `serde_json` and `Into` `.unwrap()` calls in `crates/xi-core-lib/src/plugins/manifest.rs` (L153, L179, L191, L243, L288, L292) with `?` propagation.
-
-### LSP host edge cases (beyond items already tracked)
-
-- [x] Replace `panic!("unexpected value for id: None")` and `.parse().expect()` id handling in `crates/xi-lsp-lib/src/language_server_client.rs` (L59-L60) with structured errors.
-- [x] Replace `language_config.get_mut(...).unwrap()` and path/URI unwraps in `crates/xi-lsp-lib/src/lsp_plugin.rs` (L116, L119, L122, L135) with explicit failure paths.
-- [x] Replace `serde_json::from_value(...).unwrap()` for server responses in `crates/xi-lsp-lib/src/lsp_plugin.rs` (L141, L168) with structured errors that surface to the client.
-- [x] Redesign `process.stdin.take().unwrap()` (and matching stdout) in `crates/xi-lsp-lib/src/utils.rs` (L192) to return `Result` rather than relying on the "unwrap so the thread panics" pattern.
-
-### Encoding
-
-- [x] Add support (or explicit rejection with a clear error) for legacy `\r`-only line endings in `crates/xi-core-lib/src/line_ending.rs` (L46-L60).
-
-### Configuration
-
-- [x] Replace widespread `.unwrap()` chains across `crates/xi-core-lib/src/config.rs` (L199, L207, L221, L233, L236, L355, L367, L398-L410, L444, L495, L507-L509, L642, L744, L882, L897) with structured config errors that surface to clients.
-
 ### Tooling and CI
 
 - [x] Add GitHub Actions workflows under `.github/workflows/` for build, `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check`.
-- [ ] Add `cargo-fuzz` targets for the rope delta/CRDT operations in `crates/xi-rope`, the JSON-RPC parser in `crates/xi-rpc`, and the LSP transport wrapper in `crates/xi-lsp-lib`.
+- [x] Add `cargo-fuzz` targets for the rope delta/CRDT operations in `crates/xi-rope`, the JSON-RPC parser in `crates/xi-rpc`, and the LSP transport wrapper in `crates/xi-lsp-lib`.
 - [ ] Add property-based tests (`proptest` or `quickcheck`) in `crates/xi-rope` for delta application, merging, and CRDT invariants.

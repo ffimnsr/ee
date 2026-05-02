@@ -81,6 +81,7 @@ impl FoldStore {
     }
 
     /// `true` when `line_idx` is inside a closed fold body (not the header).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_hidden(&self, buf_id: BufferId, line_idx: usize) -> bool {
         self.get(buf_id).iter().any(|&(s, e)| line_idx > s && line_idx <= e)
     }
@@ -105,8 +106,7 @@ pub(crate) fn indent_fold_extent(lines: &[String], start_line: usize) -> Option<
     }
     let base_indent = leading_indent(&lines[start_line]);
     let mut end = start_line;
-    for i in (start_line + 1)..line_count {
-        let line = &lines[i];
+    for (i, line) in lines.iter().enumerate().take(line_count).skip(start_line + 1) {
         if line.trim().is_empty() {
             // Blank lines are part of the fold body but do not terminate it.
             continue;
@@ -117,11 +117,7 @@ pub(crate) fn indent_fold_extent(lines: &[String], start_line: usize) -> Option<
             break;
         }
     }
-    if end > start_line {
-        Some((start_line, end))
-    } else {
-        None
-    }
+    if end > start_line { Some((start_line, end)) } else { None }
 }
 
 fn leading_indent(line: &str) -> usize {

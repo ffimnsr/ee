@@ -21,8 +21,9 @@
 use log::warn;
 
 use crate::movement::Movement;
+use crate::plugins::manifest::PluginCapability;
 use crate::rpc::{
-    EditNotification, FindQuery, GestureType, LineRange, MouseAction, Position,
+    EditNotification, FindQuery, GestureType, LineRange, LineReplacement, MouseAction, Position,
     SelectionGranularity, SelectionModifier,
 };
 use crate::view::Size;
@@ -68,6 +69,7 @@ pub(crate) enum BufferEvent {
     Outdent,
     Insert(String),
     Paste(String),
+    PasteRegister { chars: String, before: bool },
     InsertNewline,
     InsertTab,
     Yank,
@@ -81,17 +83,38 @@ pub(crate) enum BufferEvent {
 /// An event that needs special handling
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) enum SpecialEvent {
-    DebugRewrap,
-    DebugWrapWidth,
-    DebugPrintSpans,
     Resize(Size),
     RequestLines(LineRange),
-    RequestHover { request_id: usize, position: Option<Position> },
-    DebugToggleComment,
+    RequestHover {
+        request_id: usize,
+        position: Option<Position>,
+    },
+    DispatchPluginCommand {
+        capability: PluginCapability,
+        method: &'static str,
+        params: serde_json::Value,
+    },
+    DeleteLineRange {
+        start_line: usize,
+        end_line: usize,
+    },
+    DeleteBlock {
+        start_line: usize,
+        end_line: usize,
+        left_col: usize,
+        right_col: usize,
+    },
+    ReplayBlockInsert {
+        start_line: usize,
+        end_line: usize,
+        column: usize,
+        text: String,
+        append: bool,
+    },
+    ApplyLineReplacements {
+        replacements: Vec<LineReplacement>,
+    },
     Reindent,
-    ToggleRecording(Option<String>),
-    PlayRecording(String),
-    ClearRecording(String),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -128,6 +151,8 @@ impl From<EditNotification> for EventDomain {
                 BufferEvent::Insert(chars).into(),
             Paste { chars } =>
                 BufferEvent::Paste(chars).into(),
+            PasteRegister { chars, before } =>
+                BufferEvent::PasteRegister { chars, before }.into(),
             DeleteForward =>
                 BufferEvent::Delete {
                     movement: Movement::Right,
@@ -272,16 +297,12 @@ impl From<EditNotification> for EventDomain {
             FindPrevious { wrap_around, allow_same, modify_selection } =>
                 ViewEvent::FindPrevious { wrap_around, allow_same, modify_selection }.into(),
             FindAll => ViewEvent::FindAll.into(),
-            DebugRewrap => SpecialEvent::DebugRewrap.into(),
-            DebugWrapWidth => SpecialEvent::DebugWrapWidth.into(),
-            DebugPrintSpans => SpecialEvent::DebugPrintSpans.into(),
             Uppercase => BufferEvent::Uppercase.into(),
             Lowercase => BufferEvent::Lowercase.into(),
             Capitalize => BufferEvent::Capitalize.into(),
             Indent => BufferEvent::Indent.into(),
             Outdent => BufferEvent::Outdent.into(),
             Reindent => SpecialEvent::Reindent.into(),
-            DebugToggleComment => SpecialEvent::DebugToggleComment.into(),
             HighlightFind { visible } => ViewEvent::HighlightFind { visible }.into(),
             SelectionForFind { case_sensitive } =>
                 ViewEvent::SelectionForFind { case_sensitive }.into(),
@@ -290,15 +311,62 @@ impl From<EditNotification> for EventDomain {
             ReplaceNext => BufferEvent::ReplaceNext.into(),
             ReplaceAll => BufferEvent::ReplaceAll.into(),
             SelectionForReplace => ViewEvent::SelectionForReplace.into(),
+            RequestCompletion { index } =>
+                SpecialEvent::DispatchPluginCommand {
+                    capability: PluginCapability::Edit,
+                    method: "request_completion",
+                    params: serde_json::json!({ "index": index }),
+                }.into(),
+            RequestDefinition =>
+                SpecialEvent::DispatchPluginCommand {
+                    capability: PluginCapability::Edit,
+                    method: "request_definition",
+                    params: serde_json::json!({}),
+                }.into(),
+            RequestReferences =>
+                SpecialEvent::DispatchPluginCommand {
+                    capability: PluginCapability::Edit,
+                    method: "request_references",
+                    params: serde_json::json!({}),
+                }.into(),
+            FormatDocument =>
+                SpecialEvent::DispatchPluginCommand {
+                    capability: PluginCapability::Edit,
+                    method: "format_document",
+                    params: serde_json::json!({}),
+                }.into(),
+            RequestCodeActions { index } =>
+                SpecialEvent::DispatchPluginCommand {
+                    capability: PluginCapability::Edit,
+                    method: "request_code_actions",
+                    params: serde_json::json!({ "index": index }),
+                }.into(),
+            RequestRename { new_name } =>
+                SpecialEvent::DispatchPluginCommand {
+                    capability: PluginCapability::Edit,
+                    method: "request_rename",
+                    params: serde_json::json!({ "new_name": new_name }),
+                }.into(),
             RequestHover { request_id, position } =>
                 SpecialEvent::RequestHover { request_id, position }.into(),
+            DeleteLineRange { start_line, end_line } =>
+                SpecialEvent::DeleteLineRange { start_line, end_line }.into(),
+            DeleteBlock { start_line, end_line, left_col, right_col } =>
+                SpecialEvent::DeleteBlock { start_line, end_line, left_col, right_col }.into(),
+            ReplayBlockInsert { start_line, end_line, column, text, append } =>
+                SpecialEvent::ReplayBlockInsert {
+                    start_line,
+                    end_line,
+                    column,
+                    text,
+                    append,
+                }.into(),
+            ApplyLineReplacements { replacements } =>
+                SpecialEvent::ApplyLineReplacements { replacements }.into(),
             SelectionIntoLines => ViewEvent::SelectionIntoLines.into(),
             DuplicateLine => BufferEvent::DuplicateLine.into(),
             IncreaseNumber => BufferEvent::IncreaseNumber.into(),
             DecreaseNumber => BufferEvent::DecreaseNumber.into(),
-            ToggleRecording { recording_name } => SpecialEvent::ToggleRecording(recording_name).into(),
-            PlayRecording { recording_name } => SpecialEvent::PlayRecording(recording_name).into(),
-            ClearRecording { recording_name } => SpecialEvent::ClearRecording(recording_name).into(),
             CollapseSelections => ViewEvent::CollapseSelections.into(),
         }
     }

@@ -30,7 +30,9 @@ use xi_rope::rope::RopeDelta;
 use crate::conversion_utils::*;
 use crate::language_server_client::LanguageServerClient;
 use crate::result_queue::ResultQueue;
-use crate::types::{Config, Error, LanguageResponseError, LspCodeAction};
+use crate::types::{
+    Config, Error, LanguageResponseError, LspCodeAction, LspResponse, PendingCompletionItem,
+};
 use crate::utils::*;
 use lsp_types::*;
 use xi_core_lib::{ConfigTable, ViewId};
@@ -50,6 +52,7 @@ pub struct LspPlugin {
     core: Option<CoreProxy>,
     result_queue: ResultQueue,
     pending_code_actions: HashMap<ViewId, Vec<LspCodeAction>>,
+    pending_completions: HashMap<ViewId, Vec<PendingCompletionItem>>,
     language_server_clients: HashMap<String, Arc<Mutex<LanguageServerClient>>>,
 }
 
@@ -61,6 +64,7 @@ impl LspPlugin {
             result_queue: ResultQueue::new(),
             view_info: HashMap::new(),
             pending_code_actions: HashMap::new(),
+            pending_completions: HashMap::new(),
             language_server_clients: HashMap::new(),
         }
     }
@@ -181,16 +185,29 @@ impl Plugin for LspPlugin {
 
     fn custom_command(&mut self, view: &mut View<Self::Cache>, method: &str, params: Value) {
         match method {
-            "lsp.completion" => self.request_completion(view),
-            "lsp.definition" => self.request_definition(view),
-            "lsp.references" => self.request_references(view),
-            "lsp.format_document" => self.request_document_formatting(view),
-            "lsp.code_action" => {
+            "request_completion" | "lsp.completion" => {
+                let index = params
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| usize::try_from(value).ok());
+                self.request_completion(view, index);
+            }
+            "request_definition" | "lsp.definition" => self.request_definition(view),
+            "request_references" | "lsp.references" => self.request_references(view),
+            "format_document" | "lsp.format_document" => self.request_document_formatting(view),
+            "request_code_actions" | "lsp.code_action" => {
                 let index = params
                     .get("index")
                     .and_then(Value::as_u64)
                     .and_then(|value| usize::try_from(value).ok());
                 self.request_or_apply_code_action(view, index);
+            }
+            "request_rename" => {
+                let Some(new_name) = params.get("new_name").and_then(Value::as_str) else {
+                    self.record_view_failure(view, String::from("rename failed: missing new_name"));
+                    return;
+                };
+                self.request_rename(view, new_name.to_owned());
             }
             _ => {}
         }
@@ -209,8 +226,8 @@ impl Plugin for LspPlugin {
         let queued = self.result_queue.drain_results_for(usize::from(view.get_id()));
         for response in queued {
             match response {
-                crate::types::LspResponse::Hover(_) => {}
-                crate::types::LspResponse::Diagnostics(result) => match result {
+                LspResponse::Hover(_) => {}
+                LspResponse::Diagnostics(result) => match result {
                     Ok(diagnostics) => {
                         if let Some(core) = &self.core {
                             core.update_diagnostics(view.get_id(), &diagnostics);
@@ -227,17 +244,23 @@ impl Plugin for LspPlugin {
                         }
                     }
                 },
-                crate::types::LspResponse::Completions(result) => match result {
+                LspResponse::Completions(result) => match result {
                     Ok(items) => {
+                        self.pending_completions.insert(view.get_id(), items.clone());
                         if let Some(core) = &self.core {
-                            core.show_completions(view.get_id(), &items);
+                            let suggestions = items
+                                .iter()
+                                .map(|item| item.suggestion.clone())
+                                .collect::<Vec<_>>();
+                            core.show_completions(view.get_id(), &suggestions);
                         }
                     }
                     Err(err) => {
+                        self.pending_completions.remove(&view.get_id());
                         self.record_view_failure(view, format!("completion failed: {err:?}"))
                     }
                 },
-                crate::types::LspResponse::Locations { title, result } => match result {
+                LspResponse::Locations { title, result } => match result {
                     Ok(locations) => {
                         if let Some(core) = &self.core {
                             core.show_locations(view.get_id(), &title, &locations);
@@ -245,15 +268,19 @@ impl Plugin for LspPlugin {
                     }
                     Err(err) => self.record_view_failure(view, format!("{title} failed: {err:?}")),
                 },
-                crate::types::LspResponse::Formatting { title, result } => match result {
+                LspResponse::Formatting { title, result } => match result {
                     Ok(edits) => self.apply_named_edits(view, &title, &edits),
                     Err(err) => self.record_view_failure(view, format!("{title} failed: {err:?}")),
                 },
-                crate::types::LspResponse::CodeActions(result) => match result {
+                LspResponse::CodeActions(result) => match result {
                     Ok(actions) => self.handle_code_actions_result(view, actions),
                     Err(err) => {
                         self.record_view_failure(view, format!("code actions failed: {err:?}"))
                     }
+                },
+                LspResponse::Rename { title, result } => match result {
+                    Ok(edit) => self.handle_rename_result(view, &title, edit),
+                    Err(err) => self.record_view_failure(view, format!("{title} failed: {err:?}")),
                 },
             }
         }
@@ -376,8 +403,19 @@ impl LspPlugin {
         })
     }
 
-    fn request_completion(&mut self, view: &mut View<ChunkCache>) {
+    fn request_completion(&mut self, view: &mut View<ChunkCache>, index: Option<usize>) {
         let view_id = view.get_id();
+        if let Some(index) = index {
+            if let Some(item) = self
+                .pending_completions
+                .get(&view_id)
+                .and_then(|items| index.checked_sub(1).and_then(|idx| items.get(idx)).cloned())
+            {
+                self.apply_completion(view, &item);
+                return;
+            }
+        }
+
         let position = match self.current_position(view) {
             Ok(position) => position,
             Err(err) => {
@@ -405,13 +443,13 @@ impl LspPlugin {
                                     })
                                     .map(|response| {
                                         response
-                                            .map(completion_suggestions_from_response)
+                                            .map(pending_completions_from_response)
                                             .unwrap_or_default()
                                     })
                             });
                         ls_client.result_queue.push_result(
                             view_id.into(),
-                            crate::types::LspResponse::Completions(response),
+                            LspResponse::Completions(response),
                         );
                         ls_client.core.schedule_idle(view_id);
                     })
@@ -483,7 +521,7 @@ impl LspPlugin {
                             });
                         ls_client.result_queue.push_result(
                             view_id.into(),
-                            crate::types::LspResponse::Locations {
+                            LspResponse::Locations {
                                 title: String::from("definition"),
                                 result: response,
                             },
@@ -557,7 +595,7 @@ impl LspPlugin {
                             });
                         ls_client.result_queue.push_result(
                             view_id.into(),
-                            crate::types::LspResponse::Locations {
+                            LspResponse::Locations {
                                 title: String::from("references"),
                                 result: response,
                             },
@@ -599,7 +637,7 @@ impl LspPlugin {
                             });
                         ls_client.result_queue.push_result(
                             view_id.into(),
-                            crate::types::LspResponse::Formatting {
+                            LspResponse::Formatting {
                                 title: String::from("format"),
                                 result: response,
                             },
@@ -664,7 +702,7 @@ impl LspPlugin {
                             });
                         ls_client.result_queue.push_result(
                             view_id.into(),
-                            crate::types::LspResponse::CodeActions(response),
+                            LspResponse::CodeActions(response),
                         );
                         ls_client.core.schedule_idle(view_id);
                     })
@@ -697,13 +735,115 @@ impl LspPlugin {
         }
 
         if let Some(core) = &self.core {
-            let message = actions
+            let actions = actions
                 .iter()
-                .enumerate()
-                .map(|(index, action)| format!("{}:{}", index + 1, action.title))
-                .collect::<Vec<_>>()
-                .join("; ");
-            core.alert(format!("code actions: {message}"));
+                .map(|action| xi_core_lib::plugin_rpc::CodeActionDescriptor {
+                    title: action.title.clone(),
+                })
+                .collect::<Vec<_>>();
+            core.show_code_actions(view_id, &actions);
+        }
+    }
+
+    fn apply_completion(&mut self, view: &mut View<ChunkCache>, item: &PendingCompletionItem) {
+        match completion_text_edits(view, &item.item) {
+            Ok(edits) => self.apply_named_edits(view, "completion", &edits),
+            Err(err) => self.record_view_failure(view, format!("completion failed: {err:?}")),
+        }
+    }
+
+    fn request_rename(&mut self, view: &mut View<ChunkCache>, new_name: String) {
+        let view_id = view.get_id();
+        let position = match self.current_position(view) {
+            Ok(position) => position,
+            Err(err) => {
+                self.record_view_failure(view, format!("rename failed: {err:?}"));
+                return;
+            }
+        };
+        let Ok(ls_client_arc) = self.client_for_view(view) else {
+            return;
+        };
+        let request = ls_client_arc
+            .lock()
+            .map_err(|_| String::from("language server client lock poisoned"))
+            .and_then(|mut ls_client| {
+                ls_client
+                    .request_rename(view_id, position, new_name, move |ls_client, result| {
+                        let response = result
+                            .map_err(|err| {
+                                LanguageResponseError::LanguageServerError(format!("{err:?}"))
+                            })
+                            .and_then(|value| {
+                                serde_json::from_value::<Option<WorkspaceEdit>>(value)
+                                    .map_err(|err| {
+                                        LanguageResponseError::Transport(err.to_string())
+                                    })
+                            });
+                        ls_client.result_queue.push_result(
+                            view_id.into(),
+                            LspResponse::Rename {
+                                title: String::from("rename"),
+                                result: response,
+                            },
+                        );
+                        ls_client.core.schedule_idle(view_id);
+                    })
+                    .map_err(|err| err.to_string())
+            });
+        if let Err(err) = request {
+            self.record_view_failure(view, format!("rename failed: {err}"));
+        }
+    }
+
+    fn handle_rename_result(
+        &mut self,
+        view: &mut View<ChunkCache>,
+        title: &str,
+        edit: Option<WorkspaceEdit>,
+    ) {
+        let Some(edit) = edit else {
+            if let Some(core) = &self.core {
+                core.alert("rename produced no changes");
+            }
+            return;
+        };
+
+        let document_uri = match view.get_path().map(file_path_to_uri) {
+            Some(Ok(uri)) => uri,
+            Some(Err(err)) => {
+                self.record_view_failure(view, format!("{title} failed: {err}"));
+                return;
+            }
+            None => {
+                self.record_view_failure(view, format!("{title} failed: missing file path"));
+                return;
+            }
+        };
+
+        match workspace_edit_changes_only_document(&edit, &document_uri) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.record_view_failure(
+                    view,
+                    format!("{title} failed: multi-file rename is not supported yet"),
+                );
+                return;
+            }
+            Err(err) => {
+                self.record_view_failure(view, format!("{title} failed: {err:?}"));
+                return;
+            }
+        }
+
+        match extract_document_edits_for_uri(edit, &document_uri) {
+            Ok(edits) if edits.is_empty() => {
+                if let Some(core) = &self.core {
+                    core.alert("rename produced no document edits");
+                }
+            }
+            Ok(edits) => self.apply_named_edits(view, title, &edits),
+            Err(err) => self.record_view_failure(view, format!("{title} failed: {err:?}")),
         }
     }
 
