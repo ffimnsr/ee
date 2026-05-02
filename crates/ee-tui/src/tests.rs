@@ -126,6 +126,36 @@ fn repeated_enter_tracks_cursor_beyond_visible_rows() {
 }
 
 #[test]
+fn carriage_return_key_is_treated_as_enter() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    for _ in 0..5 {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('\r'), KeyModifiers::NONE)));
+        app.backend.pump().unwrap();
+    }
+
+    assert_eq!(app.backend.cursor_line, 5);
+    assert_eq!(app.backend.cursor_col, 0);
+    assert_eq!(app.backend.lines.len(), 6);
+}
+
+#[test]
+fn ctrl_m_key_is_treated_as_enter() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    for _ in 0..5 {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL)));
+        app.backend.pump().unwrap();
+    }
+
+    assert_eq!(app.backend.cursor_line, 5);
+    assert_eq!(app.backend.cursor_col, 0);
+    assert_eq!(app.backend.lines.len(), 6);
+}
+
+#[test]
 fn ui_render_shows_scrolled_gutter_after_many_enters() {
     let mut app = App::from_path(None).unwrap();
 
@@ -152,8 +182,10 @@ fn ui_render_shows_scrolled_gutter_after_many_enters() {
         .map(|x| buffer.cell((x, height - 2)).unwrap().symbol())
         .collect::<String>();
 
-    assert_eq!(app.viewport.top_line, 9);
-    assert!(top_gutter.contains("10"), "top gutter row was {top_gutter:?}");
+    // With the gap-fix, top_line is clamped so the last line fills the screen:
+    // total_lines(51) - editor_height(47) = 4.
+    assert_eq!(app.viewport.top_line, 4);
+    assert!(top_gutter.contains("5"), "top gutter row was {top_gutter:?}");
     assert!(status.contains("Ln 51, Col 1"), "status row was {status:?}");
 }
 
@@ -184,7 +216,11 @@ fn apply_update_merges_copy_update_insert_and_invalidate() {
         .apply_update(CoreUpdate {
             pristine: false,
             ops: vec![
-                CoreUpdateOp { op: CoreUpdateKind::Copy, n: 1, lines: Vec::new() },
+                CoreUpdateOp {
+                    op: CoreUpdateKind::Copy,
+                    n: 1,
+                    lines: Vec::new(),
+                },
                 CoreUpdateOp {
                     op: CoreUpdateKind::Update,
                     n: 1,
@@ -195,7 +231,11 @@ fn apply_update_merges_copy_update_insert_and_invalidate() {
                     n: 1,
                     lines: vec![CoreLine { text: Some("delta".into()), cursor: Vec::new() }],
                 },
-                CoreUpdateOp { op: CoreUpdateKind::Invalidate, n: 2, lines: Vec::new() },
+                CoreUpdateOp {
+                    op: CoreUpdateKind::Invalidate,
+                    n: 2,
+                    lines: Vec::new(),
+                },
             ],
         })
         .unwrap();
@@ -916,6 +956,9 @@ fn display_col_to_byte_wide_char() {
 #[test]
 fn viewport_scrolls_down_when_cursor_leaves_view() {
     let mut app = App::from_path(None).unwrap();
+    // Populate enough lines so the clamp doesn't pull top_line back.
+    // 40 lines, height 20: max_top = 20, cursor scroll gives 11 < 20, no clamp.
+    app.backend.lines = (0..40).map(|i| format!("line {i}")).collect();
     app.backend.cursor_line = 25;
     app.scroll_into_view(20);
     // scroll_offset=5: top = cursor(25) + off(5) + 1 - height(20) = 11
