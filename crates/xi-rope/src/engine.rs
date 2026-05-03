@@ -482,7 +482,7 @@ impl Engine {
     /// Find the first revision that could be affected by toggling a set of undo groups
     fn find_first_undo_candidate_index(&self, toggled_groups: &BTreeSet<usize>) -> usize {
         // find the lowest toggled undo group number
-        if let Some(lowest_group) = toggled_groups.iter().cloned().next() {
+        if let Some(lowest_group) = toggled_groups.iter().next().copied() {
             for (i, rev) in self.revs.iter().enumerate().rev() {
                 if rev.max_undo_so_far < lowest_group {
                     return i + 1; // +1 since we know the one we just found doesn't have it

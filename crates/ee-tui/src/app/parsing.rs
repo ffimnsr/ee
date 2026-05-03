@@ -37,9 +37,9 @@ pub(crate) fn text_obj_word(
     }
 
     let mut start = cursor;
-    for (i, c) in line[..cursor].char_indices().collect::<Vec<_>>().iter().rev() {
-        if pred(*c) {
-            start = *i;
+    for (i, c) in line[..cursor].char_indices().rev() {
+        if pred(c) {
+            start = i;
         } else {
             break;
         }
@@ -208,9 +208,10 @@ pub(crate) fn parse_substitute_cmd(body: &str) -> Option<(String, String, String
         parts.push(current);
     }
 
-    let pattern = parts.first().cloned().unwrap_or_default();
-    let replacement = parts.get(1).cloned().unwrap_or_default();
-    let flags = parts.get(2).cloned().unwrap_or_default();
+    let mut parts_iter = parts.into_iter();
+    let pattern = parts_iter.next().unwrap_or_default();
+    let replacement = parts_iter.next().unwrap_or_default();
+    let flags = parts_iter.next().unwrap_or_default();
     Some((pattern, replacement, flags))
 }
 

@@ -355,6 +355,8 @@ impl Editor {
 
             if last_selection_region(view.sel_regions()).is_some() {
                 self.add_delta(edit_ops::insert(&self.text, view.sel_regions(), chars));
+            } else {
+                view.set_selection(&self.text, old_selection);
             }
         }
     }
