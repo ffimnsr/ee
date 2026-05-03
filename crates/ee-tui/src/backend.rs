@@ -32,7 +32,7 @@ impl ReadTransport for ChannelReader {
 }
 
 pub(crate) struct ChannelWriter {
-    pub(crate) tx: mpsc::Sender<String>,
+    pub(crate) tx: std_mpsc::Sender<String>,
 }
 
 impl WriteTransport for ChannelWriter {
@@ -40,7 +40,7 @@ impl WriteTransport for ChannelWriter {
         let message = String::from_utf8(data.to_vec())
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         self.tx
-            .blocking_send(message)
+            .send(message)
             .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))
     }
 }
@@ -142,7 +142,7 @@ pub(crate) struct CoreLine {
 pub(crate) struct XiClient {
     pub(crate) path: Option<PathBuf>,
     pub(crate) tx: mpsc::Sender<String>,
-    pub(crate) backend_rx: mpsc::Receiver<BackendEvent>,
+    pub(crate) backend_rx: std_mpsc::Receiver<BackendEvent>,
     pub(crate) view_id: String,
     pub(crate) pending_line_request: bool,
     pub(crate) line_cache: Vec<LineSlot>,
@@ -161,8 +161,8 @@ pub(crate) struct XiClient {
 impl XiClient {
     pub(crate) fn new(path: Option<PathBuf>) -> io::Result<Self> {
         let (to_core_tx, to_core_rx) = mpsc::channel::<String>(256);
-        let (from_core_tx, mut from_core_rx) = mpsc::channel::<String>(256);
-        let (backend_tx, backend_rx) = mpsc::channel::<BackendEvent>(256);
+        let (from_core_tx, mut from_core_rx) = std_mpsc::channel::<String>();
+        let (backend_tx, backend_rx) = std_mpsc::channel::<BackendEvent>();
 
         thread::spawn(move || {
             let mut core = XiCore::new();
@@ -714,12 +714,12 @@ pub(crate) fn invalid_line_ranges(line_cache: &[LineSlot]) -> Vec<(usize, usize)
 }
 
 pub(crate) fn xi_reader_thread(
-    mut rx: mpsc::Receiver<String>,
+    rx: std_mpsc::Receiver<String>,
     tx: mpsc::Sender<String>,
-    backend_tx: mpsc::Sender<BackendEvent>,
+    backend_tx: std_mpsc::Sender<BackendEvent>,
     pending: PendingRequests,
 ) {
-    while let Some(raw) = rx.blocking_recv() {
+    while let Ok(raw) = rx.recv() {
         let msg: Value = match serde_json::from_str(&raw) {
             Ok(value) => value,
             Err(_) => continue,
@@ -729,7 +729,7 @@ pub(crate) fn xi_reader_thread(
             if let Some(id) = msg.get("id").cloned() {
                 respond_to_frontend_request(method, params, id, &tx);
             } else if let Some(event) = parse_notification(method, params) {
-                let _ = backend_tx.blocking_send(event);
+                let _ = backend_tx.send(event);
             }
         } else if let Some(id) = msg.get("id").and_then(Value::as_u64) {
             // Response to an outstanding RPC request.
@@ -881,12 +881,12 @@ pub(crate) fn send_rpc_request(
 }
 
 pub(crate) fn block_for_response(
-    rx: &mut mpsc::Receiver<String>,
+    rx: &mut std_mpsc::Receiver<String>,
     tx: &mpsc::Sender<String>,
     expected_id: u64,
 ) -> io::Result<Value> {
     loop {
-        let raw = rx.blocking_recv().ok_or_else(|| {
+        let raw = rx.recv().ok().ok_or_else(|| {
             io::Error::new(io::ErrorKind::BrokenPipe, "rpc response channel closed")
         })?;
         let msg: Value = serde_json::from_str(&raw)
@@ -907,7 +907,7 @@ pub(crate) fn block_for_response(
 }
 
 pub(crate) fn drain_sync_notifications(
-    rx: &mut mpsc::Receiver<String>,
+    rx: &mut std_mpsc::Receiver<String>,
     tx: &mpsc::Sender<String>,
 ) -> Vec<BackendEvent> {
     let mut events = Vec::new();
@@ -928,13 +928,13 @@ pub(crate) fn drain_sync_notifications(
     events
 }
 
-pub(crate) fn recv_with_timeout<T>(rx: &mut mpsc::Receiver<T>, timeout: Duration) -> Option<T> {
+pub(crate) fn recv_with_timeout<T>(rx: &mut std_mpsc::Receiver<T>, timeout: Duration) -> Option<T> {
     let deadline = Instant::now() + timeout;
     loop {
         match rx.try_recv() {
             Ok(value) => return Some(value),
-            Err(mpsc::error::TryRecvError::Disconnected) => return None,
-            Err(mpsc::error::TryRecvError::Empty) => {
+            Err(std_mpsc::TryRecvError::Disconnected) => return None,
+            Err(std_mpsc::TryRecvError::Empty) => {
                 if Instant::now() >= deadline {
                     return None;
                 }

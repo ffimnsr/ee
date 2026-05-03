@@ -73,11 +73,8 @@ fn run_test(filename: &str, lb: bool) -> std::io::Result<()> {
     let mut reader = BufReader::new(f);
     let mut pass = 0;
     let mut total = 0;
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
-            break;
-        };
+    for line in reader.lines() {
+        let line = line?;
         let mut s = String::new();
         let mut breaks = Vec::new();
         for token in line.split_whitespace() {

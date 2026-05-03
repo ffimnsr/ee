@@ -960,12 +960,10 @@ impl<'a, N: NodeInfo> Cursor<'a, N> {
         let leaf = self.leaf?;
         self.position = self.offset_of_leaf + leaf.len();
         for i in 0..CURSOR_CACHE_SIZE {
-            if self.cache[i].is_none() {
-                // this probably can't happen
+            let Some((node, j)) = self.cache[i] else {
                 self.leaf = None;
                 return None;
-            }
-            let (node, j) = self.cache[i].unwrap();
+            };
             let children = node.get_children();
             if j + 1 < children.len() {
                 self.cache[i] = Some((node, j + 1));

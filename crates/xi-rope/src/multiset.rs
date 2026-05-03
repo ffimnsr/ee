@@ -177,7 +177,7 @@ impl Subset {
     /// Determine whether the subset is empty.
     /// In this case deleting it would do nothing.
     pub fn is_empty(&self) -> bool {
-        (self.segments.is_empty()) || ((self.segments.len() == 1) && (self.segments[0].count == 0))
+        self.segments.is_empty() || (self.segments.len() == 1 && self.segments[0].count == 0)
     }
 
     /// Compute the union of two subsets. The count of an element in the
@@ -322,11 +322,7 @@ impl Subset {
     pub fn complement(&self) -> Subset {
         let mut sb = SubsetBuilder::new();
         for seg in &self.segments {
-            if seg.count == 0 {
-                sb.push_segment(seg.len, 1);
-            } else {
-                sb.push_segment(seg.len, 0);
-            }
+            sb.push_segment(seg.len, if seg.count == 0 { 1 } else { 0 });
         }
         sb.build()
     }

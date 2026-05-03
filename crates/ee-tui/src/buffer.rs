@@ -223,7 +223,7 @@ pub(crate) struct BufferManager {
     /// Send side of the channel to xi-core.
     pub(crate) tx: mpsc::Sender<String>,
     /// Receive side of events coming from the xi-core reader thread.
-    pub(crate) backend_rx: mpsc::Receiver<BackendEvent>,
+    pub(crate) backend_rx: std_mpsc::Receiver<BackendEvent>,
     /// All open buffers.
     bufs: Vec<BufState>,
     /// Maps xi view_id strings to indices in `bufs`.
@@ -262,8 +262,8 @@ impl BufferManager {
     /// the initial view.
     pub(crate) fn new(path: Option<PathBuf>) -> io::Result<Self> {
         let (to_core_tx, to_core_rx) = mpsc::channel::<String>(256);
-        let (from_core_tx, from_core_rx) = mpsc::channel::<String>(256);
-        let (backend_tx, backend_rx) = mpsc::channel::<BackendEvent>(256);
+        let (from_core_tx, from_core_rx) = std_mpsc::channel::<String>();
+        let (backend_tx, backend_rx) = std_mpsc::channel::<BackendEvent>();
 
         thread::spawn(move || {
             let mut core = XiCore::new();
@@ -881,15 +881,6 @@ impl BufferManager {
             }
         });
 
-        let (backend_bridge_tx, backend_bridge_rx) = mpsc::channel::<BackendEvent>(64);
-        thread::spawn(move || {
-            while let Ok(event) = backend_rx.recv() {
-                if backend_bridge_tx.blocking_send(event).is_err() {
-                    break;
-                }
-            }
-        });
-
         let buf = BufState {
             id: 1,
             path: None,
@@ -910,7 +901,7 @@ impl BufferManager {
         view_to_idx.insert(view_id, 0);
         Self {
             tx: internal_tx,
-            backend_rx: backend_bridge_rx,
+            backend_rx,
             bufs: vec![buf],
             view_to_idx,
             current: 0,
