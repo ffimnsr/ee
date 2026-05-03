@@ -233,7 +233,7 @@ fn load_ee_toml(settings: &mut EditorSettings, path: &Path) {
 
 /// Walk up directory tree from `start` looking for `.git` or `.git` file.
 /// Returns the directory that contains `.git`, or `None`.
-fn find_git_root(start: &Path) -> Option<PathBuf> {
+pub(crate) fn find_git_root(start: &Path) -> Option<PathBuf> {
     let mut dir = start.to_path_buf();
     loop {
         if dir.join(".git").exists() {

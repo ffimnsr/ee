@@ -3584,12 +3584,12 @@ impl App {
             self.mode = Mode::Normal;
             self.backend.status_message = Some(format!("{applied} substitution(s) applied"));
         } else {
-            let li = self.substitute_pending.as_ref().unwrap().matches
-                [self.substitute_pending.as_ref().unwrap().current]
-                .line;
+            let (li, total, current) = if let Some(pending) = &self.substitute_pending {
+                (pending.matches[pending.current].line, pending.matches.len(), pending.current)
+            } else {
+                return;
+            };
             self.jump_to_line(li);
-            let total = self.substitute_pending.as_ref().unwrap().matches.len();
-            let current = self.substitute_pending.as_ref().unwrap().current;
             self.backend.status_message =
                 Some(format!("substitute ({}/{total}) replace? [y/n/a/q]", current + 1));
         }

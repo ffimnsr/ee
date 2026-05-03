@@ -1,9 +1,11 @@
-use std::env;
 use std::io::{self, Stdout};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{Shell, generate};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event,
@@ -35,6 +37,52 @@ mod tests;
 use app::App;
 use ui::ui;
 
+// ── CLI definition ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "ee",
+    version,
+    about = "A terminal editor",
+    long_about = None,
+)]
+struct Cli {
+    /// Files to open (multiple allowed)
+    #[arg(value_name = "FILE")]
+    files: Vec<PathBuf>,
+
+    /// Load a specific config file instead of the default search path
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// Change the working directory before opening files
+    #[arg(short = 'w', long, value_name = "DIR")]
+    working_dir: Option<PathBuf>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    /// Check for problems and locate loaded config files
+    Doctor,
+    /// Validate config file syntax and values
+    Validate {
+        /// Config file to validate
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
+    },
+    /// Generate shell completion script
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+}
+
+// ── Panic hook ────────────────────────────────────────────────────────────────
+
 /// Install a panic hook that restores the terminal to a sane state before
 /// printing the panic message. Without this a panic in raw/alternate-screen
 /// mode leaves the terminal unusable.
@@ -52,7 +100,109 @@ fn install_panic_hook() {
     }));
 }
 
+// ── Subcommand handlers ───────────────────────────────────────────────────────
+
+fn cmd_doctor(config_path: Option<&PathBuf>) {
+    println!("ee doctor");
+    println!("─────────");
+
+    // Config search path
+    let home_cfg = dirs::home_dir().map(|h| h.join(".ee.toml"));
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd_cfg = cwd.join(".ee.toml");
+
+    if let Some(explicit) = config_path {
+        let status = if explicit.exists() { "found" } else { "not found" };
+        println!("  --config {explicit:?}  [{status}]");
+    } else {
+        if let Some(ref hc) = home_cfg {
+            let status = if hc.exists() { "found" } else { "not found" };
+            println!("  ~/.ee.toml              [{status}]");
+        }
+        // Git repo root
+        if let Some(root) = config::find_git_root(&cwd) {
+            if root != cwd {
+                let repo_cfg = root.join(".ee.toml");
+                let status = if repo_cfg.exists() { "found" } else { "not found" };
+                println!("  {repo_cfg:?}  [git root] [{status}]");
+            }
+        }
+        let status = if cwd_cfg.exists() { "found" } else { "not found" };
+        println!("  {cwd_cfg:?}  [cwd] [{status}]");
+    }
+
+    println!();
+    println!("No problems detected.");
+}
+
+fn cmd_validate(config_path: Option<&PathBuf>) {
+    let path_to_validate =
+        config_path.cloned().or_else(|| dirs::home_dir().map(|h| h.join(".ee.toml")));
+
+    match path_to_validate {
+        None => {
+            eprintln!("No config file found to validate.");
+            std::process::exit(1);
+        }
+        Some(p) => {
+            if !p.exists() {
+                eprintln!("Config file not found: {p:?}");
+                std::process::exit(1);
+            }
+            match std::fs::read_to_string(&p) {
+                Err(e) => {
+                    eprintln!("Cannot read {p:?}: {e}");
+                    std::process::exit(1);
+                }
+                Ok(contents) => match toml::from_str::<toml::Value>(&contents) {
+                    Err(e) => {
+                        eprintln!("Config parse error in {p:?}: {e}");
+                        std::process::exit(1);
+                    }
+                    Ok(_) => {
+                        println!("Config {p:?} is valid.");
+                    }
+                },
+            }
+        }
+    }
+}
+
+fn cmd_completions(shell: Shell) {
+    let mut cmd = Cli::command();
+    generate(shell, &mut cmd, "ee", &mut io::stdout());
+}
+
+// ── Editor entry point ────────────────────────────────────────────────────────
+
 fn main() -> io::Result<()> {
+    let cli = Cli::parse();
+
+    // Handle subcommands that don't launch the editor.
+    match cli.command {
+        Some(Commands::Doctor) => {
+            cmd_doctor(cli.config.as_ref());
+            return Ok(());
+        }
+        Some(Commands::Validate { config }) => {
+            let config_path = config.as_ref().or(cli.config.as_ref());
+            cmd_validate(config_path);
+            return Ok(());
+        }
+        Some(Commands::Completions { shell }) => {
+            cmd_completions(shell);
+            return Ok(());
+        }
+        None => {}
+    }
+
+    // Apply --working-dir before opening files.
+    if let Some(ref dir) = cli.working_dir {
+        std::env::set_current_dir(dir).map_err(|e| {
+            io::Error::new(e.kind(), format!("cannot change directory to {dir:?}: {e}"))
+        })?;
+    }
+
     install_panic_hook();
 
     // Atomic flag set by SIGTERM and SIGINT handlers so the main loop can
@@ -63,8 +213,14 @@ fn main() -> io::Result<()> {
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown))
         .map_err(io::Error::other)?;
 
-    let path = env::args_os().nth(1).map(Into::into);
-    let mut app = App::from_path(path)?;
+    let first = cli.files.first().cloned();
+    let mut app = App::from_path(first)?;
+
+    // Open any additional files as extra buffers.
+    for path in cli.files.iter().skip(1) {
+        let _ = app.backend.open_buffer(Some(path.clone()));
+    }
+
     run(&mut app, shutdown)
 }
 
