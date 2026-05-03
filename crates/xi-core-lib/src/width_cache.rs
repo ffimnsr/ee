@@ -92,6 +92,12 @@ impl WidthMeasure for CodepointMono {
     }
 }
 
+impl Default for WidthCache {
+    fn default() -> Self {
+        WidthCache::new()
+    }
+}
+
 impl WidthCache {
     pub fn new() -> WidthCache {
         WidthCache { m: HashMap::new(), widths: Vec::new() }
@@ -108,7 +114,7 @@ impl WidthCache {
     }
 
     /// Create a new batch of requests.
-    pub fn batch_req(self: &mut WidthCache) -> WidthBatchReq<'_> {
+    pub fn batch_req(&mut self) -> WidthBatchReq<'_> {
         let pending_tok = self.widths.len();
         WidthBatchReq {
             cache: self,
