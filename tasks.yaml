@@ -21,3 +21,11 @@ tasks:
     commands:
       - rm -rf .git/hooks
     description: Uninstall git hooks by removing the .git/hooks directory.
+  lf:
+    commands:
+      - |
+        git ls-files -z --cached --others --exclude-standard \
+        | xargs -0 -I{} sh -c '[ -f "{}" ] && wc -l "{}"' \
+        | awk '$1 > 1000' \
+        | sort -nr
+    description: Check for files with more than 1000 LOC.

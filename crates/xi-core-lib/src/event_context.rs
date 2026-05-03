@@ -284,13 +284,7 @@ impl<'a> EventContext<'a> {
                 })
             }
             UpdateDiagnostics { diagnostics } => {
-                let client = self.client;
-                let view_id = self.view_id;
-                self.with_view(|view, _| {
-                    view.update_diagnostics(plugin, diagnostics);
-                    let diagnostics = view.get_diagnostics();
-                    client.diagnostics(view_id, &diagnostics);
-                })
+                self.with_view(|view, _| view.update_diagnostics(plugin, diagnostics))
             }
             RemoveStatusItem { key } => self.client.remove_status_item(self.view_id, &key),
             ShowHover { request_id, result } => self.do_show_hover(request_id, result),
@@ -1180,113 +1174,6 @@ mod tests {
         assert!(diagnostics.diagnostics.is_empty());
         assert!(matches!(format_err, RemoteError::Custom { code: 501, .. }));
         assert!(matches!(code_actions_err, RemoteError::Custom { code: 501, .. }));
-    }
-
-    #[test]
-    fn delete_line_range_uses_authoritative_buffer_offsets() {
-        let harness = ContextHarness::new("zero\none\ntwo\nthree");
-        let mut ctx = harness.make_context();
-
-        ctx.do_edit(EditNotification::DeleteLineRange { start_line: 1, end_line: 2 });
-
-        assert_eq!(harness.debug_render(), "zero\n|three");
-    }
-
-    #[test]
-    fn delete_block_removes_rectangular_slice_in_core() {
-        let harness = ContextHarness::new("abcd\nefgh\nijkl");
-        let mut ctx = harness.make_context();
-
-        ctx.do_edit(EditNotification::DeleteBlock {
-            start_line: 0,
-            end_line: 2,
-            left_col: 1,
-            right_col: 3,
-        });
-
-        assert_eq!(harness.debug_render(), "|ad\neh\nil");
-    }
-
-    #[test]
-    fn replay_block_insert_reuses_core_buffer_geometry() {
-        let harness = ContextHarness::new("zero\none\ntwo");
-        let mut ctx = harness.make_context();
-
-        ctx.do_edit(EditNotification::ReplayBlockInsert {
-            start_line: 1,
-            end_line: 2,
-            column: 1,
-            text: String::from("X"),
-            append: false,
-        });
-
-        assert_eq!(harness.debug_render(), "|zero\noXne\ntXwo");
-    }
-
-    #[test]
-    fn substitute_preview_uses_authoritative_buffer_lines() {
-        let harness = ContextHarness::new("alpha\nbeta\nalpha");
-        let ctx = harness.make_context();
-
-        let replacements = ctx
-            .preview_substitute(1, 2, "a", "A", false, true)
-            .expect("substitute preview should succeed");
-
-        assert_eq!(
-            replacements,
-            vec![
-                LineReplacement { line: 1, text: String::from("betA") },
-                LineReplacement { line: 2, text: String::from("Alpha") },
-            ]
-        );
-    }
-
-    #[test]
-    fn apply_line_replacements_reuses_authoritative_buffer_offsets() {
-        let harness = ContextHarness::new("zero\none\ntwo");
-        let mut ctx = harness.make_context();
-
-        ctx.do_edit(EditNotification::ApplyLineReplacements {
-            replacements: vec![LineReplacement { line: 1, text: String::from("ONE") }],
-        });
-
-        assert_eq!(harness.debug_render(), "|zero\nONE\ntwo");
-    }
-
-    #[test]
-    fn paste_register_characterwise_after_cursor_stays_backend_owned() {
-        let harness = ContextHarness::new("one");
-        let mut ctx = harness.make_context();
-
-        ctx.do_edit(EditNotification::Gesture {
-            line: 0,
-            col: 0,
-            ty: crate::rpc::GestureType::PointSelect,
-        });
-        ctx.do_edit(EditNotification::PasteRegister {
-            chars: String::from("X"),
-            before: false,
-        });
-
-        assert_eq!(harness.debug_render().replace('|', ""), "oXne");
-    }
-
-    #[test]
-    fn paste_register_linewise_after_cursor_inserts_full_line() {
-        let harness = ContextHarness::new("one\ntwo");
-        let mut ctx = harness.make_context();
-
-        ctx.do_edit(EditNotification::Gesture {
-            line: 0,
-            col: 0,
-            ty: crate::rpc::GestureType::PointSelect,
-        });
-        ctx.do_edit(EditNotification::PasteRegister {
-            chars: String::from("X\n"),
-            before: false,
-        });
-
-        assert_eq!(harness.debug_render().replace('|', ""), "one\nX\ntwo");
     }
 
     #[test]

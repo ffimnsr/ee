@@ -101,13 +101,15 @@ impl<'a> Iterator for LineBreakIterator<'a> {
                 Ordering::Equal => {
                     // LB3, break at EOT
                     self.ix += 1;
-                    let i = (self.state as usize) * N_LINEBREAK_CATEGORIES;
+                    let row = LINEBREAK_STATE_MAP[self.state as usize];
+                    let i = (row as usize) * N_LINEBREAK_CATEGORIES;
                     let new = LINEBREAK_STATE_MACHINE[i];
                     return Some((self.s.len(), new >= 0xc0));
                 }
                 Ordering::Less => {
                     let (lb, len) = linebreak_property_str(self.s, self.ix);
-                    let i = (self.state as usize) * N_LINEBREAK_CATEGORIES + (lb as usize);
+                    let row = LINEBREAK_STATE_MAP[self.state as usize];
+                    let i = (row as usize) * N_LINEBREAK_CATEGORIES + (lb as usize);
                     let new = LINEBREAK_STATE_MACHINE[i];
                     //println!("{:?}[{}], state {} + lb {} -> {}", &self.s[self.ix..], self.ix, self.state, lb, new);
                     let result = self.ix;
@@ -189,7 +191,8 @@ impl LineBreakLeafIter {
                 return (s.len(), false);
             }
             let (lb, len) = linebreak_property_str(s, self.ix);
-            let i = (self.state as usize) * N_LINEBREAK_CATEGORIES + (lb as usize);
+            let row = LINEBREAK_STATE_MAP[self.state as usize];
+            let i = (row as usize) * N_LINEBREAK_CATEGORIES + (lb as usize);
             let new = LINEBREAK_STATE_MACHINE[i];
             //println!("\"{}\"[{}], state {} + lb {} -> {}", &s[self.ix..], self.ix, self.state, lb, new);
             let result = self.ix;
@@ -205,21 +208,8 @@ impl LineBreakLeafIter {
     }
 }
 
-fn is_in_asc_list<T: core::cmp::PartialOrd>(c: T, list: &[T], start: usize, end: usize) -> bool {
-    if c == list[start] || c == list[end] {
-        return true;
-    }
-    if end - start <= 1 {
-        return false;
-    }
-
-    let mid = (start + end) / 2;
-
-    if c >= list[mid] {
-        is_in_asc_list(c, list, mid, end)
-    } else {
-        is_in_asc_list(c, list, start, mid)
-    }
+fn is_in_asc_list<T: core::cmp::Ord>(c: T, list: &[T]) -> bool {
+    list.binary_search(&c).is_ok()
 }
 
 pub fn is_variation_selector(c: char) -> bool {
@@ -249,10 +239,10 @@ impl EmojiExt for char {
         self == '\u{20E3}'
     }
     fn is_emoji(self) -> bool {
-        is_in_asc_list(self, &EMOJI_TABLE, 0, EMOJI_TABLE.len() - 1)
+        is_in_asc_list(self, &EMOJI_TABLE)
     }
     fn is_emoji_modifier_base(self) -> bool {
-        is_in_asc_list(self, &EMOJI_MODIFIER_BASE_TABLE, 0, EMOJI_MODIFIER_BASE_TABLE.len() - 1)
+        is_in_asc_list(self, &EMOJI_MODIFIER_BASE_TABLE)
     }
     fn is_tag_spec_char(self) -> bool {
         ('\u{E0020}'..='\u{E007E}').contains(&self)

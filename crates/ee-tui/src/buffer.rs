@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 use xi_core_lib::XiCore;
 use xi_core_lib::plugin_rpc::{Diagnostic, SymbolItem};
 use xi_core_lib::rpc::LineReplacement;
@@ -16,7 +17,7 @@ use crate::backend::{
     BackendEvent, CachedLine, ChannelReader, ChannelWriter, CoreUpdate, CoreUpdateKind, LineSlot,
     NavigationTarget, PendingRequests, PendingUiAction, block_for_response, checked_advance,
     drain_sync_notifications, invalid_line_ranges, normalize_line_text, parse_response,
-    send_rpc_notification, send_rpc_request, xi_reader_thread,
+    recv_with_timeout, send_rpc_notification, send_rpc_request, xi_reader_thread,
 };
 use crate::text::previous_char_boundary;
 
@@ -168,7 +169,10 @@ impl BufState {
         self.cursor_col = previous_char_boundary(&self.lines[self.cursor_line], self.cursor_col);
     }
 
-    pub(crate) fn request_invalidated_lines(&mut self, tx: &Sender<String>) -> io::Result<()> {
+    pub(crate) fn request_invalidated_lines(
+        &mut self,
+        tx: &mpsc::Sender<String>,
+    ) -> io::Result<()> {
         if self.pending_line_request || self.view_id.is_empty() {
             return Ok(());
         }
@@ -217,9 +221,9 @@ impl Eq for BufState {}
 #[derive(Debug)]
 pub(crate) struct BufferManager {
     /// Send side of the channel to xi-core.
-    pub(crate) tx: Sender<String>,
+    pub(crate) tx: mpsc::Sender<String>,
     /// Receive side of events coming from the xi-core reader thread.
-    pub(crate) backend_rx: Receiver<BackendEvent>,
+    pub(crate) backend_rx: mpsc::Receiver<BackendEvent>,
     /// All open buffers.
     bufs: Vec<BufState>,
     /// Maps xi view_id strings to indices in `bufs`.
@@ -257,9 +261,9 @@ impl BufferManager {
     /// Create a new xi-core process and open `path` (or a scratch buffer) as
     /// the initial view.
     pub(crate) fn new(path: Option<PathBuf>) -> io::Result<Self> {
-        let (to_core_tx, to_core_rx) = mpsc::channel::<String>();
-        let (from_core_tx, from_core_rx) = mpsc::channel::<String>();
-        let (backend_tx, backend_rx) = mpsc::channel::<BackendEvent>();
+        let (to_core_tx, to_core_rx) = mpsc::channel::<String>(256);
+        let (from_core_tx, from_core_rx) = mpsc::channel::<String>(256);
+        let (backend_tx, backend_rx) = mpsc::channel::<BackendEvent>(256);
 
         thread::spawn(move || {
             let mut core = XiCore::new();
@@ -277,7 +281,8 @@ impl BufferManager {
             json!({ "file_path": path.as_ref().map(|p| p.to_string_lossy().to_string()) }),
         )?;
 
-        let view_id_val = block_for_response(&from_core_rx, &to_core_tx, new_view_id)?;
+        let mut from_core_rx = from_core_rx;
+        let view_id_val = block_for_response(&mut from_core_rx, &to_core_tx, new_view_id)?;
         let view_id = view_id_val
             .as_str()
             .ok_or_else(|| {
@@ -285,7 +290,7 @@ impl BufferManager {
             })?
             .to_owned();
 
-        let init_events = drain_sync_notifications(&from_core_rx, &to_core_tx);
+        let init_events = drain_sync_notifications(&mut from_core_rx, &to_core_tx);
 
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
         let pending_clone = Arc::clone(&pending);
@@ -373,7 +378,7 @@ impl BufferManager {
         let rpc_id = self.next_rpc_id;
         self.next_rpc_id = self.next_rpc_id.saturating_add(1);
 
-        let (resp_tx, resp_rx) = mpsc::sync_channel::<Value>(1);
+        let (resp_tx, resp_rx) = std_mpsc::sync_channel::<Value>(1);
         {
             let mut map = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             map.insert(rpc_id, resp_tx);
@@ -589,19 +594,18 @@ impl BufferManager {
     }
 
     fn pump_init(&mut self) -> io::Result<()> {
-        use std::sync::mpsc::RecvTimeoutError;
         loop {
             if invalid_line_ranges(&self.bufs[self.current].line_cache).is_empty() {
                 break;
             }
-            match self.backend_rx.recv_timeout(Duration::from_millis(20)) {
-                Ok(event) => {
+            match recv_with_timeout(&mut self.backend_rx, Duration::from_millis(20)) {
+                Some(event) => {
                     self.apply_event_to_buffer(event)?;
                     while let Ok(event) = self.backend_rx.try_recv() {
                         self.apply_event_to_buffer(event)?;
                     }
                 }
-                Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => break,
+                None => break,
             }
         }
         Ok(())
@@ -689,7 +693,7 @@ impl BufferManager {
 
         // Register a one-shot channel so the reader thread can hand us the
         // view_id response without blocking the reader loop.
-        let (resp_tx, resp_rx) = mpsc::sync_channel::<Value>(1);
+        let (resp_tx, resp_rx) = std_mpsc::sync_channel::<Value>(1);
         {
             let mut map = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             map.insert(rpc_id, resp_tx);
@@ -846,16 +850,15 @@ impl BufferManager {
 
     #[cfg(test)]
     pub(crate) fn pump(&mut self) -> io::Result<()> {
-        use std::sync::mpsc::RecvTimeoutError;
         for _ in 0..6 {
-            match self.backend_rx.recv_timeout(Duration::from_millis(10)) {
-                Ok(event) => {
+            match recv_with_timeout(&mut self.backend_rx, Duration::from_millis(10)) {
+                Some(event) => {
                     self.apply_event_to_buffer(event)?;
                     while let Ok(event) = self.backend_rx.try_recv() {
                         self.apply_event_to_buffer(event)?;
                     }
                 }
-                Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => break,
+                None => break,
             }
         }
         Ok(())
@@ -865,10 +868,28 @@ impl BufferManager {
     /// pre-existing channel ends and a known view_id.
     #[cfg(test)]
     pub(crate) fn test_new(
-        tx: Sender<String>,
-        backend_rx: Receiver<BackendEvent>,
+        tx: std_mpsc::Sender<String>,
+        backend_rx: std_mpsc::Receiver<BackendEvent>,
         view_id: String,
     ) -> Self {
+        let (internal_tx, mut internal_rx) = mpsc::channel::<String>(64);
+        thread::spawn(move || {
+            while let Some(message) = internal_rx.blocking_recv() {
+                if tx.send(message).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let (backend_bridge_tx, backend_bridge_rx) = mpsc::channel::<BackendEvent>(64);
+        thread::spawn(move || {
+            while let Ok(event) = backend_rx.recv() {
+                if backend_bridge_tx.blocking_send(event).is_err() {
+                    break;
+                }
+            }
+        });
+
         let buf = BufState {
             id: 1,
             path: None,
@@ -888,8 +909,8 @@ impl BufferManager {
         let mut view_to_idx = HashMap::new();
         view_to_idx.insert(view_id, 0);
         Self {
-            tx,
-            backend_rx,
+            tx: internal_tx,
+            backend_rx: backend_bridge_rx,
             bufs: vec![buf],
             view_to_idx,
             current: 0,
@@ -956,7 +977,7 @@ impl BufferManager {
         let rpc_id = self.next_rpc_id;
         self.next_rpc_id += 1;
 
-        let (resp_tx, resp_rx) = mpsc::sync_channel::<Value>(1);
+        let (resp_tx, resp_rx) = std_mpsc::sync_channel::<Value>(1);
         {
             let mut map = self.pending.lock().unwrap_or_else(|e| e.into_inner());
             map.insert(rpc_id, resp_tx);
@@ -1017,14 +1038,14 @@ pub(crate) fn recovery_file_path(original: &std::path::Path) -> Option<PathBuf> 
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn send_xi_notification(tx: &Sender<String>, method: &str, params: Value) -> io::Result<()> {
+fn send_xi_notification(tx: &mpsc::Sender<String>, method: &str, params: Value) -> io::Result<()> {
     let raw = serde_json::to_string(&json!({
         "jsonrpc": "2.0",
         "method": method,
         "params": params,
     }))
     .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    tx.send(raw).map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))
+    tx.blocking_send(raw).map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))
 }
 
 // Keep these imports satisfied for the test helper.

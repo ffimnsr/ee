@@ -1,11 +1,12 @@
 use std::io;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc as std_mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
 use xi_core_lib::XiCore;
 use xi_core_lib::plugin_rpc::{CodeActionDescriptor, Diagnostic, SymbolItem};
@@ -14,24 +15,24 @@ use xi_rpc::{ReadTransport, RpcLoop, WriteTransport};
 use crate::text::previous_char_boundary;
 
 pub(crate) struct ChannelReader {
-    pub(crate) rx: Receiver<String>,
+    pub(crate) rx: mpsc::Receiver<String>,
 }
 
 impl ReadTransport for ChannelReader {
     fn read_message(&mut self, buf: &mut String) -> io::Result<usize> {
-        match self.rx.recv() {
-            Ok(message) => {
+        match self.rx.blocking_recv() {
+            Some(message) => {
                 let len = message.len();
                 buf.push_str(&message);
                 Ok(len)
             }
-            Err(_) => Ok(0),
+            None => Ok(0),
         }
     }
 }
 
 pub(crate) struct ChannelWriter {
-    pub(crate) tx: Sender<String>,
+    pub(crate) tx: mpsc::Sender<String>,
 }
 
 impl WriteTransport for ChannelWriter {
@@ -39,13 +40,13 @@ impl WriteTransport for ChannelWriter {
         let message = String::from_utf8(data.to_vec())
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         self.tx
-            .send(message)
+            .blocking_send(message)
             .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))
     }
 }
 
 pub(crate) type PendingRequests =
-    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, mpsc::SyncSender<Value>>>>;
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<u64, std_mpsc::SyncSender<Value>>>>;
 
 #[derive(Debug)]
 pub(crate) enum BackendEvent {
@@ -140,8 +141,8 @@ pub(crate) struct CoreLine {
 #[derive(Debug)]
 pub(crate) struct XiClient {
     pub(crate) path: Option<PathBuf>,
-    pub(crate) tx: Sender<String>,
-    pub(crate) backend_rx: Receiver<BackendEvent>,
+    pub(crate) tx: mpsc::Sender<String>,
+    pub(crate) backend_rx: mpsc::Receiver<BackendEvent>,
     pub(crate) view_id: String,
     pub(crate) pending_line_request: bool,
     pub(crate) line_cache: Vec<LineSlot>,
@@ -159,9 +160,9 @@ pub(crate) struct XiClient {
 #[allow(dead_code)]
 impl XiClient {
     pub(crate) fn new(path: Option<PathBuf>) -> io::Result<Self> {
-        let (to_core_tx, to_core_rx) = mpsc::channel::<String>();
-        let (from_core_tx, from_core_rx) = mpsc::channel::<String>();
-        let (backend_tx, backend_rx) = mpsc::channel::<BackendEvent>();
+        let (to_core_tx, to_core_rx) = mpsc::channel::<String>(256);
+        let (from_core_tx, mut from_core_rx) = mpsc::channel::<String>(256);
+        let (backend_tx, backend_rx) = mpsc::channel::<BackendEvent>(256);
 
         thread::spawn(move || {
             let mut core = XiCore::new();
@@ -179,7 +180,7 @@ impl XiClient {
             json!({ "file_path": path.as_ref().map(|p| p.to_string_lossy().to_string()) }),
         )?;
 
-        let view_id = block_for_response(&from_core_rx, &to_core_tx, new_view_id)?;
+        let view_id = block_for_response(&mut from_core_rx, &to_core_tx, new_view_id)?;
         let view_id = view_id
             .as_str()
             .ok_or_else(|| {
@@ -187,7 +188,7 @@ impl XiClient {
             })?
             .to_owned();
 
-        let init_events = drain_sync_notifications(&from_core_rx, &to_core_tx);
+        let init_events = drain_sync_notifications(&mut from_core_rx, &to_core_tx);
 
         let pending: PendingRequests =
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -343,21 +344,18 @@ impl XiClient {
     }
 
     fn pump_init(&mut self) -> io::Result<()> {
-        use std::sync::mpsc::RecvTimeoutError;
-
         loop {
             if invalid_line_ranges(&self.line_cache).is_empty() {
                 break;
             }
-            match self.backend_rx.recv_timeout(Duration::from_millis(20)) {
-                Ok(event) => {
+            match recv_with_timeout(&mut self.backend_rx, Duration::from_millis(20)) {
+                Some(event) => {
                     self.apply_backend_event(event)?;
                     while let Ok(event) = self.backend_rx.try_recv() {
                         self.apply_backend_event(event)?;
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => break,
-                Err(RecvTimeoutError::Disconnected) => break,
+                None => break,
             }
         }
         Ok(())
@@ -470,7 +468,7 @@ impl XiClient {
         let message = serde_json::to_string(&value)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         self.tx
-            .send(message)
+            .blocking_send(message)
             .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))
     }
 
@@ -594,18 +592,15 @@ impl XiClient {
 
     #[cfg(test)]
     pub(crate) fn pump(&mut self) -> io::Result<()> {
-        use std::sync::mpsc::RecvTimeoutError;
-
         for _ in 0..6 {
-            match self.backend_rx.recv_timeout(Duration::from_millis(10)) {
-                Ok(event) => {
+            match recv_with_timeout(&mut self.backend_rx, Duration::from_millis(10)) {
+                Some(event) => {
                     self.apply_backend_event(event)?;
                     while let Ok(event) = self.backend_rx.try_recv() {
                         self.apply_backend_event(event)?;
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => break,
-                Err(RecvTimeoutError::Disconnected) => break,
+                None => break,
             }
         }
         Ok(())
@@ -719,12 +714,12 @@ pub(crate) fn invalid_line_ranges(line_cache: &[LineSlot]) -> Vec<(usize, usize)
 }
 
 pub(crate) fn xi_reader_thread(
-    rx: Receiver<String>,
-    tx: Sender<String>,
-    backend_tx: Sender<BackendEvent>,
+    mut rx: mpsc::Receiver<String>,
+    tx: mpsc::Sender<String>,
+    backend_tx: mpsc::Sender<BackendEvent>,
     pending: PendingRequests,
 ) {
-    while let Ok(raw) = rx.recv() {
+    while let Some(raw) = rx.blocking_recv() {
         let msg: Value = match serde_json::from_str(&raw) {
             Ok(value) => value,
             Err(_) => continue,
@@ -734,7 +729,7 @@ pub(crate) fn xi_reader_thread(
             if let Some(id) = msg.get("id").cloned() {
                 respond_to_frontend_request(method, params, id, &tx);
             } else if let Some(event) = parse_notification(method, params) {
-                let _ = backend_tx.send(event);
+                let _ = backend_tx.blocking_send(event);
             }
         } else if let Some(id) = msg.get("id").and_then(Value::as_u64) {
             // Response to an outstanding RPC request.
@@ -750,7 +745,7 @@ pub(crate) fn respond_to_frontend_request(
     method: &str,
     params: Value,
     id: Value,
-    tx: &Sender<String>,
+    tx: &mpsc::Sender<String>,
 ) {
     let response = match method {
         "measure_width" => {
@@ -780,7 +775,7 @@ pub(crate) fn respond_to_frontend_request(
         }),
     };
     if let Ok(raw) = serde_json::to_string(&response) {
-        let _ = tx.send(raw);
+        let _ = tx.blocking_send(raw);
     }
 }
 
@@ -856,7 +851,7 @@ pub(crate) fn format_location_message(title: &str, locations: &[NavigationTarget
 }
 
 pub(crate) fn send_rpc_notification(
-    tx: &Sender<String>,
+    tx: &mpsc::Sender<String>,
     method: &str,
     params: Value,
 ) -> io::Result<()> {
@@ -866,11 +861,11 @@ pub(crate) fn send_rpc_notification(
         "params": params,
     }))
     .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    tx.send(raw).map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))
+    tx.blocking_send(raw).map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))
 }
 
 pub(crate) fn send_rpc_request(
-    tx: &Sender<String>,
+    tx: &mpsc::Sender<String>,
     id: u64,
     method: &str,
     params: Value,
@@ -882,17 +877,18 @@ pub(crate) fn send_rpc_request(
         "params": params,
     }))
     .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    tx.send(raw).map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))
+    tx.blocking_send(raw).map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))
 }
 
 pub(crate) fn block_for_response(
-    rx: &Receiver<String>,
-    tx: &Sender<String>,
+    rx: &mut mpsc::Receiver<String>,
+    tx: &mpsc::Sender<String>,
     expected_id: u64,
 ) -> io::Result<Value> {
     loop {
-        let raw =
-            rx.recv().map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))?;
+        let raw = rx.blocking_recv().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "rpc response channel closed")
+        })?;
         let msg: Value = serde_json::from_str(&raw)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
 
@@ -911,11 +907,11 @@ pub(crate) fn block_for_response(
 }
 
 pub(crate) fn drain_sync_notifications(
-    rx: &Receiver<String>,
-    tx: &Sender<String>,
+    rx: &mut mpsc::Receiver<String>,
+    tx: &mpsc::Sender<String>,
 ) -> Vec<BackendEvent> {
     let mut events = Vec::new();
-    while let Ok(raw) = rx.recv_timeout(Duration::from_millis(20)) {
+    while let Some(raw) = recv_with_timeout(rx, Duration::from_millis(20)) {
         let msg: Value = match serde_json::from_str(&raw) {
             Ok(value) => value,
             Err(_) => continue,
@@ -930,4 +926,20 @@ pub(crate) fn drain_sync_notifications(
         }
     }
     events
+}
+
+pub(crate) fn recv_with_timeout<T>(rx: &mut mpsc::Receiver<T>, timeout: Duration) -> Option<T> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match rx.try_recv() {
+            Ok(value) => return Some(value),
+            Err(mpsc::error::TryRecvError::Disconnected) => return None,
+            Err(mpsc::error::TryRecvError::Empty) => {
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                thread::yield_now();
+            }
+        }
+    }
 }
