@@ -40,26 +40,6 @@ impl Interval {
         Interval { start, end }
     }
 
-    #[deprecated(since = "0.3.0", note = "all intervals are now closed_open, use Interval::new")]
-    pub fn new_closed_open(start: usize, end: usize) -> Interval {
-        Self::new(start, end)
-    }
-
-    #[deprecated(since = "0.3.0", note = "all intervals are now closed_open")]
-    pub fn new_open_closed(start: usize, end: usize) -> Interval {
-        Self::new(start, end)
-    }
-
-    #[deprecated(since = "0.3.0", note = "all intervals are now closed_open")]
-    pub fn new_closed_closed(start: usize, end: usize) -> Interval {
-        Self::new(start, end)
-    }
-
-    #[deprecated(since = "0.3.0", note = "all intervals are now closed_open")]
-    pub fn new_open_open(start: usize, end: usize) -> Interval {
-        Self::new(start, end)
-    }
-
     pub fn start(&self) -> usize {
         self.start
     }

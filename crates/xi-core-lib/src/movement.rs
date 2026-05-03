@@ -151,7 +151,7 @@ fn selection_position(
     } else {
         r.max()
     };
-    let col = if let Some(col) = r.horiz { col } else { lo.offset_to_line_col(text, active).1 };
+    let col = r.horiz.unwrap_or_else(|| lo.offset_to_line_col(text, active).1);
     let line = lo.line_of_offset(text, active);
 
     (col, line)
