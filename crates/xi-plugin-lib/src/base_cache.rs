@@ -596,13 +596,13 @@ mod tests {
         };
         c.reset_chunk(data);
         assert_eq!(c.line_offsets, vec![5, 29]);
-        c.clear_up_to(5);
+        c.clear_up_to(5).unwrap();
         assert_eq!(c.offset, 5);
         assert_eq!(c.first_line, 1);
         assert_eq!(c.first_line_offset, 0);
         assert_eq!(c.line_offsets, vec![24]);
 
-        c.clear_up_to(10);
+        c.clear_up_to(10).unwrap();
         assert_eq!(c.offset, 15);
         assert_eq!(c.first_line, 1);
         assert_eq!(c.first_line_offset, 10);
@@ -768,7 +768,7 @@ mod tests {
 
         // reset and fetch the middle, so we have an offset:
         let _ = c.offset_of_line(&source, 0);
-        c.clear_up_to(5);
+        c.clear_up_to(5).unwrap();
         assert_eq!(&c.contents, &"this\nhas\nfive nice\nsour\nlines!"[5..CHUNK_SIZE]);
         assert_eq!(c.offset, 5);
         assert_eq!(c.first_line, 1);
