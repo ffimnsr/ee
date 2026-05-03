@@ -632,7 +632,7 @@ fn pending_hover_notification_opens_popup() {
 
 #[test]
 fn ee_tui_sources_do_not_use_raw_lsp_or_plugin_routes() {
-    let app_src = include_str!("app.rs");
+    let app_src = include_str!("app/mod.rs");
     let buffer_src = include_str!("buffer.rs");
     let backend_src = include_str!("backend.rs");
 

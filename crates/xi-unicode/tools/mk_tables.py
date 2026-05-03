@@ -388,19 +388,27 @@ def mk_lb_rules():
                 bk = ts[L + '|' + R]
                 flags = bk_to_flags[bk]
                 sm[left + n + nspecial][right] = flags + r_with_cm
-    nunique = len(set(str(line) for line in sm))
+    unique_rows = []
+    state_map = []
+    for row in sm:
+        t = tuple(row)
+        if t not in unique_rows:
+            unique_rows.append(t)
+        state_map.append(unique_rows.index(t))
+
+    nunique = len(unique_rows)
     print('//', nunique, 'unique states')
     print('pub const N_LINEBREAK_CATEGORIES: usize = %d;' % n)
     print('\n#[rustfmt::skip]')
-    print('pub const LINEBREAK_STATE_MACHINE: [u8; %d] = [' % (nstates * n))
-    # TODO: dedup
-    for state in range(nstates):
-        if state < n + nspecial:
-            statename = Any[state]
-        else:
-            statename = 'SP+ ' + Any[state - (n + nspecial)]
-        print('    // state %d: %s' % (state, statename))
-        gen_data(sm[state])
+    print('pub const LINEBREAK_STATE_MACHINE: [u8; %d] = [' % (nunique * n))
+    for i, row in enumerate(unique_rows):
+        print('    // unique row %d' % i)
+        gen_data(row)
+    print('];')
+
+    print('\n#[rustfmt::skip]')
+    print('pub const LINEBREAK_STATE_MAP: [u8; %d] = [' % nstates)
+    gen_data(state_map)
     print('];')
 
 def main():
