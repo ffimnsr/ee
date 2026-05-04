@@ -18,12 +18,11 @@ use std::cmp::Ordering;
 use std::ops::Range;
 
 use xi_rope::breaks::{BreakBuilder, Breaks, BreaksInfo, BreaksMetric};
-use xi_rope::spans::Spans;
 use xi_rope::{Cursor, Interval, LinesMetric, Rope, RopeDelta, RopeInfo};
 use xi_unicode::LineBreakLeafIter;
 
 use crate::client::Client;
-use crate::styles::{N_RESERVED_STYLES, Style};
+use crate::styles::N_RESERVED_STYLES;
 use crate::width_cache::{CodepointMono, Token, WidthCache, WidthMeasure};
 
 /// The visual width of the buffer for the purpose of word wrapping.
@@ -263,7 +262,6 @@ impl Lines {
         text: &Rope,
         width_cache: &mut WidthCache,
         client: &Client,
-        _spans: &Spans<Style>,
         visible_lines: Range<usize>,
     ) -> Option<InvalLines> {
         if self.is_converged() {

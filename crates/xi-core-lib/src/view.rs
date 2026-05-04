@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cell::RefCell;
 use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::iter;
@@ -33,15 +32,11 @@ use crate::movement::{Movement, region_movement, selection_movement};
 use crate::plugins::PluginId;
 use crate::rpc::{FindQuery, GestureType, MouseAction, SelectionGranularity, SelectionModifier};
 use crate::selection::{Affinity, InsertDrift, SelRegion, Selection};
-use crate::styles::{Style, ThemeStyleMap};
 use crate::tabs::{BufferId, Counter, ViewId};
 use crate::width_cache::WidthCache;
 use crate::word_boundaries::WordCursor;
-use xi_rope::spans::Spans;
 use xi_rope::{Cursor, Interval, LinesMetric, Rope, RopeDelta};
 use xi_rpc::RequestId;
-
-type StyleMap = RefCell<ThemeStyleMap>;
 
 /// A flag used to indicate when legacy actions should modify selections
 const FLAG_SELECT: u64 = 2;
@@ -450,15 +445,6 @@ impl View {
     }
 
     // TODO: insert from keyboard or input method shouldn't break undo group,
-    /// Invalidates the styles of the given range (start and end are offsets within
-    /// the text).
-    pub fn invalidate_styles(&mut self, text: &Rope, start: usize, end: usize) {
-        let first_line = self.line_of_offset(text, start);
-        let (mut last_line, last_col) = self.offset_to_line_col(text, end);
-        last_line += if last_col > 0 { 1 } else { 0 };
-        self.lc_shadow.partial_invalidate(first_line, last_line, line_cache_shadow::STYLES_VALID);
-    }
-
     pub fn update_annotations(
         &mut self,
         plugin: PluginId,
@@ -649,18 +635,9 @@ impl View {
         !self.selection.regions_in_range(offset, offset).is_empty()
     }
 
-    // Encode a single line with its styles and cursors in JSON.
+    // Encode a single line with its text and cursors in JSON.
     // If "text" is not specified, don't add "text" to the output.
-    // If "style_spans" are not specified, don't add "styles" to the output.
-    fn encode_line(
-        &self,
-        client: &Client,
-        styles: &StyleMap,
-        line: VisualLine,
-        text: Option<&Rope>,
-        style_spans: Option<&Spans<Style>>,
-        last_pos: usize,
-    ) -> Value {
+    fn encode_line(&self, line: VisualLine, text: Option<&Rope>, last_pos: usize) -> Value {
         let start_pos = line.interval.start;
         let pos = line.interval.end;
         let mut cursors = Vec::new();
@@ -706,17 +683,6 @@ impl View {
         if let Some(text) = text {
             result["text"] = json!(text.slice_to_cow(start_pos..pos));
         }
-        if let Some(style_spans) = style_spans {
-            result["styles"] = json!(self.encode_styles(
-                client,
-                styles,
-                start_pos,
-                pos,
-                &selections,
-                &hls,
-                style_spans
-            ));
-        }
         if !cursors.is_empty() {
             result["cursor"] = json!(cursors);
         }
@@ -726,65 +692,10 @@ impl View {
         result
     }
 
-    pub fn encode_styles(
-        &self,
-        client: &Client,
-        styles: &StyleMap,
-        start: usize,
-        end: usize,
-        sel: &[(usize, usize)],
-        hls: &Vec<Vec<(usize, usize)>>,
-        style_spans: &Spans<Style>,
-    ) -> Vec<isize> {
-        let mut encoded_styles = Vec::new();
-        assert!(start <= end, "{} {}", start, end);
-        let style_spans = style_spans.subseq(Interval::new(start, end));
-
-        let mut ix = 0;
-        // we add the special find highlights (1 to N) and selection (0) styles first.
-        // We add selection after find because we want it to be preferred if the
-        // same span exists in both sets (as when there is an active selection)
-        for (index, cur_find_hls) in hls.iter().enumerate() {
-            for &(sel_start, sel_end) in cur_find_hls {
-                encoded_styles.push((sel_start as isize) - ix);
-                encoded_styles.push(sel_end as isize - sel_start as isize);
-                encoded_styles.push(index as isize + 1);
-                ix = sel_end as isize;
-            }
-        }
-        for &(sel_start, sel_end) in sel {
-            encoded_styles.push((sel_start as isize) - ix);
-            encoded_styles.push(sel_end as isize - sel_start as isize);
-            encoded_styles.push(0);
-            ix = sel_end as isize;
-        }
-        for (iv, style) in style_spans.iter() {
-            let style_id = self.get_or_def_style_id(client, styles, style);
-            encoded_styles.push((iv.start() as isize) - ix);
-            encoded_styles.push(iv.end() as isize - iv.start() as isize);
-            encoded_styles.push(style_id as isize);
-            ix = iv.end() as isize;
-        }
-        encoded_styles
-    }
-
-    fn get_or_def_style_id(&self, client: &Client, style_map: &StyleMap, style: &Style) -> usize {
-        let mut style_map = style_map.borrow_mut();
-        if let Some(ix) = style_map.lookup(style) {
-            return ix;
-        }
-        let ix = style_map.add(style);
-        let style = style_map.merge_with_default(style);
-        client.def_style(&style.to_json(ix));
-        ix
-    }
-
     fn send_update_for_plan(
         &mut self,
         text: &Rope,
         client: &Client,
-        styles: &StyleMap,
-        style_spans: &Spans<Style>,
         plan: &RenderPlan,
         pristine: bool,
     ) {
@@ -871,16 +782,7 @@ impl View {
                                 .lines
                                 .iter_lines(text, start_line)
                                 .take(seg.n)
-                                .map(|l| {
-                                    self.encode_line(
-                                        client,
-                                        styles,
-                                        l,
-                                        /* text = */ None,
-                                        /* style_spans = */ None,
-                                        text.len(),
-                                    )
-                                })
+                                .map(|l| self.encode_line(l, /* text = */ None, text.len()))
                                 .collect::<Vec<_>>();
 
                             let logical_line_opt =
@@ -898,16 +800,7 @@ impl View {
                             .lines
                             .iter_lines(text, start_line)
                             .take(seg.n)
-                            .map(|l| {
-                                self.encode_line(
-                                    client,
-                                    styles,
-                                    l,
-                                    Some(text),
-                                    Some(style_spans),
-                                    text.len(),
-                                )
-                            })
+                            .map(|l| self.encode_line(l, Some(text), text.len()))
                             .collect::<Vec<_>>();
                         debug_assert_eq!(encoded_lines.len(), seg.n);
                         ops.push(UpdateOp::insert(encoded_lines));
@@ -938,17 +831,10 @@ impl View {
     /// Update front-end with any changes to view since the last time sent.
     /// The `pristine` argument indicates whether or not the buffer has
     /// unsaved changes.
-    pub fn render_if_dirty(
-        &mut self,
-        text: &Rope,
-        client: &Client,
-        styles: &StyleMap,
-        style_spans: &Spans<Style>,
-        pristine: bool,
-    ) {
+    pub fn render_if_dirty(&mut self, text: &Rope, client: &Client, pristine: bool) {
         let height = self.line_of_offset(text, text.len()) + 1;
         let plan = RenderPlan::create(height, self.first_line, self.height);
-        self.send_update_for_plan(text, client, styles, style_spans, &plan, pristine);
+        self.send_update_for_plan(text, client, &plan, pristine);
         if let Some(new_scroll_pos) = self.scroll_to.take() {
             let (line, col) = self.offset_to_line_col(text, new_scroll_pos);
             client.scroll_to(self.view_id, line, col);
@@ -960,8 +846,6 @@ impl View {
         &mut self,
         text: &Rope,
         client: &Client,
-        styles: &StyleMap,
-        style_spans: &Spans<Style>,
         first_line: usize,
         last_line: usize,
         pristine: bool,
@@ -969,7 +853,7 @@ impl View {
         let height = self.line_of_offset(text, text.len()) + 1;
         let mut plan = RenderPlan::create(height, self.first_line, self.height);
         plan.request_lines(first_line, last_line);
-        self.send_update_for_plan(text, client, styles, style_spans, &plan, pristine);
+        self.send_update_for_plan(text, client, &plan, pristine);
     }
 
     /// Invalidates front-end's entire line cache, forcing a full render at the next
@@ -992,16 +876,10 @@ impl View {
 
     /// Generate line breaks, based on current settings. Currently batch-mode,
     /// and currently in a debugging state.
-    pub(crate) fn rewrap(
-        &mut self,
-        text: &Rope,
-        width_cache: &mut WidthCache,
-        client: &Client,
-        spans: &Spans<Style>,
-    ) {
+    pub(crate) fn rewrap(&mut self, text: &Rope, width_cache: &mut WidthCache, client: &Client) {
         let _t = tracing::trace_span!("View::rewrap", categories = "core").entered();
         let visible = self.first_line..self.first_line + self.height;
-        let inval = self.lines.rewrap_chunk(text, width_cache, client, spans, visible);
+        let inval = self.lines.rewrap_chunk(text, width_cache, client, visible);
         if let Some(InvalLines { start_line, inval_count, new_count }) = inval {
             self.lc_shadow.edit(start_line, start_line + inval_count, new_count);
         }
@@ -1316,11 +1194,10 @@ impl View {
     pub fn debug_force_rewrap_cols(&mut self, text: &Rope, cols: usize) {
         use xi_rpc::test_utils::DummyPeer;
 
-        let spans: Spans<Style> = Spans::default();
         let mut width_cache = WidthCache::new();
         let client = Client::new(Box::new(DummyPeer));
         self.update_wrap_settings(text, cols, false);
-        self.rewrap(text, &mut width_cache, &client, &spans);
+        self.rewrap(text, &mut width_cache, &client);
     }
 }
 

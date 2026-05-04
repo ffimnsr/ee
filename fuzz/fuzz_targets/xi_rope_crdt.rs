@@ -82,8 +82,8 @@ fuzz_target!(|input: RopeInput| {
     left.undo(to_group_set(&input.left_undo_groups));
     right.undo(to_group_set(&input.right_undo_groups));
 
-    left.gc(&to_group_set(&input.left_gc_groups));
-    right.gc(&to_group_set(&input.right_gc_groups));
+    left.gc(to_group_set(&input.left_gc_groups).iter());
+    right.gc(to_group_set(&input.right_gc_groups).iter());
 
     left.merge(&right);
     right.merge(&left);

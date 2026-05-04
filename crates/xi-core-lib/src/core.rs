@@ -32,7 +32,7 @@ use crate::tracing_support;
 /// is configured, so we defer instantiating state until we have that
 /// information.
 pub enum XiCore {
-    // TODO: profile startup, and determine what things (such as theme loading)
+    // TODO: profile startup, and determine what things
     // we should be doing before client_init.
     Waiting,
     Running(Arc<Mutex<CoreState>>),

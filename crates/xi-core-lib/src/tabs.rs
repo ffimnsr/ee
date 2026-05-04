@@ -52,7 +52,6 @@ use crate::plugins::{
 use crate::rpc::{
     CoreNotification, CoreRequest, EditNotification, PluginNotification as CorePluginNotification,
 };
-use crate::styles::{DEFAULT_THEME, ThemeStyleMap};
 use crate::syntax::LanguageId;
 use crate::view::View;
 use crate::whitespace::Indentation;
@@ -102,10 +101,7 @@ const CONFIG_EVENT_TOKEN: WatchToken = WatchToken(1);
 pub const OPEN_FILE_EVENT_TOKEN: WatchToken = WatchToken(2);
 
 #[cfg(feature = "notify")]
-const THEME_FILE_EVENT_TOKEN: WatchToken = WatchToken(3);
-
-#[cfg(feature = "notify")]
-const PLUGIN_EVENT_TOKEN: WatchToken = WatchToken(4);
+const PLUGIN_EVENT_TOKEN: WatchToken = WatchToken(3);
 
 #[allow(dead_code)]
 pub struct CoreState {
@@ -114,8 +110,6 @@ pub struct CoreState {
     file_manager: FileManager,
     /// A local pasteboard.
     kill_ring: RefCell<Rope>,
-    /// Theme and style state.
-    style_map: RefCell<ThemeStyleMap>,
     width_cache: RefCell<WidthCache>,
     /// User and platform specific settings
     config_manager: ConfigManager,
@@ -182,14 +176,6 @@ impl CoreState {
 
         let config_manager = ConfigManager::new(config_dir, extras_dir);
 
-        let themes_dir = config_manager.get_themes_dir();
-        if let Some(p) = themes_dir.as_ref() {
-            #[cfg(feature = "notify")]
-            watcher.watch_filtered(p, true, THEME_FILE_EVENT_TOKEN, |p| {
-                p.extension().and_then(OsStr::to_str).unwrap_or("") == "tmTheme"
-            });
-        }
-
         let plugins_dir = config_manager.get_plugins_dir();
         if let Some(p) = plugins_dir.as_ref() {
             #[cfg(feature = "notify")]
@@ -204,7 +190,6 @@ impl CoreState {
             #[cfg(not(feature = "notify"))]
             file_manager: FileManager::new(),
             kill_ring: RefCell::new(Rope::from("")),
-            style_map: RefCell::new(ThemeStyleMap::new(themes_dir)),
             width_cache: RefCell::new(WidthCache::new()),
             config_manager,
             self_ref: None,
@@ -240,9 +225,6 @@ impl CoreState {
             self.load_file_based_config(&path);
         }
 
-        // Load the custom theme files.
-        self.style_map.borrow_mut().load_theme_dir();
-
         // instead of having to do this here, config should just own
         // the plugin catalog and reload automatically
         let plugin_paths = self.config_manager.get_plugin_paths();
@@ -254,8 +236,6 @@ impl CoreState {
         self.peer.available_languages(languages_ids);
         let lang_config_changes = self.config_manager.set_languages(languages);
         self.handle_config_changes(lang_config_changes);
-        let theme_names = self.style_map.borrow().get_theme_names();
-        self.peer.available_themes(theme_names);
 
         self.ensure_manifest_plugins_started();
     }
@@ -327,7 +307,6 @@ impl CoreState {
                 siblings: Vec::new(),
                 plugins,
                 client: &self.peer,
-                style_map: &self.style_map,
                 width_cache: &self.width_cache,
                 kill_ring: &self.kill_ring,
                 weak_core: self.self_ref.as_ref().unwrap(),
@@ -495,33 +474,6 @@ impl CoreState {
                 self.config_manager.remove_buffer(buffer_id);
             }
         }
-    }
-
-    fn do_set_theme(&self, theme_name: &str) {
-        //Set only if requested theme is different from the
-        //current one.
-        if theme_name != self.style_map.borrow().get_theme_name() {
-            if let Err(e) = self.style_map.borrow_mut().set_theme(theme_name) {
-                error!("error setting theme: {:?}, {:?}", theme_name, e);
-                return;
-            }
-        }
-        self.notify_client_and_update_views();
-    }
-
-    fn notify_client_and_update_views(&self) {
-        {
-            let style_map = self.style_map.borrow();
-            self.peer.theme_changed(style_map.get_theme_name(), style_map.get_theme_settings());
-        }
-
-        self.iter_groups().for_each(|mut edit_ctx| {
-            edit_ctx.with_editor(|ed, view, _, _| {
-                ed.theme_changed(&self.style_map.borrow());
-                view.set_dirty(ed.get_buffer());
-            });
-            edit_ctx.render_if_needed();
-        });
     }
 
     fn do_start_plugin(&mut self, _view_id: ViewId, plugin: &str) {
@@ -887,7 +839,6 @@ impl CoreState {
             match token {
                 OPEN_FILE_EVENT_TOKEN => self.handle_open_file_fs_event(event),
                 CONFIG_EVENT_TOKEN => self.handle_config_fs_event(event),
-                THEME_FILE_EVENT_TOKEN => self.handle_themes_fs_event(event),
                 PLUGIN_EVENT_TOKEN => self.handle_plugin_fs_event(event),
                 _ => warn!("unexpected fs event token {:?}", token),
             }
@@ -1055,64 +1006,6 @@ impl CoreState {
                 .collect::<Vec<_>>();
             self.peer.available_plugins(*view_id, &available_plugins);
         });
-    }
-
-    /// Handles changes in theme files.
-    #[cfg(feature = "notify")]
-    fn handle_themes_fs_event(&mut self, event: Event) {
-        use notify::event::*;
-        match event.kind {
-            EventKind::Create(CreateKind::Any) | EventKind::Modify(ModifyKind::Any) => {
-                self.load_theme_file(&event.paths[0])
-            }
-            // the way FSEvents on macOS work, we want to verify that this path
-            // has actually be removed before we do anything.
-            EventKind::Remove(RemoveKind::Any) if !event.paths[0].exists() => {
-                self.remove_theme(&event.paths[0]);
-            }
-            EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
-                let old = &event.paths[0];
-                let new = &event.paths[1];
-                self.remove_theme(old);
-                self.load_theme_file(new);
-            }
-            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any))
-            | EventKind::Remove(RemoveKind::Any) => {
-                self.style_map.borrow_mut().sync_dir(event.paths[0].parent())
-            }
-            _ => (),
-        }
-        let theme_names = self.style_map.borrow().get_theme_names();
-        self.peer.available_themes(theme_names);
-    }
-
-    /// Load a single theme file. Updates if already present.
-    fn load_theme_file(&mut self, path: &Path) {
-        let _t = tracing::trace_span!("CoreState::load_theme_file", categories = "core").entered();
-
-        let result = self.style_map.borrow_mut().load_theme_info_from_path(path);
-        match result {
-            Ok(theme_name) => {
-                if theme_name == self.style_map.borrow().get_theme_name() {
-                    if self.style_map.borrow_mut().set_theme(&theme_name).is_ok() {
-                        self.notify_client_and_update_views();
-                    }
-                }
-            }
-            Err(e) => error!("Error loading theme file: {:?}, {:?}", path, e),
-        }
-    }
-
-    fn remove_theme(&mut self, path: &Path) {
-        let result = self.style_map.borrow_mut().remove_theme(path);
-
-        // Set default theme if the removed theme was the
-        // current one.
-        if let Some(theme_name) = result {
-            if theme_name == self.style_map.borrow().get_theme_name() {
-                self.do_set_theme(DEFAULT_THEME);
-            }
-        }
     }
 }
 

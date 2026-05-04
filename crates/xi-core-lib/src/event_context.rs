@@ -44,7 +44,6 @@ use crate::lang_features;
 use crate::line_offset::LineOffset;
 use crate::plugins::{Plugin, PluginCapability};
 use crate::selection::{InsertDrift, SelRegion};
-use crate::styles::ThemeStyleMap;
 use crate::syntax::LanguageId;
 use crate::tabs::{
     BufferId, FIND_VIEW_IDLE_MASK, PluginId, RENDER_VIEW_IDLE_MASK, REWRAP_VIEW_IDLE_MASK, ViewId,
@@ -76,7 +75,6 @@ pub struct EventContext<'a> {
     pub(crate) siblings: Vec<&'a RefCell<View>>,
     pub(crate) plugins: Vec<&'a Plugin>,
     pub(crate) client: &'a Client,
-    pub(crate) style_map: &'a RefCell<ThemeStyleMap>,
     pub(crate) width_cache: &'a RefCell<WidthCache>,
     pub(crate) kill_ring: &'a RefCell<Rope>,
     pub(crate) weak_core: &'a WeakXiCore,
@@ -250,8 +248,7 @@ impl<'a> EventContext<'a> {
         match cmd {
             AddScopes { scopes } => {
                 let mut ed = self.editor.borrow_mut();
-                let style_map = self.style_map.borrow();
-                ed.get_layers_mut().add_scopes(plugin, scopes, &style_map);
+                ed.get_layers_mut().add_scopes(plugin, scopes);
             }
             UpdateSpans { start, len, spans, rev } => self.with_editor(|ed, view, _, _| {
                 ed.update_spans(view, plugin, start, len, spans, rev)
@@ -431,14 +428,7 @@ impl<'a> EventContext<'a> {
     fn render(&mut self) {
         let _t = tracing::trace_span!("EventContext::render", categories = "core").entered();
         let ed = self.editor.borrow();
-        //TODO: render other views
-        self.view.borrow_mut().render_if_dirty(
-            ed.get_buffer(),
-            self.client,
-            self.style_map,
-            ed.get_layers().get_merged(),
-            ed.is_pristine(),
-        )
+        self.view.borrow_mut().render_if_dirty(ed.get_buffer(), self.client, ed.is_pristine())
     }
 }
 
@@ -588,21 +578,13 @@ impl<'a> EventContext<'a> {
         self.client.plugin_started(self.view_id, &plugin.name)
     }
 
-    /// Notifies the client that `plugin` has stopped and removes its style
-    /// layer, scheduling a render if the display changed.
+    /// Notifies the client that `plugin` has stopped and removes its scope
+    /// layer bookkeeping.
     pub(crate) fn plugin_stopped(&mut self, plugin: &Plugin) {
         self.client.plugin_stopped(self.view_id, &plugin.name, 0);
-        let needs_render = self.with_editor(|ed, view, _, _| {
-            if ed.get_layers_mut().remove_layer(plugin.id).is_some() {
-                view.set_dirty(ed.get_buffer());
-                true
-            } else {
-                false
-            }
+        self.with_editor(|ed, _, _, _| {
+            ed.get_layers_mut().remove_layer(plugin.id);
         });
-        if needs_render {
-            self.render();
-        }
     }
 
     /// Handles the acknowledgement from a plugin after an update was delivered.
@@ -678,7 +660,7 @@ impl<'a> EventContext<'a> {
         let mut view = self.view.borrow_mut();
         let ed = self.editor.borrow();
         let mut width_cache = self.width_cache.borrow_mut();
-        view.rewrap(ed.get_buffer(), &mut width_cache, self.client, ed.get_layers().get_merged());
+        view.rewrap(ed.get_buffer(), &mut width_cache, self.client);
     }
 
     /// Does incremental find.
@@ -729,15 +711,7 @@ impl<'a> EventContext<'a> {
     fn do_request_lines(&mut self, first: usize, last: usize) {
         let mut view = self.view.borrow_mut();
         let ed = self.editor.borrow();
-        view.request_lines(
-            ed.get_buffer(),
-            self.client,
-            self.style_map,
-            ed.get_layers().get_merged(),
-            first,
-            last,
-            ed.is_pristine(),
-        )
+        view.request_lines(ed.get_buffer(), self.client, first, last, ed.is_pristine())
     }
 
     fn selected_line_ranges(&mut self) -> Vec<(usize, usize)> {
@@ -1038,7 +1012,6 @@ mod tests {
         client: Client,
         core_ref: WeakXiCore,
         kill_ring: RefCell<Rope>,
-        style_map: RefCell<ThemeStyleMap>,
         width_cache: RefCell<WidthCache>,
         config_manager: ConfigManager,
     }
@@ -1056,10 +1029,9 @@ mod tests {
             let client = Client::new(Box::new(DummyPeer));
             let core_ref = dummy_weak_core();
             let kill_ring = RefCell::new(Rope::from(""));
-            let style_map = RefCell::new(ThemeStyleMap::new(None));
             let width_cache = RefCell::new(WidthCache::new());
             let harness = ContextHarness { view, editor, client, core_ref, kill_ring,
-                             style_map, width_cache, config_manager };
+                             width_cache, config_manager };
             harness.make_context().view_init();
             harness.make_context().finish_init(&config);
             harness
@@ -1103,7 +1075,6 @@ mod tests {
                 plugins: Vec::new(),
                 client: &self.client,
                 kill_ring: &self.kill_ring,
-                style_map: &self.style_map,
                 width_cache: &self.width_cache,
                 weak_core: &self.core_ref,
             }
