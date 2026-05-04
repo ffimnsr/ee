@@ -39,7 +39,6 @@ use crate::plugins::rpc::{
 };
 use crate::rpc::SelectionModifier;
 use crate::selection::{InsertDrift, SelRegion, Selection};
-use crate::styles::ThemeStyleMap;
 use crate::view::{Replace, View};
 
 // TODO This could go much higher without issue but while developing it is
@@ -111,10 +110,6 @@ impl Editor {
 
     pub(crate) fn get_buffer(&self) -> &Rope {
         &self.text
-    }
-
-    pub(crate) fn get_layers(&self) -> &Layers {
-        &self.layers
     }
 
     pub(crate) fn get_layers_mut(&mut self) -> &mut Layers {
@@ -214,7 +209,7 @@ impl Editor {
             *self.live_undos.last().unwrap()
         } else {
             let undo_group = self.undo_group_id;
-            self.gc_undos.extend(&self.live_undos[self.cur_undo..]);
+            self.gc_undos.extend(self.live_undos[self.cur_undo..].iter().copied());
             self.live_undos.truncate(self.cur_undo);
             self.live_undos.push(undo_group);
             if self.live_undos.len() <= MAX_UNDOS {
@@ -278,7 +273,7 @@ impl Editor {
 
     fn gc_undos(&mut self) {
         if self.revs_in_flight == 0 && !self.gc_undos.is_empty() {
-            self.engine.gc(&self.gc_undos);
+            self.engine.gc(self.gc_undos.iter());
             self.undos = &self.undos - &self.gc_undos;
             self.gc_undos.clear();
         }
@@ -333,7 +328,7 @@ impl Editor {
     }
 
     fn update_undos(&mut self) {
-        self.engine.undo(self.undos.clone());
+        self.engine.undo(self.undos.iter());
         self.text = self.engine.get_head().clone();
     }
 
@@ -524,19 +519,14 @@ impl Editor {
         }
     }
 
-    /// Propagates a theme change to all style layers, recomputing cached styles.
-    pub fn theme_changed(&mut self, style_map: &ThemeStyleMap) {
-        self.layers.theme_changed(style_map);
-    }
-
     /// Returns the number of lines in the buffer as seen by plugins
     /// (always at least 1, even for an empty buffer).
     pub fn plugin_n_lines(&self) -> usize {
         self.text.measure::<LinesMetric>() + 1
     }
 
-    /// Applies scope span updates from a plugin to the style layer identified
-    /// by `plugin`, transforming spans if `rev` is stale.
+    /// Applies scope span updates from a plugin layer, transforming spans if
+    /// `rev` is stale.
     ///
     /// # Preconditions
     ///
@@ -544,7 +534,7 @@ impl Editor {
     /// the revision identified by `rev`.
     pub fn update_spans(
         &mut self,
-        view: &mut View,
+        _view: &mut View,
         plugin: PluginId,
         start: usize,
         len: usize,
@@ -575,7 +565,6 @@ impl Editor {
         }
         let iv = Interval::new(start, end_offset);
         self.layers.update_layer(plugin, iv, spans);
-        view.invalidate_styles(&self.text, start, end_offset);
     }
 
     /// Applies annotation span updates from a plugin, transforming spans if

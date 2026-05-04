@@ -14,6 +14,7 @@ memchr.workspace = true
 serde = { workspace = true, optional = true, features = ["derive"] }
 unicode-segmentation.workspace = true
 regex.workspace = true
+im = "15.1.0"
 
 [dev-dependencies]
 serde_test = "^1.0"
@@ -21,3 +22,4 @@ serde_json.workspace = true
 
 [features]
 default = []
+serde = ["dep:serde", "im/serde"]

@@ -28,10 +28,13 @@
 //! `Engine::merge`, which is more powerful but considerably more complex.
 //! It enables support for full asynchronous and even peer-to-peer editing.
 
+use im::OrdSet;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
+use std::borrow::Borrow;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 
 use crate::delta::{Delta, InsertDelta};
@@ -69,8 +72,8 @@ pub struct Engine {
     /// `deletes_from_union` by splicing a segment of `tombstones` into `text`
     /// wherever there's a non-zero-count segment in `deletes_from_union`.
     deletes_from_union: Subset,
-    // TODO: switch to a persistent Set representation to avoid O(n) copying
-    undone_groups: BTreeSet<usize>, // set of undo_group id's
+    /// Persistent set of undo-group ids currently toggled off.
+    undone_groups: OrdSet<usize>,
     /// The revision history of the document
     revs: Vec<Revision>,
 }
@@ -151,7 +154,7 @@ enum Contents {
     Undo {
         /// The set of groups toggled between undone and done.
         /// Just the `symmetric_difference` (XOR) of the two sets.
-        toggled_groups: BTreeSet<usize>, // set of undo_group id's
+        toggled_groups: OrdSet<usize>, // set of undo_group id's
         /// Used to store a reversible difference between the old
         /// and new deletes_from_union
         deletes_bitxor: Subset,
@@ -206,7 +209,7 @@ impl Engine {
         let rev = Revision {
             rev_id: RevId { session1: 0, session2: 0, num: 0 },
             edit: Undo {
-                toggled_groups: BTreeSet::new(),
+                toggled_groups: OrdSet::new(),
                 deletes_bitxor: deletes_from_union.clone(),
             },
             max_undo_so_far: 0,
@@ -217,7 +220,7 @@ impl Engine {
             text: Rope::default(),
             tombstones: Rope::default(),
             deletes_from_union,
-            undone_groups: BTreeSet::new(),
+            undone_groups: OrdSet::new(),
             revs: vec![rev],
         }
     }
@@ -239,7 +242,6 @@ impl Engine {
             .map(|(i, _)| i)
     }
 
-    // TODO: does Cow really help much here? It certainly won't after making Subsets a rope.
     /// Find what the `deletes_from_union` field in Engine would have been at the time
     /// of a certain `rev_index`. In other words, the deletes from the union string at that time.
     fn deletes_from_union_for_index(&self, rev_index: usize) -> Cow<'_, Subset> {
@@ -270,8 +272,10 @@ impl Engine {
                 }
                 Undo { ref toggled_groups, ref deletes_bitxor } => {
                     if invert_undos {
-                        let new_undone =
-                            undone_groups.symmetric_difference(toggled_groups).cloned().collect();
+                        let new_undone = undone_groups
+                            .clone()
+                            .into_owned()
+                            .symmetric_difference(toggled_groups.clone());
                         undone_groups = Cow::Owned(new_undone);
                         Cow::Owned(deletes_from_union.bitxor(deletes_bitxor))
                     } else {
@@ -329,7 +333,6 @@ impl Engine {
     pub fn try_delta_rev_head(&self, base_rev: RevToken) -> Result<Delta<RopeInfo>, Error> {
         let ix = self.find_rev_token(base_rev).ok_or(Error::MissingRevision(base_rev))?;
         let prev_from_union = self.deletes_from_cur_union_for_index(ix);
-        // TODO: this does 2 calls to Delta::synthesize and 1 to apply, this probably could be better.
         let old_tombstones = shuffle_tombstones(
             &self.text,
             &self.tombstones,
@@ -339,8 +342,6 @@ impl Engine {
         Ok(Delta::synthesize(&old_tombstones, &prev_from_union, &self.deletes_from_union))
     }
 
-    // TODO: don't construct transform if subsets are empty
-    // TODO: maybe switch to using a revision index for `base_rev` once we disable GC
     /// Returns a tuple of a new `Revision` representing the edit based on the
     /// current head, a new text `Rope`, a new tombstones `Rope` and a new `deletes_from_union`.
     /// Returns an [`Error`] if `base_rev` cannot be found, or `delta.base_len`
@@ -445,9 +446,6 @@ impl Engine {
         self.try_edit_rev(priority, undo_group, base_rev, delta).unwrap();
     }
 
-    // TODO: have `base_rev` be an index so that it can be used maximally
-    // efficiently with the head revision, a token or a revision ID.
-    // Efficiency loss of token is negligible but unfortunate.
     /// Attempts to apply a new edit based on the [`Revision`] specified by `base_rev`,
     /// Returning an [`Error`] if the `Revision` cannot be found.
     pub fn try_edit_rev(
@@ -480,7 +478,7 @@ impl Engine {
     }
 
     /// Find the first revision that could be affected by toggling a set of undo groups
-    fn find_first_undo_candidate_index(&self, toggled_groups: &BTreeSet<usize>) -> usize {
+    fn find_first_undo_candidate_index(&self, toggled_groups: &OrdSet<usize>) -> usize {
         // find the lowest toggled undo group number
         if let Some(lowest_group) = toggled_groups.iter().next().copied() {
             for (i, rev) in self.revs.iter().enumerate().rev() {
@@ -498,8 +496,8 @@ impl Engine {
     // This computes undo all the way from the beginning. An optimization would be to not
     // recompute the prefix up to where the history diverges, but it's not clear that's
     // even worth the code complexity.
-    fn compute_undo(&self, groups: &BTreeSet<usize>) -> (Revision, Subset) {
-        let toggled_groups = self.undone_groups.symmetric_difference(groups).cloned().collect();
+    fn compute_undo(&self, groups: &OrdSet<usize>) -> (Revision, Subset) {
+        let toggled_groups = self.undone_groups.clone().symmetric_difference(groups.clone());
         let first_candidate = self.find_first_undo_candidate_index(&toggled_groups);
         // the `false` below: don't invert undos since our first_candidate is based on the current undo set, not past
         let mut deletes_from_union =
@@ -534,8 +532,12 @@ impl Engine {
         )
     }
 
-    // TODO: maybe refactor this API to take a toggle set
-    pub fn undo(&mut self, groups: BTreeSet<usize>) {
+    pub fn undo<I, T>(&mut self, groups: I)
+    where
+        I: IntoIterator<Item = T>,
+        T: Borrow<usize>,
+    {
+        let groups: OrdSet<usize> = groups.into_iter().map(|group| *group.borrow()).collect();
         let (new_rev, new_deletes_from_union) = self.compute_undo(&groups);
 
         let (new_text, new_tombstones) = shuffle(
@@ -572,9 +574,13 @@ impl Engine {
     //
     // Thus, it's easiest to defer gc to when all plugins quiesce, but it's certainly
     // possible to fix it so that's not necessary.
-    pub fn gc(&mut self, gc_groups: &BTreeSet<usize>) {
+    pub fn gc<I, T>(&mut self, gc_groups: I)
+    where
+        I: IntoIterator<Item = T>,
+        T: Borrow<usize>,
+    {
+        let gc_groups: OrdSet<usize> = gc_groups.into_iter().map(|group| *group.borrow()).collect();
         let mut gc_dels = self.empty_subset_before_first_rev();
-        // TODO: want to let caller retain more rev_id's.
         let mut retain_revs = BTreeSet::new();
         if let Some(last) = self.revs.last() {
             retain_revs.insert(last.rev_id);
@@ -645,7 +651,9 @@ impl Engine {
                             rev_id: rev.rev_id,
                             max_undo_so_far: rev.max_undo_so_far,
                             edit: Undo {
-                                toggled_groups: &toggled_groups - gc_groups,
+                                toggled_groups: toggled_groups
+                                    .clone()
+                                    .relative_complement(gc_groups.clone()),
                                 deletes_bitxor: new_deletes_bitxor,
                             },
                         })
@@ -744,17 +752,18 @@ fn shuffle(
 fn find_base_index(a: &[Revision], b: &[Revision]) -> usize {
     assert!(!a.is_empty() && !b.is_empty());
     assert!(a[0].rev_id == b[0].rev_id);
-    // TODO find the maximum base revision.
-    // this should have the same behavior, but worse performance
-    1
+
+    a.iter().zip(b.iter()).take_while(|(left, right)| left.rev_id == right.rev_id).count()
 }
 
 /// Find a set of revisions common to both lists
 fn find_common(a: &[Revision], b: &[Revision]) -> BTreeSet<RevId> {
-    // TODO make this faster somehow?
-    let a_ids: BTreeSet<RevId> = a.iter().map(|r| r.rev_id).collect();
-    let b_ids: BTreeSet<RevId> = b.iter().map(|r| r.rev_id).collect();
-    a_ids.intersection(&b_ids).cloned().collect()
+    let (smaller, larger) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    let smaller_ids: HashSet<RevId> = smaller.iter().map(|rev| rev.rev_id).collect();
+    larger
+        .iter()
+        .filter_map(|rev| smaller_ids.contains(&rev.rev_id).then_some(rev.rev_id))
+        .collect()
 }
 
 /// Returns the operations in `revs` that don't have their `rev_id` in
@@ -827,12 +836,10 @@ fn compute_deltas(
             Contents::Edit { priority, undo_group, ref inserts, ref deletes } => {
                 let older_all_inserts = inserts.transform_union(&cur_all_inserts);
 
-                // TODO could probably be more efficient by avoiding shuffling from head every time
                 let tombstones_here =
                     shuffle_tombstones(text, tombstones, deletes_from_union, &older_all_inserts);
                 let delta =
                     Delta::synthesize(&tombstones_here, &older_all_inserts, &cur_all_inserts);
-                // TODO create InsertDelta directly and more efficiently instead of factoring
                 let (ins, _) = delta.factor();
                 out.push(DeltaOp {
                     rev_id: rev.rev_id,
@@ -1048,7 +1055,7 @@ mod tests {
         engine.edit_rev(1, 2, rev, delta2);
     }
 
-    fn undo_test(before: bool, undos : BTreeSet<usize>, output: &str) {
+    fn undo_test(before: bool, undos : OrdSet<usize>, output: &str) {
         let mut engine = Engine::new(Rope::from(TEST_STR));
         let first_rev = engine.get_head_rev_id().token();
         if before {
@@ -1064,17 +1071,17 @@ mod tests {
 
     #[test]
     fn edit_rev_undo() {
-        undo_test(true, [1,2].iter().cloned().collect(), TEST_STR);
+        undo_test(true, [1usize,2].iter().copied().collect(), TEST_STR);
     }
 
     #[test]
     fn edit_rev_undo_2() {
-        undo_test(true, [2].iter().cloned().collect(), "0123456789abcDEEFghijklmnopqr999stuvz");
+        undo_test(true, [2usize].iter().copied().collect(), "0123456789abcDEEFghijklmnopqr999stuvz");
     }
 
     #[test]
     fn edit_rev_undo_3() {
-        undo_test(true, [1].iter().cloned().collect(), "0!3456789abcdefGIjklmnopqr888stuvwHIyz");
+        undo_test(true, [1usize].iter().copied().collect(), "0!3456789abcdefGIjklmnopqr888stuvwHIyz");
     }
 
     #[test]
@@ -1119,17 +1126,17 @@ mod tests {
 
     #[test]
     fn undo() {
-        undo_test(false, [1,2].iter().cloned().collect(), TEST_STR);
+        undo_test(false, [1usize,2].iter().copied().collect(), TEST_STR);
     }
 
     #[test]
     fn undo_2() {
-        undo_test(false, [2].iter().cloned().collect(), "0123456789abcDEEFghijklmnopqr999stuvz");
+        undo_test(false, [2usize].iter().copied().collect(), "0123456789abcDEEFghijklmnopqr999stuvz");
     }
 
     #[test]
     fn undo_3() {
-        undo_test(false, [1].iter().cloned().collect(), "0!3456789abcdefGIjklmnopqr888stuvwHIyz");
+        undo_test(false, [1usize].iter().copied().collect(), "0!3456789abcdefGIjklmnopqr888stuvwHIyz");
     }
 
     #[test]
@@ -1139,13 +1146,13 @@ mod tests {
         let first_rev = engine.get_head_rev_id().token();
         engine.edit_rev(1, 1, first_rev, d1);
         let new_head = engine.get_head_rev_id().token();
-        engine.undo([1].iter().cloned().collect());
+        engine.undo([1usize]);
         let d2 = Delta::simple_edit(Interval::new(0,0), Rope::from("a"), TEST_STR.len()+1);
         engine.edit_rev(1, 2, new_head, d2); // note this is based on d1 before, not the undo
         let new_head_2 = engine.get_head_rev_id().token();
         let d3 = Delta::simple_edit(Interval::new(0,0), Rope::from("b"), TEST_STR.len()+1);
         engine.edit_rev(1, 3, new_head_2, d3);
-        engine.undo([1,3].iter().cloned().collect());
+        engine.undo([1usize, 3]);
         assert_eq!("a0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", String::from(engine.get_head()));
     }
 
@@ -1156,11 +1163,11 @@ mod tests {
         let first_rev = engine.get_head_rev_id().token();
         engine.edit_rev(1, 1, first_rev, d1.clone());
         engine.edit_rev(1, 2, first_rev, d1);
-        engine.undo([1].iter().cloned().collect());
+        engine.undo([1usize]);
         assert_eq!("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", String::from(engine.get_head()));
-        engine.undo([1,2].iter().cloned().collect());
+        engine.undo([1usize, 2]);
         assert_eq!(TEST_STR, String::from(engine.get_head()));
-        engine.undo([].iter().cloned().collect());
+        engine.undo(std::iter::empty::<usize>());
         assert_eq!("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", String::from(engine.get_head()));
     }
 
@@ -1171,15 +1178,15 @@ mod tests {
         let first_rev = engine.get_head_rev_id().token();
         engine.edit_rev(1, 1, first_rev, d1);
         let new_head = engine.get_head_rev_id().token();
-        engine.undo([1].iter().cloned().collect());
+        engine.undo([1usize]);
         let d2 = Delta::simple_edit(Interval::new(0,0), Rope::from("a"), TEST_STR.len()+1);
         engine.edit_rev(1, 2, new_head, d2);
-        let gc : BTreeSet<usize> = [1].iter().cloned().collect();
+        let gc : OrdSet<usize> = [1usize].iter().copied().collect();
         engine.gc(&gc);
         let d3 = Delta::simple_edit(Interval::new(0,0), Rope::from("b"), TEST_STR.len()+1);
         let new_head_2 = engine.get_head_rev_id().token();
         engine.edit_rev(1, 3, new_head_2, d3);
-        engine.undo([3].iter().cloned().collect());
+        engine.undo([3usize]);
         assert_eq!("a0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", String::from(engine.get_head()));
     }
 
@@ -1194,13 +1201,13 @@ mod tests {
             let head = engine.get_head_rev_id().token();
             engine.edit_rev(1, i+1, head, d);
             if i >= max_undos {
-                let to_gc : BTreeSet<usize> = [i-max_undos].iter().cloned().collect();
+                let to_gc : OrdSet<usize> = [i-max_undos].iter().copied().collect();
                 engine.gc(&to_gc)
             }
         }
 
         // spam cmd+z until the available undo history is exhausted
-        let mut to_undo = BTreeSet::new();
+        let mut to_undo = OrdSet::new();
         for i in ((edits-max_undos)..edits).rev() {
             to_undo.insert(i+1);
             engine.undo(to_undo.clone());
@@ -1247,10 +1254,10 @@ mod tests {
         let first_rev = engine.get_head_rev_id().token();
         engine.edit_rev(1, 1, first_rev, d1.clone());
         engine.edit_rev(1, 2, first_rev, d1);
-        let gc : BTreeSet<usize> = [1].iter().cloned().collect();
+        let gc : OrdSet<usize> = [1usize].iter().copied().collect();
         engine.gc(&gc);
         // shouldn't do anything since it was double-deleted and one was GC'd
-        engine.undo([1,2].iter().cloned().collect());
+        engine.undo([1usize, 2]);
         assert_eq!("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", String::from(engine.get_head()));
     }
 
@@ -1259,15 +1266,15 @@ mod tests {
         let mut engine = Engine::new(Rope::from(TEST_STR));
         let d1 = Delta::simple_edit(Interval::new(0,10), Rope::from(""), TEST_STR.len());
         let initial_rev = engine.get_head_rev_id().token();
-        engine.undo([1].iter().cloned().collect());
+        engine.undo([1usize]);
         engine.edit_rev(1, 1, initial_rev, d1.clone());
         engine.edit_rev(1, 2, initial_rev, d1);
-        let gc : BTreeSet<usize> = [1].iter().cloned().collect();
+        let gc : OrdSet<usize> = [1usize].iter().copied().collect();
         engine.gc(&gc);
         // only one of the deletes was gc'd, the other should still be in effect
         assert_eq!("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", String::from(engine.get_head()));
         // since one of the two deletes was gc'd this should undo the one that wasn't
-        engine.undo([2].iter().cloned().collect());
+        engine.undo([2usize]);
         assert_eq!(TEST_STR, String::from(engine.get_head()));
     }
 
@@ -1277,13 +1284,13 @@ mod tests {
         let d1 = Delta::simple_edit(Interval::new(0,10), Rope::from(""), TEST_STR.len());
         let initial_rev = engine.get_head_rev_id().token();
         engine.edit_rev(1, 1, initial_rev, d1.clone());
-        engine.undo([1,2].iter().cloned().collect());
+        engine.undo([1usize, 2]);
         engine.edit_rev(1, 2, initial_rev, d1);
-        let gc : BTreeSet<usize> = [1].iter().cloned().collect();
+        let gc : OrdSet<usize> = [1usize].iter().copied().collect();
         engine.gc(&gc);
         assert_eq!(TEST_STR, String::from(engine.get_head()));
         // since one of the two deletes was gc'd this should re-do the one that wasn't
-        engine.undo([].iter().cloned().collect());
+        engine.undo(std::iter::empty::<usize>());
         assert_eq!("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", String::from(engine.get_head()));
     }
 
@@ -1371,6 +1378,15 @@ mod tests {
         let res = find_base_index(&a, &b);
 
         assert_eq!(1, res);
+    }
+
+    #[test]
+    fn find_base_2() {
+        let a: Vec<Revision> = ids_to_fake_revs(&[0,1,2,6,8]);
+        let b: Vec<Revision> = ids_to_fake_revs(&[0,1,2,7,9]);
+        let res = find_base_index(&a, &b);
+
+        assert_eq!(3, res);
     }
 
     #[test]

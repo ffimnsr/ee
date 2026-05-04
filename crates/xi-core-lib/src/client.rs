@@ -26,7 +26,6 @@ use crate::plugins::rpc::{
     ClientPluginInfo, CodeActionDescriptor, CompletionSuggestion, Diagnostic, NavigationTarget,
     SymbolItem,
 };
-use crate::styles::ThemeSettings;
 use crate::syntax::LanguageId;
 use crate::tabs::ViewId;
 use crate::width_cache::{WidthReq, WidthResponse};
@@ -70,22 +69,8 @@ impl Client {
         );
     }
 
-    pub fn available_themes(&self, theme_names: Vec<String>) {
-        self.0.send_rpc_notification("available_themes", &json!({ "themes": theme_names }))
-    }
-
     pub fn available_languages(&self, languages: Vec<LanguageId>) {
         self.0.send_rpc_notification("available_languages", &json!({ "languages": languages }))
-    }
-
-    pub fn theme_changed(&self, name: &str, theme: &ThemeSettings) {
-        self.0.send_rpc_notification(
-            "theme_changed",
-            &json!({
-                "name": name,
-                "theme": theme,
-            }),
-        );
     }
 
     pub fn language_changed(&self, view_id: ViewId, new_lang: &LanguageId) {
@@ -143,10 +128,6 @@ impl Client {
                 "cmds": cmds,
             }),
         );
-    }
-
-    pub fn def_style(&self, style: &Value) {
-        self.0.send_rpc_notification("def_style", style)
     }
 
     pub fn find_status(&self, view_id: ViewId, queries: &Value) {
