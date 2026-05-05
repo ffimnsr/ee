@@ -769,6 +769,31 @@ fn pending_hover_notification_opens_popup() {
 }
 
 #[test]
+fn plugin_terminated_notification_updates_status_message() {
+    let params = json!({
+        "view_id": "view-id-1",
+        "plugin": "rust-analyzer",
+        "reason": {
+            "kind": "rpc_timed_out",
+            "limit_ms": 250,
+            "method": "update"
+        }
+    });
+
+    let event =
+        parse_notification("plugin_terminated", params).expect("plugin_terminated should parse");
+    match event {
+        BackendEvent::Alert(message) => {
+            assert_eq!(
+                message,
+                "plugin rust-analyzer terminated: rpc update timed out after 250 ms"
+            );
+        }
+        other => panic!("unexpected backend event: {other:?}"),
+    }
+}
+
+#[test]
 fn ee_tui_sources_do_not_use_raw_lsp_or_plugin_routes() {
     let app_src = include_str!("app/mod.rs");
     let buffer_src = include_str!("buffer.rs");

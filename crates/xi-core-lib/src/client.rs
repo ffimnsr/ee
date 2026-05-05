@@ -22,6 +22,7 @@ use xi_rpc::{self, RpcPeer};
 
 use crate::config::Table;
 use crate::plugins::Command;
+use crate::plugins::PluginTerminationReason;
 use crate::plugins::rpc::{
     ClientPluginInfo, CodeActionDescriptor, CompletionSuggestion, Diagnostic, NavigationTarget,
     SymbolItem,
@@ -105,6 +106,22 @@ impl Client {
                 "view_id": view_id,
                 "plugin": plugin,
                 "code": code,
+            }),
+        );
+    }
+
+    pub fn plugin_terminated(
+        &self,
+        view_id: ViewId,
+        plugin: &str,
+        reason: &PluginTerminationReason,
+    ) {
+        self.0.send_rpc_notification(
+            "plugin_terminated",
+            &json!({
+                "view_id": view_id,
+                "plugin": plugin,
+                "reason": reason,
             }),
         );
     }

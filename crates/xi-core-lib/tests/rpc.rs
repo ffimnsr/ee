@@ -131,18 +131,17 @@ fn test_invalidate() {
             // Verify that the "invalidate" ops can only go first or last.
             if ops.len() > 2 {
                 debug_assert!(
-                    ops.iter()
+                    !ops.iter()
                         // step over leading "invalidate" and "skip"
                         .skip_while(|op| op["op"].as_str().unwrap() == "invalidate"
                             || op["op"].as_str().unwrap() == "skip")
                         // current op (ins/copy/update) adds lines;
                         // wait for another invalidate/skip
                         .skip_while(|op| op["op"].as_str().unwrap() != "invalidate")
-                        .find(|op| {
+                        .any(|op| {
                             op["op"].as_str().unwrap() != "invalidate"
                                 && op["op"].as_str().unwrap() != "skip"
-                        })
-                        .is_none(),
+                        }),
                     "bad update: {}",
                     &ops.iter()
                         .map(|op| format!(

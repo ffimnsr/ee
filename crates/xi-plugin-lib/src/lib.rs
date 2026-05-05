@@ -18,9 +18,14 @@ mod core_proxy;
 mod dispatch;
 mod state_cache;
 mod view;
+pub mod wasm;
 
+use std::backtrace::Backtrace;
 use std::io;
+use std::io::Write;
 use std::path::Path;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::{any::Any, panic};
 
 use serde_json::Value;
 use xi_core_lib::plugin_rpc::{GetDataResponse, TextUnit};
@@ -37,8 +42,13 @@ pub use crate::state_cache::StateCache;
 pub use crate::view::View;
 pub use xi_core_lib::plugin_rpc::{
     CodeAction, CodeActionRequest, Diagnostic, DiagnosticSeverity, FormatDocumentRequest,
-    FormattingOptions, Hover, PluginEdit, PluginEditAck, Range, SelectionRange, TextEdit,
+    FormattingOptions, Hover, PluginEdit, PluginEditAck, Range, ScopeSpan, SelectionRange,
+    TextEdit,
 };
+pub use xi_plugin_derive::{SpanType, xi_plugin};
+
+pub extern crate self as xi_plugin;
+pub extern crate self as xi_plugin_lib;
 
 /// Abstracts getting data from the peer. Mainly exists for mocking in tests.
 pub trait DataSource {
@@ -191,33 +201,420 @@ pub trait Plugin {
     }
 }
 
+pub trait SimplePlugin {
+    fn initialize(&mut self, _core: CoreProxy) {}
+
+    fn update(
+        &mut self,
+        _view: &mut View<ChunkCache>,
+        _delta: Option<&RopeDelta>,
+        _edit_type: String,
+        _author: String,
+    ) {
+    }
+
+    fn did_save(&mut self, _view: &mut View<ChunkCache>, _old_path: Option<&Path>) {}
+
+    fn did_close(&mut self, _view: &View<ChunkCache>) {}
+
+    fn new_view(&mut self, _view: &mut View<ChunkCache>) {}
+
+    fn config_changed(&mut self, _view: &mut View<ChunkCache>, _changes: &ConfigTable) {}
+
+    fn language_changed(&mut self, _view: &mut View<ChunkCache>, _old_lang: LanguageId) {}
+
+    fn custom_command(&mut self, _view: &mut View<ChunkCache>, _method: &str, _params: Value) {}
+
+    fn idle(&mut self, _view: &mut View<ChunkCache>) {}
+
+    fn shutdown(&mut self) {}
+
+    fn get_hover(
+        &mut self,
+        _view: &mut View<ChunkCache>,
+        _position: usize,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Hover, RemoteError> {
+        Err(RemoteError::custom(404, "hover not supported", None))
+    }
+}
+
+pub trait SyntaxDescriptor {
+    const LANGUAGE: &'static str;
+}
+
+pub trait SyntaxPlugin {
+    type State: Clone + Default;
+
+    fn initialize(&mut self, _core: CoreProxy) {}
+
+    fn update(
+        &mut self,
+        _view: &mut View<StateCache<Self::State>>,
+        _delta: Option<&RopeDelta>,
+        _edit_type: String,
+        _author: String,
+    ) {
+    }
+
+    fn did_save(&mut self, _view: &mut View<StateCache<Self::State>>, _old_path: Option<&Path>) {}
+
+    fn did_close(&mut self, _view: &View<StateCache<Self::State>>) {}
+
+    fn new_view(&mut self, _view: &mut View<StateCache<Self::State>>) {}
+
+    fn config_changed(
+        &mut self,
+        _view: &mut View<StateCache<Self::State>>,
+        _changes: &ConfigTable,
+    ) {
+    }
+
+    fn language_changed(
+        &mut self,
+        _view: &mut View<StateCache<Self::State>>,
+        _old_lang: LanguageId,
+    ) {
+    }
+
+    fn custom_command(
+        &mut self,
+        _view: &mut View<StateCache<Self::State>>,
+        _method: &str,
+        _params: Value,
+    ) {
+    }
+
+    fn idle(&mut self, _view: &mut View<StateCache<Self::State>>) {}
+
+    fn shutdown(&mut self) {}
+
+    fn get_hover(
+        &mut self,
+        _view: &mut View<StateCache<Self::State>>,
+        _position: usize,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Hover, RemoteError> {
+        Err(RemoteError::custom(404, "hover not supported", None))
+    }
+}
+
+pub trait SpanType {
+    fn scope_name(&self) -> &'static str;
+
+    fn scope_stack(&self) -> Vec<String> {
+        self.scope_name().split_whitespace().map(str::to_owned).collect()
+    }
+
+    fn span(self, start: usize, end: usize) -> ScopeSpanBuilder<Self>
+    where
+        Self: Sized,
+    {
+        ScopeSpanBuilder::new(start, end, self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeSpanBuilder<T> {
+    pub start: usize,
+    pub end: usize,
+    pub scope: T,
+}
+
+impl<T> ScopeSpanBuilder<T> {
+    pub const fn new(start: usize, end: usize, scope: T) -> Self {
+        Self { start, end, scope }
+    }
+
+    pub fn map_scope<U>(self, f: impl FnOnce(T) -> U) -> ScopeSpanBuilder<U> {
+        ScopeSpanBuilder { start: self.start, end: self.end, scope: f(self.scope) }
+    }
+}
+
+impl<T: SpanType> ScopeSpanBuilder<T> {
+    pub fn scope_stack(&self) -> Vec<String> {
+        self.scope.scope_stack()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ScopeRegistry {
+    scopes: Vec<Vec<String>>,
+}
+
+impl ScopeRegistry {
+    pub fn is_empty(&self) -> bool {
+        self.scopes.is_empty()
+    }
+
+    pub fn scopes(&self) -> &[Vec<String>] {
+        &self.scopes
+    }
+
+    pub fn build<T: SpanType>(&mut self, spans: &[ScopeSpanBuilder<T>]) -> Vec<ScopeSpan> {
+        spans
+            .iter()
+            .map(|span| ScopeSpan {
+                start: span.start,
+                end: span.end,
+                scope_id: self.intern(span.scope_stack()),
+            })
+            .collect()
+    }
+
+    fn intern(&mut self, scope_stack: Vec<String>) -> u32 {
+        if let Some((index, _)) =
+            self.scopes.iter().enumerate().find(|(_, existing)| **existing == scope_stack)
+        {
+            index as u32
+        } else {
+            self.scopes.push(scope_stack);
+            (self.scopes.len() - 1) as u32
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! log {
+    ($plugin:expr, $level:expr, $message:expr $(,)?) => {
+        $crate::log!($plugin, $level, $message, serde_json::Value::Null)
+    };
+    ($plugin:expr, $level:expr, $message:expr, $fields:expr $(,)?) => {{
+        use std::io::Write as _;
+
+        let plugin_name = ::std::borrow::Cow::<str>::from($plugin);
+        let fields = ::serde_json::to_value($fields).unwrap_or_else(|err| {
+            ::serde_json::json!({
+                "serialization_error": err.to_string(),
+            })
+        });
+        let record = ::serde_json::json!({
+            "plugin": plugin_name,
+            "level": $level,
+            "message": $message,
+            "fields": fields,
+        });
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "[plugin:{}] {}", plugin_name, record);
+    }};
+}
+
 #[derive(Debug)]
 pub enum Error {
     RpcError(xi_rpc::Error),
     WrongReturnType,
     BadRequest,
-    PeerDisconnect,
+    PeerUnavailable,
     ConfigDeserialization { context: &'static str, source: serde_json::Error },
     // Just used in tests
     Other(String),
 }
 
-/// Run `plugin` until it exits, blocking the current thread.
-pub fn mainloop<P: Plugin>(plugin: &mut P) -> Result<(), ReadError> {
+trait PanicResponseSink: Send + Sync {
+    fn write_panic_response(&self, response: &Value);
+}
+
+thread_local! {
+    static PANIC_RESPONSE_SINK: std::cell::RefCell<Option<Arc<dyn PanicResponseSink>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+static PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
+
+struct SharedWriter<W> {
+    inner: Arc<Mutex<W>>,
+}
+
+impl<W> SharedWriter<W> {
+    fn new(inner: Arc<Mutex<W>>) -> Self {
+        Self { inner }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, W> {
+        self.inner.lock().unwrap_or_else(|err| err.into_inner())
+    }
+}
+
+impl<W> Clone for SharedWriter<W> {
+    fn clone(&self) -> Self {
+        Self { inner: Arc::clone(&self.inner) }
+    }
+}
+
+impl<W: Write + Send + 'static> Write for SharedWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.lock().write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.lock().flush()
+    }
+}
+
+impl<W: Write + Send + 'static> PanicResponseSink for SharedWriter<W> {
+    fn write_panic_response(&self, response: &Value) {
+        let mut writer = self.lock();
+        let _ = serde_json::to_writer(&mut *writer, response);
+        let _ = writer.write_all(b"\n");
+        let _ = writer.flush();
+    }
+}
+
+struct PanicHookGuard {
+    _lock: MutexGuard<'static, ()>,
+    previous: Box<dyn Fn(&panic::PanicHookInfo<'_>) + Sync + Send + 'static>,
+}
+
+impl PanicHookGuard {
+    fn install(sink: Arc<dyn PanicResponseSink>) -> Self {
+        let lock = PANIC_HOOK_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        PANIC_RESPONSE_SINK.with(|slot| {
+            *slot.borrow_mut() = Some(sink);
+        });
+        let previous = panic::take_hook();
+        panic::set_hook(Box::new(|info| {
+            emit_plugin_panicked_response(info);
+        }));
+        Self { _lock: lock, previous }
+    }
+}
+
+impl Drop for PanicHookGuard {
+    fn drop(&mut self) {
+        PANIC_RESPONSE_SINK.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+        let previous = std::mem::replace(&mut self.previous, Box::new(|_| {}));
+        panic::set_hook(previous);
+    }
+}
+
+fn emit_plugin_panicked_response(info: &panic::PanicHookInfo<'_>) {
+    let Some(request_id) = xi_rpc::current_request_id() else {
+        return;
+    };
+    let payload = panic_payload(info.payload());
+    let backtrace = Backtrace::force_capture().to_string();
+    let location = info
+        .location()
+        .map(|location| format!("{}:{}:{}", location.file(), location.line(), location.column()));
+    let error = RemoteError::custom(
+        -32099,
+        "PluginPanicked",
+        Some(serde_json::json!({
+            "payload": payload,
+            "backtrace": backtrace,
+            "location": location,
+        })),
+    );
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "error": error,
+    });
+    PANIC_RESPONSE_SINK.with(|slot| {
+        if let Some(sink) = slot.borrow().as_ref() {
+            sink.write_panic_response(&response);
+        }
+    });
+}
+
+fn panic_payload(payload: &(dyn Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        String::from("non-string panic payload")
+    }
+}
+
+fn mainloop_with_newline_io<P, W, R, RF>(
+    plugin: &mut P,
+    writer: Arc<Mutex<W>>,
+    reader_factory: RF,
+) -> Result<(), ReadError>
+where
+    P: Plugin,
+    W: Write + Send + 'static,
+    R: xi_rpc::ReadTransport + Send + 'static,
+    RF: FnOnce() -> R + Send + 'static,
+{
     xi_core_lib::tracing_support::install();
-    let stdout = io::stdout();
-    let mut rpc_looper = RpcLoop::new(NewlineWriter::new(stdout));
+    let shared_writer = SharedWriter::new(writer);
+    let panic_sink: Arc<dyn PanicResponseSink> =
+        Arc::new(SharedWriter::new(Arc::clone(&shared_writer.inner)));
+    let _panic_hook = PanicHookGuard::install(panic_sink);
+    let mut rpc_looper = RpcLoop::new(NewlineWriter::new(shared_writer));
     let mut dispatcher = Dispatcher::new(plugin);
 
-    rpc_looper
-        .mainloop(|| NewlineReader::new(std::io::BufReader::new(io::stdin())), &mut dispatcher)
+    rpc_looper.mainloop(reader_factory, &mut dispatcher)
+}
+
+/// Run `plugin` until it exits, blocking the current thread.
+pub fn mainloop<P: Plugin>(plugin: &mut P) -> Result<(), ReadError> {
+    mainloop_with_newline_io(plugin, Arc::new(Mutex::new(io::stdout())), || {
+        NewlineReader::new(std::io::BufReader::new(io::stdin()))
+    })
+}
+
+#[macro_export]
+macro_rules! xi_plugin_wasm {
+    ($plugin_ty:ty, $init:expr) => {
+        static XI_PLUGIN_RUNTIME: std::sync::OnceLock<$crate::wasm::WasmPluginRuntime<$plugin_ty>> =
+            std::sync::OnceLock::new();
+
+        fn xi_plugin_runtime() -> &'static $crate::wasm::WasmPluginRuntime<$plugin_ty> {
+            XI_PLUGIN_RUNTIME.get_or_init(|| $crate::wasm::WasmPluginRuntime::new($init))
+        }
+
+        #[unsafe(no_mangle)]
+        pub extern "C" fn alloc(len: usize) -> u32 {
+            $crate::wasm::alloc(len)
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn dealloc(ptr: u32, len: usize) {
+            unsafe { $crate::wasm::dealloc(ptr, len) }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn handle_host_notification(ptr: u32, len: u32) {
+            let runtime = xi_plugin_runtime();
+            let bytes = unsafe { $crate::wasm::read_input(ptr, len) };
+            if let Err(err) = runtime.handle_notification(bytes) {
+                panic!("wasm plugin notification bridge failed: {err}");
+            }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn handle_host_request(ptr: u32, len: u32) -> u64 {
+            let runtime = xi_plugin_runtime();
+            let bytes = unsafe { $crate::wasm::read_input(ptr, len) };
+            let response = runtime.handle_request(bytes).unwrap_or_else(|err| {
+                serde_json::to_vec(&serde_json::json!({
+                    "status": "err",
+                    "payload": {
+                        "code": 500,
+                        "message": err,
+                        "data": null,
+                    }
+                }))
+                .expect("wasm plugin error payload should serialize")
+            });
+            $crate::wasm::pack_output(response)
+        }
+    };
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io;
+    use std::io::Cursor;
 
+    use std::panic::AssertUnwindSafe;
+    use xi_rpc::RequestId;
     use xi_rpc::test_utils::make_reader;
 
     struct ShutdownPlugin {
@@ -260,5 +657,57 @@ mod tests {
 
         assert!(result.is_ok(), "shutdown should end plugin loop cleanly: {:?}", result);
         assert!(plugin.shutdown_called, "plugin shutdown hook should run before exit");
+    }
+
+    #[test]
+    fn panic_hook_replies_with_plugin_panicked_error() {
+        let writer = Arc::new(Mutex::new(Cursor::new(Vec::<u8>::new())));
+        let shared_writer = SharedWriter::new(Arc::clone(&writer));
+        let panic_sink: Arc<dyn PanicResponseSink> =
+            Arc::new(SharedWriter::new(Arc::clone(&shared_writer.inner)));
+        let _panic_hook = PanicHookGuard::install(panic_sink);
+        let _request_scope = xi_rpc::enter_request_scope(RequestId::Number(1));
+
+        let panic_result = panic::catch_unwind(AssertUnwindSafe(|| {
+            panic!("hover panic");
+        }));
+
+        assert!(panic_result.is_err(), "panic should still unwind after hook response");
+        let raw = {
+            let guard = writer.lock().unwrap();
+            String::from_utf8(guard.clone().into_inner()).unwrap()
+        };
+        let response: serde_json::Value =
+            serde_json::from_str(raw.lines().next().expect("panic response should be present"))
+                .unwrap();
+        assert_eq!(response["id"], 1);
+        assert_eq!(response["error"]["code"], -32099);
+        assert_eq!(response["error"]["message"], "PluginPanicked");
+        assert_eq!(response["error"]["data"]["payload"], "hover panic");
+        assert!(
+            response["error"]["data"]["backtrace"]
+                .as_str()
+                .is_some_and(|backtrace| !backtrace.is_empty())
+        );
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, SpanType)]
+    enum TestScope {
+        #[span_type(name = "keyword.control")]
+        Keyword,
+        StringLiteral,
+    }
+
+    #[test]
+    fn scope_registry_builds_scope_spans_from_derived_span_types() {
+        let mut registry = ScopeRegistry::default();
+        let spans = [TestScope::Keyword.span(1, 3), TestScope::StringLiteral.span(3, 7)];
+
+        let resolved = registry.build(&spans);
+
+        assert_eq!(registry.scopes()[0], vec![String::from("keyword.control")]);
+        assert_eq!(registry.scopes()[1], vec![String::from("string_literal")]);
+        assert_eq!(resolved[0].scope_id, 0);
+        assert_eq!(resolved[1].scope_id, 1);
     }
 }

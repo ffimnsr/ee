@@ -35,6 +35,7 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use tracing::{trace, trace_span};
 
+use std::cell::RefCell;
 use std::cmp;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::io;
@@ -52,7 +53,7 @@ use serde_json::Value;
 /// from many unique tokens sent by a runaway caller.
 const MAX_IDLE_QUEUE_SIZE: usize = 256;
 
-pub use crate::error::{Error, ReadError, RemoteError};
+pub use crate::error::{Error, OptionExt, ReadError, RemoteError, RemoteErrorDetails, ResultExt};
 pub use crate::parse::RequestId;
 use crate::parse::{Call, MessageReader, Response, RpcObject};
 pub use crate::transport::{
@@ -112,8 +113,39 @@ pub trait Peer: Send + 'static {
 /// The `Peer` trait object.
 pub type RpcPeer = Box<dyn Peer>;
 
+thread_local! {
+    static CURRENT_REQUEST_ID: RefCell<Option<RequestId>> = const { RefCell::new(None) };
+}
+
 pub struct RpcCtx {
     peer: RpcPeer,
+}
+
+pub struct RequestScopeGuard;
+
+impl RequestScopeGuard {
+    fn enter(id: RequestId) -> Self {
+        CURRENT_REQUEST_ID.with(|slot| {
+            *slot.borrow_mut() = Some(id);
+        });
+        Self
+    }
+}
+
+impl Drop for RequestScopeGuard {
+    fn drop(&mut self) {
+        CURRENT_REQUEST_ID.with(|slot| {
+            *slot.borrow_mut() = None;
+        });
+    }
+}
+
+pub fn current_request_id() -> Option<RequestId> {
+    CURRENT_REQUEST_ID.with(|slot| slot.borrow().clone())
+}
+
+pub fn enter_request_scope(id: RequestId) -> RequestScopeGuard {
+    RequestScopeGuard::enter(id)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,7 +295,7 @@ impl<W: WriteTransport> RpcLoop<W> {
 
             rt.block_on(async {
                 peer.reset_needs_exit();
-                let ctx = RpcCtx { peer: Box::new(peer.clone()) };
+                let ctx = RpcCtx::new(Box::new(peer.clone()));
                 let (msg_tx, mut msg_rx) =
                     tokio::sync::mpsc::unbounded_channel::<Result<RpcObject, ReadError>>();
 
@@ -280,6 +312,7 @@ impl<W: WriteTransport> RpcLoop<W> {
                             Ok(json) => {
                                 if json.is_response() {
                                     let id = json.get_id().unwrap();
+                                    let response_id = id.clone();
                                     let span = trace_span!(
                                         target: "xi_rpc",
                                         "read_loop_response",
@@ -293,8 +326,15 @@ impl<W: WriteTransport> RpcLoop<W> {
                                         }
                                         Err(msg) => {
                                             error!("failed to parse response: {}", msg);
-                                            peer_reader
-                                                .handle_response(id, Err(Error::InvalidResponse));
+                                            peer_reader.handle_response(
+                                                id,
+                                                Err(Error::PeerProtocolError {
+                                                    reason: format!(
+                                                        "invalid response payload for id {:?}: {}",
+                                                        response_id, msg
+                                                    ),
+                                                }),
+                                            );
                                         }
                                     }
                                 } else {
@@ -303,6 +343,9 @@ impl<W: WriteTransport> RpcLoop<W> {
                                 }
                             }
                             Err(ReadError::BatchNotSupported) => {
+                                peer_reader.disconnect_with_error(Error::PeerProtocolError {
+                                    reason: "JSON-RPC batch requests are not supported".into(),
+                                });
                                 peer_reader.0.rx_pending.fetch_add(1, Ordering::Release);
                                 let _ = msg_tx.send(Err(ReadError::BatchNotSupported));
                                 break;
@@ -314,7 +357,12 @@ impl<W: WriteTransport> RpcLoop<W> {
                                     < peer_reader.0.max_in_flight
                                 {
                                     error!("read error with in-flight request: {}", err);
-                                    peer_reader.disconnect();
+                                    peer_reader.disconnect_with_error(match &err {
+                                        ReadError::Disconnect => {
+                                            Error::PeerExited { exit_status: None }
+                                        }
+                                        _ => Error::PeerProtocolError { reason: err.to_string() },
+                                    });
                                 }
                                 peer_reader.0.rx_pending.fetch_add(1, Ordering::Release);
                                 let _ = msg_tx.send(Err(err));
@@ -374,10 +422,14 @@ impl<W: WriteTransport> RpcLoop<W> {
                                 }
                             });
                             if let Err(e) = peer.send_raw(&batch_err) {
-                                peer.disconnect();
+                                peer.disconnect_with_error(Error::PeerProtocolError {
+                                    reason: e.to_string(),
+                                });
                                 break ReadError::Io(e);
                             }
-                            peer.disconnect();
+                            peer.disconnect_with_error(Error::PeerProtocolError {
+                                reason: "JSON-RPC batch requests are not supported".into(),
+                            });
                             break ReadError::BatchNotSupported;
                         }
                         Err(err) => {
@@ -385,7 +437,10 @@ impl<W: WriteTransport> RpcLoop<W> {
                             if let Some(idle_token) = peer.try_get_idle() {
                                 handler.idle(&ctx, idle_token);
                             }
-                            peer.disconnect();
+                            peer.disconnect_with_error(match &err {
+                                ReadError::Disconnect => Error::PeerExited { exit_status: None },
+                                _ => Error::PeerProtocolError { reason: err.to_string() },
+                            });
                             break err;
                         }
                     };
@@ -400,10 +455,13 @@ impl<W: WriteTransport> RpcLoop<W> {
                                 method = %method
                             );
                             let _entered = span.enter();
+                            let _request_guard = RequestScopeGuard::enter(id.clone());
                             let cancel = CancellationToken::new();
                             let result = handler.handle_request(&ctx, cmd, cancel);
                             if let Err(err) = peer.respond(result, id) {
-                                peer.disconnect();
+                                peer.disconnect_with_error(Error::PeerProtocolError {
+                                    reason: err.to_string(),
+                                });
                                 break ReadError::Io(err);
                             }
                         }
@@ -419,7 +477,9 @@ impl<W: WriteTransport> RpcLoop<W> {
                         }
                         Call::InvalidRequest(id, err) => {
                             if let Err(io_err) = peer.respond(Err(err), id) {
-                                peer.disconnect();
+                                peer.disconnect_with_error(Error::PeerProtocolError {
+                                    reason: io_err.to_string(),
+                                });
                                 break ReadError::Io(io_err);
                             }
                         }
@@ -449,6 +509,10 @@ fn do_idle<H: Handler>(handler: &mut H, ctx: &RpcCtx, token: usize) {
 }
 
 impl RpcCtx {
+    pub fn new(peer: RpcPeer) -> Self {
+        Self { peer }
+    }
+
     pub fn get_peer(&self) -> &RpcPeer {
         &self.peer
     }
@@ -505,7 +569,7 @@ impl<W: WriteTransport> Peer for RawPeer<W> {
         };
         let (tx, rx) = mpsc::channel();
         self.send_rpc_request_common(method, params, ResponseHandler::Chan(tx));
-        rx.recv().unwrap_or(Err(Error::PeerDisconnect))
+        rx.recv().unwrap_or(Err(Error::PeerExited { exit_status: None }))
     }
 
     fn send_rpc_request_timeout(
@@ -522,7 +586,7 @@ impl<W: WriteTransport> Peer for RawPeer<W> {
                 Ok(p) => break p,
                 Err(_) => {
                     if Instant::now() >= deadline {
-                        return Err(Error::RequestTimeout);
+                        return Err(Error::PeerTimedOut { after_ms: duration_to_millis(timeout) });
                     }
                     thread::yield_now();
                 }
@@ -532,8 +596,12 @@ impl<W: WriteTransport> Peer for RawPeer<W> {
         self.send_rpc_request_common(method, params, ResponseHandler::Chan(tx));
         match rx.recv_timeout(timeout) {
             Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(Error::RequestTimeout),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(Error::PeerDisconnect),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                Err(Error::PeerTimedOut { after_ms: duration_to_millis(timeout) })
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(Error::PeerExited { exit_status: None })
+            }
         }
     }
 
@@ -673,11 +741,15 @@ impl<W: WriteTransport> RawPeer<W> {
 
     /// Send disconnect error to pending requests and signal exit.
     fn disconnect(&self) {
+        self.disconnect_with_error(Error::PeerExited { exit_status: None });
+    }
+
+    pub fn disconnect_with_error(&self, err: Error) {
         let mut pending = self.0.pending.lock().unwrap_or_else(|e| e.into_inner());
         let ids = pending.keys().cloned().collect::<Vec<_>>();
         for id in ids {
             let callback = pending.remove(&id).unwrap();
-            callback.invoke(Err(Error::PeerDisconnect));
+            callback.invoke(Err(clone_error(&err)));
         }
         self.0.needs_exit.store(true, Ordering::Release);
     }
@@ -701,6 +773,22 @@ impl<W: WriteTransport> Clone for RawPeer<W> {
     fn clone(&self) -> Self {
         RawPeer(self.0.clone())
     }
+}
+
+fn clone_error(err: &Error) -> Error {
+    match err {
+        Error::Io(io_err) => Error::Io(io::Error::new(io_err.kind(), io_err.to_string())),
+        Error::RemoteError(remote) => Error::RemoteError(remote.clone()),
+        Error::PeerExited { exit_status } => Error::PeerExited { exit_status: *exit_status },
+        Error::PeerTimedOut { after_ms } => Error::PeerTimedOut { after_ms: *after_ms },
+        Error::PeerProtocolError { reason } => Error::PeerProtocolError { reason: reason.clone() },
+        Error::InvalidResponse => Error::InvalidResponse,
+        Error::RequestCancelled => Error::RequestCancelled,
+    }
+}
+
+fn duration_to_millis(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
 }
 
 impl Ord for Timer {

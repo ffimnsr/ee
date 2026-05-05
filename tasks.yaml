@@ -11,6 +11,14 @@ tasks:
     commands:
       - cargo clippy --all -- -D warnings
     description: Lint the code using clippy, treating warnings as errors.
+  lint-stable:
+    commands:
+      - cargo +stable clippy --workspace --lib --bins --tests --examples --all-features -- -D warnings
+    description: Lint the code using clippy with the stable Rust toolchain, treating warnings as errors.
+  test-stable:
+    commands:
+      - cargo +stable test --workspace --lib --tests --examples --all-features
+    description: Run tests using the stable Rust toolchain.
   install-githooks:
     commands:
       - rm -rf .git/hooks

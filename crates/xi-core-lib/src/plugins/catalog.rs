@@ -14,15 +14,18 @@
 
 //! Keeping track of available plugins.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use jsonschema::validator_for;
 use log::{error, info};
+use semver::{Version, VersionReq};
 use serde::Deserialize;
+use toml::Table as TomlTable;
 
 use super::{ManifestValidationError, PluginDescription, PluginName};
 use crate::config::table_from_toml_str;
@@ -57,6 +60,26 @@ pub enum PluginLoadError {
         path: PathBuf,
         err: ManifestValidationError,
     },
+    SchemaValidation {
+        path: PathBuf,
+        pointer: String,
+        message: String,
+    },
+    InvalidRequirement {
+        path: PathBuf,
+        plugin: PluginName,
+        requirement: String,
+        message: String,
+    },
+    UnsatisfiedRequirement {
+        path: PathBuf,
+        plugin: PluginName,
+        requirement: String,
+        message: String,
+    },
+    CyclicRequirements {
+        cycle: Vec<PluginName>,
+    },
 }
 
 impl fmt::Display for PluginLoadError {
@@ -80,8 +103,39 @@ impl fmt::Display for PluginLoadError {
             PluginLoadError::InvalidManifest { path, err } => {
                 write!(f, "invalid plugin manifest {}: {err}", path.display())
             }
+            PluginLoadError::SchemaValidation { path, pointer, message } => {
+                write!(f, "invalid plugin manifest {} at {}: {}", path.display(), pointer, message)
+            }
+            PluginLoadError::InvalidRequirement { path, plugin, requirement, message } => write!(
+                f,
+                "invalid plugin requirement {requirement:?} for {plugin:?} in {}: {message}",
+                path.display()
+            ),
+            PluginLoadError::UnsatisfiedRequirement { path, plugin, requirement, message } => {
+                write!(
+                    f,
+                    "unsatisfied plugin requirement {requirement:?} for {plugin:?} in {}: {message}",
+                    path.display()
+                )
+            }
+            PluginLoadError::CyclicRequirements { cycle } => {
+                write!(f, "cyclic plugin requirements: {}", cycle.join(" -> "))
+            }
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct PendingManifest {
+    path: PathBuf,
+    plugin: Arc<PluginDescription>,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedRequirement {
+    dependency: String,
+    version_req: VersionReq,
+    raw: String,
 }
 
 #[derive(Deserialize)]
@@ -105,11 +159,21 @@ impl<'a> PluginCatalog {
     pub fn load_from_paths(&mut self, paths: &[PathBuf]) -> Vec<PluginLoadError> {
         let all_manifests = find_all_manifests(paths);
         let mut errors = Vec::new();
+        let mut staged = HashMap::<PluginName, PendingManifest>::new();
         for manifest_path in &all_manifests {
             match load_manifest(manifest_path) {
                 Err(e) => errors.push(e),
                 Ok(manifest) => {
                     let manifest_path = canonicalize_for_lookup(manifest_path);
+                    if let Some(existing) = staged.get(&manifest.name) {
+                        errors.push(PluginLoadError::DuplicatePluginName {
+                            name: manifest.name.clone(),
+                            first_path: existing.path.clone(),
+                            second_path: manifest_path,
+                        });
+                        continue;
+                    }
+
                     if let Some(existing_path) = self.manifest_path_for_name(&manifest.name)
                         && existing_path != manifest_path
                     {
@@ -123,15 +187,41 @@ impl<'a> PluginCatalog {
 
                     info!("loaded {}", manifest.name);
                     let manifest = Arc::new(manifest);
-                    if let Some(previous) =
-                        self.locations.insert(manifest_path.clone(), manifest.clone())
-                    {
-                        self.items.remove(&previous.name);
-                    }
-                    self.items.insert(manifest.name.clone(), manifest.clone());
+                    staged.insert(
+                        manifest.name.clone(),
+                        PendingManifest { path: manifest_path, plugin: manifest },
+                    );
                 }
             }
         }
+
+        let mut next_items = self.items.clone();
+        let mut next_locations = self.locations.clone();
+        for pending in staged.values() {
+            if let Some(previous) =
+                next_locations.insert(pending.path.clone(), pending.plugin.clone())
+            {
+                next_items.remove(&previous.name);
+            }
+            next_items.insert(pending.plugin.name.clone(), pending.plugin.clone());
+        }
+
+        let mut name_to_path = next_locations
+            .iter()
+            .map(|(path, plugin)| (plugin.name.clone(), path.clone()))
+            .collect::<HashMap<_, _>>();
+        for pending in staged.values() {
+            name_to_path.insert(pending.plugin.name.clone(), pending.path.clone());
+        }
+
+        let requirement_errors = validate_requirements(&next_items, &name_to_path);
+        if !requirement_errors.is_empty() {
+            errors.extend(requirement_errors);
+            return errors;
+        }
+
+        self.items = next_items;
+        self.locations = next_locations;
         errors
     }
 
@@ -216,6 +306,8 @@ fn load_manifest(path: &Path) -> Result<PluginDescription, PluginLoadError> {
     let mut file = fs::File::open(path)?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
+    let raw_manifest: toml::Value = toml::from_str(&contents)?;
+    validate_manifest_schema(path, &raw_manifest)?;
     let manifest: PluginManifest = toml::from_str(&contents)?;
     if manifest.manifest_version != SUPPORTED_MANIFEST_VERSION {
         return Err(PluginLoadError::UnsupportedManifestVersion {
@@ -254,6 +346,223 @@ fn load_manifest(path: &Path) -> Result<PluginDescription, PluginLoadError> {
         lang.default_config = Some(lang_defaults);
     }
     Ok(manifest)
+}
+
+fn validate_manifest_schema(
+    path: &Path,
+    raw_manifest: &toml::Value,
+) -> Result<(), PluginLoadError> {
+    let Some(table) = raw_manifest.as_table() else {
+        return Ok(());
+    };
+
+    let mut plugin_table = TomlTable::new();
+    for (key, value) in table {
+        if key != "manifest_version" {
+            plugin_table.insert(key.clone(), value.clone());
+        }
+    }
+
+    let instance = serde_json::to_value(toml::Value::Table(plugin_table)).map_err(|err| {
+        PluginLoadError::Io(io::Error::new(io::ErrorKind::InvalidData, err.to_string()))
+    })?;
+    let schema = PluginDescription::json_schema();
+    let validator = validator_for(&schema).map_err(|err| PluginLoadError::SchemaValidation {
+        path: path.to_path_buf(),
+        pointer: String::from("/"),
+        message: format!("schema compilation failed: {err}"),
+    })?;
+    if let Some(err) = validator.iter_errors(&instance).next() {
+        let pointer = err.instance_path.to_string();
+        return Err(PluginLoadError::SchemaValidation {
+            path: path.to_path_buf(),
+            pointer: if pointer.is_empty() { String::from("/") } else { pointer },
+            message: err.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_requirements(
+    items: &HashMap<PluginName, Arc<PluginDescription>>,
+    name_to_path: &HashMap<PluginName, PathBuf>,
+) -> Vec<PluginLoadError> {
+    let mut errors = Vec::new();
+    let core_version = Version::parse(env!("CARGO_PKG_VERSION"))
+        .expect("xi-core-lib package version should be valid semver");
+    let mut dependency_graph = HashMap::<PluginName, Vec<PluginName>>::new();
+
+    for (plugin_name, plugin) in items {
+        let path = name_to_path
+            .get(plugin_name)
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from(format!("<{}>", plugin_name)));
+        let plugin_version = match Version::parse(&plugin.version) {
+            Ok(version) => version,
+            Err(err) => {
+                errors.push(PluginLoadError::UnsatisfiedRequirement {
+                    path,
+                    plugin: plugin_name.clone(),
+                    requirement: String::from("version"),
+                    message: format!(
+                        "plugin version {:?} is not valid semver: {err}",
+                        plugin.version
+                    ),
+                });
+                continue;
+            }
+        };
+
+        let mut deps = Vec::new();
+        for requirement in &plugin.requires {
+            let parsed = match parse_requirement(requirement) {
+                Ok(parsed) => parsed,
+                Err(message) => {
+                    errors.push(PluginLoadError::InvalidRequirement {
+                        path: path.clone(),
+                        plugin: plugin_name.clone(),
+                        requirement: requirement.clone(),
+                        message,
+                    });
+                    continue;
+                }
+            };
+
+            if parsed.dependency == "xi-core" {
+                if !parsed.version_req.matches(&core_version) {
+                    errors.push(PluginLoadError::UnsatisfiedRequirement {
+                        path: path.clone(),
+                        plugin: plugin_name.clone(),
+                        requirement: parsed.raw,
+                        message: format!(
+                            "xi-core version {} does not satisfy {}",
+                            core_version, parsed.version_req
+                        ),
+                    });
+                }
+                continue;
+            }
+
+            let Some(dependency) = items.get(&parsed.dependency) else {
+                errors.push(PluginLoadError::UnsatisfiedRequirement {
+                    path: path.clone(),
+                    plugin: plugin_name.clone(),
+                    requirement: parsed.raw,
+                    message: format!("required plugin {:?} is not present", parsed.dependency),
+                });
+                continue;
+            };
+
+            let dependency_version = match Version::parse(&dependency.version) {
+                Ok(version) => version,
+                Err(err) => {
+                    errors.push(PluginLoadError::UnsatisfiedRequirement {
+                        path: path.clone(),
+                        plugin: plugin_name.clone(),
+                        requirement: parsed.raw,
+                        message: format!(
+                            "required plugin {:?} has invalid semver {:?}: {err}",
+                            parsed.dependency, dependency.version
+                        ),
+                    });
+                    continue;
+                }
+            };
+
+            if !parsed.version_req.matches(&dependency_version) {
+                errors.push(PluginLoadError::UnsatisfiedRequirement {
+                    path: path.clone(),
+                    plugin: plugin_name.clone(),
+                    requirement: parsed.raw,
+                    message: format!(
+                        "plugin {:?} version {} does not satisfy {}",
+                        parsed.dependency, dependency_version, parsed.version_req
+                    ),
+                });
+                continue;
+            }
+
+            let _ = plugin_version;
+            deps.push(parsed.dependency);
+        }
+        dependency_graph.insert(plugin_name.clone(), deps);
+    }
+
+    if let Some(cycle) = detect_dependency_cycle(&dependency_graph) {
+        errors.push(PluginLoadError::CyclicRequirements { cycle });
+    }
+
+    errors
+}
+
+fn parse_requirement(spec: &str) -> Result<ParsedRequirement, String> {
+    let trimmed = spec.trim();
+    if trimmed.is_empty() {
+        return Err(String::from("requirement must not be empty"));
+    }
+
+    let split_at = trimmed
+        .char_indices()
+        .find_map(|(index, ch)| {
+            (!(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')).then_some(index)
+        })
+        .ok_or_else(|| {
+            String::from("requirement must include dependency name and semver expression")
+        })?;
+    let (dependency, req_text) = trimmed.split_at(split_at);
+    let dependency = dependency.trim();
+    let req_text = req_text.trim();
+    if dependency.is_empty() || req_text.is_empty() {
+        return Err(String::from("requirement must include dependency name and semver expression"));
+    }
+
+    let version_req = VersionReq::parse(req_text)
+        .map_err(|err| format!("invalid semver requirement {req_text:?}: {err}"))?;
+    Ok(ParsedRequirement {
+        dependency: dependency.to_owned(),
+        version_req,
+        raw: trimmed.to_owned(),
+    })
+}
+
+fn detect_dependency_cycle(
+    graph: &HashMap<PluginName, Vec<PluginName>>,
+) -> Option<Vec<PluginName>> {
+    fn visit(
+        node: &str,
+        graph: &HashMap<PluginName, Vec<PluginName>>,
+        visited: &mut HashSet<PluginName>,
+        visiting: &mut Vec<PluginName>,
+    ) -> Option<Vec<PluginName>> {
+        if let Some(index) = visiting.iter().position(|candidate| candidate == node) {
+            let mut cycle = visiting[index..].to_vec();
+            cycle.push(node.to_owned());
+            return Some(cycle);
+        }
+        if !visited.insert(node.to_owned()) {
+            return None;
+        }
+
+        visiting.push(node.to_owned());
+        if let Some(dependencies) = graph.get(node) {
+            for dependency in dependencies {
+                if let Some(cycle) = visit(dependency, graph, visited, visiting) {
+                    return Some(cycle);
+                }
+            }
+        }
+        visiting.pop();
+        None
+    }
+
+    let mut visited = HashSet::new();
+    let mut visiting = Vec::new();
+    for node in graph.keys() {
+        if let Some(cycle) = visit(node, graph, &mut visited, &mut visiting) {
+            return Some(cycle);
+        }
+    }
+    None
 }
 
 fn canonicalize_for_lookup(path: &Path) -> PathBuf {
@@ -462,6 +771,32 @@ arg_type = "String"
     }
 
     #[test]
+    fn load_manifest_rejects_schema_invalid_field_with_pointer() {
+        let temp_dir = TempDir::new().unwrap();
+        let manifest_path = temp_dir.path().join("manifest.toml");
+        let exec_path = temp_dir.path().join("bin/test-plugin");
+        fs::create_dir_all(exec_path.parent().unwrap()).unwrap();
+        fs::write(&exec_path, b"#!/bin/sh\n").unwrap();
+        fs::write(
+            &manifest_path,
+            r#"manifest_version = 1
+name = "test-plugin"
+version = "0.1.0"
+exec_path = "bin/test-plugin"
+rpc_timeout_ms = "fast"
+"#,
+        )
+        .unwrap();
+
+        match load_manifest(&manifest_path) {
+            Err(PluginLoadError::SchemaValidation { pointer, .. }) => {
+                assert_eq!(pointer, "/rpc_timeout_ms");
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    #[test]
     fn load_from_paths_reports_duplicate_plugin_names() {
         let temp_dir = TempDir::new().unwrap();
         let first_dir = temp_dir.path().join("first-plugin");
@@ -501,5 +836,107 @@ arg_type = "String"
         assert!(catalog.get_from_path(&extra_file).is_some());
         assert!(catalog.get_from_path(&plugin_dir.join("bin/run-plugin")).is_some());
         assert!(catalog.get_from_path(&temp_dir.path().join("sample")).is_none());
+    }
+
+    #[test]
+    fn load_from_paths_rejects_unsatisfied_plugin_requirement() {
+        let temp_dir = TempDir::new().unwrap();
+        let plugin_dir = temp_dir.path().join("needs-syntect");
+        let exec_path = plugin_dir.join("bin/run-plugin");
+        fs::create_dir_all(exec_path.parent().unwrap()).unwrap();
+        fs::write(&exec_path, b"#!/bin/sh\n").unwrap();
+        fs::write(
+            plugin_dir.join("manifest.toml"),
+            r#"manifest_version = 1
+name = "needs-syntect"
+version = "0.1.0"
+exec_path = "bin/run-plugin"
+requires = ["syntect>=0.2.0"]
+"#,
+        )
+        .unwrap();
+
+        let mut catalog = PluginCatalog::default();
+        let errors = catalog.load_from_paths(&[plugin_dir]);
+
+        match errors.as_slice() {
+            [PluginLoadError::UnsatisfiedRequirement { plugin, requirement, .. }] => {
+                assert_eq!(plugin, "needs-syntect");
+                assert_eq!(requirement, "syntect>=0.2.0");
+            }
+            other => panic!("unexpected errors: {other:?}"),
+        }
+        assert!(catalog.iter().next().is_none());
+    }
+
+    #[test]
+    fn load_from_paths_rejects_cyclic_requirements() {
+        let temp_dir = TempDir::new().unwrap();
+        let first_dir = temp_dir.path().join("first");
+        let second_dir = temp_dir.path().join("second");
+
+        for (dir, name, requires) in
+            [(&first_dir, "first", "second>=0.1.0"), (&second_dir, "second", "first>=0.1.0")]
+        {
+            let exec_path = dir.join("bin/run-plugin");
+            fs::create_dir_all(exec_path.parent().unwrap()).unwrap();
+            fs::write(&exec_path, b"#!/bin/sh\n").unwrap();
+            fs::write(
+                dir.join("manifest.toml"),
+                format!(
+                    "manifest_version = 1\nname = \"{name}\"\nversion = \"0.1.0\"\nexec_path = \"bin/run-plugin\"\nrequires = [\"{requires}\"]\n"
+                ),
+            )
+            .unwrap();
+        }
+
+        let mut catalog = PluginCatalog::default();
+        let errors = catalog.load_from_paths(&[first_dir, second_dir]);
+
+        match errors.as_slice() {
+            [PluginLoadError::CyclicRequirements { cycle }] => {
+                assert_eq!(cycle.first().unwrap(), cycle.last().unwrap());
+                assert!(cycle.iter().any(|plugin| plugin == "first"));
+                assert!(cycle.iter().any(|plugin| plugin == "second"));
+            }
+            other => panic!("unexpected errors: {other:?}"),
+        }
+        assert!(catalog.iter().next().is_none());
+    }
+
+    #[test]
+    fn load_from_paths_accepts_satisfied_requirements() {
+        let temp_dir = TempDir::new().unwrap();
+        let syntect_dir = temp_dir.path().join("syntect");
+        let consumer_dir = temp_dir.path().join("consumer");
+
+        for (dir, name, version, requires) in [
+            (&syntect_dir, "syntect", "0.2.1", None),
+            (
+                &consumer_dir,
+                "consumer",
+                "0.1.0",
+                Some(r#"requires = ["xi-core>=0.4.0", "syntect>=0.2.0"]"#),
+            ),
+        ] {
+            let exec_path = dir.join("bin/run-plugin");
+            fs::create_dir_all(exec_path.parent().unwrap()).unwrap();
+            fs::write(&exec_path, b"#!/bin/sh\n").unwrap();
+            let requires = requires.unwrap_or("");
+            fs::write(
+                dir.join("manifest.toml"),
+                format!(
+                    "manifest_version = 1\nname = \"{name}\"\nversion = \"{version}\"\nexec_path = \"bin/run-plugin\"\n{requires}\n"
+                ),
+            )
+            .unwrap();
+        }
+
+        let mut catalog = PluginCatalog::default();
+        let errors = catalog.load_from_paths(&[syntect_dir, consumer_dir]);
+
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert!(catalog.get_named("syntect").is_some());
+        assert!(catalog.get_named("consumer").is_some());
     }
 }

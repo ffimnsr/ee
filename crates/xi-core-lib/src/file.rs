@@ -27,7 +27,7 @@ use fs2::FileExt;
 use log::warn;
 
 use xi_rope::Rope;
-use xi_rpc::RemoteError;
+use xi_rpc::RemoteErrorDetails;
 
 use crate::tabs::BufferId;
 
@@ -350,16 +350,8 @@ fn get_permissions<P: AsRef<Path>>(path: P) -> Option<u32> {
     File::open(path).and_then(|f| f.metadata()).map(|meta| meta.permissions().mode()).ok()
 }
 
-impl From<FileError> for RemoteError {
-    fn from(src: FileError) -> RemoteError {
-        let code = src.error_code();
-        let message = src.to_string();
-        RemoteError::custom(code, message, None)
-    }
-}
-
-impl FileError {
-    fn error_code(&self) -> i64 {
+impl RemoteErrorDetails for FileError {
+    fn remote_error_code(&self) -> i64 {
         match self {
             FileError::Io(_, _) => 5,
             FileError::UnknownEncoding(_) => 6,
@@ -391,12 +383,19 @@ impl fmt::Display for FileError {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use xi_rpc::RemoteError;
+
+    use super::FileError;
 
     #[cfg(all(target_family = "unix", not(feature = "notify")))]
     #[test]
     fn open_rejects_non_utf8_path() {
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
+
+        use super::FileManager;
 
         let mut mgr = FileManager::new();
         // Construct a path with a raw non-UTF-8 byte sequence.
@@ -407,6 +406,20 @@ mod tests {
             matches!(result, Err(FileError::NonUtf8Path(_))),
             "expected NonUtf8Path error, got {:?}",
             result.err().map(|e| e.to_string())
+        );
+    }
+
+    #[test]
+    fn file_error_converts_into_remote_error() {
+        let err: RemoteError = FileError::UnknownEncoding(PathBuf::from("/tmp/demo.txt")).into();
+
+        assert_eq!(
+            err,
+            RemoteError::custom(
+                6,
+                "Error decoding UTF-8 file contents: /tmp/demo.txt",
+                None::<serde_json::Value>,
+            )
         );
     }
 }

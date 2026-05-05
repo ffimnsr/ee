@@ -25,7 +25,7 @@ use regex::RegexBuilder;
 use serde_json::{self, Value, json};
 
 use xi_rope::{Cursor, DeltaBuilder, Interval, LinesMetric, Rope, RopeDelta};
-use xi_rpc::{Error as RpcError, RemoteError};
+use xi_rpc::{Error as RpcError, RemoteError, ResultExt};
 
 use crate::plugins::rpc::{
     ClientPluginInfo, GetDiagnosticsResponse, GetSelectionsResponse, Hover, PluginBufferInfo,
@@ -42,7 +42,7 @@ use crate::editor::{EditType, Editor};
 use crate::file::FileInfo;
 use crate::lang_features;
 use crate::line_offset::LineOffset;
-use crate::plugins::{Plugin, PluginCapability};
+use crate::plugins::{Plugin, PluginCapability, PluginTerminationReason};
 use crate::selection::{InsertDrift, SelRegion};
 use crate::syntax::LanguageId;
 use crate::tabs::{
@@ -594,6 +594,10 @@ impl<'a> EventContext<'a> {
         });
     }
 
+    pub(crate) fn plugin_terminated(&self, plugin_name: &str, reason: &PluginTerminationReason) {
+        self.client.plugin_terminated(self.view_id, plugin_name, reason);
+    }
+
     /// Handles the acknowledgement from a plugin after an update was delivered.
     /// Decrements the in-flight revision counter, enabling CRDT garbage collection.
     pub(crate) fn do_plugin_update(&mut self, update: Result<Value, RpcError>) {
@@ -938,7 +942,7 @@ fn compute_line_replacements(
     let regex = RegexBuilder::new(&regex::escape(pattern))
         .case_insensitive(!case_sensitive)
         .build()
-        .map_err(|err| RemoteError::custom(400, format!("substitute: bad pattern: {err}"), None))?;
+        .map_err_remote(400, |err| format!("substitute: bad pattern: {err}"))?;
 
     let total_lines = text.measure::<LinesMetric>() + 1;
     let start_line = start_line.min(total_lines.saturating_sub(1));

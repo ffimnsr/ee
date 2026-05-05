@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use xi_rope::Rope;
-use xi_rpc::{self, ReadError, RemoteError, RpcCtx, RpcPeer};
+use xi_rpc::{self, OptionExt, ReadError, RemoteError, RpcCtx, RpcPeer};
 
 use crate::WeakXiCore;
 use crate::client::Client;
@@ -47,7 +47,7 @@ use crate::plugin_rpc::{PluginNotification, PluginRequest};
 use crate::plugins::rpc::ClientPluginInfo;
 use crate::plugins::{
     Plugin, PluginCatalog, PluginDescription, PluginPid, PluginStartError, PluginStartErrorKind,
-    start_plugin_process,
+    PluginTerminationReason, start_plugin_process,
 };
 use crate::rpc::{
     CoreNotification, CoreRequest, EditNotification, PluginNotification as CorePluginNotification,
@@ -138,10 +138,11 @@ struct PendingPluginCommand {
     shutdown_after_dispatch: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum StopReason {
     Manual,
     SingleInvocation,
+    ResourceLimit(PluginTerminationReason),
 }
 
 #[derive(Debug, Default, Clone)]
@@ -415,9 +416,7 @@ impl CoreState {
         global: bool,
         case_sensitive: bool,
     ) -> Result<Value, RemoteError> {
-        let ctx = self
-            .make_context(view_id)
-            .ok_or_else(|| RemoteError::custom(404, "view not found", None))?;
+        let ctx = self.make_context(view_id).ok_or_not_found("view not found")?;
         Ok(json!(ctx.preview_substitute(
             start_line,
             end_line,
@@ -532,6 +531,10 @@ impl CoreState {
     fn after_stop_plugin(&mut self, plugin: &Plugin) {
         self.iter_groups().for_each(|mut cx| cx.plugin_stopped(plugin));
     }
+
+    fn notify_plugin_terminated(&mut self, plugin_name: &str, reason: &PluginTerminationReason) {
+        self.iter_groups().for_each(|cx| cx.plugin_terminated(plugin_name, reason));
+    }
 }
 
 impl CoreState {
@@ -604,7 +607,7 @@ impl CoreState {
         }
 
         let weak_core = self.self_ref.as_ref().unwrap().clone();
-        let process = plugin.process_handle();
+        let process = plugin.controller_handle();
         let plugin_name = plugin.name.clone();
         plugin.shutdown();
         self.stopping_plugins.insert(plugin_id, reason);
@@ -612,9 +615,8 @@ impl CoreState {
         std::thread::spawn(move || {
             let deadline = Instant::now() + PLUGIN_SHUTDOWN_TIMEOUT;
             loop {
-                let wait_result =
-                    process.lock().ok().and_then(|mut child| child.try_wait().ok()).flatten();
-                if wait_result.is_some() {
+                let wait_result = process.has_exited().ok();
+                if wait_result == Some(true) {
                     break;
                 }
 
@@ -626,10 +628,7 @@ impl CoreState {
                             PLUGIN_SHUTDOWN_TIMEOUT
                         ),
                     );
-                    if let Ok(mut child) = process.lock() {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                    }
+                    let _ = process.terminate();
                     break;
                 }
 
@@ -1041,6 +1040,9 @@ impl CoreState {
                     PluginStartErrorKind::UnsupportedTransport(transport) => {
                         format!("unsupported transport {transport:?}")
                     }
+                    PluginStartErrorKind::Sandbox(detail) | PluginStartErrorKind::Wasm(detail) => {
+                        detail
+                    }
                 };
                 self.peer.alert(format!("failed to start plugin {}: {}", err.name, detail));
                 self.schedule_plugin_restart(&err.name);
@@ -1056,13 +1058,21 @@ impl CoreState {
             self.launching_plugins.remove(&plugin.name);
             let stop_reason = self.stopping_plugins.remove(&id);
             self.after_stop_plugin(&plugin);
-            if stop_reason.is_none() {
+            if let Some(StopReason::ResourceLimit(reason)) = stop_reason {
+                self.notify_plugin_terminated(&plugin.name, &reason);
+                self.scheduled_plugin_restarts.remove(&plugin.name);
+                self.plugin_restart_state.remove(&plugin.name);
+            } else if stop_reason.is_none() {
                 self.schedule_plugin_restart(&plugin.name);
             } else {
                 self.scheduled_plugin_restarts.remove(&plugin.name);
                 self.plugin_restart_state.remove(&plugin.name);
             }
         }
+    }
+
+    pub(crate) fn plugin_terminated(&mut self, id: PluginId, reason: PluginTerminationReason) {
+        self.stopping_plugins.insert(id, StopReason::ResourceLimit(reason));
     }
 
     /// Handles the response to a sync update sent to a plugin.
@@ -1101,9 +1111,33 @@ impl CoreState {
         }
     }
 
+    pub(crate) fn plugin_notification_from_host(
+        &mut self,
+        view_id: ViewId,
+        plugin_id: PluginId,
+        cmd: PluginNotification,
+    ) {
+        if let Some(mut edit_ctx) = self.make_context(view_id) {
+            edit_ctx.do_plugin_cmd(plugin_id, cmd)
+        }
+    }
+
     pub(crate) fn plugin_request(
         &mut self,
         _ctx: &RpcCtx,
+        view_id: ViewId,
+        plugin_id: PluginId,
+        cmd: PluginRequest,
+    ) -> Result<Value, RemoteError> {
+        if let Some(mut edit_ctx) = self.make_context(view_id) {
+            edit_ctx.do_plugin_cmd_sync(plugin_id, cmd)
+        } else {
+            Err(RemoteError::custom(404, "missing view", None))
+        }
+    }
+
+    pub(crate) fn plugin_request_from_host(
+        &mut self,
         view_id: ViewId,
         plugin_id: PluginId,
         cmd: PluginRequest,

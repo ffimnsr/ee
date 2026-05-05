@@ -19,26 +19,30 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::config::Table;
 
 /// The canonical identifier for a particular `LanguageDefinition`.
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord, JsonSchema,
+)]
 #[allow(clippy::rc_buffer)] // suppress clippy;  TODO consider addressing
 // the warning by changing String to str
-pub struct LanguageId(Arc<String>);
+pub struct LanguageId(#[schemars(with = "String")] Arc<String>);
 
 /// Describes a `LanguageDefinition`. Although these are provided by plugins,
 /// they are a fundamental concept in core, used to determine things like
 /// plugin activations and active user config tables.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct LanguageDefinition {
     pub name: LanguageId,
     pub extensions: Vec<String>,
     pub first_line_match: Option<String>,
     pub scope: String,
     #[serde(skip)]
+    #[schemars(skip)]
     pub default_config: Option<Table>,
 }
 

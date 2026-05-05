@@ -478,7 +478,12 @@ mod tests {
 
         fn send_rpc_request(&self, method: &str, params: &Value) -> Result<Value, xi_rpc::Error> {
             self.requests.lock().unwrap().push((method.to_owned(), params.clone()));
-            self.responses.lock().unwrap().get(method).cloned().ok_or(xi_rpc::Error::PeerDisconnect)
+            self.responses
+                .lock()
+                .unwrap()
+                .get(method)
+                .cloned()
+                .ok_or(xi_rpc::Error::PeerExited { exit_status: None })
         }
 
         fn send_rpc_request_timeout(
