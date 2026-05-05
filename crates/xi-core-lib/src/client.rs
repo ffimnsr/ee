@@ -20,7 +20,6 @@ use serde::Serialize;
 use serde_json::{self, Value, json};
 use xi_rpc::{self, RpcPeer};
 
-use crate::config::Table;
 use crate::plugins::Command;
 use crate::plugins::PluginTerminationReason;
 use crate::plugins::rpc::{
@@ -56,16 +55,6 @@ impl Client {
                 "view_id": view_id,
                 "line": line,
                 "col": col,
-            }),
-        );
-    }
-
-    pub fn config_changed(&self, view_id: ViewId, changes: &Table) {
-        self.0.send_rpc_notification(
-            "config_changed",
-            &json!({
-                "view_id": view_id,
-                "changes": changes,
             }),
         );
     }

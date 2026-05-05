@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use xi_core_lib::XiCore;
+use xi_core_lib::config::Table;
 use xi_core_lib::plugin_rpc::{Diagnostic, SymbolItem};
 use xi_core_lib::rpc::LineReplacement;
 use xi_rpc::RpcLoop;
@@ -31,7 +32,9 @@ pub(crate) type BufferId = u32;
 pub(crate) struct BufState {
     pub(crate) id: BufferId,
     pub(crate) path: Option<PathBuf>,
+    pub(crate) display_name: Option<String>,
     pub(crate) view_id: String,
+    pub(crate) editor_config_synced: bool,
     pub(crate) pending_line_request: bool,
     pub(crate) line_cache: Vec<LineSlot>,
     pub(crate) lines: Vec<String>,
@@ -50,6 +53,9 @@ pub(crate) struct BufState {
 
 impl BufState {
     pub(crate) fn title(&self) -> String {
+        if let Some(name) = &self.display_name {
+            return name.clone();
+        }
         self.path
             .as_ref()
             .and_then(|p| p.file_name())
@@ -204,7 +210,9 @@ impl PartialEq for BufState {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
             && self.path == other.path
+            && self.display_name == other.display_name
             && self.view_id == other.view_id
+            && self.editor_config_synced == other.editor_config_synced
             && self.lines == other.lines
             && self.cursor_line == other.cursor_line
             && self.cursor_col == other.cursor_col
@@ -278,6 +286,9 @@ impl BufferManager {
 
         send_rpc_notification(&to_core_tx, "client_started", json!({}))?;
 
+        let (_, general_config, _) = crate::config::xi_config_tables_for_file(path.as_deref());
+        send_config_notification(&to_core_tx, json!("general"), general_config)?;
+
         let new_view_id = 1_u64;
         send_rpc_request(
             &to_core_tx,
@@ -305,7 +316,9 @@ impl BufferManager {
         let buf = BufState {
             id: 1,
             path: path.clone(),
+            display_name: None,
             view_id: view_id.clone(),
+            editor_config_synced: false,
             pending_line_request: false,
             line_cache: Vec::new(),
             lines: Vec::new(),
@@ -638,6 +651,10 @@ impl BufferManager {
                     }
                     _ => unreachable!(),
                 }
+
+                if !buf.editor_config_synced {
+                    self.sync_buffer_editor_config(idx)?;
+                }
             }
             BackendEvent::Alert(msg) => {
                 self.bufs[current].status_message = Some(msg);
@@ -732,7 +749,9 @@ impl BufferManager {
         self.bufs.push(BufState {
             id: buf_id,
             path,
+            display_name: None,
             view_id,
+            editor_config_synced: false,
             pending_line_request: false,
             line_cache: Vec::new(),
             lines: Vec::new(),
@@ -746,6 +765,17 @@ impl BufferManager {
             diagnostics: Vec::new(),
             annotations: Vec::new(),
         });
+        Ok(buf_id)
+    }
+
+    pub(crate) fn open_named_scratch_buffer(
+        &mut self,
+        title: impl Into<String>,
+    ) -> io::Result<BufferId> {
+        let buf_id = self.open_buffer(None)?;
+        if let Some(buf) = self.bufs.iter_mut().find(|buf| buf.id == buf_id) {
+            buf.display_name = Some(title.into());
+        }
         Ok(buf_id)
     }
 
@@ -817,6 +847,35 @@ impl BufferManager {
         let alt = self.alternate.ok_or_else(|| io::Error::other("no alternate buffer"))?;
         self.switch_to_idx(alt);
         Ok(())
+    }
+
+    pub(crate) fn restore_cursor(
+        &mut self,
+        id: BufferId,
+        line: usize,
+        col: usize,
+    ) -> io::Result<()> {
+        let idx = self
+            .bufs
+            .iter()
+            .position(|b| b.id == id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "buffer not found"))?;
+        let view_id = self.bufs[idx].view_id.clone();
+        self.bufs[idx].cursor_line = line;
+        self.bufs[idx].cursor_col = col;
+        send_xi_notification(
+            &self.tx,
+            "edit",
+            json!({
+                "view_id": view_id,
+                "method": "gesture",
+                "params": {
+                    "line": line as u64,
+                    "col": col as u64,
+                    "ty": "point_select",
+                },
+            }),
+        )
     }
 
     /// Cycle to the next buffer (wrapping).
@@ -891,7 +950,9 @@ impl BufferManager {
         let buf = BufState {
             id: 1,
             path: None,
+            display_name: None,
             view_id: view_id.clone(),
+            editor_config_synced: true,
             pending_line_request: false,
             line_cache: Vec::new(),
             lines: Vec::new(),
@@ -1004,6 +1065,8 @@ impl BufferManager {
 
         let buf = &mut self.bufs[idx];
         buf.view_id = new_view_id.clone();
+        buf.display_name = None;
+        buf.editor_config_synced = false;
         buf.line_cache = Vec::new();
         buf.lines = Vec::new();
         buf.cursor_line = 0;
@@ -1045,6 +1108,33 @@ fn send_xi_notification(tx: &mpsc::Sender<String>, method: &str, params: Value) 
     }))
     .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     tx.blocking_send(raw).map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err.to_string()))
+}
+
+fn send_config_notification(
+    tx: &mpsc::Sender<String>,
+    domain: Value,
+    changes: Table,
+) -> io::Result<()> {
+    send_rpc_notification(
+        tx,
+        "set_config",
+        json!({
+            "domain": domain,
+            "changes": changes,
+        }),
+    )
+}
+
+impl BufferManager {
+    fn sync_buffer_editor_config(&mut self, idx: usize) -> io::Result<()> {
+        let Some(buf) = self.bufs.get_mut(idx) else {
+            return Ok(());
+        };
+        let (_, _, overrides) = crate::config::xi_config_tables_for_file(buf.path.as_deref());
+        send_config_notification(&self.tx, json!({ "user_override": buf.view_id }), overrides)?;
+        buf.editor_config_synced = true;
+        Ok(())
+    }
 }
 
 // Keep these imports satisfied for the test helper.

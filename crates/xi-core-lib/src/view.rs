@@ -18,6 +18,7 @@ use std::iter;
 use std::ops::Range;
 
 use log::warn;
+use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -257,6 +258,8 @@ impl View {
             Move(movement) => self.do_move(text, movement, false),
             ModifySelection(movement) => self.do_move(text, movement, true),
             SelectAll => self.select_all(text),
+            MergeSelections => self.merge_selections(text),
+            MergeConsecutiveSelections => self.merge_consecutive_selections(text),
             Scroll(range) => self.set_scroll(range.first, range.last),
             AddSelectionAbove => self.add_selection_by_movement(text, Movement::UpExactPosition),
             AddSelectionBelow => self.add_selection_by_movement(text, Movement::DownExactPosition),
@@ -307,7 +310,15 @@ impl View {
             SelectionForFind { case_sensitive } => self.do_selection_for_find(text, case_sensitive),
             Replace { chars, preserve_case } => self.do_set_replace(chars, preserve_case),
             SelectionForReplace => self.do_selection_for_replace(text),
+            SelectRegex { chars, case_sensitive } => {
+                self.do_select_regex(text, &chars, case_sensitive)
+            }
             SelectionIntoLines => self.do_split_selection_into_lines(text),
+            TrimSelections => self.trim_selections(text),
+            FlipSelections => self.flip_selections(text),
+            EnsureSelectionsForward => self.ensure_selections_forward(text),
+            KeepPrimarySelection => self.keep_primary_selection(text),
+            RemovePrimarySelection => self.remove_primary_selection(text),
         }
     }
 
@@ -475,6 +486,35 @@ impl View {
         self.set_selection_raw(text, selection);
     }
 
+    fn merge_selections(&mut self, text: &Rope) {
+        let Some(first) = self.selection.first().copied() else {
+            return;
+        };
+        let Some(last) = self.selection.last().copied() else {
+            return;
+        };
+        self.set_selection_raw(text, SelRegion::new(first.min(), last.max()).into());
+    }
+
+    fn merge_consecutive_selections(&mut self, text: &Rope) {
+        if self.selection.len() < 2 {
+            return;
+        }
+
+        let mut merged = Selection::new();
+        let mut current = self.selection[0];
+        for &region in self.selection.iter().skip(1) {
+            if current.max() == region.min() {
+                current = SelRegion::new(current.min(), region.max());
+            } else {
+                merged.add_region(current);
+                current = region;
+            }
+        }
+        merged.add_region(current);
+        self.set_selection_raw(text, merged);
+    }
+
     /// Finds the unit of text containing the given offset.
     fn unit(&self, text: &Rope, offset: usize, granularity: SelectionGranularity) -> Interval {
         match granularity {
@@ -581,6 +621,101 @@ impl View {
             }
         }
 
+        self.set_selection_raw(text, selection);
+    }
+
+    fn do_select_regex(&mut self, text: &Rope, pattern: &str, case_sensitive: bool) {
+        let Ok(regex) = RegexBuilder::new(pattern).case_insensitive(!case_sensitive).build() else {
+            return;
+        };
+
+        let mut selection = Selection::new();
+        for &region in self.selection.iter() {
+            if region.is_caret() {
+                continue;
+            }
+
+            let start = region.min();
+            let end = region.max();
+            let slice = text.slice_to_cow(start..end);
+            for matched in regex.find_iter(&slice) {
+                selection
+                    .add_region(SelRegion::new(start + matched.start(), start + matched.end()));
+            }
+        }
+
+        if !selection.is_empty() {
+            self.set_selection_raw(text, selection);
+        }
+    }
+
+    fn trim_selections(&mut self, text: &Rope) {
+        let mut selection = Selection::new();
+
+        for &region in self.selection.iter() {
+            if region.is_caret() {
+                selection.add_region(region);
+                continue;
+            }
+
+            let min = region.min();
+            let max = region.max();
+            let slice = text.slice_to_cow(min..max);
+            let trimmed_start_len =
+                slice.len() - slice.trim_start_matches(char::is_whitespace).len();
+            let trimmed_end_len = slice.len() - slice.trim_end_matches(char::is_whitespace).len();
+            let new_min = min + trimmed_start_len;
+            let new_max = max.saturating_sub(trimmed_end_len);
+
+            let trimmed = if new_min >= new_max {
+                SelRegion::caret(new_min.min(max))
+            } else if region.start <= region.end {
+                SelRegion::new(new_min, new_max)
+            } else {
+                SelRegion::new(new_max, new_min)
+            };
+            selection.add_region(trimmed);
+        }
+
+        self.set_selection_raw(text, selection);
+    }
+
+    fn flip_selections(&mut self, text: &Rope) {
+        let mut selection = Selection::new();
+        for &region in self.selection.iter() {
+            selection.add_region(
+                SelRegion::new(region.end, region.start).with_affinity(region.affinity),
+            );
+        }
+        self.set_selection_raw(text, selection);
+    }
+
+    fn ensure_selections_forward(&mut self, text: &Rope) {
+        let mut selection = Selection::new();
+        for &region in self.selection.iter() {
+            selection.add_region(
+                SelRegion::new(region.min(), region.max()).with_affinity(region.affinity),
+            );
+        }
+        self.set_selection_raw(text, selection);
+    }
+
+    fn keep_primary_selection(&mut self, text: &Rope) {
+        let Some(region) = self.selection.last().copied() else {
+            return;
+        };
+        self.set_selection_raw(text, region.into());
+    }
+
+    fn remove_primary_selection(&mut self, text: &Rope) {
+        if self.selection.len() <= 1 {
+            return;
+        }
+
+        let mut selection = Selection::new();
+        for &region in self.selection[..self.selection.len() - 1].iter() {
+            selection.add_region(region);
+        }
         self.set_selection_raw(text, selection);
     }
 
@@ -1507,6 +1642,80 @@ mod tests {
         view.do_find(&text);
         view.do_find_all(&text);
         assert_eq!(view.sel_regions().len(), 3);
+    }
+
+    #[test]
+    fn merge_consecutive_selections_only_joins_touching_regions() {
+        let mut view = View::new(1.into(), BufferId::new(2));
+        let text = Rope::from("abcdef");
+        let mut selection = Selection::new();
+        selection.add_region(SelRegion::new(0, 1));
+        selection.add_region(SelRegion::new(1, 3));
+        selection.add_region(SelRegion::new(4, 6));
+        view.set_selection(&text, selection);
+
+        view.do_edit(&text, ViewEvent::MergeConsecutiveSelections);
+
+        assert_eq!(view.sel_regions(), &[SelRegion::new(0, 3), SelRegion::new(4, 6)]);
+    }
+
+    #[test]
+    fn trim_selections_removes_edge_whitespace() {
+        let mut view = View::new(1.into(), BufferId::new(2));
+        let text = Rope::from("  alpha  ");
+        view.set_selection(&text, SelRegion::new(0, text.len()));
+
+        view.do_edit(&text, ViewEvent::TrimSelections);
+
+        assert_eq!(view.sel_regions(), &[SelRegion::new(2, 7)]);
+    }
+
+    #[test]
+    fn flip_and_ensure_forward_adjust_region_direction() {
+        let mut view = View::new(1.into(), BufferId::new(2));
+        let text = Rope::from("abcdef");
+        view.set_selection(&text, SelRegion::new(1, 4));
+
+        view.do_edit(&text, ViewEvent::FlipSelections);
+        assert_eq!(view.sel_regions(), &[SelRegion::new(4, 1)]);
+
+        view.do_edit(&text, ViewEvent::EnsureSelectionsForward);
+        assert_eq!(view.sel_regions(), &[SelRegion::new(1, 4)]);
+    }
+
+    #[test]
+    fn keep_and_remove_primary_selection_use_last_region() {
+        let mut view = View::new(1.into(), BufferId::new(2));
+        let text = Rope::from("abcdef");
+        let mut selection = Selection::new();
+        selection.add_region(SelRegion::new(0, 1));
+        selection.add_region(SelRegion::new(2, 3));
+        selection.add_region(SelRegion::new(4, 5));
+        view.set_selection(&text, selection.clone());
+
+        view.do_edit(&text, ViewEvent::KeepPrimarySelection);
+        assert_eq!(view.sel_regions(), &[SelRegion::new(4, 5)]);
+
+        view.set_selection(&text, selection);
+        view.do_edit(&text, ViewEvent::RemovePrimarySelection);
+        assert_eq!(view.sel_regions(), &[SelRegion::new(0, 1), SelRegion::new(2, 3)]);
+    }
+
+    #[test]
+    fn select_regex_only_matches_inside_existing_selections() {
+        let mut view = View::new(1.into(), BufferId::new(2));
+        let text = Rope::from("foo1 bar foo2 baz");
+        let mut selection = Selection::new();
+        selection.add_region(SelRegion::new(0, 8));
+        selection.add_region(SelRegion::new(9, text.len()));
+        view.set_selection(&text, selection);
+
+        view.do_edit(
+            &text,
+            ViewEvent::SelectRegex { chars: String::from(r"foo\d"), case_sensitive: true },
+        );
+
+        assert_eq!(view.sel_regions(), &[SelRegion::new(0, 4), SelRegion::new(9, 13)]);
     }
 
     #[test]

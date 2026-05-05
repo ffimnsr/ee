@@ -1,5 +1,21 @@
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+fn is_long_word_char(ch: char) -> bool {
+    !ch.is_whitespace()
+}
+
+fn is_motion_char(ch: char, long_word: bool) -> bool {
+    if long_word { is_long_word_char(ch) } else { is_word_char(ch) }
+}
+
+fn char_at(line: &str, byte: usize) -> Option<char> {
+    line.get(byte..)?.chars().next()
+}
+
 pub(crate) fn previous_char_boundary(line: &str, col: usize) -> usize {
     let mut col = col.min(line.len());
     while col > 0 && !line.is_char_boundary(col) {
@@ -44,4 +60,83 @@ pub(crate) fn prev_char_start(line: &str, byte: usize) -> usize {
 
 pub(crate) fn next_char_start(line: &str, byte: usize) -> usize {
     line[byte..].chars().next().map(|c| byte + c.len_utf8()).unwrap_or(byte)
+}
+
+pub(crate) fn next_word_start(line: &str, byte: usize, long_word: bool) -> Option<usize> {
+    let mut idx = previous_char_boundary(line, byte.min(line.len()));
+    let mut chars = line.get(idx..)?.chars();
+    let current = chars.next()?;
+
+    if is_motion_char(current, long_word) {
+        idx = next_char_start(line, idx);
+        while let Some(ch) = char_at(line, idx) {
+            if !is_motion_char(ch, long_word) {
+                break;
+            }
+            idx = next_char_start(line, idx);
+        }
+    }
+
+    while let Some(ch) = char_at(line, idx) {
+        if is_motion_char(ch, long_word) {
+            return Some(idx);
+        }
+        idx = next_char_start(line, idx);
+    }
+
+    None
+}
+
+pub(crate) fn prev_word_start(line: &str, byte: usize, long_word: bool) -> Option<usize> {
+    if line.is_empty() || byte == 0 {
+        return None;
+    }
+
+    let mut idx = prev_char_start(line, byte.min(line.len()));
+    while let Some(ch) = char_at(line, idx) {
+        if is_motion_char(ch, long_word) {
+            break;
+        }
+        if idx == 0 {
+            return None;
+        }
+        idx = prev_char_start(line, idx);
+    }
+
+    while idx > 0 {
+        let prev = prev_char_start(line, idx);
+        let Some(ch) = char_at(line, prev) else {
+            break;
+        };
+        if !is_motion_char(ch, long_word) {
+            break;
+        }
+        idx = prev;
+    }
+
+    Some(idx)
+}
+
+pub(crate) fn next_word_end(line: &str, byte: usize, long_word: bool) -> Option<usize> {
+    let mut idx = previous_char_boundary(line, byte.min(line.len()));
+
+    while let Some(ch) = char_at(line, idx) {
+        if is_motion_char(ch, long_word) {
+            break;
+        }
+        idx = next_char_start(line, idx);
+    }
+
+    let mut end = idx;
+    let mut found = false;
+    while let Some(ch) = char_at(line, idx) {
+        if !is_motion_char(ch, long_word) {
+            break;
+        }
+        found = true;
+        end = idx;
+        idx = next_char_start(line, idx);
+    }
+
+    found.then_some(end)
 }

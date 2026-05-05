@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 use std::fs;
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -27,36 +27,6 @@ use serde_json::{self, Value};
 
 use crate::syntax::{LanguageId, Languages};
 use crate::tabs::{BufferId, ViewId};
-
-/// Loads the included base config settings.
-fn load_base_config() -> Table {
-    fn load(default: &str) -> Table {
-        table_from_toml_str(default).expect("default configs must load")
-    }
-
-    fn platform_overrides() -> Option<Table> {
-        if cfg!(test) {
-            // Exit early if we are in tests and never have platform overrides.
-            // This makes sure we have a stable test environment.
-            None
-        } else if cfg!(windows) {
-            let toml = include_str!("../assets/windows.toml");
-            Some(load(toml))
-        } else {
-            // All other platorms
-            None
-        }
-    }
-
-    let base_toml: &str = include_str!("../assets/defaults.toml");
-    let mut base = load(base_toml);
-    if let Some(overrides) = platform_overrides() {
-        for (k, v) in overrides.iter() {
-            base.insert(k.to_owned(), v.to_owned());
-        }
-    }
-    base
-}
 
 /// A map of config keys to settings
 pub type Table = serde_json::Map<String, Value>;
@@ -192,6 +162,31 @@ pub struct BufferItems {
     pub save_with_newline: bool,
 }
 
+impl Default for BufferItems {
+    fn default() -> Self {
+        Self {
+            line_ending: "\n".to_owned(),
+            tab_size: 4,
+            translate_tabs_to_spaces: true,
+            use_tab_stops: true,
+            font_face: "InconsolataGo".to_owned(),
+            font_size: 14.0,
+            auto_indent: true,
+            scroll_past_end: false,
+            wrap_width: 0,
+            word_wrap: false,
+            autodetect_whitespace: true,
+            surrounding_pairs: vec![
+                ("\"".to_owned(), "\"".to_owned()),
+                ("'".to_owned(), "'".to_owned()),
+                ("{".to_owned(), "}".to_owned()),
+                ("[".to_owned(), "]".to_owned()),
+            ],
+            save_with_newline: true,
+        }
+    }
+}
+
 pub type BufferConfig = Config<BufferItems>;
 
 impl ConfigPair {
@@ -244,9 +239,8 @@ impl ConfigPair {
 
 impl ConfigManager {
     pub fn new(config_dir: Option<PathBuf>, extras_dir: Option<PathBuf>) -> Self {
-        let base = load_base_config();
         let mut defaults = HashMap::new();
-        defaults.insert(ConfigDomain::General, ConfigPair::with_base(base));
+        defaults.insert(ConfigDomain::General, ConfigPair::with_base(default_buffer_table()));
         ConfigManager {
             configs: defaults,
             buffer_tags: HashMap::new(),
@@ -255,13 +249,6 @@ impl ConfigManager {
             config_dir,
             extras_dir,
         }
-    }
-
-    /// The path of the user's config file, if present.
-    pub(crate) fn base_config_file_path(&self) -> Option<PathBuf> {
-        let config_file = self.config_dir.as_ref().map(|p| p.join("preferences.xiconfig"));
-        let exists = config_file.as_ref().map(|p| p.exists()).unwrap_or(false);
-        if exists { config_file } else { None }
     }
 
     pub(crate) fn get_plugin_paths(&self) -> Vec<PathBuf> {
@@ -431,34 +418,10 @@ impl ConfigManager {
                 .entry(domain.clone())
                 .and_modify(|c| *c = c.new_with_base(default_config.clone()))
                 .or_insert_with(|| ConfigPair::with_base(default_config));
-            if let Some(table) = self.load_user_config_file(&domain) {
-                // we can't report this error because we don't have a
-                // handle to the peer :|
-                let _ = self.set_user_config(domain, table);
-            }
         }
         // Language config changes are returned to the caller for propagation.
         self.languages = languages;
         self.update_all_buffer_configs()
-    }
-
-    fn load_user_config_file(&self, domain: &ConfigDomain) -> Option<Table> {
-        let path = self
-            .config_dir
-            .as_ref()
-            .map(|p| p.join(domain.file_stem()).with_extension("xiconfig"))?;
-
-        if !path.exists() {
-            return None;
-        }
-
-        match try_load_from_file(&path) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                error!("Error loading config: {:?}", e);
-                None
-            }
-        }
     }
 
     pub fn language_for_path(&self, path: &Path) -> Option<LanguageId> {
@@ -536,28 +499,6 @@ impl ConfigManager {
             .table_for_update(changes)
     }
 
-    /// Returns the `ConfigDomain` relevant to a given file, if one exists.
-    /// Returns `None` for paths that are not `.xiconfig` files.
-    pub fn domain_for_path(&self, path: &Path) -> Option<ConfigDomain> {
-        if path.extension().map(|e| e != "xiconfig").unwrap_or(true) {
-            return None;
-        }
-        match path.file_stem().and_then(|s| s.to_str()) {
-            // Accept both "preferences" and legacy "config" as general config.
-            Some("preferences") | Some("config") => Some(ConfigDomain::General),
-            Some(name) => {
-                if let Some(lang) = self.languages.language_for_name(name) {
-                    Some(ConfigDomain::Language(lang.name.clone()))
-                } else {
-                    // Treat unrecognized xiconfig files as plugin configs so
-                    // they are loaded and stored without triggering an alert.
-                    Some(ConfigDomain::PluginConfig(name.to_owned()))
-                }
-            }
-            _ => None,
-        }
-    }
-
     fn check_table(&self, table: &Table) -> Result<(), ConfigError> {
         // Plugin configs have free-form schemas; skip BufferItems validation.
         // Validation is performed only for domains that map to buffer settings.
@@ -592,6 +533,13 @@ impl ConfigManager {
             }
         }
         None
+    }
+}
+
+fn default_buffer_table() -> Table {
+    match serde_json::to_value(BufferItems::default()) {
+        Ok(Value::Object(table)) => table,
+        Ok(_) | Err(_) => Table::new(),
     }
 }
 
@@ -683,17 +631,6 @@ impl<'de, T: Deserialize<'de>> Config<T> {
     }
 }
 
-impl ConfigDomain {
-    fn file_stem(&self) -> &str {
-        match self {
-            ConfigDomain::General => "preferences",
-            ConfigDomain::Language(lang) => lang.as_ref(),
-            ConfigDomain::PluginConfig(name) => name.as_str(),
-            ConfigDomain::UserOverride(_) | ConfigDomain::SysOverride(_) => "we don't have files",
-        }
-    }
-}
-
 impl LanguageTag {
     fn new(detected: LanguageId) -> Self {
         LanguageTag { detected, user: None }
@@ -763,23 +700,6 @@ impl From<serde_json::Error> for ConfigError {
     fn from(src: serde_json::Error) -> ConfigError {
         ConfigError::UnexpectedItem(src)
     }
-}
-
-/// Creates initial config directory structure
-pub(crate) fn init_config_dir(dir: &Path) -> io::Result<()> {
-    let builder = fs::DirBuilder::new();
-    builder.create(dir)?;
-    builder.create(dir.join("plugins"))?;
-    Ok(())
-}
-
-/// Attempts to load a config from a file. The config's domain is determined
-/// by the file name.
-pub(crate) fn try_load_from_file(path: &Path) -> Result<Table, ConfigError> {
-    let mut file = fs::File::open(path)?;
-    let mut contents = String::new();
-    file.read_to_string(&mut contents)?;
-    table_from_toml_str(&contents).map_err(|e| ConfigError::Parse(path.to_owned(), e))
 }
 
 pub(crate) fn table_from_toml_str(s: &str) -> Result<Table, toml::de::Error> {
@@ -1015,25 +935,6 @@ translate_tabs_to_spaces = true
 
     fn rust_lang_def<T: Into<Option<Table>>>(defaults: T) -> LanguageDefinition {
         LanguageDefinition::simple("Rust", &["rs"], "source.rust", defaults.into())
-    }
-
-    #[test]
-    fn domain_for_path_preferences_and_legacy_config() {
-        let manager = ConfigManager::new(None, None);
-        let pref = Path::new("/some/dir/preferences.xiconfig");
-        let legacy = Path::new("/some/dir/config.xiconfig");
-        assert_eq!(manager.domain_for_path(pref), Some(ConfigDomain::General));
-        assert_eq!(manager.domain_for_path(legacy), Some(ConfigDomain::General));
-    }
-
-    #[test]
-    fn domain_for_path_plugin_config() {
-        let manager = ConfigManager::new(None, None);
-        let plugin_cfg = Path::new("/some/dir/xi-syntect-plugin.xiconfig");
-        assert_eq!(
-            manager.domain_for_path(plugin_cfg),
-            Some(ConfigDomain::PluginConfig("xi-syntect-plugin".to_owned()))
-        );
     }
 
     #[test]

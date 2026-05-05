@@ -34,7 +34,6 @@ fn test_startup() {
     assert!(rpc_looper.mainloop(|| json, &mut state).is_ok());
     assert_eq!(rx.expect_response(), Ok(json!("view-id-1")));
     rx.expect_rpc("available_plugins");
-    rx.expect_rpc("config_changed");
     rx.expect_rpc("language_changed");
     rx.expect_rpc("update");
     rx.expect_rpc("scroll_to");

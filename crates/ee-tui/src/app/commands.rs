@@ -20,6 +20,20 @@ impl App {
         let (range, rest) = parse_ex_range(&raw, cursor_line, line_count, &self.marks);
         let command = rest.trim_start();
 
+        match crate::terminal::parse_command(command) {
+            Ok(Some(shell_command)) => {
+                self.run_terminal_command(shell_command);
+                self.enter_normal_mode();
+                return;
+            }
+            Err(message) => {
+                self.backend.status_message = Some(message.to_owned());
+                self.enter_normal_mode();
+                return;
+            }
+            Ok(None) => {}
+        }
+
         // Bare range (e.g. `:5`, `:.`, `:%`) with no following command → jump.
         if command.is_empty() {
             if let Some((start, _end)) = range {
@@ -150,6 +164,21 @@ impl App {
                     self.backend.status_message = Some(format!("hover failed: {err}"));
                 }
             }
+            "gblame" => {
+                self.show_git_blame();
+                self.enter_normal_mode();
+                return;
+            }
+            "gdiff" => {
+                self.open_git_diff_view(false);
+                self.enter_normal_mode();
+                return;
+            }
+            "ghunkdiff" => {
+                self.open_git_diff_view(true);
+                self.enter_normal_mode();
+                return;
+            }
             "reindent" => {
                 let _ = self.backend.send_edit("reindent", json!([]));
             }
@@ -165,31 +194,31 @@ impl App {
                 self.open_help_picker("Keymap", Self::keymap_help_items());
                 return;
             }
-            "selectionforfind" => {
+            "selection_for_find" => {
                 let _ =
                     self.backend.send_edit("selection_for_find", json!({ "case_sensitive": true }));
                 let _ = self.backend.send_edit("highlight_find", json!({ "visible": true }));
             }
-            "selectionforreplace" => {
+            "selection_for_replace" => {
                 let _ = self.backend.send_edit("selection_for_replace", json!([]));
             }
             "transpose" => {
                 let _ = self.backend.send_edit("transpose", json!([]));
             }
-            "duplicateline" => {
+            "duplicate_line" => {
                 let _ = self.backend.send_edit("duplicate_line", json!([]));
             }
-            "increasenumber" => {
+            "increment" => {
                 let _ = self.backend.send_edit("increase_number", json!([]));
             }
-            "decreasenumber" => {
+            "decrement" => {
                 let _ = self.backend.send_edit("decrease_number", json!([]));
             }
-            "multifind" => {
+            "multi_find" => {
                 let terms = parts.collect::<Vec<_>>();
                 if terms.is_empty() {
                     self.backend.status_message =
-                        Some("multifind: usage: :multifind term [term ...]".to_owned());
+                        Some("multi_find: usage: :multi_find term [term ...]".to_owned());
                 } else {
                     let queries = terms
                         .into_iter()
@@ -207,16 +236,73 @@ impl App {
                     let _ = self.backend.send_edit("multi_find", json!({ "queries": queries }));
                 }
             }
-            "selectionintolines" | "splitselection" => {
+            "selection_into_lines" | "split_selection" => {
                 let _ = self.backend.send_edit("selection_into_lines", json!([]));
             }
-            "addselabove" => {
-                let _ = self.backend.send_edit("add_selection_above", json!([]));
+            "split_selection_on_newline" => {
+                let _ = self.backend.send_edit("selection_into_lines", json!([]));
             }
-            "addselbelow" => {
+            "select_regex" => {
+                let pattern = parts.collect::<Vec<_>>().join(" ");
+                if pattern.is_empty() {
+                    self.backend.status_message =
+                        Some("select_regex: usage: :select_regex pattern".to_owned());
+                } else {
+                    let _ = self.backend.send_edit(
+                        "select_regex",
+                        json!({
+                            "chars": pattern,
+                            "case_sensitive": false,
+                        }),
+                    );
+                }
+            }
+            "merge_selections" => {
+                let _ = self.backend.send_edit("merge_selections", json!([]));
+            }
+            "merge_consecutive_selections" => {
+                let _ = self.backend.send_edit("merge_consecutive_selections", json!([]));
+            }
+            "trim_selections" => {
+                let _ = self.backend.send_edit("trim_selections", json!([]));
+            }
+            "collapse_selection" => {
+                let _ = self.backend.send_edit("collapse_selections", json!([]));
+            }
+            "flip_selections" => {
+                let _ = self.backend.send_edit("flip_selections", json!([]));
+            }
+            "ensure_selections_forward" => {
+                let _ = self.backend.send_edit("ensure_selections_forward", json!([]));
+            }
+            "keep_primary_selection" => {
+                let _ = self.backend.send_edit("keep_primary_selection", json!([]));
+            }
+            "remove_primary_selection" => {
+                let _ = self.backend.send_edit("remove_primary_selection", json!([]));
+            }
+            "copy_selection_on_next_line" => {
                 let _ = self.backend.send_edit("add_selection_below", json!([]));
             }
-            "inserttab" => {
+            "copy_selection_on_prev_line" => {
+                let _ = self.backend.send_edit("add_selection_above", json!([]));
+            }
+            "rotate_selection_contents_backward" => {
+                let _ = self.backend.send_edit("rotate_selection_contents_backward", json!([]));
+            }
+            "rotate_selection_contents_forward" => {
+                let _ = self.backend.send_edit("rotate_selection_contents_forward", json!([]));
+            }
+            "select_all" => {
+                let _ = self.backend.send_edit("select_all", json!([]));
+            }
+            "add_selection_above" => {
+                let _ = self.backend.send_edit("add_selection_above", json!([]));
+            }
+            "add_selection_below" => {
+                let _ = self.backend.send_edit("add_selection_below", json!([]));
+            }
+            "insert_tab" => {
                 let _ = self.backend.send_edit("insert_tab", json!([]));
             }
             "e" | "edit" => {
@@ -675,17 +761,20 @@ impl App {
             "edit",
             "edit!",
             "commands",
-            "decreasenumber",
-            "duplicateline",
+            "decrement",
+            "duplicate_line",
             "files",
             "Files",
             "format",
             "grep",
             "Grep",
+            "gblame",
+            "gdiff",
+            "ghunkdiff",
             "help",
             "hover",
-            "increasenumber",
-            "inserttab",
+            "increment",
+            "insert_tab",
             "keymap",
             "lcl",
             "lclose",
@@ -699,7 +788,8 @@ impl App {
             "lprev",
             "lprevious",
             "ls",
-            "multifind",
+            "multi_find",
+            "make",
             "q",
             "q!",
             "quit",
@@ -710,10 +800,26 @@ impl App {
             "rename",
             "references",
             "refs",
-            "selectionforfind",
-            "selectionforreplace",
-            "selectionintolines",
-            "splitselection",
+            "run",
+            "selection_for_find",
+            "selection_for_replace",
+            "select_regex",
+            "selection_into_lines",
+            "split_selection",
+            "split_selection_on_newline",
+            "merge_selections",
+            "merge_consecutive_selections",
+            "trim_selections",
+            "collapse_selection",
+            "flip_selections",
+            "ensure_selections_forward",
+            "keep_primary_selection",
+            "remove_primary_selection",
+            "copy_selection_on_next_line",
+            "copy_selection_on_prev_line",
+            "rotate_selection_contents_backward",
+            "rotate_selection_contents_forward",
+            "select_all",
             "sp",
             "split",
             "tabc",
@@ -727,9 +833,12 @@ impl App {
             "tabprev",
             "tabprevious",
             "tabs",
+            "term",
+            "terminal",
+            "test",
             "transpose",
-            "addselabove",
-            "addselbelow",
+            "add_selection_above",
+            "add_selection_below",
             "vs",
             "vsplit",
             "w",
@@ -758,9 +867,10 @@ impl App {
             "Move: h j k l | w b e | gg G | % | * # | n N".to_owned(),
             "Edit: d c y operators | p/P register paste | u undo | Ctrl-R redo | . repeat".to_owned(),
             "IDE: :hover :complete :codeaction :definition :references :rename :diagnostics".to_owned(),
-            "Backend ops: :transpose :duplicateline :increasenumber :decreasenumber :reindent".to_owned(),
-            "Selections: :selectionforfind :selectionforreplace :selectionintolines :addselabove :addselbelow".to_owned(),
-            "Search sets: :multifind term [term ...]".to_owned(),
+            "Backend ops: :transpose :duplicate_line :increment :decrement :reindent".to_owned(),
+            "Selections: :select_regex :selection_into_lines :trim_selections :collapse_selection :select_all".to_owned(),
+            "Search sets: :multi_find term [term ...]".to_owned(),
+            "Shell: :term cmd | :!cmd | :make [args] | :test [args] | :run [args]".to_owned(),
             "Workspace: :files :bpick :grep :buffers :split :vsplit :tabnew".to_owned(),
         ]
     }
@@ -771,25 +881,48 @@ impl App {
             ":commands list ex commands and features".to_owned(),
             ":keymap list high-value normal-mode bindings".to_owned(),
             ":hover request LSP hover at cursor".to_owned(),
+            ":term cmd run shell command and open transcript buffer".to_owned(),
+            ":!cmd shorthand shell command runner".to_owned(),
+            ":make [args] run cargo build in transcript buffer".to_owned(),
+            ":test [args] run cargo test in transcript buffer".to_owned(),
+            ":run [args] run cargo run in transcript buffer".to_owned(),
+            ":gblame show git blame metadata for current line".to_owned(),
+            ":gdiff open git diff for current buffer in scratch view".to_owned(),
+            ":ghunkdiff open git diff for current hunk in scratch view".to_owned(),
             ":complete open completion picker from backend suggestions".to_owned(),
             ":codeaction open backend code-action picker".to_owned(),
             ":rename new_name request backend rename at cursor".to_owned(),
             ":diagnostics open location list for active-buffer diagnostics".to_owned(),
             ":reindent run core reindent on current selection or line".to_owned(),
             ":transpose backend transpose at cursor".to_owned(),
-            ":duplicateline backend duplicate current selection line(s)".to_owned(),
-            ":increasenumber / :decreasenumber adjust number under cursor".to_owned(),
-            ":selectionforfind / :selectionforreplace lift selection into find or replace"
+            ":duplicate_line backend duplicate current selection line(s)".to_owned(),
+            ":increment / :decrement adjust number under cursor".to_owned(),
+            ":selection_for_find / :selection_for_replace lift selection into find or replace"
                 .to_owned(),
-            ":selectionintolines split selection into per-line cursors".to_owned(),
-            ":addselabove / :addselbelow grow multi-cursor set".to_owned(),
-            ":multifind term [term ...] run backend multi-find queries".to_owned(),
+            ":selection_into_lines split selection into per-line cursors".to_owned(),
+            ":select_regex pattern select regex matches inside current selections".to_owned(),
+            ":split_selection_on_newline split selections on line boundaries".to_owned(),
+            ":merge_selections / :merge_consecutive_selections combine active selections"
+                .to_owned(),
+            ":trim_selections / :collapse_selection normalize current selections".to_owned(),
+            ":flip_selections / :ensure_selections_forward rewrite selection direction".to_owned(),
+            ":keep_primary_selection / :remove_primary_selection keep or drop rightmost selection"
+                .to_owned(),
+            ":copy_selection_on_next_line / :copy_selection_on_prev_line clone selection to adjacent line"
+                .to_owned(),
+            ":rotate_selection_contents_backward / :rotate_selection_contents_forward cycle selected text"
+                .to_owned(),
+            ":select_all select entire buffer".to_owned(),
+            ":add_selection_above / :add_selection_below grow multi-cursor set".to_owned(),
+            ":multi_find term [term ...] run backend multi-find queries".to_owned(),
         ]
     }
 
     fn keymap_help_items() -> Vec<String> {
         vec![
             "K request hover".to_owned(),
+            "gb show git blame for current line".to_owned(),
+            "gD open git diff scratch view".to_owned(),
             "Ctrl-A increase number under cursor".to_owned(),
             "Ctrl-X decrease number under cursor".to_owned(),
             "Ctrl-Up add selection above".to_owned(),
@@ -797,6 +930,7 @@ impl App {
             "gd duplicate current line or selection".to_owned(),
             "* / # selection-for-find forward/backward".to_owned(),
             "gt / gT next and previous tab".to_owned(),
+            "]h / [h git hunk next and previous".to_owned(),
             "]q / [q quickfix next and previous".to_owned(),
             "]Q / [Q location list next and previous".to_owned(),
             "z a o c R M fold toggle/open/close/open-all/close-all".to_owned(),

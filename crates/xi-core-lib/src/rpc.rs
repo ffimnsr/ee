@@ -26,6 +26,7 @@ use serde::ser::{self, Serializer};
 use serde::{Deserialize, Serialize};
 use serde_json::{self, Value, json};
 
+use crate::config::{ConfigDomainExternal, Table};
 use crate::plugins::PlaceholderRpc;
 use crate::tabs::ViewId;
 use crate::view::Size;
@@ -175,6 +176,8 @@ pub enum CoreNotification {
     Plugin(PluginNotification),
     /// Tells `xi-core` to close the specified view.
     CloseView { view_id: ViewId },
+    /// Replaces frontend-owned editor config for one domain.
+    SetConfig { domain: ConfigDomainExternal, changes: Table },
     /// Tells `xi-core` to save the contents of the specified view's
     /// buffer to the specified path.
     Save { view_id: ViewId, file_path: String },
@@ -481,6 +484,20 @@ pub enum EditNotification {
     ReplaceNext,
     ReplaceAll,
     SelectionForReplace,
+    SelectRegex {
+        chars: String,
+        #[serde(default)]
+        case_sensitive: bool,
+    },
+    MergeSelections,
+    MergeConsecutiveSelections,
+    TrimSelections,
+    FlipSelections,
+    EnsureSelectionsForward,
+    KeepPrimarySelection,
+    RemovePrimarySelection,
+    RotateSelectionContentsBackward,
+    RotateSelectionContentsForward,
     RequestHover {
         request_id: usize,
         position: Option<Position>,

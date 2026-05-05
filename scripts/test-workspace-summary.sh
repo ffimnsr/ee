@@ -9,6 +9,7 @@ Usage:
   scripts/test-workspace-summary.sh --print-command [cargo test args...]
 
 Runs `cargo test` with provided args. If no args passed, defaults to `--workspace`.
+Cargo global args like `+stable` are accepted before test args.
 Hides raw cargo output, then prints merged totals for:
 passed, failed, ignored, measured, filtered out.
 
@@ -149,16 +150,17 @@ END {
 
 run_tests() {
     local log_file cargo_pid heartbeat_pid start_ts cargo_status
+    local cargo_prefix=()
     local cargo_args=()
     log_file="$(mktemp)"
     trap "rm -f '$log_file'; if [ -n \"\${heartbeat_pid-}\" ]; then kill \"\$heartbeat_pid\" 2>/dev/null || true; fi" EXIT
-    resolve_cargo_args cargo_args "$@"
+    resolve_cargo_invocation cargo_prefix cargo_args "$@"
 
     start_ts="$(date +%s)"
     printf 'cargo test started...\n'
 
     set +e
-    cargo test "${cargo_args[@]}" >"$log_file" 2>&1 &
+    cargo "${cargo_prefix[@]}" test "${cargo_args[@]}" >"$log_file" 2>&1 &
     cargo_pid=$!
     print_heartbeat "$start_ts" "$cargo_pid" &
     heartbeat_pid=$!
@@ -177,6 +179,38 @@ run_tests() {
     return "$cargo_status"
 }
 
+resolve_cargo_invocation() {
+    local -n out_prefix="$1"
+    local -n out_args="$2"
+    shift 2
+
+    out_prefix=()
+    out_args=()
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            +*)
+                out_prefix+=("$1")
+                shift
+                ;;
+            --)
+                shift
+                break
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    if [ "$#" -eq 0 ]; then
+        out_args=(--workspace)
+        return
+    fi
+
+    out_args=("$@")
+}
+
 resolve_cargo_args() {
     local -n out_args="$1"
     shift
@@ -190,9 +224,14 @@ resolve_cargo_args() {
 }
 
 print_command() {
+    local cargo_prefix=()
     local cargo_args=()
-    resolve_cargo_args cargo_args "$@"
-    printf 'cargo test'
+    resolve_cargo_invocation cargo_prefix cargo_args "$@"
+    printf 'cargo'
+    if [ "${#cargo_prefix[@]}" -gt 0 ]; then
+        printf ' %q' "${cargo_prefix[@]}"
+    fi
+    printf ' test'
     if [ "${#cargo_args[@]}" -gt 0 ]; then
         printf ' %q' "${cargo_args[@]}"
     fi

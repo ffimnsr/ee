@@ -47,6 +47,20 @@ impl WindowLayout {
         Self { windows: vec![win], focused: 0, split_dir: SplitDir::Horizontal, next_id: 2 }
     }
 
+    pub(crate) fn from_parts(windows: Vec<Window>, focused: usize, split_dir: SplitDir) -> Self {
+        let next_id = windows.iter().map(|window| window.id).max().unwrap_or(0).saturating_add(1);
+        let focused = focused.min(windows.len().saturating_sub(1));
+        Self { windows, focused, split_dir, next_id }
+    }
+
+    pub(crate) fn windows(&self) -> &[Window] {
+        &self.windows
+    }
+
+    pub(crate) fn focused_idx(&self) -> usize {
+        self.focused
+    }
+
     pub(crate) fn focused_window(&self) -> &Window {
         &self.windows[self.focused]
     }
@@ -301,6 +315,14 @@ impl TabManager {
     /// Iterator over all tabs for UI rendering: yields `(index, &TabPage)`.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (usize, &TabPage)> {
         self.tabs.iter().enumerate()
+    }
+
+    pub(crate) fn replace_tabs(&mut self, tabs: Vec<TabPage>, focused: usize) {
+        if tabs.is_empty() {
+            return;
+        }
+        self.tabs = tabs;
+        self.focused = focused.min(self.tabs.len().saturating_sub(1));
     }
 }
 

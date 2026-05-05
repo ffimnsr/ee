@@ -798,8 +798,12 @@ fn render_gutter(
             } else {
                 (' ', Color::Rgb(100, 130, 160))
             };
-            let (annotation_marker, annotation_fg) =
-                annotation_marker_for_line(buf, li).unwrap_or((' ', Color::Rgb(90, 100, 125)));
+            let (annotation_marker, annotation_fg) = app
+                .git_status(buf.id)
+                .and_then(|status| status.sign_for_line(li))
+                .map(|sign| (sign.marker(), git_sign_color(sign)))
+                .or_else(|| annotation_marker_for_line(buf, li))
+                .unwrap_or((' ', Color::Rgb(90, 100, 125)));
             vec![
                 Span::styled(marker.to_string(), Style::default().fg(fg).bg(bg)),
                 Span::styled(
@@ -1084,7 +1088,12 @@ fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
 
     let spans = match app.config.statusline_format {
         StatuslineFormat::Minimal => {
-            vec![mode, file, modified, position]
+            let mut spans = vec![mode, file, modified];
+            if let Some(git_span) = git_status_span(app) {
+                spans.push(git_span);
+            }
+            spans.push(position);
+            spans
         }
         StatuslineFormat::Default => {
             let buf_count = app.backend.buf_count();
@@ -1115,7 +1124,14 @@ fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
                     Style::default().fg(Color::Rgb(100, 120, 150)).bg(Color::Rgb(49, 54, 68)),
                 )
             };
-            vec![mode, file, modified, buf_indicator, flag_span, position]
+            let mut spans = vec![mode, file, modified];
+            if let Some(git_span) = git_status_span(app) {
+                spans.push(git_span);
+            }
+            spans.push(buf_indicator);
+            spans.push(flag_span);
+            spans.push(position);
+            spans
         }
     };
 
@@ -1123,6 +1139,23 @@ fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(49, 54, 68))),
         area,
     );
+}
+
+fn git_sign_color(sign: crate::git::GitSign) -> Color {
+    match sign {
+        crate::git::GitSign::Added => Color::Rgb(166, 227, 161),
+        crate::git::GitSign::Modified => Color::Rgb(250, 179, 135),
+        crate::git::GitSign::Deleted => Color::Rgb(243, 139, 168),
+    }
+}
+
+fn git_status_span(app: &App) -> Option<Span<'static>> {
+    let status = app.current_git_status()?;
+    let dirty = if status.dirty { '*' } else { ' ' };
+    Some(Span::styled(
+        format!("  git:{}{}", status.branch, dirty),
+        Style::default().fg(Color::Rgb(166, 227, 161)).bg(Color::Rgb(49, 54, 68)),
+    ))
 }
 
 fn render_prompt(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
@@ -1494,7 +1527,9 @@ mod tests {
         let buf = BufState {
             id: 1,
             path: None,
+            display_name: None,
             view_id: String::new(),
+            editor_config_synced: true,
             pending_line_request: false,
             line_cache: Vec::new(),
             lines: vec![String::from("alpha")],

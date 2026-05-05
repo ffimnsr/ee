@@ -36,14 +36,18 @@ Place behavior in frontend when it depends on input device, UI toolkit, terminal
 - Viewport origin: terminal dimensions, resize handling, scroll offsets, cursor placement on screen.
 - Clipboard and registers: unnamed, named, numbered, system clipboard, bracketed paste, OSC 52.
 - Local workflow glue: messages, prompts, picker filtering, quickfix navigation, command history.
+- Editor config loading: filetype-specific config discovery, parser choice, config-file precedence, and translation from frontend config sources into backend config tables.
 - Display cache: frontend may cache backend line updates, but backend remains source of truth.
 
 Frontend code must not reimplement document mutation semantics, undo history, plugin revision logic, LSP protocol handling, or file consistency rules.
+
+Editor config is frontend-owned. Backend is editor-config agnostic and must not load editor config files, choose parser by filetype, or depend on `.editorconfig`, `.ee.toml`, or any other frontend config source. Frontend must resolve whatever config source applies for file type and parser in use, then send resulting semantic config values to backend.
 
 ## Boundary Rules
 
 - Frontend sends intent; backend applies editor semantics.
 - Backend sends state; frontend chooses display.
+- Frontend resolves editor config source and parser; backend only receives resolved config values.
 - Raw mouse or touch input is frontend-owned; canonical gesture semantics are backend-owned.
 - RPC methods must stay frontend agnostic. Names should describe editor operations, not UI gestures unless operation is inherently a gesture.
 - Backend notifications should contain data, not rendering instructions.

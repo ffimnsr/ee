@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::sync::mpsc::TryRecvError;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -24,11 +26,12 @@ use crate::backend::{
     invalid_line_ranges, parse_notification,
 };
 use crate::buffer::{BufState, BufferManager};
+use crate::git::{GitBufferCache, GitBufferStatus, GitHunk, GitSign};
 use crate::keymap::{Action, BindingKey, bindings};
 use crate::picker::PickerKind;
 use crate::text::{
     byte_col_to_display_col, display_col_to_byte, find_char_backward, find_char_forward,
-    next_char_start, prev_char_start,
+    next_char_start, next_word_end, next_word_start, prev_char_start, prev_word_start,
 };
 use crate::ui::ui;
 
@@ -354,6 +357,36 @@ fn open_file_bootstraps_full_buffer_from_updates() {
 
     fs::remove_file(&path).unwrap();
     assert_eq!(app.backend.lines, contents.split('\n').map(ToOwned::to_owned).collect::<Vec<_>>());
+}
+
+#[test]
+fn terminal_command_opens_named_transcript_buffer() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)));
+    #[cfg(windows)]
+    let command = "!echo hello-from-shell";
+    #[cfg(not(windows))]
+    let command = "!printf 'hello-from-shell\\n'";
+    for ch in command.chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    app.backend.pump().unwrap();
+
+    assert_eq!(app.backend.buf_count(), 2);
+    assert!(app.backend.title().starts_with("term: "));
+    assert!(app.backend.lines.iter().any(|line| line.contains("hello-from-shell")));
+}
+
+#[test]
+fn named_scratch_buffer_uses_display_name() {
+    let mut app = App::from_path(None).unwrap();
+
+    let buf_id = app.backend.open_named_scratch_buffer("term: cargo test").unwrap();
+    app.backend.switch_to_id(buf_id).unwrap();
+
+    assert_eq!(app.backend.title(), "term: cargo test");
 }
 
 #[test]
@@ -687,6 +720,24 @@ fn complete_command_uses_backend_edit() {
 }
 
 #[test]
+fn increment_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in ":increment".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "increase_number");
+}
+
+#[test]
 fn rename_command_uses_backend_edit() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
@@ -836,10 +887,7 @@ fn selection_for_replace_command_uses_backend_edit() {
     let mut app = App::from_path(None).unwrap();
     app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
 
-    for ch in [
-        ':', 's', 'e', 'l', 'e', 'c', 't', 'i', 'o', 'n', 'f', 'o', 'r', 'r', 'e', 'p', 'l', 'a',
-        'c', 'e',
-    ] {
+    for ch in ":selection_for_replace".chars() {
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
     }
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
@@ -848,6 +896,76 @@ fn selection_for_replace_command_uses_backend_edit() {
     let value: Value = serde_json::from_str(&message).expect("message should be json");
     assert_eq!(value["method"], "edit");
     assert_eq!(value["params"]["method"], "selection_for_replace");
+}
+
+#[test]
+fn select_regex_command_uses_selection_scoped_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in ":select_regex foo.*bar".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("select_regex request should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["params"]["method"], "select_regex");
+    assert_eq!(value["params"]["params"]["chars"], "foo.*bar");
+    assert_eq!(value["params"]["params"]["case_sensitive"], false);
+}
+
+#[test]
+fn split_selection_on_newline_command_uses_selection_into_lines_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in ":split_selection_on_newline".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["params"]["method"], "selection_into_lines");
+}
+
+#[test]
+fn collapse_selection_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in ":collapse_selection".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["params"]["method"], "collapse_selections");
+}
+
+#[test]
+fn select_all_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in ":select_all".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["params"]["method"], "select_all");
 }
 
 #[test]
@@ -910,7 +1028,7 @@ fn duplicate_line_command_uses_backend_edit() {
     let mut app = App::from_path(None).unwrap();
     app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
 
-    for ch in [':', 'd', 'u', 'p', 'l', 'i', 'c', 'a', 't', 'e', 'l', 'i', 'n', 'e'] {
+    for ch in ":duplicate_line".chars() {
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
     }
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
@@ -940,13 +1058,13 @@ fn reindent_command_uses_backend_edit() {
 }
 
 #[test]
-fn multifind_command_uses_backend_edit() {
+fn multi_find_command_uses_backend_edit() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
     let mut app = App::from_path(None).unwrap();
     app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
 
-    for ch in ":multifind alpha beta".chars() {
+    for ch in ":multi_find alpha beta".chars() {
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
     }
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
@@ -1191,6 +1309,462 @@ fn k_binding_requests_hover() {
 }
 
 #[test]
+fn parse_action_spec_accepts_requested_motion_aliases() {
+    assert_eq!(
+        crate::keymap::parse_action_spec("move_next_word_start").unwrap(),
+        Action::MoveWordStart { forward: true, long_word: false }
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("move_prev_word_start").unwrap(),
+        Action::MoveWordStart { forward: false, long_word: false }
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("move_next_word_end").unwrap(),
+        Action::MoveWordEnd { long_word: false }
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("move_next_long_word_start").unwrap(),
+        Action::MoveWordStart { forward: true, long_word: true }
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("move_prev_long_word_start").unwrap(),
+        Action::MoveWordStart { forward: false, long_word: true }
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("move_next_long_word_end").unwrap(),
+        Action::MoveWordEnd { long_word: true }
+    );
+}
+
+#[test]
+fn parse_action_spec_accepts_requested_find_aliases() {
+    assert_eq!(
+        crate::keymap::parse_action_spec("find_next_char").unwrap(),
+        Action::PendingCharFind { forward: true, inclusive: true }
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("find_till_char").unwrap(),
+        Action::PendingCharFind { forward: true, inclusive: false }
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("find_prev_char").unwrap(),
+        Action::PendingCharFind { forward: false, inclusive: true }
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("till_prev_char").unwrap(),
+        Action::PendingCharFind { forward: false, inclusive: false }
+    );
+}
+
+#[test]
+fn parse_action_spec_accepts_requested_command_aliases() {
+    assert_eq!(crate::keymap::parse_action_spec("no_op").unwrap(), Action::NoOp);
+    assert_eq!(
+        crate::keymap::parse_action_spec("record_macro").unwrap(),
+        Action::MacroRecordToggle
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("replay_macro").unwrap(),
+        Action::MacroReplayPrefix
+    );
+    assert_eq!(crate::keymap::parse_action_spec("search").unwrap(), Action::EnterSearch);
+    assert_eq!(
+        crate::keymap::parse_action_spec("reverse_search").unwrap(),
+        Action::EnterSearchBackward
+    );
+    assert_eq!(crate::keymap::parse_action_spec("search_next").unwrap(), Action::FindNext);
+    assert_eq!(crate::keymap::parse_action_spec("search_prev").unwrap(), Action::FindPrevious);
+    assert_eq!(
+        crate::keymap::parse_action_spec("search_selection_detect_word_boundaries").unwrap(),
+        Action::SearchSelection { detect_word_boundaries: true }
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("search_selection").unwrap(),
+        Action::SearchSelection { detect_word_boundaries: false }
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("normal_mode").unwrap(),
+        Action::EnterMode(Mode::Normal)
+    );
+    assert_eq!(crate::keymap::parse_action_spec("goto_line").unwrap(), Action::GotoLine);
+    assert_eq!(
+        crate::keymap::parse_action_spec("repeat_last_motion").unwrap(),
+        Action::RepeatLastMotion
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("goto_line_start").unwrap(),
+        Action::Edit("move_to_left_end_of_line")
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("goto_line_end").unwrap(),
+        Action::Edit("move_to_right_end_of_line")
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("page_up").unwrap(),
+        Action::Edit("scroll_page_up")
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("page_down").unwrap(),
+        Action::Edit("scroll_page_down")
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("page_cursor_half_up").unwrap(),
+        Action::PageCursorHalfUp
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("page_cursor_half_down").unwrap(),
+        Action::PageCursorHalfDown
+    );
+    assert_eq!(crate::keymap::parse_action_spec("jump_forward").unwrap(), Action::JumpListNewer);
+    assert_eq!(crate::keymap::parse_action_spec("jump_backward").unwrap(), Action::JumpListOlder);
+    assert_eq!(crate::keymap::parse_action_spec("save_selection").unwrap(), Action::SaveSelection);
+    assert_eq!(crate::keymap::parse_action_spec("replace").unwrap(), Action::Replace);
+    assert_eq!(
+        crate::keymap::parse_action_spec("replace_with_yanked").unwrap(),
+        Action::ReplaceWithYanked
+    );
+    assert_eq!(crate::keymap::parse_action_spec("switch_case").unwrap(), Action::SwitchCase);
+    assert_eq!(
+        crate::keymap::parse_action_spec("switch_to_lowercase").unwrap(),
+        Action::SwitchToLowercase
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("switch_to_uppercase").unwrap(),
+        Action::SwitchToUppercase
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("insert_mode").unwrap(),
+        Action::EnterMode(Mode::Insert)
+    );
+    assert_eq!(crate::keymap::parse_action_spec("append_mode").unwrap(), Action::AppendAfterCursor);
+    assert_eq!(
+        crate::keymap::parse_action_spec("visual_mode").unwrap(),
+        Action::EnterMode(Mode::Visual)
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("select_mode").unwrap(),
+        Action::EnterMode(Mode::Visual)
+    );
+    assert_eq!(crate::keymap::parse_action_spec("command_mode").unwrap(), Action::EnterCommandMode);
+    assert_eq!(
+        crate::keymap::parse_action_spec("insert_at_line_start").unwrap(),
+        Action::InsertAtLineStart
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("insert_at_line_end").unwrap(),
+        Action::AppendAtEndOfLine
+    );
+    assert_eq!(crate::keymap::parse_action_spec("open_below").unwrap(), Action::OpenLineBelow);
+    assert_eq!(crate::keymap::parse_action_spec("open_above").unwrap(), Action::OpenLineAbove);
+    assert_eq!(crate::keymap::parse_action_spec("undo").unwrap(), Action::Undo);
+    assert_eq!(crate::keymap::parse_action_spec("redo").unwrap(), Action::Redo);
+    assert_eq!(crate::keymap::parse_action_spec("earlier").unwrap(), Action::Undo);
+    assert_eq!(crate::keymap::parse_action_spec("later").unwrap(), Action::Redo);
+    assert_eq!(crate::keymap::parse_action_spec("yank").unwrap(), Action::YankSelection);
+    assert_eq!(crate::keymap::parse_action_spec("paste_after").unwrap(), Action::PasteAfter);
+    assert_eq!(crate::keymap::parse_action_spec("paste_before").unwrap(), Action::PasteBefore);
+    assert_eq!(
+        crate::keymap::parse_action_spec("select_register").unwrap(),
+        Action::RegisterPrefix
+    );
+    assert_eq!(crate::keymap::parse_action_spec("indent").unwrap(), Action::IndentSelection);
+    assert_eq!(crate::keymap::parse_action_spec("unindent").unwrap(), Action::UnindentSelection);
+    assert_eq!(
+        crate::keymap::parse_action_spec("format_selections").unwrap(),
+        Action::FormatSelections
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("delete_selection").unwrap(),
+        Action::DeleteSelection { yank: true, enter_insert: false }
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("delete_selection_noyank").unwrap(),
+        Action::DeleteSelection { yank: false, enter_insert: false }
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("change_selection").unwrap(),
+        Action::DeleteSelection { yank: true, enter_insert: true }
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("change_selection_noyank").unwrap(),
+        Action::DeleteSelection { yank: false, enter_insert: true }
+    );
+}
+
+#[test]
+fn no_op_action_leaves_mode_unchanged() {
+    let mut app = App::from_path(None).unwrap();
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('z'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::NoOp,
+    );
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::ALT)));
+
+    assert_eq!(app.mode, Mode::Normal);
+}
+
+#[test]
+fn search_selection_alias_uses_plain_find_query() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.lines = vec![String::from("alpha beta")];
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('*'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::SearchSelection { detect_word_boundaries: false },
+    );
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('*'), KeyModifiers::ALT)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "find");
+    assert_eq!(value["params"]["params"]["chars"], "alpha");
+    assert_eq!(value["params"]["params"]["whole_words"], false);
+}
+
+#[test]
+fn search_selection_detect_word_boundaries_uses_whole_word_find_query() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.lines = vec![String::from("alpha beta")];
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('#'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::SearchSelection { detect_word_boundaries: true },
+    );
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('#'), KeyModifiers::ALT)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "find");
+    assert_eq!(value["params"]["params"]["chars"], "alpha");
+    assert_eq!(value["params"]["params"]["whole_words"], true);
+}
+
+#[test]
+fn normal_mode_alias_returns_from_insert() {
+    let mut app = App::from_path(None).unwrap();
+    app.mode = Mode::Insert;
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Insert,
+            key: KeyCode::Char('n'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::EnterMode(Mode::Normal),
+    );
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT)));
+
+    assert_eq!(app.mode, Mode::Normal);
+}
+
+#[test]
+fn change_selection_alias_enters_insert_mode() {
+    let mut app = App::from_path(None).unwrap();
+    app.backend.lines = vec![String::from("abc")];
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('c'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::DeleteSelection { yank: true, enter_insert: true },
+    );
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT)));
+
+    assert_eq!(app.mode, Mode::Insert);
+}
+
+#[test]
+fn goto_line_action_uses_count_as_target_line() {
+    let mut app = App::from_path(None).unwrap();
+    app.backend.lines = vec![String::from("a"), String::from("b"), String::from("c")];
+    app.input_state.count_digits = vec![2];
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('g'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::GotoLine,
+    );
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT)));
+
+    assert_eq!(app.jump_list.last().copied(), Some((0, 0)));
+}
+
+#[test]
+fn save_selection_action_pushes_current_cursor_to_jump_list() {
+    let mut app = App::from_path(None).unwrap();
+    app.backend.cursor_line = 3;
+    app.backend.cursor_col = 4;
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('s'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::SaveSelection,
+    );
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT)));
+
+    assert_eq!(app.jump_list.last().copied(), Some((3, 4)));
+}
+
+#[test]
+fn replace_action_waits_for_next_character() {
+    let mut app = App::from_path(None).unwrap();
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('r'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::Replace,
+    );
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT)));
+
+    assert!(app.input_state.awaiting_replace_char);
+}
+
+#[test]
+fn insert_visual_and_command_aliases_change_modes() {
+    let mut app = App::from_path(None).unwrap();
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('i'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::EnterMode(Mode::Insert),
+    );
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('v'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::EnterMode(Mode::Visual),
+    );
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char(':'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::EnterCommandMode,
+    );
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::ALT)));
+    assert_eq!(app.mode, Mode::Insert);
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT)));
+    assert_eq!(app.mode, Mode::Visual);
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::ALT)));
+    assert_eq!(app.mode, Mode::CommandLine);
+}
+
+#[test]
+fn git_bindings_are_registered() {
+    let b = bindings();
+    let lookup = |key, prefix| {
+        b.get(&BindingKey { mode: Mode::Normal, key, modifiers: KeyModifiers::NONE, prefix })
+            .cloned()
+    };
+
+    assert_eq!(lookup(KeyCode::Char('h'), Some(']')), Some(Action::GitNextHunk));
+    assert_eq!(lookup(KeyCode::Char('h'), Some('[')), Some(Action::GitPrevHunk));
+    assert_eq!(lookup(KeyCode::Char('b'), Some('g')), Some(Action::GitBlame));
+    assert_eq!(lookup(KeyCode::Char('D'), Some('g')), Some(Action::GitDiff));
+}
+
+#[test]
+fn ui_render_shows_git_gutter_sign() {
+    let mut app = App::from_path(None).unwrap();
+    let line = String::from("alpha");
+    let buf_id = app.backend.active().id;
+    app.backend.lines = vec![line.clone()];
+    app.backend.line_cache = vec![LineSlot::Known(CachedLine {
+        text: line,
+        cursors: vec![0],
+        syntax_spans: Vec::new(),
+    })];
+    app.source_control.insert(
+        buf_id,
+        GitBufferCache {
+            fingerprint: 0,
+            path: None,
+            last_refresh: Instant::now(),
+            status: Some(GitBufferStatus {
+                repo_root: PathBuf::from("/tmp/repo"),
+                repo_name: String::from("repo"),
+                repo_relative: String::from("src/lib.rs"),
+                branch: String::from("main"),
+                tracked: true,
+                dirty: true,
+                hunks: vec![GitHunk {
+                    old_start: 0,
+                    old_count: 1,
+                    new_start: 0,
+                    new_count: 1,
+                    display_line: 0,
+                    sign: GitSign::Modified,
+                    lines: Vec::new(),
+                }],
+                line_signs: HashMap::from([(0, GitSign::Modified)]),
+            }),
+        },
+    );
+
+    let backend = TestBackend::new(30, 6);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let gutter = (0..6).map(|x| buffer.cell((x, 0)).unwrap().symbol()).collect::<String>();
+
+    assert!(gutter.contains("~"), "gutter row was {gutter:?}");
+}
+
+#[test]
 fn ctrl_up_and_down_bind_multi_cursor_actions() {
     let b = bindings();
     let up = b
@@ -1248,6 +1822,48 @@ fn gd_binds_duplicate_line() {
         })
         .cloned();
     assert_eq!(lookup, Some(Action::Edit("duplicate_line")));
+}
+
+#[test]
+fn app_uses_configured_keymap_overrides() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(".ee.toml"),
+        r#"
+[keymap]
+inherit_defaults = true
+
+[[keymap.unbind]]
+mode = "normal"
+key = "K"
+
+[[keymap.bindings]]
+mode = "normal"
+key = "H"
+action = "request_hover"
+"#,
+    )
+    .unwrap();
+
+    let cwd = env::current_dir().unwrap();
+    env::set_current_dir(temp.path()).unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::NONE)));
+    assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::NONE)));
+    let message = rx.recv().expect("message should be sent");
+
+    env::set_current_dir(cwd).unwrap();
+
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "request_hover");
 }
 
 #[test]
@@ -1405,6 +2021,27 @@ fn find_char_backward_returns_none_when_absent() {
 }
 
 #[test]
+fn next_word_start_moves_to_following_identifier() {
+    assert_eq!(next_word_start("alpha beta", 0, false), Some(6));
+}
+
+#[test]
+fn prev_word_start_moves_to_current_identifier_start() {
+    assert_eq!(prev_word_start("alpha beta", 8, false), Some(6));
+}
+
+#[test]
+fn next_word_end_stops_at_identifier_end() {
+    assert_eq!(next_word_end("alpha beta", 0, false), Some(4));
+}
+
+#[test]
+fn long_word_motion_treats_punctuation_as_word_content() {
+    assert_eq!(next_word_start("alpha::beta gamma", 0, true), Some(12));
+    assert_eq!(next_word_end("alpha::beta gamma", 0, true), Some(10));
+}
+
+#[test]
 fn prev_char_start_ascii() {
     assert_eq!(prev_char_start("hello", 3), 2);
 }
@@ -1464,7 +2101,9 @@ fn test_buf_state() -> BufState {
     BufState {
         id: 1,
         path: None,
+        display_name: None,
         view_id: String::new(),
+        editor_config_synced: true,
         pending_line_request: false,
         line_cache: Vec::new(),
         lines: Vec::new(),

@@ -465,7 +465,7 @@ impl<'a> EventContext<'a> {
     /// [`view_init`] must have been called before this method.
     ///
     /// [`view_init`]: Self::view_init
-    pub(crate) fn finish_init(&mut self, config: &Table) {
+    pub(crate) fn finish_init(&mut self, _config: &Table) {
         if !self.plugins.is_empty() {
             let info = self.plugin_info();
 
@@ -482,7 +482,6 @@ impl<'a> EventContext<'a> {
             .collect::<Vec<_>>();
         self.client.available_plugins(self.view_id, &available_plugins);
 
-        self.client.config_changed(self.view_id, config);
         self.client.language_changed(self.view_id, &self.language);
 
         // Rewrap and request a render.
@@ -534,7 +533,6 @@ impl<'a> EventContext<'a> {
             self.update_wrap_settings(true);
         }
 
-        self.client.config_changed(self.view_id, changes);
         self.plugins.iter().for_each(|plug| plug.config_changed(self.view_id, changes));
         self.render()
     }
