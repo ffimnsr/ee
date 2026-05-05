@@ -341,7 +341,7 @@ impl Lines {
         &mut self,
         text: &Rope,
         width_cache: &mut WidthCache,
-        client: &Client,
+        client: &dyn WidthMeasure,
         visible_lines: Range<usize>,
         max_lines: Option<usize>,
     ) -> WrapSummary {
@@ -444,6 +444,45 @@ impl Lines {
             self.do_wrap_task(text, width_cache, client, 0..10, Some(usize::MAX));
         }
     }
+}
+
+#[doc(hidden)]
+pub fn fuzz_rewrap_mono(
+    text: &Rope,
+    wrap_cols: usize,
+    visible_start_line: usize,
+    visible_end_line: usize,
+) {
+    let mut lines = Lines::default();
+    let wrap = match wrap_cols {
+        0 => WrapWidth::None,
+        _ => WrapWidth::Width(wrap_cols as f64),
+    };
+    lines.set_wrap_width(text, wrap);
+
+    let mut width_cache = WidthCache::new();
+    let max_visible_line = text.measure::<LinesMetric>() + 1;
+    let visible_start_line = visible_start_line.min(max_visible_line.saturating_sub(1));
+    let visible_end_line =
+        visible_end_line.max(visible_start_line.saturating_add(1)).min(max_visible_line);
+    for _ in 0..64 {
+        if lines.is_converged() {
+            break;
+        }
+        let _ = lines.do_wrap_task(
+            text,
+            &mut width_cache,
+            &CodepointMono,
+            visible_start_line..visible_end_line,
+            None,
+        );
+    }
+
+    let probe_offset = text.prev_codepoint_offset(text.len()).unwrap_or(0);
+    let visual_line = lines.visual_line_of_offset(text, probe_offset);
+    let _ = lines.offset_of_visual_line(text, visual_line);
+    let _ = lines.logical_line_range(text, visual_line);
+    let _ = lines.iter_lines(text, visual_line).take(8).count();
 }
 
 /// A potential opportunity to insert a break. In this representation, the widths
@@ -941,6 +980,24 @@ mod tests {
 
         assert_eq!(cursor.next(), Some(30));
         assert_eq!(cursor.next(), None);
+    }
+
+    #[test]
+    fn fuzz_rewrap_mono_smoke() {
+        let text: Rope = "zero\u{200d}width joiner\nemoji 👨‍👩‍👧‍👦 cluster".into();
+        fuzz_rewrap_mono(&text, 6, 0, 8);
+    }
+
+    #[test]
+    fn fuzz_rewrap_mono_clamps_visible_window() {
+        let text: Rope = "single line".into();
+        fuzz_rewrap_mono(&text, 8, usize::MAX, usize::MAX);
+    }
+
+    #[test]
+    fn fuzz_rewrap_mono_uses_char_boundary_probe() {
+        let text: Rope = "emoji 🙈".into();
+        fuzz_rewrap_mono(&text, 8, 0, 4);
     }
 
     #[test]

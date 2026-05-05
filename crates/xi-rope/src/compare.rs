@@ -121,20 +121,17 @@ pub unsafe fn ne_idx_avx(one: &[u8], two: &[u8]) -> Option<usize> {
     unsafe {
         let min_len = one.len().min(two.len());
         let mut idx = 0;
-        while idx < min_len {
-            let stride_len = AVX_STRIDE.min(min_len - idx);
+        while idx + AVX_STRIDE <= min_len {
             let mask = avx_compare_mask(
-                one.get_unchecked(idx..idx + stride_len),
-                two.get_unchecked(idx..idx + stride_len),
+                one.get_unchecked(idx..idx + AVX_STRIDE),
+                two.get_unchecked(idx..idx + AVX_STRIDE),
             );
-            // at the end of the slice the mask might include garbage bytes, so
-            // we ignore matches that are OOB
-            if mask != 0 && idx + (mask.trailing_zeros() as usize) < min_len {
+            if mask != 0 {
                 return Some(idx + mask.trailing_zeros() as usize);
             }
             idx += AVX_STRIDE;
         }
-        None
+        ne_idx_fallback(&one[idx..min_len], &two[idx..min_len]).map(|tail_idx| idx + tail_idx)
     }
 }
 
@@ -149,18 +146,17 @@ pub unsafe fn ne_idx_sse(one: &[u8], two: &[u8]) -> Option<usize> {
     unsafe {
         let min_len = one.len().min(two.len());
         let mut idx = 0;
-        while idx < min_len {
-            let stride_len = SSE_STRIDE.min(min_len - idx);
+        while idx + SSE_STRIDE <= min_len {
             let mask = sse_compare_mask(
-                one.get_unchecked(idx..idx + stride_len),
-                two.get_unchecked(idx..idx + stride_len),
+                one.get_unchecked(idx..idx + SSE_STRIDE),
+                two.get_unchecked(idx..idx + SSE_STRIDE),
             );
-            if mask != 0 && idx + (mask.trailing_zeros() as usize) < min_len {
+            if mask != 0 {
                 return Some(idx + mask.trailing_zeros() as usize);
             }
             idx += SSE_STRIDE;
         }
-        None
+        ne_idx_fallback(&one[idx..min_len], &two[idx..min_len]).map(|tail_idx| idx + tail_idx)
     }
 }
 
@@ -756,6 +752,42 @@ mod tests {
             let one = "________________________________________";
             let two = "______________________________________0_";
             assert_eq!(ne_idx_avx(one.as_bytes(), two.as_bytes()), Some(38));
+        }
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn simd_tail_regression_matches_fallback() {
+        fn assert_tail_case(one: &[u8], two: &[u8]) {
+            let expected = ne_idx_fallback(one, two);
+
+            if is_x86_feature_detected!("sse4.2") {
+                unsafe {
+                    assert_eq!(ne_idx_sse(one, two), expected);
+                }
+            }
+
+            if is_x86_feature_detected!("avx2") {
+                unsafe {
+                    assert_eq!(ne_idx_avx(one, two), expected);
+                }
+            }
+        }
+
+        for len in 0..40 {
+            let one = vec![b'a'; len];
+            assert_tail_case(&one, &one);
+
+            if len > 0 {
+                let shorter = vec![b'a'; len - 1];
+                assert_tail_case(&one, &shorter);
+            }
+
+            for mismatch in 0..len {
+                let mut two = one.clone();
+                two[mismatch] = b'b';
+                assert_tail_case(&one, &two);
+            }
         }
     }
 }

@@ -111,16 +111,16 @@ pub fn duplicate_line(base: &Rope, regions: &[SelRegion], config: &BufferItems) 
 pub fn delete_backward(base: &Rope, regions: &[SelRegion], config: &BufferItems) -> RopeDelta {
     // TODO: this function is workable but probably overall code complexity
     // could be improved by implementing a "backspace" movement instead.
-    let mut builder = DeltaBuilder::new(base.len());
+    let mut deletions = Selection::new();
     for region in regions {
         let start = offset_for_delete_backwards(region, base, config);
         let iv = Interval::new(start, region.max());
         if !iv.is_empty() {
-            builder.delete(iv);
+            deletions.add_region(SelRegion::new(iv.start(), iv.end()));
         }
     }
 
-    builder.build()
+    delete_sel_regions(base, &deletions)
 }
 
 /// Common logic for a number of delete methods. For each region in the
@@ -489,16 +489,16 @@ pub fn transpose(base: &Rope, regions: &[SelRegion]) -> RopeDelta {
 
             // Note: this matches Emac's behavior. It swaps last
             // two characters of line if at end of line.
-            if start >= last {
-                let end_line_offset =
-                    LogicalLines.offset_of_line(base, LogicalLines.line_of_offset(base, end));
-                // include end != base.len() because if the editor is entirely empty, we dont' want to pull from empty space
-                if (end == middle || end == end_line_offset) && end != base.len() {
-                    middle = start;
-                    start = base.prev_grapheme_offset(middle).unwrap_or(0);
-                    end = middle.wrapping_add(1);
-                }
+            let end_line_offset =
+                LogicalLines.offset_of_line(base, LogicalLines.line_of_offset(base, end));
+            // include end != base.len() because if the editor is entirely empty, we dont' want to pull from empty space
+            if (end == middle || end == end_line_offset) && end != base.len() {
+                middle = start;
+                start = base.prev_grapheme_offset(middle).unwrap_or(0);
+                end = base.next_grapheme_offset(middle).unwrap_or(middle);
+            }
 
+            if start >= last {
                 let interval = Interval::new(start, end);
                 let before = base.slice_to_cow(start..middle);
                 let after = base.slice_to_cow(middle..end);
@@ -506,10 +506,13 @@ pub fn transpose(base: &Rope, regions: &[SelRegion]) -> RopeDelta {
                 builder.replace(interval, Rope::from(swapped));
                 last = end;
             }
-        } else if let Some(previous_selection) = optional_previous_selection {
+        } else if let Some(previous_selection) = optional_previous_selection.as_ref() {
             let current_interval = sel_region_to_interval_and_rope(base, region);
-            builder.replace(current_interval.0, previous_selection.1);
-            optional_previous_selection = Some(current_interval);
+            if current_interval.0.start() >= last {
+                builder.replace(current_interval.0, previous_selection.1.clone());
+                last = current_interval.0.end();
+                optional_previous_selection = Some(current_interval);
+            }
         }
     }
 
@@ -622,4 +625,67 @@ fn n_spaces(n: usize) -> &'static str {
     let spaces = "                                ";
     assert!(n <= spaces.len());
     &spaces[..n]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{delete_backward, transpose};
+    use crate::config::BufferItems;
+    use crate::selection::SelRegion;
+    use xi_rope::Rope;
+
+    #[test]
+    fn transpose_skips_overlapping_mixed_regions() {
+        let text: Rope = "abcd".into();
+        let regions = [SelRegion::new(1, 3), SelRegion::new(2, 2)];
+
+        let delta = transpose(&text, &regions);
+
+        assert_eq!(String::from(delta.apply(&text)), "abcd");
+    }
+
+    #[test]
+    fn transpose_skips_eol_overlap_after_adjustment() {
+        let text: Rope = "ab\n".into();
+        let regions = [SelRegion::new(0, 0), SelRegion::new(2, 2)];
+
+        let delta = transpose(&text, &regions);
+
+        assert_eq!(String::from(delta.apply(&text)), "a\nb");
+    }
+
+    #[test]
+    fn transpose_handles_multibyte_eol_grapheme() {
+        let text: Rope = "1ё\n".into();
+        let regions = [SelRegion::new(3, 3)];
+
+        let delta = transpose(&text, &regions);
+
+        assert_eq!(String::from(delta.apply(&text)), "1\nё");
+    }
+
+    #[test]
+    fn delete_backward_merges_overlapping_regions() {
+        let text: Rope = "abcd".into();
+        let config = BufferItems {
+            line_ending: "\n".to_owned(),
+            tab_size: 4,
+            translate_tabs_to_spaces: false,
+            use_tab_stops: true,
+            font_face: String::new(),
+            font_size: 12.0,
+            auto_indent: false,
+            scroll_past_end: false,
+            wrap_width: 0,
+            word_wrap: false,
+            autodetect_whitespace: false,
+            surrounding_pairs: Vec::new(),
+            save_with_newline: false,
+        };
+        let regions = [SelRegion::new(2, 2), SelRegion::new(3, 3)];
+
+        let delta = delete_backward(&text, &regions, &config);
+
+        assert_eq!(String::from(delta.apply(&text)), "ad");
+    }
 }

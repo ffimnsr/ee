@@ -481,6 +481,35 @@ impl ConfigManager {
         Ok(self.update_all_buffer_configs())
     }
 
+    #[doc(hidden)]
+    pub fn fuzz_apply_user_config_payload(
+        domain_case: u8,
+        language_name: &str,
+        format_case: u8,
+        payload: &[u8],
+    ) {
+        let mut manager = ConfigManager::new(None, None);
+        let buffer_id = BufferId(0);
+        let _ = manager.add_buffer(buffer_id, None);
+
+        let domain = match domain_case % 5 {
+            0 => ConfigDomain::General,
+            1 => ConfigDomain::Language(LanguageId::from(normalize_language_name(language_name))),
+            2 => ConfigDomain::PluginConfig(language_name.to_owned()),
+            3 => ConfigDomain::UserOverride(buffer_id),
+            _ => ConfigDomain::SysOverride(buffer_id),
+        };
+
+        let table = match parse_fuzz_table_payload(format_case, payload) {
+            Some(table) => table,
+            None => return,
+        };
+
+        let merged = manager.table_for_update(domain.clone(), table.clone());
+        let _ = manager.set_user_config(domain, table);
+        let _ = manager.check_table(&merged);
+    }
+
     /// Returns the `Table` produced by applying `changes` to the current user
     /// config for the given `ConfigDomain`.
     ///
@@ -563,6 +592,22 @@ impl ConfigManager {
             }
         }
         None
+    }
+}
+
+fn normalize_language_name(language_name: &str) -> &str {
+    if language_name.is_empty() { "Plain Text" } else { language_name }
+}
+
+fn parse_fuzz_table_payload(format_case: u8, payload: &[u8]) -> Option<Table> {
+    let text = std::str::from_utf8(payload).ok()?;
+    if format_case % 2 == 0 {
+        match serde_json::from_str::<Value>(text).ok()? {
+            Value::Object(table) => Some(table),
+            _ => None,
+        }
+    } else {
+        table_from_toml_str(text).ok()
     }
 }
 
@@ -820,6 +865,23 @@ mod tests {
         manager.set_user_config(ConfigDomain::UserOverride(buf_id_3), changes).unwrap();
         let config = manager.get_buffer_config(buf_id_3);
         assert_eq!(config.items.tab_size, 85);
+    }
+
+    #[test]
+    fn fuzz_apply_user_config_payload_accepts_json_and_toml_tables() {
+        ConfigManager::fuzz_apply_user_config_payload(
+            0,
+            "Rust",
+            0,
+            br#"{"tab_size": 4, "translate_tabs_to_spaces": true}"#,
+        );
+
+        ConfigManager::fuzz_apply_user_config_payload(
+            3,
+            "Rust",
+            1,
+            b"tab_size = 8\ntranslate_tabs_to_spaces = false\n",
+        );
     }
 
     #[test]

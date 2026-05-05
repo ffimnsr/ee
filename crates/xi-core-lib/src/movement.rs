@@ -114,6 +114,11 @@ fn vertical_motion_exact_pos(
     let col = if line_length < col { line_length - 1 } else { col };
 
     loop {
+        if line > n_lines {
+            line = init_line;
+            break;
+        }
+
         line_length = lo.offset_of_line(text, line + 1) - lo.offset_of_line(text, line);
 
         // If the line is longer than the current cursor position, break.
@@ -308,4 +313,24 @@ pub fn selection_movement(
         result.add_region(new_region);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Movement, region_movement};
+    use crate::line_offset::LogicalLines;
+    use crate::selection::SelRegion;
+    use xi_rope::Rope;
+
+    #[test]
+    fn down_exact_position_stays_on_single_line() {
+        let text: Rope = "single line".into();
+        let region = SelRegion::new(text.len(), text.len());
+
+        let moved =
+            region_movement(Movement::DownExactPosition, region, &LogicalLines, 1, &text, false);
+
+        assert_eq!(moved.min(), region.min());
+        assert_eq!(moved.max(), region.max());
+    }
 }
