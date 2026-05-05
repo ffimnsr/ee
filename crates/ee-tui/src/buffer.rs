@@ -14,10 +14,11 @@ use xi_core_lib::rpc::LineReplacement;
 use xi_rpc::RpcLoop;
 
 use crate::backend::{
-    BackendEvent, CachedLine, ChannelReader, ChannelWriter, CoreUpdate, CoreUpdateKind, LineSlot,
-    NavigationTarget, PendingRequests, PendingUiAction, block_for_response, checked_advance,
-    drain_sync_notifications, invalid_line_ranges, normalize_line_text, parse_response,
-    recv_with_timeout, send_rpc_notification, send_rpc_request, xi_reader_thread,
+    BackendEvent, CachedLine, ChannelReader, ChannelWriter, CoreAnnotation, CoreUpdate,
+    CoreUpdateKind, LineSlot, NavigationTarget, PendingRequests, PendingUiAction,
+    block_for_response, checked_advance, drain_sync_notifications, invalid_line_ranges,
+    normalize_line_text, parse_response, recv_with_timeout, send_rpc_notification,
+    send_rpc_request, xi_reader_thread,
 };
 use crate::text::previous_char_boundary;
 
@@ -44,6 +45,7 @@ pub(crate) struct BufState {
     /// Set when the backing file has been modified by another process.
     pub(crate) externally_modified: bool,
     pub(crate) diagnostics: Vec<Diagnostic>,
+    pub(crate) annotations: Vec<CoreAnnotation>,
 }
 
 impl BufState {
@@ -57,13 +59,15 @@ impl BufState {
     }
 
     pub(crate) fn apply_update(&mut self, update: CoreUpdate) -> io::Result<()> {
+        let CoreUpdate { ops, pristine, annotations } = update;
         let previous = std::mem::take(&mut self.line_cache);
         let mut next_cache = Vec::new();
         let mut source_index = 0;
 
-        self.pristine = update.pristine;
+        self.pristine = pristine;
+        self.annotations = annotations;
 
-        for op in update.ops {
+        for op in ops {
             match op.op {
                 CoreUpdateKind::Insert => {
                     if op.lines.len() != op.n {
@@ -207,6 +211,7 @@ impl PartialEq for BufState {
             && self.pristine == other.pristine
             && self.status_message == other.status_message
             && self.externally_modified == other.externally_modified
+            && self.annotations == other.annotations
     }
 }
 
@@ -315,6 +320,7 @@ impl BufferManager {
                 .and_then(|m| m.modified().ok()),
             externally_modified: false,
             diagnostics: Vec::new(),
+            annotations: Vec::new(),
         };
 
         let mut view_to_idx = HashMap::new();
@@ -738,6 +744,7 @@ impl BufferManager {
             mtime,
             externally_modified: false,
             diagnostics: Vec::new(),
+            annotations: Vec::new(),
         });
         Ok(buf_id)
     }
@@ -896,6 +903,7 @@ impl BufferManager {
             mtime: None,
             externally_modified: false,
             diagnostics: Vec::new(),
+            annotations: Vec::new(),
         };
         let mut view_to_idx = HashMap::new();
         view_to_idx.insert(view_id, 0);

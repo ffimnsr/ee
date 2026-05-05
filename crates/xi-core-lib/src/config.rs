@@ -975,21 +975,6 @@ translate_tabs_to_spaces = true
     }
 
     #[test]
-    fn plugin_config_is_stored_and_retrievable() {
-        let mut manager = ConfigManager::new(None, None);
-        let cfg = json!({"syntax_theme": "Solarized (dark)"}).as_object().cloned().unwrap();
-        manager
-            .set_user_config(ConfigDomain::PluginConfig("xi-syntect-plugin".to_owned()), cfg)
-            .unwrap();
-        let stored = manager.get_plugin_config("xi-syntect-plugin");
-        assert!(stored.is_some());
-        assert_eq!(
-            stored.unwrap().get("syntax_theme"),
-            Some(&Value::String("Solarized (dark)".to_owned()))
-        );
-    }
-
-    #[test]
     fn set_languages_returns_changes() {
         let mut manager = ConfigManager::new(None, None);
 

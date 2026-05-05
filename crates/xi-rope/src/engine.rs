@@ -33,9 +33,9 @@ use im::OrdSet;
 use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
 use std::borrow::Cow;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
-use std::collections::hash_map::DefaultHasher;
 
 use crate::delta::{Delta, InsertDelta};
 use crate::interval::Interval;
@@ -457,6 +457,12 @@ impl Engine {
     ) -> Result<(), Error> {
         let (new_rev, new_text, new_tombstones, new_deletes_from_union) =
             self.mk_new_rev(priority, undo_group, base_rev, delta)?;
+        if matches!(
+            new_rev.edit,
+            Edit { ref inserts, ref deletes, .. } if inserts.is_empty() && deletes.is_empty()
+        ) {
+            return Ok(());
+        }
         self.rev_id_counter += 1;
         self.revs.push(new_rev);
         self.text = new_text;
@@ -496,6 +502,29 @@ impl Engine {
     // This computes undo all the way from the beginning. An optimization would be to not
     // recompute the prefix up to where the history diverges, but it's not clear that's
     // even worth the code complexity.
+    fn deletes_from_union_for_undone_groups(&self, groups: &OrdSet<usize>) -> Subset {
+        let mut deletes_from_union = self.empty_subset_before_first_rev();
+
+        for rev in &self.revs {
+            if let Edit { ref undo_group, ref inserts, ref deletes, .. } = rev.edit {
+                if groups.contains(undo_group) {
+                    if !inserts.is_empty() {
+                        deletes_from_union = deletes_from_union.transform_union(inserts);
+                    }
+                } else {
+                    if !inserts.is_empty() {
+                        deletes_from_union = deletes_from_union.transform_expand(inserts);
+                    }
+                    if !deletes.is_empty() {
+                        deletes_from_union = deletes_from_union.union(deletes);
+                    }
+                }
+            }
+        }
+
+        deletes_from_union
+    }
+
     fn compute_undo(&self, groups: &OrdSet<usize>) -> (Revision, Subset) {
         let toggled_groups = self.undone_groups.clone().symmetric_difference(groups.clone());
         let first_candidate = self.find_first_undo_candidate_index(&toggled_groups);
@@ -540,6 +569,14 @@ impl Engine {
         let groups: OrdSet<usize> = groups.into_iter().map(|group| *group.borrow()).collect();
         let (new_rev, new_deletes_from_union) = self.compute_undo(&groups);
 
+        if matches!(
+            new_rev.edit,
+            Undo { ref deletes_bitxor, .. } if deletes_bitxor.is_empty()
+        ) {
+            self.undone_groups = groups;
+            return;
+        }
+
         let (new_text, new_tombstones) = shuffle(
             &self.text,
             &self.tombstones,
@@ -582,6 +619,9 @@ impl Engine {
         let gc_groups: OrdSet<usize> = gc_groups.into_iter().map(|group| *group.borrow()).collect();
         let mut gc_dels = self.empty_subset_before_first_rev();
         let mut retain_revs = BTreeSet::new();
+        if let Some(first) = self.revs.first() {
+            retain_revs.insert(first.rev_id);
+        }
         if let Some(last) = self.revs.last() {
             retain_revs.insert(last.rev_id);
         }
@@ -622,17 +662,24 @@ impl Engine {
                     } else {
                         Some(gc_dels.transform_shrink(&inserts))
                     };
-                    if retain_revs.contains(&rev.rev_id) || !gc_groups.contains(&undo_group) {
-                        let (inserts, deletes) = if gc_dels.is_empty() {
-                            (inserts, deletes)
-                        } else {
-                            (inserts.transform_shrink(&gc_dels), deletes.transform_shrink(&gc_dels))
-                        };
-                        self.revs.push(Revision {
-                            rev_id: rev.rev_id,
-                            max_undo_so_far: rev.max_undo_so_far,
-                            edit: Edit { priority, undo_group, inserts, deletes },
-                        });
+                    let (inserts, deletes) = if gc_dels.is_empty() {
+                        (inserts, deletes)
+                    } else {
+                        (inserts.transform_shrink(&gc_dels), deletes.transform_shrink(&gc_dels))
+                    };
+                    let retain_visible_insert = gc_groups.contains(&undo_group) && !inserts.is_empty();
+                    if retain_revs.contains(&rev.rev_id)
+                        || !gc_groups.contains(&undo_group)
+                        || retain_visible_insert
+                    {
+                        let drop_gc_only_delete = gc_groups.contains(&undo_group) && inserts.is_empty();
+                        if !drop_gc_only_delete && (!inserts.is_empty() || !deletes.is_empty()) {
+                            self.revs.push(Revision {
+                                rev_id: rev.rev_id,
+                                max_undo_so_far: rev.max_undo_so_far,
+                                edit: Edit { priority, undo_group, inserts, deletes },
+                            });
+                        }
                     }
                     if let Some(new_gc_dels) = new_gc_dels {
                         gc_dels = new_gc_dels;
@@ -662,16 +709,32 @@ impl Engine {
             }
         }
         self.revs.reverse();
+        if !self.revs.iter().any(|rev| matches!(rev.edit, Edit { .. })) {
+            self.text = Rope::default();
+            self.tombstones = Rope::default();
+            self.deletes_from_union = Subset::new(0);
+            self.undone_groups = OrdSet::new();
+        }
     }
 
     /// Merge the new content from another Engine into this one with a CRDT merge
     pub fn merge(&mut self, other: &Engine) {
-        let (mut new_revs, text, tombstones, deletes_from_union) = {
+        let (mut new_revs, remote_undos, text, tombstones, deletes_from_union) = {
             let base_index = find_base_index(&self.revs, &other.revs);
             let a_to_merge = &self.revs[base_index..];
             let b_to_merge = &other.revs[base_index..];
 
             let common = find_common(a_to_merge, b_to_merge);
+            let remote_undos = b_to_merge
+                .iter()
+                .filter(|rev| !common.contains(&rev.rev_id))
+                .filter_map(|rev| match rev.edit {
+                    Undo { ref toggled_groups, .. } => {
+                        Some((rev.rev_id, rev.max_undo_so_far, toggled_groups.clone()))
+                    }
+                    Edit { .. } => None,
+                })
+                .collect::<Vec<_>>();
 
             let a_new = rearrange(a_to_merge, &common, self.deletes_from_union.len());
             let b_new = rearrange(b_to_merge, &common, other.deletes_from_union.len());
@@ -681,20 +744,64 @@ impl Engine {
             let expand_by = compute_transforms(a_new);
 
             let max_undo = self.max_undo_group_id();
-            rebase(
+            let (new_revs, text, tombstones, deletes_from_union) = rebase(
                 expand_by,
                 b_deltas,
                 self.text.clone(),
                 self.tombstones.clone(),
                 self.deletes_from_union.clone(),
                 max_undo,
-            )
+            );
+            (new_revs, remote_undos, text, tombstones, deletes_from_union)
         };
 
         self.text = text;
         self.tombstones = tombstones;
         self.deletes_from_union = deletes_from_union;
         self.revs.append(&mut new_revs);
+        for (rev_id, max_undo_so_far, toggled_groups) in remote_undos {
+            self.merge_undo_revision(rev_id, max_undo_so_far, toggled_groups);
+        }
+        self.reconcile_undo_state();
+    }
+
+    fn merge_undo_revision(
+        &mut self,
+        rev_id: RevId,
+        max_undo_so_far: usize,
+        toggled_groups: OrdSet<usize>,
+    ) {
+        self.revs.push(Revision {
+            rev_id,
+            max_undo_so_far: std::cmp::max(max_undo_so_far, self.max_undo_group_id()),
+            edit: Undo { toggled_groups, deletes_bitxor: Subset::new(self.deletes_from_union.len()) },
+        });
+    }
+
+    fn reconcile_undo_state(&mut self) {
+        let groups = self
+            .revs
+            .iter()
+            .filter_map(|rev| match rev.edit {
+                Undo { ref toggled_groups, .. } if !toggled_groups.is_empty() => {
+                    Some(toggled_groups.clone())
+                }
+                _ => None,
+            })
+            .fold(OrdSet::new(), |groups, toggled| groups.symmetric_difference(toggled));
+        let new_deletes_from_union = self.deletes_from_union_for_undone_groups(&groups);
+        if new_deletes_from_union != self.deletes_from_union {
+            let (new_text, new_tombstones) = shuffle(
+                &self.text,
+                &self.tombstones,
+                &self.deletes_from_union,
+                &new_deletes_from_union,
+            );
+            self.text = new_text;
+            self.tombstones = new_tombstones;
+            self.deletes_from_union = new_deletes_from_union;
+        }
+        self.undone_groups = groups;
     }
 
     /// When merging between multiple concurrently-editing sessions, each session should have a unique ID
@@ -750,8 +857,9 @@ fn shuffle(
 
 /// Find an index before which everything is the same
 fn find_base_index(a: &[Revision], b: &[Revision]) -> usize {
-    assert!(!a.is_empty() && !b.is_empty());
-    assert!(a[0].rev_id == b[0].rev_id);
+    if a.is_empty() || b.is_empty() {
+        return 0;
+    }
 
     a.iter().zip(b.iter()).take_while(|(left, right)| left.rev_id == right.rev_id).count()
 }
@@ -774,6 +882,9 @@ fn find_common(a: &[Revision], b: &[Revision]) -> BTreeSet<RevId> {
 /// Conceptually, see the diagram below, with `.` being base revs and `n` being
 /// non-base revs, `N` being transformed non-base revs, and rearranges it:
 /// .n..n...nn..  -> ........NNNN -> returns vec![N,N,N,N]
+///
+/// Undo revisions do not affect insert ordering, so they are skipped here and
+/// replayed separately during merge.
 fn rearrange(revs: &[Revision], base_revs: &BTreeSet<RevId>, head_len: usize) -> Vec<Revision> {
     // transform representing the characters added by common revisions after a point.
     let mut s = Subset::new(head_len);
@@ -800,7 +911,7 @@ fn rearrange(revs: &[Revision], base_revs: &BTreeSet<RevId>, head_len: usize) ->
                     })
                 }
             }
-            Contents::Undo { .. } => panic!("can't merge undo yet"),
+            Contents::Undo { .. } => None,
         };
         if let Some(edit) = contents {
             out.push(Revision { edit, rev_id: rev.rev_id, max_undo_so_far: rev.max_undo_so_far });
@@ -907,7 +1018,8 @@ fn rebase(
         let full_priority = FullPriority { priority, session_id: rev_id.session_id() };
         // expand by each in expand_by
         for &(trans_priority, ref trans_inserts) in &expand_by {
-            let after = full_priority >= trans_priority; // should never be ==
+            // Equal priorities only happen for identical revisions, which do not rebase here.
+            let after = full_priority >= trans_priority;
             // d-expand by other
             inserts = inserts.transform_expand(trans_inserts, after);
             // trans-expand other by expanded so they have the same context
@@ -1292,6 +1404,181 @@ mod tests {
         // since one of the two deletes was gc'd this should re-do the one that wasn't
         engine.undo(std::iter::empty::<usize>());
         assert_eq!("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz", String::from(engine.get_head()));
+    }
+
+    #[test]
+    fn merge_after_empty_gc_keeps_common_base() {
+        let mut left = Engine::new(Rope::from(""));
+        left.set_session_id((11, 0));
+        let mut right = Engine::new(Rope::from(""));
+        right.set_session_id((29, 0));
+
+        left.undo(std::iter::empty::<usize>());
+        right.undo(std::iter::empty::<usize>());
+
+        left.gc(std::iter::empty::<usize>());
+        right.gc(std::iter::empty::<usize>());
+
+        left.merge(&right);
+        right.merge(&left);
+
+        assert_eq!(String::from(left.get_head()), String::from(right.get_head()));
+        assert_eq!("", String::from(left.get_head()));
+    }
+
+    #[test]
+    fn merge_ignores_noop_edit_revision() {
+        let mut left = Engine::new(Rope::from(""));
+        left.set_session_id((11, 0));
+        let mut right = Engine::new(Rope::from(""));
+        right.set_session_id((29, 0));
+
+        let base_rev = left.get_head_rev_id().token();
+        let no_op = Delta::simple_edit(Interval::new(0, 0), Rope::from(""), 0);
+        left.edit_rev(0, 0, base_rev, no_op);
+
+        left.merge(&right);
+        right.merge(&left);
+
+        assert_eq!(String::from(left.get_head()), String::from(right.get_head()));
+        assert_eq!(left.revs.len(), right.revs.len());
+        assert_eq!(1, left.revs.len());
+    }
+
+    #[test]
+    fn merge_ignores_unknown_undo_group() {
+        let mut left = Engine::new(Rope::from(""));
+        left.set_session_id((11, 0));
+        let mut right = Engine::new(Rope::from(""));
+        right.set_session_id((29, 0));
+
+        left.undo([0usize]);
+
+        left.merge(&right);
+        right.merge(&left);
+
+        assert_eq!(String::from(left.get_head()), String::from(right.get_head()));
+        assert_eq!(left.revs.len(), right.revs.len());
+        assert_eq!(1, left.revs.len());
+    }
+
+    #[test]
+    fn merge_replays_undo_of_initial_contents() {
+        let mut left = Engine::empty();
+        left.set_session_id((11, 0));
+        left.merge(&Engine::new(Rope::from("\u{1}")));
+        let mut right = Engine::empty();
+        right.set_session_id((29, 0));
+        right.merge(&Engine::new(Rope::from("\u{1}")));
+
+        left.undo([0usize]);
+
+        left.merge(&right);
+        right.merge(&left);
+        left.merge(&right);
+        right.merge(&left);
+
+        assert_eq!("", String::from(left.get_head()));
+        assert_eq!(String::from(left.get_head()), String::from(right.get_head()));
+        assert_eq!(left.revs.len(), right.revs.len());
+        assert_eq!(3, left.revs.len());
+        assert_eq!(left.undone_groups, right.undone_groups);
+    }
+
+    #[test]
+    fn merge_handles_histories_without_shared_prefix() {
+        let mut left = Engine::new(Rope::from(""));
+        left.set_session_id((11, 0));
+        let mut right = Engine::new(Rope::from(""));
+        right.set_session_id((29, 0));
+
+        let right_base = right.get_head_rev_id().token();
+        right.edit_rev(
+            0,
+            0,
+            right_base,
+            Delta::simple_edit(Interval::new(0, 0), Rope::from("\u{1}"), 0),
+        );
+
+        left.merge(&right);
+        right.merge(&left);
+
+        assert_eq!(String::from(left.get_head()), String::from(right.get_head()));
+        assert_eq!("\u{1}", String::from(left.get_head()));
+    }
+
+    #[test]
+    fn merge_concurrent_insert_in_undone_group_stays_undone() {
+        let mut left = Engine::empty();
+        left.set_session_id((11, 0));
+        left.merge(&Engine::new(Rope::from("A")));
+        let mut right = Engine::empty();
+        right.set_session_id((29, 0));
+        right.merge(&Engine::new(Rope::from("A")));
+
+        left.undo([0usize]);
+
+        let right_base = right.get_head_rev_id().token();
+        right.edit_rev(
+            255,
+            0,
+            right_base,
+            Delta::simple_edit(Interval::new(1, 1), Rope::from("\0"), 1),
+        );
+
+        left.merge(&right);
+        right.merge(&left);
+
+        assert_eq!(String::from(left.get_head()), String::from(right.get_head()));
+        assert_eq!("", String::from(left.get_head()));
+    }
+
+    #[test]
+    fn merge_duplicate_undo_toggles_converge_after_gc() {
+        let mut left = Engine::empty();
+        left.set_session_id((11, 0));
+        left.merge(&Engine::new(Rope::from("\0")));
+        let mut right = Engine::empty();
+        right.set_session_id((29, 0));
+        right.merge(&Engine::new(Rope::from("\0")));
+
+        left.undo([0usize, 255]);
+        right.undo([255usize, 0]);
+        left.gc([208usize, 0]);
+
+        left.merge(&right);
+        right.merge(&left);
+
+        assert_eq!(String::from(left.get_head()), String::from(right.get_head()));
+    }
+
+    #[test]
+    fn gc_group_zero_after_delete_from_initial_revision() {
+        let mut engine = Engine::new(Rope::from("\0\n"));
+        let base = engine.get_head_rev_id().token();
+        engine.edit_rev(0, 0, base, Delta::simple_edit(Interval::new(0, 2), Rope::from(""), 2));
+        engine.gc([0usize]);
+
+        assert_eq!("", String::from(engine.get_head()));
+    }
+
+    #[test]
+    fn merge_after_gc_of_group_zero_delete_from_initial_revision() {
+        let mut left = Engine::empty();
+        left.set_session_id((11, 0));
+        left.merge(&Engine::new(Rope::from("\0\n")));
+        let base = left.get_head_rev_id().token();
+        left.edit_rev(0, 0, base, Delta::simple_edit(Interval::new(0, 2), Rope::from(""), 2));
+        left.gc([0usize]);
+
+        let mut right = Engine::empty();
+        right.set_session_id((29, 0));
+        right.merge(&Engine::new(Rope::from("\0\n")));
+
+        left.merge(&right);
+        right.merge(&left);
+
+        assert_eq!(String::from(left.get_head()), String::from(right.get_head()));
     }
 
     fn basic_rev(i: usize) -> RevId {

@@ -70,7 +70,7 @@ fn check_lb(s: &str) -> bool {
 
 fn run_test(filename: &str, lb: bool) -> std::io::Result<()> {
     let f = File::open(filename)?;
-    let mut reader = BufReader::new(f);
+    let reader = BufReader::new(f);
     let mut pass = 0;
     let mut total = 0;
     for line in reader.lines() {

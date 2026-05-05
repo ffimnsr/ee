@@ -478,7 +478,6 @@ const MAX_POT_BREAKS: usize = 10_000;
 impl<'a> RewrapCtx<'a> {
     fn new(
         text: &'a Rope,
-        //_style_spans: &Spans<Style>,  client: &'a T,
         client: &'a dyn WidthMeasure,
         max_width: f64,
         width_cache: &'a mut WidthCache,

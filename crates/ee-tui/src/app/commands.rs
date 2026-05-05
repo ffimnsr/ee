@@ -165,10 +165,6 @@ impl App {
                 self.open_help_picker("Keymap", Self::keymap_help_items());
                 return;
             }
-            "protocol" => {
-                self.open_help_picker("Protocol", Self::protocol_help_items());
-                return;
-            }
             "selectionforfind" => {
                 let _ =
                     self.backend.send_edit("selection_for_find", json!({ "case_sensitive": true }));
@@ -704,7 +700,6 @@ impl App {
             "lprevious",
             "ls",
             "multifind",
-            "protocol",
             "q",
             "q!",
             "quit",
@@ -758,7 +753,7 @@ impl App {
 
     fn help_items() -> Vec<String> {
         vec![
-            "Discovery: :commands | :keymap | :protocol".to_owned(),
+            "Discovery: :commands | :keymap".to_owned(),
             "Modes: i insert | v visual | V visual-line | Ctrl-V visual-block | : command".to_owned(),
             "Move: h j k l | w b e | gg G | % | * # | n N".to_owned(),
             "Edit: d c y operators | p/P register paste | u undo | Ctrl-R redo | . repeat".to_owned(),
@@ -775,7 +770,6 @@ impl App {
             ":help open searchable editor help".to_owned(),
             ":commands list ex commands and features".to_owned(),
             ":keymap list high-value normal-mode bindings".to_owned(),
-            ":protocol show exposed vs retired xi-core protocol surface".to_owned(),
             ":hover request LSP hover at cursor".to_owned(),
             ":complete open completion picker from backend suggestions".to_owned(),
             ":codeaction open backend code-action picker".to_owned(),
@@ -808,18 +802,6 @@ impl App {
             "z a o c R M fold toggle/open/close/open-all/close-all".to_owned(),
             "Ctrl-O / Tab jump list older/newer".to_owned(),
             "g; / g, change list older/newer".to_owned(),
-        ]
-    }
-
-    fn protocol_help_items() -> Vec<String> {
-        vec![
-            "Exposed backend edits: request_hover transpose duplicate_line increase_number decrease_number multi_find reindent".to_owned(),
-            "Exposed selection edits: selection_for_find selection_for_replace selection_into_lines add_selection_above add_selection_below insert_tab".to_owned(),
-            "Canonical mouse path: gesture.select and gesture.drag; legacy click/drag shims avoided in ee-tui".to_owned(),
-            "Frontend-owned by design: paste, cut, copy, registers, clipboard, viewport resize".to_owned(),
-            "Removed from frontend protocol: get_config debug_get_contents set_theme modify_user_config tracing_config save_trace set_language cut copy".to_owned(),
-            "Removed legacy edit protocol commands no longer supported by xi crates".to_owned(),
-            "Intentional remaining legacy exposure: reindent via :reindent only".to_owned(),
         ]
     }
 }

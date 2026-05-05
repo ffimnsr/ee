@@ -116,6 +116,10 @@ impl Editor {
         &mut self.layers
     }
 
+    pub(crate) fn get_layers(&self) -> &Layers {
+        &self.layers
+    }
+
     pub(crate) fn get_head_rev_token(&self) -> u64 {
         self.engine.get_head_rev_id().token()
     }
@@ -534,7 +538,7 @@ impl Editor {
     /// the revision identified by `rev`.
     pub fn update_spans(
         &mut self,
-        _view: &mut View,
+        view: &mut View,
         plugin: PluginId,
         start: usize,
         len: usize,
@@ -565,6 +569,7 @@ impl Editor {
         }
         let iv = Interval::new(start, end_offset);
         self.layers.update_layer(plugin, iv, spans);
+        view.set_dirty(self.get_buffer());
     }
 
     /// Applies annotation span updates from a plugin, transforming spans if
