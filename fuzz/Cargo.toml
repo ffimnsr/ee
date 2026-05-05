@@ -13,9 +13,12 @@ arbitrary = { version = "1.4.2", features = ["derive"] }
 libfuzzer-sys = "0.4.10"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+xi-core-lib.workspace = true
+xi-plugin-lib.workspace = true
 xi-rope.workspace = true
 xi-rpc.workspace = true
 xi-lsp-lib = { path = "../crates/xi-lsp-lib", version = "0.1.0" }
+xi-unicode.workspace = true
 
 [[bin]]
 name = "xi_rope_crdt"
@@ -34,6 +37,41 @@ bench = false
 [[bin]]
 name = "xi_lsp_transport"
 path = "fuzz_targets/xi_lsp_transport.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xi_core_config"
+path = "fuzz_targets/xi_core_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xi_core_text"
+path = "fuzz_targets/xi_core_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xi_plugin_wasm"
+path = "fuzz_targets/xi_plugin_wasm.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xi_rope_compare"
+path = "fuzz_targets/xi_rope_compare.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "xi_unicode_text"
+path = "fuzz_targets/xi_unicode_text.rs"
 test = false
 doc = false
 bench = false

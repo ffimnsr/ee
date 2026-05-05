@@ -719,9 +719,12 @@ dependencies = [
  "libfuzzer-sys",
  "serde",
  "serde_json",
+ "xi-core-lib",
  "xi-lsp-lib",
+ "xi-plugin-lib",
  "xi-rope",
  "xi-rpc",
+ "xi-unicode",
 ]
 
 [[package]]

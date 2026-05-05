@@ -287,3 +287,54 @@ fn unpack_ptr_len(packed: u64) -> Result<(u32, usize), RpcError> {
 unsafe fn take_alloc(ptr: u32, len: usize) -> Vec<u8> {
     unsafe { Vec::from_raw_parts(ptr as *mut u8, len, len) }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::WasmPluginRuntime;
+    use crate::{ChunkCache, ConfigTable, CoreProxy, Plugin, View};
+    use std::path::Path;
+    use xi_rope::RopeDelta;
+
+    struct NoopPlugin;
+
+    impl Plugin for NoopPlugin {
+        type Cache = ChunkCache;
+
+        fn initialize(&mut self, _core: CoreProxy) {}
+
+        fn update(
+            &mut self,
+            _view: &mut View<Self::Cache>,
+            _delta: Option<&RopeDelta>,
+            _edit_type: String,
+            _author: String,
+        ) {
+        }
+
+        fn did_save(&mut self, _view: &mut View<Self::Cache>, _old_path: Option<&Path>) {}
+
+        fn did_close(&mut self, _view: &View<Self::Cache>) {}
+
+        fn new_view(&mut self, _view: &mut View<Self::Cache>) {}
+
+        fn config_changed(&mut self, _view: &mut View<Self::Cache>, _changes: &ConfigTable) {}
+    }
+
+    #[test]
+    fn handle_notification_rejects_empty_payload() {
+        let runtime = WasmPluginRuntime::new(NoopPlugin);
+
+        let err = runtime.handle_notification(&[]).unwrap_err();
+
+        assert!(err.contains("invalid host notification payload"));
+    }
+
+    #[test]
+    fn handle_request_rejects_empty_payload() {
+        let runtime = WasmPluginRuntime::new(NoopPlugin);
+
+        let err = runtime.handle_request(&[]).unwrap_err();
+
+        assert!(err.contains("invalid host request payload"));
+    }
+}
