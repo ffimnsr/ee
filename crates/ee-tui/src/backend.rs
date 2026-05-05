@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
 use xi_core_lib::XiCore;
 use xi_core_lib::plugin_rpc::{CodeActionDescriptor, Diagnostic, SymbolItem};
+use xi_core_lib::plugins::PluginTerminationReason;
 use xi_rpc::{ReadTransport, RpcLoop, WriteTransport};
 
 use crate::text::previous_char_boundary;
@@ -828,6 +829,15 @@ pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendE
             let msg = params.get("msg").and_then(Value::as_str)?.to_owned();
             Some(BackendEvent::Alert(msg))
         }
+        "plugin_started" => {
+            Some(BackendEvent::Alert(format_plugin_state_notification("started", &params)?))
+        }
+        "plugin_stopped" => {
+            Some(BackendEvent::Alert(format_plugin_state_notification("stopped", &params)?))
+        }
+        "plugin_terminated" => {
+            Some(BackendEvent::Alert(format_plugin_terminated_notification(&params)?))
+        }
         "hover" => {
             let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
             let content = params.get("content").and_then(Value::as_str)?.to_owned();
@@ -871,6 +881,29 @@ pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendE
         }
         _ => None,
     }
+}
+
+fn format_plugin_state_notification(state: &str, params: &Value) -> Option<String> {
+    let plugin = params.get("plugin").and_then(Value::as_str)?;
+    Some(format!("plugin {plugin} {state}"))
+}
+
+fn format_plugin_terminated_notification(params: &Value) -> Option<String> {
+    let plugin = params.get("plugin").and_then(Value::as_str)?;
+    let reason =
+        serde_json::from_value::<PluginTerminationReason>(params.get("reason")?.clone()).ok()?;
+    Some(match reason {
+        PluginTerminationReason::MaxRssBytes { limit_bytes, observed_bytes } => {
+            format!("plugin {plugin} terminated: rss {} > {} bytes", observed_bytes, limit_bytes)
+        }
+        PluginTerminationReason::MaxCpuSeconds { limit_seconds, observed_seconds } => format!(
+            "plugin {plugin} terminated: cpu {} > {} seconds",
+            observed_seconds, limit_seconds
+        ),
+        PluginTerminationReason::RpcTimedOut { limit_ms, method } => {
+            format!("plugin {plugin} terminated: rpc {method} timed out after {limit_ms} ms")
+        }
+    })
 }
 
 pub(crate) fn format_location_message(title: &str, locations: &[NavigationTarget]) -> String {

@@ -5,6 +5,7 @@ members = [
   "crates/xi-core-lib",
   "crates/xi-core",
   "crates/xi-lsp-lib",
+  "crates/xi-plugin-derive",
   "crates/xi-plugin-lib",
   "crates/xi-rope",
   "crates/xi-rpc",
@@ -37,12 +38,16 @@ memchr = "2.8.0"
 notify = "6"
 globset = "0.4"
 ignore = "0.4"
+jsonschema = "0.30"
 rand = "0.9"
 ratatui = "0.29"
 regex = "1.12.3"
+schemars = { version = "1.0", features = ["derive"] }
+semver = "1.0"
 signal-hook = "0.3"
 serde = "1.0.228"
 serde_json = "1.0.149"
+seccompiler = "0.5.0"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.20"
 syntect = { version = "5.3.0", default-features = false, features = ["default-themes", "default-syntaxes", "parsing", "dump-load", "dump-create", "plist-load", "yaml-load", "regex-fancy"] }
@@ -55,8 +60,11 @@ tree-sitter-rust = "0.24"
 tree-sitter-python = "0.25"
 unicode-segmentation = "1.13.2"
 url = "2.5.8"
+wasmtime = { version = "44.0.0", default-features = false, features = ["cranelift", "runtime", "std", "wat"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 xi-core-lib = { path = "crates/xi-core-lib", version = "0.4.0" }
+xi-plugin-derive = { path = "crates/xi-plugin-derive", version = "0.1.0" }
 xi-plugin-lib = { path = "crates/xi-plugin-lib", version = "0.1.0" }
 xi-rope = { path = "crates/xi-rope", version = "0.3.0" }
 xi-rpc = { path = "crates/xi-rpc", version = "0.3.0" }

@@ -30,11 +30,13 @@ pub enum Error {
     /// The peer returned an error.
     RemoteError(RemoteError),
     /// The peer closed the connection.
-    PeerDisconnect,
+    PeerExited { exit_status: Option<i32> },
+    /// The peer did not answer before the timeout elapsed.
+    PeerTimedOut { after_ms: u64 },
+    /// The peer sent malformed protocol data.
+    PeerProtocolError { reason: String },
     /// The peer sent a response containing the id, but was malformed.
     InvalidResponse,
-    /// The synchronous request timed out waiting for a response.
-    RequestTimeout,
     /// The request was cancelled by the caller.
     RequestCancelled,
 }
@@ -123,6 +125,35 @@ pub enum RemoteError {
     Unknown(Value),
 }
 
+pub trait RemoteErrorDetails: fmt::Display {
+    fn remote_error_code(&self) -> i64;
+
+    fn remote_error_data(&self) -> Option<Value> {
+        None
+    }
+}
+
+pub trait OptionExt<T> {
+    fn ok_or_remote<S>(self, code: i64, message: S) -> Result<T, RemoteError>
+    where
+        S: Into<String>;
+
+    fn ok_or_not_found<S>(self, message: S) -> Result<T, RemoteError>
+    where
+        Self: Sized,
+        S: Into<String>,
+    {
+        self.ok_or_remote(404, message)
+    }
+}
+
+pub trait ResultExt<T, E> {
+    fn map_err_remote<S, F>(self, code: i64, message: F) -> Result<T, RemoteError>
+    where
+        S: Into<String>,
+        F: FnOnce(&E) -> S;
+}
+
 impl RemoteError {
     /// Creates a new custom error.
     pub fn custom<S, V>(code: i64, message: S, data: V) -> Self
@@ -165,6 +196,25 @@ impl RemoteError {
     }
 }
 
+impl<T> OptionExt<T> for Option<T> {
+    fn ok_or_remote<S>(self, code: i64, message: S) -> Result<T, RemoteError>
+    where
+        S: Into<String>,
+    {
+        self.ok_or_else(|| RemoteError::custom(code, message.into(), None))
+    }
+}
+
+impl<T, E> ResultExt<T, E> for Result<T, E> {
+    fn map_err_remote<S, F>(self, code: i64, message: F) -> Result<T, RemoteError>
+    where
+        S: Into<String>,
+        F: FnOnce(&E) -> S,
+    {
+        self.map_err(|err| RemoteError::custom(code, message(&err).into(), None))
+    }
+}
+
 impl ReadError {
     /// Returns `true` iff this is the `ReadError::Disconnect` variant.
     pub fn is_disconnect(&self) -> bool {
@@ -203,6 +253,15 @@ impl From<io::Error> for ReadError {
 impl From<JsonError> for RemoteError {
     fn from(err: JsonError) -> RemoteError {
         RemoteError::ParseError(Some(json!(err.to_string())))
+    }
+}
+
+impl<T> From<T> for RemoteError
+where
+    T: RemoteErrorDetails,
+{
+    fn from(err: T) -> RemoteError {
+        RemoteError::custom(err.remote_error_code(), err.to_string(), err.remote_error_data())
     }
 }
 
@@ -263,5 +322,56 @@ impl Serialize for RemoteError {
         let data = data.to_owned();
         let err = ErrorHelper { code, message, data };
         err.serialize(serializer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OptionExt, RemoteError, RemoteErrorDetails, ResultExt};
+    use serde_json::{Value, json};
+
+    #[derive(Debug)]
+    struct SampleError;
+
+    impl std::fmt::Display for SampleError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "sample failure")
+        }
+    }
+
+    impl RemoteErrorDetails for SampleError {
+        fn remote_error_code(&self) -> i64 {
+            42
+        }
+
+        fn remote_error_data(&self) -> Option<Value> {
+            Some(json!({ "kind": "sample" }))
+        }
+    }
+
+    #[test]
+    fn remote_error_details_convert_into_remote_error() {
+        let err: RemoteError = SampleError.into();
+
+        assert_eq!(
+            err,
+            RemoteError::custom(42, "sample failure", Some(json!({ "kind": "sample" })))
+        );
+    }
+
+    #[test]
+    fn option_ext_maps_missing_values_to_not_found_errors() {
+        let err = None::<usize>.ok_or_not_found("missing value").unwrap_err();
+
+        assert_eq!(err, RemoteError::custom(404, "missing value", None));
+    }
+
+    #[test]
+    fn result_ext_maps_errors_to_remote_error_messages() {
+        let err = Err::<(), _>("bad regex")
+            .map_err_remote(400, |inner| format!("substitute: {inner}"))
+            .unwrap_err();
+
+        assert_eq!(err, RemoteError::custom(400, "substitute: bad regex", None));
     }
 }

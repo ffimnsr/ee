@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::ops::DerefMut;
 use std::path::PathBuf;
 
 use log::{info, warn};
@@ -25,20 +26,20 @@ use xi_core_lib::plugin_rpc::{
 };
 use xi_core_lib::tracing_support;
 use xi_core_lib::{ConfigTable, LanguageId, PluginPid, ViewId};
-use xi_rpc::{Handler as RpcHandler, RemoteError, RpcCtx};
+use xi_rpc::{Handler as RpcHandler, OptionExt, RemoteError, ResultExt, RpcCtx};
 
 use super::{Plugin, View};
 
 /// Handles raw RPCs from core, updating state and forwarding calls
 /// to the plugin,
-pub struct Dispatcher<'a, P: 'a + Plugin> {
+pub struct Dispatcher<P: Plugin, H: DerefMut<Target = P>> {
     buffers: HashMap<ViewId, View<P::Cache>>,
     view_to_buffer: HashMap<ViewId, ViewId>,
     pid: Option<PluginPid>,
-    plugin: &'a mut P,
+    plugin: H,
 }
 
-impl<'a, P: 'a + Plugin> Dispatcher<'a, P> {
+impl<P: Plugin, H: DerefMut<Target = P>> Dispatcher<P, H> {
     fn supported_protocol_capabilities() -> [ProtocolCapability; 3] {
         [
             ProtocolCapability::CoreCapabilityNegotiation,
@@ -47,7 +48,7 @@ impl<'a, P: 'a + Plugin> Dispatcher<'a, P> {
         ]
     }
 
-    pub(crate) fn new(plugin: &'a mut P) -> Self {
+    pub(crate) fn new(plugin: H) -> Self {
         Dispatcher { buffers: HashMap::new(), view_to_buffer: HashMap::new(), pid: None, plugin }
     }
 
@@ -85,8 +86,7 @@ impl<'a, P: 'a + Plugin> Dispatcher<'a, P> {
         view_id: ViewId,
         f: impl FnOnce(&mut P, &mut View<P::Cache>) -> R,
     ) -> Result<R, RemoteError> {
-        self.with_view_mut(method, view_id, f)
-            .ok_or_else(|| RemoteError::custom(404, "missing view", None))
+        self.with_view_mut(method, view_id, f).ok_or_not_found("missing view")
     }
 
     fn do_initialize(
@@ -274,15 +274,12 @@ impl<'a, P: 'a + Plugin> Dispatcher<'a, P> {
     }
 
     fn do_collect_trace(&self) -> Result<Value, RemoteError> {
-        tracing_support::collect_json().map_err(|e| RemoteError::Custom {
-            code: 0,
-            message: format!("Could not serialize trace: {:?}", e),
-            data: None,
-        })
+        tracing_support::collect_json()
+            .map_err_remote(0, |err| format!("Could not serialize trace: {err:?}"))
     }
 }
 
-impl<'a, P: Plugin> RpcHandler for Dispatcher<'a, P> {
+impl<P: Plugin, H: DerefMut<Target = P>> RpcHandler for Dispatcher<P, H> {
     type Notification = HostNotification;
     type Request = HostRequest;
 

@@ -17,6 +17,7 @@ memchr.workspace = true
 log.workspace = true
 tracing.workspace = true
 tokio-util = { workspace = true }
+xi-plugin-derive.workspace = true
 
 [dependencies.xi-rpc]
 workspace = true

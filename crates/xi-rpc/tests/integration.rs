@@ -183,18 +183,18 @@ fn sink_loop() -> RpcLoop<NewlineWriter<io::Sink>> {
 
 #[test]
 fn test_sync_request_timeout() {
-    // send_rpc_request_timeout returns RequestTimeout when no response arrives.
+    // send_rpc_request_timeout returns PeerTimedOut when no response arrives.
     let rpc_loop = sink_loop();
     let peer = rpc_loop.get_raw_peer();
     // No mainloop running, so no response is ever delivered.
     let result = peer.send_rpc_request_timeout("ping", &json!({}), Duration::from_millis(50));
     match result {
-        Err(Error::RequestTimeout) => (),
-        other => panic!("expected RequestTimeout, got {:?}", other),
+        Err(Error::PeerTimedOut { after_ms: 50 }) => (),
+        other => panic!("expected PeerTimedOut, got {:?}", other),
     }
     // is_blocked must be cleared after timeout so subsequent requests work.
     let result2 = peer.send_rpc_request_timeout("ping", &json!({}), Duration::from_millis(50));
-    assert!(matches!(result2, Err(Error::RequestTimeout)));
+    assert!(matches!(result2, Err(Error::PeerTimedOut { after_ms: 50 })));
 }
 
 #[test]
@@ -266,7 +266,7 @@ fn test_request_cancellation() {
 #[test]
 fn test_sync_request_is_blocked_reset_after_disconnect() {
     // is_blocked must be reset to false after send_rpc_request completes
-    // (even via PeerDisconnect path), so the peer is usable for subsequent calls.
+    // (even via PeerExited path), so the peer is usable for subsequent calls.
     let mut rpc_loop = sink_loop();
     let peer = rpc_loop.get_raw_peer();
 
@@ -287,7 +287,10 @@ fn test_sync_request_is_blocked_reset_after_disconnect() {
     let result = req_thread.join().unwrap();
     // Either disconnect or timeout is acceptable depending on scheduling.
     assert!(
-        matches!(result, Err(Error::PeerDisconnect) | Err(Error::RequestTimeout)),
+        matches!(
+            result,
+            Err(Error::PeerExited { exit_status: None }) | Err(Error::PeerTimedOut { .. })
+        ),
         "unexpected result: {:?}",
         result
     );
@@ -295,7 +298,10 @@ fn test_sync_request_is_blocked_reset_after_disconnect() {
     // After the request completes, is_blocked must be false.
     // We verify indirectly: a second timeout call must complete (not hang).
     let result2 = peer.send_rpc_request_timeout("test2", &json!({}), Duration::from_millis(50));
-    assert!(matches!(result2, Err(Error::RequestTimeout) | Err(Error::PeerDisconnect)));
+    assert!(matches!(
+        result2,
+        Err(Error::PeerTimedOut { .. }) | Err(Error::PeerExited { exit_status: None })
+    ));
 }
 
 #[test]
@@ -673,7 +679,7 @@ fn test_malformed_response_returns_invalid_response_and_loop_continues() {
         .expect("malformed response should be sent");
 
     match first_rx.recv_timeout(Duration::from_secs(1)).expect("first callback should fire") {
-        Err(Error::InvalidResponse) => {}
+        Err(Error::PeerProtocolError { .. }) => {}
         other => panic!("expected invalid response error, got {:?}", other),
     }
 

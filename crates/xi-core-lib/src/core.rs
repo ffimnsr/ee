@@ -16,10 +16,10 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use serde_json::Value;
 
-use xi_rpc::{Error as RpcError, Handler, ReadError, RemoteError, RpcCtx};
+use xi_rpc::{Error as RpcError, Handler, OptionExt, ReadError, RemoteError, RpcCtx};
 
 use crate::plugin_rpc::{PluginCommand, PluginNotification, PluginRequest};
-use crate::plugins::{Plugin, PluginId, PluginStartError};
+use crate::plugins::{Plugin, PluginId, PluginStartError, PluginTerminationReason};
 use crate::rpc::*;
 use crate::tabs::{CoreState, ViewId};
 use crate::tracing_support;
@@ -148,6 +148,12 @@ impl WeakXiCore {
         }
     }
 
+    pub fn plugin_terminated(&self, plugin: PluginId, reason: PluginTerminationReason) {
+        if let Some(core) = self.upgrade() {
+            core.inner().plugin_terminated(plugin, reason)
+        }
+    }
+
     /// Handles the result of an update sent to a plugin.
     ///
     /// All plugins must acknowledge when they are sent a new update, so that
@@ -180,6 +186,29 @@ impl WeakXiCore {
             core.inner().plugin_hover(plugin, view, request_id, response);
         }
     }
+
+    pub fn handle_plugin_notification_message(
+        &self,
+        view: ViewId,
+        plugin: PluginId,
+        cmd: PluginNotification,
+    ) {
+        if let Some(core) = self.upgrade() {
+            core.inner().plugin_notification_from_host(view, plugin, cmd)
+        }
+    }
+
+    pub fn handle_plugin_request_message(
+        &self,
+        view: ViewId,
+        plugin: PluginId,
+        cmd: PluginRequest,
+    ) -> Result<Value, RemoteError> {
+        self.upgrade()
+            .ok_or_remote(0, "core is missing")?
+            .inner()
+            .plugin_request_from_host(view, plugin, cmd)
+    }
 }
 
 /// Handler for messages originating from plugins.
@@ -201,11 +230,10 @@ impl Handler for WeakXiCore {
         _cancel: tokio_util::sync::CancellationToken,
     ) -> Result<Value, RemoteError> {
         let PluginCommand { view_id, plugin_id, cmd } = rpc;
-        if let Some(core) = self.upgrade() {
-            core.inner().plugin_request(ctx, view_id, plugin_id, cmd)
-        } else {
-            Err(RemoteError::custom(0, "core is missing", None))
-        }
+        self.upgrade()
+            .ok_or_remote(0, "core is missing")?
+            .inner()
+            .plugin_request(ctx, view_id, plugin_id, cmd)
     }
 }
 

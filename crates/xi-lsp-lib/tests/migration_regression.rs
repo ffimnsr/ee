@@ -1,6 +1,7 @@
 use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -70,6 +71,36 @@ fn test_log_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(unique)
 }
 
+fn fake_server_binary_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_xi_lsp_fake_server") {
+        return PathBuf::from(path);
+    }
+
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|path| path.parent())
+        .expect("workspace root should exist")
+        .to_path_buf();
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root.join("target"));
+    let binary_name = format!("xi_lsp_fake_server{}", std::env::consts::EXE_SUFFIX);
+    let binary_path = target_dir.join("debug").join(binary_name);
+    if binary_path.exists() {
+        return binary_path;
+    }
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let status = Command::new(cargo)
+        .current_dir(&workspace_root)
+        .args(["build", "-p", "xi-lsp-lib", "--bin", "xi_lsp_fake_server"])
+        .status()
+        .expect("cargo build for fake server should start");
+    assert!(status.success(), "cargo build for fake server should succeed");
+    assert!(binary_path.exists(), "fake server binary should exist after build");
+    binary_path
+}
+
 fn initialize_client(client: &std::sync::Arc<std::sync::Mutex<LanguageServerClient>>) {
     let (tx, rx) = mpsc::channel();
     client
@@ -97,11 +128,10 @@ fn initialize_client(client: &std::sync::Arc<std::sync::Mutex<LanguageServerClie
 #[test]
 fn fake_language_server_covers_migration_flows() {
     let log_path = test_log_path("xi-lsp-migration");
-    let server_path = std::env::var("CARGO_BIN_EXE_xi_lsp_fake_server")
-        .expect("fake server binary path should be available");
+    let server_path = fake_server_binary_path();
     let queue = ResultQueue::new();
     let client = start_new_server(
-        server_path,
+        server_path.display().to_string(),
         vec![log_path.display().to_string()],
         vec![String::from("rs")],
         "rust",

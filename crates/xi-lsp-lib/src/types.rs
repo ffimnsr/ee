@@ -23,7 +23,7 @@ use serde_json::Value;
 use xi_core_lib::plugin_rpc::{CompletionSuggestion, NavigationTarget, SymbolItem};
 use xi_plugin_lib::Diagnostic as CoreDiagnostic;
 use xi_plugin_lib::Error as PluginLibError;
-use xi_rpc::RemoteError;
+use xi_rpc::RemoteErrorDetails;
 
 use crate::language_server_client::LanguageServerClient;
 use lsp_types::*;
@@ -119,28 +119,39 @@ impl From<PluginLibError> for LanguageResponseError {
     }
 }
 
-impl From<LanguageResponseError> for RemoteError {
-    fn from(src: LanguageResponseError) -> Self {
-        match src {
-            LanguageResponseError::NullResponse => {
-                RemoteError::custom(0, "null response from server", None)
+impl fmt::Display for LanguageResponseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LanguageResponseError::NullResponse => write!(f, "null response from server"),
+            LanguageResponseError::FallbackResponse => write!(f, "fallback response from server"),
+            LanguageResponseError::LanguageServerError(_) => {
+                write!(f, "language server error occured")
             }
-            LanguageResponseError::FallbackResponse => {
-                RemoteError::custom(1, "fallback response from server", None)
+            LanguageResponseError::PluginLibError(_) => write!(f, "Plugin Lib Error"),
+            LanguageResponseError::Transport(_) => write!(f, "language server transport error"),
+        }
+    }
+}
+
+impl RemoteErrorDetails for LanguageResponseError {
+    fn remote_error_code(&self) -> i64 {
+        match self {
+            LanguageResponseError::NullResponse => 0,
+            LanguageResponseError::FallbackResponse => 1,
+            LanguageResponseError::LanguageServerError(_) => 2,
+            LanguageResponseError::PluginLibError(_) => 3,
+            LanguageResponseError::Transport(_) => 4,
+        }
+    }
+
+    fn remote_error_data(&self) -> Option<Value> {
+        match self {
+            LanguageResponseError::NullResponse | LanguageResponseError::FallbackResponse => None,
+            LanguageResponseError::LanguageServerError(error)
+            | LanguageResponseError::Transport(error) => Some(Value::String(error.clone())),
+            LanguageResponseError::PluginLibError(error) => {
+                Some(Value::String(format!("{:?}", error)))
             }
-            LanguageResponseError::LanguageServerError(error) => {
-                RemoteError::custom(2, "language server error occured", Some(Value::String(error)))
-            }
-            LanguageResponseError::PluginLibError(error) => RemoteError::custom(
-                3,
-                "Plugin Lib Error",
-                Some(Value::String(format!("{:?}", error))),
-            ),
-            LanguageResponseError::Transport(error) => RemoteError::custom(
-                4,
-                "language server transport error",
-                Some(Value::String(error)),
-            ),
         }
     }
 }
@@ -174,4 +185,26 @@ pub enum LspResponse {
     Formatting { title: String, result: Result<Vec<TextEdit>, LanguageResponseError> },
     CodeActions(Result<Vec<LspCodeAction>, LanguageResponseError>),
     Rename { title: String, result: Result<Option<WorkspaceEdit>, LanguageResponseError> },
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+    use xi_rpc::RemoteError;
+
+    use super::LanguageResponseError;
+
+    #[test]
+    fn language_response_error_converts_into_remote_error() {
+        let err: RemoteError = LanguageResponseError::Transport("connection reset".into()).into();
+
+        assert_eq!(
+            err,
+            RemoteError::custom(
+                4,
+                "language server transport error",
+                Some(Value::String("connection reset".into())),
+            )
+        );
+    }
 }

@@ -20,13 +20,14 @@ use std::{
     fmt,
 };
 
+use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{self, Value, json};
 
 use crate::syntax::{LanguageDefinition, LanguageId};
 
 /// Declared permissions and editor features a plugin may use.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginCapability {
     Edit,
@@ -40,17 +41,27 @@ pub enum PluginCapability {
 /// Describes attributes and capabilities of a plugin.
 ///
 /// Note: - these will eventually be loaded from manifest files.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct PluginDescription {
     pub name: String,
     pub version: String,
     #[serde(default)]
+    pub requires: Vec<String>,
+    #[serde(default)]
     pub scope: PluginScope,
+    #[serde(default)]
+    pub runtime: PluginRuntime,
     #[serde(default)]
     pub capabilities: Vec<PluginCapability>,
     #[serde(default)]
     pub launch: PluginLaunchConfig,
+    #[serde(default)]
+    pub max_rss_bytes: Option<u64>,
+    #[serde(default)]
+    pub max_cpu_seconds: Option<u64>,
+    #[serde(default)]
+    pub rpc_timeout_ms: Option<u64>,
     // more metadata ...
     /// path to plugin executable
     #[serde(deserialize_with = "platform_exec_path")]
@@ -64,7 +75,15 @@ pub struct PluginDescription {
     pub languages: Vec<LanguageDefinition>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginRuntime {
+    #[default]
+    Native,
+    Wasm,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct PluginLaunchConfig {
     #[serde(default)]
@@ -75,7 +94,7 @@ pub struct PluginLaunchConfig {
     pub transport: PluginTransport,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginTransport {
     #[default]
@@ -89,7 +108,7 @@ fn platform_exec_path<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Path
 }
 
 /// `PluginActivation`s represent events that trigger running a plugin.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginActivation {
     /// Always run this plugin, when available.
@@ -112,7 +131,7 @@ impl PluginActivation {
 }
 
 /// Describes the scope of events a plugin receives.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum PluginScope {
@@ -126,7 +145,7 @@ pub enum PluginScope {
     SingleInvocation,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 /// Represents a custom command provided by a plugin.
 pub struct Command {
     /// Human readable title, for display in (for example) a menu.
@@ -139,7 +158,7 @@ pub struct Command {
     pub args: Vec<CommandArgument>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 /// A user provided argument to a plugin command.
 pub struct CommandArgument {
     /// A human readable name for this argument, for use as placeholder
@@ -154,7 +173,7 @@ pub struct CommandArgument {
     pub options: Option<Vec<ArgumentOption>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 pub enum ArgumentType {
     Number,
     Int,
@@ -164,14 +183,14 @@ pub enum ArgumentType {
     Choice,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 /// Represents an option for a user-selectable argument.
 pub struct ArgumentOption {
     pub title: String,
     pub value: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 /// A placeholder type which can represent a generic RPC.
 ///
@@ -183,7 +202,7 @@ pub struct PlaceholderRpc {
     pub rpc_type: RpcType,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RpcType {
     Notification,
@@ -330,6 +349,11 @@ impl PlaceholderRpc {
 }
 
 impl PluginDescription {
+    pub(crate) fn json_schema() -> Value {
+        serde_json::to_value(schema_for!(PluginDescription))
+            .expect("plugin description schema should serialize")
+    }
+
     /// Returns `true` if this plugin is globally scoped, else `false`.
     pub fn is_global(&self) -> bool {
         matches!(self.scope, PluginScope::Global)
@@ -409,11 +433,15 @@ mod tests {
         } else {
             assert!(plugin_desc.exec_path.ends_with("binary"));
         }
+        assert_eq!(plugin_desc.runtime, PluginRuntime::Native);
         assert!(plugin_desc.has_capability(PluginCapability::Hover));
         assert!(plugin_desc.has_capability(PluginCapability::StatusItems));
         assert_eq!(plugin_desc.launch.working_dir, Some(PathBuf::from("plugin-data")));
         assert_eq!(plugin_desc.launch.env.get("RUST_LOG"), Some(&"debug".to_string()));
         assert_eq!(plugin_desc.launch.transport, PluginTransport::StdioContentLength);
+        assert_eq!(plugin_desc.max_rss_bytes, None);
+        assert_eq!(plugin_desc.max_cpu_seconds, None);
+        assert_eq!(plugin_desc.rpc_timeout_ms, None);
     }
 
     #[test]
@@ -430,7 +458,47 @@ mod tests {
 
         assert!(plugin_desc.capabilities.is_empty());
         assert!(!plugin_desc.has_capability(PluginCapability::Edit));
+        assert_eq!(plugin_desc.runtime, PluginRuntime::Native);
         assert_eq!(plugin_desc.launch, PluginLaunchConfig::default());
+        assert_eq!(plugin_desc.max_rss_bytes, None);
+        assert_eq!(plugin_desc.max_cpu_seconds, None);
+        assert_eq!(plugin_desc.rpc_timeout_ms, None);
+    }
+
+    #[test]
+    fn plugin_description_deserializes_wasm_runtime() {
+        let json = r#"
+        {
+            "name": "test_plugin",
+            "version": "0.0.0",
+            "runtime": "wasm",
+            "exec_path": "path/to/plugin.wasm"
+        }
+        "#;
+
+        let plugin_desc: PluginDescription = serde_json::from_str(json).unwrap();
+
+        assert_eq!(plugin_desc.runtime, PluginRuntime::Wasm);
+    }
+
+    #[test]
+    fn plugin_description_deserializes_resource_limits() {
+        let json = r#"
+        {
+            "name": "test_plugin",
+            "version": "0.0.0",
+            "max_rss_bytes": 4096,
+            "max_cpu_seconds": 12,
+            "rpc_timeout_ms": 250,
+            "exec_path": "path/to/plugin"
+        }
+        "#;
+
+        let plugin_desc: PluginDescription = serde_json::from_str(json).unwrap();
+
+        assert_eq!(plugin_desc.max_rss_bytes, Some(4096));
+        assert_eq!(plugin_desc.max_cpu_seconds, Some(12));
+        assert_eq!(plugin_desc.rpc_timeout_ms, Some(250));
     }
 
     #[test]
@@ -539,9 +607,14 @@ mod tests {
         let syntax_plugin = PluginDescription {
             name: "syntax-plugin".into(),
             version: "0.1.0".into(),
+            requires: Vec::new(),
             scope: PluginScope::BufferLocal,
+            runtime: PluginRuntime::Native,
             capabilities: Vec::new(),
             launch: PluginLaunchConfig::default(),
+            max_rss_bytes: None,
+            max_cpu_seconds: None,
+            rpc_timeout_ms: None,
             exec_path: PathBuf::from("plugin"),
             activations: vec![PluginActivation::OnSyntax("rust".into())],
             commands: Vec::new(),
@@ -550,9 +623,14 @@ mod tests {
         let command_plugin = PluginDescription {
             name: "command-plugin".into(),
             version: "0.1.0".into(),
+            requires: Vec::new(),
             scope: PluginScope::BufferLocal,
+            runtime: PluginRuntime::Native,
             capabilities: Vec::new(),
             launch: PluginLaunchConfig::default(),
+            max_rss_bytes: None,
+            max_cpu_seconds: None,
+            rpc_timeout_ms: None,
             exec_path: PathBuf::from("plugin"),
             activations: vec![PluginActivation::OnCommand],
             commands: Vec::new(),
@@ -561,9 +639,14 @@ mod tests {
         let single_invocation = PluginDescription {
             name: "single-plugin".into(),
             version: "0.1.0".into(),
+            requires: Vec::new(),
             scope: PluginScope::SingleInvocation,
+            runtime: PluginRuntime::Native,
             capabilities: Vec::new(),
             launch: PluginLaunchConfig::default(),
+            max_rss_bytes: None,
+            max_cpu_seconds: None,
+            rpc_timeout_ms: None,
             exec_path: PathBuf::from("plugin"),
             activations: Vec::new(),
             commands: Vec::new(),
@@ -593,9 +676,14 @@ mod tests {
         let plugin_desc = PluginDescription {
             name: "test_plugin".into(),
             version: "0.0.0".into(),
+            requires: Vec::new(),
             scope: PluginScope::Global,
+            runtime: PluginRuntime::Native,
             capabilities: Vec::new(),
             launch: PluginLaunchConfig::default(),
+            max_rss_bytes: None,
+            max_cpu_seconds: None,
+            rpc_timeout_ms: None,
             exec_path: PathBuf::from("path/to/binary"),
             activations: Vec::new(),
             commands: vec![Command::new(
