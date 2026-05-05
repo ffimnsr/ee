@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -18,9 +19,9 @@ use xi_core_lib::rpc::LineReplacement;
 
 use crate::app::{App, Mode, Operator, PendingCharFind};
 use crate::backend::{
-    BackendEvent, CachedLine, CompletionSuggestion, CoreLine, CoreUpdate, CoreUpdateKind,
-    CoreUpdateOp, LineSlot, NavigationTarget, format_location_message, invalid_line_ranges,
-    parse_notification,
+    BackendEvent, CachedLine, CompletionSuggestion, CoreAnnotation, CoreLine, CoreSyntaxSpan,
+    CoreUpdate, CoreUpdateKind, CoreUpdateOp, LineSlot, NavigationTarget,
+    format_location_message, invalid_line_ranges, parse_notification,
 };
 use crate::buffer::{BufState, BufferManager};
 use crate::keymap::{Action, BindingKey, bindings};
@@ -189,6 +190,46 @@ fn ui_render_shows_scrolled_gutter_after_many_enters() {
 }
 
 #[test]
+fn ui_render_prefers_backend_syntax_spans_over_syntect_fallback() {
+    fn render_numeric_fg(with_backend_syntax: bool) -> ratatui::style::Color {
+        let mut app = App::from_path(None).unwrap();
+        let line = String::from("let answer = 42;");
+
+        app.backend.lines = vec![line.clone()];
+        app.backend.path = Some(PathBuf::from("sample.rs"));
+        app.backend.line_cache = vec![LineSlot::Known(CachedLine {
+            text: line,
+            cursors: Vec::new(),
+            syntax_spans: if with_backend_syntax {
+                vec![CoreSyntaxSpan {
+                    start_byte: 13,
+                    end_byte: 15,
+                    scope: String::from("constant.numeric.decimal.rust"),
+                }]
+            } else {
+                Vec::new()
+            },
+        })];
+
+        let backend = TestBackend::new(40, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| ui(frame, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+
+        let four_x = (0..40)
+            .find(|&x| buf.cell((x, 0)).unwrap().symbol() == "4")
+            .expect("rendered line should contain numeric literal");
+        buf.cell((four_x, 0)).unwrap().fg
+    }
+
+    let syntect_fg = render_numeric_fg(false);
+    let backend_fg = render_numeric_fg(true);
+
+    assert_ne!(backend_fg, syntect_fg);
+    assert_eq!(backend_fg, ratatui::style::Color::Rgb(211, 120, 70));
+}
+
+#[test]
 fn backspace_removes_multibyte_char() {
     let mut app = App::from_path(None).unwrap();
 
@@ -205,26 +246,55 @@ fn backspace_removes_multibyte_char() {
 fn apply_update_merges_copy_update_insert_and_invalidate() {
     let mut client = test_buf_state();
     client.line_cache = vec![
-        LineSlot::Known(CachedLine { text: "alpha".into(), cursors: Vec::new() }),
-        LineSlot::Known(CachedLine { text: "beta".into(), cursors: vec![2] }),
-        LineSlot::Known(CachedLine { text: "gamma".into(), cursors: Vec::new() }),
+        LineSlot::Known(CachedLine {
+            text: "alpha".into(),
+            cursors: Vec::new(),
+            syntax_spans: Vec::new(),
+        }),
+        LineSlot::Known(CachedLine {
+            text: "beta".into(),
+            cursors: vec![2],
+            syntax_spans: vec![CoreSyntaxSpan {
+                start_byte: 0,
+                end_byte: 4,
+                scope: "keyword.control.rust".into(),
+            }],
+        }),
+        LineSlot::Known(CachedLine {
+            text: "gamma".into(),
+            cursors: Vec::new(),
+            syntax_spans: Vec::new(),
+        }),
     ];
     client.rebuild_lines();
 
     client
         .apply_update(CoreUpdate {
             pristine: false,
+            annotations: vec![CoreAnnotation {
+                annotation_type: String::from("selection"),
+                ranges: vec![[1, 1, 1, 3]],
+                payloads: None,
+            }],
             ops: vec![
                 CoreUpdateOp { op: CoreUpdateKind::Copy, n: 1, lines: Vec::new() },
                 CoreUpdateOp {
                     op: CoreUpdateKind::Update,
                     n: 1,
-                    lines: vec![CoreLine { text: None, cursor: vec![1] }],
+                    lines: vec![CoreLine { text: None, cursor: vec![1], syntax_spans: None }],
                 },
                 CoreUpdateOp {
                     op: CoreUpdateKind::Insert,
                     n: 1,
-                    lines: vec![CoreLine { text: Some("delta".into()), cursor: Vec::new() }],
+                    lines: vec![CoreLine {
+                        text: Some("delta".into()),
+                        cursor: Vec::new(),
+                        syntax_spans: Some(vec![CoreSyntaxSpan {
+                            start_byte: 0,
+                            end_byte: 5,
+                            scope: "entity.name.function.rust".into(),
+                        }]),
+                    }],
                 },
                 CoreUpdateOp { op: CoreUpdateKind::Invalidate, n: 2, lines: Vec::new() },
             ],
@@ -233,8 +303,51 @@ fn apply_update_merges_copy_update_insert_and_invalidate() {
 
     assert_eq!(client.lines, vec!["alpha", "beta", "delta", "", ""]);
     assert_eq!((client.cursor_line, client.cursor_col), (1, 1));
+    let LineSlot::Known(line) = &client.line_cache[1] else {
+        panic!("expected cached line")
+    };
+    assert_eq!(line.syntax_spans.len(), 1);
+    let LineSlot::Known(line) = &client.line_cache[2] else {
+        panic!("expected cached line")
+    };
+    assert_eq!(line.syntax_spans.len(), 1);
     assert_eq!(invalid_line_ranges(&client.line_cache), vec![(3, 5)]);
+    assert_eq!(client.annotations.len(), 1);
     assert!(!client.pristine);
+}
+
+#[test]
+fn parse_notification_decodes_syntax_spans_in_update_lines() {
+    let event = parse_notification(
+        "update",
+        json!({
+            "view_id": "view-id-1",
+            "update": {
+                "pristine": true,
+                "annotations": [],
+                "ops": [{
+                    "op": "ins",
+                    "n": 1,
+                    "lines": [{
+                        "text": "let x = 1",
+                        "cursor": [3],
+                        "syntax_spans": [
+                            { "start_byte": 0, "end_byte": 3, "scope": "keyword.control.rust" },
+                            { "start_byte": 8, "end_byte": 9, "scope": "constant.numeric.decimal.rust" }
+                        ]
+                    }]
+                }]
+            }
+        }),
+    )
+    .expect("update notification should parse");
+
+    let BackendEvent::Update { update, .. } = event else {
+        panic!("expected update event")
+    };
+    let spans = update.ops[0].lines[0].syntax_spans.as_ref().expect("missing syntax spans");
+    assert_eq!(spans.len(), 2);
+    assert_eq!(spans[0].scope, "keyword.control.rust");
 }
 
 #[test]
@@ -323,6 +436,37 @@ fn parse_notification_handles_diagnostics() {
             assert_eq!(view_id, "view-id-1");
             assert_eq!(diagnostics.len(), 1);
             assert_eq!(diagnostics[0].message, "watch this");
+        }
+        other => panic!("unexpected event: {:?}", other),
+    }
+}
+
+#[test]
+fn parse_notification_handles_update_annotations() {
+    let event = parse_notification(
+        "update",
+        json!({
+            "view_id": "view-id-1",
+            "update": {
+                "ops": [],
+                "pristine": true,
+                "annotations": [{
+                    "type": "selection",
+                    "ranges": [[0, 1, 0, 4]],
+                    "payloads": ["cursor"],
+                    "n": 1
+                }]
+            }
+        }),
+    )
+    .expect("update notification should parse");
+
+    match event {
+        BackendEvent::Update { view_id, update } => {
+            assert_eq!(view_id, "view-id-1");
+            assert_eq!(update.annotations.len(), 1);
+            assert_eq!(update.annotations[0].annotation_type, "selection");
+            assert_eq!(update.annotations[0].ranges, vec![[0, 1, 0, 4]]);
         }
         other => panic!("unexpected event: {:?}", other),
     }
@@ -807,22 +951,8 @@ fn help_command_opens_help_picker() {
     let picker = app.picker.as_ref().expect("help picker should open");
     assert_eq!(picker.kind, PickerKind::Help);
     assert_eq!(picker.title, "Help");
-    assert!(picker.visible_items_range(0, 8).iter().any(|line| line.contains(":protocol")));
-}
-
-#[test]
-fn protocol_command_lists_quarantined_core_surface() {
-    let mut app = App::from_path(None).unwrap();
-
-    for ch in [':', 'p', 'r', 'o', 't', 'o', 'c', 'o', 'l'] {
-        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
-    }
-    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-
-    let picker = app.picker.as_ref().expect("protocol picker should open");
-    assert_eq!(picker.kind, PickerKind::Help);
-    assert!(picker.visible_items_range(0, 8).iter().any(|line| line.contains("get_config")));
-    assert!(picker.visible_items_range(0, 8).iter().any(|line| line.contains("set_theme")));
+    assert!(picker.visible_items_range(0, 8).iter().any(|line| line.contains(":commands")));
+    assert!(!picker.visible_items_range(0, 8).iter().any(|line| line.contains(":protocol")));
 }
 
 #[test]
@@ -1327,6 +1457,7 @@ fn test_buf_state() -> BufState {
         mtime: None,
         externally_modified: false,
         diagnostics: Vec::new(),
+        annotations: Vec::new(),
     }
 }
 
@@ -2128,4 +2259,55 @@ fn visual_char_mode_highlights_single_line_selection() {
     let row_has_vis =
         (gutter_width..gutter_width + 4).any(|x| buf.cell((x, 0)).unwrap().bg == vis_bg);
     assert!(row_has_vis, "selected chars should carry visual-selection background");
+}
+
+#[test]
+fn multi_line_core_annotation_highlights_rendered_rows() {
+    let mut app = App::from_path(None).unwrap();
+    app.backend.lines = vec![String::from("alpha"), String::from("beta"), String::from("gamma")];
+    app.backend.annotations = vec![CoreAnnotation {
+        annotation_type: String::from("lint"),
+        ranges: vec![[0, 1, 1, 2]],
+        payloads: Some(vec![json!("todo")]),
+    }];
+
+    let width: u16 = 40;
+    let height: u16 = 10;
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let buf = terminal.backend().buffer();
+
+    let annotation_bg = ratatui::style::Color::Rgb(43, 82, 74);
+    let gutter_width: u16 = 5;
+    let row0_has_annotation = (gutter_width + 1..gutter_width + 5)
+        .any(|x| buf.cell((x, 0)).unwrap().bg == annotation_bg);
+    let row1_has_annotation = (gutter_width..gutter_width + 2)
+        .any(|x| buf.cell((x, 1)).unwrap().bg == annotation_bg);
+    let row2_has_annotation = (gutter_width..gutter_width + 5)
+        .any(|x| buf.cell((x, 2)).unwrap().bg == annotation_bg);
+
+    assert!(row0_has_annotation, "row 0 should show annotation highlight");
+    assert!(row1_has_annotation, "row 1 should show annotation highlight");
+    assert!(!row2_has_annotation, "row 2 should not show annotation highlight");
+}
+
+#[test]
+fn payload_backed_annotation_renders_gutter_marker() {
+    let mut app = App::from_path(None).unwrap();
+    app.backend.lines = vec![String::from("alpha")];
+    app.backend.annotations = vec![CoreAnnotation {
+        annotation_type: String::from("lint"),
+        ranges: vec![[0, 0, 0, 5]],
+        payloads: Some(vec![json!({ "label": "todo" })]),
+    }];
+
+    let width: u16 = 20;
+    let height: u16 = 6;
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let buf = terminal.backend().buffer();
+
+    assert_eq!(buf.cell((1, 0)).unwrap().symbol(), "T");
 }

@@ -1,12 +1,16 @@
 //! Syntax highlighting for the `ee-tui` frontend.
 //!
-//! Phase 1: in-process `syntect` parsing using bundled grammars and themes.
-//! Highlights only the visible viewport; no plugin process involved.
+//! Backend semantic syntax spans are preferred when xi-core provides them.
+//! Local `syntect` parsing remains as whole-line fallback for lines without
+//! backend syntax data.
 
-use ratatui::style::Color;
+use ratatui::style::{Color, Style};
+use ratatui::text::Span;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
+
+use crate::backend::CoreSyntaxSpan;
 
 /// A highlighted span: a foreground color and the text of that span.
 pub(crate) type HlSpan = (Color, String);
@@ -36,17 +40,18 @@ impl Highlighter {
         Self { syntax_set, theme }
     }
 
-    /// Highlight the lines visible in the current viewport.
+    /// Highlight the lines visible in the current viewport for syntect fallback.
     ///
     /// * `lines`     — all buffer lines (may be large; only visible range is returned)
     /// * `extension` — file extension used to select the grammar (e.g. `"rs"`, `"py"`)
     /// * `top`       — index of the first visible line
     /// * `count`     — number of visible lines (height of the editor area)
     ///
-    /// Returns one `Vec<HlSpan>` per visible line.  The spans for each line
-    /// concatenate to the full line text.  If a line has no highlights (e.g.
+    /// Returns one `Vec<HlSpan>` per visible line. The spans for each line
+    /// concatenate to the full line text. If a line has no highlights (e.g.
     /// plain text fallback) its span vec holds a single entry with the default
-    /// foreground color.
+    /// foreground color. `ui.rs` only uses this output when backend
+    /// `syntax_spans` are absent for the line.
     ///
     /// To build correct incremental state, the function processes every line
     /// from 0 up to `top + count`.  For most files (< ~10 k lines visible) this
@@ -117,9 +122,6 @@ impl Highlighter {
         hl_spans: &[HlSpan],
         byte_start: usize,
     ) -> Vec<ratatui::text::Span<'static>> {
-        use ratatui::style::Style;
-        use ratatui::text::Span;
-
         let mut out = Vec::new();
         let mut offset = 0usize;
 
@@ -141,6 +143,143 @@ impl Highlighter {
         }
 
         out
+    }
+
+    pub(crate) fn scope_spans_with_offset(
+        line: &str,
+        syntax_spans: &[CoreSyntaxSpan],
+        byte_start: usize,
+    ) -> Vec<Span<'static>> {
+        let mut out = Vec::new();
+        let mut cursor = 0usize;
+
+        for span in syntax_spans {
+            let start = span.start_byte.min(line.len());
+            let end = span.end_byte.min(line.len());
+            if end <= start {
+                continue;
+            }
+            if cursor < start {
+                Self::push_segment(&mut out, line, cursor, start, byte_start, Style::default());
+            }
+            Self::push_segment(
+                &mut out,
+                line,
+                start,
+                end,
+                byte_start,
+                Self::style_for_scope(&span.scope),
+            );
+            cursor = end;
+        }
+
+        if cursor < line.len() {
+            Self::push_segment(&mut out, line, cursor, line.len(), byte_start, Style::default());
+        }
+
+        if out.is_empty() && byte_start <= line.len() {
+            out.push(Span::styled(line[byte_start..].to_owned(), Style::default()));
+        }
+
+        out
+    }
+
+    fn push_segment(
+        out: &mut Vec<Span<'static>>,
+        line: &str,
+        start: usize,
+        end: usize,
+        byte_start: usize,
+        style: Style,
+    ) {
+        if end <= start || end <= byte_start {
+            return;
+        }
+        let visible_start = start.max(byte_start);
+        let Some(text) = line.get(visible_start..end) else {
+            return;
+        };
+        if !text.is_empty() {
+            out.push(Span::styled(text.to_owned(), style));
+        }
+    }
+
+    fn style_for_scope(scope: &str) -> Style {
+        for candidate in Self::scope_candidates(scope) {
+            if let Some(style) = Self::lookup_scope_style(&candidate) {
+                return style;
+            }
+        }
+        Style::default()
+    }
+
+    fn scope_candidates(scope: &str) -> Vec<String> {
+        let scope = scope.trim();
+        if scope.is_empty() {
+            return Vec::new();
+        }
+
+        let mut candidates = Vec::new();
+        let stack: Vec<&str> = scope.split_whitespace().collect();
+
+        for entry in stack.iter().rev() {
+            let mut current = (*entry).to_owned();
+            loop {
+                candidates.push(current.clone());
+                let Some((parent, _)) = current.rsplit_once('.') else {
+                    break;
+                };
+                current = parent.to_owned();
+            }
+        }
+
+        for len in (1..=stack.len()).rev() {
+            candidates.push(stack[..len].join(" "));
+        }
+
+        candidates
+    }
+
+    fn lookup_scope_style(scope: &str) -> Option<Style> {
+        let color = if scope.starts_with("comment") {
+            Color::Rgb(101, 115, 126)
+        } else if scope.starts_with("string") {
+            Color::Rgb(195, 151, 66)
+        } else if scope.starts_with("constant.numeric")
+            || scope.starts_with("constant.language")
+            || scope.starts_with("constant.character")
+        {
+            Color::Rgb(211, 120, 70)
+        } else if scope.starts_with("keyword")
+            || scope.starts_with("storage")
+            || scope == "support.macro"
+        {
+            Color::Rgb(180, 142, 173)
+        } else if scope.starts_with("entity.name.function")
+            || scope.starts_with("support.function")
+            || scope.starts_with("meta.function")
+        {
+            Color::Rgb(136, 192, 208)
+        } else if scope.starts_with("entity.name.type")
+            || scope.starts_with("support.type")
+            || scope.starts_with("storage.type")
+            || scope.starts_with("entity.name.namespace")
+        {
+            Color::Rgb(143, 188, 187)
+        } else if scope.starts_with("variable") {
+            Color::Rgb(216, 222, 233)
+        } else if scope.starts_with("entity.name.tag") || scope.starts_with("keyword.operator") {
+            Color::Rgb(129, 161, 193)
+        } else if scope.starts_with("punctuation") {
+            Color::Rgb(171, 178, 191)
+        } else if scope.starts_with("invalid") {
+            Color::Rgb(239, 83, 80)
+        } else if scope.starts_with("markup.heading") {
+            Color::Rgb(94, 129, 172)
+        } else {
+            return None;
+        };
+        Some(Style::default().fg(color))
     }
 }
 
@@ -235,5 +374,48 @@ mod tests {
         let result = Highlighter::spans_with_offset(&spans, 0);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].content, "hello");
+    }
+
+    #[test]
+    fn scope_spans_with_offset_uses_backend_ranges() {
+        let line = "let answer = 42;";
+        let spans = vec![
+            CoreSyntaxSpan {
+                start_byte: 0,
+                end_byte: 3,
+                scope: "keyword.control.rust".into(),
+            },
+            CoreSyntaxSpan {
+                start_byte: 13,
+                end_byte: 15,
+                scope: "constant.numeric.decimal.rust".into(),
+            },
+        ];
+
+        let result = Highlighter::scope_spans_with_offset(line, &spans, 0);
+        let joined: String = result.iter().map(|span| span.content.as_ref()).collect();
+        assert_eq!(joined, line);
+        assert_eq!(result[0].content, "let");
+        assert!(result.iter().any(|span| span.content == "42"));
+    }
+
+    #[test]
+    fn scope_spans_with_offset_respects_scroll_offset() {
+        let line = "let answer = 42;";
+        let spans = vec![CoreSyntaxSpan {
+            start_byte: 13,
+            end_byte: 15,
+            scope: "constant.numeric.decimal.rust".into(),
+        }];
+
+        let result = Highlighter::scope_spans_with_offset(line, &spans, 4);
+        let joined: String = result.iter().map(|span| span.content.as_ref()).collect();
+        assert_eq!(joined, "answer = 42;");
+    }
+
+    #[test]
+    fn style_for_scope_falls_back_to_parent_segments() {
+        let style = Highlighter::style_for_scope("meta.function variable.parameter.rust");
+        assert_eq!(style.fg, Some(Color::Rgb(216, 222, 233)));
     }
 }

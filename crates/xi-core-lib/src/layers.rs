@@ -24,6 +24,13 @@ use xi_rope::{Interval, RopeDelta};
 
 use crate::plugins::PluginPid;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedScopeSpan {
+    pub start: usize,
+    pub end: usize,
+    pub scope: String,
+}
+
 /// A collection of layers containing scope information.
 #[derive(Default)]
 pub struct Layers {
@@ -98,6 +105,16 @@ impl Layers {
         }
     }
 
+    pub fn resolved_spans(&self, iv: Interval) -> Vec<ResolvedScopeSpan> {
+        self.layers
+            .values()
+            .find_map(|layer| {
+                let spans = layer.resolved_spans(iv);
+                (!spans.is_empty()).then_some(spans)
+            })
+            .unwrap_or_default()
+    }
+
     /// Returns an `Err` if this layer has been deleted; the caller should return.
     fn create_if_missing(&mut self, layer_id: PluginPid) -> Result<(), ()> {
         if self.deleted.contains(&layer_id) {
@@ -140,10 +157,56 @@ impl ScopeLayer {
         self.scope_spans.edit(iv, spans.to_owned());
     }
 
+    fn resolved_spans(&self, iv: Interval) -> Vec<ResolvedScopeSpan> {
+        self.scope_spans
+            .subseq(iv)
+            .iter()
+            .filter_map(|(span_iv, scope_id)| {
+                let stack = self.stack_lookup.get(*scope_id as usize)?;
+                let scope = stack.iter().map(|scope| scope.to_string()).collect::<Vec<_>>().join(" ");
+                if scope.is_empty() {
+                    return None;
+                }
+                Some(ResolvedScopeSpan { start: span_iv.start(), end: span_iv.end(), scope })
+            })
+            .collect()
+    }
+
     /// Applies `delta`, which is presumed to contain empty spans.
     /// This is only used when we receive an edit, to adjust current span
     /// positions.
     fn blank_scopes(&mut self, delta: &RopeDelta) {
         self.scope_spans.apply_shape(delta);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolved_spans_return_line_local_scope_strings() {
+        let mut layers = Layers::default();
+        layers.add_scopes(
+            PluginPid(1),
+            vec![
+                vec!["keyword.control.rust".into()],
+                vec!["constant.numeric.decimal.rust".into()],
+            ],
+        );
+
+        let mut builder = SpansBuilder::new(16);
+        builder.add_span(Interval::new(0, 3), 0);
+        builder.add_span(Interval::new(8, 10), 1);
+        layers.update_layer(PluginPid(1), Interval::new(0, 16), builder.build());
+
+        let spans = layers.resolved_spans(Interval::new(0, 12));
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].start, 0);
+        assert_eq!(spans[0].end, 3);
+        assert_eq!(spans[0].scope, "keyword.control.rust");
+        assert_eq!(spans[1].start, 8);
+        assert_eq!(spans[1].end, 10);
+        assert_eq!(spans[1].scope, "constant.numeric.decimal.rust");
     }
 }

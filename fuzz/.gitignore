@@ -1,1 +1,11 @@
 crash-*
+artifacts/
+corpus/*
+!corpus/xi_rope_crdt/
+corpus/xi_rope_crdt/*
+# Keep only curated, minimized seeds intended for repo history.
+!corpus/xi_rope_crdt/4a2f537d5e6565d3ce7353e5f0f14ac1ada477e9
+!corpus/xi_rope_crdt/73f568cc83cded8370229839d6426d89b3b58edf
+!corpus/xi_rope_crdt/a5d5b61aa8a61b7d9d765e1daf971a9a578f1cfa
+!corpus/xi_rope_crdt/a634322f2c5a056adfacafe726f8d3907eead396
+!corpus/xi_rope_crdt/da39a3ee5e6b4b0d3255bfef95601890afd80709

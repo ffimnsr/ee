@@ -25,6 +25,7 @@ use crate::annotations::{AnnotationStore, Annotations, ToAnnotation};
 use crate::client::{Client, Update, UpdateOp};
 use crate::edit_types::ViewEvent;
 use crate::find::{Find, FindStatus};
+use crate::layers::Layers;
 use crate::line_cache_shadow::{self, LineCacheShadow, RenderPlan, RenderTactic};
 use crate::line_offset::LineOffset;
 use crate::linewrap::{InvalLines, Lines, VisualLine, WrapWidth};
@@ -428,7 +429,7 @@ impl View {
         let invalid = if all_caret {
             line_cache_shadow::CURSOR_VALID
         } else {
-            line_cache_shadow::CURSOR_VALID | line_cache_shadow::STYLES_VALID
+            line_cache_shadow::CURSOR_VALID | line_cache_shadow::SYNTAX_VALID
         };
         self.lc_shadow.partial_invalidate(first_line, last_line, invalid);
     }
@@ -635,9 +636,9 @@ impl View {
         !self.selection.regions_in_range(offset, offset).is_empty()
     }
 
-    // Encode a single line with its text and cursors in JSON.
+    // Encode a single line with its text, plugin syntax spans, and cursors in JSON.
     // If "text" is not specified, don't add "text" to the output.
-    fn encode_line(&self, line: VisualLine, text: Option<&Rope>, last_pos: usize) -> Value {
+    fn encode_line(&self, line: VisualLine, text: Option<&Rope>, layers: &Layers, last_pos: usize) -> Value {
         let start_pos = line.interval.start;
         let pos = line.interval.end;
         let mut cursors = Vec::new();
@@ -683,6 +684,10 @@ impl View {
         if let Some(text) = text {
             result["text"] = json!(text.slice_to_cow(start_pos..pos));
         }
+        let syntax_spans = self.encode_syntax_spans(line.interval, layers);
+        if !syntax_spans.is_empty() {
+            result["syntax_spans"] = Value::Array(syntax_spans);
+        }
         if !cursors.is_empty() {
             result["cursor"] = json!(cursors);
         }
@@ -692,10 +697,26 @@ impl View {
         result
     }
 
+    fn encode_syntax_spans(&self, interval: Interval, layers: &Layers) -> Vec<Value> {
+        layers
+            .resolved_spans(interval)
+            .into_iter()
+            .filter(|span| span.end > span.start)
+            .map(|span| {
+                json!({
+                    "start_byte": span.start,
+                    "end_byte": span.end,
+                    "scope": span.scope,
+                })
+            })
+            .collect()
+    }
+
     fn send_update_for_plan(
         &mut self,
         text: &Rope,
         client: &Client,
+        layers: &Layers,
         plan: &RenderPlan,
         pristine: bool,
     ) {
@@ -748,22 +769,22 @@ impl View {
                     b.add_span(seg.n, 0, 0);
                 }
                 RenderTactic::Preserve | RenderTactic::Render => {
-                    // Depending on the state of TEXT_VALID, STYLES_VALID and
+                    // Depending on the state of TEXT_VALID, SYNTAX_VALID and
                     // CURSOR_VALID, perform one of the following actions:
                     //
                     //   - All the three are valid => send the "copy" op
                     //     (+leading "skip" to catch up with "ln" to update);
                     //
-                    //   - Text and styles are valid, cursors are not => same,
+                    //   - Text and syntax are valid, cursors are not => same,
                     //     but send an "update" op instead of "copy" to move
                     //     the cursors;
                     //
-                    //   - Text or styles are invalid:
+                    //   - Text or syntax are invalid:
                     //     => send "invalidate" if RenderTactic is "Preserve";
                     //     => send "skip"+"insert" (recreate the lines) if
                     //        RenderTactic is "Render".
                     if (seg.validity & line_cache_shadow::TEXT_VALID) != 0
-                        && (seg.validity & line_cache_shadow::STYLES_VALID) != 0
+                        && (seg.validity & line_cache_shadow::SYNTAX_VALID) != 0
                     {
                         let n_skip = seg.their_line_num - line_num;
                         if n_skip > 0 {
@@ -782,7 +803,7 @@ impl View {
                                 .lines
                                 .iter_lines(text, start_line)
                                 .take(seg.n)
-                                .map(|l| self.encode_line(l, /* text = */ None, text.len()))
+                                .map(|l| self.encode_line(l, /* text = */ None, layers, text.len()))
                                 .collect::<Vec<_>>();
 
                             let logical_line_opt =
@@ -800,7 +821,7 @@ impl View {
                             .lines
                             .iter_lines(text, start_line)
                             .take(seg.n)
-                            .map(|l| self.encode_line(l, Some(text), text.len()))
+                            .map(|l| self.encode_line(l, Some(text), layers, text.len()))
                             .collect::<Vec<_>>();
                         debug_assert_eq!(encoded_lines.len(), seg.n);
                         ops.push(UpdateOp::insert(encoded_lines));
@@ -831,10 +852,10 @@ impl View {
     /// Update front-end with any changes to view since the last time sent.
     /// The `pristine` argument indicates whether or not the buffer has
     /// unsaved changes.
-    pub fn render_if_dirty(&mut self, text: &Rope, client: &Client, pristine: bool) {
+    pub fn render_if_dirty(&mut self, text: &Rope, client: &Client, layers: &Layers, pristine: bool) {
         let height = self.line_of_offset(text, text.len()) + 1;
         let plan = RenderPlan::create(height, self.first_line, self.height);
-        self.send_update_for_plan(text, client, &plan, pristine);
+        self.send_update_for_plan(text, client, layers, &plan, pristine);
         if let Some(new_scroll_pos) = self.scroll_to.take() {
             let (line, col) = self.offset_to_line_col(text, new_scroll_pos);
             client.scroll_to(self.view_id, line, col);
@@ -846,6 +867,7 @@ impl View {
         &mut self,
         text: &Rope,
         client: &Client,
+        layers: &Layers,
         first_line: usize,
         last_line: usize,
         pristine: bool,
@@ -853,7 +875,7 @@ impl View {
         let height = self.line_of_offset(text, text.len()) + 1;
         let mut plan = RenderPlan::create(height, self.first_line, self.height);
         plan.request_lines(first_line, last_line);
-        self.send_update_for_plan(text, client, &plan, pristine);
+        self.send_update_for_plan(text, client, layers, &plan, pristine);
     }
 
     /// Invalidates front-end's entire line cache, forcing a full render at the next
@@ -1225,7 +1247,88 @@ fn clamp(x: usize, min: usize, max: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layers::Layers;
+    use crate::plugins::rpc::ScopeSpan;
+    use crate::plugins::PluginPid;
     use crate::rpc::FindQuery;
+    use serde_json::Value;
+    use std::mem;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+    use xi_rope::spans::SpansBuilder;
+    use xi_rpc::{Callback, Error as RpcError, Peer, RequestId};
+
+    #[derive(Clone, Default)]
+    struct RecordingPeer {
+        notifications: Arc<Mutex<Vec<(String, Value)>>>,
+    }
+
+    impl RecordingPeer {
+        fn take_notifications(&self) -> Vec<(String, Value)> {
+            let mut notifications = self.notifications.lock().expect("recording peer poisoned");
+            mem::take(&mut *notifications)
+        }
+    }
+
+    impl Peer for RecordingPeer {
+        fn box_clone(&self) -> Box<dyn Peer> {
+            Box::new(self.clone())
+        }
+
+        fn send_rpc_notification(&self, method: &str, params: &Value) {
+            self.notifications
+                .lock()
+                .expect("recording peer poisoned")
+                .push((method.to_owned(), params.clone()));
+        }
+
+        fn send_rpc_request_async(
+            &self,
+            _method: &str,
+            _params: &Value,
+            f: Box<dyn Callback>,
+        ) -> RequestId {
+            f.call(Ok(Value::Null));
+            RequestId::Number(0)
+        }
+
+        fn send_rpc_request(&self, _method: &str, _params: &Value) -> Result<Value, RpcError> {
+            Ok(Value::Null)
+        }
+
+        fn send_rpc_request_timeout(
+            &self,
+            _method: &str,
+            _params: &Value,
+            _timeout: std::time::Duration,
+        ) -> Result<Value, RpcError> {
+            Ok(Value::Null)
+        }
+
+        fn cancel_rpc_request(&self, _id: RequestId) -> bool {
+            false
+        }
+
+        fn request_is_pending(&self) -> bool {
+            false
+        }
+
+        fn schedule_idle(&self, _token: usize) {}
+
+        fn schedule_timer(&self, _time: Instant, _token: usize) {}
+
+        fn cancel_timer(&self, _token: usize) -> bool {
+            false
+        }
+
+        fn request_shutdown(&self) {}
+    }
+
+    fn recording_client() -> (Client, RecordingPeer) {
+        let peer = RecordingPeer::default();
+        let client = Client::new(Box::new(peer.clone()));
+        (client, peer)
+    }
 
     #[test]
     fn incremental_find_update() {
@@ -1442,5 +1545,141 @@ mod tests {
         view.do_find(&text);
         view.do_find_all(&text);
         assert_eq!(view.sel_regions().len(), 4);
+    }
+
+    #[test]
+    fn encode_line_includes_plugin_syntax_spans_with_byte_ranges() {
+        let view = View::new(1.into(), BufferId::new(2));
+        let text = Rope::from("let x = 1;\n");
+        let mut layers = Layers::default();
+        layers.add_scopes(
+            PluginPid(1),
+            vec![
+                vec!["keyword.control.rust".into()],
+                vec!["constant.numeric.decimal.rust".into()],
+            ],
+        );
+
+        let mut builder = SpansBuilder::new(text.len());
+        builder.add_span(Interval::new(0, 3), 0);
+        builder.add_span(Interval::new(8, 9), 1);
+        layers.update_layer(PluginPid(1), Interval::new(0, text.len()), builder.build());
+
+        let line = VisualLine { interval: Interval::new(0, 10), line_num: Some(1) };
+        let encoded = view.encode_line(line, Some(&text), &layers, text.len());
+        let syntax = encoded["syntax_spans"].as_array().expect("missing syntax spans");
+
+        assert_eq!(syntax.len(), 2);
+        assert_eq!(syntax[0]["start_byte"], 0);
+        assert_eq!(syntax[0]["end_byte"], 3);
+        assert_eq!(syntax[0]["scope"], "keyword.control.rust");
+        assert_eq!(syntax[1]["start_byte"], 8);
+        assert_eq!(syntax[1]["end_byte"], 9);
+        assert_eq!(syntax[1]["scope"], "constant.numeric.decimal.rust");
+    }
+
+    #[test]
+    fn encode_line_omits_syntax_spans_when_no_plugin_data_exists() {
+        let view = View::new(1.into(), BufferId::new(2));
+        let text = Rope::from("plain text\n");
+        let layers = Layers::default();
+        let line = VisualLine { interval: Interval::new(0, 10), line_num: Some(1) };
+
+        let encoded = view.encode_line(line, Some(&text), &layers, text.len());
+
+        assert!(encoded.get("syntax_spans").is_none());
+    }
+
+    #[test]
+    fn render_if_dirty_emits_syntax_spans_after_plugin_update() {
+        let mut view = View::new(1.into(), BufferId::new(2));
+        let mut editor = crate::editor::Editor::with_text("let x = 1;\n");
+        let (client, peer) = recording_client();
+        view.debug_force_rewrap_cols(editor.get_buffer(), 80);
+
+        view.render_if_dirty(editor.get_buffer(), &client, editor.get_layers(), true);
+        peer.take_notifications();
+
+        editor.get_layers_mut().add_scopes(
+            PluginPid(1),
+            vec![vec!["constant.numeric.decimal.rust".into()]],
+        );
+        let rev = editor.get_head_rev_token();
+        editor.update_spans(
+            &mut view,
+            PluginPid(1),
+            0,
+            editor.get_buffer().len(),
+            vec![ScopeSpan { start: 8, end: 9, scope_id: 0 }],
+            rev,
+        );
+
+        view.render_if_dirty(editor.get_buffer(), &client, editor.get_layers(), true);
+        let notifications = peer.take_notifications();
+
+        let syntax_refresh = notifications.iter().any(|(method, params)| {
+            method == "update"
+                && params["update"]["ops"].as_array().is_some_and(|ops| {
+                    ops.iter().any(|op| {
+                        op["lines"].as_array().is_some_and(|lines| {
+                            lines.iter().any(|line| line.get("syntax_spans").is_some())
+                        })
+                    })
+                })
+        });
+
+        assert!(syntax_refresh, "plugin span update should force syntax-bearing line updates");
+    }
+
+    #[test]
+    #[ignore = "manual perf probe for syntax payload size and render latency"]
+    fn syntax_span_render_perf_probe() {
+        let mut view = View::new(1.into(), BufferId::new(2));
+        let text = Rope::from(
+            (0..200)
+                .map(|index| format!("let value_{index} = 42;\n"))
+                .collect::<String>(),
+        );
+
+        let mut layers = Layers::default();
+        layers.add_scopes(
+            PluginPid(1),
+            vec![
+                vec!["keyword.control.rust".into()],
+                vec!["constant.numeric.decimal.rust".into()],
+            ],
+        );
+
+        let mut builder = SpansBuilder::new(text.len());
+        for line_idx in 0..200 {
+            let start = text.offset_of_line(line_idx);
+            builder.add_span(Interval::new(start, start + 3), 0);
+            builder.add_span(Interval::new(start + 15, start + 17), 1);
+        }
+        layers.update_layer(PluginPid(1), Interval::new(0, text.len()), builder.build());
+
+        let baseline_client = Client::new(Box::new(RecordingPeer::default()));
+        let (syntax_client, syntax_peer) = recording_client();
+
+        view.request_lines(&text, &baseline_client, &Layers::default(), 0, 199, true);
+
+        let started = Instant::now();
+        view.request_lines(&text, &syntax_client, &layers, 0, 199, true);
+        let elapsed = started.elapsed();
+
+        let syntax_bytes: usize = syntax_peer
+            .take_notifications()
+            .into_iter()
+            .filter(|(method, _)| method == "update")
+            .map(|(_, params)| serde_json::to_vec(&params).expect("serialize update payload").len())
+            .sum();
+
+        eprintln!(
+            "syntax perf probe: visible_lines=200 payload_bytes={} render_us={}",
+            syntax_bytes,
+            elapsed.as_micros()
+        );
+
+        assert!(syntax_bytes > 0, "probe should emit a measured update payload");
     }
 }

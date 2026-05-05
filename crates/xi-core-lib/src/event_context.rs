@@ -428,7 +428,9 @@ impl<'a> EventContext<'a> {
     fn render(&mut self) {
         let _t = tracing::trace_span!("EventContext::render", categories = "core").entered();
         let ed = self.editor.borrow();
-        self.view.borrow_mut().render_if_dirty(ed.get_buffer(), self.client, ed.is_pristine())
+        self.view
+            .borrow_mut()
+            .render_if_dirty(ed.get_buffer(), self.client, ed.get_layers(), ed.is_pristine())
     }
 }
 
@@ -539,6 +541,8 @@ impl<'a> EventContext<'a> {
         self.language = new_language_id.clone();
         self.client.language_changed(self.view_id, new_language_id);
         self.plugins.iter().for_each(|plug| plug.language_changed(self.view_id, new_language_id));
+        self.with_view(|view, text| view.set_dirty(text));
+        self.render();
     }
 
     /// Replaces buffer contents with `text`, preserving undo history, and
@@ -711,7 +715,7 @@ impl<'a> EventContext<'a> {
     fn do_request_lines(&mut self, first: usize, last: usize) {
         let mut view = self.view.borrow_mut();
         let ed = self.editor.borrow();
-        view.request_lines(ed.get_buffer(), self.client, first, last, ed.is_pristine())
+        view.request_lines(ed.get_buffer(), self.client, ed.get_layers(), first, last, ed.is_pristine())
     }
 
     fn selected_line_ranges(&mut self) -> Vec<(usize, usize)> {
@@ -998,18 +1002,90 @@ mod tests {
     use super::*;
     use crate::config::ConfigManager;
     use crate::core::dummy_weak_core;
+    use crate::plugins::PluginPid;
     use crate::plugins::rpc::{
         CodeActionRequest, Diagnostic, DiagnosticSeverity, FormatDocumentRequest,
         GetDiagnosticsResponse, GetSelectionsResponse, SelectionRange,
     };
     use crate::tabs::BufferId;
+    use serde_json::Value;
+    use std::mem;
+    use std::sync::{Arc, Mutex};
     use xi_rope::Interval;
-    use xi_rpc::test_utils::DummyPeer;
+    use xi_rope::spans::SpansBuilder;
+    use xi_rpc::{Callback, Error as RpcError, Peer, RequestId};
+
+    #[derive(Clone, Default)]
+    struct RecordingPeer {
+        notifications: Arc<Mutex<Vec<(String, Value)>>>,
+    }
+
+    impl RecordingPeer {
+        fn take_notifications(&self) -> Vec<(String, Value)> {
+            let mut notifications = self.notifications.lock().expect("recording peer poisoned");
+            mem::take(&mut *notifications)
+        }
+    }
+
+    impl Peer for RecordingPeer {
+        fn box_clone(&self) -> Box<dyn Peer> {
+            Box::new(self.clone())
+        }
+
+        fn send_rpc_notification(&self, method: &str, params: &Value) {
+            self.notifications
+                .lock()
+                .expect("recording peer poisoned")
+                .push((method.to_owned(), params.clone()));
+        }
+
+        fn send_rpc_request_async(
+            &self,
+            _method: &str,
+            _params: &Value,
+            f: Box<dyn Callback>,
+        ) -> RequestId {
+            f.call(Ok(Value::Null));
+            RequestId::Number(0)
+        }
+
+        fn send_rpc_request(&self, _method: &str, _params: &Value) -> Result<Value, RpcError> {
+            Ok(Value::Null)
+        }
+
+        fn send_rpc_request_timeout(
+            &self,
+            _method: &str,
+            _params: &Value,
+            _timeout: std::time::Duration,
+        ) -> Result<Value, RpcError> {
+            Ok(Value::Null)
+        }
+
+        fn cancel_rpc_request(&self, _id: RequestId) -> bool {
+            false
+        }
+
+        fn request_is_pending(&self) -> bool {
+            false
+        }
+
+        fn schedule_idle(&self, _token: usize) {}
+
+        fn schedule_timer(&self, _time: Instant, _token: usize) {}
+
+        fn cancel_timer(&self, _token: usize) -> bool {
+            false
+        }
+
+        fn request_shutdown(&self) {}
+    }
 
     struct ContextHarness {
         view: RefCell<View>,
         editor: RefCell<Editor>,
         client: Client,
+        peer: RecordingPeer,
         core_ref: WeakXiCore,
         kill_ring: RefCell<Rope>,
         width_cache: RefCell<WidthCache>,
@@ -1026,11 +1102,12 @@ mod tests {
             let config = config_manager.add_buffer(buffer_id, None);
             let view = RefCell::new(View::new(view_id, buffer_id));
             let editor = RefCell::new(Editor::with_text(s));
-            let client = Client::new(Box::new(DummyPeer));
+            let peer = RecordingPeer::default();
+            let client = Client::new(Box::new(peer.clone()));
             let core_ref = dummy_weak_core();
             let kill_ring = RefCell::new(Rope::from(""));
             let width_cache = RefCell::new(WidthCache::new());
-            let harness = ContextHarness { view, editor, client, core_ref, kill_ring,
+            let harness = ContextHarness { view, editor, client, peer, core_ref, kill_ring,
                              width_cache, config_manager };
             harness.make_context().view_init();
             harness.make_context().finish_init(&config);
@@ -1056,6 +1133,10 @@ mod tests {
                 }
             }
             text
+        }
+
+        fn take_notifications(&self) -> Vec<(String, Value)> {
+            self.peer.take_notifications()
         }
 
         fn make_context(&self) -> EventContext<'_> {
@@ -1097,6 +1178,42 @@ mod tests {
         assert_eq!(harness.debug_render(), "hello \n[world|]!");
         ctx.do_edit(EditNotification::Insert { chars: "friends".into() });
         assert_eq!(harness.debug_render(), "hello \nfriends|!");
+    }
+
+    #[test]
+    fn language_changed_invalidates_view_for_syntax_refresh() {
+        let harness = ContextHarness::new("let x = 1;\n");
+        harness.take_notifications();
+
+        {
+            let mut editor = harness.editor.borrow_mut();
+            let len = editor.get_buffer().len();
+            editor
+                .get_layers_mut()
+                .add_scopes(PluginPid(1), vec![vec!["constant.numeric.decimal.rust".into()]]);
+            let mut builder = SpansBuilder::new(len);
+            builder.add_span(Interval::new(8, 9), 0);
+            editor.get_layers_mut().update_layer(PluginPid(1), Interval::new(0, len), builder.build());
+        }
+
+        let mut ctx = harness.make_context();
+        ctx.language_changed(&LanguageId::from("Rust"));
+
+        let notifications = harness.take_notifications();
+        assert!(notifications.iter().any(|(method, _)| method == "language_changed"));
+
+        let syntax_refresh = notifications.iter().any(|(method, params)| {
+            method == "update"
+                && params["update"]["ops"].as_array().is_some_and(|ops| {
+                    ops.iter().any(|op| {
+                        op["lines"].as_array().is_some_and(|lines| {
+                            lines.iter().any(|line| line.get("syntax_spans").is_some())
+                        })
+                    })
+                })
+        });
+
+        assert!(syntax_refresh, "language change should force a rendered syntax refresh");
     }
 
     #[test]

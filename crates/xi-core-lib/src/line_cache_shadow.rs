@@ -34,7 +34,7 @@ type Validity = u8;
 
 pub const INVALID: Validity = 0;
 pub const TEXT_VALID: Validity = 1;
-pub const STYLES_VALID: Validity = 2;
+pub const SYNTAX_VALID: Validity = 2;
 pub const CURSOR_VALID: Validity = 4;
 pub const ALL_VALID: Validity = 7;
 
@@ -312,6 +312,7 @@ impl fmt::Debug for Span {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let validity = match self.validity {
             TEXT_VALID => "text",
+            SYNTAX_VALID => "syntax",
             ALL_VALID => "all",
             _other => "mixed",
         };

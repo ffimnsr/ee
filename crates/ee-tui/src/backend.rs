@@ -90,6 +90,7 @@ pub(crate) struct NavigationTarget {
 pub(crate) struct CachedLine {
     pub(crate) text: String,
     pub(crate) cursors: Vec<usize>,
+    pub(crate) syntax_spans: Vec<CoreSyntaxSpan>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,6 +109,18 @@ pub(crate) struct CoreNotificationParams {
 pub(crate) struct CoreUpdate {
     pub(crate) ops: Vec<CoreUpdateOp>,
     pub(crate) pristine: bool,
+    #[serde(default)]
+    pub(crate) annotations: Vec<CoreAnnotation>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub(crate) struct CoreAnnotation {
+    #[serde(rename = "type")]
+    pub(crate) annotation_type: String,
+    #[serde(default)]
+    pub(crate) ranges: Vec<[usize; 4]>,
+    #[serde(default)]
+    pub(crate) payloads: Option<Vec<Value>>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -135,6 +148,15 @@ pub(crate) struct CoreLine {
     pub(crate) text: Option<String>,
     #[serde(default)]
     pub(crate) cursor: Vec<usize>,
+    #[serde(default)]
+    pub(crate) syntax_spans: Option<Vec<CoreSyntaxSpan>>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub(crate) struct CoreSyntaxSpan {
+    pub(crate) start_byte: usize,
+    pub(crate) end_byte: usize,
+    pub(crate) scope: String,
 }
 
 #[allow(dead_code)]
@@ -153,6 +175,7 @@ pub(crate) struct XiClient {
     pub(crate) status_message: Option<String>,
     pub(crate) last_scroll: Option<(usize, usize)>,
     pub(crate) diagnostics: Vec<Diagnostic>,
+    pub(crate) annotations: Vec<CoreAnnotation>,
     /// Pending symbol results waiting to be opened in a picker.
     pub(crate) pending_symbols: Vec<(String, String, Vec<SymbolItem>)>,
 }
@@ -210,6 +233,7 @@ impl XiClient {
             status_message: None,
             last_scroll: None,
             diagnostics: Vec::new(),
+            annotations: Vec::new(),
             pending_symbols: Vec::new(),
         };
 
@@ -473,13 +497,15 @@ impl XiClient {
     }
 
     pub(crate) fn apply_update(&mut self, update: CoreUpdate) -> io::Result<()> {
+        let CoreUpdate { ops, pristine, annotations } = update;
         let previous = std::mem::take(&mut self.line_cache);
         let mut next_cache = Vec::new();
         let mut source_index = 0;
 
-        self.pristine = update.pristine;
+        self.pristine = pristine;
+        self.annotations = annotations;
 
-        for op in update.ops {
+        for op in ops {
             match op.op {
                 CoreUpdateKind::Insert => {
                     if op.lines.len() != op.n {
@@ -623,7 +649,11 @@ impl Eq for XiClient {}
 
 impl From<CoreLine> for LineSlot {
     fn from(line: CoreLine) -> Self {
-        LineSlot::Known(CachedLine { text: normalize_line_text(line.text), cursors: line.cursor })
+        LineSlot::Known(CachedLine {
+            text: normalize_line_text(line.text),
+            cursors: line.cursor,
+            syntax_spans: line.syntax_spans.unwrap_or_default(),
+        })
     }
 }
 
@@ -635,6 +665,9 @@ impl LineSlot {
                     line.text = text;
                 }
                 line.cursors = update.cursor;
+                if let Some(syntax_spans) = update.syntax_spans {
+                    line.syntax_spans = syntax_spans;
+                }
                 Ok(LineSlot::Known(line))
             }
             LineSlot::Invalid => {

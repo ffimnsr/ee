@@ -5,6 +5,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use xi_core_lib::plugin_rpc::DiagnosticSeverity;
 
 use crate::app::{App, Mode, Viewport, smart_case_sensitive};
+use crate::backend::{CoreAnnotation, LineSlot};
 use crate::buffer::BufState;
 use crate::config::{NumberStyle, StatuslineFormat};
 use crate::picker::PickerKind;
@@ -469,6 +470,246 @@ fn apply_search_highlights(
     if out.is_empty() { spans } else { out }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AnnotationVisual {
+    bg: Color,
+    fg: Option<Color>,
+    modifier: Modifier,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LineAnnotationSegment {
+    start_display: usize,
+    end_display: usize,
+    visual: AnnotationVisual,
+    priority: u8,
+}
+
+fn annotation_visual(kind: &str) -> AnnotationVisual {
+    match kind {
+        "selection" => AnnotationVisual {
+            bg: Color::Rgb(68, 71, 90),
+            fg: Some(Color::Rgb(205, 214, 244)),
+            modifier: Modifier::empty(),
+        },
+        "find" => AnnotationVisual {
+            bg: Color::Rgb(250, 179, 135),
+            fg: Some(Color::Rgb(22, 24, 31)),
+            modifier: Modifier::BOLD,
+        },
+        _ => AnnotationVisual {
+            bg: Color::Rgb(43, 82, 74),
+            fg: None,
+            modifier: Modifier::UNDERLINED,
+        },
+    }
+}
+
+fn annotation_priority(kind: &str) -> u8 {
+    match kind {
+        "selection" => 0,
+        "find" => 2,
+        _ => 1,
+    }
+}
+
+fn annotation_marker_color(kind: &str) -> Color {
+    match kind {
+        "find" => Color::Rgb(250, 179, 135),
+        "selection" => Color::Rgb(137, 180, 250),
+        _ => Color::Rgb(166, 227, 161),
+    }
+}
+
+fn payload_marker_for_value(value: &serde_json::Value) -> Option<char> {
+    match value {
+        serde_json::Value::String(text) => text.chars().find(|ch| !ch.is_whitespace()).map(|ch| {
+            if ch.is_alphanumeric() { ch.to_ascii_uppercase() } else { '•' }
+        }),
+        serde_json::Value::Object(map) => ["label", "kind", "name", "message"]
+            .iter()
+            .find_map(|key| map.get(*key).and_then(payload_marker_for_value))
+            .or(Some('•')),
+        serde_json::Value::Array(values) => values.iter().find_map(payload_marker_for_value),
+        serde_json::Value::Null => None,
+        _ => Some('•'),
+    }
+}
+
+fn annotation_marker_for_line(buf: &BufState, line_index: usize) -> Option<(char, Color)> {
+    let mut best: Option<(u8, char, Color)> = None;
+
+    for annotation in &buf.annotations {
+        if matches!(annotation.annotation_type.as_str(), "selection" | "find") {
+            continue;
+        }
+        let Some(payloads) = annotation.payloads.as_ref() else { continue };
+        for (idx, range) in annotation.ranges.iter().enumerate() {
+            let Some(payload) = payloads.get(idx) else { continue };
+            let [start_line, _, end_line, _] = *range;
+            if line_index < start_line || line_index > end_line {
+                continue;
+            }
+            let Some(marker) = payload_marker_for_value(payload) else { continue };
+            let priority = annotation_priority(&annotation.annotation_type);
+            let color = annotation_marker_color(&annotation.annotation_type);
+            if best.as_ref().is_none_or(|(best_priority, _, _)| priority >= *best_priority) {
+                best = Some((priority, marker, color));
+            }
+        }
+    }
+
+    best.map(|(_, marker, color)| (marker, color))
+}
+
+fn annotation_style(base: Style, visual: AnnotationVisual) -> Style {
+    let mut style = base.bg(visual.bg);
+    if let Some(fg) = visual.fg {
+        style = style.fg(fg);
+    }
+    if visual.modifier != Modifier::empty() {
+        style = style.add_modifier(visual.modifier);
+    }
+    style
+}
+
+fn apply_annotation_overlay(
+    spans: Vec<Span<'static>>,
+    col_start: usize,
+    col_end: usize,
+    left: usize,
+    visual: AnnotationVisual,
+) -> Vec<Span<'static>> {
+    let sel_start = col_start.saturating_sub(left);
+    let mut sel_end = col_end.saturating_sub(left);
+    if sel_end <= sel_start {
+        sel_end = sel_start + 1;
+    }
+
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut col = 0usize;
+    let mut painted = false;
+
+    for sp in spans {
+        let content = sp.content.into_owned();
+        let style = sp.style;
+        let span_cols = byte_col_to_display_col(&content, content.len());
+        let sp_end = col + span_cols;
+
+        if sp_end <= sel_start || col >= sel_end {
+            out.push(Span::styled(content, style));
+            col = sp_end;
+            continue;
+        }
+
+        let local_start = sel_start.saturating_sub(col).min(span_cols);
+        let local_end = sel_end.saturating_sub(col).min(span_cols);
+        let start_byte = display_col_to_byte(&content, local_start);
+        let end_byte = display_col_to_byte(&content, local_end);
+
+        if start_byte > 0 {
+            out.push(Span::styled(content[..start_byte].to_owned(), style));
+        }
+
+        if end_byte > start_byte {
+            out.push(Span::styled(
+                content[start_byte..end_byte].to_owned(),
+                annotation_style(style, visual),
+            ));
+            painted = true;
+        }
+
+        if end_byte < content.len() {
+            out.push(Span::styled(content[end_byte..].to_owned(), style));
+        }
+
+        col = sp_end;
+    }
+
+    if !painted && col <= sel_start {
+        let pad = sel_start - col;
+        if pad > 0 {
+            out.push(Span::raw(" ".repeat(pad)));
+        }
+        out.push(Span::styled(" ", annotation_style(Style::default(), visual)));
+    } else if painted && sel_end > col {
+        out.push(Span::styled(" ", annotation_style(Style::default(), visual)));
+    }
+
+    out
+}
+
+fn collect_line_annotation_segments(
+    line: &str,
+    log_idx: usize,
+    annotations: &[CoreAnnotation],
+) -> Vec<LineAnnotationSegment> {
+    let mut segments = Vec::new();
+
+    for annotation in annotations {
+        let visual = annotation_visual(&annotation.annotation_type);
+        let priority = annotation_priority(&annotation.annotation_type);
+        for range in &annotation.ranges {
+            let [start_line, start_col, end_line, end_col] = *range;
+            if log_idx < start_line || log_idx > end_line {
+                continue;
+            }
+
+            let start_byte = if log_idx == start_line { start_col.min(line.len()) } else { 0 };
+            let end_byte = if log_idx == end_line { end_col.min(line.len()) } else { line.len() };
+            let start_display = byte_col_to_display_col(line, start_byte);
+            let mut end_display = byte_col_to_display_col(line, end_byte);
+            if end_display <= start_display {
+                end_display = start_display + 1;
+            }
+
+            segments.push(LineAnnotationSegment {
+                start_display,
+                end_display,
+                visual,
+                priority,
+            });
+        }
+    }
+
+    segments.sort_by_key(|segment| (segment.priority, segment.start_display, segment.end_display));
+
+    let mut merged: Vec<LineAnnotationSegment> = Vec::new();
+    for segment in segments {
+        if let Some(last) = merged.last_mut() {
+            if last.priority == segment.priority
+                && last.visual == segment.visual
+                && segment.start_display <= last.end_display
+            {
+                last.end_display = last.end_display.max(segment.end_display);
+                continue;
+            }
+        }
+        merged.push(segment);
+    }
+
+    merged
+}
+
+fn apply_core_annotations(
+    mut spans: Vec<Span<'static>>,
+    line: &str,
+    log_idx: usize,
+    annotations: &[CoreAnnotation],
+    left: usize,
+) -> Vec<Span<'static>> {
+    for segment in collect_line_annotation_segments(line, log_idx, annotations) {
+        spans = apply_annotation_overlay(
+            spans,
+            segment.start_display,
+            segment.end_display,
+            left,
+            segment.visual,
+        );
+    }
+    spans
+}
+
 fn render_tab_bar(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let focused_idx = app.tabs.focused_idx();
     let spans: Vec<Span> = app
@@ -548,22 +789,30 @@ fn render_gutter(
         };
 
         // Sign column: show fold markers when applicable.
-        let sign_span = if sign_col {
+        let sign_spans = if sign_col {
             let (marker, fg) = if let Some(severity) = diagnostic_marker_for_line(buf, li) {
                 match severity {
-                    DiagnosticSeverity::Error => ("E ", Color::Rgb(243, 139, 168)),
-                    DiagnosticSeverity::Warning => ("W ", Color::Rgb(250, 179, 135)),
-                    DiagnosticSeverity::Information => ("I ", Color::Rgb(137, 220, 235)),
-                    DiagnosticSeverity::Hint => ("H ", Color::Rgb(166, 227, 161)),
+                    DiagnosticSeverity::Error => ('E', Color::Rgb(243, 139, 168)),
+                    DiagnosticSeverity::Warning => ('W', Color::Rgb(250, 179, 135)),
+                    DiagnosticSeverity::Information => ('I', Color::Rgb(137, 220, 235)),
+                    DiagnosticSeverity::Hint => ('H', Color::Rgb(166, 227, 161)),
                 }
             } else if app.folds.fold_at(buf.id, li).is_some() {
-                ("▸ ", Color::Rgb(100, 130, 160))
+                ('▸', Color::Rgb(100, 130, 160))
             } else {
-                ("  ", Color::Rgb(100, 130, 160))
+                (' ', Color::Rgb(100, 130, 160))
             };
-            Span::styled(marker, Style::default().fg(fg).bg(bg))
+            let (annotation_marker, annotation_fg) =
+                annotation_marker_for_line(buf, li).unwrap_or((' ', Color::Rgb(90, 100, 125)));
+            vec![
+                Span::styled(marker.to_string(), Style::default().fg(fg).bg(bg)),
+                Span::styled(
+                    annotation_marker.to_string(),
+                    Style::default().fg(annotation_fg).bg(bg),
+                ),
+            ]
         } else {
-            Span::raw("")
+            Vec::new()
         };
 
         let num_text = match app.config.number_style {
@@ -596,7 +845,9 @@ fn render_gutter(
         }
 
         if sign_col {
-            lines.push(Line::from(vec![sign_span, num_span]));
+            let mut row = sign_spans;
+            row.push(num_span);
+            lines.push(Line::from(row));
         } else {
             lines.push(Line::from(num_span));
         }
@@ -683,31 +934,60 @@ fn render_buffer(
                 )]
             } else {
                 let byte_start = display_col_to_byte(line, left);
-                let raw = hl_lines.get(log_idx.saturating_sub(top));
-                if let Some(spans_ref) = raw {
-                    if spans_ref.is_empty() {
-                        vec![Span::styled(line[byte_start..].to_owned(), Style::default().bg(bg))]
-                    } else {
-                        crate::highlight::Highlighter::spans_with_offset(spans_ref, byte_start)
-                            .into_iter()
-                            .map(|s| {
-                                let style = if is_cursor && app.config.cursor_line {
-                                    s.style.bg(bg)
-                                } else {
-                                    s.style
-                                };
-                                Span::styled(s.content.into_owned(), style)
-                            })
-                            .collect()
+                let backend_syntax = match buf.line_cache.get(log_idx) {
+                    Some(LineSlot::Known(cached_line)) if !cached_line.syntax_spans.is_empty() => {
+                        Some(cached_line.syntax_spans.as_slice())
                     }
+                    _ => None,
+                };
+
+                if let Some(syntax_spans) = backend_syntax {
+                    crate::highlight::Highlighter::scope_spans_with_offset(
+                        line,
+                        syntax_spans,
+                        byte_start,
+                    )
+                    .into_iter()
+                    .map(|s| {
+                        let style = if is_cursor && app.config.cursor_line {
+                            s.style.bg(bg)
+                        } else {
+                            s.style
+                        };
+                        Span::styled(s.content.into_owned(), style)
+                    })
+                    .collect()
                 } else {
-                    vec![Span::styled(line[byte_start..].to_owned(), Style::default().bg(bg))]
+                    let raw = hl_lines.get(log_idx.saturating_sub(top));
+                    if let Some(spans_ref) = raw {
+                        if spans_ref.is_empty() {
+                            vec![Span::styled(line[byte_start..].to_owned(), Style::default().bg(bg))]
+                        } else {
+                            crate::highlight::Highlighter::spans_with_offset(spans_ref, byte_start)
+                                .into_iter()
+                                .map(|s| {
+                                    let style = if is_cursor && app.config.cursor_line {
+                                        s.style.bg(bg)
+                                    } else {
+                                        s.style
+                                    };
+                                    Span::styled(s.content.into_owned(), style)
+                                })
+                                .collect()
+                        }
+                    } else {
+                        vec![Span::styled(line[byte_start..].to_owned(), Style::default().bg(bg))]
+                    }
                 }
             };
 
             // Apply visible-whitespace substitution when enabled.
             if app.config.show_visible_whitespace && !is_fold_header {
                 spans = apply_visible_whitespace(spans);
+            }
+
+            if !is_fold_header {
+                spans = apply_core_annotations(spans, line, log_idx, &buf.annotations, left);
             }
 
             // Apply search match highlighting over the rendered spans.
@@ -1122,5 +1402,118 @@ fn diagnostic_rank(severity: &DiagnosticSeverity) -> u8 {
         DiagnosticSeverity::Warning => 1,
         DiagnosticSeverity::Information => 2,
         DiagnosticSeverity::Hint => 3,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_annotation_overlay_styles_target_range() {
+        let spans = vec![Span::styled("alpha", Style::default().fg(Color::Rgb(1, 2, 3)))];
+        let visual = annotation_visual("find");
+
+        let out = apply_annotation_overlay(spans, 1, 3, 0, visual);
+
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].content, "a");
+        assert_eq!(out[1].content, "lp");
+        assert_eq!(out[2].content, "ha");
+        assert_eq!(
+            out[1].style,
+            Style::default().fg(Color::Rgb(22, 24, 31)).bg(visual.bg).add_modifier(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn apply_core_annotations_maps_byte_ranges_to_display_cols() {
+        let spans = vec![Span::styled("abcdef", Style::default())];
+        let annotations = vec![CoreAnnotation {
+            annotation_type: String::from("other"),
+            ranges: vec![[0, 2, 0, 5]],
+            payloads: None,
+        }];
+
+        let out = apply_core_annotations(spans, "abcdef", 0, &annotations, 0);
+
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].content, "ab");
+        assert_eq!(out[1].content, "cde");
+        assert_eq!(
+            out[1].style,
+            Style::default().bg(Color::Rgb(43, 82, 74)).add_modifier(Modifier::UNDERLINED)
+        );
+    }
+
+    #[test]
+    fn collect_line_annotation_segments_merges_same_priority_overlaps() {
+        let annotations = vec![
+            CoreAnnotation {
+                annotation_type: String::from("lint"),
+                ranges: vec![[0, 1, 0, 3]],
+                payloads: None,
+            },
+            CoreAnnotation {
+                annotation_type: String::from("lint"),
+                ranges: vec![[0, 2, 0, 5]],
+                payloads: None,
+            },
+        ];
+
+        let segments = collect_line_annotation_segments("abcdef", 0, &annotations);
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].start_display, 1);
+        assert_eq!(segments[0].end_display, 5);
+    }
+
+    #[test]
+    fn collect_line_annotation_segments_sorts_by_priority() {
+        let annotations = vec![
+            CoreAnnotation {
+                annotation_type: String::from("find"),
+                ranges: vec![[0, 1, 0, 2]],
+                payloads: None,
+            },
+            CoreAnnotation {
+                annotation_type: String::from("selection"),
+                ranges: vec![[0, 1, 0, 2]],
+                payloads: None,
+            },
+        ];
+
+        let segments = collect_line_annotation_segments("abcdef", 0, &annotations);
+
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].priority, annotation_priority("selection"));
+        assert_eq!(segments[1].priority, annotation_priority("find"));
+    }
+
+    #[test]
+    fn annotation_marker_for_line_prefers_payload_backed_plugin_annotations() {
+        let buf = BufState {
+            id: 1,
+            path: None,
+            view_id: String::new(),
+            pending_line_request: false,
+            line_cache: Vec::new(),
+            lines: vec![String::from("alpha")],
+            cursor_line: 0,
+            cursor_col: 0,
+            pristine: true,
+            status_message: None,
+            last_scroll: None,
+            mtime: None,
+            externally_modified: false,
+            diagnostics: Vec::new(),
+            annotations: vec![CoreAnnotation {
+                annotation_type: String::from("lint"),
+                ranges: vec![[0, 0, 0, 3]],
+                payloads: Some(vec![serde_json::Value::String(String::from("todo"))]),
+            }],
+        };
+
+        assert_eq!(annotation_marker_for_line(&buf, 0), Some(('T', Color::Rgb(166, 227, 161))));
     }
 }
