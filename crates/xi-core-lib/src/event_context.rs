@@ -428,9 +428,12 @@ impl<'a> EventContext<'a> {
     fn render(&mut self) {
         let _t = tracing::trace_span!("EventContext::render", categories = "core").entered();
         let ed = self.editor.borrow();
-        self.view
-            .borrow_mut()
-            .render_if_dirty(ed.get_buffer(), self.client, ed.get_layers(), ed.is_pristine())
+        self.view.borrow_mut().render_if_dirty(
+            ed.get_buffer(),
+            self.client,
+            ed.get_layers(),
+            ed.is_pristine(),
+        )
     }
 }
 
@@ -715,7 +718,14 @@ impl<'a> EventContext<'a> {
     fn do_request_lines(&mut self, first: usize, last: usize) {
         let mut view = self.view.borrow_mut();
         let ed = self.editor.borrow();
-        view.request_lines(ed.get_buffer(), self.client, ed.get_layers(), first, last, ed.is_pristine())
+        view.request_lines(
+            ed.get_buffer(),
+            self.client,
+            ed.get_layers(),
+            first,
+            last,
+            ed.is_pristine(),
+        )
     }
 
     fn selected_line_ranges(&mut self) -> Vec<(usize, usize)> {

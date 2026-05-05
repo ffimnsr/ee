@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+test_summary_script="./scripts/test-workspace-summary.sh"
+
+declare -A package_scope=()
+scope_args=()
+needs_rust_checks=0
+needs_workspace_checks=0
+
+collect_check_scope() {
+    local file
+    while IFS= read -r file; do
+        [[ -z "$file" ]] && continue
+
+        case "$file" in
+            *.rs|Cargo.toml|Cargo.lock|rustfmt.toml|crates/*/Cargo.toml|crates/*/build.rs|crates/*/src/*|crates/*/tests/*|crates/*/benches/*)
+                needs_rust_checks=1
+                ;;
+            *)
+                ;;
+        esac
+
+        case "$file" in
+            Cargo.toml|Cargo.lock|rustfmt.toml)
+                needs_workspace_checks=1
+                ;;
+            crates/*)
+                local package_dir
+                package_dir="${file#crates/}"
+                package_dir="${package_dir%%/*}"
+                if [[ -n "$package_dir" ]]; then
+                    package_scope["$package_dir"]=1
+                else
+                    needs_workspace_checks=1
+                fi
+                ;;
+            *.rs)
+                needs_workspace_checks=1
+                ;;
+            *)
+                ;;
+        esac
+    done < <(git diff --cached --name-only --diff-filter=ACMR)
+}
+
+build_scope_args() {
+    if [[ "$needs_workspace_checks" -eq 1 || "${ATLAS_PRE_COMMIT_FULL:-0}" == "1" ]]; then
+        scope_args=(--workspace)
+        return
+    fi
+
+    local packages=()
+    local package
+    for package in "${!package_scope[@]}"; do
+        packages+=("$package")
+    done
+    if [[ "${#packages[@]}" -eq 0 ]]; then
+        return
+    fi
+
+    IFS=$'\n' packages=($(printf '%s\n' "${packages[@]}" | sort))
+    unset IFS
+    for package in "${packages[@]}"; do
+        scope_args+=(-p "$package")
+    done
+}
+
+collect_check_scope
+build_scope_args
+
+if [[ "$needs_rust_checks" -eq 1 || "${ATLAS_PRE_COMMIT_FULL:-0}" == "1" ]]; then
+    echo "[pre-commit] format check"
+    cargo fmt --all --check
+
+    if [[ "${#scope_args[@]}" -eq 0 ]]; then
+        scope_args=(--workspace)
+    fi
+
+    echo "[pre-commit] lint (${scope_args[*]})"
+    cargo clippy "${scope_args[@]}" --all-targets --all-features -- -D warnings
+
+    echo "[pre-commit] lint stable (${scope_args[*]})"
+    cargo +stable clippy "${scope_args[@]}" --all-targets --all-features -- -D warnings
+
+    echo "[pre-commit] test (${scope_args[*]})"
+    "$test_summary_script" "${scope_args[@]}"
+    echo "[pre-commit] test passed"
+else
+    echo "[pre-commit] no Rust changes staged; skipping cargo fmt/clippy/test"
+fi
+
+# atlas-hook start
+
+# Installed by atlas. Remove these lines to disable atlas graph updates.
+if command -v atlas >/dev/null 2>&1; then
+    atlas update || true
+    atlas detect-changes || true
+fi
+echo "[pre-commit] complete"
+# atlas-hook end

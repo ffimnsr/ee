@@ -380,11 +380,7 @@ mod tests {
     fn scope_spans_with_offset_uses_backend_ranges() {
         let line = "let answer = 42;";
         let spans = vec![
-            CoreSyntaxSpan {
-                start_byte: 0,
-                end_byte: 3,
-                scope: "keyword.control.rust".into(),
-            },
+            CoreSyntaxSpan { start_byte: 0, end_byte: 3, scope: "keyword.control.rust".into() },
             CoreSyntaxSpan {
                 start_byte: 13,
                 end_byte: 15,

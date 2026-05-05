@@ -523,9 +523,10 @@ fn annotation_marker_color(kind: &str) -> Color {
 
 fn payload_marker_for_value(value: &serde_json::Value) -> Option<char> {
     match value {
-        serde_json::Value::String(text) => text.chars().find(|ch| !ch.is_whitespace()).map(|ch| {
-            if ch.is_alphanumeric() { ch.to_ascii_uppercase() } else { '•' }
-        }),
+        serde_json::Value::String(text) => text
+            .chars()
+            .find(|ch| !ch.is_whitespace())
+            .map(|ch| if ch.is_alphanumeric() { ch.to_ascii_uppercase() } else { '•' }),
         serde_json::Value::Object(map) => ["label", "kind", "name", "message"]
             .iter()
             .find_map(|key| map.get(*key).and_then(payload_marker_for_value))
@@ -663,12 +664,7 @@ fn collect_line_annotation_segments(
                 end_display = start_display + 1;
             }
 
-            segments.push(LineAnnotationSegment {
-                start_display,
-                end_display,
-                visual,
-                priority,
-            });
+            segments.push(LineAnnotationSegment { start_display, end_display, visual, priority });
         }
     }
 
@@ -961,7 +957,10 @@ fn render_buffer(
                     let raw = hl_lines.get(log_idx.saturating_sub(top));
                     if let Some(spans_ref) = raw {
                         if spans_ref.is_empty() {
-                            vec![Span::styled(line[byte_start..].to_owned(), Style::default().bg(bg))]
+                            vec![Span::styled(
+                                line[byte_start..].to_owned(),
+                                Style::default().bg(bg),
+                            )]
                         } else {
                             crate::highlight::Highlighter::spans_with_offset(spans_ref, byte_start)
                                 .into_iter()

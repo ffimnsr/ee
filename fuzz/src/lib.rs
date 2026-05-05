@@ -37,11 +37,7 @@ fn clamp_offset(text: &Rope, raw: u16) -> usize {
 fn clamp_interval(text: &Rope, start: u16, end: u16) -> (usize, usize) {
     let start = clamp_offset(text, start);
     let end = clamp_offset(text, end);
-    if start <= end {
-        (start, end)
-    } else {
-        (end, start)
-    }
+    if start <= end { (start, end) } else { (end, start) }
 }
 
 fn to_group_set(groups: &[u8]) -> BTreeSet<usize> {
@@ -115,7 +111,7 @@ pub fn run_rope_input(input: RopeInput) {
 
 #[cfg(test)]
 mod tests {
-    use super::{clamp_interval, new_engine, run_rope_input, RopeInput};
+    use super::{RopeInput, clamp_interval, new_engine, run_rope_input};
     use xi_rope::delta::Delta;
     use xi_rope::{Interval, Rope, RopeInfo};
 
@@ -343,5 +339,4 @@ mod tests {
             right_gc_groups: Vec::new(),
         });
     }
-
 }
