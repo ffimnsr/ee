@@ -638,7 +638,13 @@ impl View {
 
     // Encode a single line with its text, plugin syntax spans, and cursors in JSON.
     // If "text" is not specified, don't add "text" to the output.
-    fn encode_line(&self, line: VisualLine, text: Option<&Rope>, layers: &Layers, last_pos: usize) -> Value {
+    fn encode_line(
+        &self,
+        line: VisualLine,
+        text: Option<&Rope>,
+        layers: &Layers,
+        last_pos: usize,
+    ) -> Value {
         let start_pos = line.interval.start;
         let pos = line.interval.end;
         let mut cursors = Vec::new();
@@ -803,7 +809,9 @@ impl View {
                                 .lines
                                 .iter_lines(text, start_line)
                                 .take(seg.n)
-                                .map(|l| self.encode_line(l, /* text = */ None, layers, text.len()))
+                                .map(|l| {
+                                    self.encode_line(l, /* text = */ None, layers, text.len())
+                                })
                                 .collect::<Vec<_>>();
 
                             let logical_line_opt =
@@ -852,7 +860,13 @@ impl View {
     /// Update front-end with any changes to view since the last time sent.
     /// The `pristine` argument indicates whether or not the buffer has
     /// unsaved changes.
-    pub fn render_if_dirty(&mut self, text: &Rope, client: &Client, layers: &Layers, pristine: bool) {
+    pub fn render_if_dirty(
+        &mut self,
+        text: &Rope,
+        client: &Client,
+        layers: &Layers,
+        pristine: bool,
+    ) {
         let height = self.line_of_offset(text, text.len()) + 1;
         let plan = RenderPlan::create(height, self.first_line, self.height);
         self.send_update_for_plan(text, client, layers, &plan, pristine);
@@ -1248,8 +1262,8 @@ fn clamp(x: usize, min: usize, max: usize) -> usize {
 mod tests {
     use super::*;
     use crate::layers::Layers;
-    use crate::plugins::rpc::ScopeSpan;
     use crate::plugins::PluginPid;
+    use crate::plugins::rpc::ScopeSpan;
     use crate::rpc::FindQuery;
     use serde_json::Value;
     use std::mem;
@@ -1554,10 +1568,7 @@ mod tests {
         let mut layers = Layers::default();
         layers.add_scopes(
             PluginPid(1),
-            vec![
-                vec!["keyword.control.rust".into()],
-                vec!["constant.numeric.decimal.rust".into()],
-            ],
+            vec![vec!["keyword.control.rust".into()], vec!["constant.numeric.decimal.rust".into()]],
         );
 
         let mut builder = SpansBuilder::new(text.len());
@@ -1600,10 +1611,9 @@ mod tests {
         view.render_if_dirty(editor.get_buffer(), &client, editor.get_layers(), true);
         peer.take_notifications();
 
-        editor.get_layers_mut().add_scopes(
-            PluginPid(1),
-            vec![vec!["constant.numeric.decimal.rust".into()]],
-        );
+        editor
+            .get_layers_mut()
+            .add_scopes(PluginPid(1), vec![vec!["constant.numeric.decimal.rust".into()]]);
         let rev = editor.get_head_rev_token();
         editor.update_spans(
             &mut view,
@@ -1636,18 +1646,13 @@ mod tests {
     fn syntax_span_render_perf_probe() {
         let mut view = View::new(1.into(), BufferId::new(2));
         let text = Rope::from(
-            (0..200)
-                .map(|index| format!("let value_{index} = 42;\n"))
-                .collect::<String>(),
+            (0..200).map(|index| format!("let value_{index} = 42;\n")).collect::<String>(),
         );
 
         let mut layers = Layers::default();
         layers.add_scopes(
             PluginPid(1),
-            vec![
-                vec!["keyword.control.rust".into()],
-                vec!["constant.numeric.decimal.rust".into()],
-            ],
+            vec![vec!["keyword.control.rust".into()], vec!["constant.numeric.decimal.rust".into()]],
         );
 
         let mut builder = SpansBuilder::new(text.len());

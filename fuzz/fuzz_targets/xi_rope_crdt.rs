@@ -1,6 +1,6 @@
 #![no_main]
 
-use ee_fuzz::{run_rope_input, RopeInput};
+use ee_fuzz::{RopeInput, run_rope_input};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|input: RopeInput| {

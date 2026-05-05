@@ -163,7 +163,8 @@ impl ScopeLayer {
             .iter()
             .filter_map(|(span_iv, scope_id)| {
                 let stack = self.stack_lookup.get(*scope_id as usize)?;
-                let scope = stack.iter().map(|scope| scope.to_string()).collect::<Vec<_>>().join(" ");
+                let scope =
+                    stack.iter().map(|scope| scope.to_string()).collect::<Vec<_>>().join(" ");
                 if scope.is_empty() {
                     return None;
                 }
@@ -189,10 +190,7 @@ mod tests {
         let mut layers = Layers::default();
         layers.add_scopes(
             PluginPid(1),
-            vec![
-                vec!["keyword.control.rust".into()],
-                vec!["constant.numeric.decimal.rust".into()],
-            ],
+            vec![vec!["keyword.control.rust".into()], vec!["constant.numeric.decimal.rust".into()]],
         );
 
         let mut builder = SpansBuilder::new(16);

@@ -20,8 +20,8 @@ use xi_core_lib::rpc::LineReplacement;
 use crate::app::{App, Mode, Operator, PendingCharFind};
 use crate::backend::{
     BackendEvent, CachedLine, CompletionSuggestion, CoreAnnotation, CoreLine, CoreSyntaxSpan,
-    CoreUpdate, CoreUpdateKind, CoreUpdateOp, LineSlot, NavigationTarget,
-    format_location_message, invalid_line_ranges, parse_notification,
+    CoreUpdate, CoreUpdateKind, CoreUpdateOp, LineSlot, NavigationTarget, format_location_message,
+    invalid_line_ranges, parse_notification,
 };
 use crate::buffer::{BufState, BufferManager};
 use crate::keymap::{Action, BindingKey, bindings};
@@ -303,13 +303,9 @@ fn apply_update_merges_copy_update_insert_and_invalidate() {
 
     assert_eq!(client.lines, vec!["alpha", "beta", "delta", "", ""]);
     assert_eq!((client.cursor_line, client.cursor_col), (1, 1));
-    let LineSlot::Known(line) = &client.line_cache[1] else {
-        panic!("expected cached line")
-    };
+    let LineSlot::Known(line) = &client.line_cache[1] else { panic!("expected cached line") };
     assert_eq!(line.syntax_spans.len(), 1);
-    let LineSlot::Known(line) = &client.line_cache[2] else {
-        panic!("expected cached line")
-    };
+    let LineSlot::Known(line) = &client.line_cache[2] else { panic!("expected cached line") };
     assert_eq!(line.syntax_spans.len(), 1);
     assert_eq!(invalid_line_ranges(&client.line_cache), vec![(3, 5)]);
     assert_eq!(client.annotations.len(), 1);
@@ -342,9 +338,7 @@ fn parse_notification_decodes_syntax_spans_in_update_lines() {
     )
     .expect("update notification should parse");
 
-    let BackendEvent::Update { update, .. } = event else {
-        panic!("expected update event")
-    };
+    let BackendEvent::Update { update, .. } = event else { panic!("expected update event") };
     let spans = update.ops[0].lines[0].syntax_spans.as_ref().expect("missing syntax spans");
     assert_eq!(spans.len(), 2);
     assert_eq!(spans[0].scope, "keyword.control.rust");
@@ -2280,12 +2274,12 @@ fn multi_line_core_annotation_highlights_rendered_rows() {
 
     let annotation_bg = ratatui::style::Color::Rgb(43, 82, 74);
     let gutter_width: u16 = 5;
-    let row0_has_annotation = (gutter_width + 1..gutter_width + 5)
-        .any(|x| buf.cell((x, 0)).unwrap().bg == annotation_bg);
-    let row1_has_annotation = (gutter_width..gutter_width + 2)
-        .any(|x| buf.cell((x, 1)).unwrap().bg == annotation_bg);
-    let row2_has_annotation = (gutter_width..gutter_width + 5)
-        .any(|x| buf.cell((x, 2)).unwrap().bg == annotation_bg);
+    let row0_has_annotation =
+        (gutter_width + 1..gutter_width + 5).any(|x| buf.cell((x, 0)).unwrap().bg == annotation_bg);
+    let row1_has_annotation =
+        (gutter_width..gutter_width + 2).any(|x| buf.cell((x, 1)).unwrap().bg == annotation_bg);
+    let row2_has_annotation =
+        (gutter_width..gutter_width + 5).any(|x| buf.cell((x, 2)).unwrap().bg == annotation_bg);
 
     assert!(row0_has_annotation, "row 0 should show annotation highlight");
     assert!(row1_has_annotation, "row 1 should show annotation highlight");

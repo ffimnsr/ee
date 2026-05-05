@@ -33,9 +33,9 @@ use im::OrdSet;
 use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
 use std::borrow::Cow;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
 
 use crate::delta::{Delta, InsertDelta};
 use crate::interval::Interval;
@@ -667,12 +667,14 @@ impl Engine {
                     } else {
                         (inserts.transform_shrink(&gc_dels), deletes.transform_shrink(&gc_dels))
                     };
-                    let retain_visible_insert = gc_groups.contains(&undo_group) && !inserts.is_empty();
+                    let retain_visible_insert =
+                        gc_groups.contains(&undo_group) && !inserts.is_empty();
                     if retain_revs.contains(&rev.rev_id)
                         || !gc_groups.contains(&undo_group)
                         || retain_visible_insert
                     {
-                        let drop_gc_only_delete = gc_groups.contains(&undo_group) && inserts.is_empty();
+                        let drop_gc_only_delete =
+                            gc_groups.contains(&undo_group) && inserts.is_empty();
                         if !drop_gc_only_delete && (!inserts.is_empty() || !deletes.is_empty()) {
                             self.revs.push(Revision {
                                 rev_id: rev.rev_id,
@@ -774,7 +776,10 @@ impl Engine {
         self.revs.push(Revision {
             rev_id,
             max_undo_so_far: std::cmp::max(max_undo_so_far, self.max_undo_group_id()),
-            edit: Undo { toggled_groups, deletes_bitxor: Subset::new(self.deletes_from_union.len()) },
+            edit: Undo {
+                toggled_groups,
+                deletes_bitxor: Subset::new(self.deletes_from_union.len()),
+            },
         });
     }
 
