@@ -80,6 +80,14 @@ pub(crate) struct PendingCharFind {
     pub(crate) inclusive: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RepeatableMotion {
+    CharFind { target: char, forward: bool, inclusive: bool },
+    MatchingPair,
+    Quickfix { forward: bool, is_quickfix: bool },
+    GitHunk { forward: bool },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct InputState {
     pub(crate) count_digits: Vec<u8>,
@@ -101,6 +109,8 @@ pub(crate) struct InputState {
     pub(crate) awaiting_macro_replay: bool,
     /// Set when `Ctrl-W` is pressed; next char is the window command.
     pub(crate) awaiting_window_cmd: bool,
+    /// Set when `replace` is pressed; next char replaces current selection.
+    pub(crate) awaiting_replace_char: bool,
 }
 
 impl InputState {
@@ -126,12 +136,14 @@ impl InputState {
         self.awaiting_macro_record = false;
         self.awaiting_macro_replay = false;
         self.awaiting_window_cmd = false;
+        self.awaiting_replace_char = false;
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct App {
     pub(crate) config: crate::config::EditorSettings,
+    pub(crate) key_bindings: HashMap<crate::keymap::BindingKey, crate::keymap::Action>,
     pub(crate) backend: BufferManager,
     pub(crate) tabs: TabManager,
     pub(crate) mode: Mode,
@@ -178,6 +190,8 @@ pub(crate) struct App {
     pub(crate) macros: HashMap<char, Vec<KeyEvent>>,
     /// Last register used for macro replay; `@@` replays this.
     pub(crate) last_macro: Option<char>,
+    /// Last repeatable motion for Helix-style motion replay.
+    pub(crate) last_repeatable_motion: Option<RepeatableMotion>,
     /// `true` while a macro is replaying to suppress nested recording.
     pub(super) macro_replaying: bool,
     // ── Ex command history ─────────────────────────────────────────────────
@@ -220,6 +234,8 @@ pub(crate) struct App {
     pub(crate) search_backward: bool,
     /// Active hover popup for the focused editor surface.
     pub(crate) hover_popup: Option<HoverPopup>,
+    /// Cached git state keyed by buffer id.
+    pub(crate) source_control: HashMap<crate::buffer::BufferId, crate::git::GitBufferCache>,
     // ── Substitute confirm state ──────────────────────────────────────────────────
     /// Pending substitutions awaiting `y`/`n`/`a`/`q` confirmation.
     pub(crate) substitute_pending: Option<SubstitutePending>,
@@ -228,6 +244,7 @@ pub(crate) struct App {
 impl App {
     pub(crate) fn from_path(path: Option<PathBuf>) -> io::Result<Self> {
         let config = crate::config::load_config(path.as_deref());
+        let key_bindings = crate::keymap::bindings_for(&config.keymap);
         let mut backend = BufferManager::new(path)?;
         let initial_buf_id = backend.active().id;
 
@@ -245,6 +262,7 @@ impl App {
 
         Ok(Self {
             config,
+            key_bindings,
             backend,
             tabs: TabManager::new(initial_buf_id),
             mode: Mode::Normal,
@@ -269,6 +287,7 @@ impl App {
             macro_buffer: Vec::new(),
             macros: HashMap::new(),
             last_macro: None,
+            last_repeatable_motion: None,
             macro_replaying: false,
             command_history: Vec::new(),
             history_idx: None,
@@ -286,6 +305,7 @@ impl App {
             search_pattern: None,
             search_backward: false,
             hover_popup: None,
+            source_control: HashMap::new(),
             substitute_pending: None,
         })
     }

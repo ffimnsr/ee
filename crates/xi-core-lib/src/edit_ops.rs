@@ -519,6 +519,31 @@ pub fn transpose(base: &Rope, regions: &[SelRegion]) -> RopeDelta {
     builder.build()
 }
 
+pub fn rotate_selection_contents(base: &Rope, regions: &[SelRegion], forward: bool) -> RopeDelta {
+    if regions.len() < 2 {
+        return identity_delta(base);
+    }
+
+    let intervals = regions
+        .iter()
+        .map(|&region| sel_region_to_interval_and_rope(base, region))
+        .collect::<Vec<_>>();
+
+    let mut builder = DeltaBuilder::new(base.len());
+    let len = intervals.len();
+    let mut last = 0;
+    for (index, (interval, _)) in intervals.iter().enumerate() {
+        if interval.start() < last {
+            continue;
+        }
+        let source_index = if forward { (index + len - 1) % len } else { (index + 1) % len };
+        builder.replace(*interval, intervals[source_index].1.clone());
+        last = interval.end();
+    }
+
+    builder.build()
+}
+
 pub fn transform_text<F: Fn(&str) -> String>(
     base: &Rope,
     regions: &[SelRegion],
@@ -629,7 +654,7 @@ fn n_spaces(n: usize) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{delete_backward, transpose};
+    use super::{delete_backward, rotate_selection_contents, transpose};
     use crate::config::BufferItems;
     use crate::selection::SelRegion;
     use xi_rope::Rope;
@@ -687,5 +712,25 @@ mod tests {
         let delta = delete_backward(&text, &regions, &config);
 
         assert_eq!(String::from(delta.apply(&text)), "ad");
+    }
+
+    #[test]
+    fn rotate_selection_contents_forward_wraps_last_into_first() {
+        let text: Rope = "aa bb cc".into();
+        let regions = [SelRegion::new(0, 2), SelRegion::new(3, 5), SelRegion::new(6, 8)];
+
+        let delta = rotate_selection_contents(&text, &regions, true);
+
+        assert_eq!(String::from(delta.apply(&text)), "cc aa bb");
+    }
+
+    #[test]
+    fn rotate_selection_contents_backward_wraps_first_into_last() {
+        let text: Rope = "aa bb cc".into();
+        let regions = [SelRegion::new(0, 2), SelRegion::new(3, 5), SelRegion::new(6, 8)];
+
+        let delta = rotate_selection_contents(&text, &regions, false);
+
+        assert_eq!(String::from(delta.apply(&text)), "bb cc aa");
     }
 }

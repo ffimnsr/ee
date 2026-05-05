@@ -25,6 +25,7 @@ regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
+similar = "2.7.0"
 syntect.workspace = true
 tokio.workspace = true
 toml.workspace = true
@@ -33,3 +34,6 @@ xi-rpc.workspace = true
 
 [dependencies.xi-core-lib]
 workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -400,6 +400,14 @@ impl Editor {
         }
     }
 
+    fn do_rotate_selection_contents(&mut self, view: &View, forward: bool) {
+        let delta = edit_ops::rotate_selection_contents(&self.text, view.sel_regions(), forward);
+        if !delta.is_identity() {
+            self.this_edit_type = EditType::Transpose;
+            self.add_delta(delta);
+        }
+    }
+
     fn do_transform_text<F: Fn(&str) -> String>(&mut self, view: &View, transform_function: F) {
         let delta = edit_ops::transform_text(&self.text, view.sel_regions(), transform_function);
         if !delta.is_identity() {
@@ -520,6 +528,8 @@ impl Editor {
             DuplicateLine => self.do_duplicate_line(view, config),
             IncreaseNumber => self.do_change_number(view, |s| s.checked_add(1)),
             DecreaseNumber => self.do_change_number(view, |s| s.checked_sub(1)),
+            RotateSelectionContentsBackward => self.do_rotate_selection_contents(view, false),
+            RotateSelectionContentsForward => self.do_rotate_selection_contents(view, true),
         }
     }
 

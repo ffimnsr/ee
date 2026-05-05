@@ -7,6 +7,7 @@ use crate::app::{Mode, Operator};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
+    NoOp,
     Quit,
     EnterMode(Mode),
     EnterCommandMode,
@@ -19,15 +20,49 @@ pub(crate) enum Action {
     EnterSearch,
     EnterSearchBackward,
     ExecuteSearch,
+    CompleteCommandLine,
     FindNext,
     FindPrevious,
     RequestHover,
     RequestDocumentSymbols,
     RequestWorkspaceSymbols,
+    RegisterPrefix,
+    MarkSetPrefix,
+    MarkJumpPrefix {
+        line_start: bool,
+    },
+    MacroRecordToggle,
+    MacroReplayPrefix,
+    WindowCommandPrefix,
     SetPrefix(char),
     PendingCharFind {
         forward: bool,
         inclusive: bool,
+    },
+    MoveWordStart {
+        forward: bool,
+        long_word: bool,
+    },
+    MoveWordEnd {
+        long_word: bool,
+    },
+    GotoLine,
+    SaveSelection,
+    RepeatLastMotion,
+    PageCursorHalfUp,
+    PageCursorHalfDown,
+    Replace,
+    ReplaceWithYanked,
+    SwitchCase,
+    SwitchToLowercase,
+    SwitchToUppercase,
+    YankSelection,
+    IndentSelection,
+    UnindentSelection,
+    FormatSelections,
+    DeleteSelection {
+        yank: bool,
+        enter_insert: bool,
     },
     MatchingPair,
     // Operator-pending mode
@@ -79,6 +114,11 @@ pub(crate) enum Action {
     // Location list navigation
     LocNext,
     LocPrev,
+    // Git-aware navigation and views
+    GitNextHunk,
+    GitPrevHunk,
+    GitBlame,
+    GitDiff,
     // Fold commands (z-prefix)
     FoldToggle,
     FoldOpen,
@@ -89,6 +129,10 @@ pub(crate) enum Action {
     /// Use word under cursor (or selection) as search pattern and jump forward.
     SearchWordUnderCursor {
         forward: bool,
+    },
+    /// Use current selection or word under cursor as search pattern.
+    SearchSelection {
+        detect_word_boundaries: bool,
     },
     /// Select all occurrences of current search pattern.
     FindAll,
@@ -102,12 +146,416 @@ pub(crate) struct BindingKey {
     pub(crate) prefix: Option<char>,
 }
 
-pub(crate) fn bindings() -> &'static HashMap<BindingKey, Action> {
-    static BINDINGS: OnceLock<HashMap<BindingKey, Action>> = OnceLock::new();
-    BINDINGS.get_or_init(build_bindings)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeymapSettings {
+    pub(crate) inherit_defaults: bool,
+    pub(crate) operations: Vec<KeymapOperation>,
 }
 
-fn build_bindings() -> HashMap<BindingKey, Action> {
+impl Default for KeymapSettings {
+    fn default() -> Self {
+        Self { inherit_defaults: true, operations: Vec::new() }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum KeymapOperation {
+    Unbind(BindingKey),
+    Bind { binding: BindingKey, action: Action },
+}
+
+pub(crate) fn bindings() -> &'static HashMap<BindingKey, Action> {
+    static BINDINGS: OnceLock<HashMap<BindingKey, Action>> = OnceLock::new();
+    BINDINGS.get_or_init(build_vim_bindings)
+}
+
+pub(crate) fn bindings_for(settings: &KeymapSettings) -> HashMap<BindingKey, Action> {
+    let mut map = if settings.inherit_defaults { bindings().clone() } else { HashMap::new() };
+
+    for operation in &settings.operations {
+        match operation {
+            KeymapOperation::Unbind(binding) => {
+                map.remove(binding);
+            }
+            KeymapOperation::Bind { binding, action } => {
+                map.insert(*binding, action.clone());
+            }
+        }
+    }
+
+    map
+}
+
+pub(crate) fn parse_binding_spec(
+    mode: &str,
+    key: &str,
+    prefix: Option<&str>,
+) -> Result<BindingKey, String> {
+    let mode = parse_mode_spec(mode).ok_or_else(|| format!("unknown mode `{mode}`"))?;
+    let (key, modifiers) = parse_key_spec(key)?;
+    let prefix = parse_prefix_spec(prefix)?;
+    Ok(BindingKey { mode, key, modifiers, prefix })
+}
+
+pub(crate) fn parse_action_spec(spec: &str) -> Result<Action, String> {
+    let spec = spec.trim();
+
+    if let Some(mode) = spec.strip_prefix("enter_mode:") {
+        return parse_mode_spec(mode)
+            .map(Action::EnterMode)
+            .ok_or_else(|| format!("unknown mode `{mode}`"));
+    }
+
+    if let Some(method) = spec.strip_prefix("edit:") {
+        return parse_edit_method(method)
+            .map(Action::Edit)
+            .ok_or_else(|| format!("unknown edit method `{method}`"));
+    }
+
+    if let Some(prefix) = spec.strip_prefix("set_prefix:") {
+        return parse_prefix_char(prefix).map(Action::SetPrefix);
+    }
+
+    if let Some(operator) = spec.strip_prefix("set_operator:") {
+        return parse_operator_spec(operator)
+            .map(Action::SetOperator)
+            .ok_or_else(|| format!("unknown operator `{operator}`"));
+    }
+
+    if let Some(rest) = spec.strip_prefix("pending_char_find:") {
+        let mut parts = rest.split(':');
+        let direction = parts.next().unwrap_or_default();
+        let inclusive = parts.next().unwrap_or_default();
+        if parts.next().is_some() {
+            return Err(format!("invalid pending_char_find spec `{rest}`"));
+        }
+        let forward = match direction {
+            "forward" => true,
+            "backward" => false,
+            _ => return Err(format!("unknown direction `{direction}`")),
+        };
+        let inclusive = match inclusive {
+            "inclusive" => true,
+            "exclusive" => false,
+            _ => return Err(format!("unknown inclusivity `{inclusive}`")),
+        };
+        return Ok(Action::PendingCharFind { forward, inclusive });
+    }
+
+    if let Some(rest) = spec.strip_prefix("move_word_start:") {
+        let mut parts = rest.split(':');
+        let direction = parts.next().unwrap_or_default();
+        let family = parts.next().unwrap_or("word");
+        if parts.next().is_some() {
+            return Err(format!("invalid move_word_start spec `{rest}`"));
+        }
+        let forward = match direction {
+            "forward" | "next" => true,
+            "backward" | "prev" | "previous" => false,
+            _ => return Err(format!("unknown direction `{direction}`")),
+        };
+        let long_word = match family {
+            "word" => false,
+            "long" | "long_word" | "big" | "big_word" => true,
+            _ => return Err(format!("unknown word family `{family}`")),
+        };
+        return Ok(Action::MoveWordStart { forward, long_word });
+    }
+
+    if let Some(family) = spec.strip_prefix("move_word_end:") {
+        let long_word = match family {
+            "word" => false,
+            "long" | "long_word" | "big" | "big_word" => true,
+            _ => return Err(format!("unknown word family `{family}`")),
+        };
+        return Ok(Action::MoveWordEnd { long_word });
+    }
+
+    if let Some(direction) = spec.strip_prefix("search_word_under_cursor:") {
+        let forward = match direction {
+            "forward" => true,
+            "backward" => false,
+            _ => return Err(format!("unknown direction `{direction}`")),
+        };
+        return Ok(Action::SearchWordUnderCursor { forward });
+    }
+
+    if let Some(mode) = spec.strip_prefix("mark_jump_prefix:") {
+        let line_start = match mode {
+            "line" | "line_start" => true,
+            "exact" => false,
+            _ => return Err(format!("unknown mark jump mode `{mode}`")),
+        };
+        return Ok(Action::MarkJumpPrefix { line_start });
+    }
+
+    let action = match spec {
+        "no_op" => Action::NoOp,
+        "normal_mode" => Action::EnterMode(Mode::Normal),
+        "quit" => Action::Quit,
+        "enter_command_mode" => Action::EnterCommandMode,
+        "collapse_and_enter_normal" => Action::CollapseAndEnterNormal,
+        "execute_command" => Action::ExecuteCommand,
+        "complete_command_line" => Action::CompleteCommandLine,
+        "delete_backward" => Action::DeleteBackward,
+        "command_backspace" => Action::CommandBackspace,
+        "search_backspace" => Action::SearchBackspace,
+        "enter_search" => Action::EnterSearch,
+        "enter_search_backward" => Action::EnterSearchBackward,
+        "execute_search" => Action::ExecuteSearch,
+        "record_macro" => Action::MacroRecordToggle,
+        "replay_macro" => Action::MacroReplayPrefix,
+        "search" => Action::EnterSearch,
+        "reverse_search" | "rsearch" => Action::EnterSearchBackward,
+        "search_next" => Action::FindNext,
+        "search_prev" => Action::FindPrevious,
+        "search_selection_detect_word_boundaries" => {
+            Action::SearchSelection { detect_word_boundaries: true }
+        }
+        "search_selection" => Action::SearchSelection { detect_word_boundaries: false },
+        "find_next" => Action::FindNext,
+        "find_previous" => Action::FindPrevious,
+        "goto_line" => Action::GotoLine,
+        "goto_line_start" => Action::Edit("move_to_left_end_of_line"),
+        "goto_line_end" => Action::Edit("move_to_right_end_of_line"),
+        "page_up" => Action::Edit("scroll_page_up"),
+        "page_down" => Action::Edit("scroll_page_down"),
+        "page_cursor_half_up" => Action::PageCursorHalfUp,
+        "page_cursor_half_down" => Action::PageCursorHalfDown,
+        "jump_forward" => Action::JumpListNewer,
+        "jump_backward" => Action::JumpListOlder,
+        "save_selection" => Action::SaveSelection,
+        "repeat_last_motion" => Action::RepeatLastMotion,
+        "replace" => Action::Replace,
+        "replace_with_yanked" => Action::ReplaceWithYanked,
+        "switch_case" => Action::SwitchCase,
+        "switch_to_lowercase" => Action::SwitchToLowercase,
+        "switch_to_uppercase" => Action::SwitchToUppercase,
+        "yank" => Action::YankSelection,
+        "indent" => Action::IndentSelection,
+        "unindent" => Action::UnindentSelection,
+        "format_selections" => Action::FormatSelections,
+        "delete_selection" => Action::DeleteSelection { yank: true, enter_insert: false },
+        "delete_selection_noyank" => Action::DeleteSelection { yank: false, enter_insert: false },
+        "change_selection" => Action::DeleteSelection { yank: true, enter_insert: true },
+        "change_selection_noyank" => Action::DeleteSelection { yank: false, enter_insert: true },
+        "insert_mode" => Action::EnterMode(Mode::Insert),
+        "append_mode" => Action::AppendAfterCursor,
+        "visual_mode" | "select_mode" => Action::EnterMode(Mode::Visual),
+        "command_mode" => Action::EnterCommandMode,
+        "move_next_word_start" => Action::MoveWordStart { forward: true, long_word: false },
+        "move_prev_word_start" => Action::MoveWordStart { forward: false, long_word: false },
+        "move_next_word_end" => Action::MoveWordEnd { long_word: false },
+        "move_next_long_word_start" => Action::MoveWordStart { forward: true, long_word: true },
+        "move_prev_long_word_start" => Action::MoveWordStart { forward: false, long_word: true },
+        "move_next_long_word_end" => Action::MoveWordEnd { long_word: true },
+        "find_next_char" => Action::PendingCharFind { forward: true, inclusive: true },
+        "find_till_char" => Action::PendingCharFind { forward: true, inclusive: false },
+        "find_prev_char" => Action::PendingCharFind { forward: false, inclusive: true },
+        "till_prev_char" => Action::PendingCharFind { forward: false, inclusive: false },
+        "request_hover" => Action::RequestHover,
+        "request_document_symbols" => Action::RequestDocumentSymbols,
+        "request_workspace_symbols" => Action::RequestWorkspaceSymbols,
+        "register_prefix" => Action::RegisterPrefix,
+        "mark_set_prefix" => Action::MarkSetPrefix,
+        "macro_record_toggle" => Action::MacroRecordToggle,
+        "macro_replay_prefix" => Action::MacroReplayPrefix,
+        "window_command_prefix" => Action::WindowCommandPrefix,
+        "matching_pair" => Action::MatchingPair,
+        "append_after_cursor" => Action::AppendAfterCursor,
+        "append_at_end_of_line" => Action::AppendAtEndOfLine,
+        "insert_at_line_start" => Action::InsertAtLineStart,
+        "insert_at_line_end" => Action::AppendAtEndOfLine,
+        "open_line_below" => Action::OpenLineBelow,
+        "open_line_above" => Action::OpenLineAbove,
+        "open_below" => Action::OpenLineBelow,
+        "open_above" => Action::OpenLineAbove,
+        "substitute_char" => Action::SubstituteChar,
+        "substitute_line" => Action::SubstituteLine,
+        "delete_word_backward" => Action::DeleteWordBackward,
+        "delete_to_line_start" => Action::DeleteToLineStart,
+        "indent_line" => Action::IndentLine,
+        "outdent_line" => Action::OutdentLine,
+        "undo" => Action::Undo,
+        "redo" => Action::Redo,
+        "earlier" => Action::Undo,
+        "later" => Action::Redo,
+        "repeat_last_change" => Action::RepeatLastChange,
+        "paste_after" => Action::PasteAfter,
+        "paste_before" => Action::PasteBefore,
+        "select_register" => Action::RegisterPrefix,
+        "enter_visual_line" => Action::EnterVisualLine,
+        "enter_visual_block" => Action::EnterVisualBlock,
+        "swap_visual_anchor" => Action::SwapVisualAnchor,
+        "restore_last_visual" => Action::RestoreLastVisual,
+        "visual_block_insert" => Action::VisualBlockInsert,
+        "visual_block_append" => Action::VisualBlockAppend,
+        "jump_list_older" => Action::JumpListOlder,
+        "jump_list_newer" => Action::JumpListNewer,
+        "change_list_older" => Action::ChangeListOlder,
+        "change_list_newer" => Action::ChangeListNewer,
+        "tab_next" => Action::TabNext,
+        "tab_prev" => Action::TabPrev,
+        "command_history_older" => Action::CommandHistoryOlder,
+        "command_history_newer" => Action::CommandHistoryNewer,
+        "qf_next" => Action::QfNext,
+        "qf_prev" => Action::QfPrev,
+        "loc_next" => Action::LocNext,
+        "loc_prev" => Action::LocPrev,
+        "git_next_hunk" => Action::GitNextHunk,
+        "git_prev_hunk" => Action::GitPrevHunk,
+        "git_blame" => Action::GitBlame,
+        "git_diff" => Action::GitDiff,
+        "fold_toggle" => Action::FoldToggle,
+        "fold_open" => Action::FoldOpen,
+        "fold_close" => Action::FoldClose,
+        "fold_open_all" => Action::FoldOpenAll,
+        "fold_close_all" => Action::FoldCloseAll,
+        "find_all" => Action::FindAll,
+        _ => return Err(format!("unknown action `{spec}`")),
+    };
+
+    Ok(action)
+}
+
+fn parse_mode_spec(spec: &str) -> Option<Mode> {
+    match spec.trim().to_ascii_lowercase().as_str() {
+        "normal" => Some(Mode::Normal),
+        "insert" => Some(Mode::Insert),
+        "visual" => Some(Mode::Visual),
+        "visual_line" | "visualline" | "line_visual" => Some(Mode::VisualLine),
+        "visual_block" | "visualblock" | "block_visual" => Some(Mode::VisualBlock),
+        "operator_pending" | "operator" => Some(Mode::OperatorPending),
+        "command_line" | "command" => Some(Mode::CommandLine),
+        "search" => Some(Mode::Search),
+        "substitute_confirm" | "substitute" => Some(Mode::SubstituteConfirm),
+        _ => None,
+    }
+}
+
+fn parse_operator_spec(spec: &str) -> Option<Operator> {
+    match spec.trim().to_ascii_lowercase().as_str() {
+        "delete" => Some(Operator::Delete),
+        "change" => Some(Operator::Change),
+        "yank" => Some(Operator::Yank),
+        "indent" => Some(Operator::Indent),
+        "outdent" => Some(Operator::Outdent),
+        "uppercase" => Some(Operator::Uppercase),
+        "lowercase" => Some(Operator::Lowercase),
+        "case_toggle" | "casetoggle" => Some(Operator::CaseToggle),
+        _ => None,
+    }
+}
+
+fn parse_edit_method(spec: &str) -> Option<&'static str> {
+    match spec.trim() {
+        "move_left" => Some("move_left"),
+        "move_char_left" => Some("move_left"),
+        "move_right" => Some("move_right"),
+        "move_char_right" => Some("move_right"),
+        "move_up" => Some("move_up"),
+        "move_visual_line_up" => Some("move_up"),
+        "move_down" => Some("move_down"),
+        "move_visual_line_down" => Some("move_down"),
+        "move_word_right" => Some("move_word_right"),
+        "move_word_left" => Some("move_word_left"),
+        "move_to_beginning_of_paragraph" => Some("move_to_beginning_of_paragraph"),
+        "move_to_right_end_of_line" => Some("move_to_right_end_of_line"),
+        "move_to_end_of_document" => Some("move_to_end_of_document"),
+        "duplicate_line" => Some("duplicate_line"),
+        "scroll_page_down" => Some("scroll_page_down"),
+        "scroll_page_up" => Some("scroll_page_up"),
+        "add_selection_above" => Some("add_selection_above"),
+        "add_selection_below" => Some("add_selection_below"),
+        "increase_number" => Some("increase_number"),
+        "decrease_number" => Some("decrease_number"),
+        "move_left_and_modify_selection" => Some("move_left_and_modify_selection"),
+        "move_right_and_modify_selection" => Some("move_right_and_modify_selection"),
+        "move_up_and_modify_selection" => Some("move_up_and_modify_selection"),
+        "move_visual_line_up_and_modify_selection" => Some("move_up_and_modify_selection"),
+        "move_down_and_modify_selection" => Some("move_down_and_modify_selection"),
+        "move_visual_line_down_and_modify_selection" => Some("move_down_and_modify_selection"),
+        "move_word_right_and_modify_selection" => Some("move_word_right_and_modify_selection"),
+        "move_word_left_and_modify_selection" => Some("move_word_left_and_modify_selection"),
+        "move_to_right_end_of_line_and_modify_selection" => {
+            Some("move_to_right_end_of_line_and_modify_selection")
+        }
+        "move_to_beginning_of_paragraph_and_modify_selection" => {
+            Some("move_to_beginning_of_paragraph_and_modify_selection")
+        }
+        "move_to_end_of_document_and_modify_selection" => {
+            Some("move_to_end_of_document_and_modify_selection")
+        }
+        "insert_newline" => Some("insert_newline"),
+        _ => None,
+    }
+}
+
+fn parse_prefix_spec(prefix: Option<&str>) -> Result<Option<char>, String> {
+    prefix.map(parse_prefix_char).transpose()
+}
+
+fn parse_prefix_char(spec: &str) -> Result<char, String> {
+    let mut chars = spec.chars();
+    let Some(ch) = chars.next() else {
+        return Err(String::from("prefix must contain exactly one character"));
+    };
+    if chars.next().is_some() {
+        return Err(String::from("prefix must contain exactly one character"));
+    }
+    Ok(ch)
+}
+
+fn parse_key_spec(spec: &str) -> Result<(KeyCode, KeyModifiers), String> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err(String::from("key cannot be empty"));
+    }
+
+    let parts: Vec<_> = spec.split('+').collect();
+    let mut modifiers = KeyModifiers::NONE;
+    let key_token = if parts.len() == 1 {
+        parts[0]
+    } else {
+        for modifier in &parts[..parts.len() - 1] {
+            match modifier.trim().to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => modifiers |= KeyModifiers::CONTROL,
+                "alt" => modifiers |= KeyModifiers::ALT,
+                "shift" => modifiers |= KeyModifiers::SHIFT,
+                other => return Err(format!("unknown modifier `{other}`")),
+            }
+        }
+        parts[parts.len() - 1]
+    };
+
+    let key = match key_token.trim().to_ascii_lowercase().as_str() {
+        "left" => KeyCode::Left,
+        "right" => KeyCode::Right,
+        "up" => KeyCode::Up,
+        "down" => KeyCode::Down,
+        "enter" | "return" => KeyCode::Enter,
+        "backspace" => KeyCode::Backspace,
+        "tab" => KeyCode::Tab,
+        "backtab" => KeyCode::BackTab,
+        "esc" | "escape" => KeyCode::Esc,
+        "space" => KeyCode::Char(' '),
+        "plus" => KeyCode::Char('+'),
+        _ => {
+            let mut chars = key_token.chars();
+            let Some(ch) = chars.next() else {
+                return Err(String::from("key cannot be empty"));
+            };
+            if chars.next().is_some() {
+                return Err(format!("unknown key `{key_token}`"));
+            }
+            KeyCode::Char(ch)
+        }
+    };
+
+    Ok((key, modifiers))
+}
+
+fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     use Action::*;
     use Mode::*;
 
@@ -129,11 +577,16 @@ fn build_bindings() -> HashMap<BindingKey, Action> {
         bind!(mode, KeyCode::Char('c'), ctrl, None, Quit);
     }
 
-    // `q` is NOT bound here; it is handled in handle_default for macro recording.
     // Quit is available via `:q`, `:quit`, `:q!`, `:quit!`, or Ctrl-C.
     bind!(Normal, KeyCode::Char('i'), none, None, EnterMode(Insert));
     bind!(Normal, KeyCode::Char('v'), none, None, EnterMode(Visual));
     bind!(Normal, KeyCode::Char(':'), none, None, EnterCommandMode);
+    bind!(Normal, KeyCode::Char('"'), none, None, RegisterPrefix);
+    bind!(Normal, KeyCode::Char('m'), none, None, MarkSetPrefix);
+    bind!(Normal, KeyCode::Char('\''), none, None, MarkJumpPrefix { line_start: true });
+    bind!(Normal, KeyCode::Char('`'), none, None, MarkJumpPrefix { line_start: false });
+    bind!(Normal, KeyCode::Char('q'), none, None, MacroRecordToggle);
+    bind!(Normal, KeyCode::Char('@'), none, None, MacroReplayPrefix);
     bind!(Normal, KeyCode::Left, none, None, Edit("move_left"));
     bind!(Normal, KeyCode::Char('h'), none, None, Edit("move_left"));
     bind!(Normal, KeyCode::Right, none, None, Edit("move_right"));
@@ -158,13 +611,19 @@ fn build_bindings() -> HashMap<BindingKey, Action> {
     // ]Q / [Q — location list next / prev
     bind!(Normal, KeyCode::Char('Q'), none, Some(']'), LocNext);
     bind!(Normal, KeyCode::Char('Q'), none, Some('['), LocPrev);
+    // ]h / [h — git hunk next / prev
+    bind!(Normal, KeyCode::Char('h'), none, Some(']'), GitNextHunk);
+    bind!(Normal, KeyCode::Char('h'), none, Some('['), GitPrevHunk);
     bind!(Normal, KeyCode::Char('g'), none, Some('g'), Edit("move_to_beginning_of_document"),);
     bind!(Normal, KeyCode::Char('d'), none, Some('g'), Edit("duplicate_line"));
+    bind!(Normal, KeyCode::Char('b'), none, Some('g'), GitBlame);
+    bind!(Normal, KeyCode::Char('D'), none, Some('g'), GitDiff);
     // g+o — document symbols; g+O — workspace symbols
     bind!(Normal, KeyCode::Char('o'), none, Some('g'), RequestDocumentSymbols);
     bind!(Normal, KeyCode::Char('O'), none, Some('g'), RequestWorkspaceSymbols);
     bind!(Normal, KeyCode::Char('d'), ctrl, None, Edit("scroll_page_down"));
     bind!(Normal, KeyCode::Char('u'), ctrl, None, Edit("scroll_page_up"));
+    bind!(Normal, KeyCode::Char('w'), ctrl, None, WindowCommandPrefix);
     bind!(Normal, KeyCode::Char('/'), none, None, EnterSearch);
     bind!(Normal, KeyCode::Char('?'), none, None, EnterSearchBackward);
     bind!(Normal, KeyCode::Char('n'), none, None, FindNext);
@@ -343,6 +802,7 @@ fn build_bindings() -> HashMap<BindingKey, Action> {
     bind!(CommandLine, KeyCode::Esc, none, None, EnterMode(Normal));
     bind!(CommandLine, KeyCode::Enter, none, None, ExecuteCommand);
     bind!(CommandLine, KeyCode::Backspace, none, None, CommandBackspace);
+    bind!(CommandLine, KeyCode::Tab, none, None, CompleteCommandLine);
     bind!(CommandLine, KeyCode::Up, none, None, CommandHistoryOlder);
     bind!(CommandLine, KeyCode::Down, none, None, CommandHistoryNewer);
 

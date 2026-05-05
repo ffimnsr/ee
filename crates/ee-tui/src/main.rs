@@ -22,11 +22,14 @@ mod backend;
 mod buffer;
 mod config;
 mod folds;
+mod git;
 mod highlight;
 mod keymap;
 mod picker;
 mod quickfix;
 mod registers;
+mod session;
+mod terminal;
 mod text;
 mod ui;
 mod window;
@@ -213,8 +216,29 @@ fn main() -> io::Result<()> {
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown))
         .map_err(io::Error::other)?;
 
-    let first = cli.files.first().cloned();
+    let saved_session = if cli.files.is_empty() {
+        match session::SessionState::load() {
+            Ok(state) => state,
+            Err(err) => {
+                eprintln!("ee: warning: failed to load session: {err}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let first = cli
+        .files
+        .first()
+        .cloned()
+        .or_else(|| saved_session.as_ref().and_then(session::SessionState::initial_path));
     let mut app = App::from_path(first)?;
+
+    if let Some(state) = saved_session.as_ref() {
+        if let Err(err) = state.restore(&mut app) {
+            eprintln!("ee: warning: failed to restore session: {err}");
+        }
+    }
 
     // Open any additional files as extra buffers.
     for path in cli.files.iter().skip(1) {
@@ -232,6 +256,10 @@ fn run(app: &mut App, shutdown: Arc<AtomicBool>) -> io::Result<()> {
     terminal.clear()?;
 
     let result = run_app(&mut terminal, app, shutdown);
+
+    if let Err(err) = session::SessionState::save(app) {
+        eprintln!("ee: warning: failed to save session: {err}");
+    }
 
     disable_raw_mode()?;
     execute!(
@@ -258,6 +286,7 @@ fn run_app(
         app.handle_pending_locations();
         // Dispatch pending symbol results (document/workspace symbols) to picker.
         app.handle_pending_symbols();
+        app.refresh_source_control();
         // Periodically check for external file changes.
         app.backend.check_external_changes();
         // Warn the user when a backing file has been modified externally.

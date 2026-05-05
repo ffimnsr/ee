@@ -14,6 +14,10 @@ use std::str::FromStr;
 
 use globset::GlobBuilder;
 use serde::Deserialize;
+use serde_json::Value;
+use xi_core_lib::config::Table as XiConfigTable;
+
+use crate::keymap::{self, KeymapOperation, KeymapSettings};
 
 // ── Public settings ───────────────────────────────────────────────────────────
 
@@ -55,7 +59,7 @@ pub(crate) enum EndOfLine {
 }
 
 /// Fully resolved editor settings with all defaults applied.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EditorSettings {
     pub indent_style: IndentStyle,
     /// Number of spaces per indent level (or soft-tab width when `indent_style = spaces`).
@@ -84,6 +88,8 @@ pub(crate) struct EditorSettings {
     pub cursor_line: bool,
     /// Statusline layout variant.
     pub statusline_format: StatuslineFormat,
+    /// Resolved keymap overrides layered from `.ee.toml` files.
+    pub keymap: KeymapSettings,
 }
 
 impl Default for EditorSettings {
@@ -104,8 +110,71 @@ impl Default for EditorSettings {
             sign_column: true,
             cursor_line: false,
             statusline_format: StatuslineFormat::Default,
+            keymap: KeymapSettings::default(),
         }
     }
+}
+
+impl EditorSettings {
+    pub(crate) fn to_xi_config_table(&self) -> XiConfigTable {
+        let mut table = XiConfigTable::new();
+        table.insert("line_ending".into(), Value::String(self.end_of_line.as_xi_string().into()));
+        table.insert("tab_size".into(), Value::from(self.indent_size.max(1)));
+        table.insert(
+            "translate_tabs_to_spaces".into(),
+            Value::Bool(matches!(self.indent_style, IndentStyle::Spaces)),
+        );
+        table.insert("use_tab_stops".into(), Value::Bool(true));
+        table.insert("font_face".into(), Value::String(String::from("Noto Mono")));
+        table.insert("font_size".into(), Value::from(14.0_f32));
+        table.insert("auto_indent".into(), Value::Bool(true));
+        table.insert("scroll_past_end".into(), Value::Bool(false));
+        table.insert("wrap_width".into(), Value::from(0));
+        table.insert("word_wrap".into(), Value::Bool(self.wrap_lines));
+        table.insert("autodetect_whitespace".into(), Value::Bool(true));
+        table.insert(
+            "surrounding_pairs".into(),
+            Value::Array(vec![
+                Value::Array(vec![Value::String("\"".into()), Value::String("\"".into())]),
+                Value::Array(vec![Value::String("'".into()), Value::String("'".into())]),
+                Value::Array(vec![Value::String("{".into()), Value::String("}".into())]),
+                Value::Array(vec![Value::String("[".into()), Value::String("]".into())]),
+            ]),
+        );
+        table.insert("save_with_newline".into(), Value::Bool(self.insert_final_newline));
+        table
+    }
+}
+
+impl EndOfLine {
+    fn as_xi_string(self) -> &'static str {
+        match self {
+            EndOfLine::Lf => "\n",
+            EndOfLine::CrLf => "\r\n",
+            EndOfLine::Cr => "\r",
+        }
+    }
+}
+
+pub(crate) fn xi_config_tables_for_file(
+    file_path: Option<&Path>,
+) -> (EditorSettings, XiConfigTable, XiConfigTable) {
+    let general = load_config(None);
+    let effective = load_config(file_path);
+    let general_table = general.to_xi_config_table();
+    let effective_table = effective.to_xi_config_table();
+    let override_table = diff_xi_config_tables(&general_table, &effective_table);
+    (effective, general_table, override_table)
+}
+
+fn diff_xi_config_tables(base: &XiConfigTable, updated: &XiConfigTable) -> XiConfigTable {
+    updated
+        .iter()
+        .filter_map(|(key, value)| match base.get(key) {
+            Some(existing) if existing == value => None,
+            _ => Some((key.clone(), value.clone())),
+        })
+        .collect()
 }
 
 // ── .ee.toml raw shape ────────────────────────────────────────────────────────
@@ -139,6 +208,34 @@ pub(crate) struct EeToml {
     pub cursor_line: Option<bool>,
     /// `"default"` or `"minimal"`.
     pub statusline_format: Option<String>,
+    pub keymap: Option<KeymapToml>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct KeymapToml {
+    pub inherit_defaults: Option<bool>,
+    #[serde(default)]
+    pub unbind: Vec<KeyBindingTargetToml>,
+    #[serde(default)]
+    pub bindings: Vec<KeyBindingEntryToml>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct KeyBindingTargetToml {
+    pub mode: String,
+    pub key: String,
+    pub prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct KeyBindingEntryToml {
+    pub mode: String,
+    pub key: String,
+    pub prefix: Option<String>,
+    pub action: String,
 }
 
 // ── Merging ───────────────────────────────────────────────────────────────────
@@ -210,6 +307,55 @@ impl EditorSettings {
                 "minimal" => self.statusline_format = StatuslineFormat::Minimal,
                 _ => {}
             }
+        }
+        if let Some(keymap) = &patch.keymap {
+            self.merge_keymap_toml(keymap);
+        }
+    }
+
+    fn merge_keymap_toml(&mut self, patch: &KeymapToml) {
+        if let Some(inherit_defaults) = patch.inherit_defaults {
+            self.keymap.inherit_defaults = inherit_defaults;
+        }
+
+        for entry in &patch.unbind {
+            match keymap::parse_binding_spec(&entry.mode, &entry.key, entry.prefix.as_deref()) {
+                Ok(binding) => self.keymap.operations.push(KeymapOperation::Unbind(binding)),
+                Err(err) => {
+                    eprintln!(
+                        "ee: warning: invalid keymap unbind ({}, {}): {err}",
+                        entry.mode, entry.key
+                    );
+                }
+            }
+        }
+
+        for entry in &patch.bindings {
+            let binding = match keymap::parse_binding_spec(
+                &entry.mode,
+                &entry.key,
+                entry.prefix.as_deref(),
+            ) {
+                Ok(binding) => binding,
+                Err(err) => {
+                    eprintln!(
+                        "ee: warning: invalid keymap binding ({}, {}): {err}",
+                        entry.mode, entry.key
+                    );
+                    continue;
+                }
+            };
+            let action = match keymap::parse_action_spec(&entry.action) {
+                Ok(action) => action,
+                Err(err) => {
+                    eprintln!(
+                        "ee: warning: invalid keymap action ({}, {}): {err}",
+                        entry.mode, entry.action
+                    );
+                    continue;
+                }
+            };
+            self.keymap.operations.push(KeymapOperation::Bind { binding, action });
         }
     }
 }
@@ -424,8 +570,9 @@ pub(crate) fn load_config(file_path: Option<&Path>) -> EditorSettings {
     load_ee_toml(&mut settings, &cwd.join(".ee.toml"));
 
     // 4. .editorconfig (highest priority, per-file aware).
-    let ec_target = file_path.unwrap_or(cwd.as_path());
-    apply_editorconfig(&mut settings, ec_target);
+    if let Some(file_path) = file_path {
+        apply_editorconfig(&mut settings, file_path);
+    }
 
     settings
 }
@@ -507,5 +654,48 @@ tab_width = 4
     fn glob_match_double_star() {
         assert!(glob_match("**/*.rs", "src/main.rs"));
         assert!(glob_match("**/*.rs", "a/b/c/lib.rs"));
+    }
+
+    #[test]
+    fn xi_config_tables_split_global_and_file_overrides() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("main.rs");
+        let editorconfig = temp.path().join(".editorconfig");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        std::fs::write(&editorconfig, "[*]\nindent_style = tab\nindent_size = 2\n").unwrap();
+
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+
+        let (_, general, overrides) = xi_config_tables_for_file(Some(&file));
+
+        std::env::set_current_dir(cwd).unwrap();
+
+        assert_eq!(general.get("tab_size").and_then(Value::as_u64), Some(4));
+        assert_eq!(overrides.get("tab_size").and_then(Value::as_u64), Some(2));
+        assert_eq!(overrides.get("translate_tabs_to_spaces").and_then(Value::as_bool), Some(false));
+    }
+
+    #[test]
+    fn ee_toml_parses_keymap_overrides() {
+        let toml = r#"
+[keymap]
+inherit_defaults = false
+
+[[keymap.bindings]]
+mode = "normal"
+key = "H"
+action = "request_hover"
+
+[[keymap.unbind]]
+mode = "normal"
+key = "K"
+"#;
+        let raw: EeToml = toml::from_str(toml).unwrap();
+        let mut settings = EditorSettings::default();
+        settings.merge_toml(&raw);
+
+        assert!(!settings.keymap.inherit_defaults);
+        assert_eq!(settings.keymap.operations.len(), 2);
     }
 }

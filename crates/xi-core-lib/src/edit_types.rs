@@ -34,6 +34,8 @@ pub(crate) enum ViewEvent {
     Move(Movement),
     ModifySelection(Movement),
     SelectAll,
+    MergeSelections,
+    MergeConsecutiveSelections,
     Scroll(LineRange),
     AddSelectionAbove,
     AddSelectionBelow,
@@ -50,8 +52,14 @@ pub(crate) enum ViewEvent {
     SelectionForFind { case_sensitive: bool },
     Replace { chars: String, preserve_case: bool },
     SelectionForReplace,
+    SelectRegex { chars: String, case_sensitive: bool },
     SelectionIntoLines,
     CollapseSelections,
+    TrimSelections,
+    FlipSelections,
+    EnsureSelectionsForward,
+    KeepPrimarySelection,
+    RemovePrimarySelection,
 }
 
 /// Events that modify the buffer
@@ -78,6 +86,8 @@ pub(crate) enum BufferEvent {
     DuplicateLine,
     IncreaseNumber,
     DecreaseNumber,
+    RotateSelectionContentsBackward,
+    RotateSelectionContentsForward,
 }
 
 /// An event that needs special handling
@@ -241,6 +251,8 @@ impl From<EditNotification> for EventDomain {
             PageDownAndModifySelection =>
                 ViewEvent::ModifySelection(Movement::DownPage).into(),
             SelectAll => ViewEvent::SelectAll.into(),
+            MergeSelections => ViewEvent::MergeSelections.into(),
+            MergeConsecutiveSelections => ViewEvent::MergeConsecutiveSelections.into(),
             AddSelectionAbove => ViewEvent::AddSelectionAbove.into(),
             AddSelectionBelow => ViewEvent::AddSelectionBelow.into(),
             Scroll(range) => ViewEvent::Scroll(range).into(),
@@ -311,6 +323,14 @@ impl From<EditNotification> for EventDomain {
             ReplaceNext => BufferEvent::ReplaceNext.into(),
             ReplaceAll => BufferEvent::ReplaceAll.into(),
             SelectionForReplace => ViewEvent::SelectionForReplace.into(),
+            SelectRegex { chars, case_sensitive } => {
+                ViewEvent::SelectRegex { chars, case_sensitive }.into()
+            }
+            TrimSelections => ViewEvent::TrimSelections.into(),
+            FlipSelections => ViewEvent::FlipSelections.into(),
+            EnsureSelectionsForward => ViewEvent::EnsureSelectionsForward.into(),
+            KeepPrimarySelection => ViewEvent::KeepPrimarySelection.into(),
+            RemovePrimarySelection => ViewEvent::RemovePrimarySelection.into(),
             RequestCompletion { index } =>
                 SpecialEvent::DispatchPluginCommand {
                     capability: PluginCapability::Edit,
@@ -367,6 +387,8 @@ impl From<EditNotification> for EventDomain {
             DuplicateLine => BufferEvent::DuplicateLine.into(),
             IncreaseNumber => BufferEvent::IncreaseNumber.into(),
             DecreaseNumber => BufferEvent::DecreaseNumber.into(),
+            RotateSelectionContentsBackward => BufferEvent::RotateSelectionContentsBackward.into(),
+            RotateSelectionContentsForward => BufferEvent::RotateSelectionContentsForward.into(),
             CollapseSelections => ViewEvent::CollapseSelections.into(),
         }
     }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -14,13 +14,14 @@ use xi_core_lib::rpc::LineReplacement;
 use crate::backend::{CompletionSuggestion, PendingUiAction};
 use crate::buffer::BufferManager;
 use crate::folds::{FoldStore, indent_fold_extent};
-use crate::keymap::{Action, BindingKey, bindings};
+use crate::git::{self, GitBufferCache, GitBufferStatus};
+use crate::keymap::{Action, BindingKey};
 use crate::picker::PickerState;
 use crate::quickfix::{QfEntry, QfList};
 use crate::registers::{BlockInsert, LastChange, RegisterName, RegisterStore};
 use crate::text::{
-    byte_col_to_display_col, find_char_backward, find_char_forward, next_char_start,
-    prev_char_start,
+    byte_col_to_display_col, find_char_backward, find_char_forward, next_char_start, next_word_end,
+    next_word_start, prev_char_start, prev_word_start,
 };
 use crate::window::{SplitDir, TabManager};
 
@@ -33,10 +34,25 @@ pub(crate) use parsing::{
     text_obj_bracket, text_obj_quote, text_obj_tag, text_obj_word,
 };
 pub(crate) use state::{
-    App, HoverPopup, Mode, Operator, PendingCharFind, SubstitutePending, Viewport,
+    App, HoverPopup, Mode, Operator, PendingCharFind, RepeatableMotion, SubstitutePending, Viewport,
 };
 
 impl App {
+    pub(crate) fn command_history(&self) -> &[String] {
+        &self.command_history
+    }
+
+    pub(crate) fn restore_command_history(&mut self, mut history: Vec<String>) {
+        const HISTORY_MAX: usize = 100;
+        if history.len() > HISTORY_MAX {
+            let keep_from = history.len() - HISTORY_MAX;
+            history.drain(..keep_from);
+        }
+        self.command_history = history;
+        self.history_idx = None;
+        self.history_draft.clear();
+    }
+
     pub(crate) fn handle_event(&mut self, event: Event) {
         match event {
             Event::Mouse(m) => {
@@ -107,11 +123,13 @@ impl App {
             modifiers: key.modifiers,
             prefix: self.input_state.prefix,
         };
-        let action = bindings()
+        let action = self
+            .key_bindings
             .get(&binding_key)
             .or_else(|| {
                 if key.modifiers != KeyModifiers::NONE {
-                    bindings().get(&BindingKey { modifiers: KeyModifiers::NONE, ..binding_key })
+                    self.key_bindings
+                        .get(&BindingKey { modifiers: KeyModifiers::NONE, ..binding_key })
                 } else {
                     None
                 }
@@ -183,12 +201,27 @@ impl App {
             return;
         }
 
+        if self.input_state.awaiting_replace_char {
+            self.input_state.awaiting_replace_char = false;
+            if let KeyCode::Char(c) = key.code {
+                self.replace_with_char(c);
+            }
+            return;
+        }
+
         if let Some(action) = action {
             self.dispatch(action, key);
             if self.mode == Mode::Normal
                 && !matches!(key.code, KeyCode::Char(c) if c.is_ascii_digit())
                 && self.input_state.prefix.is_none()
                 && self.input_state.pending_find.is_none()
+                && !self.input_state.awaiting_register
+                && !self.input_state.awaiting_mark_set
+                && self.input_state.awaiting_mark_jump.is_none()
+                && !self.input_state.awaiting_macro_record
+                && !self.input_state.awaiting_macro_replay
+                && !self.input_state.awaiting_window_cmd
+                && !self.input_state.awaiting_replace_char
             {
                 self.input_state.reset();
             }
@@ -199,7 +232,10 @@ impl App {
 
     fn dispatch(&mut self, action: Action, _key: KeyEvent) {
         match &action {
-            Action::SetPrefix(_) | Action::PendingCharFind { .. } | Action::SetOperator(_) => {}
+            Action::NoOp
+            | Action::SetPrefix(_)
+            | Action::PendingCharFind { .. }
+            | Action::SetOperator(_) => {}
             _ => {
                 self.input_state.prefix = None;
                 self.input_state.pending_find = None;
@@ -207,6 +243,7 @@ impl App {
         }
 
         match action {
+            Action::NoOp => {}
             Action::Quit => self.should_quit = true,
             Action::EnterMode(mode) => {
                 if mode == Mode::Normal {
@@ -255,6 +292,7 @@ impl App {
                 let _ = self.backend.send_edit("highlight_find", json!({ "visible": true }));
             }
             Action::ExecuteSearch => self.execute_search(),
+            Action::CompleteCommandLine => self.complete_command(),
             Action::Edit(method) => {
                 let count = self.input_state.count();
                 // Push jump list before document-level jumps.
@@ -326,6 +364,28 @@ impl App {
                     self.backend.status_message = Some(format!("workspace symbols failed: {err}"));
                 }
             }
+            Action::RegisterPrefix => {
+                self.input_state.awaiting_register = true;
+            }
+            Action::MarkSetPrefix => {
+                self.input_state.awaiting_mark_set = true;
+            }
+            Action::MarkJumpPrefix { line_start } => {
+                self.input_state.awaiting_mark_jump = Some(line_start);
+            }
+            Action::MacroRecordToggle => {
+                if self.macro_register.is_some() {
+                    self.stop_macro_record();
+                } else {
+                    self.input_state.awaiting_macro_record = true;
+                }
+            }
+            Action::MacroReplayPrefix => {
+                self.input_state.awaiting_macro_replay = true;
+            }
+            Action::WindowCommandPrefix => {
+                self.input_state.awaiting_window_cmd = true;
+            }
             Action::SearchWordUnderCursor { forward } => {
                 // Use word under cursor (or visual selection) as search pattern via xi's
                 // selection_for_find RPC, then navigate forward or backward.
@@ -344,31 +404,13 @@ impl App {
                         json!({ "wrap_around": true, "allow_same": false }),
                     );
                 }
-                // Mirror search_pattern from word under cursor for frontend highlighting.
-                if let Some(line) = self.backend.lines.get(self.backend.cursor_line) {
-                    let col = self.backend.cursor_col;
-                    let ch = line[col..].chars().next();
-                    if ch.map(|c| c.is_alphanumeric() || c == '_').unwrap_or(false) {
-                        let start = line[..col]
-                            .char_indices()
-                            .rev()
-                            .take_while(|(_, c)| c.is_alphanumeric() || *c == '_')
-                            .last()
-                            .map(|(i, _)| i)
-                            .unwrap_or(col);
-                        let end = col
-                            + line[col..]
-                                .char_indices()
-                                .take_while(|(_, c)| c.is_alphanumeric() || *c == '_')
-                                .last()
-                                .map(|(i, c)| i + c.len_utf8())
-                                .unwrap_or(0);
-                        self.search_pattern = Some(line[start..end].to_owned());
-                    }
-                }
+                self.search_pattern = self.current_search_pattern();
                 if matches!(self.mode, Mode::Visual | Mode::VisualLine | Mode::VisualBlock) {
                     self.enter_normal_mode();
                 }
+            }
+            Action::SearchSelection { detect_word_boundaries } => {
+                self.search_current_selection(detect_word_boundaries);
             }
             Action::FindAll => {
                 // Select all occurrences of the current search pattern in the buffer.
@@ -381,8 +423,34 @@ impl App {
             Action::PendingCharFind { forward, inclusive } => {
                 self.input_state.pending_find = Some(PendingCharFind { forward, inclusive });
             }
+            Action::MoveWordStart { forward, long_word } => {
+                self.move_word_start(forward, long_word);
+            }
+            Action::MoveWordEnd { long_word } => {
+                self.move_word_end(long_word);
+            }
+            Action::GotoLine => self.goto_line_from_count(),
+            Action::SaveSelection => self.push_jump(),
+            Action::RepeatLastMotion => self.repeat_last_motion(),
+            Action::PageCursorHalfUp => self.page_cursor_half(false),
+            Action::PageCursorHalfDown => self.page_cursor_half(true),
+            Action::Replace => {
+                self.input_state.awaiting_replace_char = true;
+            }
+            Action::ReplaceWithYanked => self.replace_with_yanked(),
+            Action::SwitchCase => self.apply_case_transform("capitalize"),
+            Action::SwitchToLowercase => self.apply_case_transform("lowercase"),
+            Action::SwitchToUppercase => self.apply_case_transform("uppercase"),
+            Action::YankSelection => self.yank_selection(),
+            Action::IndentSelection => self.apply_selection_edit("indent", true),
+            Action::UnindentSelection => self.apply_selection_edit("outdent", true),
+            Action::FormatSelections => self.format_selections(),
+            Action::DeleteSelection { yank, enter_insert } => {
+                self.delete_selection(yank, enter_insert)
+            }
             Action::MatchingPair => {
                 self.push_jump();
+                self.last_repeatable_motion = Some(RepeatableMotion::MatchingPair);
                 self.jump_matching_bracket();
             }
             // Operator-pending mode
@@ -486,6 +554,10 @@ impl App {
             Action::QfPrev => self.qf_prev(true),
             Action::LocNext => self.qf_next(false),
             Action::LocPrev => self.qf_prev(false),
+            Action::GitNextHunk => self.jump_to_git_hunk(true),
+            Action::GitPrevHunk => self.jump_to_git_hunk(false),
+            Action::GitBlame => self.show_git_blame(),
+            Action::GitDiff => self.open_git_diff_view(false),
             // ── Fold commands ────────────────────────────────────────────────────
             Action::FoldToggle => self.fold_toggle(),
             Action::FoldOpen => self.fold_open(),
@@ -500,12 +572,6 @@ impl App {
         if key.code == KeyCode::Esc && self.mode == Mode::OperatorPending {
             self.enter_normal_mode();
             self.input_state.reset();
-            return;
-        }
-
-        // Tab completion in command-line mode.
-        if key.code == KeyCode::Tab && self.mode == Mode::CommandLine {
-            self.complete_command();
             return;
         }
 
@@ -535,9 +601,6 @@ impl App {
                         }
                         _ => {}
                     }
-                } else if self.mode == Mode::Normal && c == 'w' {
-                    // Ctrl-W: window command prefix.
-                    self.input_state.awaiting_window_cmd = true;
                 }
                 return;
             }
@@ -559,40 +622,6 @@ impl App {
                 self.command_buffer.push(ch);
             }
             Mode::Normal => {
-                // `"` — start register prefix.
-                if ch == '"' && self.input_state.prefix.is_none() {
-                    self.input_state.awaiting_register = true;
-                    return;
-                }
-                // `m` — set mark.
-                if ch == 'm' && self.input_state.prefix.is_none() {
-                    self.input_state.awaiting_mark_set = true;
-                    return;
-                }
-                // `'` — jump to mark (line start).
-                if ch == '\'' && self.input_state.prefix.is_none() {
-                    self.input_state.awaiting_mark_jump = Some(true);
-                    return;
-                }
-                // `` ` `` — jump to mark (exact position).
-                if ch == '`' && self.input_state.prefix.is_none() {
-                    self.input_state.awaiting_mark_jump = Some(false);
-                    return;
-                }
-                // `q` — start/stop macro recording.
-                if ch == 'q' && self.input_state.prefix.is_none() {
-                    if self.macro_register.is_some() {
-                        self.stop_macro_record();
-                    } else {
-                        self.input_state.awaiting_macro_record = true;
-                    }
-                    return;
-                }
-                // `@` — replay macro.
-                if ch == '@' && self.input_state.prefix.is_none() {
-                    self.input_state.awaiting_macro_replay = true;
-                    return;
-                }
                 if let Some(find) = self.input_state.pending_find.take() {
                     let count = self.input_state.count();
                     self.input_state.reset();
@@ -1177,6 +1206,56 @@ impl App {
         self.enter_normal_mode();
     }
 
+    fn search_current_selection(&mut self, detect_word_boundaries: bool) {
+        let Some(chars) = self.current_search_pattern() else {
+            return;
+        };
+        let case_sensitive = smart_case_sensitive(&chars);
+        let _ = self.backend.send_edit(
+            "find",
+            json!({
+                "chars": chars,
+                "case_sensitive": case_sensitive,
+                "regex": false,
+                "whole_words": detect_word_boundaries
+            }),
+        );
+        let _ = self.backend.send_edit("highlight_find", json!({ "visible": true }));
+        self.search_pattern = self.current_search_pattern();
+    }
+
+    fn current_search_pattern(&self) -> Option<String> {
+        if matches!(self.mode, Mode::Visual | Mode::VisualLine | Mode::VisualBlock) {
+            let selected = self.extract_selected_text();
+            if !selected.is_empty() {
+                return Some(selected);
+            }
+        }
+
+        let line = self.backend.lines.get(self.backend.cursor_line)?;
+        let col = self.backend.cursor_col;
+        let ch = line.get(col..)?.chars().next()?;
+        if !(ch.is_alphanumeric() || ch == '_') {
+            return None;
+        }
+
+        let start = line[..col]
+            .char_indices()
+            .rev()
+            .take_while(|(_, current)| current.is_alphanumeric() || *current == '_')
+            .last()
+            .map(|(idx, _)| idx)
+            .unwrap_or(col);
+        let end = col
+            + line[col..]
+                .char_indices()
+                .take_while(|(_, current)| current.is_alphanumeric() || *current == '_')
+                .last()
+                .map(|(idx, current)| idx + current.len_utf8())
+                .unwrap_or(0);
+        Some(line[start..end].to_owned())
+    }
+
     fn jump_to_char(&mut self, target: char, forward: bool, inclusive: bool) {
         let line_idx = self.backend.cursor_line;
         let cursor_byte = self.backend.cursor_col;
@@ -1201,6 +1280,8 @@ impl App {
         };
 
         if let Some(col) = col_opt {
+            self.last_repeatable_motion =
+                Some(RepeatableMotion::CharFind { target, forward, inclusive });
             let _ = self.backend.send_edit(
                 "gesture",
                 json!({ "line": line_idx as u64, "col": col as u64, "ty": "point_select" }),
@@ -1278,6 +1359,256 @@ impl App {
                 }
             }
         }
+    }
+
+    fn move_word_start(&mut self, forward: bool, long_word: bool) {
+        let line_idx = self.backend.cursor_line;
+        let cursor_byte = self.backend.cursor_col;
+        let Some(line) = self.backend.lines.get(line_idx) else {
+            return;
+        };
+
+        let target = if forward {
+            next_word_start(line, cursor_byte, long_word)
+        } else {
+            prev_word_start(line, cursor_byte, long_word)
+        };
+
+        if let Some(col) = target {
+            self.move_cursor_with_selection(line_idx, col);
+        }
+    }
+
+    fn move_word_end(&mut self, long_word: bool) {
+        let line_idx = self.backend.cursor_line;
+        let cursor_byte = self.backend.cursor_col;
+        let Some(line) = self.backend.lines.get(line_idx) else {
+            return;
+        };
+
+        if let Some(col) = next_word_end(line, cursor_byte, long_word) {
+            self.move_cursor_with_selection(line_idx, col);
+        }
+    }
+
+    fn move_cursor_with_selection(&mut self, line_idx: usize, col: usize) {
+        let ty = if self.mode.is_visual() {
+            json!({ "select_extend": { "granularity": "point" } })
+        } else {
+            json!("point_select")
+        };
+        let _ = self
+            .backend
+            .send_edit("gesture", json!({ "line": line_idx as u64, "col": col as u64, "ty": ty }));
+    }
+
+    fn goto_line_from_count(&mut self) {
+        let target = self.input_state.count().saturating_sub(1) as usize;
+        self.jump_to_line(target);
+    }
+
+    fn page_cursor_half(&mut self, down: bool) {
+        let editor_rows = crossterm::terminal::size()
+            .map(|(_, height)| height.saturating_sub(2) as usize)
+            .unwrap_or(22);
+        let delta = (editor_rows / 2).max(1);
+        let max_line = self.backend.lines.len().saturating_sub(1);
+        let next_line = if down {
+            self.backend.cursor_line.saturating_add(delta).min(max_line)
+        } else {
+            self.backend.cursor_line.saturating_sub(delta)
+        };
+        let next_col = self
+            .backend
+            .lines
+            .get(next_line)
+            .map(|line| self.backend.cursor_col.min(line.len()))
+            .unwrap_or(0);
+        self.push_jump();
+        let _ = self.backend.send_edit(
+            "gesture",
+            json!({ "line": next_line as u64, "col": next_col as u64, "ty": "point_select" }),
+        );
+        self.viewport.top_line = if down {
+            self.viewport.top_line.saturating_add(delta).min(max_line)
+        } else {
+            self.viewport.top_line.saturating_sub(delta)
+        };
+    }
+
+    fn repeat_last_motion(&mut self) {
+        let Some(motion) = self.last_repeatable_motion else {
+            return;
+        };
+
+        match motion {
+            RepeatableMotion::CharFind { target, forward, inclusive } => {
+                self.jump_to_char(target, forward, inclusive);
+            }
+            RepeatableMotion::MatchingPair => self.jump_matching_bracket(),
+            RepeatableMotion::Quickfix { forward, is_quickfix } => {
+                if forward {
+                    self.qf_next(is_quickfix);
+                } else {
+                    self.qf_prev(is_quickfix);
+                }
+            }
+            RepeatableMotion::GitHunk { forward } => self.jump_to_git_hunk(forward),
+        }
+    }
+
+    fn apply_case_transform(&mut self, method: &'static str) {
+        let count = self.input_state.count() as usize;
+        let had_visual = self.mode.is_visual();
+        if !had_visual && !self.select_chars_from_cursor(count) {
+            return;
+        }
+        let _ = self.backend.send_edit(method, json!([]));
+        self.push_change();
+        let _ = self.backend.send_edit("collapse_selections", json!([]));
+        if had_visual {
+            self.enter_normal_mode();
+        }
+    }
+
+    fn yank_selection(&mut self) {
+        let count = self.input_state.count() as usize;
+        let had_visual = self.mode.is_visual();
+        if !had_visual && !self.select_chars_from_cursor(count) {
+            return;
+        }
+        let reg = self.take_register();
+        let text = self.extract_selected_text();
+        self.registers.yank(&reg, text, false);
+        let _ = self.backend.send_edit("collapse_selections", json!([]));
+        if had_visual {
+            self.enter_normal_mode();
+        }
+    }
+
+    fn apply_selection_edit(&mut self, method: &'static str, push_change: bool) {
+        let had_visual = self.mode.is_visual();
+        if !had_visual {
+            let _ = self.backend.send_edit("move_to_left_end_of_line", json!([]));
+            let _ =
+                self.backend.send_edit("move_to_right_end_of_line_and_modify_selection", json!([]));
+        }
+        let _ = self.backend.send_edit(method, json!([]));
+        if push_change {
+            self.push_change();
+        }
+        let _ = self.backend.send_edit("collapse_selections", json!([]));
+        if had_visual {
+            self.enter_normal_mode();
+        }
+    }
+
+    fn format_selections(&mut self) {
+        if self.backend.format_document().is_ok() {
+            self.push_change();
+            if self.mode.is_visual() {
+                self.enter_normal_mode();
+            }
+        }
+    }
+
+    fn delete_selection(&mut self, yank: bool, enter_insert: bool) {
+        let count = self.input_state.count() as usize;
+        let had_visual = self.mode.is_visual();
+        if !had_visual && !self.select_chars_from_cursor(count) {
+            return;
+        }
+        if yank {
+            let reg = self.take_register();
+            let text = self.extract_selected_text();
+            self.registers.delete(&reg, text, false);
+        }
+        self.record_edit("delete_forward", json!([]));
+        self.push_change();
+        if had_visual {
+            self.enter_normal_mode();
+        }
+        if enter_insert {
+            self.mode = Mode::Insert;
+        }
+    }
+
+    fn replace_with_char(&mut self, ch: char) {
+        let repeat = if self.mode.is_visual() {
+            self.extract_selected_text().chars().filter(|current| *current != '\n').count().max(1)
+        } else {
+            self.input_state.count() as usize
+        };
+        if !self.mode.is_visual() && !self.select_chars_from_cursor(repeat) {
+            return;
+        }
+        let _ = self.backend.send_edit("delete_forward", json!([]));
+        let _ = self
+            .backend
+            .send_edit("insert", json!({ "chars": ch.to_string().repeat(repeat.max(1)) }));
+        self.push_change();
+        if self.mode.is_visual() {
+            self.enter_normal_mode();
+        }
+    }
+
+    fn replace_with_yanked(&mut self) {
+        let reg = self.take_register();
+        let text = self.registers.get(&reg);
+        if text.is_empty() {
+            return;
+        }
+        let count = self.input_state.count() as usize;
+        if !self.mode.is_visual() && !self.select_chars_from_cursor(count) {
+            return;
+        }
+        let _ = self.backend.send_edit("delete_forward", json!([]));
+        let _ = self.backend.send_edit("paste_register", json!({ "chars": text, "before": true }));
+        self.push_change();
+        if self.mode.is_visual() {
+            self.enter_normal_mode();
+        }
+    }
+
+    fn select_chars_from_cursor(&mut self, count: usize) -> bool {
+        let line_idx = self.backend.cursor_line;
+        let cursor_byte = self.backend.cursor_col;
+        let Some(line) = self.backend.lines.get(line_idx) else {
+            return false;
+        };
+        if cursor_byte >= line.len() {
+            return false;
+        }
+
+        let mut end = cursor_byte;
+        for _ in 0..count.max(1) {
+            let next = next_char_start(line, end);
+            if next == end {
+                break;
+            }
+            end = next;
+        }
+        if end == cursor_byte {
+            return false;
+        }
+
+        let _ = self.backend.send_edit(
+            "gesture",
+            json!({
+                "line": line_idx as u64,
+                "col": cursor_byte as u64,
+                "ty": { "select": { "granularity": "point", "multi": false } }
+            }),
+        );
+        let _ = self.backend.send_edit(
+            "gesture",
+            json!({
+                "line": line_idx as u64,
+                "col": end as u64,
+                "ty": { "select_extend": { "granularity": "point" } }
+            }),
+        );
+        true
     }
 
     // ── Range-based line operations ─────────────────────────────────────────
@@ -1378,6 +1709,8 @@ impl App {
             self.location_list.as_mut().and_then(|l| l.next_entry()).cloned()
         };
         if let Some(e) = entry {
+            self.last_repeatable_motion =
+                Some(RepeatableMotion::Quickfix { forward: true, is_quickfix });
             self.navigate_to_qf_entry(e);
         }
     }
@@ -1390,6 +1723,8 @@ impl App {
             self.location_list.as_mut().and_then(|l| l.prev_entry()).cloned()
         };
         if let Some(e) = entry {
+            self.last_repeatable_motion =
+                Some(RepeatableMotion::Quickfix { forward: false, is_quickfix });
             self.navigate_to_qf_entry(e);
         }
     }
@@ -1769,6 +2104,173 @@ impl App {
                 self.viewport.left_col = cursor_display_col + 1 - editor_width;
             }
         }
+    }
+
+    pub(crate) fn refresh_source_control(&mut self) {
+        let now = Instant::now();
+        let snapshots = self
+            .backend
+            .all_bufs()
+            .iter()
+            .map(|buf| (buf.id, buf.path.clone(), buf.lines.clone()))
+            .collect::<Vec<_>>();
+
+        for (buf_id, path, lines) in snapshots {
+            let fingerprint = git::buffer_fingerprint(path.as_deref(), &lines);
+            let stale = self.source_control.get(&buf_id).is_none_or(|cached| {
+                cached.fingerprint != fingerprint
+                    || cached.path != path
+                    || now.duration_since(cached.last_refresh) >= Duration::from_secs(2)
+            });
+            if !stale {
+                continue;
+            }
+
+            let status = path
+                .as_deref()
+                .and_then(|file_path| git::inspect_buffer(file_path, &lines).ok().flatten());
+            self.source_control
+                .insert(buf_id, GitBufferCache { fingerprint, path, last_refresh: now, status });
+        }
+    }
+
+    pub(crate) fn git_status(&self, buf_id: crate::buffer::BufferId) -> Option<&GitBufferStatus> {
+        self.source_control.get(&buf_id).and_then(|cached| cached.status.as_ref())
+    }
+
+    pub(crate) fn current_git_status(&self) -> Option<&GitBufferStatus> {
+        self.git_status(self.backend.active().id)
+    }
+
+    fn refresh_active_git_status(&mut self) -> Option<GitBufferStatus> {
+        let buf = self.backend.active();
+        let fingerprint = git::buffer_fingerprint(buf.path.as_deref(), &buf.lines);
+        let status = buf
+            .path
+            .as_deref()
+            .and_then(|path| git::inspect_buffer(path, &buf.lines).ok().flatten());
+        self.source_control.insert(
+            buf.id,
+            GitBufferCache {
+                fingerprint,
+                path: buf.path.clone(),
+                last_refresh: Instant::now(),
+                status: status.clone(),
+            },
+        );
+        status
+    }
+
+    fn jump_to_git_hunk(&mut self, forward: bool) {
+        self.last_repeatable_motion = Some(RepeatableMotion::GitHunk { forward });
+        let Some(status) = self.refresh_active_git_status() else {
+            self.backend.status_message =
+                Some(String::from("git: current buffer not in repository"));
+            return;
+        };
+        if status.hunks.is_empty() {
+            self.backend.status_message = Some(String::from("git: no hunks in current buffer"));
+            return;
+        }
+        let target = if forward {
+            status.next_hunk_line(self.backend.cursor_line)
+        } else {
+            status.prev_hunk_line(self.backend.cursor_line)
+        };
+        if let Some(line) = target {
+            self.jump_to_line(line);
+            self.backend.status_message = Some(format!(
+                "git hunk: line {} ({}/{})",
+                line + 1,
+                status.branch,
+                status.repo_relative
+            ));
+        }
+    }
+
+    fn show_git_blame(&mut self) {
+        let Some(path) = self.backend.active().path.clone() else {
+            self.backend.status_message =
+                Some(String::from("git blame unavailable for scratch buffer"));
+            return;
+        };
+        match git::blame_line(&path, self.backend.cursor_line) {
+            Ok(Some(blame)) => {
+                let content = git::format_blame(&blame, self.backend.cursor_line);
+                self.hover_popup = Some(HoverPopup {
+                    title: format!("Git Blame {}", self.backend.cursor_line + 1),
+                    content: content.clone(),
+                });
+                self.backend.status_message = Some(content);
+            }
+            Ok(None) => {
+                self.backend.status_message =
+                    Some(String::from("git blame unavailable for current line"));
+            }
+            Err(err) => {
+                self.backend.status_message = Some(format!("git blame failed: {err}"));
+            }
+        }
+    }
+
+    fn open_generated_buffer(&mut self, title: &str, body: &str) {
+        match self.backend.open_named_scratch_buffer(title) {
+            Ok(buf_id) => {
+                let _ = self.backend.switch_to_id(buf_id);
+                self.tabs.focused_windows_mut().set_focused_buffer(buf_id);
+                self.viewport = Viewport::default();
+                if !body.is_empty() {
+                    let _ = self.backend.send_edit("insert", json!({ "chars": body }));
+                }
+                self.backend.status_message = Some(title.to_owned());
+            }
+            Err(err) => {
+                self.backend.status_message = Some(format!("{title} failed: {err}"));
+            }
+        }
+    }
+
+    fn run_terminal_command(&mut self, command: crate::terminal::TerminalCommand) {
+        let cwd = match std::env::current_dir() {
+            Ok(path) => path,
+            Err(err) => {
+                self.backend.status_message = Some(format!("shell failed: {err}"));
+                return;
+            }
+        };
+
+        match crate::terminal::run_command(&command, &cwd) {
+            Ok(result) => {
+                let title = command.title.clone();
+                let body = crate::terminal::render_transcript(&result);
+                self.open_generated_buffer(&title, &body);
+                self.backend.status_message = Some(if result.success {
+                    format!("{} finished", title)
+                } else {
+                    format!("{} failed", title)
+                });
+            }
+            Err(err) => {
+                self.backend.status_message = Some(format!("shell failed: {err}"));
+            }
+        }
+    }
+
+    fn open_git_diff_view(&mut self, current_hunk_only: bool) {
+        let Some(status) = self.refresh_active_git_status() else {
+            self.backend.status_message =
+                Some(String::from("git diff unavailable for current buffer"));
+            return;
+        };
+        let selected_hunk =
+            if current_hunk_only { status.hunk_at_line(self.backend.cursor_line) } else { None };
+        if current_hunk_only && selected_hunk.is_none() {
+            self.backend.status_message = Some(String::from("git: cursor not inside changed hunk"));
+            return;
+        }
+        let title = if current_hunk_only { "git hunk diff" } else { "git diff" };
+        let rendered = git::render_diff(&status, selected_hunk);
+        self.open_generated_buffer(title, &rendered);
     }
 
     // ── Recording helpers ──────────────────────────────────────────────────

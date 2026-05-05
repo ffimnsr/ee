@@ -38,7 +38,7 @@ use xi_rpc::{self, OptionExt, ReadError, RemoteError, RpcCtx, RpcPeer};
 
 use crate::WeakXiCore;
 use crate::client::Client;
-use crate::config::{self, ConfigDomain, ConfigManager, Table};
+use crate::config::{ConfigDomain, ConfigDomainExternal, ConfigManager, Table};
 use crate::editor::Editor;
 use crate::event_context::EventContext;
 use crate::file::FileManager;
@@ -61,9 +61,6 @@ use crate::width_cache::WidthCache;
 use crate::watcher::{FileWatcher, WatchToken};
 #[cfg(feature = "notify")]
 use notify::Event;
-#[cfg(feature = "notify")]
-use std::ffi::OsStr;
-
 /// ViewIds are the primary means of routing messages between
 /// xi-core and a client view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -93,15 +90,12 @@ const PLUGIN_RESTART_BASE_DELAY_MS: u64 = 250;
 const PLUGIN_RESTART_MAX_DELAY_MS: u64 = 5_000;
 const PLUGIN_STABLE_UPTIME: Duration = Duration::from_secs(30);
 
-#[cfg(feature = "notify")]
-const CONFIG_EVENT_TOKEN: WatchToken = WatchToken(1);
-
 /// Token for file-change events in open files
 #[cfg(feature = "notify")]
-pub const OPEN_FILE_EVENT_TOKEN: WatchToken = WatchToken(2);
+pub const OPEN_FILE_EVENT_TOKEN: WatchToken = WatchToken(1);
 
 #[cfg(feature = "notify")]
-const PLUGIN_EVENT_TOKEN: WatchToken = WatchToken(3);
+const PLUGIN_EVENT_TOKEN: WatchToken = WatchToken(2);
 
 #[allow(dead_code)]
 pub struct CoreState {
@@ -161,20 +155,6 @@ impl CoreState {
         #[cfg(feature = "notify")]
         let mut watcher = FileWatcher::new(peer.clone());
 
-        if let Some(p) = config_dir.as_ref() {
-            if !p.exists() {
-                if let Err(e) = config::init_config_dir(p) {
-                    //TODO: report this error?
-                    error!("error initing file based configs: {:?}", e);
-                }
-            }
-
-            #[cfg(feature = "notify")]
-            watcher.watch_filtered(p, true, CONFIG_EVENT_TOKEN, |p| {
-                p.extension().and_then(OsStr::to_str).unwrap_or("") == "xiconfig"
-            });
-        }
-
         let config_manager = ConfigManager::new(config_dir, extras_dir);
 
         let plugins_dir = config_manager.get_plugins_dir();
@@ -222,10 +202,6 @@ impl CoreState {
     pub(crate) fn finish_setup(&mut self, self_ref: WeakXiCore) {
         self.self_ref = Some(self_ref);
 
-        if let Some(path) = self.config_manager.base_config_file_path() {
-            self.load_file_based_config(&path);
-        }
-
         // instead of having to do this here, config should just own
         // the plugin catalog and reload automatically
         let plugin_paths = self.config_manager.get_plugin_paths();
@@ -239,19 +215,6 @@ impl CoreState {
         self.handle_config_changes(lang_config_changes);
 
         self.ensure_manifest_plugins_started();
-    }
-
-    /// Attempt to load a config file.
-    fn load_file_based_config(&mut self, path: &Path) {
-        let _t = tracing::trace_span!("CoreState::load_config_file", categories = "core").entered();
-        if let Some(domain) = self.config_manager.domain_for_path(path) {
-            match config::try_load_from_file(path) {
-                Ok(table) => self.set_config(domain, table),
-                Err(e) => self.peer.alert(e.to_string()),
-            }
-        } else {
-            self.peer.alert(format!("Unexpected config file {:?}", path));
-        }
     }
 
     /// Sets (overwriting) the config for a given domain.
@@ -328,6 +291,7 @@ impl CoreState {
             Edit(crate::rpc::EditCommand { view_id, cmd }) => self.do_edit(view_id, cmd),
             Save { view_id, file_path } => self.do_save(view_id, file_path),
             CloseView { view_id } => self.do_close_view(view_id),
+            SetConfig { domain, changes } => self.do_set_config(domain, changes),
             Plugin(cmd) => match cmd {
                 PN::Start { view_id, plugin_name } => self.do_start_plugin(view_id, &plugin_name),
                 PN::Stop { view_id, plugin_name } => self.do_stop_plugin(view_id, &plugin_name),
@@ -370,6 +334,13 @@ impl CoreState {
         if let Some(mut edit_ctx) = self.make_context(view_id) {
             edit_ctx.do_edit(cmd);
         }
+    }
+
+    fn do_set_config(&mut self, domain: ConfigDomainExternal, changes: Table) {
+        let Some(domain) = self.resolve_config_domain(domain) else {
+            return;
+        };
+        self.set_config(domain, changes);
     }
 
     fn do_new_view(&mut self, path: Option<PathBuf>) -> Result<Value, RemoteError> {
@@ -472,6 +443,21 @@ impl CoreState {
                 self.file_manager.close(buffer_id);
                 self.config_manager.remove_buffer(buffer_id);
             }
+        }
+    }
+
+    fn resolve_config_domain(&self, domain: ConfigDomainExternal) -> Option<ConfigDomain> {
+        match domain {
+            ConfigDomainExternal::General => Some(ConfigDomain::General),
+            ConfigDomainExternal::Language(language) => Some(ConfigDomain::Language(language)),
+            ConfigDomainExternal::UserOverride(view_id) => self
+                .views
+                .get(&view_id)
+                .map(|view| ConfigDomain::UserOverride(view.borrow().get_buffer_id()))
+                .or_else(|| {
+                    warn!("ignoring config update for unknown view {:?}", view_id);
+                    None
+                }),
         }
     }
 
@@ -837,7 +823,6 @@ impl CoreState {
         for (token, event) in events.drain(..) {
             match token {
                 OPEN_FILE_EVENT_TOKEN => self.handle_open_file_fs_event(event),
-                CONFIG_EVENT_TOKEN => self.handle_config_fs_event(event),
                 PLUGIN_EVENT_TOKEN => self.handle_plugin_fs_event(event),
                 _ => warn!("unexpected fs event token {:?}", token),
             }
@@ -884,33 +869,6 @@ impl CoreState {
                     .unwrap();
                 self.make_context(view_id).unwrap().reload(text);
             }
-        }
-    }
-
-    /// Handles a config related file system event.
-    #[cfg(feature = "notify")]
-    fn handle_config_fs_event(&mut self, event: Event) {
-        use notify::event::*;
-        match event.kind {
-            EventKind::Create(CreateKind::Any)
-            | EventKind::Modify(ModifyKind::Any)
-            | EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)) => {
-                self.load_file_based_config(&event.paths[0])
-            }
-            EventKind::Remove(RemoveKind::Any) if !event.paths[0].exists() => {
-                self.remove_config_at_path(&event.paths[0])
-            }
-            EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
-                self.remove_config_at_path(&event.paths[0]);
-                self.load_file_based_config(&event.paths[1]);
-            }
-            _ => (),
-        }
-    }
-
-    fn remove_config_at_path(&mut self, path: &Path) {
-        if let Some(domain) = self.config_manager.domain_for_path(path) {
-            self.set_config(domain, Table::default());
         }
     }
 
