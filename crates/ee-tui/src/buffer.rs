@@ -1,16 +1,18 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use xi_core_lib::XiCore;
 use xi_core_lib::config::Table;
-use xi_core_lib::plugin_rpc::{Diagnostic, SymbolItem};
+use xi_core_lib::plugin_rpc::{Diagnostic, SelectionRange, SymbolItem};
 use xi_core_lib::rpc::LineReplacement;
 use xi_rpc::RpcLoop;
 
@@ -237,6 +239,9 @@ pub(crate) struct BufferManager {
     pub(crate) tx: mpsc::Sender<String>,
     /// Receive side of events coming from the xi-core reader thread.
     pub(crate) backend_rx: std_mpsc::Receiver<BackendEvent>,
+    core_thread: Option<JoinHandle<()>>,
+    reader_thread: Option<JoinHandle<()>>,
+    reader_shutdown: Arc<AtomicBool>,
     /// All open buffers.
     bufs: Vec<BufState>,
     /// Maps xi view_id strings to indices in `bufs`.
@@ -270,6 +275,27 @@ impl std::ops::DerefMut for BufferManager {
     }
 }
 
+impl Drop for BufferManager {
+    fn drop(&mut self) {
+        for view_id in self.bufs.iter().map(|buf| buf.view_id.clone()) {
+            let _ = send_rpc_notification(&self.tx, "close_view", json!({ "view_id": view_id }));
+        }
+
+        self.reader_shutdown.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.reader_thread.take() {
+            let _ = handle.join();
+        }
+
+        let (dummy_tx, _dummy_rx) = mpsc::channel::<String>(1);
+        let core_tx = std::mem::replace(&mut self.tx, dummy_tx);
+        drop(core_tx);
+
+        if let Some(handle) = self.core_thread.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 impl BufferManager {
     /// Create a new xi-core process and open `path` (or a scratch buffer) as
     /// the initial view.
@@ -278,7 +304,7 @@ impl BufferManager {
         let (from_core_tx, from_core_rx) = std_mpsc::channel::<String>();
         let (backend_tx, backend_rx) = std_mpsc::channel::<BackendEvent>();
 
-        thread::spawn(move || {
+        let core_thread = thread::spawn(move || {
             let mut core = XiCore::new();
             let mut rpc_loop = RpcLoop::new(ChannelWriter { tx: from_core_tx });
             let _ = rpc_loop.mainloop(|| ChannelReader { rx: to_core_rx }, &mut core);
@@ -311,7 +337,17 @@ impl BufferManager {
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
         let pending_clone = Arc::clone(&pending);
         let tx_clone = to_core_tx.clone();
-        thread::spawn(move || xi_reader_thread(from_core_rx, tx_clone, backend_tx, pending_clone));
+        let reader_shutdown = Arc::new(AtomicBool::new(false));
+        let reader_shutdown_clone = Arc::clone(&reader_shutdown);
+        let reader_thread = thread::spawn(move || {
+            xi_reader_thread(
+                from_core_rx,
+                tx_clone,
+                backend_tx,
+                pending_clone,
+                Some(reader_shutdown_clone),
+            )
+        });
 
         let buf = BufState {
             id: 1,
@@ -342,6 +378,9 @@ impl BufferManager {
         let mut mgr = Self {
             tx: to_core_tx,
             backend_rx,
+            core_thread: Some(core_thread),
+            reader_thread: Some(reader_thread),
+            reader_shutdown,
             bufs: vec![buf],
             view_to_idx,
             current: 0,
@@ -363,6 +402,22 @@ impl BufferManager {
 
     pub(crate) fn active(&self) -> &BufState {
         &self.bufs[self.current]
+    }
+
+    pub(crate) fn set_buffer_path(&mut self, id: BufferId, path: PathBuf) -> io::Result<()> {
+        let idx = self
+            .bufs
+            .iter()
+            .position(|buf| buf.id == id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "buffer not found"))?;
+        let mtime = std::fs::metadata(&path).ok().and_then(|meta| meta.modified().ok());
+        let buf = &mut self.bufs[idx];
+        buf.path = Some(path);
+        buf.display_name = None;
+        buf.mtime = mtime;
+        buf.externally_modified = false;
+        buf.editor_config_synced = false;
+        Ok(())
     }
 
     /// Slice of all open buffers (for window/UI enumeration).
@@ -412,7 +467,17 @@ impl BufferManager {
     }
 
     pub(crate) fn save(&mut self) -> io::Result<()> {
-        let buf = &self.bufs[self.current];
+        let id = self.bufs[self.current].id;
+        self.save_buffer(id)
+    }
+
+    pub(crate) fn save_buffer(&mut self, id: BufferId) -> io::Result<()> {
+        let idx = self
+            .bufs
+            .iter()
+            .position(|buf| buf.id == id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "buffer not found"))?;
+        let buf = &self.bufs[idx];
         let Some(path) = buf.path.clone() else {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "scratch buffer has no path"));
         };
@@ -428,13 +493,22 @@ impl BufferManager {
         let display = path.display().to_string();
         // Refresh mtime after the save so external-change detection stays accurate.
         let new_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
-        let buf = &mut self.bufs[self.current];
+        let buf = &mut self.bufs[idx];
         buf.mtime = new_mtime;
         buf.externally_modified = false;
         buf.status_message = Some(format!("saved {display}"));
         // Remove crash-recovery artifact now that the file is persisted.
         if let Some(rp) = recovery_file_path(&path) {
             let _ = std::fs::remove_file(rp);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reload_editor_config(&mut self) -> io::Result<()> {
+        let (_, general_config, _) = crate::config::xi_config_tables_for_file(None);
+        send_config_notification(&self.tx, json!("general"), general_config)?;
+        for idx in 0..self.bufs.len() {
+            self.sync_buffer_editor_config(idx)?;
         }
         Ok(())
     }
@@ -481,6 +555,101 @@ impl BufferManager {
             json!({
                 "start_line": start_line,
                 "end_line": end_line,
+            }),
+        )
+    }
+
+    pub(crate) fn goto_column(
+        &mut self,
+        display_col: usize,
+        modify_selection: bool,
+    ) -> io::Result<()> {
+        self.send_edit(
+            "goto_column",
+            json!({
+                "display_col": display_col,
+                "modify_selection": modify_selection,
+            }),
+        )
+    }
+
+    pub(crate) fn add_newline_above(&mut self) -> io::Result<()> {
+        self.send_edit("add_newline_above", json!({}))
+    }
+
+    pub(crate) fn add_newline_below(&mut self) -> io::Result<()> {
+        self.send_edit("add_newline_below", json!({}))
+    }
+
+    pub(crate) fn join_selections(&mut self, select_space: bool) -> io::Result<()> {
+        self.send_edit("join_selections", json!({ "select_space": select_space }))
+    }
+
+    pub(crate) fn extend_line_below(&mut self, count: usize) -> io::Result<()> {
+        self.send_edit("extend_line_below", json!({ "count": count }))
+    }
+
+    pub(crate) fn extend_to_line_bounds(&mut self) -> io::Result<()> {
+        self.send_edit("extend_to_line_bounds", json!({}))
+    }
+
+    pub(crate) fn shrink_to_line_bounds(&mut self) -> io::Result<()> {
+        self.send_edit("shrink_to_line_bounds", json!({}))
+    }
+
+    pub(crate) fn move_word_start(
+        &mut self,
+        forward: bool,
+        long_word: bool,
+        modify_selection: bool,
+    ) -> io::Result<()> {
+        self.send_edit(
+            "move_word_start",
+            json!({
+                "forward": forward,
+                "long_word": long_word,
+                "modify_selection": modify_selection,
+            }),
+        )
+    }
+
+    pub(crate) fn move_word_end(
+        &mut self,
+        long_word: bool,
+        modify_selection: bool,
+    ) -> io::Result<()> {
+        self.send_edit(
+            "move_word_end",
+            json!({
+                "long_word": long_word,
+                "modify_selection": modify_selection,
+            }),
+        )
+    }
+
+    pub(crate) fn find_char(
+        &mut self,
+        target: char,
+        forward: bool,
+        inclusive: bool,
+        modify_selection: bool,
+    ) -> io::Result<()> {
+        self.send_edit(
+            "find_char",
+            json!({
+                "target": target,
+                "forward": forward,
+                "inclusive": inclusive,
+                "modify_selection": modify_selection,
+            }),
+        )
+    }
+
+    pub(crate) fn move_to_matching_bracket(&mut self, modify_selection: bool) -> io::Result<()> {
+        self.send_edit(
+            "move_to_matching_bracket",
+            json!({
+                "modify_selection": modify_selection,
             }),
         )
     }
@@ -547,6 +716,76 @@ impl BufferManager {
         )?;
         serde_json::from_value(response)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    }
+
+    pub(crate) fn filter_selections_preview(
+        &mut self,
+        pattern: &str,
+        remove: bool,
+    ) -> io::Result<Vec<SelectionRange>> {
+        let view_id = self.bufs[self.current].view_id.clone();
+        let response = self.send_request(
+            "filter_selections_preview",
+            json!({
+                "view_id": view_id,
+                "pattern": pattern,
+                "remove": remove,
+            }),
+        )?;
+        serde_json::from_value(response)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    }
+
+    pub(crate) fn selected_text_preview(&mut self, linewise: bool) -> io::Result<String> {
+        let view_id = self.bufs[self.current].view_id.clone();
+        let response = self.send_request(
+            "selected_text_preview",
+            json!({
+                "view_id": view_id,
+                "linewise": linewise,
+            }),
+        )?;
+        serde_json::from_value(response)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    }
+
+    pub(crate) fn block_text_preview(
+        &mut self,
+        start_line: usize,
+        end_line: usize,
+        left_col: usize,
+        right_col: usize,
+    ) -> io::Result<String> {
+        let view_id = self.bufs[self.current].view_id.clone();
+        let response = self.send_request(
+            "block_text_preview",
+            json!({
+                "view_id": view_id,
+                "start_line": start_line,
+                "end_line": end_line,
+                "left_col": left_col,
+                "right_col": right_col,
+            }),
+        )?;
+        serde_json::from_value(response)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    }
+
+    pub(crate) fn select_chars_preview(&mut self, count: usize) -> io::Result<Vec<SelectionRange>> {
+        let view_id = self.bufs[self.current].view_id.clone();
+        let response = self.send_request(
+            "select_chars_preview",
+            json!({
+                "view_id": view_id,
+                "count": count,
+            }),
+        )?;
+        serde_json::from_value(response)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    }
+
+    pub(crate) fn set_selections(&mut self, selections: &[SelectionRange]) -> io::Result<()> {
+        self.send_edit("set_selections", json!({ "selections": selections }))
     }
 
     pub(crate) fn apply_line_replacements(
@@ -914,8 +1153,7 @@ impl BufferManager {
             .join("\n")
     }
 
-    #[cfg(test)]
-    pub(crate) fn pump(&mut self) -> io::Result<()> {
+    pub(crate) fn sync_pending_events(&mut self) -> io::Result<()> {
         for _ in 0..6 {
             match recv_with_timeout(&mut self.backend_rx, Duration::from_millis(10)) {
                 Some(event) => {
@@ -928,6 +1166,11 @@ impl BufferManager {
             }
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pump(&mut self) -> io::Result<()> {
+        self.sync_pending_events()
     }
 
     /// Test-only constructor that builds a minimal `BufferManager` around
@@ -971,6 +1214,9 @@ impl BufferManager {
         Self {
             tx: internal_tx,
             backend_rx,
+            core_thread: None,
+            reader_thread: None,
+            reader_shutdown: Arc::new(AtomicBool::new(false)),
             bufs: vec![buf],
             view_to_idx,
             current: 0,

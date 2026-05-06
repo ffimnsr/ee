@@ -31,7 +31,10 @@ pub(crate) fn parse_command(command: &str) -> Result<Option<TerminalCommand>, &'
         };
     }
 
-    if let Some(raw) = strip_keyword(command, "term").or_else(|| strip_keyword(command, "terminal"))
+    if let Some(raw) = strip_keyword(command, "term")
+        .or_else(|| strip_keyword(command, "terminal"))
+        .or_else(|| strip_keyword(command, "sh"))
+        .or_else(|| strip_keyword(command, "run_shell_command"))
     {
         return if raw.is_empty() {
             Err("term: usage: :term shell-command")
@@ -167,6 +170,12 @@ mod tests {
 
         let term = parse_command("term cargo test -p ee-tui").unwrap().unwrap();
         assert_eq!(term.command, "cargo test -p ee-tui");
+
+        let sh = parse_command("sh printf 'ok'").unwrap().unwrap();
+        assert_eq!(sh.command, "printf 'ok'");
+
+        let run_shell_snake = parse_command("run_shell_command cargo check").unwrap().unwrap();
+        assert_eq!(run_shell_snake.command, "cargo check");
 
         let build = parse_command("make --workspace").unwrap().unwrap();
         assert_eq!(build.command, "cargo build --workspace");

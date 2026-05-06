@@ -33,6 +33,7 @@ syntect.workspace = true
 tree-sitter.workspace = true
 tree-sitter-rust.workspace = true
 tree-sitter-python.workspace = true
+unicode-width.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 seccompiler = { workspace = true }

@@ -1,5 +1,7 @@
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -165,6 +167,8 @@ pub(crate) struct CoreSyntaxSpan {
 pub(crate) struct XiClient {
     pub(crate) path: Option<PathBuf>,
     pub(crate) tx: mpsc::Sender<String>,
+    pub(crate) pending_requests: PendingRequests,
+    pub(crate) next_request_id: u64,
     pub(crate) backend_rx: std_mpsc::Receiver<BackendEvent>,
     pub(crate) view_id: String,
     pub(crate) pending_line_request: bool,
@@ -218,11 +222,15 @@ impl XiClient {
             std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
         let tx_clone = to_core_tx.clone();
         let pending_clone = std::sync::Arc::clone(&pending);
-        thread::spawn(move || xi_reader_thread(from_core_rx, tx_clone, backend_tx, pending_clone));
+        thread::spawn(move || {
+            xi_reader_thread(from_core_rx, tx_clone, backend_tx, pending_clone, None)
+        });
 
         let mut client = Self {
             path,
             tx: to_core_tx,
+            pending_requests: pending,
+            next_request_id: 2,
             backend_rx,
             view_id,
             pending_line_request: false,
@@ -281,6 +289,22 @@ impl XiClient {
         )
     }
 
+    pub(crate) fn send_request(&mut self, method: &str, params: Value) -> io::Result<Value> {
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.saturating_add(1);
+        let (response_tx, response_rx) = std_mpsc::sync_channel(1);
+        self.pending_requests
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .insert(request_id, response_tx);
+
+        send_rpc_request(&self.tx, request_id, method, params)?;
+        let raw = response_rx.recv().map_err(|_| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "rpc response channel closed")
+        })?;
+        parse_response(raw)
+    }
+
     pub(crate) fn request_completion(&mut self) -> io::Result<()> {
         self.send_edit("request_completion", json!({}))
     }
@@ -321,6 +345,134 @@ impl XiClient {
                 "end_line": end_line,
             }),
         )
+    }
+
+    pub(crate) fn goto_column(
+        &mut self,
+        display_col: usize,
+        modify_selection: bool,
+    ) -> io::Result<()> {
+        self.send_edit(
+            "goto_column",
+            json!({
+                "display_col": display_col,
+                "modify_selection": modify_selection,
+            }),
+        )
+    }
+
+    pub(crate) fn add_newline_above(&mut self) -> io::Result<()> {
+        self.send_edit("add_newline_above", json!({}))
+    }
+
+    pub(crate) fn add_newline_below(&mut self) -> io::Result<()> {
+        self.send_edit("add_newline_below", json!({}))
+    }
+
+    pub(crate) fn join_selections(&mut self, select_space: bool) -> io::Result<()> {
+        self.send_edit("join_selections", json!({ "select_space": select_space }))
+    }
+
+    pub(crate) fn extend_line_below(&mut self, count: usize) -> io::Result<()> {
+        self.send_edit("extend_line_below", json!({ "count": count }))
+    }
+
+    pub(crate) fn extend_to_line_bounds(&mut self) -> io::Result<()> {
+        self.send_edit("extend_to_line_bounds", json!({}))
+    }
+
+    pub(crate) fn shrink_to_line_bounds(&mut self) -> io::Result<()> {
+        self.send_edit("shrink_to_line_bounds", json!({}))
+    }
+
+    pub(crate) fn move_word_start(
+        &mut self,
+        forward: bool,
+        long_word: bool,
+        modify_selection: bool,
+    ) -> io::Result<()> {
+        self.send_edit(
+            "move_word_start",
+            json!({
+                "forward": forward,
+                "long_word": long_word,
+                "modify_selection": modify_selection,
+            }),
+        )
+    }
+
+    pub(crate) fn move_word_end(
+        &mut self,
+        long_word: bool,
+        modify_selection: bool,
+    ) -> io::Result<()> {
+        self.send_edit(
+            "move_word_end",
+            json!({
+                "long_word": long_word,
+                "modify_selection": modify_selection,
+            }),
+        )
+    }
+
+    pub(crate) fn find_char(
+        &mut self,
+        target: char,
+        forward: bool,
+        inclusive: bool,
+        modify_selection: bool,
+    ) -> io::Result<()> {
+        self.send_edit(
+            "find_char",
+            json!({
+                "target": target,
+                "forward": forward,
+                "inclusive": inclusive,
+                "modify_selection": modify_selection,
+            }),
+        )
+    }
+
+    pub(crate) fn move_to_matching_bracket(&mut self, modify_selection: bool) -> io::Result<()> {
+        self.send_edit(
+            "move_to_matching_bracket",
+            json!({
+                "modify_selection": modify_selection,
+            }),
+        )
+    }
+
+    pub(crate) fn selected_text_preview(&mut self, linewise: bool) -> io::Result<String> {
+        let response = self.send_request(
+            "selected_text_preview",
+            json!({
+                "view_id": self.view_id,
+                "linewise": linewise,
+            }),
+        )?;
+        serde_json::from_value(response)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    }
+
+    pub(crate) fn block_text_preview(
+        &mut self,
+        start_line: usize,
+        end_line: usize,
+        left_col: usize,
+        right_col: usize,
+    ) -> io::Result<String> {
+        let response = self.send_request(
+            "block_text_preview",
+            json!({
+                "view_id": self.view_id,
+                "start_line": start_line,
+                "end_line": end_line,
+                "left_col": left_col,
+                "right_col": right_col,
+            }),
+        )?;
+        serde_json::from_value(response)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
     }
 
     pub(crate) fn delete_block(
@@ -752,8 +904,19 @@ pub(crate) fn xi_reader_thread(
     tx: mpsc::Sender<String>,
     backend_tx: std_mpsc::Sender<BackendEvent>,
     pending: PendingRequests,
+    shutdown: Option<Arc<AtomicBool>>,
 ) {
-    while let Ok(raw) = rx.recv() {
+    loop {
+        if shutdown.as_ref().is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            break;
+        }
+
+        let raw = match rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(raw) => raw,
+            Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+
         let msg: Value = match serde_json::from_str(&raw) {
             Ok(value) => value,
             Err(_) => continue,

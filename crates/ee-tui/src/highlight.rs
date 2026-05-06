@@ -6,6 +6,7 @@
 
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
+use std::path::Path;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
@@ -40,6 +41,20 @@ impl Highlighter {
         Self { syntax_set, theme }
     }
 
+    pub(crate) fn canonical_syntax_name(&self, requested: &str) -> Option<String> {
+        let requested = normalize_syntax_key(requested);
+        self.syntax_set
+            .syntaxes()
+            .iter()
+            .find(|syntax| normalize_syntax_key(&syntax.name) == requested)
+            .map(|syntax| syntax.name.clone())
+    }
+
+    pub(crate) fn syntax_name_for_path(&self, path: Option<&Path>) -> Option<String> {
+        let extension = path.and_then(|path| path.extension()).and_then(|ext| ext.to_str())?;
+        self.syntax_set.find_syntax_by_extension(extension).map(|syntax| syntax.name.clone())
+    }
+
     /// Highlight the lines visible in the current viewport for syntect fallback.
     ///
     /// * `lines`     — all buffer lines (may be large; only visible range is returned)
@@ -59,6 +74,7 @@ impl Highlighter {
     pub(crate) fn highlight_visible(
         &self,
         lines: &[String],
+        syntax_name: Option<&str>,
         extension: Option<&str>,
         top: usize,
         count: usize,
@@ -67,8 +83,9 @@ impl Highlighter {
             return Vec::new();
         }
 
-        let syntax = extension
-            .and_then(|ext| self.syntax_set.find_syntax_by_extension(ext))
+        let syntax = syntax_name
+            .and_then(|name| self.syntax_set.find_syntax_by_name(name))
+            .or_else(|| extension.and_then(|ext| self.syntax_set.find_syntax_by_extension(ext)))
             .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
 
         let mut hl = HighlightLines::new(syntax, &self.theme);
@@ -283,6 +300,10 @@ impl Highlighter {
     }
 }
 
+fn normalize_syntax_key(value: &str) -> String {
+    value.chars().filter(|ch| !matches!(ch, '-' | '_' | ' ')).flat_map(char::to_lowercase).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,7 +316,7 @@ mod tests {
     fn highlight_visible_rust_basic() {
         let hl = make_highlighter();
         let lines = vec!["fn main() {".to_owned(), "    let x = 42;".to_owned(), "}".to_owned()];
-        let result = hl.highlight_visible(&lines, Some("rs"), 0, 3);
+        let result = hl.highlight_visible(&lines, None, Some("rs"), 0, 3);
         assert_eq!(result.len(), 3);
         // Each visible line must produce at least one span.
         for (i, spans) in result.iter().enumerate() {
@@ -313,7 +334,7 @@ mod tests {
         let hl = make_highlighter();
         let lines: Vec<String> = (0..10).map(|i| format!("// line {i}")).collect();
         // Request only lines 3..6.
-        let result = hl.highlight_visible(&lines, Some("rs"), 3, 3);
+        let result = hl.highlight_visible(&lines, None, Some("rs"), 3, 3);
         assert_eq!(result.len(), 3);
         for (i, (spans, original)) in result.iter().zip(lines[3..6].iter()).enumerate() {
             let joined: String = spans.iter().map(|(_, t)| t.as_str()).collect();
@@ -324,7 +345,7 @@ mod tests {
     #[test]
     fn highlight_visible_empty_lines() {
         let hl = make_highlighter();
-        let result = hl.highlight_visible(&[], Some("rs"), 0, 10);
+        let result = hl.highlight_visible(&[], None, Some("rs"), 0, 10);
         assert!(result.is_empty());
     }
 
@@ -332,7 +353,7 @@ mod tests {
     fn highlight_visible_count_zero() {
         let hl = make_highlighter();
         let lines = vec!["fn main() {}".to_owned()];
-        let result = hl.highlight_visible(&lines, Some("rs"), 0, 0);
+        let result = hl.highlight_visible(&lines, None, Some("rs"), 0, 0);
         assert!(result.is_empty());
     }
 
@@ -341,7 +362,7 @@ mod tests {
         let hl = make_highlighter();
         let lines = vec!["hello world".to_owned()];
         // Unknown extension falls back to plain text; should still produce spans.
-        let result = hl.highlight_visible(&lines, Some("zzz_unknown"), 0, 1);
+        let result = hl.highlight_visible(&lines, None, Some("zzz_unknown"), 0, 1);
         assert_eq!(result.len(), 1);
         let joined: String = result[0].iter().map(|(_, t)| t.as_str()).collect();
         assert_eq!(joined, "hello world");

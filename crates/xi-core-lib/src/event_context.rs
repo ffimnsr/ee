@@ -21,8 +21,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use log::{debug, error, warn};
-use regex::RegexBuilder;
+use regex::{Regex, RegexBuilder};
 use serde_json::{self, Value, json};
+use unicode_width::UnicodeWidthChar;
 
 use xi_rope::{Cursor, DeltaBuilder, Interval, LinesMetric, Rope, RopeDelta};
 use xi_rpc::{Error as RpcError, RemoteError, ResultExt};
@@ -42,8 +43,9 @@ use crate::editor::{EditType, Editor};
 use crate::file::FileInfo;
 use crate::lang_features;
 use crate::line_offset::LineOffset;
+use crate::object::{self, SyntaxSelectionAction};
 use crate::plugins::{Plugin, PluginCapability, PluginTerminationReason};
-use crate::selection::{InsertDrift, SelRegion};
+use crate::selection::{InsertDrift, SelRegion, Selection};
 use crate::syntax::LanguageId;
 use crate::tabs::{
     BufferId, FIND_VIEW_IDLE_MASK, PluginId, RENDER_VIEW_IDLE_MASK, REWRAP_VIEW_IDLE_MASK, ViewId,
@@ -157,12 +159,15 @@ impl<'a> EventContext<'a> {
     pub(crate) fn do_edit(&mut self, cmd: EditNotification) {
         let event: EventDomain = cmd.into();
 
-        self.dispatch_event(event);
+        let pending_selection = self.dispatch_event(event);
         self.after_edit("core");
+        if let Some(selection) = pending_selection {
+            self.with_view(|view, text| view.set_selection(text, selection));
+        }
         self.render_if_needed();
     }
 
-    fn dispatch_event(&mut self, event: EventDomain) {
+    fn dispatch_event(&mut self, event: EventDomain) -> Option<Selection> {
         use self::EventDomain as E;
         match event {
             E::View(cmd) => {
@@ -174,44 +179,104 @@ impl<'a> EventContext<'a> {
                 if self.with_view(|v, _| v.find_in_progress()) {
                     self.do_incremental_find();
                 }
+                None
             }
             E::Buffer(cmd) => {
-                self.with_editor(|ed, view, k_ring, conf| ed.do_edit(view, k_ring, conf, cmd))
+                self.with_editor(|ed, view, k_ring, conf| ed.do_edit(view, k_ring, conf, cmd));
+                None
             }
             E::Special(cmd) => self.do_special(cmd),
         }
     }
 
-    fn do_special(&mut self, cmd: SpecialEvent) {
+    fn do_special(&mut self, cmd: SpecialEvent) -> Option<Selection> {
         match cmd {
             SpecialEvent::Resize(size) => {
                 self.with_view(|view, _| view.set_size(size));
                 if self.config.word_wrap {
                     self.update_wrap_settings(false);
                 }
+                None
             }
             SpecialEvent::RequestLines(LineRange { first, last }) => {
-                self.do_request_lines(first as usize, last as usize)
+                self.do_request_lines(first as usize, last as usize);
+                None
             }
             SpecialEvent::RequestHover { request_id, position } => {
-                self.do_request_hover(request_id, position)
+                self.do_request_hover(request_id, position);
+                None
             }
             SpecialEvent::DispatchPluginCommand { capability, method, params } => {
-                self.dispatch_capability_command(capability, method, &params)
+                self.dispatch_capability_command(capability, method, &params);
+                None
             }
             SpecialEvent::DeleteLineRange { start_line, end_line } => {
-                self.do_delete_line_range(start_line, end_line)
+                self.do_delete_line_range(start_line, end_line);
+                None
             }
             SpecialEvent::DeleteBlock { start_line, end_line, left_col, right_col } => {
-                self.do_delete_block(start_line, end_line, left_col, right_col)
+                self.do_delete_block(start_line, end_line, left_col, right_col);
+                None
             }
             SpecialEvent::ReplayBlockInsert { start_line, end_line, column, text, append } => {
-                self.do_replay_block_insert(start_line, end_line, column, &text, append)
+                self.do_replay_block_insert(start_line, end_line, column, &text, append);
+                None
             }
             SpecialEvent::ApplyLineReplacements { replacements } => {
-                self.do_apply_line_replacements(&replacements)
+                self.do_apply_line_replacements(&replacements);
+                None
             }
-            SpecialEvent::Reindent => self.do_reindent(),
+            SpecialEvent::SetSelections { selections } => self.do_set_selections(&selections),
+            SpecialEvent::GotoColumn { display_col, modify_selection } => {
+                self.do_goto_column(display_col, modify_selection)
+            }
+            SpecialEvent::AddNewlineAbove => self.do_add_newline_above(),
+            SpecialEvent::AddNewlineBelow => self.do_add_newline_below(),
+            SpecialEvent::JoinSelections { select_space } => self.do_join_selections(select_space),
+            SpecialEvent::ExtendLineBelow { count } => self.do_extend_line_below(count),
+            SpecialEvent::ExtendToLineBounds => self.do_extend_to_line_bounds(),
+            SpecialEvent::ShrinkToLineBounds => self.do_shrink_to_line_bounds(),
+            SpecialEvent::MoveWordStart { forward, long_word, modify_selection } => {
+                self.do_move_word_start(forward, long_word, modify_selection)
+            }
+            SpecialEvent::MoveWordEnd { long_word, modify_selection } => {
+                self.do_move_word_end(long_word, modify_selection)
+            }
+            SpecialEvent::FindChar { target, forward, inclusive, modify_selection } => {
+                self.do_find_char(target, forward, inclusive, modify_selection)
+            }
+            SpecialEvent::MoveToMatchingBracket { modify_selection } => {
+                self.do_move_to_matching_bracket(modify_selection)
+            }
+            SpecialEvent::Reindent => {
+                self.do_reindent();
+                None
+            }
+            SpecialEvent::SyntaxSelection(action) => {
+                self.do_syntax_selection(action);
+                None
+            }
+        }
+    }
+
+    fn do_syntax_selection(&mut self, action: SyntaxSelectionAction) {
+        let language = self.language.clone();
+        let file_path = self.info.map(|info| info.path.clone());
+        let result = self.with_view(|view, text| {
+            let current = view.selection().clone();
+            object::apply_syntax_selection(
+                text,
+                &current,
+                view.syntax_selection_history_mut(),
+                language.as_ref(),
+                file_path.as_deref(),
+                action,
+            )
+            .map(|selection| view.set_selection(text, selection))
+        });
+
+        if let Err(err) = result {
+            self.client.alert(format!("{}: {}", action.method_name(), err.message()));
         }
     }
 
@@ -879,6 +944,237 @@ impl<'a> EventContext<'a> {
         }
     }
 
+    fn do_set_selections(&mut self, selections: &[SelectionRange]) -> Option<Selection> {
+        if selections.is_empty() {
+            return None;
+        }
+
+        let mut selection = Selection::new();
+        for range in selections {
+            selection.add_region(SelRegion::new(range.start, range.end));
+        }
+        Some(selection)
+    }
+
+    pub(crate) fn preview_filter_selections(
+        &mut self,
+        pattern: &str,
+        remove: bool,
+    ) -> Result<Vec<SelectionRange>, RemoteError> {
+        if pattern.is_empty() {
+            return Err(RemoteError::custom(400, "filter_selections: empty pattern", None));
+        }
+
+        let regex = Regex::new(pattern)
+            .map_err(|_| RemoteError::custom(400, "filter_selections: invalid regex", None))?;
+
+        Ok(self.with_view(|view, text| {
+            view.sel_regions()
+                .iter()
+                .copied()
+                .filter(|region| selection_matches_regex(text, *region, &regex) != remove)
+                .map(|region| SelectionRange { start: region.start, end: region.end })
+                .collect()
+        }))
+    }
+
+    pub(crate) fn preview_selected_text(&mut self, linewise: bool) -> String {
+        self.with_view(|view, text| {
+            if linewise {
+                selected_linewise_text(text, view.sel_regions())
+            } else {
+                selected_text(text, view.sel_regions())
+            }
+        })
+    }
+
+    pub(crate) fn preview_block_text(
+        &mut self,
+        start_line: usize,
+        end_line: usize,
+        left_col: usize,
+        right_col: usize,
+    ) -> String {
+        let editor = self.editor.borrow();
+        block_text(editor.get_buffer(), start_line, end_line, left_col, right_col)
+    }
+
+    pub(crate) fn preview_select_chars(&mut self, count: usize) -> Vec<SelectionRange> {
+        self.with_view(|view, text| {
+            select_chars_selection(text, view.sel_regions(), count.max(1))
+                .iter()
+                .map(|region| SelectionRange { start: region.start, end: region.end })
+                .collect()
+        })
+    }
+
+    fn do_goto_column(&mut self, display_col: usize, modify_selection: bool) -> Option<Selection> {
+        self.with_view(|view, text| {
+            let region = view.sel_regions().last().copied()?;
+            let line = text.line_of_offset(region.end);
+            let line_text = line_text(text, line);
+            let target_col = display_col_to_byte(&line_text, display_col);
+            let target_offset = text.offset_of_line(line) + target_col;
+
+            if modify_selection {
+                let mut selection = Selection::new();
+                if let Some((last, rest)) = view.sel_regions().split_last() {
+                    for region in rest {
+                        selection.add_region(*region);
+                    }
+                    selection.add_region(
+                        SelRegion::new(last.start, target_offset)
+                            .with_horiz(None)
+                            .with_affinity(last.affinity),
+                    );
+                } else {
+                    selection.add_region(SelRegion::caret(target_offset));
+                }
+                Some(selection)
+            } else {
+                Some(Selection::new_simple(SelRegion::caret(target_offset)))
+            }
+        })
+    }
+
+    fn do_add_newline_below(&mut self) -> Option<Selection> {
+        let (insert_offset, caret_offset) = self.with_view(|view, text| {
+            let region = view.sel_regions().last().copied()?;
+            let line = text.line_of_offset(region.end);
+            let insert_offset = line_content_end(text, line);
+            Some((insert_offset, insert_offset + self.config.line_ending.len()))
+        })?;
+
+        let delta = replace_interval_with_text(
+            &self.editor.borrow().get_buffer().clone(),
+            Interval::new(insert_offset, insert_offset),
+            &self.config.line_ending,
+        );
+        self.editor.borrow_mut().apply_direct_delta(EditType::InsertNewline, delta);
+        Some(Selection::new_simple(SelRegion::caret(caret_offset)))
+    }
+
+    fn do_add_newline_above(&mut self) -> Option<Selection> {
+        let insert_offset = self.with_view(|view, text| {
+            let region = view.sel_regions().last().copied()?;
+            let line = text.line_of_offset(region.end);
+            Some(text.offset_of_line(line))
+        })?;
+
+        let delta = replace_interval_with_text(
+            &self.editor.borrow().get_buffer().clone(),
+            Interval::new(insert_offset, insert_offset),
+            &self.config.line_ending,
+        );
+        self.editor.borrow_mut().apply_direct_delta(EditType::InsertNewline, delta);
+        Some(Selection::new_simple(SelRegion::caret(insert_offset)))
+    }
+
+    fn do_join_selections(&mut self, select_space: bool) -> Option<Selection> {
+        let operations =
+            self.with_view(|view, text| collect_join_operations(text, view.sel_regions()));
+        if operations.is_empty() {
+            return None;
+        }
+
+        let mut final_selection = Selection::new();
+        for operation in operations {
+            let delta = replace_interval_with_text(
+                &self.editor.borrow().get_buffer().clone(),
+                Interval::new(operation.start_offset, operation.end_offset),
+                &operation.joined,
+            );
+            final_selection = final_selection.apply_delta(&delta, false, InsertDrift::Default);
+            self.editor.borrow_mut().apply_direct_delta(EditType::Other, delta);
+
+            if select_space {
+                for offset in operation.space_offsets {
+                    final_selection.add_region(SelRegion::new(offset, offset + 1));
+                }
+            } else {
+                final_selection
+                    .add_region(SelRegion::caret(operation.start_offset + operation.joined.len()));
+            }
+        }
+
+        if !select_space || !final_selection.is_empty() { Some(final_selection) } else { None }
+    }
+
+    fn do_extend_line_below(&mut self, count: usize) -> Option<Selection> {
+        self.with_view(|view, text| {
+            let selection = extend_line_below_selection(text, view.sel_regions(), count.max(1));
+            (!selection.is_empty()).then_some(selection)
+        })
+    }
+
+    fn do_extend_to_line_bounds(&mut self) -> Option<Selection> {
+        self.with_view(|view, text| {
+            let selection = extend_to_line_bounds_selection(text, view.sel_regions());
+            (!selection.is_empty()).then_some(selection)
+        })
+    }
+
+    fn do_shrink_to_line_bounds(&mut self) -> Option<Selection> {
+        self.with_view(|view, text| {
+            let selection = shrink_to_line_bounds_selection(text, view.sel_regions());
+            (!selection.is_empty()).then_some(selection)
+        })
+    }
+
+    fn do_move_word_start(
+        &mut self,
+        forward: bool,
+        long_word: bool,
+        modify_selection: bool,
+    ) -> Option<Selection> {
+        self.with_view(|view, text| {
+            let selection = move_word_start_selection(
+                text,
+                view.sel_regions(),
+                forward,
+                long_word,
+                modify_selection,
+            );
+            (!selection.is_empty()).then_some(selection)
+        })
+    }
+
+    fn do_move_word_end(&mut self, long_word: bool, modify_selection: bool) -> Option<Selection> {
+        self.with_view(|view, text| {
+            let selection =
+                move_word_end_selection(text, view.sel_regions(), long_word, modify_selection);
+            (!selection.is_empty()).then_some(selection)
+        })
+    }
+
+    fn do_find_char(
+        &mut self,
+        target: char,
+        forward: bool,
+        inclusive: bool,
+        modify_selection: bool,
+    ) -> Option<Selection> {
+        self.with_view(|view, text| {
+            let selection = find_char_selection(
+                text,
+                view.sel_regions(),
+                target,
+                forward,
+                inclusive,
+                modify_selection,
+            );
+            (!selection.is_empty()).then_some(selection)
+        })
+    }
+
+    fn do_move_to_matching_bracket(&mut self, modify_selection: bool) -> Option<Selection> {
+        self.with_view(|view, text| {
+            let selection =
+                move_to_matching_bracket_selection(text, view.sel_regions(), modify_selection);
+            (!selection.is_empty()).then_some(selection)
+        })
+    }
+
     fn do_request_hover(&mut self, request_id: usize, position: Option<ClientPosition>) {
         if let Some(position) = self.get_resolved_position(position) {
             let hover_plugins = self
@@ -973,6 +1269,586 @@ fn apply_line_replacements(text: &Rope, replacements: &[LineReplacement]) -> Rop
         builder.replace(line_content_interval(text, replacement.line), replacement.text.into());
     }
     builder.build()
+}
+
+fn selected_text(text: &Rope, regions: &[SelRegion]) -> String {
+    let mut out = String::new();
+    for region in regions {
+        if region.is_caret() {
+            continue;
+        }
+        out.push_str(&text.slice(region.min()..region.max()).to_string());
+    }
+    out
+}
+
+fn selected_linewise_text(text: &Rope, regions: &[SelRegion]) -> String {
+    let mut out = String::new();
+    for region in regions {
+        let (start_line, end_line) = selection_line_range(text, *region);
+        for line in start_line..=end_line {
+            out.push_str(&line_text(text, line));
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn block_text(
+    text: &Rope,
+    start_line: usize,
+    end_line: usize,
+    left_col: usize,
+    right_col: usize,
+) -> String {
+    let total_lines = text.measure::<LinesMetric>() + 1;
+    if total_lines == 0 {
+        return String::new();
+    }
+
+    let top = start_line.min(end_line);
+    let bottom = start_line.max(end_line).min(total_lines.saturating_sub(1));
+    let left = left_col.min(right_col);
+    let right = left_col.max(right_col);
+
+    let mut out = String::new();
+    for line in top..=bottom {
+        let line = line_text(text, line);
+        let start = left.min(line.len());
+        let end = right.min(line.len());
+        out.push_str(&line[start..end]);
+        out.push('\n');
+    }
+    out
+}
+
+#[derive(Debug)]
+struct JoinOperation {
+    start_offset: usize,
+    end_offset: usize,
+    joined: String,
+    space_offsets: Vec<usize>,
+}
+
+fn collect_join_operations(text: &Rope, regions: &[SelRegion]) -> Vec<JoinOperation> {
+    let mut operations = Vec::new();
+    let total_lines = text.measure::<LinesMetric>() + 1;
+    if total_lines == 0 {
+        return operations;
+    }
+
+    let source_regions =
+        if regions.is_empty() { vec![SelRegion::caret(0)] } else { regions.to_vec() };
+    for region in source_regions {
+        let (start_line, _) = logical_line_col(text, region.min());
+        let (mut end_line, end_col) = logical_line_col(text, region.max());
+        if end_col == 0 && end_line > start_line {
+            end_line = end_line.saturating_sub(1);
+        }
+        if start_line == end_line {
+            if end_line + 1 >= total_lines {
+                continue;
+            }
+            end_line += 1;
+        }
+
+        let start_offset = text.offset_of_line(start_line);
+        let end_offset =
+            if end_line + 1 < total_lines { text.offset_of_line(end_line + 1) } else { text.len() };
+
+        let mut joined = line_text(text, start_line);
+        let mut space_offsets = Vec::new();
+        for line in start_line + 1..=end_line {
+            let trimmed = line_text(text, line).trim_start_matches([' ', '\t']).to_owned();
+            if trimmed.is_empty() {
+                continue;
+            }
+            space_offsets.push(start_offset + joined.len());
+            joined.push(' ');
+            joined.push_str(&trimmed);
+        }
+
+        operations.push(JoinOperation { start_offset, end_offset, joined, space_offsets });
+    }
+
+    operations.sort_by_key(|operation| std::cmp::Reverse(operation.start_offset));
+    operations
+}
+
+fn extend_line_below_selection(text: &Rope, regions: &[SelRegion], count: usize) -> Selection {
+    let mut selection = Selection::new();
+    let total_lines = text.measure::<LinesMetric>() + 1;
+    if total_lines == 0 {
+        return selection;
+    }
+
+    let source_regions =
+        if regions.is_empty() { vec![SelRegion::caret(0)] } else { regions.to_vec() };
+    let last_line = total_lines.saturating_sub(1);
+
+    for region in source_regions {
+        let (start_line, end_line) = selection_line_range(text, region);
+        let start_offset = text.offset_of_line(start_line);
+        let target_offset = if selection_is_linewise(text, region, start_line, end_line) {
+            line_end_offset_inclusive(text, end_line.saturating_add(count).min(last_line))
+        } else {
+            let target_line = end_line.saturating_add(count);
+            if target_line >= total_lines {
+                line_end_offset_inclusive(text, last_line)
+            } else {
+                text.offset_of_line(target_line)
+            }
+        };
+        selection.add_region(SelRegion::new(start_offset, target_offset));
+    }
+
+    selection
+}
+
+fn extend_to_line_bounds_selection(text: &Rope, regions: &[SelRegion]) -> Selection {
+    let mut selection = Selection::new();
+    let source_regions =
+        if regions.is_empty() { vec![SelRegion::caret(0)] } else { regions.to_vec() };
+
+    for region in source_regions {
+        let (start_line, end_line) = selection_line_range(text, region);
+        selection.add_region(SelRegion::new(
+            text.offset_of_line(start_line),
+            line_end_offset_inclusive(text, end_line),
+        ));
+    }
+
+    selection
+}
+
+fn shrink_to_line_bounds_selection(text: &Rope, regions: &[SelRegion]) -> Selection {
+    let mut selection = Selection::new();
+    let total_lines = text.measure::<LinesMetric>() + 1;
+    if total_lines == 0 {
+        return selection;
+    }
+
+    for &region in regions {
+        let (start_line, end_line) = selection_line_range(text, region);
+        if start_line == end_line {
+            selection.add_region(region);
+            continue;
+        }
+
+        let from = region.min();
+        let to = region.max();
+        let mut start = text.offset_of_line(start_line);
+        let mut end = line_end_offset_inclusive(text, end_line);
+
+        if start != from {
+            start = text.offset_of_line((start_line + 1).min(total_lines));
+        }
+        if end != to {
+            end = text.offset_of_line(end_line);
+        }
+
+        selection.add_region(SelRegion::new(start, end));
+    }
+
+    selection
+}
+
+fn move_word_start_selection(
+    text: &Rope,
+    regions: &[SelRegion],
+    forward: bool,
+    long_word: bool,
+    modify_selection: bool,
+) -> Selection {
+    let mut selection = Selection::new();
+    let source_regions =
+        if regions.is_empty() { vec![SelRegion::caret(0)] } else { regions.to_vec() };
+
+    for region in source_regions {
+        let active = region.end;
+        let line = text.line_of_offset(active);
+        let line_start = text.offset_of_line(line);
+        let line_text = line_text(text, line);
+        let cursor_byte = active.saturating_sub(line_start).min(line_text.len());
+        let target = if forward {
+            next_word_start(&line_text, cursor_byte, long_word)
+        } else {
+            prev_word_start(&line_text, cursor_byte, long_word)
+        };
+        if let Some(col) = target {
+            selection.add_region(selection_region(region, line_start + col, modify_selection));
+        }
+    }
+
+    selection
+}
+
+fn move_word_end_selection(
+    text: &Rope,
+    regions: &[SelRegion],
+    long_word: bool,
+    modify_selection: bool,
+) -> Selection {
+    let mut selection = Selection::new();
+    let source_regions =
+        if regions.is_empty() { vec![SelRegion::caret(0)] } else { regions.to_vec() };
+
+    for region in source_regions {
+        let active = region.end;
+        let line = text.line_of_offset(active);
+        let line_start = text.offset_of_line(line);
+        let line_text = line_text(text, line);
+        let cursor_byte = active.saturating_sub(line_start).min(line_text.len());
+        if let Some(col) = next_word_end(&line_text, cursor_byte, long_word) {
+            selection.add_region(selection_region(region, line_start + col, modify_selection));
+        }
+    }
+
+    selection
+}
+
+fn find_char_selection(
+    text: &Rope,
+    regions: &[SelRegion],
+    target: char,
+    forward: bool,
+    inclusive: bool,
+    modify_selection: bool,
+) -> Selection {
+    let mut selection = Selection::new();
+    let source_regions =
+        if regions.is_empty() { vec![SelRegion::caret(0)] } else { regions.to_vec() };
+
+    for region in source_regions {
+        let active = region.end;
+        let line = text.line_of_offset(active);
+        let line_start = text.offset_of_line(line);
+        let line_text = line_text(text, line);
+        let cursor_byte = active.saturating_sub(line_start).min(line_text.len());
+        let col = if forward {
+            find_char_forward(&line_text, cursor_byte, target).and_then(|pos| {
+                if inclusive {
+                    Some(pos)
+                } else if pos > 0 {
+                    Some(prev_char_start(&line_text, pos))
+                } else {
+                    None
+                }
+            })
+        } else {
+            find_char_backward(&line_text, cursor_byte, target)
+                .map(|pos| if inclusive { pos } else { next_char_start(&line_text, pos) })
+        };
+
+        if let Some(col) = col {
+            selection.add_region(selection_region(region, line_start + col, modify_selection));
+        }
+    }
+
+    selection
+}
+
+fn move_to_matching_bracket_selection(
+    text: &Rope,
+    regions: &[SelRegion],
+    modify_selection: bool,
+) -> Selection {
+    let mut selection = Selection::new();
+    let source_regions =
+        if regions.is_empty() { vec![SelRegion::caret(0)] } else { regions.to_vec() };
+
+    for region in source_regions {
+        if let Some(offset) = matching_bracket_offset(text, region.end) {
+            selection.add_region(selection_region(region, offset, modify_selection));
+        }
+    }
+
+    selection
+}
+
+fn select_chars_selection(text: &Rope, regions: &[SelRegion], count: usize) -> Selection {
+    let mut selection = Selection::new();
+    let source_regions =
+        if regions.is_empty() { vec![SelRegion::caret(0)] } else { regions.to_vec() };
+
+    for region in source_regions {
+        let active = region.end;
+        let line = text.line_of_offset(active);
+        let line_start = text.offset_of_line(line);
+        let line_text = line_text(text, line);
+        let cursor_byte = active.saturating_sub(line_start).min(line_text.len());
+        if cursor_byte >= line_text.len() {
+            continue;
+        }
+
+        let mut end = cursor_byte;
+        for _ in 0..count {
+            let next = next_char_start(&line_text, end);
+            if next == end {
+                break;
+            }
+            end = next;
+        }
+        if end == cursor_byte {
+            continue;
+        }
+
+        selection.add_region(SelRegion::new(line_start + cursor_byte, line_start + end));
+    }
+
+    selection
+}
+
+fn selection_region(region: SelRegion, target_offset: usize, modify_selection: bool) -> SelRegion {
+    if modify_selection {
+        SelRegion::new(region.start, target_offset).with_horiz(None).with_affinity(region.affinity)
+    } else {
+        SelRegion::caret(target_offset)
+    }
+}
+
+fn matching_bracket_offset(text: &Rope, offset: usize) -> Option<usize> {
+    let line = text.line_of_offset(offset);
+    let line_start = text.offset_of_line(line);
+    let current_line = line_text(text, line);
+    let cursor_byte = offset.saturating_sub(line_start).min(current_line.len());
+    let ch = current_line.get(cursor_byte..)?.chars().next()?;
+
+    let (open, close, forward) = match ch {
+        '(' => ('(', ')', true),
+        ')' => ('(', ')', false),
+        '[' => ('[', ']', true),
+        ']' => ('[', ']', false),
+        '{' => ('{', '}', true),
+        '}' => ('{', '}', false),
+        _ => return None,
+    };
+
+    let total_lines = text.measure::<LinesMetric>() + 1;
+    if forward {
+        let mut depth = 0_i32;
+        for line_idx in line..total_lines {
+            let current = line_text(text, line_idx);
+            let base = text.offset_of_line(line_idx);
+            let start = if line_idx == line { cursor_byte } else { 0 };
+            for (off, current_ch) in current[start..].char_indices() {
+                if current_ch == open {
+                    depth += 1;
+                } else if current_ch == close {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(base + start + off);
+                    }
+                }
+            }
+        }
+    } else {
+        let mut depth = 0_i32;
+        for line_idx in (0..=line).rev() {
+            let current = line_text(text, line_idx);
+            let scan_end = if line_idx == line {
+                (cursor_byte + ch.len_utf8()).min(current.len())
+            } else {
+                current.len()
+            };
+            for (off, current_ch) in current[..scan_end].char_indices().rev() {
+                if current_ch == close {
+                    depth += 1;
+                } else if current_ch == open {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(text.offset_of_line(line_idx) + off);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+fn is_long_word_char(ch: char) -> bool {
+    !ch.is_whitespace()
+}
+
+fn is_motion_char(ch: char, long_word: bool) -> bool {
+    if long_word { is_long_word_char(ch) } else { is_word_char(ch) }
+}
+
+fn char_at(line: &str, byte: usize) -> Option<char> {
+    line.get(byte..)?.chars().next()
+}
+
+fn previous_char_boundary(line: &str, col: usize) -> usize {
+    let mut col = col.min(line.len());
+    while col > 0 && !line.is_char_boundary(col) {
+        col -= 1;
+    }
+    col
+}
+
+fn find_char_forward(line: &str, from_byte: usize, target: char) -> Option<usize> {
+    let skip = line[from_byte..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+    let start = from_byte + skip;
+    line[start..].char_indices().find(|(_, c)| *c == target).map(|(off, _)| start + off)
+}
+
+fn find_char_backward(line: &str, before_byte: usize, target: char) -> Option<usize> {
+    line[..before_byte].char_indices().rfind(|(_, c)| *c == target).map(|(off, _)| off)
+}
+
+fn prev_char_start(line: &str, byte: usize) -> usize {
+    let mut idx = byte.saturating_sub(1);
+    while idx > 0 && !line.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    idx
+}
+
+fn next_char_start(line: &str, byte: usize) -> usize {
+    line[byte..].chars().next().map(|c| byte + c.len_utf8()).unwrap_or(byte)
+}
+
+fn next_word_start(line: &str, byte: usize, long_word: bool) -> Option<usize> {
+    let mut idx = previous_char_boundary(line, byte.min(line.len()));
+    let mut chars = line.get(idx..)?.chars();
+    let current = chars.next()?;
+
+    if is_motion_char(current, long_word) {
+        idx = next_char_start(line, idx);
+        while let Some(ch) = char_at(line, idx) {
+            if !is_motion_char(ch, long_word) {
+                break;
+            }
+            idx = next_char_start(line, idx);
+        }
+    }
+
+    while let Some(ch) = char_at(line, idx) {
+        if is_motion_char(ch, long_word) {
+            return Some(idx);
+        }
+        idx = next_char_start(line, idx);
+    }
+
+    None
+}
+
+fn prev_word_start(line: &str, byte: usize, long_word: bool) -> Option<usize> {
+    if line.is_empty() || byte == 0 {
+        return None;
+    }
+
+    let mut idx = prev_char_start(line, byte.min(line.len()));
+    while let Some(ch) = char_at(line, idx) {
+        if is_motion_char(ch, long_word) {
+            break;
+        }
+        if idx == 0 {
+            return None;
+        }
+        idx = prev_char_start(line, idx);
+    }
+
+    while idx > 0 {
+        let prev = prev_char_start(line, idx);
+        let Some(ch) = char_at(line, prev) else {
+            break;
+        };
+        if !is_motion_char(ch, long_word) {
+            break;
+        }
+        idx = prev;
+    }
+
+    Some(idx)
+}
+
+fn next_word_end(line: &str, byte: usize, long_word: bool) -> Option<usize> {
+    let mut idx = previous_char_boundary(line, byte.min(line.len()));
+
+    while let Some(ch) = char_at(line, idx) {
+        if is_motion_char(ch, long_word) {
+            break;
+        }
+        idx = next_char_start(line, idx);
+    }
+
+    let mut end = idx;
+    let mut found = false;
+    while let Some(ch) = char_at(line, idx) {
+        if !is_motion_char(ch, long_word) {
+            break;
+        }
+        found = true;
+        end = idx;
+        idx = next_char_start(line, idx);
+    }
+
+    found.then_some(end)
+}
+
+fn selection_line_range(text: &Rope, region: SelRegion) -> (usize, usize) {
+    let (start_line, _) = logical_line_col(text, region.min());
+    let (mut end_line, end_col) = logical_line_col(text, region.max());
+    if end_col == 0 && end_line > start_line {
+        end_line = end_line.saturating_sub(1);
+    }
+    (start_line, end_line)
+}
+
+fn selection_is_linewise(
+    text: &Rope,
+    region: SelRegion,
+    start_line: usize,
+    end_line: usize,
+) -> bool {
+    region.min() == text.offset_of_line(start_line)
+        && region.max() == line_end_offset_inclusive(text, end_line)
+}
+
+fn replace_interval_with_text(text: &Rope, interval: Interval, replacement: &str) -> RopeDelta {
+    let mut builder = DeltaBuilder::new(text.len());
+    builder.replace(interval, Rope::from(replacement));
+    builder.build()
+}
+
+fn line_end_offset_inclusive(text: &Rope, line: usize) -> usize {
+    let total_lines = text.measure::<LinesMetric>() + 1;
+    let line = line.min(total_lines.saturating_sub(1));
+    if line + 1 < total_lines { text.offset_of_line(line + 1) } else { text.len() }
+}
+
+fn display_col_to_byte(line: &str, display_col: usize) -> usize {
+    let mut col = 0usize;
+    for (byte_idx, ch) in line.char_indices() {
+        if col >= display_col {
+            return byte_idx;
+        }
+        col += UnicodeWidthChar::width(ch).unwrap_or(0);
+    }
+    line.len()
+}
+
+fn logical_line_col(text: &Rope, offset: usize) -> (usize, usize) {
+    let line = text.line_of_offset(offset);
+    (line, offset.saturating_sub(text.offset_of_line(line)))
+}
+
+fn selection_matches_regex(text: &Rope, region: SelRegion, regex: &Regex) -> bool {
+    if region.is_caret() {
+        return regex.is_match("");
+    }
+
+    regex.is_match(text.slice_to_cow(region.min()..region.max()).as_ref())
+}
+
+fn line_content_end(text: &Rope, line: usize) -> usize {
+    line_content_interval(text, line).end()
 }
 
 fn line_text(text: &Rope, line: usize) -> String {
@@ -1434,6 +2310,307 @@ mod tests {
         this is a string\n\
         that h|as three\n\
         lines|." );
+    }
+
+    #[test]
+    fn goto_column_uses_display_width_and_can_extend_selection() {
+        let harness = ContextHarness::new("日本x");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::GotoColumn { display_col: 2, modify_selection: false });
+        assert_eq!(harness.debug_render(), "日|本x");
+
+        ctx.do_edit(EditNotification::GotoColumn { display_col: 0, modify_selection: false });
+        ctx.do_edit(EditNotification::GotoColumn { display_col: 2, modify_selection: true });
+        assert_eq!(harness.debug_render(), "[日|]本x");
+    }
+
+    #[test]
+    fn goto_column_uses_logical_column_even_when_view_is_wrapped() {
+        let harness = ContextHarness::new("abcdef");
+        {
+            let text = harness.editor.borrow().get_buffer().clone();
+            harness.view.borrow_mut().debug_force_rewrap_cols(&text, 2);
+        }
+
+        let mut ctx = harness.make_context();
+        ctx.do_edit(EditNotification::GotoColumn { display_col: 4, modify_selection: false });
+
+        assert_eq!(harness.debug_render(), "abcd|ef");
+    }
+
+    #[test]
+    fn add_newline_commands_insert_blank_lines_around_current_line() {
+        let harness = ContextHarness::new("alpha\nbeta");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::AddNewlineBelow);
+        assert_eq!(harness.debug_render(), "alpha\n|\nbeta");
+
+        let harness = ContextHarness::new("alpha\nbeta");
+        let mut ctx = harness.make_context();
+        ctx.do_edit(EditNotification::MoveDown);
+        ctx.do_edit(EditNotification::AddNewlineAbove);
+        assert_eq!(harness.debug_render(), "alpha\n|\nbeta");
+    }
+
+    #[test]
+    fn join_selections_joins_current_and_next_line() {
+        let harness = ContextHarness::new("abc\n    def\nxyz");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::JoinSelections { select_space: false });
+
+        assert_eq!(harness.debug_render(), "abc def|xyz");
+    }
+
+    #[test]
+    fn join_selections_space_selects_inserted_space() {
+        let harness = ContextHarness::new("abc\n    def\nxyz");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::JoinSelections { select_space: true });
+
+        assert_eq!(harness.debug_render(), "abc[ |]defxyz");
+    }
+
+    #[test]
+    fn join_selections_handles_multiple_regions() {
+        let harness = ContextHarness::new("aa\n  bb\ncc\n  dd\nend");
+        {
+            let text = harness.editor.borrow().get_buffer().clone();
+            let mut selection = Selection::new();
+            selection.add_region(SelRegion::new(text.offset_of_line(0), text.offset_of_line(2)));
+            selection.add_region(SelRegion::new(text.offset_of_line(2), text.offset_of_line(4)));
+            harness.view.borrow_mut().set_selection(&text, selection);
+        }
+
+        let mut ctx = harness.make_context();
+        ctx.do_edit(EditNotification::JoinSelections { select_space: true });
+
+        assert_eq!(harness.debug_render(), "aa[ |]bbcc[ |]ddend");
+    }
+
+    #[test]
+    fn preview_filter_selections_keeps_matching_regions() {
+        let harness = ContextHarness::new("alpha beta alps");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::SetSelections {
+            selections: vec![
+                SelectionRange { start: 0, end: 5 },
+                SelectionRange { start: 6, end: 10 },
+                SelectionRange { start: 11, end: 15 },
+            ],
+        });
+
+        let filtered =
+            ctx.preview_filter_selections("^a", false).expect("filter preview should succeed");
+
+        assert_eq!(
+            filtered,
+            vec![SelectionRange { start: 0, end: 5 }, SelectionRange { start: 11, end: 15 }]
+        );
+    }
+
+    #[test]
+    fn preview_filter_selections_removes_matching_regions() {
+        let harness = ContextHarness::new("alpha beta alps");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::SetSelections {
+            selections: vec![
+                SelectionRange { start: 0, end: 5 },
+                SelectionRange { start: 6, end: 10 },
+                SelectionRange { start: 11, end: 15 },
+            ],
+        });
+
+        let filtered =
+            ctx.preview_filter_selections("^a", true).expect("filter preview should succeed");
+
+        assert_eq!(filtered, vec![SelectionRange { start: 6, end: 10 }]);
+    }
+
+    #[test]
+    fn set_selections_replaces_current_selection_regions() {
+        let harness = ContextHarness::new("alpha beta alps");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::SetSelections {
+            selections: vec![SelectionRange { start: 6, end: 10 }],
+        });
+
+        assert_eq!(harness.debug_render(), "alpha [beta|] alps");
+    }
+
+    #[test]
+    fn extend_line_below_expands_to_next_line_start() {
+        let harness = ContextHarness::new("alpha\nbeta\ngamma");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::Gesture {
+            line: 0,
+            col: 2,
+            ty: crate::rpc::GestureType::PointSelect,
+        });
+        ctx.do_edit(EditNotification::ExtendLineBelow { count: 1 });
+
+        assert_eq!(harness.debug_render(), "[alpha\n|]beta\ngamma");
+    }
+
+    #[test]
+    fn extend_to_line_bounds_selects_entire_lines() {
+        let harness = ContextHarness::new("alpha\nbeta\ngamma");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::Gesture {
+            line: 0,
+            col: 1,
+            ty: crate::rpc::GestureType::PointSelect,
+        });
+        ctx.do_edit(EditNotification::Gesture {
+            line: 1,
+            col: 2,
+            ty: crate::rpc::GestureType::SelectExtend {
+                granularity: crate::rpc::SelectionGranularity::Point,
+            },
+        });
+        ctx.do_edit(EditNotification::ExtendToLineBounds);
+
+        assert_eq!(harness.debug_render(), "[alpha\nbeta\n|]gamma");
+    }
+
+    #[test]
+    fn move_word_start_uses_backend_vim_semantics() {
+        let harness = ContextHarness::new("alpha beta");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::MoveWordStart {
+            forward: true,
+            long_word: false,
+            modify_selection: false,
+        });
+        assert_eq!(harness.debug_render(), "alpha |beta");
+
+        ctx.do_edit(EditNotification::MoveWordStart {
+            forward: false,
+            long_word: false,
+            modify_selection: false,
+        });
+        assert_eq!(harness.debug_render(), "|alpha beta");
+    }
+
+    #[test]
+    fn move_word_end_extends_selection_when_requested() {
+        let harness = ContextHarness::new("alpha beta");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::MoveWordEnd { long_word: false, modify_selection: true });
+
+        assert_eq!(harness.debug_render(), "[alph|]a beta");
+    }
+
+    #[test]
+    fn find_char_moves_with_inclusive_and_exclusive_variants() {
+        let harness = ContextHarness::new("abcabc");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::FindChar {
+            target: 'b',
+            forward: true,
+            inclusive: true,
+            modify_selection: false,
+        });
+        assert_eq!(harness.debug_render(), "a|bcabc");
+
+        ctx.do_edit(EditNotification::Gesture {
+            line: 0,
+            col: 6,
+            ty: crate::rpc::GestureType::PointSelect,
+        });
+        ctx.do_edit(EditNotification::FindChar {
+            target: 'b',
+            forward: false,
+            inclusive: false,
+            modify_selection: true,
+        });
+        assert_eq!(harness.debug_render(), "abcab[|c]");
+    }
+
+    #[test]
+    fn move_to_matching_bracket_handles_nested_multiline_pairs() {
+        let harness = ContextHarness::new("fn main() {\n    (alpha + [beta])\n}\n");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::Gesture {
+            line: 0,
+            col: 10,
+            ty: crate::rpc::GestureType::PointSelect,
+        });
+        ctx.do_edit(EditNotification::MoveToMatchingBracket { modify_selection: false });
+        assert_eq!(harness.debug_render(), "fn main() {\n    (alpha + [beta])\n|}\n");
+
+        ctx.do_edit(EditNotification::Gesture {
+            line: 1,
+            col: 4,
+            ty: crate::rpc::GestureType::PointSelect,
+        });
+        ctx.do_edit(EditNotification::MoveToMatchingBracket { modify_selection: true });
+        assert_eq!(harness.debug_render(), "fn main() {\n    [(alpha + [beta]|])\n}\n");
+    }
+
+    #[test]
+    fn preview_select_chars_respects_multibyte_boundaries() {
+        let harness = ContextHarness::new("aéb");
+        let mut ctx = harness.make_context();
+
+        let selection = ctx.preview_select_chars(2);
+
+        assert_eq!(selection, vec![SelectionRange { start: 0, end: 3 }]);
+    }
+
+    #[test]
+    fn preview_selected_text_uses_backend_selection_truth() {
+        let harness = ContextHarness::new("alpha\nbeta");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::SetSelections {
+            selections: vec![SelectionRange { start: 1, end: 8 }],
+        });
+
+        assert_eq!(ctx.preview_selected_text(false), "lpha\nbe");
+        assert_eq!(ctx.preview_selected_text(true), "alpha\nbeta\n");
+    }
+
+    #[test]
+    fn preview_block_text_respects_requested_rectangle() {
+        let harness = ContextHarness::new("abcd\nefgh\nijk");
+        let mut ctx = harness.make_context();
+
+        assert_eq!(ctx.preview_block_text(0, 2, 1, 3), "bc\nfg\njk\n");
+    }
+
+    #[test]
+    fn shrink_to_line_bounds_drops_partial_outer_lines() {
+        let harness = ContextHarness::new("alpha\nbeta\ngamma");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::Gesture {
+            line: 0,
+            col: 1,
+            ty: crate::rpc::GestureType::PointSelect,
+        });
+        ctx.do_edit(EditNotification::Gesture {
+            line: 2,
+            col: 2,
+            ty: crate::rpc::GestureType::SelectExtend {
+                granularity: crate::rpc::SelectionGranularity::Point,
+            },
+        });
+        ctx.do_edit(EditNotification::ShrinkToLineBounds);
+
+        assert_eq!(harness.debug_render(), "alpha\n[beta\n|]gamma");
     }
 
     #[test]

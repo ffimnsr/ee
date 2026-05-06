@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -19,10 +20,7 @@ use crate::keymap::{Action, BindingKey};
 use crate::picker::PickerState;
 use crate::quickfix::{QfEntry, QfList};
 use crate::registers::{BlockInsert, LastChange, RegisterName, RegisterStore};
-use crate::text::{
-    byte_col_to_display_col, find_char_backward, find_char_forward, next_char_start, next_word_end,
-    next_word_start, prev_char_start, prev_word_start,
-};
+use crate::text::byte_col_to_display_col;
 use crate::window::{SplitDir, TabManager};
 
 mod commands;
@@ -364,6 +362,11 @@ impl App {
                     self.backend.status_message = Some(format!("workspace symbols failed: {err}"));
                 }
             }
+            Action::RequestCodeActions => {
+                if let Err(err) = self.backend.request_code_actions(None) {
+                    self.backend.status_message = Some(format!("code action failed: {err}"));
+                }
+            }
             Action::RegisterPrefix => {
                 self.input_state.awaiting_register = true;
             }
@@ -430,6 +433,10 @@ impl App {
                 self.move_word_end(long_word);
             }
             Action::GotoLine => self.goto_line_from_count(),
+            Action::GotoColumn => self.goto_column_from_count(),
+            Action::GotoFileStart => self.goto_file_start_from_count(),
+            Action::GotoLastLine => self.goto_last_line(),
+            Action::GotoFile => self.goto_file_under_cursor(),
             Action::SaveSelection => self.push_jump(),
             Action::RepeatLastMotion => self.repeat_last_motion(),
             Action::PageCursorHalfUp => self.page_cursor_half(false),
@@ -445,6 +452,37 @@ impl App {
             Action::IndentSelection => self.apply_selection_edit("indent", true),
             Action::UnindentSelection => self.apply_selection_edit("outdent", true),
             Action::FormatSelections => self.format_selections(),
+            Action::ExtendLineBelow => self.extend_line_below(),
+            Action::ExtendToLineBounds => self.extend_to_line_bounds(),
+            Action::ShrinkToLineBounds => self.shrink_to_line_bounds(),
+            Action::JoinSelections => self.join_selections(false),
+            Action::JoinSelectionsSpace => self.join_selections(true),
+            Action::KeepSelections => self.filter_selections_from_search(false),
+            Action::RemoveSelections => self.filter_selections_from_search(true),
+            Action::ExpandSelection => {
+                let _ = self.backend.send_edit("expand_selection", json!([]));
+            }
+            Action::ShrinkSelection => {
+                let _ = self.backend.send_edit("shrink_selection", json!([]));
+            }
+            Action::SelectPrevSibling => {
+                let _ = self.backend.send_edit("select_prev_sibling", json!([]));
+            }
+            Action::SelectNextSibling => {
+                let _ = self.backend.send_edit("select_next_sibling", json!([]));
+            }
+            Action::SelectAllSiblings => {
+                let _ = self.backend.send_edit("select_all_siblings", json!([]));
+            }
+            Action::SelectAllChildren => {
+                let _ = self.backend.send_edit("select_all_children", json!([]));
+            }
+            Action::MoveParentNodeStart => {
+                let _ = self.backend.send_edit("move_parent_node_start", json!([]));
+            }
+            Action::MoveParentNodeEnd => {
+                let _ = self.backend.send_edit("move_parent_node_end", json!([]));
+            }
             Action::DeleteSelection { yank, enter_insert } => {
                 self.delete_selection(yank, enter_insert)
             }
@@ -501,6 +539,18 @@ impl App {
             }
             Action::DeleteToLineStart => {
                 let _ = self.backend.send_edit("delete_to_beginning_of_line", json!([]));
+            }
+            Action::AddNewlineBelow => {
+                self.add_newline_below();
+            }
+            Action::AddNewlineAbove => {
+                self.add_newline_above();
+            }
+            Action::DeleteCurrentLine => {
+                let count = usize::try_from(self.input_state.count()).unwrap_or(usize::MAX);
+                let start = self.backend.cursor_line;
+                let end = start.saturating_add(count.saturating_sub(1));
+                self.delete_line_range(start, end);
             }
             Action::IndentLine => {
                 let _ = self.backend.send_edit("indent", json!([]));
@@ -803,7 +853,7 @@ impl App {
         match op {
             Operator::Delete => {
                 let reg = self.take_register();
-                let text = self.extract_selected_text();
+                let text = self.selected_text_preview(false);
                 self.registers.delete(&reg, text, false);
                 self.record_edit("delete_forward", json!([]));
                 self.push_change();
@@ -812,7 +862,7 @@ impl App {
             }
             Operator::Change => {
                 let reg = self.take_register();
-                let text = self.extract_selected_text();
+                let text = self.selected_text_preview(false);
                 self.registers.delete(&reg, text, false);
                 self.record_edit("delete_forward", json!([]));
                 self.push_change();
@@ -822,7 +872,7 @@ impl App {
             }
             Operator::Yank => {
                 let reg = self.take_register();
-                let text = self.extract_selected_text();
+                let text = self.selected_text_preview(false);
                 self.registers.yank(&reg, text, false);
                 // Collapse selection without modifying buffer.
                 let _ = self.backend.send_edit("collapse_selections", json!([]));
@@ -1062,44 +1112,7 @@ impl App {
     /// Like [`jump_to_char`] but uses `select_extend` so the region from the
     /// current cursor position to the found char is selected (for operators).
     fn jump_to_char_selecting(&mut self, target: char, forward: bool, inclusive: bool) {
-        let line_idx = self.backend.cursor_line;
-        let cursor_byte = self.backend.cursor_col;
-        let line = match self.backend.lines.get(line_idx) {
-            Some(l) => l.clone(),
-            None => return,
-        };
-
-        // Compute the byte position to extend the selection to.
-        let col_opt = if forward {
-            find_char_forward(&line, cursor_byte, target).map(|pos| {
-                if inclusive {
-                    // Include the found char in the selection.
-                    pos + target.len_utf8()
-                } else {
-                    pos
-                }
-            })
-        } else {
-            find_char_backward(&line, cursor_byte, target).map(|pos| {
-                if inclusive {
-                    pos
-                } else {
-                    // Exclude the found char.
-                    pos + target.len_utf8()
-                }
-            })
-        };
-
-        if let Some(col) = col_opt {
-            let _ = self.backend.send_edit(
-                "gesture",
-                json!({
-                    "line": line_idx as u64,
-                    "col": col as u64,
-                    "ty": { "select_extend": { "granularity": "point" } }
-                }),
-            );
-        }
+        let _ = self.backend.find_char(target, forward, inclusive, true);
     }
 
     /// Select `(start, end)` byte range on `line_idx` and apply the operator.
@@ -1224,9 +1237,9 @@ impl App {
         self.search_pattern = self.current_search_pattern();
     }
 
-    fn current_search_pattern(&self) -> Option<String> {
+    fn current_search_pattern(&mut self) -> Option<String> {
         if matches!(self.mode, Mode::Visual | Mode::VisualLine | Mode::VisualBlock) {
-            let selected = self.extract_selected_text();
+            let selected = self.selected_text_preview(false);
             if !selected.is_empty() {
                 return Some(selected);
             }
@@ -1256,155 +1269,163 @@ impl App {
         Some(line[start..end].to_owned())
     }
 
-    fn jump_to_char(&mut self, target: char, forward: bool, inclusive: bool) {
-        let line_idx = self.backend.cursor_line;
-        let cursor_byte = self.backend.cursor_col;
-        let line = match self.backend.lines.get(line_idx) {
-            Some(line) => line.clone(),
-            None => return,
-        };
+    fn current_file_target(&mut self) -> Option<String> {
+        if matches!(self.mode, Mode::Visual | Mode::VisualLine | Mode::VisualBlock) {
+            let selected = self.selected_text_preview(false);
+            let trimmed = selected.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
+            }
+        }
 
-        let col_opt = if forward {
-            find_char_forward(&line, cursor_byte, target).and_then(|pos| {
-                if inclusive {
-                    Some(pos)
-                } else if pos > 0 {
-                    Some(prev_char_start(&line, pos))
-                } else {
-                    None
-                }
+        let line = self.backend.lines.get(self.backend.cursor_line)?;
+        if line.is_empty() {
+            return None;
+        }
+
+        let mut cursor = self.backend.cursor_col.min(line.len().saturating_sub(1));
+        if line[cursor..].chars().next().is_none_or(char::is_whitespace) {
+            cursor = line[..cursor]
+                .char_indices()
+                .rev()
+                .find(|(_, ch)| !ch.is_whitespace())
+                .map(|(idx, _)| idx)?;
+        }
+
+        let start = line[..cursor]
+            .char_indices()
+            .rev()
+            .find(|(_, ch)| ch.is_whitespace())
+            .map(|(idx, ch)| idx + ch.len_utf8())
+            .unwrap_or(0);
+        let end = line[cursor..]
+            .char_indices()
+            .find(|(_, ch)| ch.is_whitespace())
+            .map(|(idx, _)| cursor + idx)
+            .unwrap_or(line.len());
+
+        let token = line[start..end]
+            .trim_matches(|ch: char| {
+                matches!(ch, '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';')
             })
-        } else {
-            find_char_backward(&line, cursor_byte, target)
-                .map(|pos| if inclusive { pos } else { next_char_start(&line, pos) })
-        };
+            .trim_end_matches(['.', ':']);
+        if token.is_empty() { None } else { Some(token.to_owned()) }
+    }
 
-        if let Some(col) = col_opt {
+    fn resolve_file_target_path(&self, target: &str) -> Option<PathBuf> {
+        let target = target.strip_prefix("file://").unwrap_or(target);
+        if target.is_empty() {
+            return None;
+        }
+
+        let path = PathBuf::from(target);
+        if path.is_absolute() {
+            return Some(path);
+        }
+
+        self.backend
+            .active()
+            .path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(|parent| parent.join(&path))
+            .or_else(|| std::env::current_dir().ok().map(|cwd| cwd.join(path)))
+    }
+
+    fn jump_to_char(&mut self, target: char, forward: bool, inclusive: bool) {
+        if self.backend.find_char(target, forward, inclusive, self.mode.is_visual()).is_ok() {
             self.last_repeatable_motion =
                 Some(RepeatableMotion::CharFind { target, forward, inclusive });
-            let _ = self.backend.send_edit(
-                "gesture",
-                json!({ "line": line_idx as u64, "col": col as u64, "ty": "point_select" }),
-            );
         }
     }
 
     fn jump_matching_bracket(&mut self) {
-        let line_idx = self.backend.cursor_line;
-        let cursor_byte = self.backend.cursor_col;
-        let ch = match self.backend.lines.get(line_idx) {
-            Some(line) => line[cursor_byte..].chars().next(),
-            None => return,
-        };
-        let Some(ch) = ch else {
-            return;
-        };
-
-        let (open, close, forward) = match ch {
-            '(' => ('(', ')', true),
-            ')' => ('(', ')', false),
-            '[' => ('[', ']', true),
-            ']' => ('[', ']', false),
-            '{' => ('{', '}', true),
-            '}' => ('{', '}', false),
-            _ => return,
-        };
-
-        let lines = self.backend.lines.clone();
-        if forward {
-            let mut depth = 0_i32;
-            'fwd: for (li, text) in lines.iter().enumerate().skip(line_idx) {
-                let (scan, base) = if li == line_idx {
-                    (&text[cursor_byte..], cursor_byte)
-                } else {
-                    (text.as_str(), 0)
-                };
-                for (off, c) in scan.char_indices() {
-                    if c == open {
-                        depth += 1;
-                    } else if c == close {
-                        depth -= 1;
-                        if depth == 0 {
-                            let col = base + off;
-                            let _ = self.backend.send_edit(
-                                "gesture",
-                                json!({ "line": li as u64, "col": col as u64, "ty": "point_select" }),
-                            );
-                            break 'fwd;
-                        }
-                    }
-                }
-            }
-        } else {
-            let mut depth = 0_i32;
-            'bwd: for li in (0..=line_idx).rev() {
-                let text = &lines[li];
-                let scan_end =
-                    if li == line_idx { cursor_byte + ch.len_utf8() } else { text.len() };
-                for (off, c) in
-                    text[..scan_end].char_indices().collect::<Vec<_>>().into_iter().rev()
-                {
-                    if c == close {
-                        depth += 1;
-                    } else if c == open {
-                        depth -= 1;
-                        if depth == 0 {
-                            let _ = self.backend.send_edit(
-                                "gesture",
-                                json!({ "line": li as u64, "col": off as u64, "ty": "point_select" }),
-                            );
-                            break 'bwd;
-                        }
-                    }
-                }
-            }
-        }
+        let _ = self.backend.move_to_matching_bracket(self.mode.is_visual());
     }
 
     fn move_word_start(&mut self, forward: bool, long_word: bool) {
-        let line_idx = self.backend.cursor_line;
-        let cursor_byte = self.backend.cursor_col;
-        let Some(line) = self.backend.lines.get(line_idx) else {
-            return;
-        };
-
-        let target = if forward {
-            next_word_start(line, cursor_byte, long_word)
-        } else {
-            prev_word_start(line, cursor_byte, long_word)
-        };
-
-        if let Some(col) = target {
-            self.move_cursor_with_selection(line_idx, col);
-        }
+        let _ = self.backend.move_word_start(forward, long_word, self.mode.is_visual());
     }
 
     fn move_word_end(&mut self, long_word: bool) {
-        let line_idx = self.backend.cursor_line;
-        let cursor_byte = self.backend.cursor_col;
-        let Some(line) = self.backend.lines.get(line_idx) else {
-            return;
-        };
-
-        if let Some(col) = next_word_end(line, cursor_byte, long_word) {
-            self.move_cursor_with_selection(line_idx, col);
-        }
-    }
-
-    fn move_cursor_with_selection(&mut self, line_idx: usize, col: usize) {
-        let ty = if self.mode.is_visual() {
-            json!({ "select_extend": { "granularity": "point" } })
-        } else {
-            json!("point_select")
-        };
-        let _ = self
-            .backend
-            .send_edit("gesture", json!({ "line": line_idx as u64, "col": col as u64, "ty": ty }));
+        let _ = self.backend.move_word_end(long_word, self.mode.is_visual());
     }
 
     fn goto_line_from_count(&mut self) {
         let target = self.input_state.count().saturating_sub(1) as usize;
         self.jump_to_line(target);
+    }
+
+    fn goto_column(&mut self, display_col: usize) {
+        let _ = self.backend.goto_column(display_col, self.mode.is_visual());
+    }
+
+    fn goto_column_from_count(&mut self) {
+        let target = self.input_state.count().saturating_sub(1) as usize;
+        self.goto_column(target);
+    }
+
+    fn goto_file_start_from_count(&mut self) {
+        if self.input_state.count_digits.is_empty() {
+            self.jump_to_line(0);
+        } else {
+            self.goto_line_from_count();
+        }
+    }
+
+    fn goto_last_line(&mut self) {
+        let last_line = self.backend.lines.len().saturating_sub(1);
+        self.jump_to_line(last_line);
+    }
+
+    fn goto_file_under_cursor(&mut self) {
+        let Some(target) = self.current_file_target() else {
+            self.backend.status_message = Some("goto_file: no file under cursor".to_owned());
+            return;
+        };
+
+        if target.starts_with("http://") || target.starts_with("https://") {
+            self.backend.status_message =
+                Some("goto_file: URL targets are not supported yet".to_owned());
+            return;
+        }
+
+        let Some(path) = self.resolve_file_target_path(&target) else {
+            self.backend.status_message = Some(format!("goto_file: invalid target `{target}`"));
+            return;
+        };
+
+        let existing_id = self
+            .backend
+            .all_bufs()
+            .iter()
+            .find(|buf| buf.path.as_ref().is_some_and(|candidate| *candidate == path))
+            .map(|buf| buf.id);
+
+        let buf_id = if let Some(id) = existing_id {
+            if let Err(err) = self.backend.switch_to_id(id) {
+                self.backend.status_message = Some(format!("goto_file failed: {err}"));
+                return;
+            }
+            id
+        } else {
+            match self.backend.open_buffer(Some(path.clone())) {
+                Ok(id) => {
+                    if let Err(err) = self.backend.switch_to_id(id) {
+                        self.backend.status_message = Some(format!("goto_file failed: {err}"));
+                        return;
+                    }
+                    id
+                }
+                Err(err) => {
+                    self.backend.status_message = Some(format!("goto_file failed: {err}"));
+                    return;
+                }
+            }
+        };
+
+        self.tabs.focused_windows_mut().set_focused_buffer(buf_id);
+        self.viewport = Viewport::default();
     }
 
     fn page_cursor_half(&mut self, down: bool) {
@@ -1478,7 +1499,7 @@ impl App {
             return;
         }
         let reg = self.take_register();
-        let text = self.extract_selected_text();
+        let text = self.selected_text_preview(false);
         self.registers.yank(&reg, text, false);
         let _ = self.backend.send_edit("collapse_selections", json!([]));
         if had_visual {
@@ -1512,6 +1533,67 @@ impl App {
         }
     }
 
+    fn extend_line_below(&mut self) {
+        let _ = self.backend.extend_line_below(self.input_state.count() as usize);
+    }
+
+    fn extend_to_line_bounds(&mut self) {
+        let _ = self.backend.extend_to_line_bounds();
+    }
+
+    fn shrink_to_line_bounds(&mut self) {
+        let _ = self.backend.shrink_to_line_bounds();
+    }
+
+    fn filter_selections_from_search(&mut self, remove: bool) {
+        let Some(pattern) = self.search_pattern.clone() else {
+            self.backend.status_message = Some(format!(
+                "{}: search pattern required",
+                if remove { "remove_selections" } else { "keep_selections" }
+            ));
+            return;
+        };
+        self.filter_selections(&pattern, remove);
+    }
+
+    fn filter_selections(&mut self, pattern: &str, remove: bool) {
+        if regex::Regex::new(pattern).is_err() {
+            self.backend.status_message = Some(format!(
+                "{}: invalid regex",
+                if remove { "remove_selections" } else { "keep_selections" }
+            ));
+            return;
+        }
+
+        let filtered = match self.backend.filter_selections_preview(pattern, remove) {
+            Ok(filtered) => filtered,
+            Err(err) => {
+                self.backend.status_message = Some(format!(
+                    "{}: {err}",
+                    if remove { "remove_selections" } else { "keep_selections" }
+                ));
+                return;
+            }
+        };
+
+        if filtered.is_empty() {
+            self.backend.status_message = Some("no selections remaining".to_owned());
+            return;
+        }
+
+        if self.backend.set_selections(&filtered).is_ok()
+            && filtered.iter().any(|range| range.start != range.end)
+        {
+            self.mode = Mode::Visual;
+        }
+    }
+
+    fn join_selections(&mut self, select_space: bool) {
+        if self.backend.join_selections(select_space).is_ok() {
+            self.push_change();
+        }
+    }
+
     fn delete_selection(&mut self, yank: bool, enter_insert: bool) {
         let count = self.input_state.count() as usize;
         let had_visual = self.mode.is_visual();
@@ -1520,7 +1602,7 @@ impl App {
         }
         if yank {
             let reg = self.take_register();
-            let text = self.extract_selected_text();
+            let text = self.selected_text_preview(false);
             self.registers.delete(&reg, text, false);
         }
         self.record_edit("delete_forward", json!([]));
@@ -1535,7 +1617,11 @@ impl App {
 
     fn replace_with_char(&mut self, ch: char) {
         let repeat = if self.mode.is_visual() {
-            self.extract_selected_text().chars().filter(|current| *current != '\n').count().max(1)
+            self.selected_text_preview(false)
+                .chars()
+                .filter(|current| *current != '\n')
+                .count()
+                .max(1)
         } else {
             self.input_state.count() as usize
         };
@@ -1571,44 +1657,14 @@ impl App {
     }
 
     fn select_chars_from_cursor(&mut self, count: usize) -> bool {
-        let line_idx = self.backend.cursor_line;
-        let cursor_byte = self.backend.cursor_col;
-        let Some(line) = self.backend.lines.get(line_idx) else {
-            return false;
+        let selections = match self.backend.select_chars_preview(count.max(1)) {
+            Ok(selections) => selections,
+            Err(_) => return false,
         };
-        if cursor_byte >= line.len() {
+        if selections.is_empty() {
             return false;
         }
-
-        let mut end = cursor_byte;
-        for _ in 0..count.max(1) {
-            let next = next_char_start(line, end);
-            if next == end {
-                break;
-            }
-            end = next;
-        }
-        if end == cursor_byte {
-            return false;
-        }
-
-        let _ = self.backend.send_edit(
-            "gesture",
-            json!({
-                "line": line_idx as u64,
-                "col": cursor_byte as u64,
-                "ty": { "select": { "granularity": "point", "multi": false } }
-            }),
-        );
-        let _ = self.backend.send_edit(
-            "gesture",
-            json!({
-                "line": line_idx as u64,
-                "col": end as u64,
-                "ty": { "select_extend": { "granularity": "point" } }
-            }),
-        );
-        true
+        self.backend.set_selections(&selections).is_ok()
     }
 
     // ── Range-based line operations ─────────────────────────────────────────
@@ -1617,6 +1673,18 @@ impl App {
     fn delete_line_range(&mut self, start: usize, end: usize) {
         let _ = self.backend.delete_line_range(start, end);
         self.push_change();
+    }
+
+    fn add_newline_below(&mut self) {
+        if self.backend.add_newline_below().is_ok() {
+            self.push_change();
+        }
+    }
+
+    fn add_newline_above(&mut self) {
+        if self.backend.add_newline_above().is_ok() {
+            self.push_change();
+        }
     }
 
     /// Yank lines `start..=end` (0-based, inclusive) into the active register.
@@ -2531,42 +2599,21 @@ impl App {
         self.input_state.pending_register.take().unwrap_or(RegisterName::Unnamed)
     }
 
-    /// Extract the text that xi currently has selected, using the local line
-    /// cache as a best-effort source.  Returns an empty string when no anchor
-    /// is set or the selection is a bare caret.
-    fn extract_selected_text(&self) -> String {
-        let cl = self.backend.cursor_line;
-        let cc = self.backend.cursor_col;
-        let (al, ac) = match self.visual_anchor {
-            Some(a) => a,
-            None => return String::new(),
-        };
-        // Normalise so (start_line, start_col) ≤ (end_line, end_col).
-        let ((sl, sc), (el, ec)) =
-            if (al, ac) <= (cl, cc) { ((al, ac), (cl, cc)) } else { ((cl, cc), (al, ac)) };
-        let lines = &self.backend.lines;
-        if sl >= lines.len() {
-            return String::new();
+    fn selected_text_preview(&mut self, linewise: bool) -> String {
+        if self.mode == Mode::VisualBlock {
+            let (al, ac) =
+                self.visual_anchor.unwrap_or((self.backend.cursor_line, self.backend.cursor_col));
+            let cl = self.backend.cursor_line;
+            let cc = self.backend.cursor_col;
+            let (top, bottom) = if al <= cl { (al, cl) } else { (cl, al) };
+            let (left_col, right_col) = if ac <= cc { (ac, cc) } else { (cc, ac) };
+            return self
+                .backend
+                .block_text_preview(top, bottom, left_col, right_col)
+                .unwrap_or_default();
         }
-        if sl == el {
-            let line = &lines[sl];
-            let s = sc.min(line.len());
-            let e = ec.min(line.len());
-            return line[s..e].to_owned();
-        }
-        let mut out = String::new();
-        let first = &lines[sl];
-        out.push_str(&first[sc.min(first.len())..]);
-        out.push('\n');
-        for line in &lines[sl + 1..el.min(lines.len())] {
-            out.push_str(line);
-            out.push('\n');
-        }
-        if el < lines.len() {
-            let last = &lines[el];
-            out.push_str(&last[..ec.min(last.len())]);
-        }
-        out
+
+        self.backend.selected_text_preview(linewise).unwrap_or_default()
     }
 
     // ── Paste ──────────────────────────────────────────────────────────────
@@ -2697,7 +2744,7 @@ impl App {
                     self.apply_visual_block_op(Operator::Delete);
                 } else {
                     let reg = self.take_register();
-                    let text = self.extract_selected_text();
+                    let text = self.selected_text_preview(false);
                     self.registers.delete(&reg, text, false);
                     self.record_edit("delete_forward", json!([]));
                     self.enter_normal_mode();
@@ -2712,7 +2759,7 @@ impl App {
                     self.apply_visual_block_op(Operator::Yank);
                 } else {
                     let reg = self.take_register();
-                    let text = self.extract_selected_text();
+                    let text = self.selected_text_preview(false);
                     self.registers.yank(&reg, text, false);
                     let _ = self.backend.send_edit("collapse_selections", json!([]));
                     self.enter_normal_mode();
@@ -2723,7 +2770,7 @@ impl App {
                 self.begin_record();
                 if self.mode == Mode::VisualLine {
                     let reg = self.take_register();
-                    let text = self.extract_selected_line_text();
+                    let text = self.selected_text_preview(true);
                     self.registers.delete(&reg, text, false);
                     self.record_edit("delete_forward", json!([]));
                     self.enter_normal_mode();
@@ -2733,7 +2780,7 @@ impl App {
                     self.mode = Mode::Insert;
                 } else {
                     let reg = self.take_register();
-                    let text = self.extract_selected_text();
+                    let text = self.selected_text_preview(false);
                     self.registers.delete(&reg, text, false);
                     self.record_edit("delete_forward", json!([]));
                     self.enter_normal_mode();
@@ -2776,23 +2823,9 @@ impl App {
         }
     }
 
-    /// Extract text for all selected lines (VisualLine).
-    fn extract_selected_line_text(&self) -> String {
-        let (al, _) = self.visual_anchor.unwrap_or((self.backend.cursor_line, 0));
-        let cl = self.backend.cursor_line;
-        let (top, bottom) = if al <= cl { (al, cl) } else { (cl, al) };
-        let lines = &self.backend.lines;
-        let mut out = String::new();
-        for line in &lines[top..=bottom.min(lines.len().saturating_sub(1))] {
-            out.push_str(line);
-            out.push('\n');
-        }
-        out
-    }
-
     fn apply_visual_line_delete(&mut self) {
         let reg = self.take_register();
-        let text = self.extract_selected_line_text();
+        let text = self.selected_text_preview(true);
         self.registers.delete(&reg, text, false);
         self.sync_visual_line_selection();
         self.record_edit("delete_forward", json!([]));
@@ -2801,7 +2834,7 @@ impl App {
 
     fn apply_visual_line_yank(&mut self) {
         let reg = self.take_register();
-        let text = self.extract_selected_line_text();
+        let text = self.selected_text_preview(true);
         self.registers.yank(&reg, text, false);
         // Collapse without deleting.
         let _ = self.backend.send_edit("collapse_selections", json!([]));
@@ -2816,15 +2849,8 @@ impl App {
         let cc = self.backend.cursor_col;
         let (top, bottom) = if al <= cl { (al, cl) } else { (cl, al) };
         let (left_col, right_col) = if ac <= cc { (ac, cc) } else { (cc, ac) };
-        // Clone to avoid holding borrow across mutable backend calls.
-        let lines: Vec<String> = self.backend.lines.clone();
-        let mut extracted = String::new();
-        for line in &lines[top..=bottom.min(lines.len().saturating_sub(1))] {
-            let s = left_col.min(line.len());
-            let e = right_col.min(line.len());
-            extracted.push_str(&line[s..e]);
-            extracted.push('\n');
-        }
+        let extracted =
+            self.backend.block_text_preview(top, bottom, left_col, right_col).unwrap_or_default();
         if op == Operator::Yank {
             let reg = self.take_register();
             self.registers.yank(&reg, extracted, false);

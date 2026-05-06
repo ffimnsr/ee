@@ -21,7 +21,9 @@
 use log::warn;
 
 use crate::movement::Movement;
+use crate::object::SyntaxSelectionAction;
 use crate::plugins::manifest::PluginCapability;
+use crate::plugins::rpc::SelectionRange;
 use crate::rpc::{
     EditNotification, FindQuery, GestureType, LineRange, LineReplacement, MouseAction, Position,
     SelectionGranularity, SelectionModifier,
@@ -124,7 +126,43 @@ pub(crate) enum SpecialEvent {
     ApplyLineReplacements {
         replacements: Vec<LineReplacement>,
     },
+    SetSelections {
+        selections: Vec<SelectionRange>,
+    },
+    GotoColumn {
+        display_col: usize,
+        modify_selection: bool,
+    },
+    AddNewlineAbove,
+    AddNewlineBelow,
+    JoinSelections {
+        select_space: bool,
+    },
+    ExtendLineBelow {
+        count: usize,
+    },
+    ExtendToLineBounds,
+    ShrinkToLineBounds,
+    MoveWordStart {
+        forward: bool,
+        long_word: bool,
+        modify_selection: bool,
+    },
+    MoveWordEnd {
+        long_word: bool,
+        modify_selection: bool,
+    },
+    FindChar {
+        target: char,
+        forward: bool,
+        inclusive: bool,
+        modify_selection: bool,
+    },
+    MoveToMatchingBracket {
+        modify_selection: bool,
+    },
     Reindent,
+    SyntaxSelection(SyntaxSelectionAction),
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -331,6 +369,30 @@ impl From<EditNotification> for EventDomain {
             EnsureSelectionsForward => ViewEvent::EnsureSelectionsForward.into(),
             KeepPrimarySelection => ViewEvent::KeepPrimarySelection.into(),
             RemovePrimarySelection => ViewEvent::RemovePrimarySelection.into(),
+            ExpandSelection => {
+                SpecialEvent::SyntaxSelection(SyntaxSelectionAction::Expand).into()
+            }
+            ShrinkSelection => {
+                SpecialEvent::SyntaxSelection(SyntaxSelectionAction::Shrink).into()
+            }
+            SelectPrevSibling => {
+                SpecialEvent::SyntaxSelection(SyntaxSelectionAction::SelectPrevSibling).into()
+            }
+            SelectNextSibling => {
+                SpecialEvent::SyntaxSelection(SyntaxSelectionAction::SelectNextSibling).into()
+            }
+            SelectAllSiblings => {
+                SpecialEvent::SyntaxSelection(SyntaxSelectionAction::SelectAllSiblings).into()
+            }
+            SelectAllChildren => {
+                SpecialEvent::SyntaxSelection(SyntaxSelectionAction::SelectAllChildren).into()
+            }
+            MoveParentNodeStart => {
+                SpecialEvent::SyntaxSelection(SyntaxSelectionAction::MoveParentNodeStart).into()
+            }
+            MoveParentNodeEnd => {
+                SpecialEvent::SyntaxSelection(SyntaxSelectionAction::MoveParentNodeEnd).into()
+            }
             RequestCompletion { index } =>
                 SpecialEvent::DispatchPluginCommand {
                     capability: PluginCapability::Edit,
@@ -383,7 +445,38 @@ impl From<EditNotification> for EventDomain {
                 }.into(),
             ApplyLineReplacements { replacements } =>
                 SpecialEvent::ApplyLineReplacements { replacements }.into(),
+            SetSelections { selections } =>
+                SpecialEvent::SetSelections { selections }.into(),
             SelectionIntoLines => ViewEvent::SelectionIntoLines.into(),
+            GotoColumn { display_col, modify_selection } => {
+                SpecialEvent::GotoColumn { display_col, modify_selection }.into()
+            }
+            AddNewlineAbove =>
+                SpecialEvent::AddNewlineAbove.into(),
+            AddNewlineBelow =>
+                SpecialEvent::AddNewlineBelow.into(),
+            JoinSelections { select_space } => {
+                SpecialEvent::JoinSelections { select_space }.into()
+            }
+            ExtendLineBelow { count } => {
+                SpecialEvent::ExtendLineBelow { count }.into()
+            }
+            ExtendToLineBounds =>
+                SpecialEvent::ExtendToLineBounds.into(),
+            ShrinkToLineBounds =>
+                SpecialEvent::ShrinkToLineBounds.into(),
+            MoveWordStart { forward, long_word, modify_selection } => {
+                SpecialEvent::MoveWordStart { forward, long_word, modify_selection }.into()
+            }
+            MoveWordEnd { long_word, modify_selection } => {
+                SpecialEvent::MoveWordEnd { long_word, modify_selection }.into()
+            }
+            FindChar { target, forward, inclusive, modify_selection } => {
+                SpecialEvent::FindChar { target, forward, inclusive, modify_selection }.into()
+            }
+            MoveToMatchingBracket { modify_selection } => {
+                SpecialEvent::MoveToMatchingBracket { modify_selection }.into()
+            }
             DuplicateLine => BufferEvent::DuplicateLine.into(),
             IncreaseNumber => BufferEvent::IncreaseNumber.into(),
             DecreaseNumber => BufferEvent::DecreaseNumber.into(),

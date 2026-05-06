@@ -15,7 +15,7 @@ use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use serde_json::{Value, json};
 use xi_core_lib::plugin_rpc::{
-    CodeActionDescriptor, Diagnostic, DiagnosticSeverity, Range, SymbolItem,
+    CodeActionDescriptor, Diagnostic, DiagnosticSeverity, Range, SelectionRange, SymbolItem,
 };
 use xi_core_lib::rpc::LineReplacement;
 
@@ -29,6 +29,7 @@ use crate::buffer::{BufState, BufferManager};
 use crate::git::{GitBufferCache, GitBufferStatus, GitHunk, GitSign};
 use crate::keymap::{Action, BindingKey, bindings};
 use crate::picker::PickerKind;
+use crate::registers::RegisterName;
 use crate::text::{
     byte_col_to_display_col, display_col_to_byte, find_char_backward, find_char_forward,
     next_char_start, next_word_end, next_word_start, prev_char_start, prev_word_start,
@@ -611,6 +612,174 @@ fn delete_line_range_emits_edit_notification() {
 }
 
 #[test]
+fn goto_column_emits_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.goto_column(2, true).expect("goto column should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "goto_column");
+    assert_eq!(value["params"]["params"]["display_col"], 2);
+    assert_eq!(value["params"]["params"]["modify_selection"], true);
+}
+
+#[test]
+fn join_selections_emits_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.join_selections(true).expect("join selections should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "join_selections");
+    assert_eq!(value["params"]["params"]["select_space"], true);
+}
+
+#[test]
+fn extend_line_below_emits_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.extend_line_below(3).expect("extend line below should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "extend_line_below");
+    assert_eq!(value["params"]["params"]["count"], 3);
+}
+
+#[test]
+fn move_word_start_emits_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.move_word_start(true, true, false).expect("move word start should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "move_word_start");
+    assert_eq!(value["params"]["params"]["forward"], true);
+    assert_eq!(value["params"]["params"]["long_word"], true);
+    assert_eq!(value["params"]["params"]["modify_selection"], false);
+}
+
+#[test]
+fn move_word_end_emits_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.move_word_end(false, true).expect("move word end should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "move_word_end");
+    assert_eq!(value["params"]["params"]["long_word"], false);
+    assert_eq!(value["params"]["params"]["modify_selection"], true);
+}
+
+#[test]
+fn find_char_emits_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.find_char('x', false, true, true).expect("find char should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "find_char");
+    assert_eq!(value["params"]["params"]["target"], "x");
+    assert_eq!(value["params"]["params"]["forward"], false);
+    assert_eq!(value["params"]["params"]["inclusive"], true);
+    assert_eq!(value["params"]["params"]["modify_selection"], true);
+}
+
+#[test]
+fn move_to_matching_bracket_emits_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.move_to_matching_bracket(true).expect("matching bracket move should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "move_to_matching_bracket");
+    assert_eq!(value["params"]["params"]["modify_selection"], true);
+}
+
+#[test]
+fn extend_to_line_bounds_emits_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.extend_to_line_bounds().expect("extend to line bounds should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "extend_to_line_bounds");
+}
+
+#[test]
+fn shrink_to_line_bounds_emits_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.shrink_to_line_bounds().expect("shrink to line bounds should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "shrink_to_line_bounds");
+}
+
+#[test]
+fn add_newline_above_emits_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.add_newline_above().expect("add newline above should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "add_newline_above");
+}
+
+#[test]
+fn add_newline_below_emits_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.add_newline_below().expect("add newline below should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "add_newline_below");
+}
+
+#[test]
 fn replay_block_insert_emits_edit_notification() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
@@ -698,6 +867,25 @@ fn codeaction_command_uses_backend_edit() {
     assert_eq!(value["method"], "edit");
     assert_eq!(value["params"]["method"], "request_code_actions");
     assert_eq!(value["params"]["params"]["index"], 3);
+}
+
+#[test]
+fn code_action_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in ":code_action".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "request_code_actions");
+    assert!(value["params"]["params"]["index"].is_null());
 }
 
 #[test]
@@ -966,6 +1154,240 @@ fn select_all_command_uses_backend_edit() {
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");
     assert_eq!(value["params"]["method"], "select_all");
+}
+
+#[test]
+fn delete_word_forward_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in ":delete_word_forward".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["params"]["method"], "delete_word_forward");
+}
+
+#[test]
+fn kill_line_command_uses_delete_line_range() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in ":kill_line".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["params"]["method"], "delete_line_range");
+    assert_eq!(value["params"]["params"]["start_line"], 0);
+    assert_eq!(value["params"]["params"]["end_line"], 0);
+}
+
+#[test]
+fn add_newline_below_command_emits_line_end_then_newline() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in ":add_newline_below".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message: Value = serde_json::from_str(&rx.recv().expect("message should be sent"))
+        .expect("message should be json");
+    assert_eq!(message["params"]["method"], "add_newline_below");
+}
+
+#[test]
+fn add_newline_above_command_emits_line_start_newline_and_move_up() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in ":add_newline_above".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message: Value = serde_json::from_str(&rx.recv().expect("message should be sent"))
+        .expect("message should be json");
+    assert_eq!(message["params"]["method"], "add_newline_above");
+}
+
+#[test]
+fn extend_line_below_command_emits_linewise_selection_gestures() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in ":extend_line_below".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message: Value = serde_json::from_str(&rx.recv().expect("message should be sent"))
+        .expect("message should be json");
+    assert_eq!(message["params"]["method"], "extend_line_below");
+    assert_eq!(message["params"]["params"]["count"], 1);
+}
+
+#[test]
+fn join_selections_command_joins_selected_lines() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    for ch in "abc\n    def".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    app.backend.pump().unwrap();
+
+    let _ = app.backend.send_edit(
+        "gesture",
+        json!({
+            "line": 0,
+            "col": 0,
+            "ty": "point_select",
+        }),
+    );
+    let _ = app.backend.send_edit(
+        "gesture",
+        json!({
+            "line": 1,
+            "col": 7,
+            "ty": { "select_extend": { "granularity": "point" } },
+        }),
+    );
+    app.backend.pump().unwrap();
+
+    run_ex(&mut app, "join_selections");
+    for _ in 0..20 {
+        app.backend.pump().unwrap();
+        if app.backend.lines.first().is_some_and(|line| line == "abc def") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(app.backend.lines.first().map(String::as_str), Some("abc def"));
+}
+
+#[test]
+fn filter_selections_preview_uses_backend_authoritative_text() {
+    let mut app = App::from_path(None).unwrap();
+
+    insert_text(&mut app, "alpha beta alps");
+    app.backend.pump().unwrap();
+
+    app.backend
+        .set_selections(&[
+            SelectionRange { start: 0, end: 5 },
+            SelectionRange { start: 6, end: 10 },
+            SelectionRange { start: 11, end: 15 },
+        ])
+        .expect("set selections should succeed");
+    app.backend.pump().unwrap();
+
+    let filtered =
+        app.backend.filter_selections_preview("^a", false).expect("filter preview should succeed");
+    app.backend.set_selections(&filtered).expect("filtered selections should apply");
+    app.backend.pump().unwrap();
+
+    let selection_ranges = app
+        .backend
+        .annotations
+        .iter()
+        .find(|annotation| annotation.annotation_type == "selection")
+        .map(|annotation| annotation.ranges.clone())
+        .expect("selection annotation should exist");
+
+    assert_eq!(selection_ranges, vec![[0, 0, 0, 5], [0, 11, 0, 15]]);
+}
+
+#[test]
+fn select_chars_preview_uses_backend_authoritative_text() {
+    let mut app = App::from_path(None).unwrap();
+
+    insert_text(&mut app, "aéb");
+    app.backend.pump().unwrap();
+    app.backend
+        .set_selections(&[SelectionRange { start: 0, end: 0 }])
+        .expect("set selections should succeed");
+    app.backend.pump().unwrap();
+
+    let selection =
+        app.backend.select_chars_preview(2).expect("select chars preview should succeed");
+
+    assert_eq!(selection, vec![SelectionRange { start: 0, end: 3 }]);
+}
+
+#[test]
+fn selected_text_preview_uses_backend_authoritative_selection() {
+    let mut app = App::from_path(None).unwrap();
+
+    insert_text(&mut app, "alpha\nbeta");
+    app.backend.pump().unwrap();
+    app.backend
+        .set_selections(&[SelectionRange { start: 1, end: 8 }])
+        .expect("set selections should succeed");
+    app.backend.pump().unwrap();
+
+    let selected =
+        app.backend.selected_text_preview(false).expect("selected text preview should succeed");
+    let linewise = app
+        .backend
+        .selected_text_preview(true)
+        .expect("linewise selected text preview should succeed");
+
+    assert_eq!(selected, "lpha\nbe");
+    assert_eq!(linewise, "alpha\nbeta\n");
+}
+
+#[test]
+fn block_text_preview_uses_backend_authoritative_text() {
+    let mut app = App::from_path(None).unwrap();
+
+    insert_text(&mut app, "abcd\nefgh\nijk");
+    app.backend.pump().unwrap();
+
+    let block =
+        app.backend.block_text_preview(0, 2, 1, 3).expect("block text preview should succeed");
+
+    assert_eq!(block, "bc\nfg\njk\n");
+}
+
+#[test]
+fn remove_selections_command_uses_search_pattern_and_reports_empty_result() {
+    let mut app = App::from_path(None).unwrap();
+
+    insert_text(&mut app, "alpha beta");
+    app.backend.pump().unwrap();
+
+    app.backend
+        .set_selections(&[
+            SelectionRange { start: 0, end: 5 },
+            SelectionRange { start: 6, end: 10 },
+        ])
+        .expect("set selections should succeed");
+    app.backend.pump().unwrap();
+    app.search_pattern = Some(String::from("."));
+
+    run_ex(&mut app, "remove_selections");
+
+    assert_eq!(app.backend.status_message.as_deref(), Some("no selections remaining"));
 }
 
 #[test]
@@ -1295,6 +1717,26 @@ fn bindings_table_has_normal_hjkl() {
 }
 
 #[test]
+fn bindings_table_has_requested_goto_prefix_bindings() {
+    let b = bindings();
+    let lookup = |key| {
+        b.get(&BindingKey {
+            mode: Mode::Normal,
+            key,
+            modifiers: KeyModifiers::NONE,
+            prefix: Some('g'),
+        })
+        .cloned()
+    };
+
+    assert_eq!(lookup(KeyCode::Char('g')), Some(Action::GotoFileStart));
+    assert_eq!(lookup(KeyCode::Char('e')), Some(Action::GotoLastLine));
+    assert_eq!(lookup(KeyCode::Char('f')), Some(Action::GotoFile));
+    assert_eq!(lookup(KeyCode::Char('h')), Some(Action::Edit("move_to_left_end_of_line")));
+    assert_eq!(lookup(KeyCode::Char('l')), Some(Action::Edit("move_to_right_end_of_line")));
+}
+
+#[test]
 fn k_binding_requests_hover() {
     let b = bindings();
     let lookup = b
@@ -1387,6 +1829,10 @@ fn parse_action_spec_accepts_requested_command_aliases() {
         Action::EnterMode(Mode::Normal)
     );
     assert_eq!(crate::keymap::parse_action_spec("goto_line").unwrap(), Action::GotoLine);
+    assert_eq!(crate::keymap::parse_action_spec("goto_column").unwrap(), Action::GotoColumn);
+    assert_eq!(crate::keymap::parse_action_spec("goto_file_start").unwrap(), Action::GotoFileStart);
+    assert_eq!(crate::keymap::parse_action_spec("goto_last_line").unwrap(), Action::GotoLastLine);
+    assert_eq!(crate::keymap::parse_action_spec("goto_file").unwrap(), Action::GotoFile);
     assert_eq!(
         crate::keymap::parse_action_spec("repeat_last_motion").unwrap(),
         Action::RepeatLastMotion
@@ -1456,6 +1902,43 @@ fn parse_action_spec_accepts_requested_command_aliases() {
     );
     assert_eq!(crate::keymap::parse_action_spec("open_below").unwrap(), Action::OpenLineBelow);
     assert_eq!(crate::keymap::parse_action_spec("open_above").unwrap(), Action::OpenLineAbove);
+    assert_eq!(
+        crate::keymap::parse_action_spec("code_action").unwrap(),
+        Action::RequestCodeActions
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("delete_char_backward").unwrap(),
+        Action::DeleteBackward
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("delete_char_forward").unwrap(),
+        Action::Edit("delete_forward")
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("delete_word_forward").unwrap(),
+        Action::Edit("delete_word_forward")
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("kill_to_line_start").unwrap(),
+        Action::DeleteToLineStart
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("kill_to_line_end").unwrap(),
+        Action::Edit("delete_to_end_of_paragraph")
+    );
+    assert_eq!(crate::keymap::parse_action_spec("kill_line").unwrap(), Action::DeleteCurrentLine);
+    assert_eq!(
+        crate::keymap::parse_action_spec("insert_newline").unwrap(),
+        Action::Edit("insert_newline")
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("add_newline_below").unwrap(),
+        Action::AddNewlineBelow
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("add_newline_above").unwrap(),
+        Action::AddNewlineAbove
+    );
     assert_eq!(crate::keymap::parse_action_spec("undo").unwrap(), Action::Undo);
     assert_eq!(crate::keymap::parse_action_spec("redo").unwrap(), Action::Redo);
     assert_eq!(crate::keymap::parse_action_spec("earlier").unwrap(), Action::Undo);
@@ -1488,6 +1971,66 @@ fn parse_action_spec_accepts_requested_command_aliases() {
     assert_eq!(
         crate::keymap::parse_action_spec("change_selection_noyank").unwrap(),
         Action::DeleteSelection { yank: false, enter_insert: true }
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("extend_line_below").unwrap(),
+        Action::ExtendLineBelow
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("extend_to_line_bounds").unwrap(),
+        Action::ExtendToLineBounds
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("shrink_to_line_bounds").unwrap(),
+        Action::ShrinkToLineBounds
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("join_selections").unwrap(),
+        Action::JoinSelections
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("join_selections_space").unwrap(),
+        Action::JoinSelectionsSpace
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("keep_selections").unwrap(),
+        Action::KeepSelections
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("remove_selections").unwrap(),
+        Action::RemoveSelections
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("expand_selection").unwrap(),
+        Action::ExpandSelection
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("shrink_selection").unwrap(),
+        Action::ShrinkSelection
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("select_prev_sibling").unwrap(),
+        Action::SelectPrevSibling
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("select_next_sibling").unwrap(),
+        Action::SelectNextSibling
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("select_all_siblings").unwrap(),
+        Action::SelectAllSiblings
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("select_all_children").unwrap(),
+        Action::SelectAllChildren
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("move_parent_node_start").unwrap(),
+        Action::MoveParentNodeStart
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("move_parent_node_end").unwrap(),
+        Action::MoveParentNodeEnd
     );
 }
 
@@ -1564,6 +2107,168 @@ fn search_selection_detect_word_boundaries_uses_whole_word_find_query() {
 }
 
 #[test]
+fn syntax_selection_actions_forward_backend_methods() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char(']'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::SelectNextSibling,
+    );
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::ALT)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "select_next_sibling");
+}
+
+#[test]
+fn move_parent_node_action_forwards_backend_method() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('P'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::MoveParentNodeEnd,
+    );
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::ALT)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "move_parent_node_end");
+}
+
+#[test]
+fn goto_column_action_uses_count_as_target_column() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.input_state.count_digits = vec![3];
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('c'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::GotoColumn,
+    );
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "goto_column");
+    assert_eq!(value["params"]["params"]["display_col"], 2);
+    assert_eq!(value["params"]["params"]["modify_selection"], false);
+}
+
+#[test]
+fn extend_line_below_action_uses_count_as_backend_param() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.input_state.count_digits = vec![3];
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('E'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::ExtendLineBelow,
+    );
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('E'), KeyModifiers::ALT)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "extend_line_below");
+    assert_eq!(value["params"]["params"]["count"], 3);
+}
+
+#[test]
+fn select_all_children_command_sends_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)));
+    for ch in "select_all_children".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "select_all_children");
+}
+
+#[test]
+fn move_parent_node_start_command_sends_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)));
+    for ch in "move_parent_node_start".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "move_parent_node_start");
+}
+
+#[test]
+fn goto_column_command_moves_cursor_to_requested_column() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)));
+    for ch in "goto_column 3".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "goto_column");
+    assert_eq!(value["params"]["params"]["display_col"], 2);
+    assert_eq!(value["params"]["params"]["modify_selection"], false);
+}
+
+#[test]
 fn normal_mode_alias_returns_from_insert() {
     let mut app = App::from_path(None).unwrap();
     app.mode = Mode::Insert;
@@ -1585,7 +2290,12 @@ fn normal_mode_alias_returns_from_insert() {
 #[test]
 fn change_selection_alias_enters_insert_mode() {
     let mut app = App::from_path(None).unwrap();
-    app.backend.lines = vec![String::from("abc")];
+    insert_text(&mut app, "abc");
+    app.backend.pump().unwrap();
+    app.backend
+        .set_selections(&[SelectionRange { start: 0, end: 0 }])
+        .expect("set selections should succeed");
+    app.backend.pump().unwrap();
     app.key_bindings.insert(
         BindingKey {
             mode: Mode::Normal,
@@ -1619,6 +2329,90 @@ fn goto_line_action_uses_count_as_target_line() {
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::ALT)));
 
     assert_eq!(app.jump_list.last().copied(), Some((0, 0)));
+}
+
+#[test]
+fn goto_file_start_action_without_count_jumps_to_first_line() {
+    let mut app = App::from_path(None).unwrap();
+    app.backend.lines = vec![String::from("a"), String::from("b"), String::from("c")];
+    app.backend.cursor_line = 2;
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('s'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::GotoFileStart,
+    );
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT)));
+
+    assert_eq!(app.jump_list.last().copied(), Some((2, 0)));
+}
+
+#[test]
+fn goto_file_start_action_uses_count_as_target_line() {
+    let mut app = App::from_path(None).unwrap();
+    app.backend.lines = vec![String::from("a"), String::from("b"), String::from("c")];
+    app.input_state.count_digits = vec![3];
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('s'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::GotoFileStart,
+    );
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT)));
+
+    assert_eq!(app.jump_list.last().copied(), Some((0, 0)));
+}
+
+#[test]
+fn goto_last_line_action_jumps_to_final_line() {
+    let mut app = App::from_path(None).unwrap();
+    app.backend.lines = vec![String::from("a"), String::from("b"), String::from("c")];
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('e'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::GotoLastLine,
+    );
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT)));
+
+    assert_eq!(app.jump_list.last().copied(), Some((0, 0)));
+}
+
+#[test]
+fn goto_file_action_opens_path_under_cursor() {
+    let target = unique_temp_path("ee-tui-goto-file-target");
+    fs::write(&target, "hello\n").unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+    app.backend.lines = vec![format!("see \"{}\" now", target.display())];
+    app.backend.cursor_col = 6;
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('f'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::GotoFile,
+    );
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT)));
+
+    assert_eq!(app.backend.active().path.as_ref(), Some(&target));
+
+    let _ = fs::remove_file(&target);
 }
 
 #[test]
@@ -2097,6 +2891,22 @@ fn unique_temp_path(prefix: &str) -> std::path::PathBuf {
     env::temp_dir().join(format!("{prefix}-{nanos}.txt"))
 }
 
+fn run_ex(app: &mut App, command: &str) {
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)));
+    for ch in command.chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+}
+
+fn insert_text(app: &mut App, text: &str) {
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    for ch in text.chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+}
+
 fn test_buf_state() -> BufState {
     BufState {
         id: 1,
@@ -2133,6 +2943,364 @@ fn capital_a_enters_insert_at_eol() {
     let mut app = App::from_path(None).unwrap();
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE)));
     assert_eq!(app.mode, Mode::Insert);
+}
+
+#[test]
+fn open_hsplit_and_new_aliases_work() {
+    let first = unique_temp_path("ee-tui-open-first");
+    let second = unique_temp_path("ee-tui-open-second");
+    fs::write(&first, "one\ntwo\nthree\n").unwrap();
+    fs::write(&second, "alpha\nbeta\ngamma\n").unwrap();
+
+    let mut app = App::from_path(Some(first.clone())).unwrap();
+
+    run_ex(&mut app, &format!("open {}", second.display()));
+    assert_eq!(app.backend.active().path.as_ref(), Some(&second));
+
+    run_ex(&mut app, &format!("hs {}", first.display()));
+    assert_eq!(app.tabs.focused_windows().windows().len(), 2);
+    assert_eq!(app.tabs.focused_windows().split_dir, crate::window::SplitDir::Horizontal);
+    assert_eq!(app.backend.active().path.as_ref(), Some(&first));
+
+    run_ex(&mut app, "n");
+    assert!(app.backend.active().path.is_none());
+
+    let _ = fs::remove_file(&first);
+    let _ = fs::remove_file(&second);
+}
+
+#[test]
+fn goto_alias_emits_gesture_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.lines = (0..20).map(|_| String::new()).collect();
+
+    run_ex(&mut app, "g 12");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "gesture");
+    assert_eq!(value["params"]["params"]["line"], 11);
+}
+
+#[test]
+fn write_bang_update_and_x_bang_aliases_save() {
+    let first = unique_temp_path("ee-tui-write-bang");
+    fs::write(&first, "seed").unwrap();
+
+    let mut app = App::from_path(Some(first.clone())).unwrap();
+    insert_text(&mut app, "!");
+    run_ex(&mut app, "w!");
+
+    for _ in 0..20 {
+        if fs::read_to_string(&first).unwrap().starts_with('!') {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(fs::read_to_string(&first).unwrap().starts_with('!'));
+
+    let second = unique_temp_path("ee-tui-update-bang");
+    fs::write(&second, "seed").unwrap();
+    let mut update_app = App::from_path(Some(second.clone())).unwrap();
+    insert_text(&mut update_app, "?");
+    run_ex(&mut update_app, "u");
+
+    for _ in 0..20 {
+        if fs::read_to_string(&second).unwrap().starts_with('?') {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(fs::read_to_string(&second).unwrap().starts_with('?'));
+
+    let third = unique_temp_path("ee-tui-x-bang");
+    fs::write(&third, "seed").unwrap();
+    let mut quit_app = App::from_path(Some(third.clone())).unwrap();
+    insert_text(&mut quit_app, "#");
+    run_ex(&mut quit_app, "x!");
+
+    for _ in 0..20 {
+        if fs::read_to_string(&third).unwrap().starts_with('#') {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(fs::read_to_string(&third).unwrap().starts_with('#'));
+    assert!(quit_app.should_quit);
+
+    let _ = fs::remove_file(&first);
+    let _ = fs::remove_file(&second);
+    let _ = fs::remove_file(&third);
+}
+
+#[test]
+fn write_all_and_write_quit_all_aliases_cover_hidden_buffers() {
+    let first = unique_temp_path("ee-tui-wa-first");
+    let second = unique_temp_path("ee-tui-wa-second");
+    fs::write(&first, "seed").unwrap();
+    fs::write(&second, "seed").unwrap();
+
+    let mut app = App::from_path(Some(first.clone())).unwrap();
+    insert_text(&mut app, "1");
+    run_ex(&mut app, &format!("e {}", second.display()));
+    insert_text(&mut app, "2");
+    run_ex(&mut app, "wa");
+
+    for _ in 0..20 {
+        let first_saved = fs::read_to_string(&first).unwrap().starts_with('1');
+        let second_saved = fs::read_to_string(&second).unwrap().starts_with('2');
+        if first_saved && second_saved {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(fs::read_to_string(&first).unwrap().starts_with('1'));
+    assert!(fs::read_to_string(&second).unwrap().starts_with('2'));
+
+    insert_text(&mut app, "3");
+    run_ex(&mut app, &format!("e {}", first.display()));
+    insert_text(&mut app, "4");
+    run_ex(&mut app, "xa");
+
+    for _ in 0..20 {
+        let first_saved = fs::read_to_string(&first).unwrap().starts_with('4');
+        let second_saved = fs::read_to_string(&second).unwrap().starts_with("23");
+        if first_saved && second_saved {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(fs::read_to_string(&first).unwrap().starts_with('4'));
+    assert!(fs::read_to_string(&second).unwrap().starts_with("23"));
+    assert!(app.should_quit);
+
+    let _ = fs::remove_file(&first);
+    let _ = fs::remove_file(&second);
+}
+
+#[test]
+fn quit_all_alias_checks_hidden_dirty_buffers_and_force_variant() {
+    let first = unique_temp_path("ee-tui-qa-first");
+    let second = unique_temp_path("ee-tui-qa-second");
+    fs::write(&first, "seed").unwrap();
+    fs::write(&second, "seed").unwrap();
+
+    let mut app = App::from_path(Some(first.clone())).unwrap();
+    insert_text(&mut app, "!");
+    run_ex(&mut app, &format!("e {}", second.display()));
+
+    run_ex(&mut app, "qa");
+    assert!(!app.should_quit);
+    assert_eq!(
+        app.backend.status_message.as_deref(),
+        Some("unsaved changes (use :wa to save or :qa! to force)")
+    );
+
+    run_ex(&mut app, "qa!");
+    assert!(app.should_quit);
+
+    let _ = fs::remove_file(&first);
+    let _ = fs::remove_file(&second);
+}
+
+#[test]
+fn read_command_inserts_file_contents() {
+    let source = unique_temp_path("ee-tui-read-source");
+    fs::write(&source, "alpha\nbeta\n").unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    run_ex(&mut app, &format!("r {}", source.display()));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "insert");
+    assert_eq!(value["params"]["params"]["chars"], "alpha\nbeta\n");
+    let expected = format!("read {}", source.display());
+    assert_eq!(app.backend.status_message.as_deref(), Some(expected.as_str()));
+
+    let _ = fs::remove_file(&source);
+}
+
+#[test]
+fn move_command_moves_dirty_buffer_to_new_path() {
+    let source = unique_temp_path("ee-tui-move-source");
+    let target = unique_temp_path("ee-tui-move-target");
+    fs::write(&source, "seed").unwrap();
+
+    let mut app = App::from_path(Some(source.clone())).unwrap();
+    insert_text(&mut app, "!");
+    run_ex(&mut app, &format!("mv {}", target.display()));
+
+    for _ in 0..20 {
+        let moved = !source.exists() && target.exists();
+        let saved = moved && fs::read_to_string(&target).unwrap().starts_with('!');
+        if saved {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    assert!(!source.exists());
+    assert!(target.exists());
+    assert_eq!(app.backend.active().path.as_ref(), Some(&target));
+    assert!(fs::read_to_string(&target).unwrap().starts_with('!'));
+
+    let _ = fs::remove_file(&target);
+}
+
+#[test]
+fn reload_config_refreshes_runtime_settings() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join(".ee.toml"), "cursor_line = false\n").unwrap();
+
+    let cwd = env::current_dir().unwrap();
+    env::set_current_dir(temp.path()).unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+    assert!(!app.config.cursor_line);
+
+    fs::write(temp.path().join(".ee.toml"), "cursor_line = true\n").unwrap();
+    run_ex(&mut app, "reload_config");
+
+    env::set_current_dir(cwd).unwrap();
+
+    assert!(app.config.cursor_line);
+    assert_eq!(app.backend.status_message.as_deref(), Some("config reloaded"));
+}
+
+#[test]
+fn language_encoding_echo_register_and_redraw_commands_update_state() {
+    let mut app = App::from_path(None).unwrap();
+
+    run_ex(&mut app, "set_language rust");
+    assert_eq!(
+        app.syntax_overrides.get(&app.backend.active().id).map(String::as_str),
+        Some("Rust")
+    );
+    assert_eq!(app.backend.status_message.as_deref(), Some("language: Rust"));
+
+    run_ex(&mut app, "set_language");
+    assert_eq!(app.backend.status_message.as_deref(), Some("language: Rust"));
+
+    run_ex(&mut app, "encoding utf-16");
+    assert_eq!(app.config.charset, "utf-16");
+    assert_eq!(app.backend.status_message.as_deref(), Some("encoding: utf-16"));
+
+    run_ex(&mut app, "echo hello status");
+    assert_eq!(app.backend.status_message.as_deref(), Some("hello status"));
+
+    app.registers.yank(&RegisterName::Named('a'), String::from("alpha"), false);
+    run_ex(&mut app, "clear_register a");
+    assert!(app.registers.get(&RegisterName::Named('a')).is_empty());
+    assert_eq!(app.backend.status_message.as_deref(), Some("register a cleared"));
+
+    run_ex(&mut app, "clear_register");
+    assert!(app.registers.get(&RegisterName::Unnamed).is_empty());
+    assert_eq!(app.backend.status_message.as_deref(), Some("registers cleared"));
+
+    run_ex(&mut app, "redraw");
+    assert!(app.redraw_requested);
+    assert_eq!(app.backend.status_message.as_deref(), Some("redraw"));
+}
+
+#[test]
+fn reload_and_reload_all_aliases_refresh_from_disk() {
+    let first = unique_temp_path("ee-tui-reload-first");
+    let second = unique_temp_path("ee-tui-reload-second");
+    fs::write(&first, "old-one\n").unwrap();
+    fs::write(&second, "old-two\n").unwrap();
+
+    let mut app = App::from_path(Some(first.clone())).unwrap();
+    run_ex(&mut app, &format!("e {}", second.display()));
+    fs::write(&first, "new-one\n").unwrap();
+    fs::write(&second, "new-two\n").unwrap();
+
+    run_ex(&mut app, "rl");
+    for _ in 0..20 {
+        app.backend.pump().unwrap();
+        if app.backend.lines.first().is_some_and(|line| line == "new-two") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(app.backend.lines.first().map(String::as_str), Some("new-two"));
+
+    run_ex(&mut app, "rla");
+    for _ in 0..20 {
+        app.backend.pump().unwrap();
+        let all_loaded = app.backend.all_bufs().iter().all(|buf| match buf.path.as_ref() {
+            Some(path) if path == &first => buf.lines.first().is_some_and(|line| line == "new-one"),
+            Some(path) if path == &second => {
+                buf.lines.first().is_some_and(|line| line == "new-two")
+            }
+            _ => true,
+        });
+        if all_loaded {
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(app.backend.all_bufs().iter().any(|buf| {
+        buf.path.as_ref() == Some(&first) && buf.lines.first().is_some_and(|line| line == "new-one")
+    }));
+    assert!(app.backend.all_bufs().iter().any(|buf| {
+        buf.path.as_ref() == Some(&second)
+            && buf.lines.first().is_some_and(|line| line == "new-two")
+    }));
+
+    let _ = fs::remove_file(&first);
+    let _ = fs::remove_file(&second);
+}
+
+#[test]
+fn buffer_close_aliases_and_force_variants_work() {
+    let first = unique_temp_path("ee-tui-bc-first");
+    let second = unique_temp_path("ee-tui-bc-second");
+    let third = unique_temp_path("ee-tui-bc-third");
+    fs::write(&first, "one\n").unwrap();
+    fs::write(&second, "two\n").unwrap();
+    fs::write(&third, "three\n").unwrap();
+
+    let mut app = App::from_path(Some(first.clone())).unwrap();
+    run_ex(&mut app, &format!("e {}", second.display()));
+    insert_text(&mut app, "!");
+
+    run_ex(&mut app, "bc");
+    assert_eq!(app.backend.buf_count(), 2);
+    assert_eq!(
+        app.backend.status_message.as_deref(),
+        Some("unsaved changes (use :write to save or :bc! to force)")
+    );
+
+    run_ex(&mut app, "bc!");
+    assert_eq!(app.backend.buf_count(), 1);
+    assert_eq!(app.backend.active().path.as_ref(), Some(&first));
+
+    run_ex(&mut app, &format!("e {}", second.display()));
+    run_ex(&mut app, &format!("e {}", third.display()));
+    assert_eq!(app.backend.buf_count(), 3);
+
+    run_ex(&mut app, "bco");
+    assert_eq!(app.backend.buf_count(), 1);
+    assert_eq!(app.backend.active().path.as_ref(), Some(&third));
+
+    run_ex(&mut app, &format!("e {}", first.display()));
+    run_ex(&mut app, "bca");
+    assert_eq!(app.backend.buf_count(), 1);
+    assert!(app.backend.active().path.is_none());
+
+    let _ = fs::remove_file(&first);
+    let _ = fs::remove_file(&second);
+    let _ = fs::remove_file(&third);
 }
 
 #[test]

@@ -26,6 +26,7 @@ pub(crate) enum Action {
     RequestHover,
     RequestDocumentSymbols,
     RequestWorkspaceSymbols,
+    RequestCodeActions,
     RegisterPrefix,
     MarkSetPrefix,
     MarkJumpPrefix {
@@ -47,6 +48,10 @@ pub(crate) enum Action {
         long_word: bool,
     },
     GotoLine,
+    GotoColumn,
+    GotoFileStart,
+    GotoLastLine,
+    GotoFile,
     SaveSelection,
     RepeatLastMotion,
     PageCursorHalfUp,
@@ -60,6 +65,21 @@ pub(crate) enum Action {
     IndentSelection,
     UnindentSelection,
     FormatSelections,
+    ExtendLineBelow,
+    ExtendToLineBounds,
+    ShrinkToLineBounds,
+    JoinSelections,
+    JoinSelectionsSpace,
+    KeepSelections,
+    RemoveSelections,
+    ExpandSelection,
+    ShrinkSelection,
+    SelectPrevSibling,
+    SelectNextSibling,
+    SelectAllSiblings,
+    SelectAllChildren,
+    MoveParentNodeStart,
+    MoveParentNodeEnd,
     DeleteSelection {
         yank: bool,
         enter_insert: bool,
@@ -78,6 +98,9 @@ pub(crate) enum Action {
     // Insert mode editing controls
     DeleteWordBackward,
     DeleteToLineStart,
+    AddNewlineBelow,
+    AddNewlineAbove,
+    DeleteCurrentLine,
     IndentLine,
     OutdentLine,
     // Undo / Redo
@@ -316,6 +339,10 @@ pub(crate) fn parse_action_spec(spec: &str) -> Result<Action, String> {
         "find_next" => Action::FindNext,
         "find_previous" => Action::FindPrevious,
         "goto_line" => Action::GotoLine,
+        "goto_column" => Action::GotoColumn,
+        "goto_file_start" => Action::GotoFileStart,
+        "goto_last_line" => Action::GotoLastLine,
+        "goto_file" => Action::GotoFile,
         "goto_line_start" => Action::Edit("move_to_left_end_of_line"),
         "goto_line_end" => Action::Edit("move_to_right_end_of_line"),
         "page_up" => Action::Edit("scroll_page_up"),
@@ -335,6 +362,21 @@ pub(crate) fn parse_action_spec(spec: &str) -> Result<Action, String> {
         "indent" => Action::IndentSelection,
         "unindent" => Action::UnindentSelection,
         "format_selections" => Action::FormatSelections,
+        "extend_line_below" => Action::ExtendLineBelow,
+        "extend_to_line_bounds" => Action::ExtendToLineBounds,
+        "shrink_to_line_bounds" => Action::ShrinkToLineBounds,
+        "join_selections" => Action::JoinSelections,
+        "join_selections_space" => Action::JoinSelectionsSpace,
+        "keep_selections" => Action::KeepSelections,
+        "remove_selections" => Action::RemoveSelections,
+        "expand_selection" => Action::ExpandSelection,
+        "shrink_selection" => Action::ShrinkSelection,
+        "select_prev_sibling" => Action::SelectPrevSibling,
+        "select_next_sibling" => Action::SelectNextSibling,
+        "select_all_siblings" => Action::SelectAllSiblings,
+        "select_all_children" => Action::SelectAllChildren,
+        "move_parent_node_start" => Action::MoveParentNodeStart,
+        "move_parent_node_end" => Action::MoveParentNodeEnd,
         "delete_selection" => Action::DeleteSelection { yank: true, enter_insert: false },
         "delete_selection_noyank" => Action::DeleteSelection { yank: false, enter_insert: false },
         "change_selection" => Action::DeleteSelection { yank: true, enter_insert: true },
@@ -356,6 +398,7 @@ pub(crate) fn parse_action_spec(spec: &str) -> Result<Action, String> {
         "request_hover" => Action::RequestHover,
         "request_document_symbols" => Action::RequestDocumentSymbols,
         "request_workspace_symbols" => Action::RequestWorkspaceSymbols,
+        "code_action" => Action::RequestCodeActions,
         "register_prefix" => Action::RegisterPrefix,
         "mark_set_prefix" => Action::MarkSetPrefix,
         "macro_record_toggle" => Action::MacroRecordToggle,
@@ -372,8 +415,17 @@ pub(crate) fn parse_action_spec(spec: &str) -> Result<Action, String> {
         "open_above" => Action::OpenLineAbove,
         "substitute_char" => Action::SubstituteChar,
         "substitute_line" => Action::SubstituteLine,
+        "delete_char_backward" => Action::DeleteBackward,
+        "delete_char_forward" => Action::Edit("delete_forward"),
         "delete_word_backward" => Action::DeleteWordBackward,
+        "delete_word_forward" => Action::Edit("delete_word_forward"),
         "delete_to_line_start" => Action::DeleteToLineStart,
+        "kill_to_line_start" => Action::DeleteToLineStart,
+        "kill_to_line_end" => Action::Edit("delete_to_end_of_paragraph"),
+        "kill_line" => Action::DeleteCurrentLine,
+        "insert_newline" => Action::Edit("insert_newline"),
+        "add_newline_below" => Action::AddNewlineBelow,
+        "add_newline_above" => Action::AddNewlineAbove,
         "indent_line" => Action::IndentLine,
         "outdent_line" => Action::OutdentLine,
         "undo" => Action::Undo,
@@ -611,10 +663,14 @@ fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     // ]Q / [Q — location list next / prev
     bind!(Normal, KeyCode::Char('Q'), none, Some(']'), LocNext);
     bind!(Normal, KeyCode::Char('Q'), none, Some('['), LocPrev);
+    bind!(Normal, KeyCode::Char('g'), none, Some('g'), GotoFileStart);
+    bind!(Normal, KeyCode::Char('e'), none, Some('g'), GotoLastLine);
+    bind!(Normal, KeyCode::Char('f'), none, Some('g'), GotoFile);
+    bind!(Normal, KeyCode::Char('h'), none, Some('g'), Edit("move_to_left_end_of_line"));
+    bind!(Normal, KeyCode::Char('l'), none, Some('g'), Edit("move_to_right_end_of_line"));
     // ]h / [h — git hunk next / prev
     bind!(Normal, KeyCode::Char('h'), none, Some(']'), GitNextHunk);
     bind!(Normal, KeyCode::Char('h'), none, Some('['), GitPrevHunk);
-    bind!(Normal, KeyCode::Char('g'), none, Some('g'), Edit("move_to_beginning_of_document"),);
     bind!(Normal, KeyCode::Char('d'), none, Some('g'), Edit("duplicate_line"));
     bind!(Normal, KeyCode::Char('b'), none, Some('g'), GitBlame);
     bind!(Normal, KeyCode::Char('D'), none, Some('g'), GitDiff);

@@ -59,6 +59,7 @@ tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 tree-sitter-python = "0.25"
 unicode-segmentation = "1.13.2"
+unicode-width = "0.2"
 url = "2.5.8"
 wasmtime = { version = "44.0.0", default-features = false, features = ["cranelift", "runtime", "std", "wat"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }

@@ -50,6 +50,7 @@ pub mod line_ending;
 pub mod line_offset;
 pub mod linewrap;
 pub mod movement;
+pub mod object;
 pub mod plugins;
 #[cfg(test)]
 pub mod recorder;

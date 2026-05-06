@@ -13,8 +13,10 @@
 // limitations under the License.
 
 use std::io;
+use std::time::Duration;
 
-use serde_json::json;
+use serde_json::{Value, json};
+use tempfile::Builder;
 use xi_core_lib::XiCore;
 use xi_core_lib::test_helpers;
 use xi_rpc::test_utils::{make_reader, test_channel};
@@ -247,6 +249,110 @@ fn test_other_edit_commands() {
     rpc_looper.mainloop(|| json, &mut state).unwrap();
 }
 
+#[test]
+fn move_parent_node_start_rpc_updates_selection_annotation() {
+    let mut state = XiCore::new();
+    let (tx, mut rx) = test_channel();
+    let mut rpc_looper = RpcLoop::new(tx);
+    let file = Builder::new().suffix(".rs").tempfile().unwrap();
+    let path = serde_json::to_string(&file.path().to_string_lossy().to_string()).unwrap();
+    let startup = format!(
+        "{{\"method\":\"client_started\",\"params\":{{}}}}\n{{\"id\":0,\"method\":\"new_view\",\"params\":{{\"file_path\":{path}}}}}"
+    );
+    let json = make_reader(&startup);
+    assert!(rpc_looper.mainloop(|| json, &mut state).is_ok());
+    rx.expect_rpc("available_languages");
+    assert_eq!(rx.expect_response(), Ok(json!("view-id-1")));
+    rx.expect_rpc("available_plugins");
+    rx.expect_rpc("language_changed");
+    rx.expect_rpc("update");
+    rx.expect_rpc("scroll_to");
+    rx.expect_nothing();
+
+    let source = "fn main() { foo(bar); }";
+    let bar = source.find("bar").unwrap();
+    let parent_start = source.rfind('(').unwrap() as u64;
+    let bar_end = (bar + "bar".len()) as u64;
+    let cmds = format!(
+        "{{\"method\":\"edit\",\"params\":{{\"view_id\":\"view-id-1\",\"method\":\"insert\",\"params\":{{\"chars\":\"{}\"}}}}}}\n{{\"method\":\"edit\",\"params\":{{\"view_id\":\"view-id-1\",\"method\":\"gesture\",\"params\":{{\"line\":0,\"col\":{},\"ty\":\"point_select\"}}}}}}\n{{\"method\":\"edit\",\"params\":{{\"view_id\":\"view-id-1\",\"method\":\"gesture\",\"params\":{{\"line\":0,\"col\":{},\"ty\":\"range_select\"}}}}}}\n{{\"method\":\"edit\",\"params\":{{\"view_id\":\"view-id-1\",\"method\":\"move_parent_node_start\",\"params\":[]}}}}",
+        source, bar, bar_end
+    );
+    let json = make_reader(&cmds);
+    assert!(rpc_looper.mainloop(|| json, &mut state).is_ok());
+
+    let mut last_selection = None;
+    while let Some(Ok(resp)) = rx.next_timeout(Duration::from_millis(100)) {
+        if !resp.is_response() && resp.get_method().unwrap() == "update" {
+            last_selection = selection_ranges_from_update(&resp.0);
+        }
+    }
+
+    assert_eq!(last_selection, Some(vec![[0, parent_start, 0, parent_start]]));
+}
+
+#[test]
+fn move_parent_node_end_rpc_updates_selection_annotation() {
+    let mut state = XiCore::new();
+    let (tx, mut rx) = test_channel();
+    let mut rpc_looper = RpcLoop::new(tx);
+    let file = Builder::new().suffix(".rs").tempfile().unwrap();
+    let path = serde_json::to_string(&file.path().to_string_lossy().to_string()).unwrap();
+    let startup = format!(
+        "{{\"method\":\"client_started\",\"params\":{{}}}}\n{{\"id\":0,\"method\":\"new_view\",\"params\":{{\"file_path\":{path}}}}}"
+    );
+    let json = make_reader(&startup);
+    assert!(rpc_looper.mainloop(|| json, &mut state).is_ok());
+    rx.expect_rpc("available_languages");
+    assert_eq!(rx.expect_response(), Ok(json!("view-id-1")));
+    rx.expect_rpc("available_plugins");
+    rx.expect_rpc("language_changed");
+    rx.expect_rpc("update");
+    rx.expect_rpc("scroll_to");
+    rx.expect_nothing();
+
+    let source = "fn main() { foo(bar); }";
+    let bar = source.find("bar").unwrap();
+    let parent_end = (source.rfind(')').unwrap() + 1) as u64;
+    let bar_end = (bar + "bar".len()) as u64;
+    let cmds = format!(
+        "{{\"method\":\"edit\",\"params\":{{\"view_id\":\"view-id-1\",\"method\":\"insert\",\"params\":{{\"chars\":\"{}\"}}}}}}\n{{\"method\":\"edit\",\"params\":{{\"view_id\":\"view-id-1\",\"method\":\"gesture\",\"params\":{{\"line\":0,\"col\":{},\"ty\":\"point_select\"}}}}}}\n{{\"method\":\"edit\",\"params\":{{\"view_id\":\"view-id-1\",\"method\":\"gesture\",\"params\":{{\"line\":0,\"col\":{},\"ty\":\"range_select\"}}}}}}\n{{\"method\":\"edit\",\"params\":{{\"view_id\":\"view-id-1\",\"method\":\"move_parent_node_end\",\"params\":[]}}}}",
+        source, bar, bar_end
+    );
+    let json = make_reader(&cmds);
+    assert!(rpc_looper.mainloop(|| json, &mut state).is_ok());
+
+    let mut last_selection = None;
+    while let Some(Ok(resp)) = rx.next_timeout(Duration::from_millis(100)) {
+        if !resp.is_response() && resp.get_method().unwrap() == "update" {
+            last_selection = selection_ranges_from_update(&resp.0);
+        }
+    }
+
+    assert_eq!(last_selection, Some(vec![[0, parent_end, 0, parent_end]]));
+}
+
+fn selection_ranges_from_update(message: &Value) -> Option<Vec<[u64; 4]>> {
+    let annotations = message.get("params")?.get("update")?.get("annotations")?.as_array()?;
+    let selection = annotations.iter().find(|annotation| {
+        annotation.get("type") == Some(&Value::String(String::from("selection")))
+    })?;
+    let ranges = selection.get("ranges")?.as_array()?;
+    Some(
+        ranges
+            .iter()
+            .map(|range| {
+                let items = range.as_array().unwrap();
+                [
+                    items[0].as_u64().unwrap(),
+                    items[1].as_u64().unwrap(),
+                    items[2].as_u64().unwrap(),
+                    items[3].as_u64().unwrap(),
+                ]
+            })
+            .collect(),
+    )
+}
+
 //TODO: test saving rpc
 //TODO: test plugin rpc
 
@@ -322,4 +428,6 @@ const OTHER_EDIT_RPCS: &str = r#"{"method":"edit","params":{"view_id":"view-id-1
 {"method":"edit","params":{"view_id":"view-id-1","method":"highlight_find","params":{"visible":true}}}
 {"method":"edit","params":{"view_id":"view-id-1","method":"selection_for_find","params":{"case_sensitive":true}}}
 {"method":"edit","params":{"view_id":"view-id-1","method":"replace","params":{"chars":"a"}}}
-{"method":"edit","params":{"view_id":"view-id-1","method":"selection_for_replace","params":[]}}"#;
+{"method":"edit","params":{"view_id":"view-id-1","method":"selection_for_replace","params":[]}}
+{"method":"edit","params":{"view_id":"view-id-1","method":"move_parent_node_start","params":[]}}
+{"method":"edit","params":{"view_id":"view-id-1","method":"move_parent_node_end","params":[]}}"#;
