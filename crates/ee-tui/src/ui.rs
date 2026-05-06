@@ -912,7 +912,9 @@ fn render_buffer(
     }
 
     let hl_span = visible.last().copied().unwrap_or(top).saturating_sub(top) + 1;
-    let hl_lines = app.highlighter.highlight_visible(&buf.lines, extension, top, hl_span);
+    let syntax_name = app.syntax_overrides.get(&buf.id).map(String::as_str);
+    let hl_lines =
+        app.highlighter.highlight_visible(&buf.lines, syntax_name, extension, top, hl_span);
 
     let text: Vec<Line> = visible
         .iter()

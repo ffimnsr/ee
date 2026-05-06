@@ -149,6 +149,24 @@ impl RegisterStore {
     pub(crate) fn set_search(&mut self, pattern: String) {
         self.search = pattern;
     }
+
+    pub(crate) fn clear(&mut self, reg: Option<&RegisterName>) {
+        match reg {
+            None => *self = Self::new(),
+            Some(RegisterName::Unnamed) => self.unnamed.clear(),
+            Some(RegisterName::Zero) => self.zero.clear(),
+            Some(RegisterName::Numbered(n)) => {
+                let idx = n.saturating_sub(1).min(8) as usize;
+                self.numbered[idx].clear();
+            }
+            Some(RegisterName::Named(c)) => {
+                self.named.remove(c);
+            }
+            Some(RegisterName::BlackHole) => {}
+            Some(RegisterName::Search) => self.search.clear(),
+            Some(RegisterName::Clipboard) => write_clipboard(""),
+        }
+    }
 }
 
 // ── Clipboard helpers ────────────────────────────────────────────────────────

@@ -303,6 +303,11 @@ fn run_app(
         // Write crash-recovery artifacts every ~30 s for modified buffers.
         app.write_recovery_if_due();
 
+        if app.redraw_requested {
+            terminal.clear()?;
+            app.redraw_requested = false;
+        }
+
         let size = terminal.size()?;
         let term_rect =
             ratatui::layout::Rect { x: 0, y: 0, width: size.width, height: size.height };

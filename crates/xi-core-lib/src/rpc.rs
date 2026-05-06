@@ -28,6 +28,7 @@ use serde_json::{self, Value, json};
 
 use crate::config::{ConfigDomainExternal, Table};
 use crate::plugins::PlaceholderRpc;
+use crate::plugins::rpc::SelectionRange;
 use crate::tabs::ViewId;
 use crate::view::Size;
 
@@ -225,7 +226,9 @@ pub enum CoreRequest {
     ///
     /// Returns the view identifier that should be used to interact
     /// with the newly created view.
-    NewView { file_path: Option<String> },
+    NewView {
+        file_path: Option<String>,
+    },
     SubstitutePreview {
         view_id: ViewId,
         start_line: usize,
@@ -234,6 +237,28 @@ pub enum CoreRequest {
         replacement: String,
         global: bool,
         case_sensitive: bool,
+    },
+    FilterSelectionsPreview {
+        view_id: ViewId,
+        pattern: String,
+        #[serde(default)]
+        remove: bool,
+    },
+    SelectedTextPreview {
+        view_id: ViewId,
+        #[serde(default)]
+        linewise: bool,
+    },
+    BlockTextPreview {
+        view_id: ViewId,
+        start_line: usize,
+        end_line: usize,
+        left_col: usize,
+        right_col: usize,
+    },
+    SelectCharsPreview {
+        view_id: ViewId,
+        count: usize,
     },
 }
 
@@ -496,6 +521,14 @@ pub enum EditNotification {
     EnsureSelectionsForward,
     KeepPrimarySelection,
     RemovePrimarySelection,
+    ExpandSelection,
+    ShrinkSelection,
+    SelectPrevSibling,
+    SelectNextSibling,
+    SelectAllSiblings,
+    SelectAllChildren,
+    MoveParentNodeStart,
+    MoveParentNodeEnd,
     RotateSelectionContentsBackward,
     RotateSelectionContentsForward,
     RequestHover {
@@ -536,6 +569,52 @@ pub enum EditNotification {
     },
     ApplyLineReplacements {
         replacements: Vec<LineReplacement>,
+    },
+    SetSelections {
+        selections: Vec<SelectionRange>,
+    },
+    GotoColumn {
+        display_col: usize,
+        #[serde(default)]
+        modify_selection: bool,
+    },
+    AddNewlineAbove,
+    AddNewlineBelow,
+    JoinSelections {
+        #[serde(default)]
+        select_space: bool,
+    },
+    ExtendLineBelow {
+        count: usize,
+    },
+    ExtendToLineBounds,
+    ShrinkToLineBounds,
+    MoveWordStart {
+        #[serde(default)]
+        forward: bool,
+        #[serde(default)]
+        long_word: bool,
+        #[serde(default)]
+        modify_selection: bool,
+    },
+    MoveWordEnd {
+        #[serde(default)]
+        long_word: bool,
+        #[serde(default)]
+        modify_selection: bool,
+    },
+    FindChar {
+        target: char,
+        #[serde(default)]
+        forward: bool,
+        #[serde(default)]
+        inclusive: bool,
+        #[serde(default)]
+        modify_selection: bool,
+    },
+    MoveToMatchingBracket {
+        #[serde(default)]
+        modify_selection: bool,
     },
     SelectionIntoLines,
     DuplicateLine,

@@ -45,6 +45,7 @@ use crate::file::FileManager;
 use crate::line_ending::LineEnding;
 use crate::plugin_rpc::{PluginNotification, PluginRequest};
 use crate::plugins::rpc::ClientPluginInfo;
+use crate::plugins::rpc::SelectionRange;
 use crate::plugins::{
     Plugin, PluginCatalog, PluginDescription, PluginPid, PluginStartError, PluginStartErrorKind,
     PluginTerminationReason, start_plugin_process,
@@ -327,6 +328,16 @@ impl CoreState {
                 global,
                 case_sensitive,
             ),
+            FilterSelectionsPreview { view_id, pattern, remove } => {
+                self.do_filter_selections_preview(view_id, &pattern, remove)
+            }
+            SelectedTextPreview { view_id, linewise } => {
+                self.do_selected_text_preview(view_id, linewise)
+            }
+            BlockTextPreview { view_id, start_line, end_line, left_col, right_col } => {
+                self.do_block_text_preview(view_id, start_line, end_line, left_col, right_col)
+            }
+            SelectCharsPreview { view_id, count } => self.do_select_chars_preview(view_id, count),
         }
     }
 
@@ -334,6 +345,42 @@ impl CoreState {
         if let Some(mut edit_ctx) = self.make_context(view_id) {
             edit_ctx.do_edit(cmd);
         }
+    }
+
+    fn do_select_chars_preview(
+        &mut self,
+        view_id: ViewId,
+        count: usize,
+    ) -> Result<Value, RemoteError> {
+        let mut ctx = self
+            .make_context(view_id)
+            .ok_or_else(|| RemoteError::custom(404, "missing view", None))?;
+        Ok(json!(ctx.preview_select_chars(count)))
+    }
+
+    fn do_selected_text_preview(
+        &mut self,
+        view_id: ViewId,
+        linewise: bool,
+    ) -> Result<Value, RemoteError> {
+        let mut ctx = self
+            .make_context(view_id)
+            .ok_or_else(|| RemoteError::custom(404, "missing view", None))?;
+        Ok(json!(ctx.preview_selected_text(linewise)))
+    }
+
+    fn do_block_text_preview(
+        &mut self,
+        view_id: ViewId,
+        start_line: usize,
+        end_line: usize,
+        left_col: usize,
+        right_col: usize,
+    ) -> Result<Value, RemoteError> {
+        let mut ctx = self
+            .make_context(view_id)
+            .ok_or_else(|| RemoteError::custom(404, "missing view", None))?;
+        Ok(json!(ctx.preview_block_text(start_line, end_line, left_col, right_col)))
     }
 
     fn do_set_config(&mut self, domain: ConfigDomainExternal, changes: Table) {
@@ -396,6 +443,17 @@ impl CoreState {
             global,
             case_sensitive,
         )?))
+    }
+
+    fn do_filter_selections_preview(
+        &mut self,
+        view_id: ViewId,
+        pattern: &str,
+        remove: bool,
+    ) -> Result<Value, RemoteError> {
+        let mut ctx = self.make_context(view_id).ok_or_not_found("view not found")?;
+        let selections: Vec<SelectionRange> = ctx.preview_filter_selections(pattern, remove)?;
+        Ok(json!(selections))
     }
 
     fn do_save<P>(&mut self, view_id: ViewId, path: P)

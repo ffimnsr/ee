@@ -1,17 +1,21 @@
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+#[cfg(test)]
 fn is_word_char(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
 }
 
+#[cfg(test)]
 fn is_long_word_char(ch: char) -> bool {
     !ch.is_whitespace()
 }
 
+#[cfg(test)]
 fn is_motion_char(ch: char, long_word: bool) -> bool {
     if long_word { is_long_word_char(ch) } else { is_word_char(ch) }
 }
 
+#[cfg(test)]
 fn char_at(line: &str, byte: usize) -> Option<char> {
     line.get(byte..)?.chars().next()
 }
@@ -40,16 +44,19 @@ pub(crate) fn display_col_to_byte(line: &str, display_col: usize) -> usize {
     line.len()
 }
 
+#[cfg(test)]
 pub(crate) fn find_char_forward(line: &str, from_byte: usize, target: char) -> Option<usize> {
     let skip = line[from_byte..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
     let start = from_byte + skip;
     line[start..].char_indices().find(|(_, c)| *c == target).map(|(off, _)| start + off)
 }
 
+#[cfg(test)]
 pub(crate) fn find_char_backward(line: &str, before_byte: usize, target: char) -> Option<usize> {
     line[..before_byte].char_indices().rfind(|(_, c)| *c == target).map(|(off, _)| off)
 }
 
+#[cfg(test)]
 pub(crate) fn prev_char_start(line: &str, byte: usize) -> usize {
     let mut idx = byte.saturating_sub(1);
     while idx > 0 && !line.is_char_boundary(idx) {
@@ -58,10 +65,12 @@ pub(crate) fn prev_char_start(line: &str, byte: usize) -> usize {
     idx
 }
 
+#[cfg(test)]
 pub(crate) fn next_char_start(line: &str, byte: usize) -> usize {
     line[byte..].chars().next().map(|c| byte + c.len_utf8()).unwrap_or(byte)
 }
 
+#[cfg(test)]
 pub(crate) fn next_word_start(line: &str, byte: usize, long_word: bool) -> Option<usize> {
     let mut idx = previous_char_boundary(line, byte.min(line.len()));
     let mut chars = line.get(idx..)?.chars();
@@ -87,6 +96,7 @@ pub(crate) fn next_word_start(line: &str, byte: usize, long_word: bool) -> Optio
     None
 }
 
+#[cfg(test)]
 pub(crate) fn prev_word_start(line: &str, byte: usize, long_word: bool) -> Option<usize> {
     if line.is_empty() || byte == 0 {
         return None;
@@ -117,6 +127,7 @@ pub(crate) fn prev_word_start(line: &str, byte: usize, long_word: bool) -> Optio
     Some(idx)
 }
 
+#[cfg(test)]
 pub(crate) fn next_word_end(line: &str, byte: usize, long_word: bool) -> Option<usize> {
     let mut idx = previous_char_boundary(line, byte.min(line.len()));
 

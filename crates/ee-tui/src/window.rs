@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use ratatui::layout::Rect;
 
@@ -175,6 +176,19 @@ impl WindowLayout {
         self.windows[self.focused].buffer_id = buffer_id;
     }
 
+    pub(crate) fn retarget_invalid_buffers(
+        &mut self,
+        valid_buffers: &HashSet<BufferId>,
+        fallback: BufferId,
+    ) {
+        for window in &mut self.windows {
+            if !valid_buffers.contains(&window.buffer_id) {
+                window.buffer_id = fallback;
+                window.saved_viewport = Viewport::default();
+            }
+        }
+    }
+
     /// Get the effective viewport for a window: the live `active_viewport` for
     /// the focused window, or the window's saved viewport for all others.
     pub(crate) fn viewport_for_window(
@@ -323,6 +337,16 @@ impl TabManager {
         }
         self.tabs = tabs;
         self.focused = focused.min(self.tabs.len().saturating_sub(1));
+    }
+
+    pub(crate) fn retarget_invalid_buffers(
+        &mut self,
+        valid_buffers: &HashSet<BufferId>,
+        fallback: BufferId,
+    ) {
+        for tab in &mut self.tabs {
+            tab.windows.retarget_invalid_buffers(valid_buffers, fallback);
+        }
     }
 }
 

@@ -3831,6 +3831,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-python",
  "tree-sitter-rust",
+ "unicode-width 0.2.0",
  "wasmtime",
  "windows-sys 0.61.2",
  "xi-rope",

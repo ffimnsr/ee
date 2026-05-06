@@ -60,6 +60,9 @@ pub struct View {
     /// The selection state for this view. Invariant: non-empty.
     selection: Selection,
 
+    /// Previous syntax-object selections used by `shrink_selection`.
+    object_selection_history: Vec<Selection>,
+
     drag_state: Option<DragState>,
 
     /// vertical scroll position
@@ -170,6 +173,7 @@ impl View {
             buffer_id,
             pending_render: false,
             selection: SelRegion::caret(0).into(),
+            object_selection_history: Vec::new(),
             scroll_to: Some(0),
             size: Size::default(),
             drag_state: None,
@@ -756,6 +760,14 @@ impl View {
     /// Returns the regions of the current selection.
     pub fn sel_regions(&self) -> &[SelRegion] {
         &self.selection
+    }
+
+    pub(crate) fn selection(&self) -> &Selection {
+        &self.selection
+    }
+
+    pub(crate) fn syntax_selection_history_mut(&mut self) -> &mut Vec<Selection> {
+        &mut self.object_selection_history
     }
 
     /// Collapse all selections in this view into a single caret

@@ -201,6 +201,8 @@ pub(crate) struct App {
     pub(super) history_idx: Option<usize>,
     /// Saved `command_buffer` snapshot taken before history navigation began.
     pub(super) history_draft: String,
+    /// Per-buffer syntax override set via `:set_language`.
+    pub(crate) syntax_overrides: HashMap<crate::buffer::BufferId, String>,
     // ── Picker overlay ─────────────────────────────────────────────────────
     /// Active picker overlay (file picker, buffer picker, live grep).
     pub(crate) picker: Option<PickerState>,
@@ -239,6 +241,8 @@ pub(crate) struct App {
     // ── Substitute confirm state ──────────────────────────────────────────────────
     /// Pending substitutions awaiting `y`/`n`/`a`/`q` confirmation.
     pub(crate) substitute_pending: Option<SubstitutePending>,
+    /// Force next frame to clear and redraw the terminal surface.
+    pub(crate) redraw_requested: bool,
 }
 
 impl App {
@@ -292,6 +296,7 @@ impl App {
             command_history: Vec::new(),
             history_idx: None,
             history_draft: String::new(),
+            syntax_overrides: HashMap::new(),
             picker: None,
             quickfix: None,
             quickfix_open: false,
@@ -307,6 +312,7 @@ impl App {
             hover_popup: None,
             source_control: HashMap::new(),
             substitute_pending: None,
+            redraw_requested: false,
         })
     }
 }
