@@ -112,6 +112,15 @@ impl WindowLayout {
         Some(new_vp)
     }
 
+    pub(crate) fn close_others(&mut self, active_viewport: Viewport) -> Viewport {
+        self.windows[self.focused].saved_viewport = active_viewport;
+        let focused = self.windows[self.focused].clone();
+        let viewport = focused.saved_viewport;
+        self.windows = vec![focused];
+        self.focused = 0;
+        viewport
+    }
+
     /// Move focus to the next window (wrapping), returning the viewport to
     /// restore into `App.viewport`.
     pub(crate) fn focus_next(&mut self, active_viewport: Viewport) -> Viewport {
@@ -172,6 +181,13 @@ impl WindowLayout {
         self.windows.swap(self.focused, target);
         self.focused = target;
         true
+    }
+
+    pub(crate) fn transpose(&mut self) {
+        self.split_dir = match self.split_dir {
+            SplitDir::Horizontal => SplitDir::Vertical,
+            SplitDir::Vertical => SplitDir::Horizontal,
+        };
     }
 
     /// Return an iterator over `(window, rect)` pairs given the total area.

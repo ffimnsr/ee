@@ -1,0 +1,6 @@
+*.txt
+!/bible.txt
+!/world92.txt
+!/world03.txt
+!/world09.txt
+!/pi.txt

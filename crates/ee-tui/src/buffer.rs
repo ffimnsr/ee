@@ -181,30 +181,8 @@ impl BufState {
         self.cursor_col = previous_char_boundary(&self.lines[self.cursor_line], self.cursor_col);
     }
 
-    pub(crate) fn request_invalidated_lines(
-        &mut self,
-        tx: &mpsc::Sender<String>,
-    ) -> io::Result<()> {
-        if self.pending_line_request || self.view_id.is_empty() {
-            return Ok(());
-        }
-        let invalid_ranges = invalid_line_ranges(&self.line_cache);
-        if invalid_ranges.is_empty() {
-            return Ok(());
-        }
-        for (start, end) in invalid_ranges {
-            send_xi_notification(
-                tx,
-                "edit",
-                json!({
-                    "view_id": self.view_id,
-                    "method": "request_lines",
-                    "params": [start, end],
-                }),
-            )?;
-        }
-        self.pending_line_request = true;
-        Ok(())
+    pub(crate) fn is_fully_cached(&self) -> bool {
+        self.line_cache.iter().all(|slot| matches!(slot, LineSlot::Known(_)))
     }
 }
 
@@ -299,6 +277,8 @@ impl Drop for BufferManager {
 }
 
 impl BufferManager {
+    const SYNC_IDLE_LIMIT: usize = 6;
+
     /// Create a new xi-core process and open `path` (or a scratch buffer) as
     /// the initial view.
     pub(crate) fn new(path: Option<PathBuf>) -> io::Result<Self> {
@@ -842,6 +822,22 @@ impl BufferManager {
         self.send_edit("apply_line_replacements", json!({ "replacements": replacements }))
     }
 
+    pub(crate) fn replace_line_range(
+        &mut self,
+        start_line: usize,
+        end_line: usize,
+        lines: &[String],
+    ) -> io::Result<()> {
+        self.send_edit(
+            "replace_line_range",
+            json!({
+                "start_line": start_line,
+                "end_line": end_line,
+                "lines": lines,
+            }),
+        )
+    }
+
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn paste_register(&mut self, chars: &str, before: bool) -> io::Result<()> {
@@ -899,38 +895,44 @@ impl BufferManager {
     }
 
     fn pump_init(&mut self) -> io::Result<()> {
+        let mut idle_rounds = 0;
         loop {
             if invalid_line_ranges(&self.bufs[self.current].line_cache).is_empty() {
                 break;
             }
             match recv_with_timeout(&mut self.backend_rx, Duration::from_millis(20)) {
                 Some(event) => {
+                    idle_rounds = 0;
                     self.apply_event_to_buffer(event)?;
                     while let Ok(event) = self.backend_rx.try_recv() {
                         self.apply_event_to_buffer(event)?;
                     }
                 }
-                None => break,
+                None => {
+                    idle_rounds += 1;
+                    if idle_rounds >= Self::SYNC_IDLE_LIMIT {
+                        break;
+                    }
+                }
             }
         }
         Ok(())
     }
 
     fn apply_event_to_buffer(&mut self, event: BackendEvent) -> io::Result<()> {
-        let tx = self.tx.clone();
         let current = self.current;
         match event {
             BackendEvent::Update { ref view_id, .. }
             | BackendEvent::ScrollTo { ref view_id, .. } => {
                 let idx = self.view_to_idx.get(view_id).copied().unwrap_or(current);
-                let buf = &mut self.bufs[idx];
                 match event {
                     BackendEvent::Update { update, .. } => {
+                        let buf = &mut self.bufs[idx];
                         buf.pending_line_request = false;
                         buf.apply_update(update)?;
-                        buf.request_invalidated_lines(&tx)?;
                     }
                     BackendEvent::ScrollTo { line, col, .. } => {
+                        let buf = &mut self.bufs[idx];
                         buf.cursor_line = line;
                         buf.cursor_col = col;
                         buf.clamp_cursor();
@@ -938,7 +940,7 @@ impl BufferManager {
                     _ => unreachable!(),
                 }
 
-                if !buf.editor_config_synced {
+                if !self.bufs[idx].editor_config_synced {
                     self.sync_buffer_editor_config(idx)?;
                 }
             }
@@ -988,6 +990,46 @@ impl BufferManager {
                     format!("code actions: {count}")
                 });
             }
+        }
+        Ok(())
+    }
+
+    fn request_invalid_lines(&mut self, idx: usize) -> io::Result<()> {
+        let Some(buf) = self.bufs.get_mut(idx) else { return Ok(()) };
+        if buf.pending_line_request || buf.view_id.is_empty() {
+            return Ok(());
+        }
+
+        let invalid_ranges = invalid_line_ranges(&buf.line_cache);
+        if invalid_ranges.is_empty() {
+            return Ok(());
+        }
+
+        let view_id = buf.view_id.clone();
+        for (start, end) in invalid_ranges {
+            send_rpc_notification(
+                &self.tx,
+                "edit",
+                json!({
+                    "view_id": view_id,
+                    "method": "request_lines",
+                    "params": [start, end],
+                }),
+            )?;
+        }
+        buf.pending_line_request = true;
+        Ok(())
+    }
+
+    fn has_pending_line_work(&self) -> bool {
+        self.bufs
+            .iter()
+            .any(|buf| buf.pending_line_request || !invalid_line_ranges(&buf.line_cache).is_empty())
+    }
+
+    fn request_all_invalid_lines(&mut self) -> io::Result<()> {
+        for idx in 0..self.bufs.len() {
+            self.request_invalid_lines(idx)?;
         }
         Ok(())
     }
@@ -1236,15 +1278,24 @@ impl BufferManager {
     }
 
     pub(crate) fn sync_pending_events(&mut self) -> io::Result<()> {
-        for _ in 0..6 {
+        let mut idle_rounds = 0;
+        for _ in 0..24 {
+            self.request_all_invalid_lines()?;
             match recv_with_timeout(&mut self.backend_rx, Duration::from_millis(10)) {
                 Some(event) => {
+                    idle_rounds = 0;
                     self.apply_event_to_buffer(event)?;
                     while let Ok(event) = self.backend_rx.try_recv() {
                         self.apply_event_to_buffer(event)?;
                     }
                 }
-                None => break,
+                None if self.has_pending_line_work() => continue,
+                None => {
+                    idle_rounds += 1;
+                    if idle_rounds >= Self::SYNC_IDLE_LIMIT {
+                        break;
+                    }
+                }
             }
         }
         Ok(())

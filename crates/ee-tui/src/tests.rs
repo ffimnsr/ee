@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc;
 use std::sync::mpsc::TryRecvError;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -36,6 +37,25 @@ use crate::text::{
     next_char_start, next_word_end, next_word_start, prev_char_start, prev_word_start,
 };
 use crate::ui::ui;
+
+fn cwd_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+struct CurrentDirGuard(PathBuf);
+
+impl CurrentDirGuard {
+    fn capture() -> Self {
+        Self(env::current_dir().unwrap())
+    }
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        let _ = env::set_current_dir(&self.0);
+    }
+}
 
 #[test]
 fn scratch_title_is_default() {
@@ -318,6 +338,63 @@ fn apply_update_merges_copy_update_insert_and_invalidate() {
 }
 
 #[test]
+fn core_update_keeps_invalid_lines_lazy() {
+    let (tx, rx) = mpsc::channel();
+    let (backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    backend_tx
+        .send(BackendEvent::Update {
+            view_id: String::from("view-id-1"),
+            update: CoreUpdate {
+                pristine: true,
+                annotations: Vec::new(),
+                ops: vec![
+                    CoreUpdateOp {
+                        op: CoreUpdateKind::Insert,
+                        n: 1,
+                        lines: vec![CoreLine {
+                            text: Some(String::from("visible")),
+                            cursor: Vec::new(),
+                            syntax_spans: None,
+                        }],
+                    },
+                    CoreUpdateOp { op: CoreUpdateKind::Invalidate, n: 100_000, lines: Vec::new() },
+                ],
+            },
+        })
+        .unwrap();
+
+    client.drain_events().unwrap();
+
+    assert_eq!(client.lines.first().map(String::as_str), Some("visible"));
+    assert_eq!(client.lines.len(), 100_001);
+    assert_eq!(invalid_line_ranges(&client.line_cache), vec![(1, 100_001)]);
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
+fn source_control_skips_lazy_line_cache() {
+    let (tx, _rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.line_cache = vec![
+        LineSlot::Known(CachedLine {
+            text: String::from("visible"),
+            cursors: Vec::new(),
+            syntax_spans: Vec::new(),
+        }),
+        LineSlot::Invalid,
+    ];
+    app.backend.rebuild_lines();
+
+    app.refresh_source_control();
+
+    assert!(app.source_control.is_empty());
+}
+
+#[test]
 fn parse_notification_decodes_syntax_spans_in_update_lines() {
     let event = parse_notification(
         "update",
@@ -350,7 +427,7 @@ fn parse_notification_decodes_syntax_spans_in_update_lines() {
 }
 
 #[test]
-fn open_file_bootstraps_full_buffer_from_updates() {
+fn open_file_bootstraps_visible_lines_lazily() {
     let path = unique_temp_path("ee-tui-open");
     let contents = (0..24).map(|i| format!("line-{i}")).collect::<Vec<_>>().join("\n");
     fs::write(&path, &contents).unwrap();
@@ -358,7 +435,10 @@ fn open_file_bootstraps_full_buffer_from_updates() {
     let app = App::from_path(Some(path.clone())).unwrap();
 
     fs::remove_file(&path).unwrap();
-    assert_eq!(app.backend.lines, contents.split('\n').map(ToOwned::to_owned).collect::<Vec<_>>());
+    let expected = contents.split('\n').map(ToOwned::to_owned).collect::<Vec<_>>();
+    assert_eq!(&app.backend.lines[..12], &expected[..12]);
+    assert_eq!(app.backend.lines.len(), expected.len());
+    assert_eq!(invalid_line_ranges(&app.backend.line_cache), vec![(12, 24)]);
 }
 
 #[test]
@@ -894,6 +974,21 @@ fn definition_command_uses_backend_edit() {
 }
 
 #[test]
+fn commit_undo_checkpoint_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    run_ex(&mut app, "commit_undo_checkpoint");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "commit_undo_checkpoint");
+}
+
+#[test]
 fn goto_lsp_commands_use_backend_edit() {
     let commands = [
         ("goto_declaration", "request_declaration"),
@@ -1112,8 +1207,9 @@ fn last_picker_command_reopens_previous_picker() {
 
 #[test]
 fn changed_file_picker_command_opens_picker() {
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
     let temp = tempfile::tempdir().unwrap();
-    let cwd = env::current_dir().unwrap();
     env::set_current_dir(temp.path()).unwrap();
 
     let file = temp.path().join("sample.rs");
@@ -1136,12 +1232,39 @@ fn changed_file_picker_command_opens_picker() {
     let mut app = App::from_path(Some(file.clone())).unwrap();
     run_ex(&mut app, "changed_file_picker");
 
-    env::set_current_dir(cwd).unwrap();
-
     let picker = app.picker.as_ref().expect("changed file picker should open");
     assert_eq!(picker.kind, PickerKind::Locations);
     assert_eq!(picker.title, "Changed Files");
     assert!(picker.visible_items_range(0, 8).iter().any(|item| item.contains("sample.rs")));
+}
+
+#[test]
+fn file_explorer_command_opens_workspace_root_picker() {
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    let temp = tempfile::tempdir().unwrap();
+    env::set_current_dir(temp.path()).unwrap();
+
+    let nested = temp.path().join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    let root_file = temp.path().join("root.txt");
+    let nested_file = nested.join("sample.rs");
+    fs::write(&root_file, "root\n").unwrap();
+    fs::write(&nested_file, "fn main() {}\n").unwrap();
+    Command::new("git").arg("init").current_dir(temp.path()).output().unwrap();
+
+    let mut app = App::from_path(Some(nested_file)).unwrap();
+    run_ex(&mut app, "file_explorer");
+
+    let picker = app.picker.as_ref().expect("file explorer should open");
+    assert_eq!(picker.kind, PickerKind::Files);
+    assert_eq!(picker.title, "Explorer");
+    assert!(
+        picker
+            .visible_items_range(0, picker.visible_count())
+            .iter()
+            .any(|item| item.contains("root.txt"))
+    );
 }
 
 #[test]
@@ -3560,7 +3683,8 @@ action = "request_hover"
     )
     .unwrap();
 
-    let cwd = env::current_dir().unwrap();
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
     env::set_current_dir(temp.path()).unwrap();
 
     let (tx, rx) = mpsc::channel();
@@ -3573,8 +3697,6 @@ action = "request_hover"
 
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::NONE)));
     let message = rx.recv().expect("message should be sent");
-
-    env::set_current_dir(cwd).unwrap();
 
     let value: Value = serde_json::from_str(&message).expect("message should be json");
     assert_eq!(value["method"], "edit");
@@ -3942,6 +4064,38 @@ fn view_rotation_and_directional_jump_commands_follow_split_axis() {
 }
 
 #[test]
+fn reverse_transpose_and_window_close_commands_manage_views() {
+    let first = unique_temp_path("ee-tui-view-rev-a");
+    let second = unique_temp_path("ee-tui-view-rev-b");
+    let third = unique_temp_path("ee-tui-view-rev-c");
+    fs::write(&first, "one\n").unwrap();
+    fs::write(&second, "two\n").unwrap();
+    fs::write(&third, "three\n").unwrap();
+
+    let mut app = App::from_path(Some(first.clone())).unwrap();
+    run_ex(&mut app, &format!("vs {}", second.display()));
+    run_ex(&mut app, &format!("vs {}", third.display()));
+
+    run_ex(&mut app, "rotate_view_reverse");
+    assert_eq!(app.backend.active().path.as_ref(), Some(&second));
+
+    run_ex(&mut app, "transpose_view");
+    assert_eq!(app.tabs.focused_windows().split_dir, crate::window::SplitDir::Horizontal);
+
+    run_ex(&mut app, "wclose");
+    assert_eq!(window_paths(&app), vec![first.clone(), third.clone()]);
+    assert_eq!(app.backend.active().path.as_ref(), Some(&third));
+
+    run_ex(&mut app, "wonly");
+    assert_eq!(window_paths(&app), vec![third.clone()]);
+    assert_eq!(app.backend.active().path.as_ref(), Some(&third));
+
+    let _ = fs::remove_file(&first);
+    let _ = fs::remove_file(&second);
+    let _ = fs::remove_file(&third);
+}
+
+#[test]
 fn swap_view_commands_reorder_windows_on_matching_axis() {
     let first = unique_temp_path("ee-tui-swap-a");
     let second = unique_temp_path("ee-tui-swap-b");
@@ -3984,6 +4138,10 @@ fn swap_view_commands_reorder_windows_on_matching_axis() {
 fn parse_action_spec_accepts_view_command_names() {
     assert_eq!(parse_action_spec("rotate_view").unwrap(), Action::RotateView);
     assert_eq!(parse_action_spec("cycle_view").unwrap(), Action::RotateView);
+    assert_eq!(parse_action_spec("rotate_view_reverse").unwrap(), Action::RotateViewReverse);
+    assert_eq!(parse_action_spec("transpose_view").unwrap(), Action::TransposeView);
+    assert_eq!(parse_action_spec("wclose").unwrap(), Action::WindowClose);
+    assert_eq!(parse_action_spec("wonly").unwrap(), Action::WindowOnly);
     assert_eq!(parse_action_spec("jump_view_left").unwrap(), Action::JumpViewLeft);
     assert_eq!(parse_action_spec("jump_view_down").unwrap(), Action::JumpViewDown);
     assert_eq!(parse_action_spec("jump_view_up").unwrap(), Action::JumpViewUp);
@@ -3992,6 +4150,16 @@ fn parse_action_spec_accepts_view_command_names() {
     assert_eq!(parse_action_spec("swap_view_down").unwrap(), Action::SwapViewDown);
     assert_eq!(parse_action_spec("swap_view_up").unwrap(), Action::SwapViewUp);
     assert_eq!(parse_action_spec("swap_view_right").unwrap(), Action::SwapViewRight);
+    assert_eq!(parse_action_spec("file_explorer").unwrap(), Action::FileExplorer);
+    assert_eq!(
+        parse_action_spec("file_explorer_in_current_buffer_directory").unwrap(),
+        Action::FileExplorerInCurrentBufferDirectory
+    );
+    assert_eq!(
+        parse_action_spec("file_explorer_in_current_directory").unwrap(),
+        Action::FileExplorerInCurrentDirectory
+    );
+    assert_eq!(parse_action_spec("commit_undo_checkpoint").unwrap(), Action::CommitUndoCheckpoint);
     assert_eq!(parse_action_spec("shell_pipe").unwrap(), Action::PrefillCommandLine("pipe "));
     assert_eq!(
         parse_action_spec("shell_insert_output").unwrap(),
@@ -4189,10 +4357,11 @@ fn move_command_moves_dirty_buffer_to_new_path() {
 
 #[test]
 fn reload_config_refreshes_runtime_settings() {
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
     let temp = tempfile::tempdir().unwrap();
     fs::write(temp.path().join(".ee.toml"), "cursor_line = false\n").unwrap();
 
-    let cwd = env::current_dir().unwrap();
     env::set_current_dir(temp.path()).unwrap();
 
     let mut app = App::from_path(None).unwrap();
@@ -4200,8 +4369,6 @@ fn reload_config_refreshes_runtime_settings() {
 
     fs::write(temp.path().join(".ee.toml"), "cursor_line = true\n").unwrap();
     run_ex(&mut app, "reload_config");
-
-    env::set_current_dir(cwd).unwrap();
 
     assert!(app.config.cursor_line);
     assert_eq!(app.backend.status_message.as_deref(), Some("config reloaded"));
@@ -4244,8 +4411,9 @@ fn language_encoding_echo_register_and_redraw_commands_update_state() {
 
 #[test]
 fn cd_pwd_and_lsp_commands_update_status() {
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
     let temp = tempfile::tempdir().unwrap();
-    let cwd = env::current_dir().unwrap();
 
     let mut app = App::from_path(None).unwrap();
     run_ex(&mut app, &format!("cd {}", temp.path().display()));
@@ -4264,8 +4432,6 @@ fn cd_pwd_and_lsp_commands_update_status() {
 
     run_ex(&mut app, "lsp_stop");
     assert_eq!(app.backend.status_message.as_deref(), Some("lsp stop requested"));
-
-    env::set_current_dir(cwd).unwrap();
 }
 
 #[test]
@@ -4310,6 +4476,57 @@ fn pipe_to_and_append_output_commands_run_shell_without_replacing_buffer() {
     run_ex(&mut app, "shell_append_output printf z");
     app.backend.pump().unwrap();
     assert_eq!(app.backend.lines, vec![String::from("abzc")]);
+}
+
+#[test]
+fn sort_command_sorts_selected_lines_or_whole_buffer() {
+    let mut app = App::from_path(None).unwrap();
+    insert_text(&mut app, "keep\nccc\naaa\nbbb\nstay");
+    app.backend.pump().unwrap();
+
+    run_ex(&mut app, "2,4sort");
+    app.backend.pump().unwrap();
+    assert_eq!(
+        app.backend.lines,
+        vec![
+            String::from("keep"),
+            String::from("aaa"),
+            String::from("bbb"),
+            String::from("ccc"),
+            String::from("stay"),
+        ]
+    );
+
+    let mut whole = App::from_path(None).unwrap();
+    insert_text(&mut whole, "z\nc\na\nb");
+    whole.backend.pump().unwrap();
+    run_ex(&mut whole, "sort");
+    whole.backend.pump().unwrap();
+    assert_eq!(
+        whole.backend.lines,
+        vec![String::from("a"), String::from("b"), String::from("c"), String::from("z"),]
+    );
+}
+
+#[test]
+fn dedup_commands_remove_duplicate_lines() {
+    let mut app = App::from_path(None).unwrap();
+    insert_text(&mut app, "a\nb\na\nb\nc");
+    app.backend.pump().unwrap();
+
+    run_ex(&mut app, "dedup");
+    app.backend.pump().unwrap();
+    assert_eq!(app.backend.lines, vec![String::from("a"), String::from("b"), String::from("c")]);
+
+    let mut selected = App::from_path(None).unwrap();
+    insert_text(&mut selected, "keep\nx\nx\ny\nx");
+    selected.backend.pump().unwrap();
+    run_ex(&mut selected, "2,4uniq");
+    selected.backend.pump().unwrap();
+    assert_eq!(
+        selected.backend.lines,
+        vec![String::from("keep"), String::from("x"), String::from("y"), String::from("x"),]
+    );
 }
 
 #[test]

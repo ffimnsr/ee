@@ -591,6 +591,11 @@ pub enum EditNotification {
         #[serde(default)]
         append: bool,
     },
+    ReplaceLineRange {
+        start_line: usize,
+        end_line: usize,
+        lines: Vec<String>,
+    },
     ApplyLineReplacements {
         replacements: Vec<LineReplacement>,
     },
@@ -647,6 +652,7 @@ pub enum EditNotification {
     DuplicateLine,
     IncreaseNumber,
     DecreaseNumber,
+    CommitUndoCheckpoint,
     CollapseSelections,
 }
 

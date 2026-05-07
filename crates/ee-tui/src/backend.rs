@@ -555,7 +555,6 @@ impl XiClient {
             BackendEvent::Update { update, .. } => {
                 self.pending_line_request = false;
                 self.apply_update(update)?;
-                self.request_invalidated_lines()?;
             }
             BackendEvent::ScrollTo { line, col, .. } => {
                 self.cursor_line = line;

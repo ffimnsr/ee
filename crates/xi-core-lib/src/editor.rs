@@ -137,6 +137,11 @@ impl Editor {
         self.this_edit_type = EditType::Other
     }
 
+    pub(crate) fn commit_undo_checkpoint(&mut self) {
+        self.last_edit_type = EditType::Other;
+        self.this_edit_type = EditType::Other;
+    }
+
     pub(crate) fn set_pristine(&mut self) {
         self.pristine_rev_id = self.engine.get_head_rev_id();
     }
@@ -727,6 +732,30 @@ fn count_lines(s: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn insert_text(editor: &mut Editor, text: &str) {
+        let mut builder = DeltaBuilder::new(editor.get_buffer().len());
+        builder.replace(editor.get_buffer().len()..editor.get_buffer().len(), text.into());
+        editor.this_edit_type = EditType::InsertChars;
+        editor.add_delta(builder.build());
+        let _ = editor.commit_delta();
+        editor.update_edit_type();
+    }
+
+    #[test]
+    fn commit_undo_checkpoint_starts_new_undo_group() {
+        let mut editor = Editor::new();
+
+        insert_text(&mut editor, "a");
+        editor.commit_undo_checkpoint();
+        insert_text(&mut editor, "b");
+
+        editor.do_undo();
+        assert_eq!(editor.get_buffer().to_string(), "a");
+
+        editor.do_undo();
+        assert_eq!(editor.get_buffer().to_string(), "");
+    }
 
     #[test]
     fn plugin_edit() {
