@@ -134,6 +134,46 @@ pub(crate) fn line_comment_token(language_name: &str) -> Option<&'static str> {
     scope_to_line_comment(&scope_root)
 }
 
+fn scope_to_block_comment(scope_root: &str) -> Option<(&'static str, &'static str)> {
+    if scope_root.starts_with("source.rust")
+        || scope_root.starts_with("source.c")
+        || scope_root.starts_with("source.c++")
+        || scope_root.starts_with("source.objc")
+        || scope_root.starts_with("source.java")
+        || scope_root.starts_with("source.groovy")
+        || scope_root.starts_with("source.kotlin")
+        || scope_root.starts_with("source.scala")
+        || scope_root.starts_with("source.swift")
+        || scope_root.starts_with("source.cs")
+        || scope_root.starts_with("source.dart")
+        || scope_root.starts_with("source.js")
+        || scope_root.starts_with("source.ts")
+        || scope_root.starts_with("source.jsx")
+        || scope_root.starts_with("source.tsx")
+        || scope_root.starts_with("source.go")
+        || scope_root.starts_with("source.php")
+        || scope_root.starts_with("source.css")
+        || scope_root.starts_with("source.scss")
+        || scope_root.starts_with("source.less")
+        || scope_root.starts_with("source.sql")
+    {
+        return Some(("/*", "*/"));
+    }
+    if scope_root.starts_with("text.html")
+        || scope_root.starts_with("text.xml")
+        || scope_root.starts_with("text.sgml")
+    {
+        return Some(("<!--", "-->"));
+    }
+    None
+}
+
+pub(crate) fn block_comment_tokens(language_name: &str) -> Option<(&'static str, &'static str)> {
+    let syntax = SYNTAX_SET.find_syntax_by_name(language_name)?;
+    let scope_root = syntax.scope.to_string();
+    scope_to_block_comment(&scope_root)
+}
+
 // ---------------------------------------------------------------------------
 // Toggle-comment
 // ---------------------------------------------------------------------------
@@ -204,6 +244,66 @@ pub(crate) fn toggle_comment(
                 continue;
             }
             builder.replace(Interval::new(insert_offset, insert_offset), token_sp.clone().into());
+            changed = true;
+        }
+    }
+
+    if !changed {
+        return None;
+    }
+    Some(builder.build())
+}
+
+pub(crate) fn toggle_block_comment(
+    text: &Rope,
+    selections: &[(usize, usize)],
+    language_name: &str,
+) -> Option<RopeDelta> {
+    let (open, close) = block_comment_tokens(language_name)?;
+    let ranges = collect_comment_ranges(text, selections);
+    if ranges.is_empty() {
+        return None;
+    }
+
+    let all_commented = ranges.iter().all(|range| is_block_commented(text, range, open, close));
+    let mut builder = DeltaBuilder::new(text.len());
+    let mut changed = false;
+
+    for range in ranges {
+        let segment: String = text.slice_to_cow(range.start..range.end).into_owned();
+        let leading_ws = segment.len() - segment.trim_start().len();
+        let trailing_ws = segment.len() - segment.trim_end().len();
+        let inner_start = range.start + leading_ws;
+        let inner_end = range.end.saturating_sub(trailing_ws);
+        if inner_start >= inner_end {
+            continue;
+        }
+
+        if all_commented {
+            let inner = &segment[leading_ws..segment.len() - trailing_ws];
+            let after_open = inner.strip_prefix(open).unwrap_or(inner);
+            let open_remove_end = inner_start + (inner.len() - after_open.len());
+            let open_space_end = open_remove_end + usize::from(after_open.starts_with(' '));
+            if inner_start < open_space_end {
+                builder.delete(Interval::new(inner_start, open_space_end));
+                changed = true;
+            }
+
+            let before_close = after_open
+                .strip_suffix(close)
+                .unwrap_or_else(|| after_open.trim_end_matches(' ').strip_suffix(close).unwrap());
+            let close_keep_start = inner_end - (after_open.len() - before_close.len());
+            let close_remove_start = close_keep_start
+                .saturating_sub(usize::from(inner[..inner.len() - close.len()].ends_with(' ')));
+            if close_remove_start < inner_end {
+                builder.delete(Interval::new(close_remove_start, inner_end));
+                changed = true;
+            }
+        } else {
+            let prefix = if range.spaced { format!("{open} ") } else { open.to_owned() };
+            let suffix = if range.spaced { format!(" {close}") } else { close.to_owned() };
+            builder.replace(Interval::new(inner_start, inner_start), prefix.into());
+            builder.replace(Interval::new(inner_end, inner_end), suffix.into());
             changed = true;
         }
     }
@@ -354,6 +454,53 @@ fn collect_lines(line_ranges: &[(usize, usize)]) -> Vec<usize> {
     lines
 }
 
+#[derive(Clone, Copy)]
+struct CommentRange {
+    start: usize,
+    end: usize,
+    spaced: bool,
+}
+
+fn collect_comment_ranges(text: &Rope, selections: &[(usize, usize)]) -> Vec<CommentRange> {
+    let mut ranges = Vec::new();
+
+    for &(start, end) in selections {
+        if start == end {
+            let line = text.line_of_offset(start.min(text.len()));
+            let line_start = text.offset_of_line(line);
+            let total = text.measure::<xi_rope::LinesMetric>() + 1;
+            let line_end =
+                if line + 1 < total { text.offset_of_line(line + 1) } else { text.len() };
+            let raw: String = text.slice_to_cow(line_start..line_end).into_owned();
+            let content = raw.trim_end_matches('\n').trim_end_matches('\r');
+            let leading_ws = content.len() - content.trim_start().len();
+            let trailing_ws = content.len() - content.trim_end().len();
+            let inner_start = line_start + leading_ws;
+            let inner_end = line_start + content.len().saturating_sub(trailing_ws);
+            if inner_start < inner_end {
+                ranges.push(CommentRange { start: inner_start, end: inner_end, spaced: true });
+            }
+            continue;
+        }
+
+        let start = start.min(text.len());
+        let end = end.min(text.len());
+        if start < end {
+            ranges.push(CommentRange { start, end, spaced: false });
+        }
+    }
+
+    ranges.sort_unstable_by_key(|range| (range.start, range.end));
+    ranges.dedup_by(|right, left| right.start == left.start && right.end == left.end);
+    ranges
+}
+
+fn is_block_commented(text: &Rope, range: &CommentRange, open: &str, close: &str) -> bool {
+    let segment: String = text.slice_to_cow(range.start..range.end).into_owned();
+    let trimmed = segment.trim();
+    trimmed.starts_with(open) && trimmed.ends_with(close)
+}
+
 /// Return the text of line `ln` as a `String`, **without** a trailing newline.
 ///
 /// Returns an empty string if `ln` is beyond the end of the buffer.
@@ -411,6 +558,11 @@ mod tests {
     }
 
     #[test]
+    fn test_block_comment_tokens_css() {
+        assert_eq!(block_comment_tokens("CSS"), Some(("/*", "*/")));
+    }
+
+    #[test]
     fn test_toggle_comment_add() {
         let text = rope("fn main() {\n    let x = 1;\n}\n");
         let line_ranges = vec![(0usize, 0usize)];
@@ -456,6 +608,33 @@ mod tests {
         let result = apply_delta(text, delta);
         // Line 0 is already commented, line 1 should get a comment added.
         assert!(result.contains("// b"), "got: {result:?}");
+    }
+
+    #[test]
+    fn test_toggle_block_comment_add_current_line() {
+        let text = rope("    color: red;\n");
+        let selections = vec![(0usize, 0usize)];
+        let delta = toggle_block_comment(&text, &selections, "CSS").unwrap();
+        let result = apply_delta(text, delta);
+        assert_eq!(result, "    /* color: red; */\n");
+    }
+
+    #[test]
+    fn test_toggle_block_comment_remove_current_line() {
+        let text = rope("    /* color: red; */\n");
+        let selections = vec![(0usize, 0usize)];
+        let delta = toggle_block_comment(&text, &selections, "CSS").unwrap();
+        let result = apply_delta(text, delta);
+        assert_eq!(result, "    color: red;\n");
+    }
+
+    #[test]
+    fn test_toggle_block_comment_selection_without_spaces() {
+        let text = rope("abc def\n");
+        let selections = vec![(0usize, 3usize)];
+        let delta = toggle_block_comment(&text, &selections, "CSS").unwrap();
+        let result = apply_delta(text, delta);
+        assert_eq!(result, "/*abc*/ def\n");
     }
 
     #[test]

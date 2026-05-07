@@ -102,6 +102,14 @@ impl GitBufferStatus {
             .map(|hunk| hunk.display_line)
             .or_else(|| self.hunks.last().map(|hunk| hunk.display_line))
     }
+
+    pub(crate) fn first_hunk_line(&self) -> Option<usize> {
+        self.hunks.first().map(|hunk| hunk.display_line)
+    }
+
+    pub(crate) fn last_hunk_line(&self) -> Option<usize> {
+        self.hunks.last().map(|hunk| hunk.display_line)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +256,40 @@ pub(crate) fn format_blame(blame: &GitBlameInfo, line: usize) -> String {
     let time_suffix =
         blame.author_time.as_deref().map(|value| format!(" | t={value}")).unwrap_or_default();
     format!("line {} | {} | {} | {}{}", line + 1, short_commit, author, summary, time_suffix)
+}
+
+pub(crate) fn changed_files(repo_root: &Path) -> io::Result<Vec<PathBuf>> {
+    let output = git_command(repo_root)
+        .arg("status")
+        .arg("--porcelain=v1")
+        .arg("-z")
+        .arg("--untracked-files=all")
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("git status failed"));
+    }
+
+    let mut files = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut records = output.stdout.split(|byte| *byte == 0).filter(|record| !record.is_empty());
+
+    while let Some(record) = records.next() {
+        if record.len() < 4 {
+            continue;
+        }
+        let status = &record[..2];
+        let mut path = String::from_utf8_lossy(&record[3..]).into_owned();
+        if matches!(status[0], b'R' | b'C') || matches!(status[1], b'R' | b'C') {
+            let Some(rename_target) = records.next() else { continue };
+            path = String::from_utf8_lossy(rename_target).into_owned();
+        }
+        let absolute = repo_root.join(path);
+        if seen.insert(absolute.clone()) {
+            files.push(absolute);
+        }
+    }
+
+    Ok(files)
 }
 
 fn git_command(repo_root: &Path) -> Command {

@@ -250,6 +250,8 @@ pub(crate) struct BufferManager {
     current: usize,
     /// Index of the alternate buffer (for Ctrl-^ / `:b#`).
     alternate: Option<usize>,
+    access_history: Vec<BufferId>,
+    modified_history: Vec<BufferId>,
     next_buf_id: BufferId,
     next_rpc_id: u64,
     /// Pending synchronous RPC responses keyed by request id.
@@ -385,6 +387,8 @@ impl BufferManager {
             view_to_idx,
             current: 0,
             alternate: None,
+            access_history: Vec::new(),
+            modified_history: Vec::new(),
             next_buf_id: 2,
             next_rpc_id: 2,
             pending,
@@ -521,8 +525,20 @@ impl BufferManager {
         self.send_edit("request_definition", json!({}))
     }
 
+    pub(crate) fn request_declaration(&mut self) -> io::Result<()> {
+        self.send_edit("request_declaration", json!({}))
+    }
+
+    pub(crate) fn request_type_definition(&mut self) -> io::Result<()> {
+        self.send_edit("request_type_definition", json!({}))
+    }
+
     pub(crate) fn request_references(&mut self) -> io::Result<()> {
         self.send_edit("request_references", json!({}))
+    }
+
+    pub(crate) fn request_implementation(&mut self) -> io::Result<()> {
+        self.send_edit("request_implementation", json!({}))
     }
 
     pub(crate) fn request_document_symbols(&mut self) -> io::Result<()> {
@@ -543,6 +559,30 @@ impl BufferManager {
 
     pub(crate) fn request_rename(&mut self, new_name: &str) -> io::Result<()> {
         self.send_edit("request_rename", json!({ "new_name": new_name }))
+    }
+
+    pub(crate) fn stop_plugin(&mut self, plugin_name: &str) -> io::Result<()> {
+        send_xi_notification(
+            &self.tx,
+            "plugin",
+            json!({
+                "command": "stop",
+                "view_id": self.bufs[self.current].view_id,
+                "plugin_name": plugin_name,
+            }),
+        )
+    }
+
+    pub(crate) fn restart_plugin(&mut self, plugin_name: &str) -> io::Result<()> {
+        send_xi_notification(
+            &self.tx,
+            "plugin",
+            json!({
+                "command": "restart",
+                "view_id": self.bufs[self.current].view_id,
+                "plugin_name": plugin_name,
+            }),
+        )
     }
 
     pub(crate) fn delete_line_range(
@@ -745,6 +785,13 @@ impl BufferManager {
                 "linewise": linewise,
             }),
         )?;
+        serde_json::from_value(response)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    }
+
+    pub(crate) fn selections_preview(&mut self) -> io::Result<Vec<SelectionRange>> {
+        let view_id = self.bufs[self.current].view_id.clone();
+        let response = self.send_request("selections_preview", json!({ "view_id": view_id }))?;
         serde_json::from_value(response)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
     }
@@ -1059,12 +1106,15 @@ impl BufferManager {
                 self.alternate = Some(alt - 1);
             }
         }
+        self.access_history.retain(|candidate| *candidate != id);
+        self.modified_history.retain(|candidate| *candidate != id);
         Ok(())
     }
 
     /// Switch to buffer at list index `idx`, saving current as alternate.
     pub(crate) fn switch_to_idx(&mut self, idx: usize) {
         if idx < self.bufs.len() && idx != self.current {
+            self.access_history.push(self.bufs[self.current].id);
             self.alternate = Some(self.current);
             self.current = idx;
         }
@@ -1086,6 +1136,38 @@ impl BufferManager {
         let alt = self.alternate.ok_or_else(|| io::Error::other("no alternate buffer"))?;
         self.switch_to_idx(alt);
         Ok(())
+    }
+
+    pub(crate) fn switch_last_accessed(&mut self) -> io::Result<()> {
+        while let Some(id) = self.access_history.pop() {
+            let Some(idx) = self.bufs.iter().position(|buf| buf.id == id) else {
+                continue;
+            };
+            if idx == self.current {
+                continue;
+            }
+            self.switch_to_idx(idx);
+            return Ok(());
+        }
+        Err(io::Error::other("no last accessed buffer"))
+    }
+
+    pub(crate) fn switch_last_modified(&mut self) -> io::Result<()> {
+        let current_id = self.bufs[self.current].id;
+        let Some(id) =
+            self.modified_history.iter().copied().find(|candidate| *candidate != current_id)
+        else {
+            return Err(io::Error::other("no last modified buffer"));
+        };
+        self.switch_to_id(id)
+    }
+
+    pub(crate) fn note_buffer_modified(&mut self, id: BufferId) {
+        if self.bufs.iter().all(|buf| buf.id != id) {
+            return;
+        }
+        self.modified_history.retain(|candidate| *candidate != id);
+        self.modified_history.insert(0, id);
     }
 
     pub(crate) fn restore_cursor(
@@ -1221,6 +1303,8 @@ impl BufferManager {
             view_to_idx,
             current: 0,
             alternate: None,
+            access_history: Vec::new(),
+            modified_history: Vec::new(),
             next_buf_id: 2,
             next_rpc_id: 2,
             pending: Arc::new(Mutex::new(HashMap::new())),

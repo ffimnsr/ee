@@ -42,8 +42,8 @@ use crate::edit_types::{EventDomain, SpecialEvent};
 use crate::editor::{EditType, Editor};
 use crate::file::FileInfo;
 use crate::lang_features;
-use crate::line_offset::LineOffset;
-use crate::object::{self, SyntaxSelectionAction};
+use crate::line_offset::{LineOffset, LogicalLines};
+use crate::object::{self, SyntaxNavigationAction, SyntaxSelectionAction};
 use crate::plugins::{Plugin, PluginCapability, PluginTerminationReason};
 use crate::selection::{InsertDrift, SelRegion, Selection};
 use crate::syntax::LanguageId;
@@ -234,6 +234,9 @@ impl<'a> EventContext<'a> {
             SpecialEvent::AddNewlineBelow => self.do_add_newline_below(),
             SpecialEvent::JoinSelections { select_space } => self.do_join_selections(select_space),
             SpecialEvent::ExtendLineBelow { count } => self.do_extend_line_below(count),
+            SpecialEvent::ExtendLineAbove => self.do_extend_line_above(),
+            SpecialEvent::SelectLineAbove => self.do_select_line_above(),
+            SpecialEvent::SelectLineBelow => self.do_select_line_below(),
             SpecialEvent::ExtendToLineBounds => self.do_extend_to_line_bounds(),
             SpecialEvent::ShrinkToLineBounds => self.do_shrink_to_line_bounds(),
             SpecialEvent::MoveWordStart { forward, long_word, modify_selection } => {
@@ -248,12 +251,32 @@ impl<'a> EventContext<'a> {
             SpecialEvent::MoveToMatchingBracket { modify_selection } => {
                 self.do_move_to_matching_bracket(modify_selection)
             }
+            SpecialEvent::ToggleComment => {
+                self.do_toggle_comment();
+                None
+            }
+            SpecialEvent::ToggleLineComment => {
+                self.do_toggle_line_comment();
+                None
+            }
+            SpecialEvent::ToggleBlockComment => {
+                self.do_toggle_block_comment();
+                None
+            }
             SpecialEvent::Reindent => {
                 self.do_reindent();
                 None
             }
             SpecialEvent::SyntaxSelection(action) => {
                 self.do_syntax_selection(action);
+                None
+            }
+            SpecialEvent::SyntaxNavigation(action) => {
+                self.do_syntax_navigation(action);
+                None
+            }
+            SpecialEvent::GotoParagraph { forward } => {
+                self.do_goto_paragraph(forward);
                 None
             }
         }
@@ -278,6 +301,94 @@ impl<'a> EventContext<'a> {
         if let Err(err) = result {
             self.client.alert(format!("{}: {}", action.method_name(), err.message()));
         }
+    }
+
+    fn do_syntax_navigation(&mut self, action: SyntaxNavigationAction) {
+        let language = self.language.clone();
+        let file_path = self.info.map(|info| info.path.clone());
+        let result = self.with_view(|view, text| {
+            let current = view.selection().clone();
+            object::apply_syntax_navigation(
+                text,
+                &current,
+                language.as_ref(),
+                file_path.as_deref(),
+                action,
+            )
+            .map(|selection| view.set_selection(text, selection))
+        });
+
+        if let Err(err) = result {
+            self.client.alert(format!("{}: {}", action.method_name(), err.message()));
+        }
+    }
+
+    fn do_goto_paragraph(&mut self, forward: bool) {
+        self.with_view(|view, text| {
+            let current = view.selection().clone();
+            let next = Self::paragraph_selection(text, &current, forward);
+            view.set_selection(text, next);
+        });
+    }
+
+    fn paragraph_selection(text: &Rope, current: &Selection, forward: bool) -> Selection {
+        let mut selection = Selection::new();
+        let last_line = LogicalLines.line_of_offset(text, text.len());
+
+        for &region in current.iter() {
+            let line = LogicalLines.line_of_offset(text, region.end.min(text.len()));
+            let target_line = if forward {
+                Self::next_paragraph_line(text, line, last_line)
+            } else {
+                Self::prev_paragraph_line(text, line)
+            };
+            selection.add_region(SelRegion::caret(LogicalLines.offset_of_line(text, target_line)));
+        }
+
+        selection
+    }
+
+    fn next_paragraph_line(text: &Rope, current_line: usize, last_line: usize) -> usize {
+        let mut line = current_line;
+        while line <= last_line && !Self::is_blank_line(text, line) {
+            line += 1;
+        }
+        while line <= last_line && Self::is_blank_line(text, line) {
+            line += 1;
+        }
+        line.min(last_line)
+    }
+
+    fn prev_paragraph_line(text: &Rope, current_line: usize) -> usize {
+        if current_line == 0 {
+            return 0;
+        }
+
+        let mut line = current_line;
+        while line > 0 && Self::is_blank_line(text, line) {
+            line -= 1;
+        }
+        while line > 0 && !Self::is_blank_line(text, line - 1) {
+            line -= 1;
+        }
+        if line == 0 {
+            return 0;
+        }
+
+        line -= 1;
+        while line > 0 && Self::is_blank_line(text, line) {
+            line -= 1;
+        }
+        while line > 0 && !Self::is_blank_line(text, line - 1) {
+            line -= 1;
+        }
+        line
+    }
+
+    fn is_blank_line(text: &Rope, line: usize) -> bool {
+        let start = LogicalLines.offset_of_line(text, line).min(text.len());
+        let end = LogicalLines.offset_of_line(text, line + 1).min(text.len());
+        text.slice_to_cow(start..end).trim().is_empty()
     }
 
     fn dispatch_capability_command(
@@ -827,6 +938,58 @@ impl<'a> EventContext<'a> {
         line_ranges
     }
 
+    fn selected_offset_ranges(&self) -> Vec<(usize, usize)> {
+        let mut ranges = self
+            .view
+            .borrow()
+            .sel_regions()
+            .iter()
+            .map(|region| (region.min(), region.max()))
+            .collect::<Vec<_>>();
+        ranges.sort_unstable();
+        ranges.dedup();
+        ranges
+    }
+
+    fn do_toggle_comment(&mut self) {
+        let line_ranges = self.selected_line_ranges();
+        let selection_ranges = self.selected_offset_ranges();
+        let lang_name = self.language.as_ref();
+        let maybe_delta = {
+            let ed = self.editor.borrow();
+            lang_features::toggle_comment(ed.get_buffer(), &line_ranges, lang_name).or_else(|| {
+                lang_features::toggle_block_comment(ed.get_buffer(), &selection_ranges, lang_name)
+            })
+        };
+        if let Some(delta) = maybe_delta {
+            self.editor.borrow_mut().apply_direct_delta(EditType::Other, delta);
+        }
+    }
+
+    fn do_toggle_line_comment(&mut self) {
+        let line_ranges = self.selected_line_ranges();
+        let lang_name = self.language.as_ref();
+        let maybe_delta = {
+            let ed = self.editor.borrow();
+            lang_features::toggle_comment(ed.get_buffer(), &line_ranges, lang_name)
+        };
+        if let Some(delta) = maybe_delta {
+            self.editor.borrow_mut().apply_direct_delta(EditType::Other, delta);
+        }
+    }
+
+    fn do_toggle_block_comment(&mut self) {
+        let selection_ranges = self.selected_offset_ranges();
+        let lang_name = self.language.as_ref();
+        let maybe_delta = {
+            let ed = self.editor.borrow();
+            lang_features::toggle_block_comment(ed.get_buffer(), &selection_ranges, lang_name)
+        };
+        if let Some(delta) = maybe_delta {
+            self.editor.borrow_mut().apply_direct_delta(EditType::Other, delta);
+        }
+    }
+
     fn do_reindent(&mut self) {
         let line_ranges = self.selected_line_ranges();
         let lang_name = self.language.as_ref();
@@ -988,6 +1151,15 @@ impl<'a> EventContext<'a> {
         })
     }
 
+    pub(crate) fn preview_selections(&mut self) -> Vec<SelectionRange> {
+        self.with_view(|view, _| {
+            view.sel_regions()
+                .iter()
+                .map(|region| SelectionRange { start: region.start, end: region.end })
+                .collect()
+        })
+    }
+
     pub(crate) fn preview_block_text(
         &mut self,
         start_line: usize,
@@ -1010,7 +1182,7 @@ impl<'a> EventContext<'a> {
 
     fn do_goto_column(&mut self, display_col: usize, modify_selection: bool) -> Option<Selection> {
         self.with_view(|view, text| {
-            let region = view.sel_regions().last().copied()?;
+            let region = view.primary_sel_region()?;
             let line = text.line_of_offset(region.end);
             let line_text = line_text(text, line);
             let target_col = display_col_to_byte(&line_text, display_col);
@@ -1039,7 +1211,7 @@ impl<'a> EventContext<'a> {
 
     fn do_add_newline_below(&mut self) -> Option<Selection> {
         let (insert_offset, caret_offset) = self.with_view(|view, text| {
-            let region = view.sel_regions().last().copied()?;
+            let region = view.primary_sel_region()?;
             let line = text.line_of_offset(region.end);
             let insert_offset = line_content_end(text, line);
             Some((insert_offset, insert_offset + self.config.line_ending.len()))
@@ -1056,7 +1228,7 @@ impl<'a> EventContext<'a> {
 
     fn do_add_newline_above(&mut self) -> Option<Selection> {
         let insert_offset = self.with_view(|view, text| {
-            let region = view.sel_regions().last().copied()?;
+            let region = view.primary_sel_region()?;
             let line = text.line_of_offset(region.end);
             Some(text.offset_of_line(line))
         })?;
@@ -1103,6 +1275,27 @@ impl<'a> EventContext<'a> {
     fn do_extend_line_below(&mut self, count: usize) -> Option<Selection> {
         self.with_view(|view, text| {
             let selection = extend_line_below_selection(text, view.sel_regions(), count.max(1));
+            (!selection.is_empty()).then_some(selection)
+        })
+    }
+
+    fn do_extend_line_above(&mut self) -> Option<Selection> {
+        self.with_view(|view, text| {
+            let selection = extend_line_above_selection(text, view.sel_regions());
+            (!selection.is_empty()).then_some(selection)
+        })
+    }
+
+    fn do_select_line_above(&mut self) -> Option<Selection> {
+        self.with_view(|view, text| {
+            let selection = select_line_above_selection(text, view.sel_regions());
+            (!selection.is_empty()).then_some(selection)
+        })
+    }
+
+    fn do_select_line_below(&mut self) -> Option<Selection> {
+        self.with_view(|view, text| {
+            let selection = select_line_below_selection(text, view.sel_regions());
             (!selection.is_empty()).then_some(selection)
         })
     }
@@ -1403,6 +1596,82 @@ fn extend_line_below_selection(text: &Rope, regions: &[SelRegion], count: usize)
     }
 
     selection
+}
+
+fn extend_line_above_selection(text: &Rope, regions: &[SelRegion]) -> Selection {
+    let mut selection = Selection::new();
+    let source_regions =
+        if regions.is_empty() { vec![SelRegion::caret(0)] } else { regions.to_vec() };
+
+    for region in source_regions {
+        let (start_line, end_line) = selection_line_range(text, region);
+        let start_offset = if selection_is_linewise(text, region, start_line, end_line) {
+            text.offset_of_line(start_line.saturating_sub(1))
+        } else {
+            text.offset_of_line(start_line)
+        };
+        selection
+            .add_region(SelRegion::new(start_offset, line_end_offset_inclusive(text, end_line)));
+    }
+
+    selection
+}
+
+fn select_line_above_selection(text: &Rope, regions: &[SelRegion]) -> Selection {
+    select_line_selection(text, regions, false)
+}
+
+fn select_line_below_selection(text: &Rope, regions: &[SelRegion]) -> Selection {
+    select_line_selection(text, regions, true)
+}
+
+fn select_line_selection(text: &Rope, regions: &[SelRegion], below: bool) -> Selection {
+    let mut selection = Selection::new();
+    let total_lines = text.measure::<LinesMetric>() + 1;
+    if total_lines == 0 {
+        return selection;
+    }
+
+    let source_regions =
+        if regions.is_empty() { vec![SelRegion::caret(0)] } else { regions.to_vec() };
+    let last_line = total_lines.saturating_sub(1);
+
+    for region in source_regions {
+        let (start_line, end_line) = selection_line_range(text, region);
+        if !selection_is_linewise(text, region, start_line, end_line) {
+            selection.add_region(SelRegion::new(
+                text.offset_of_line(start_line),
+                line_end_offset_inclusive(text, end_line),
+            ));
+            continue;
+        }
+
+        let is_forward = region.start <= region.end;
+        let anchor_line = if is_forward { start_line } else { end_line };
+        let active_line = if is_forward { end_line } else { start_line };
+        let next_active = if below {
+            active_line.saturating_add(1).min(last_line)
+        } else {
+            active_line.saturating_sub(1)
+        };
+        selection.add_region(linewise_region_for_anchor(text, anchor_line, next_active));
+    }
+
+    selection
+}
+
+fn linewise_region_for_anchor(text: &Rope, anchor_line: usize, active_line: usize) -> SelRegion {
+    if active_line >= anchor_line {
+        SelRegion::new(
+            text.offset_of_line(anchor_line),
+            line_end_offset_inclusive(text, active_line),
+        )
+    } else {
+        SelRegion::new(
+            line_end_offset_inclusive(text, anchor_line),
+            text.offset_of_line(active_line),
+        )
+    }
 }
 
 fn extend_to_line_bounds_selection(text: &Rope, regions: &[SelRegion]) -> Selection {
@@ -2313,6 +2582,28 @@ mod tests {
     }
 
     #[test]
+    fn toggle_line_comment_edits_current_line() {
+        let harness = ContextHarness::new("fn main() {}\n");
+        let mut ctx = harness.make_context();
+        ctx.language = LanguageId::from("Rust");
+
+        ctx.do_edit(EditNotification::ToggleLineComment);
+
+        assert_eq!(harness.debug_render(), "// |fn main() {}\n");
+    }
+
+    #[test]
+    fn toggle_block_comment_edits_current_line_when_language_has_no_line_comment() {
+        let harness = ContextHarness::new("div { color: red; }\n");
+        let mut ctx = harness.make_context();
+        ctx.language = LanguageId::from("CSS");
+
+        ctx.do_edit(EditNotification::ToggleBlockComment);
+
+        assert_eq!(harness.debug_render(), "/* |div { color: red; } */\n");
+    }
+
+    #[test]
     fn goto_column_uses_display_width_and_can_extend_selection() {
         let harness = ContextHarness::new("日本x");
         let mut ctx = harness.make_context();
@@ -2337,6 +2628,37 @@ mod tests {
         ctx.do_edit(EditNotification::GotoColumn { display_col: 4, modify_selection: false });
 
         assert_eq!(harness.debug_render(), "abcd|ef");
+    }
+
+    #[test]
+    fn goto_next_paragraph_moves_to_next_nonblank_block() {
+        let harness = ContextHarness::new("alpha\nbeta\n\ncharlie\n\ndelta\n");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::GotoNextParagraph);
+        assert_eq!(harness.debug_render(), "alpha\nbeta\n\n|charlie\n\ndelta\n");
+
+        ctx.do_edit(EditNotification::GotoNextParagraph);
+        assert_eq!(harness.debug_render(), "alpha\nbeta\n\ncharlie\n\n|delta\n");
+    }
+
+    #[test]
+    fn goto_prev_paragraph_moves_to_previous_nonblank_block() {
+        let harness = ContextHarness::new("alpha\n\nbeta\ngamma\n\ndelta\n");
+        {
+            let text = harness.editor.borrow().get_buffer().clone();
+            harness.view.borrow_mut().set_selection(
+                &text,
+                Selection::new_simple(SelRegion::caret(LogicalLines.offset_of_line(&text, 5))),
+            );
+        }
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::GotoPrevParagraph);
+        assert_eq!(harness.debug_render(), "alpha\n\n|beta\ngamma\n\ndelta\n");
+
+        ctx.do_edit(EditNotification::GotoPrevParagraph);
+        assert_eq!(harness.debug_render(), "|alpha\n\nbeta\ngamma\n\ndelta\n");
     }
 
     #[test]
@@ -2457,6 +2779,46 @@ mod tests {
         ctx.do_edit(EditNotification::ExtendLineBelow { count: 1 });
 
         assert_eq!(harness.debug_render(), "[alpha\n|]beta\ngamma");
+    }
+
+    #[test]
+    fn extend_line_above_selects_current_line_then_previous_line() {
+        let harness = ContextHarness::new("alpha\nbeta\ngamma");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::Gesture {
+            line: 1,
+            col: 2,
+            ty: crate::rpc::GestureType::PointSelect,
+        });
+        ctx.do_edit(EditNotification::ExtendLineAbove);
+        assert_eq!(harness.debug_render(), "alpha\n[beta\n|]gamma");
+
+        ctx.do_edit(EditNotification::ExtendLineAbove);
+        assert_eq!(harness.debug_render(), "[alpha\nbeta\n|]gamma");
+    }
+
+    #[test]
+    fn select_line_commands_adjust_active_edge_from_anchor() {
+        let harness = ContextHarness::new("alpha\nbeta\ngamma");
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::Gesture {
+            line: 1,
+            col: 2,
+            ty: crate::rpc::GestureType::PointSelect,
+        });
+        ctx.do_edit(EditNotification::SelectLineBelow);
+        assert_eq!(harness.debug_render(), "alpha\n[beta\n|]gamma");
+
+        ctx.do_edit(EditNotification::SelectLineBelow);
+        assert_eq!(harness.debug_render(), "alpha\n[beta\ngamma|]");
+
+        ctx.do_edit(EditNotification::SelectLineAbove);
+        assert_eq!(harness.debug_render(), "alpha\n[beta\n|]gamma");
+
+        ctx.do_edit(EditNotification::SelectLineAbove);
+        assert_eq!(harness.debug_render(), "[|alpha\nbeta\n]gamma");
     }
 
     #[test]

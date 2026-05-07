@@ -9,7 +9,7 @@ use crossterm::event::{
 };
 use ratatui::layout::Rect;
 use serde_json::json;
-use xi_core_lib::plugin_rpc::CodeActionDescriptor;
+use xi_core_lib::plugin_rpc::{CodeActionDescriptor, SelectionRange};
 use xi_core_lib::rpc::LineReplacement;
 
 use crate::backend::{CompletionSuggestion, PendingUiAction};
@@ -21,7 +21,7 @@ use crate::picker::PickerState;
 use crate::quickfix::{QfEntry, QfList};
 use crate::registers::{BlockInsert, LastChange, RegisterName, RegisterStore};
 use crate::text::byte_col_to_display_col;
-use crate::window::{SplitDir, TabManager};
+use crate::window::{SplitDir, TabManager, ViewDirection};
 
 mod commands;
 mod parsing;
@@ -259,6 +259,10 @@ impl App {
                 self.mode = Mode::CommandLine;
                 self.command_buffer.clear();
             }
+            Action::PrefillCommandLine(template) => {
+                self.mode = Mode::CommandLine;
+                self.command_buffer = template.to_owned();
+            }
             Action::EnterSearch => {
                 self.mode = Mode::Search;
                 self.search_backward = false;
@@ -352,6 +356,31 @@ impl App {
                     self.backend.status_message = Some(format!("hover failed: {err}"));
                 }
             }
+            Action::RequestDeclaration => {
+                if let Err(err) = self.backend.request_declaration() {
+                    self.backend.status_message = Some(format!("declaration failed: {err}"));
+                }
+            }
+            Action::RequestDefinition => {
+                if let Err(err) = self.backend.request_definition() {
+                    self.backend.status_message = Some(format!("definition failed: {err}"));
+                }
+            }
+            Action::RequestTypeDefinition => {
+                if let Err(err) = self.backend.request_type_definition() {
+                    self.backend.status_message = Some(format!("type definition failed: {err}"));
+                }
+            }
+            Action::RequestReferences => {
+                if let Err(err) = self.backend.request_references() {
+                    self.backend.status_message = Some(format!("references failed: {err}"));
+                }
+            }
+            Action::RequestImplementation => {
+                if let Err(err) = self.backend.request_implementation() {
+                    self.backend.status_message = Some(format!("implementation failed: {err}"));
+                }
+            }
             Action::RequestDocumentSymbols => {
                 if let Err(err) = self.backend.request_document_symbols() {
                     self.backend.status_message = Some(format!("symbols failed: {err}"));
@@ -367,6 +396,14 @@ impl App {
                     self.backend.status_message = Some(format!("code action failed: {err}"));
                 }
             }
+            Action::FilePicker => self.open_file_picker_for_buffer_directory(),
+            Action::FilePickerInCurrentDirectory => self.open_file_picker_in_current_directory(),
+            Action::BufferPicker => self.open_buffer_picker(),
+            Action::JumpListPicker => self.open_jump_list_picker(),
+            Action::ChangedFilePicker => self.open_changed_file_picker(),
+            Action::DiagnosticsPicker => self.open_diagnostics_picker(),
+            Action::WorkspaceDiagnosticsPicker => self.open_workspace_diagnostics_picker(),
+            Action::LastPicker => self.reopen_last_picker(),
             Action::RegisterPrefix => {
                 self.input_state.awaiting_register = true;
             }
@@ -432,11 +469,17 @@ impl App {
             Action::MoveWordEnd { long_word } => {
                 self.move_word_end(long_word);
             }
+            Action::GotoFirstNonWhitespace => self.goto_first_nonwhitespace(),
             Action::GotoLine => self.goto_line_from_count(),
             Action::GotoColumn => self.goto_column_from_count(),
             Action::GotoFileStart => self.goto_file_start_from_count(),
             Action::GotoLastLine => self.goto_last_line(),
             Action::GotoFile => self.goto_file_under_cursor(),
+            Action::GotoWindowTop => self.goto_window_top(),
+            Action::GotoWindowCenter => self.goto_window_center(),
+            Action::GotoWindowBottom => self.goto_window_bottom(),
+            Action::GotoLastAccessedFile => self.goto_last_accessed_file(),
+            Action::GotoLastModifiedFile => self.goto_last_modified_file(),
             Action::SaveSelection => self.push_jump(),
             Action::RepeatLastMotion => self.repeat_last_motion(),
             Action::PageCursorHalfUp => self.page_cursor_half(false),
@@ -449,6 +492,16 @@ impl App {
             Action::SwitchToLowercase => self.apply_case_transform("lowercase"),
             Action::SwitchToUppercase => self.apply_case_transform("uppercase"),
             Action::YankSelection => self.yank_selection(),
+            Action::YankToClipboard => self.yank_selection_to_register(RegisterName::Clipboard),
+            Action::YankToPrimaryClipboard => {
+                self.yank_selection_to_register(RegisterName::PrimaryClipboard)
+            }
+            Action::YankMainSelectionToClipboard => {
+                self.yank_main_selection_to_register(RegisterName::Clipboard)
+            }
+            Action::YankMainSelectionToPrimaryClipboard => {
+                self.yank_main_selection_to_register(RegisterName::PrimaryClipboard)
+            }
             Action::IndentSelection => self.apply_selection_edit("indent", true),
             Action::UnindentSelection => self.apply_selection_edit("outdent", true),
             Action::FormatSelections => self.format_selections(),
@@ -570,6 +623,20 @@ impl App {
             // ── Paste ────────────────────────────────────────────────────────
             Action::PasteAfter => self.paste(false),
             Action::PasteBefore => self.paste(true),
+            Action::PasteClipboardAfter => self.paste_from_register(RegisterName::Clipboard, false),
+            Action::PasteClipboardBefore => self.paste_from_register(RegisterName::Clipboard, true),
+            Action::PastePrimaryClipboardAfter => {
+                self.paste_from_register(RegisterName::PrimaryClipboard, false)
+            }
+            Action::PastePrimaryClipboardBefore => {
+                self.paste_from_register(RegisterName::PrimaryClipboard, true)
+            }
+            Action::ReplaceSelectionsWithClipboard => {
+                self.replace_selections_with_register(RegisterName::Clipboard)
+            }
+            Action::ReplaceSelectionsWithPrimaryClipboard => {
+                self.replace_selections_with_register(RegisterName::PrimaryClipboard)
+            }
             // ── Visual modes ─────────────────────────────────────────────────
             Action::EnterVisualLine => self.enter_visual_line(),
             Action::EnterVisualBlock => self.enter_visual_block(),
@@ -597,6 +664,15 @@ impl App {
                 let new_buf = self.tabs.focused_windows().focused_window().buffer_id;
                 let _ = self.backend.switch_to_id(new_buf);
             }
+            Action::RotateView => self.rotate_view(),
+            Action::JumpViewLeft => self.jump_view(ViewDirection::Left),
+            Action::JumpViewDown => self.jump_view(ViewDirection::Down),
+            Action::JumpViewUp => self.jump_view(ViewDirection::Up),
+            Action::JumpViewRight => self.jump_view(ViewDirection::Right),
+            Action::SwapViewLeft => self.swap_view(ViewDirection::Left),
+            Action::SwapViewDown => self.swap_view(ViewDirection::Down),
+            Action::SwapViewUp => self.swap_view(ViewDirection::Up),
+            Action::SwapViewRight => self.swap_view(ViewDirection::Right),
             Action::CommandHistoryOlder => self.history_older(),
             Action::CommandHistoryNewer => self.history_newer(),
             // ── Quickfix / location-list navigation ─────────────────────────────
@@ -606,6 +682,8 @@ impl App {
             Action::LocPrev => self.qf_prev(false),
             Action::GitNextHunk => self.jump_to_git_hunk(true),
             Action::GitPrevHunk => self.jump_to_git_hunk(false),
+            Action::GitFirstHunk => self.jump_to_git_hunk_edge(true),
+            Action::GitLastHunk => self.jump_to_git_hunk_edge(false),
             Action::GitBlame => self.show_git_blame(),
             Action::GitDiff => self.open_git_diff_view(false),
             // ── Fold commands ────────────────────────────────────────────────────
@@ -1115,40 +1193,49 @@ impl App {
         let _ = self.backend.find_char(target, forward, inclusive, true);
     }
 
-    /// Select `(start, end)` byte range on `line_idx` and apply the operator.
-    fn select_range_and_apply(&mut self, line_idx: usize, start: usize, end: usize, op: Operator) {
+    fn select_range(
+        &mut self,
+        start_line: usize,
+        start_col: usize,
+        end_line: usize,
+        end_col: usize,
+    ) {
         let _ = self.backend.send_edit(
             "gesture",
             json!({
-                "line": line_idx as u64,
-                "col": start as u64,
+                "line": start_line as u64,
+                "col": start_col as u64,
                 "ty": { "select": { "granularity": "point", "multi": false } }
             }),
         );
         let _ = self.backend.send_edit(
             "gesture",
             json!({
-                "line": line_idx as u64,
-                "col": end as u64,
+                "line": end_line as u64,
+                "col": end_col as u64,
                 "ty": { "select_extend": { "granularity": "point" } }
             }),
         );
+    }
+
+    fn select_range_on_line(&mut self, line_idx: usize, start: usize, end: usize) {
+        self.select_range(line_idx, start, line_idx, end);
+    }
+
+    /// Select `(start, end)` byte range on `line_idx` and apply the operator.
+    fn select_range_and_apply(&mut self, line_idx: usize, start: usize, end: usize, op: Operator) {
+        self.select_range_on_line(line_idx, start, end);
         self.apply_operator(op);
     }
 
-    /// Apply operator to the text object specified by `inclusive`+`spec`.
-    fn apply_text_object_operator(&mut self, op: Operator, inclusive: bool, spec: char) {
+    fn line_text_object_range(
+        &self,
+        inclusive: bool,
+        spec: char,
+    ) -> Option<(usize, usize, usize, String)> {
         let line_idx = self.backend.cursor_line;
-        let cursor_byte = self.backend.cursor_col;
-        let line = match self.backend.lines.get(line_idx) {
-            Some(l) => l.clone(),
-            None => {
-                self.enter_normal_mode();
-                self.input_state.reset();
-                return;
-            }
-        };
-
+        let line = self.backend.lines.get(line_idx)?.clone();
+        let cursor_byte = self.backend.cursor_col.min(line.len());
         let range = match spec {
             'w' | 'W' => {
                 let big_word = spec == 'W';
@@ -1159,6 +1246,206 @@ impl App {
             '[' | ']' => text_obj_bracket(&line, cursor_byte, '[', ']', inclusive),
             '{' | '}' | 'B' => text_obj_bracket(&line, cursor_byte, '{', '}', inclusive),
             '<' | '>' => text_obj_bracket(&line, cursor_byte, '<', '>', inclusive),
+            't' => text_obj_tag(&line, cursor_byte, inclusive),
+            _ => None,
+        }?;
+        Some((line_idx, range.0, range.1, line))
+    }
+
+    fn select_text_object(&mut self, inclusive: bool, spec: char) -> Result<(), String> {
+        match spec {
+            'p' => {
+                let _ = self.backend.send_edit("move_to_beginning_of_paragraph", json!([]));
+                let _ = self
+                    .backend
+                    .send_edit("move_to_end_of_paragraph_and_modify_selection", json!([]));
+                Ok(())
+            }
+            's' => {
+                let line_idx = self.backend.cursor_line;
+                let line_len = self.backend.lines.get(line_idx).map(|line| line.len()).unwrap_or(0);
+                self.select_range_on_line(line_idx, 0, line_len);
+                Ok(())
+            }
+            _ => {
+                let Some((line_idx, start, end, _)) = self.line_text_object_range(inclusive, spec)
+                else {
+                    return Err(format!("textobject: unsupported specifier `{spec}`"));
+                };
+                self.select_range_on_line(line_idx, start, end);
+                Ok(())
+            }
+        }
+    }
+
+    fn line_ending_str(&self) -> &'static str {
+        match self.config.end_of_line {
+            crate::config::EndOfLine::Lf => "\n",
+            crate::config::EndOfLine::CrLf => "\r\n",
+            crate::config::EndOfLine::Cr => "\r",
+        }
+    }
+
+    fn move_current_line_adjacent(&mut self, down: bool) -> Result<(), String> {
+        let current_line = self.backend.cursor_line;
+        let Some(current_text) = self.backend.lines.get(current_line).cloned() else {
+            return Err("move_line: cursor is outside buffer".to_owned());
+        };
+
+        let Some(target_line) =
+            (if down { current_line.checked_add(1) } else { current_line.checked_sub(1) })
+        else {
+            return Err(if down {
+                "move_line_down: already at last line".to_owned()
+            } else {
+                "move_line_up: already at first line".to_owned()
+            });
+        };
+
+        let Some(target_text) = self.backend.lines.get(target_line).cloned() else {
+            return Err(if down {
+                "move_line_down: already at last line".to_owned()
+            } else {
+                "move_line_up: already at first line".to_owned()
+            });
+        };
+
+        let start_line = current_line.min(target_line);
+        let end_line = current_line.max(target_line);
+        let end_col = self.backend.lines.get(end_line).map(|line| line.len()).unwrap_or(0);
+        let replacement = if down {
+            format!("{target_text}{}{current_text}", self.line_ending_str())
+        } else {
+            format!("{current_text}{}{target_text}", self.line_ending_str())
+        };
+
+        self.begin_record();
+        self.select_range(start_line, 0, end_line, end_col);
+        self.record_edit("insert", json!({ "chars": replacement }));
+        self.end_record();
+
+        let cursor_col = self.backend.cursor_col.min(current_text.len());
+        self.move_cursor_to(target_line, cursor_col);
+        self.push_change();
+        Ok(())
+    }
+
+    fn current_surrounding_range(&self) -> Option<(usize, usize, usize, String)> {
+        fn take_best(
+            best: &mut Option<(usize, usize, String)>,
+            line: &str,
+            start: usize,
+            end: usize,
+        ) {
+            let Some(inner) = line.get(start + 1..end.saturating_sub(1)) else { return };
+            let replace = match best.as_ref() {
+                Some((best_start, best_end, _)) => end - start < best_end - best_start,
+                None => true,
+            };
+            if replace {
+                *best = Some((start, end, inner.to_owned()));
+            }
+        }
+
+        let line_idx = self.backend.cursor_line;
+        let line = self.backend.lines.get(line_idx)?.clone();
+        let cursor_byte = self.backend.cursor_col.min(line.len());
+        let mut best = None;
+
+        if let Some((start, end)) = text_obj_quote(&line, cursor_byte, '"', true) {
+            take_best(&mut best, &line, start, end);
+        }
+        if let Some((start, end)) = text_obj_quote(&line, cursor_byte, '\'', true) {
+            take_best(&mut best, &line, start, end);
+        }
+        if let Some((start, end)) = text_obj_quote(&line, cursor_byte, '`', true) {
+            take_best(&mut best, &line, start, end);
+        }
+        if let Some((start, end)) = text_obj_bracket(&line, cursor_byte, '(', ')', true) {
+            take_best(&mut best, &line, start, end);
+        }
+        if let Some((start, end)) = text_obj_bracket(&line, cursor_byte, '[', ']', true) {
+            take_best(&mut best, &line, start, end);
+        }
+        if let Some((start, end)) = text_obj_bracket(&line, cursor_byte, '{', '}', true) {
+            take_best(&mut best, &line, start, end);
+        }
+        if let Some((start, end)) = text_obj_bracket(&line, cursor_byte, '<', '>', true) {
+            take_best(&mut best, &line, start, end);
+        }
+
+        let (start, end, inner) = best?;
+        Some((line_idx, start, end, inner))
+    }
+
+    fn surround_add(&mut self, pair_spec: &str, textobject: Option<char>) -> Result<(), String> {
+        let Some((open, close)) = parse_surround_pair(pair_spec) else {
+            return Err(format!("surround_add: unsupported pair `{pair_spec}`"));
+        };
+
+        if let Some(spec) = textobject {
+            let Some((line_idx, start, end, line)) = self.line_text_object_range(false, spec)
+            else {
+                return Err(format!("surround_add: unsupported textobject `{spec}`"));
+            };
+            let Some(selected) = line.get(start..end) else {
+                return Err("surround_add: invalid textobject range".to_owned());
+            };
+            self.begin_record();
+            self.select_range_on_line(line_idx, start, end);
+            self.record_edit("insert", json!({ "chars": format!("{open}{selected}{close}") }));
+            self.end_record();
+            self.push_change();
+            return Ok(());
+        }
+
+        let selected = self
+            .backend
+            .selected_text_preview(false)
+            .map_err(|err| format!("surround_add failed: {err}"))?;
+        if selected.is_empty() {
+            return Err("surround_add: usage: :surround_add <pair> [textobject]".to_owned());
+        }
+
+        self.begin_record();
+        self.record_edit("insert", json!({ "chars": format!("{open}{selected}{close}") }));
+        self.end_record();
+        self.push_change();
+        Ok(())
+    }
+
+    fn surround_replace(&mut self, pair_spec: &str) -> Result<(), String> {
+        let Some((open, close)) = parse_surround_pair(pair_spec) else {
+            return Err(format!("surround_replace: unsupported pair `{pair_spec}`"));
+        };
+        let Some((line_idx, start, end, inner)) = self.current_surrounding_range() else {
+            return Err("surround_replace: no surrounding pair at cursor".to_owned());
+        };
+
+        self.begin_record();
+        self.select_range_on_line(line_idx, start, end);
+        self.record_edit("insert", json!({ "chars": format!("{open}{inner}{close}") }));
+        self.end_record();
+        self.push_change();
+        Ok(())
+    }
+
+    fn surround_delete(&mut self) -> Result<(), String> {
+        let Some((line_idx, start, end, inner)) = self.current_surrounding_range() else {
+            return Err("surround_delete: no surrounding pair at cursor".to_owned());
+        };
+
+        self.begin_record();
+        self.select_range_on_line(line_idx, start, end);
+        self.record_edit("insert", json!({ "chars": inner }));
+        self.end_record();
+        self.push_change();
+        Ok(())
+    }
+
+    /// Apply operator to the text object specified by `inclusive`+`spec`.
+    fn apply_text_object_operator(&mut self, op: Operator, inclusive: bool, spec: char) {
+        let range = match spec {
             'p' => {
                 // Paragraph: use xi's paragraph motions instead of byte range.
                 let _ = self.backend.send_edit("move_to_beginning_of_paragraph", json!([]));
@@ -1177,15 +1464,16 @@ impl App {
                 self.apply_operator(op);
                 return;
             }
-            't' => {
-                // Tag-like pair: find <tag>…</tag> on the same line.
-                text_obj_tag(&line, cursor_byte, inclusive)
+            _ => {
+                self.line_text_object_range(inclusive, spec).map(|(_, start, end, _)| (start, end))
             }
-            _ => None,
         };
 
         match range {
-            Some((start, end)) => self.select_range_and_apply(line_idx, start, end, op),
+            Some((start, end)) => {
+                let line_idx = self.backend.cursor_line;
+                self.select_range_and_apply(line_idx, start, end, op)
+            }
             None => {
                 self.enter_normal_mode();
                 self.input_state.reset();
@@ -1356,6 +1644,20 @@ impl App {
         self.jump_to_line(target);
     }
 
+    fn goto_first_nonwhitespace(&mut self) {
+        let line = self
+            .backend
+            .lines
+            .get(self.backend.cursor_line)
+            .map(String::as_str)
+            .unwrap_or_default();
+        let target_byte = line
+            .char_indices()
+            .find_map(|(idx, ch)| (!ch.is_whitespace()).then_some(idx))
+            .unwrap_or(0);
+        self.goto_column(byte_col_to_display_col(line, target_byte));
+    }
+
     fn goto_column(&mut self, display_col: usize) {
         let _ = self.backend.goto_column(display_col, self.mode.is_visual());
     }
@@ -1500,6 +1802,30 @@ impl App {
         }
         let reg = self.take_register();
         let text = self.selected_text_preview(false);
+        self.registers.yank(&reg, text, false);
+        let _ = self.backend.send_edit("collapse_selections", json!([]));
+        if had_visual {
+            self.enter_normal_mode();
+        }
+    }
+
+    fn yank_selection_to_register(&mut self, reg: RegisterName) {
+        let count = self.input_state.count() as usize;
+        let had_visual = self.mode.is_visual();
+        let has_selection = self
+            .backend
+            .selections_preview()
+            .map(|selections| selections.iter().any(|selection| selection.start != selection.end))
+            .unwrap_or(false);
+        if !had_visual && !has_selection && !self.select_chars_from_cursor(count) {
+            return;
+        }
+
+        let text = self.selected_text_preview(false);
+        if text.is_empty() {
+            return;
+        }
+
         self.registers.yank(&reg, text, false);
         let _ = self.backend.send_edit("collapse_selections", json!([]));
         if had_visual {
@@ -1656,6 +1982,31 @@ impl App {
         }
     }
 
+    fn replace_selections_with_register(&mut self, reg: RegisterName) {
+        let text = self.registers.get(&reg);
+        if text.is_empty() {
+            return;
+        }
+
+        let count = self.input_state.count() as usize;
+        let had_visual = self.mode.is_visual();
+        let has_selection = self
+            .backend
+            .selections_preview()
+            .map(|selections| selections.iter().any(|selection| selection.start != selection.end))
+            .unwrap_or(false);
+        if !had_visual && !has_selection && !self.select_chars_from_cursor(count) {
+            return;
+        }
+
+        let _ = self.backend.send_edit("delete_forward", json!([]));
+        let _ = self.backend.send_edit("paste_register", json!({ "chars": text, "before": true }));
+        self.push_change();
+        if had_visual {
+            self.enter_normal_mode();
+        }
+    }
+
     fn select_chars_from_cursor(&mut self, count: usize) -> bool {
         let selections = match self.backend.select_chars_preview(count.max(1)) {
             Ok(selections) => selections,
@@ -1665,6 +2016,241 @@ impl App {
             return false;
         }
         self.backend.set_selections(&selections).is_ok()
+    }
+
+    fn ensure_editable_selections(&mut self) -> Result<Vec<SelectionRange>, String> {
+        let mut selections = self
+            .backend
+            .selections_preview()
+            .map_err(|err| format!("selection preview failed: {err}"))?;
+        if selections.is_empty()
+            || selections.iter().all(|selection| selection.start == selection.end)
+        {
+            if !self.select_chars_from_cursor(1) {
+                return Err(String::from("no selection available"));
+            }
+            selections = self
+                .backend
+                .selections_preview()
+                .map_err(|err| format!("selection preview failed: {err}"))?;
+        }
+        if selections.is_empty() {
+            Err(String::from("no selection available"))
+        } else {
+            Ok(selections)
+        }
+    }
+
+    fn primary_selection_preview(&mut self) -> Result<Option<SelectionRange>, String> {
+        let selections = self
+            .backend
+            .selections_preview()
+            .map_err(|err| format!("selection preview failed: {err}"))?;
+        if selections.is_empty() {
+            return Ok(None);
+        }
+
+        let cursor = self.active_cursor_offset();
+        Ok(selections
+            .into_iter()
+            .find(|selection| {
+                let start = selection.start.min(selection.end);
+                let end = selection.start.max(selection.end);
+                selection.end == cursor
+                    || selection.start == cursor
+                    || (start <= cursor && cursor <= end)
+            })
+            .or(Some(SelectionRange { start: cursor, end: cursor })))
+    }
+
+    fn primary_selection_text(&mut self) -> Result<String, String> {
+        let Some(selection) = self.primary_selection_preview()? else {
+            return Ok(String::new());
+        };
+        let start = selection.start.min(selection.end);
+        let end = selection.start.max(selection.end);
+        if start == end {
+            return Ok(String::new());
+        }
+
+        let buffer = self.current_buffer_text();
+        buffer
+            .get(start..end)
+            .map(str::to_owned)
+            .ok_or_else(|| String::from("primary selection range is invalid"))
+    }
+
+    fn yank_main_selection_to_register(&mut self, reg: RegisterName) {
+        let count = self.input_state.count() as usize;
+        let had_visual = self.mode.is_visual();
+        let initial = self.primary_selection_text().unwrap_or_default();
+        if !had_visual && initial.is_empty() && !self.select_chars_from_cursor(count) {
+            return;
+        }
+
+        let text = match self.primary_selection_text() {
+            Ok(text) => text,
+            Err(message) => {
+                self.backend.status_message = Some(message);
+                return;
+            }
+        };
+        if text.is_empty() {
+            return;
+        }
+
+        self.registers.yank(&reg, text, false);
+        let _ = self.backend.send_edit("collapse_selections", json!([]));
+        if had_visual {
+            self.enter_normal_mode();
+        }
+    }
+
+    fn current_buffer_text(&self) -> String {
+        self.backend.lines.join("\n")
+    }
+
+    fn line_start_offset(&self, line: usize) -> usize {
+        self.backend.lines.iter().take(line).map(|current| current.len() + 1).sum()
+    }
+
+    fn replace_range_with_text(&mut self, range: SelectionRange, text: &str) -> Result<(), String> {
+        let is_non_empty = range.start != range.end;
+        self.backend
+            .set_selections(std::slice::from_ref(&range))
+            .map_err(|err| format!("replace failed: {err}"))?;
+        if is_non_empty {
+            let _ = self.backend.send_edit("delete_forward", json!([]));
+        }
+        if !text.is_empty() {
+            let _ = self.backend.send_edit("insert", json!({ "chars": text }));
+        }
+        Ok(())
+    }
+
+    fn insert_at_offset(&mut self, offset: usize, text: &str) -> Result<(), String> {
+        self.backend
+            .set_selections(&[SelectionRange { start: offset, end: offset }])
+            .map_err(|err| format!("insert failed: {err}"))?;
+        if !text.is_empty() {
+            let _ = self.backend.send_edit("insert", json!({ "chars": text }));
+        }
+        Ok(())
+    }
+
+    fn run_shell_command_on_selections(
+        &mut self,
+        command: &str,
+        mode: ShellSelectionMode,
+    ) -> Result<String, String> {
+        let cwd = std::env::current_dir().map_err(|err| format!("shell failed: {err}"))?;
+        let selections = self.ensure_editable_selections()?;
+        let buffer_text = self.current_buffer_text();
+
+        let mut outputs = Vec::with_capacity(selections.len());
+        let mut kept = Vec::new();
+        for selection in &selections {
+            let start = selection.start.min(selection.end);
+            let end = selection.start.max(selection.end);
+            let input = buffer_text
+                .get(start..end)
+                .ok_or_else(|| String::from("shell command encountered invalid selection range"))?;
+            let result = crate::terminal::run_command_with_input(command, &cwd, Some(input))
+                .map_err(|err| format!("shell failed: {err}"))?;
+            if !result.success && !matches!(mode, ShellSelectionMode::KeepByStatus) {
+                let stderr = result.stderr.trim();
+                let detail = if stderr.is_empty() {
+                    String::from("command exited with failure")
+                } else {
+                    stderr.to_owned()
+                };
+                return Err(format!("shell failed: {detail}"));
+            }
+            if matches!(mode, ShellSelectionMode::KeepByStatus) {
+                if result.success {
+                    kept.push(selection.clone());
+                }
+            } else {
+                outputs.push(result.stdout);
+            }
+        }
+
+        match mode {
+            ShellSelectionMode::Replace => {
+                for (selection, output) in selections.iter().zip(outputs.iter()).rev() {
+                    self.replace_range_with_text(selection.clone(), output)?;
+                }
+                self.push_change();
+                Ok(format!("pipe: {} selection(s)", selections.len()))
+            }
+            ShellSelectionMode::IgnoreOutput => {
+                Ok(format!("pipe_to: {} selection(s)", selections.len()))
+            }
+            ShellSelectionMode::InsertBefore => {
+                for (selection, output) in selections.iter().zip(outputs.iter()).rev() {
+                    self.insert_at_offset(selection.start.min(selection.end), output)?;
+                }
+                self.push_change();
+                Ok(format!("shell_insert_output: {} selection(s)", selections.len()))
+            }
+            ShellSelectionMode::InsertAfter => {
+                for (selection, output) in selections.iter().zip(outputs.iter()).rev() {
+                    self.insert_at_offset(selection.start.max(selection.end), output)?;
+                }
+                self.push_change();
+                Ok(format!("shell_append_output: {} selection(s)", selections.len()))
+            }
+            ShellSelectionMode::KeepByStatus => {
+                if kept.is_empty() {
+                    return Ok(String::from("no selections remaining"));
+                }
+                self.backend
+                    .set_selections(&kept)
+                    .map_err(|err| format!("shell_keep_pipe failed: {err}"))?;
+                Ok(format!("shell_keep_pipe: {} selection(s)", kept.len()))
+            }
+        }
+    }
+
+    fn restore_git_hunk(&mut self) -> Result<String, String> {
+        let status = self
+            .refresh_active_git_status()
+            .ok_or_else(|| String::from("git: current buffer not in repository"))?;
+        let hunk = status
+            .hunk_at_line(self.backend.cursor_line)
+            .cloned()
+            .ok_or_else(|| String::from("git: cursor not inside changed hunk"))?;
+
+        let start_offset = self.line_start_offset(hunk.new_start.min(self.backend.lines.len()));
+        let end_offset = if hunk.new_count == 0 {
+            start_offset
+        } else {
+            let after_line = (hunk.new_start + hunk.new_count).min(self.backend.lines.len());
+            if after_line < self.backend.lines.len() {
+                self.line_start_offset(after_line)
+            } else {
+                self.current_buffer_text().len()
+            }
+        };
+        let old_lines = hunk
+            .lines
+            .iter()
+            .filter(|line| matches!(line.kind, crate::git::DiffLineKind::Removed))
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>();
+        let replacement = format_git_hunk_replacement(
+            &old_lines,
+            hunk.new_start,
+            hunk.new_count,
+            self.backend.lines.len(),
+        );
+
+        self.replace_range_with_text(
+            SelectionRange { start: start_offset, end: end_offset },
+            &replacement,
+        )?;
+        self.push_change();
+        Ok(format!("git hunk reset: line {}", hunk.display_line + 1))
     }
 
     // ── Range-based line operations ─────────────────────────────────────────
@@ -1689,6 +2275,11 @@ impl App {
 
     /// Yank lines `start..=end` (0-based, inclusive) into the active register.
     fn yank_line_range(&mut self, start: usize, end: usize) {
+        let reg = self.take_register();
+        self.yank_line_range_into_register(start, end, reg);
+    }
+
+    fn yank_line_range_into_register(&mut self, start: usize, end: usize, reg: RegisterName) {
         let line_count = self.backend.lines.len();
         if line_count == 0 {
             return;
@@ -1700,7 +2291,6 @@ impl App {
             text.push_str(line);
             text.push('\n');
         }
-        let reg = self.take_register();
         self.registers.yank(&reg, text, false);
         let count = end.saturating_sub(start) + 1;
         self.backend.status_message = Some(format!("{count} line(s) yanked"));
@@ -1912,7 +2502,7 @@ impl App {
             self.backend.status_message = Some(String::from("no completions"));
             return;
         }
-        self.picker = Some(PickerState::new_completions(items));
+        self.open_picker(PickerState::new_completions(items));
     }
 
     pub(crate) fn handle_pending_symbols(&mut self) {
@@ -1926,7 +2516,7 @@ impl App {
                 self.backend.status_message = Some(format!("{title}: no symbols found"));
                 continue;
             }
-            self.picker = Some(PickerState::new_symbols(title, symbols));
+            self.open_picker(PickerState::new_symbols(title, symbols));
         }
     }
 
@@ -1937,36 +2527,18 @@ impl App {
             self.backend.status_message = Some(String::from("no code actions"));
             return;
         }
-        self.picker = Some(PickerState::new_code_actions(actions));
+        self.open_picker(PickerState::new_code_actions(actions));
+    }
+
+    pub(crate) fn open_picker(&mut self, picker: PickerState) {
+        self.last_picker = Some(picker.clone());
+        self.picker = Some(picker);
     }
 
     fn open_diagnostics_location_list(&mut self) {
-        let buf = self.backend.active();
-        if buf.diagnostics.is_empty() {
-            self.backend.status_message = Some(String::from("no diagnostics"));
+        if !self.populate_diagnostics_location_list(0) {
             return;
         }
-
-        let entries = buf
-            .diagnostics
-            .iter()
-            .map(|diagnostic| {
-                let (line, col) = line_col_for_offset(&buf.lines, diagnostic.range.start);
-                let severity = match diagnostic.severity {
-                    xi_core_lib::plugin_rpc::DiagnosticSeverity::Error => "error",
-                    xi_core_lib::plugin_rpc::DiagnosticSeverity::Warning => "warning",
-                    xi_core_lib::plugin_rpc::DiagnosticSeverity::Information => "info",
-                    xi_core_lib::plugin_rpc::DiagnosticSeverity::Hint => "hint",
-                };
-                QfEntry {
-                    path: buf.path.clone(),
-                    line,
-                    col,
-                    message: format!("[{severity}] {}", diagnostic.message),
-                }
-            })
-            .collect::<Vec<_>>();
-        self.location_list = Some(QfList::new("Diagnostics", entries));
         self.location_list_open = true;
         self.location_list_focused = true;
     }
@@ -2090,7 +2662,8 @@ impl App {
                         self.tabs.focused_windows_mut().set_focused_buffer(buf_id);
                         self.viewport = Viewport::default();
                         if let Some(line) = item.line {
-                            self.jump_to_line(line);
+                            self.push_jump();
+                            self.move_cursor_to(line, item.col.unwrap_or(0));
                         }
                     }
                     Err(err) => {
@@ -2126,12 +2699,37 @@ impl App {
                         self.tabs.focused_windows_mut().set_focused_buffer(buf_id);
                         self.viewport = Viewport::default();
                         if let Some(line) = item.line {
-                            self.jump_to_line(line);
+                            self.push_jump();
+                            self.move_cursor_to(line, item.col.unwrap_or(0));
                         }
                     }
                     Err(err) => {
                         self.backend.status_message = Some(format!("open failed: {err}"));
                     }
+                }
+            }
+            crate::picker::PickerKind::Locations => {
+                if let Some(buf_id) = item.buf_id {
+                    if self.backend.switch_to_id(buf_id).is_ok() {
+                        self.tabs.focused_windows_mut().set_focused_buffer(buf_id);
+                        self.viewport = Viewport::default();
+                    }
+                } else if let Some(path) = item.path {
+                    match self.backend.open_buffer(Some(path)) {
+                        Ok(buf_id) => {
+                            let _ = self.backend.switch_to_id(buf_id);
+                            self.tabs.focused_windows_mut().set_focused_buffer(buf_id);
+                            self.viewport = Viewport::default();
+                        }
+                        Err(err) => {
+                            self.backend.status_message = Some(format!("open failed: {err}"));
+                            return;
+                        }
+                    }
+                }
+                if let Some(line) = item.line {
+                    self.push_jump();
+                    self.move_cursor_to(line, item.col.unwrap_or(0));
                 }
             }
         }
@@ -2141,6 +2739,7 @@ impl App {
         if editor_height == 0 {
             return;
         }
+        self.last_editor_height = editor_height;
         let cursor_line = self.backend.cursor_line;
         // Clamp scroll_offset to half the editor height to avoid pathological cases.
         let off = self.config.scroll_offset.min(editor_height / 2);
@@ -2245,6 +2844,28 @@ impl App {
         } else {
             status.prev_hunk_line(self.backend.cursor_line)
         };
+        if let Some(line) = target {
+            self.jump_to_line(line);
+            self.backend.status_message = Some(format!(
+                "git hunk: line {} ({}/{})",
+                line + 1,
+                status.branch,
+                status.repo_relative
+            ));
+        }
+    }
+
+    fn jump_to_git_hunk_edge(&mut self, first: bool) {
+        let Some(status) = self.refresh_active_git_status() else {
+            self.backend.status_message =
+                Some(String::from("git: current buffer not in repository"));
+            return;
+        };
+        if status.hunks.is_empty() {
+            self.backend.status_message = Some(String::from("git: no hunks in current buffer"));
+            return;
+        }
+        let target = if first { status.first_hunk_line() } else { status.last_hunk_line() };
         if let Some(line) = target {
             self.jump_to_line(line);
             self.backend.status_message = Some(format!(
@@ -2364,6 +2985,29 @@ impl App {
 
     // ── Window management ──────────────────────────────────────────────────
 
+    fn sync_backend_to_focused_window(&mut self) {
+        let new_buf = self.tabs.focused_windows().focused_window().buffer_id;
+        let _ = self.backend.switch_to_id(new_buf);
+    }
+
+    fn rotate_view(&mut self) {
+        let new_vp = self.tabs.focused_windows_mut().focus_next(self.viewport);
+        self.viewport = new_vp;
+        self.sync_backend_to_focused_window();
+    }
+
+    fn jump_view(&mut self, direction: ViewDirection) {
+        let new_vp = self.tabs.focused_windows_mut().focus_direction(direction, self.viewport);
+        self.viewport = new_vp;
+        self.sync_backend_to_focused_window();
+    }
+
+    fn swap_view(&mut self, direction: ViewDirection) {
+        if self.tabs.focused_windows_mut().swap_focused_with_direction(direction) {
+            self.sync_backend_to_focused_window();
+        }
+    }
+
     /// Handle a key pressed after `Ctrl-W` in Normal mode.
     fn handle_window_cmd(&mut self, c: char) {
         match c {
@@ -2388,12 +3032,7 @@ impl App {
                 self.viewport = new_vp;
             }
             // Focus next window.
-            'w' => {
-                let new_vp = self.tabs.focused_windows_mut().focus_next(self.viewport);
-                self.viewport = new_vp;
-                let new_buf = self.tabs.focused_windows_mut().focused_window().buffer_id;
-                let _ = self.backend.switch_to_id(new_buf);
-            }
+            'w' => self.rotate_view(),
             // Focus previous window.
             'W' | 'p' => {
                 let new_vp = self.tabs.focused_windows_mut().focus_prev(self.viewport);
@@ -2401,6 +3040,14 @@ impl App {
                 let new_buf = self.tabs.focused_windows_mut().focused_window().buffer_id;
                 let _ = self.backend.switch_to_id(new_buf);
             }
+            'h' => self.jump_view(ViewDirection::Left),
+            'j' => self.jump_view(ViewDirection::Down),
+            'k' => self.jump_view(ViewDirection::Up),
+            'l' => self.jump_view(ViewDirection::Right),
+            'H' => self.swap_view(ViewDirection::Left),
+            'J' => self.swap_view(ViewDirection::Down),
+            'K' => self.swap_view(ViewDirection::Up),
+            'L' => self.swap_view(ViewDirection::Right),
             // Close focused window.
             'c' | 'q' => {
                 if let Some(new_vp) = self.tabs.focused_windows_mut().close_focused() {
@@ -2512,6 +3159,7 @@ impl App {
     /// Push the current cursor position onto the change list.
     /// Called after any buffer-modifying operation.
     pub(crate) fn push_change(&mut self) {
+        self.backend.note_buffer_modified(self.backend.active().id);
         let pos = (self.backend.cursor_line, self.backend.cursor_col);
         if self.change_list.last() == Some(&pos) {
             self.change_list_idx = self.change_list.len().saturating_sub(1);
@@ -2627,6 +3275,11 @@ impl App {
         }
         self.record_edit("paste_register", json!({ "chars": text, "before": before }));
         self.push_change();
+    }
+
+    fn paste_from_register(&mut self, reg: RegisterName, before: bool) {
+        self.input_state.pending_register = Some(reg);
+        self.paste(before);
     }
 
     // ── Repeat last change ──────────────────────────────────────────────────
@@ -3057,5 +3710,59 @@ impl App {
             self.backend.status_message =
                 Some(format!("{count} substitution(s) on {count} line(s)"));
         }
+    }
+}
+
+fn parse_surround_pair(spec: &str) -> Option<(String, String)> {
+    match spec {
+        "(" | ")" | "b" => Some(("(".to_owned(), ")".to_owned())),
+        "[" | "]" => Some(("[".to_owned(), "]".to_owned())),
+        "{" | "}" | "B" => Some(("{".to_owned(), "}".to_owned())),
+        "<" | ">" => Some(("<".to_owned(), ">".to_owned())),
+        "\"" => Some(("\"".to_owned(), "\"".to_owned())),
+        "'" => Some(("'".to_owned(), "'".to_owned())),
+        "`" => Some(("`".to_owned(), "`".to_owned())),
+        _ => {
+            let mut chars = spec.chars();
+            let open = chars.next()?;
+            let close = chars.next()?;
+            if chars.next().is_some() { None } else { Some((open.to_string(), close.to_string())) }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum ShellSelectionMode {
+    Replace,
+    IgnoreOutput,
+    InsertBefore,
+    InsertAfter,
+    KeepByStatus,
+}
+
+pub(super) fn format_git_hunk_replacement(
+    old_lines: &[&str],
+    new_start: usize,
+    new_count: usize,
+    total_lines: usize,
+) -> String {
+    if old_lines.is_empty() {
+        return String::new();
+    }
+
+    let joined = old_lines.join("\n");
+    let has_following_line = new_start + new_count < total_lines;
+    if new_count == 0 {
+        if total_lines == 0 {
+            joined
+        } else if has_following_line {
+            format!("{joined}\n")
+        } else {
+            format!("\n{joined}")
+        }
+    } else if has_following_line {
+        format!("{joined}\n")
+    } else {
+        joined
     }
 }

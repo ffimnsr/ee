@@ -150,6 +150,7 @@ pub(crate) struct App {
     pub(crate) command_buffer: String,
     pub(crate) should_quit: bool,
     pub(crate) viewport: Viewport,
+    pub(crate) last_editor_height: usize,
     pub(crate) input_state: InputState,
     /// Anchor position (line, col) when a visual mode was entered.
     pub(crate) visual_anchor: Option<(usize, usize)>,
@@ -206,6 +207,8 @@ pub(crate) struct App {
     // ── Picker overlay ─────────────────────────────────────────────────────
     /// Active picker overlay (file picker, buffer picker, live grep).
     pub(crate) picker: Option<PickerState>,
+    /// Last picker opened through the picker overlay.
+    pub(crate) last_picker: Option<PickerState>,
     // ── Quickfix list ───────────────────────────────────────────────────────
     /// Global quickfix list, shared across windows.
     pub(crate) quickfix: Option<QfList>,
@@ -273,6 +276,7 @@ impl App {
             command_buffer: String::new(),
             should_quit: false,
             viewport: Viewport::default(),
+            last_editor_height: 0,
             input_state: InputState::default(),
             visual_anchor: None,
             last_visual: None,
@@ -298,6 +302,7 @@ impl App {
             history_draft: String::new(),
             syntax_overrides: HashMap::new(),
             picker: None,
+            last_picker: None,
             quickfix: None,
             quickfix_open: false,
             quickfix_focused: false,

@@ -16,6 +16,14 @@ pub(crate) enum SplitDir {
     Vertical,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ViewDirection {
+    Left,
+    Down,
+    Up,
+    Right,
+}
+
 /// One visible pane; owns a saved viewport used when the window is inactive.
 #[derive(Debug, Clone)]
 pub(crate) struct Window {
@@ -123,6 +131,47 @@ impl WindowLayout {
         self.windows[self.focused].saved_viewport = active_viewport;
         self.focused = if self.focused == 0 { self.windows.len() - 1 } else { self.focused - 1 };
         self.windows[self.focused].saved_viewport
+    }
+
+    fn adjacent_index(&self, direction: ViewDirection) -> Option<usize> {
+        let delta = match (self.split_dir, direction) {
+            (SplitDir::Vertical, ViewDirection::Left)
+            | (SplitDir::Horizontal, ViewDirection::Up) => -1,
+            (SplitDir::Vertical, ViewDirection::Right)
+            | (SplitDir::Horizontal, ViewDirection::Down) => 1,
+            _ => return None,
+        };
+
+        match delta {
+            -1 => self.focused.checked_sub(1),
+            1 => {
+                let next = self.focused + 1;
+                (next < self.windows.len()).then_some(next)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn focus_direction(
+        &mut self,
+        direction: ViewDirection,
+        active_viewport: Viewport,
+    ) -> Viewport {
+        let Some(target) = self.adjacent_index(direction) else {
+            return active_viewport;
+        };
+        self.windows[self.focused].saved_viewport = active_viewport;
+        self.focused = target;
+        self.windows[self.focused].saved_viewport
+    }
+
+    pub(crate) fn swap_focused_with_direction(&mut self, direction: ViewDirection) -> bool {
+        let Some(target) = self.adjacent_index(direction) else {
+            return false;
+        };
+        self.windows.swap(self.focused, target);
+        self.focused = target;
+        true
     }
 
     /// Return an iterator over `(window, rect)` pairs given the total area.

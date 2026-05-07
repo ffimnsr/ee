@@ -192,8 +192,15 @@ impl Plugin for LspPlugin {
                     .and_then(|value| usize::try_from(value).ok());
                 self.request_completion(view, index);
             }
+            "request_declaration" | "lsp.declaration" => self.request_declaration(view),
             "request_definition" | "lsp.definition" => self.request_definition(view),
+            "request_type_definition" | "lsp.type_definition" => {
+                self.request_type_definition(view);
+            }
             "request_references" | "lsp.references" => self.request_references(view),
+            "request_implementation" | "lsp.implementation" => {
+                self.request_implementation(view);
+            }
             "request_document_symbols" | "lsp.document_symbols" => {
                 self.request_document_symbols(view);
             }
@@ -549,6 +556,81 @@ impl LspPlugin {
         }
     }
 
+    fn request_declaration(&mut self, view: &mut View<ChunkCache>) {
+        let view_id = view.get_id();
+        let position = match self.current_position(view) {
+            Ok(position) => position,
+            Err(err) => {
+                self.record_view_failure(view, format!("declaration failed: {err:?}"));
+                return;
+            }
+        };
+        let current_document_uri = match view.get_path().map(file_path_to_uri) {
+            Some(Ok(uri)) => uri,
+            Some(Err(err)) => {
+                self.record_view_failure(view, format!("declaration failed: {err}"));
+                return;
+            }
+            None => {
+                self.record_view_failure(
+                    view,
+                    String::from("declaration failed: missing file path"),
+                );
+                return;
+            }
+        };
+        let current_document_text = match view.get_document() {
+            Ok(text) => text,
+            Err(err) => {
+                self.record_view_failure(view, format!("declaration failed: {err:?}"));
+                return;
+            }
+        };
+        let Ok(ls_client_arc) = self.client_for_view(view) else {
+            return;
+        };
+        let request = ls_client_arc
+            .lock()
+            .map_err(|_| String::from("language server client lock poisoned"))
+            .and_then(|mut ls_client| {
+                ls_client
+                    .request_declaration(view_id, position, move |ls_client, result| {
+                        let current_document_uri = current_document_uri.clone();
+                        let current_document_text = current_document_text.clone();
+                        let response = result
+                            .map_err(|err| {
+                                LanguageResponseError::LanguageServerError(format!("{err:?}"))
+                            })
+                            .and_then(|value| {
+                                serde_json::from_value::<Option<GotoDefinitionResponse>>(value)
+                                    .map_err(|err| {
+                                        LanguageResponseError::Transport(err.to_string())
+                                    })
+                            })
+                            .and_then(|response| match response {
+                                Some(response) => navigation_targets_from_definition_response(
+                                    &current_document_uri,
+                                    &current_document_text,
+                                    response,
+                                ),
+                                None => Ok(Vec::new()),
+                            });
+                        ls_client.result_queue.push_result(
+                            view_id.into(),
+                            LspResponse::Locations {
+                                title: String::from("declaration"),
+                                result: response,
+                            },
+                        );
+                        ls_client.core.schedule_idle(view_id);
+                    })
+                    .map_err(|err| err.to_string())
+            });
+        if let Err(err) = request {
+            self.record_view_failure(view, format!("declaration failed: {err}"));
+        }
+    }
+
     fn request_references(&mut self, view: &mut View<ChunkCache>) {
         let view_id = view.get_id();
         let position = match self.current_position(view) {
@@ -620,6 +702,156 @@ impl LspPlugin {
             });
         if let Err(err) = request {
             self.record_view_failure(view, format!("references failed: {err}"));
+        }
+    }
+
+    fn request_type_definition(&mut self, view: &mut View<ChunkCache>) {
+        let view_id = view.get_id();
+        let position = match self.current_position(view) {
+            Ok(position) => position,
+            Err(err) => {
+                self.record_view_failure(view, format!("type definition failed: {err:?}"));
+                return;
+            }
+        };
+        let current_document_uri = match view.get_path().map(file_path_to_uri) {
+            Some(Ok(uri)) => uri,
+            Some(Err(err)) => {
+                self.record_view_failure(view, format!("type definition failed: {err}"));
+                return;
+            }
+            None => {
+                self.record_view_failure(
+                    view,
+                    String::from("type definition failed: missing file path"),
+                );
+                return;
+            }
+        };
+        let current_document_text = match view.get_document() {
+            Ok(text) => text,
+            Err(err) => {
+                self.record_view_failure(view, format!("type definition failed: {err:?}"));
+                return;
+            }
+        };
+        let Ok(ls_client_arc) = self.client_for_view(view) else {
+            return;
+        };
+        let request = ls_client_arc
+            .lock()
+            .map_err(|_| String::from("language server client lock poisoned"))
+            .and_then(|mut ls_client| {
+                ls_client
+                    .request_type_definition(view_id, position, move |ls_client, result| {
+                        let current_document_uri = current_document_uri.clone();
+                        let current_document_text = current_document_text.clone();
+                        let response = result
+                            .map_err(|err| {
+                                LanguageResponseError::LanguageServerError(format!("{err:?}"))
+                            })
+                            .and_then(|value| {
+                                serde_json::from_value::<Option<GotoDefinitionResponse>>(value)
+                                    .map_err(|err| {
+                                        LanguageResponseError::Transport(err.to_string())
+                                    })
+                            })
+                            .and_then(|response| match response {
+                                Some(response) => navigation_targets_from_definition_response(
+                                    &current_document_uri,
+                                    &current_document_text,
+                                    response,
+                                ),
+                                None => Ok(Vec::new()),
+                            });
+                        ls_client.result_queue.push_result(
+                            view_id.into(),
+                            LspResponse::Locations {
+                                title: String::from("type definition"),
+                                result: response,
+                            },
+                        );
+                        ls_client.core.schedule_idle(view_id);
+                    })
+                    .map_err(|err| err.to_string())
+            });
+        if let Err(err) = request {
+            self.record_view_failure(view, format!("type definition failed: {err}"));
+        }
+    }
+
+    fn request_implementation(&mut self, view: &mut View<ChunkCache>) {
+        let view_id = view.get_id();
+        let position = match self.current_position(view) {
+            Ok(position) => position,
+            Err(err) => {
+                self.record_view_failure(view, format!("implementation failed: {err:?}"));
+                return;
+            }
+        };
+        let current_document_uri = match view.get_path().map(file_path_to_uri) {
+            Some(Ok(uri)) => uri,
+            Some(Err(err)) => {
+                self.record_view_failure(view, format!("implementation failed: {err}"));
+                return;
+            }
+            None => {
+                self.record_view_failure(
+                    view,
+                    String::from("implementation failed: missing file path"),
+                );
+                return;
+            }
+        };
+        let current_document_text = match view.get_document() {
+            Ok(text) => text,
+            Err(err) => {
+                self.record_view_failure(view, format!("implementation failed: {err:?}"));
+                return;
+            }
+        };
+        let Ok(ls_client_arc) = self.client_for_view(view) else {
+            return;
+        };
+        let request = ls_client_arc
+            .lock()
+            .map_err(|_| String::from("language server client lock poisoned"))
+            .and_then(|mut ls_client| {
+                ls_client
+                    .request_implementation(view_id, position, move |ls_client, result| {
+                        let current_document_uri = current_document_uri.clone();
+                        let current_document_text = current_document_text.clone();
+                        let response = result
+                            .map_err(|err| {
+                                LanguageResponseError::LanguageServerError(format!("{err:?}"))
+                            })
+                            .and_then(|value| {
+                                serde_json::from_value::<Option<GotoDefinitionResponse>>(value)
+                                    .map_err(|err| {
+                                        LanguageResponseError::Transport(err.to_string())
+                                    })
+                            })
+                            .and_then(|response| match response {
+                                Some(response) => navigation_targets_from_definition_response(
+                                    &current_document_uri,
+                                    &current_document_text,
+                                    response,
+                                ),
+                                None => Ok(Vec::new()),
+                            });
+                        ls_client.result_queue.push_result(
+                            view_id.into(),
+                            LspResponse::Locations {
+                                title: String::from("implementation"),
+                                result: response,
+                            },
+                        );
+                        ls_client.core.schedule_idle(view_id);
+                    })
+                    .map_err(|err| err.to_string())
+            });
+        if let Err(err) = request {
+            self.record_view_failure(view, format!("implementation failed: {err}"));
         }
     }
 

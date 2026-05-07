@@ -21,7 +21,7 @@
 use log::warn;
 
 use crate::movement::Movement;
-use crate::object::SyntaxSelectionAction;
+use crate::object::{SyntaxNavigationAction, SyntaxNavigationTarget, SyntaxSelectionAction};
 use crate::plugins::manifest::PluginCapability;
 use crate::plugins::rpc::SelectionRange;
 use crate::rpc::{
@@ -62,6 +62,8 @@ pub(crate) enum ViewEvent {
     EnsureSelectionsForward,
     KeepPrimarySelection,
     RemovePrimarySelection,
+    RotateSelectionsBackward,
+    RotateSelectionsForward,
 }
 
 /// Events that modify the buffer
@@ -88,6 +90,7 @@ pub(crate) enum BufferEvent {
     DuplicateLine,
     IncreaseNumber,
     DecreaseNumber,
+    AlignSelections,
     RotateSelectionContentsBackward,
     RotateSelectionContentsForward,
 }
@@ -141,6 +144,9 @@ pub(crate) enum SpecialEvent {
     ExtendLineBelow {
         count: usize,
     },
+    ExtendLineAbove,
+    SelectLineAbove,
+    SelectLineBelow,
     ExtendToLineBounds,
     ShrinkToLineBounds,
     MoveWordStart {
@@ -161,8 +167,15 @@ pub(crate) enum SpecialEvent {
     MoveToMatchingBracket {
         modify_selection: bool,
     },
+    ToggleComment,
+    ToggleLineComment,
+    ToggleBlockComment,
     Reindent,
     SyntaxSelection(SyntaxSelectionAction),
+    SyntaxNavigation(SyntaxNavigationAction),
+    GotoParagraph {
+        forward: bool,
+    },
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -350,6 +363,9 @@ impl From<EditNotification> for EventDomain {
             Uppercase => BufferEvent::Uppercase.into(),
             Lowercase => BufferEvent::Lowercase.into(),
             Capitalize => BufferEvent::Capitalize.into(),
+            ToggleComment => SpecialEvent::ToggleComment.into(),
+            ToggleLineComment => SpecialEvent::ToggleLineComment.into(),
+            ToggleBlockComment => SpecialEvent::ToggleBlockComment.into(),
             Indent => BufferEvent::Indent.into(),
             Outdent => BufferEvent::Outdent.into(),
             Reindent => SpecialEvent::Reindent.into(),
@@ -365,16 +381,91 @@ impl From<EditNotification> for EventDomain {
                 ViewEvent::SelectRegex { chars, case_sensitive }.into()
             }
             TrimSelections => ViewEvent::TrimSelections.into(),
+            AlignSelections => BufferEvent::AlignSelections.into(),
             FlipSelections => ViewEvent::FlipSelections.into(),
             EnsureSelectionsForward => ViewEvent::EnsureSelectionsForward.into(),
             KeepPrimarySelection => ViewEvent::KeepPrimarySelection.into(),
             RemovePrimarySelection => ViewEvent::RemovePrimarySelection.into(),
+            RotateSelectionsBackward => ViewEvent::RotateSelectionsBackward.into(),
+            RotateSelectionsForward => ViewEvent::RotateSelectionsForward.into(),
             ExpandSelection => {
                 SpecialEvent::SyntaxSelection(SyntaxSelectionAction::Expand).into()
             }
             ShrinkSelection => {
                 SpecialEvent::SyntaxSelection(SyntaxSelectionAction::Shrink).into()
             }
+            GotoNextFunction => {
+                SpecialEvent::SyntaxNavigation(SyntaxNavigationAction::new(
+                    SyntaxNavigationTarget::Function,
+                    true,
+                ))
+                .into()
+            }
+            GotoPrevFunction => {
+                SpecialEvent::SyntaxNavigation(SyntaxNavigationAction::new(
+                    SyntaxNavigationTarget::Function,
+                    false,
+                ))
+                .into()
+            }
+            GotoNextClass => {
+                SpecialEvent::SyntaxNavigation(SyntaxNavigationAction::new(
+                    SyntaxNavigationTarget::Class,
+                    true,
+                ))
+                .into()
+            }
+            GotoPrevClass => {
+                SpecialEvent::SyntaxNavigation(SyntaxNavigationAction::new(
+                    SyntaxNavigationTarget::Class,
+                    false,
+                ))
+                .into()
+            }
+            GotoNextParameter => {
+                SpecialEvent::SyntaxNavigation(SyntaxNavigationAction::new(
+                    SyntaxNavigationTarget::Parameter,
+                    true,
+                ))
+                .into()
+            }
+            GotoPrevParameter => {
+                SpecialEvent::SyntaxNavigation(SyntaxNavigationAction::new(
+                    SyntaxNavigationTarget::Parameter,
+                    false,
+                ))
+                .into()
+            }
+            GotoNextComment => {
+                SpecialEvent::SyntaxNavigation(SyntaxNavigationAction::new(
+                    SyntaxNavigationTarget::Comment,
+                    true,
+                ))
+                .into()
+            }
+            GotoPrevComment => {
+                SpecialEvent::SyntaxNavigation(SyntaxNavigationAction::new(
+                    SyntaxNavigationTarget::Comment,
+                    false,
+                ))
+                .into()
+            }
+            GotoNextTest => {
+                SpecialEvent::SyntaxNavigation(SyntaxNavigationAction::new(
+                    SyntaxNavigationTarget::Test,
+                    true,
+                ))
+                .into()
+            }
+            GotoPrevTest => {
+                SpecialEvent::SyntaxNavigation(SyntaxNavigationAction::new(
+                    SyntaxNavigationTarget::Test,
+                    false,
+                ))
+                .into()
+            }
+            GotoNextParagraph => SpecialEvent::GotoParagraph { forward: true }.into(),
+            GotoPrevParagraph => SpecialEvent::GotoParagraph { forward: false }.into(),
             SelectPrevSibling => {
                 SpecialEvent::SyntaxSelection(SyntaxSelectionAction::SelectPrevSibling).into()
             }
@@ -399,16 +490,34 @@ impl From<EditNotification> for EventDomain {
                     method: "request_completion",
                     params: serde_json::json!({ "index": index }),
                 }.into(),
+            RequestDeclaration =>
+                SpecialEvent::DispatchPluginCommand {
+                    capability: PluginCapability::Edit,
+                    method: "request_declaration",
+                    params: serde_json::json!({}),
+                }.into(),
             RequestDefinition =>
                 SpecialEvent::DispatchPluginCommand {
                     capability: PluginCapability::Edit,
                     method: "request_definition",
                     params: serde_json::json!({}),
                 }.into(),
+            RequestTypeDefinition =>
+                SpecialEvent::DispatchPluginCommand {
+                    capability: PluginCapability::Edit,
+                    method: "request_type_definition",
+                    params: serde_json::json!({}),
+                }.into(),
             RequestReferences =>
                 SpecialEvent::DispatchPluginCommand {
                     capability: PluginCapability::Edit,
                     method: "request_references",
+                    params: serde_json::json!({}),
+                }.into(),
+            RequestImplementation =>
+                SpecialEvent::DispatchPluginCommand {
+                    capability: PluginCapability::Edit,
+                    method: "request_implementation",
                     params: serde_json::json!({}),
                 }.into(),
             FormatDocument =>
@@ -461,6 +570,12 @@ impl From<EditNotification> for EventDomain {
             ExtendLineBelow { count } => {
                 SpecialEvent::ExtendLineBelow { count }.into()
             }
+            ExtendLineAbove =>
+                SpecialEvent::ExtendLineAbove.into(),
+            SelectLineAbove =>
+                SpecialEvent::SelectLineAbove.into(),
+            SelectLineBelow =>
+                SpecialEvent::SelectLineBelow.into(),
             ExtendToLineBounds =>
                 SpecialEvent::ExtendToLineBounds.into(),
             ShrinkToLineBounds =>

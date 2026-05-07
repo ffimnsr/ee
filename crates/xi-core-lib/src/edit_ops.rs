@@ -17,6 +17,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
+use unicode_width::UnicodeWidthChar;
 use xi_rope::{Cursor, DeltaBuilder, Interval, LinesMetric, Rope, RopeDelta};
 
 use crate::backspace::offset_for_delete_backwards;
@@ -544,6 +545,79 @@ pub fn rotate_selection_contents(base: &Rope, regions: &[SelRegion], forward: bo
     builder.build()
 }
 
+pub fn align_selections(base: &Rope, regions: &[SelRegion], tab_size: usize) -> RopeDelta {
+    if regions.len() < 2 {
+        return identity_delta(base);
+    }
+
+    let mut column_widths: Vec<usize> = Vec::new();
+    let mut coordinates = Vec::with_capacity(regions.len());
+
+    let mut previous_line = usize::MAX;
+    let mut column_index = 0;
+    let mut running_offset = 0;
+
+    for &region in regions {
+        let head_line = base.line_of_offset(region.end);
+        let anchor_line = base.line_of_offset(region.start);
+        if head_line != anchor_line {
+            return identity_delta(base);
+        }
+
+        if head_line != previous_line {
+            column_index = 0;
+            running_offset = 0;
+            previous_line = head_line;
+        }
+
+        let head_col = display_col_for_offset(base, region.end, tab_size);
+        let width = head_col.saturating_sub(running_offset);
+        match column_widths.get_mut(column_index) {
+            Some(existing) => *existing = (*existing).max(width),
+            None => column_widths.push(width),
+        }
+
+        coordinates.push((head_line, head_col, region.min()));
+        running_offset += width;
+        column_index += 1;
+    }
+
+    let column_positions: Vec<_> = column_widths
+        .into_iter()
+        .scan(0, |sum, width| {
+            *sum += width;
+            Some(*sum)
+        })
+        .collect();
+
+    let mut builder = DeltaBuilder::new(base.len());
+    previous_line = usize::MAX;
+    column_index = 0;
+    running_offset = 0;
+
+    for (line, head_col, insert_pos) in coordinates {
+        if line != previous_line {
+            column_index = 0;
+            running_offset = 0;
+            previous_line = line;
+        }
+
+        let current_inserts =
+            column_positions[column_index].saturating_sub(head_col + running_offset);
+        if current_inserts > 0 {
+            builder.replace(
+                Interval::new(insert_pos, insert_pos),
+                Rope::from(" ".repeat(current_inserts)),
+            );
+        }
+
+        running_offset += current_inserts;
+        column_index += 1;
+    }
+
+    builder.build()
+}
+
 pub fn transform_text<F: Fn(&str) -> String>(
     base: &Rope,
     regions: &[SelRegion],
@@ -635,6 +709,26 @@ fn sel_region_to_interval_and_rope(base: &Rope, region: SelRegion) -> (Interval,
     (as_interval, interval_rope)
 }
 
+fn display_col_for_offset(base: &Rope, offset: usize, tab_size: usize) -> usize {
+    let line = base.line_of_offset(offset);
+    let line_start = base.offset_of_line(line);
+    display_col_for_str(base.slice_to_cow(line_start..offset).as_ref(), tab_size)
+}
+
+fn display_col_for_str(text: &str, tab_size: usize) -> usize {
+    let tab_size = tab_size.max(1);
+    let mut display_col = 0;
+    for ch in text.chars() {
+        if ch == '\t' {
+            let tab_width = tab_size - (display_col % tab_size);
+            display_col += if tab_width == 0 { tab_size } else { tab_width };
+        } else {
+            display_col += UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+    }
+    display_col
+}
+
 fn last_selection_region(regions: &[SelRegion]) -> Option<&SelRegion> {
     regions.iter().rev().find(|&region| !region.is_caret()).map(|v| v as _)
 }
@@ -654,7 +748,7 @@ fn n_spaces(n: usize) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{delete_backward, rotate_selection_contents, transpose};
+    use super::{align_selections, delete_backward, rotate_selection_contents, transpose};
     use crate::config::BufferItems;
     use crate::selection::SelRegion;
     use xi_rope::Rope;
@@ -732,5 +826,20 @@ mod tests {
         let delta = rotate_selection_contents(&text, &regions, false);
 
         assert_eq!(String::from(delta.apply(&text)), "bb cc aa");
+    }
+
+    #[test]
+    fn align_selections_pads_columns_across_lines() {
+        let text: Rope = "a  b\nab".into();
+        let regions = [
+            SelRegion::new(0, 1),
+            SelRegion::new(3, 4),
+            SelRegion::new(5, 6),
+            SelRegion::new(6, 7),
+        ];
+
+        let delta = align_selections(&text, &regions, 4);
+
+        assert_eq!(String::from(delta.apply(&text)), "a  b\na  b");
     }
 }

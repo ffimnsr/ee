@@ -66,111 +66,106 @@ different name alias this. Description for the command can be found here: https:
 - [x] goto_file
 - [x] goto_line_start
 - [x] goto_line_end
-
-- [ ] align_selections
-- [ ] rotate_selections_backward
-- [ ] rotate_selections_forward
-- move_line_down
-- move_line_up
-- match_brackets
-- surround_add
-- surround_replace
-- surround_delete
-- select_textobject_around
-- select_textobject_inner
-
-- goto_first_nonwhitespace
-- goto_window_top
-- goto_window_center
-- goto_window_bottom
-- goto_definition
-- goto_type_definition
-- goto_reference
-- goto_implementation
-- goto_last_accessed_file
-- goto_last_modified_file
-- goto_next_buffer
-- goto_previous_buffer
-- goto_last_modification
-- goto_word
-- goto_next_diag
-- goto_prev_diag
-- goto_last_diag
-- goto_first_diag
-- goto_next_function
-- goto_prev_function
-- goto_next_class
-- goto_prev_class
-- goto_next_parameter
-- goto_prev_parameter
-- goto_next_comment
-- goto_prev_comment
-- goto_next_test
-- goto_prev_test
-- goto_next_paragraph
-- goto_prev_paragraph
-- goto_next_change
-- goto_prev_change
-- goto_last_change
-- goto_first_change
-- rotate_view / cycle_view
-- jump_view_left
-- jump_view_down
-- jump_view_up
-- jump_view_right
-- swap_view_left
-- swap_view_down
-- swap_view_up
-- swap_view_right
-- file_picker
-- file_picker_in_current_directory
-- buffer_picker
-- jumplist_picker
-- changed_file_picker
-- symbol_picker
-- workspace_symbol_picker
-- diagnostics_picker
-- workspace_diagnostics_picker
+- [x] align_selections
+- [x] rotate_selections_backward
+- [x] rotate_selections_forward
+- [x] move_line_down
+- [x] move_line_up
+- [x] match_brackets
+- [x] surround_add
+- [x] surround_replace
+- [x] surround_delete
+- [x] select_textobject_around
+- [x] select_textobject_inner
+- [x] goto_first_nonwhitespace
+- [x] goto_last_modification
+- [x] goto_word
+- [x] goto_window_top
+- [x] goto_window_center
+- [x] goto_window_bottom
+- [x] goto_definition
+- [x] goto_type_definition
+- [x] goto_reference
+- [x] goto_implementation
+- [x] goto_last_accessed_file
+- [x] goto_last_modified_file
+- [x] goto_next_buffer
+- [x] goto_previous_buffer
+- [x] goto_next_diag
+- [x] goto_prev_diag
+- [x] goto_last_diag
+- [x] goto_first_diag
+- [x] goto_next_function
+- [x] goto_prev_function
+- [x] goto_next_class
+- [x] goto_prev_class
+- [x] goto_next_parameter
+- [x] goto_prev_parameter
+- [x] goto_next_comment
+- [x] goto_prev_comment
+- [x] goto_next_test
+- [x] goto_prev_test
+- [x] goto_next_paragraph
+- [x] goto_prev_paragraph
+- [x] goto_next_change
+- [x] goto_prev_change
+- [x] goto_last_change
+- [x] goto_first_change
+- [x] rotate_view / cycle_view
+- [x] jump_view_left
+- [x] jump_view_down
+- [x] jump_view_up
+- [x] jump_view_right
+- [x] swap_view_left
+- [x] swap_view_down
+- [x] swap_view_up
+- [x] swap_view_right
+- [x] file_picker
+- [x] file_picker_in_current_directory
+- [x] buffer_picker
+- [x] jumplist_picker
+- [x] changed_file_picker
+- [x] symbol_picker
+- [x] workspace_symbol_picker
+- [x] diagnostics_picker
+- [x] workspace_diagnostics_picker
+- [x] last_picker
+- [x] toggle_comments
+- [x] toggle_block_comments
+- [x] toggle_line_comments
+- [x] paste_clipboard_after / paste_clipboard_before
+- [x] yank_to_clipboard / yank_main_selection_to_clipboard
+- [x] replace_selections_with_clipboard
+- [x] paste_primary_clipboard_after / paste_primary_clipboard_before
+- [x] yank_to_primary_clipboard / yank_main_selection_to_primary_clipboard
+- [x] replace_selections_with_primary_clipboard
+- [ ] reverse_selection_contents
 - rename_symbol
 - select_references_to_symbol_under_cursor
 - hover (static command)
-- last_picker
-- toggle_comments
-- toggle_block_comments
-- toggle_line_comments
-- paste_clipboard_after
-- paste_clipboard_before
-- yank_to_clipboard
-- yank_main_selection_to_clipboard
-- replace_selections_with_clipboard
+- insert_register
 - global_search
 - command_palette
 - completion (static command)
-- commit_undo_checkpoint
-- insert_register
-
-View description of commands here https://docs.helix-editor.com/commands.html
-
-- [ ] lsp_restart
-- [ ] lsp_stop
-- [ ] pipe / |
-- [ ] pipe_to
-- [ ] reset_diff_change / diffget / diffg
-- [ ] change_current_directory / cd and show_directory / pwd
-- [ ] extend_char_left / extend_char_right
-- [ ] extend_visual_line_up / extend_visual_line_down
-- [ ] extend_line_up / extend_select_line_aboveline_down
-- [ ] extend_line_above /  / select_line_below
-- [ ] goto_file_end / extend_to_file_start / extend_to_file_end
-- [ ] goto_declaration
-- [ ] file_picker_in_current_buffer_directory
 - [ ] file_explorer / file_explorer_in_current_buffer_directory / file_explorer_in_current_directory
-- [ ] paste_primary_clipboard_after / paste_primary_clipboard_before
-- [ ] yank_to_primary_clipboard / yank_main_selection_to_primary_clipboard
-- [ ] replace_selections_with_primary_clipboard
-- [ ] reverse_selection_contents
 - [ ] rotate_view_reverse / transpose_view / wclose / wonly
-- [ ] shell_pipe / shell_pipe_to / shell_insert_output / shell_append_output / shell_keep_pipe
+- commit_undo_checkpoint
+- sort - this will sort selected lines or all of the lines if nothing is selected
+- uniq / dedup - remove duplicate from selected lines or all of lines
+- [x] lsp_restart
+- [x] lsp_stop
+- [x] change_current_directory / cd and show_directory / pwd
+- [x] pipe / |
+- [x] pipe_to
+- [x] reset_diff_change / diffget / diffg
+- [x] shell_pipe / shell_pipe_to / shell_insert_output / shell_append_output / shell_keep_pipe
+- [x] extend_char_left / extend_char_right
+- [x] extend_visual_line_up / extend_visual_line_down
+- [x] extend_line_up / extend_select_line_aboveline_down
+- [x] extend_line_above / select_line_below
+- [x] goto_file_end / extend_to_file_start / extend_to_file_end
+- [x] goto_declaration
+
 
 ### Already Implemented But Missing From Tracker
 
@@ -220,11 +215,6 @@ View description of commands here https://docs.helix-editor.com/commands.html
 - [x] yank / paste_after / paste_before / indent / unindent / format_selections
 - [x] delete_selection / delete_selection_noyank / change_selection / change_selection_noyank
 - [x] select_register / undo / redo / earlier / later
-
-### Missing From Helix Tracker
-
-View description of commands here https://docs.helix-editor.com/commands.html
-
 - [x] open / o alias for edit
 - [x] hsplit typable aliases: hsplit / hs
 - [x] new / n

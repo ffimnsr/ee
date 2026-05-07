@@ -647,6 +647,64 @@ impl LanguageServerClient {
         )
     }
 
+    pub fn request_declaration<CB>(
+        &mut self,
+        view_id: ViewId,
+        position: Position,
+        on_result: CB,
+    ) -> Result<u64, LspError>
+    where
+        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
+    {
+        let Some(state) = self.opened_documents.get(&view_id) else {
+            return Err(LspError::Protocol(format!("missing open document for view {view_id}")));
+        };
+        if !self.is_initialized {
+            return Err(LspError::Protocol(format!(
+                "language server {} not initialized",
+                self.language_id
+            )));
+        }
+
+        self.try_send_request(
+            "textDocument/declaration",
+            Params::from(json!({
+                "textDocument": { "uri": state.uri.clone() },
+                "position": position,
+            })),
+            Box::new(on_result),
+        )
+    }
+
+    pub fn request_type_definition<CB>(
+        &mut self,
+        view_id: ViewId,
+        position: Position,
+        on_result: CB,
+    ) -> Result<u64, LspError>
+    where
+        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
+    {
+        let Some(state) = self.opened_documents.get(&view_id) else {
+            return Err(LspError::Protocol(format!("missing open document for view {view_id}")));
+        };
+        if !self.is_initialized {
+            return Err(LspError::Protocol(format!(
+                "language server {} not initialized",
+                self.language_id
+            )));
+        }
+
+        self.try_send_request(
+            "textDocument/typeDefinition",
+            Params::from(json!({
+                "textDocument": { "uri": state.uri.clone() },
+                "position": position,
+            })),
+            Box::new(on_result),
+        )
+    }
+
     pub fn request_references<CB>(
         &mut self,
         view_id: ViewId,
@@ -672,6 +730,35 @@ impl LanguageServerClient {
                 "textDocument": { "uri": state.uri.clone() },
                 "position": position,
                 "context": { "includeDeclaration": true },
+            })),
+            Box::new(on_result),
+        )
+    }
+
+    pub fn request_implementation<CB>(
+        &mut self,
+        view_id: ViewId,
+        position: Position,
+        on_result: CB,
+    ) -> Result<u64, LspError>
+    where
+        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
+    {
+        let Some(state) = self.opened_documents.get(&view_id) else {
+            return Err(LspError::Protocol(format!("missing open document for view {view_id}")));
+        };
+        if !self.is_initialized {
+            return Err(LspError::Protocol(format!(
+                "language server {} not initialized",
+                self.language_id
+            )));
+        }
+
+        self.try_send_request(
+            "textDocument/implementation",
+            Params::from(json!({
+                "textDocument": { "uri": state.uri.clone() },
+                "position": position,
             })),
             Box::new(on_result),
         )
