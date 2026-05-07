@@ -313,8 +313,20 @@ impl XiClient {
         self.send_edit("request_definition", json!({}))
     }
 
+    pub(crate) fn request_declaration(&mut self) -> io::Result<()> {
+        self.send_edit("request_declaration", json!({}))
+    }
+
+    pub(crate) fn request_type_definition(&mut self) -> io::Result<()> {
+        self.send_edit("request_type_definition", json!({}))
+    }
+
     pub(crate) fn request_references(&mut self) -> io::Result<()> {
         self.send_edit("request_references", json!({}))
+    }
+
+    pub(crate) fn request_implementation(&mut self) -> io::Result<()> {
+        self.send_edit("request_implementation", json!({}))
     }
 
     pub(crate) fn request_document_symbols(&mut self) -> io::Result<()> {

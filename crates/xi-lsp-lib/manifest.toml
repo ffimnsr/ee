@@ -23,6 +23,15 @@ method = "request_definition"
 params = {}
 
 [[commands]]
+title = "Declaration"
+description = "Request declaration locations"
+
+[commands.rpc_cmd]
+rpc_type = "notification"
+method = "request_declaration"
+params = {}
+
+[[commands]]
 title = "References"
 description = "Request reference locations"
 

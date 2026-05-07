@@ -1,7 +1,194 @@
 use super::*;
+use std::path::Path;
+
 use crate::buffer::BufferId;
+use crate::registers::RegisterName;
+
+#[derive(Clone, Copy)]
+enum WindowLineTarget {
+    Top,
+    Center,
+    Bottom,
+}
 
 impl App {
+    const LSP_PLUGIN_NAME: &'static str = "xi-lsp-plugin";
+
+    fn current_picker_root(&self) -> Option<PathBuf> {
+        self.backend.active().path.as_ref().and_then(|path| path.parent().map(Path::to_path_buf))
+    }
+
+    pub(crate) fn open_file_picker_for_buffer_directory(&mut self) {
+        let cwd = self
+            .current_picker_root()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let mut picker = PickerState::new_files(cwd);
+        picker.title = String::from("Files");
+        self.open_picker(picker);
+    }
+
+    pub(crate) fn open_file_picker_in_current_directory(&mut self) {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let mut picker = PickerState::new_files(cwd);
+        picker.title = String::from("Files (cwd)");
+        self.open_picker(picker);
+    }
+
+    pub(crate) fn open_buffer_picker(&mut self) {
+        let entries: Vec<_> = self
+            .backend
+            .all_bufs()
+            .iter()
+            .map(|buffer| (buffer.id, buffer.title(), buffer.path.clone()))
+            .collect();
+        self.open_picker(PickerState::new_buffers(entries));
+    }
+
+    fn open_location_picker(
+        &mut self,
+        title: &str,
+        empty_message: &str,
+        items: Vec<crate::picker::PickerItem>,
+    ) {
+        if items.is_empty() {
+            self.backend.status_message = Some(empty_message.to_owned());
+            return;
+        }
+        self.open_picker(PickerState::new_locations(title, items));
+    }
+
+    pub(crate) fn open_jump_list_picker(&mut self) {
+        let items = self
+            .jump_list
+            .iter()
+            .enumerate()
+            .map(|(index, (line, col))| crate::picker::PickerItem {
+                label: format!(
+                    "{}:{}:{} {}",
+                    index + 1,
+                    line + 1,
+                    col + 1,
+                    self.backend
+                        .lines
+                        .get(*line)
+                        .map(|text| text.trim())
+                        .filter(|text| !text.is_empty())
+                        .unwrap_or("<blank>")
+                ),
+                detail: None,
+                path: None,
+                buf_id: None,
+                line: Some(*line),
+                col: Some(*col),
+                choice_index: None,
+            })
+            .collect();
+        self.open_location_picker("Jumplist", "no jumplist entries", items);
+    }
+
+    pub(crate) fn open_changed_file_picker(&mut self) {
+        let repo_root = self
+            .backend
+            .active()
+            .path
+            .as_deref()
+            .and_then(|path| crate::config::find_git_root(path.parent().unwrap_or(path)))
+            .or_else(|| {
+                std::env::current_dir().ok().and_then(|cwd| crate::config::find_git_root(&cwd))
+            });
+        let Some(repo_root) = repo_root else {
+            self.backend.status_message = Some(String::from("changed files: not inside git repo"));
+            return;
+        };
+        match crate::git::changed_files(&repo_root) {
+            Ok(files) => {
+                let items = files
+                    .into_iter()
+                    .map(|path| {
+                        let label = path
+                            .strip_prefix(&repo_root)
+                            .unwrap_or(&path)
+                            .to_string_lossy()
+                            .into_owned();
+                        crate::picker::PickerItem {
+                            label,
+                            detail: None,
+                            path: Some(path),
+                            buf_id: None,
+                            line: None,
+                            col: None,
+                            choice_index: None,
+                        }
+                    })
+                    .collect();
+                self.open_location_picker("Changed Files", "no changed files", items);
+            }
+            Err(err) => {
+                self.backend.status_message = Some(format!("changed files failed: {err}"));
+            }
+        }
+    }
+
+    pub(crate) fn open_diagnostics_picker(&mut self) {
+        let active_id = self.backend.active().id;
+        let items = self
+            .active_diagnostic_items()
+            .into_iter()
+            .map(|(_, entry)| crate::picker::PickerItem {
+                label: entry.display_label(),
+                detail: entry.path.as_ref().map(|path| path.to_string_lossy().into_owned()),
+                path: entry.path,
+                buf_id: Some(active_id),
+                line: Some(entry.line),
+                col: Some(entry.col),
+                choice_index: None,
+            })
+            .collect();
+        self.open_location_picker("Diagnostics", "no diagnostics", items);
+    }
+
+    pub(crate) fn open_workspace_diagnostics_picker(&mut self) {
+        let items = self
+            .backend
+            .all_bufs()
+            .iter()
+            .flat_map(|buffer| {
+                let prefix = buffer
+                    .path
+                    .as_ref()
+                    .and_then(|path| path.file_name())
+                    .and_then(|name| name.to_str())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| buffer.title());
+                buffer.diagnostics.iter().map(move |diagnostic| {
+                    let (line, col) = line_col_for_offset(&buffer.lines, diagnostic.range.start);
+                    crate::picker::PickerItem {
+                        label: format!("{prefix}:{}: {}", line + 1, diagnostic.message),
+                        detail: buffer
+                            .path
+                            .as_ref()
+                            .map(|path| path.to_string_lossy().into_owned()),
+                        path: buffer.path.clone(),
+                        buf_id: Some(buffer.id),
+                        line: Some(line),
+                        col: Some(col),
+                        choice_index: None,
+                    }
+                })
+            })
+            .collect();
+        self.open_location_picker("Workspace Diagnostics", "no workspace diagnostics", items);
+    }
+
+    pub(crate) fn reopen_last_picker(&mut self) {
+        let Some(picker) = self.last_picker.clone() else {
+            self.backend.status_message = Some(String::from("no previous picker"));
+            return;
+        };
+        self.picker = Some(picker);
+    }
+
     pub(super) fn execute_command(&mut self) {
         let _ = self.backend.sync_pending_events();
         self.handle_pending_ui_actions();
@@ -146,6 +333,44 @@ impl App {
                 let (start, end) = range.unwrap_or((cursor_line, cursor_line));
                 self.yank_line_range(start, end);
             }
+            "paste_clipboard_after" => {
+                self.paste_from_register(RegisterName::Clipboard, false);
+            }
+            "paste_clipboard_before" => {
+                self.paste_from_register(RegisterName::Clipboard, true);
+            }
+            "yank_to_clipboard" => {
+                if let Some((start, end)) = range {
+                    self.yank_line_range_into_register(start, end, RegisterName::Clipboard);
+                } else {
+                    self.yank_selection_to_register(RegisterName::Clipboard);
+                }
+            }
+            "yank_main_selection_to_clipboard" => {
+                self.yank_main_selection_to_register(RegisterName::Clipboard);
+            }
+            "replace_selections_with_clipboard" => {
+                self.replace_selections_with_register(RegisterName::Clipboard);
+            }
+            "paste_primary_clipboard_after" => {
+                self.paste_from_register(RegisterName::PrimaryClipboard, false);
+            }
+            "paste_primary_clipboard_before" => {
+                self.paste_from_register(RegisterName::PrimaryClipboard, true);
+            }
+            "yank_to_primary_clipboard" => {
+                if let Some((start, end)) = range {
+                    self.yank_line_range_into_register(start, end, RegisterName::PrimaryClipboard);
+                } else {
+                    self.yank_selection_to_register(RegisterName::PrimaryClipboard);
+                }
+            }
+            "yank_main_selection_to_primary_clipboard" => {
+                self.yank_main_selection_to_register(RegisterName::PrimaryClipboard);
+            }
+            "replace_selections_with_primary_clipboard" => {
+                self.replace_selections_with_register(RegisterName::PrimaryClipboard);
+            }
             "format" => {
                 if let Err(err) = self.backend.format_document() {
                     self.backend.status_message = Some(format!("format failed: {err}"));
@@ -161,9 +386,34 @@ impl App {
                     self.backend.status_message = Some(format!("definition failed: {err}"));
                 }
             }
+            "goto_declaration" => {
+                if let Err(err) = self.backend.request_declaration() {
+                    self.backend.status_message = Some(format!("declaration failed: {err}"));
+                }
+            }
+            "goto_definition" => {
+                if let Err(err) = self.backend.request_definition() {
+                    self.backend.status_message = Some(format!("definition failed: {err}"));
+                }
+            }
+            "goto_type_definition" => {
+                if let Err(err) = self.backend.request_type_definition() {
+                    self.backend.status_message = Some(format!("type definition failed: {err}"));
+                }
+            }
             "references" | "refs" => {
                 if let Err(err) = self.backend.request_references() {
                     self.backend.status_message = Some(format!("references failed: {err}"));
+                }
+            }
+            "goto_reference" => {
+                if let Err(err) = self.backend.request_references() {
+                    self.backend.status_message = Some(format!("references failed: {err}"));
+                }
+            }
+            "goto_implementation" => {
+                if let Err(err) = self.backend.request_implementation() {
+                    self.backend.status_message = Some(format!("implementation failed: {err}"));
                 }
             }
             "symbols" | "outline" => {
@@ -171,9 +421,19 @@ impl App {
                     self.backend.status_message = Some(format!("symbols failed: {err}"));
                 }
             }
+            "symbol_picker" => {
+                if let Err(err) = self.backend.request_document_symbols() {
+                    self.backend.status_message = Some(format!("symbols failed: {err}"));
+                }
+            }
             "wsymbols" | "wsymbol" => {
                 let query = tail.to_owned();
                 if let Err(err) = self.backend.request_workspace_symbols(&query) {
+                    self.backend.status_message = Some(format!("workspace symbols failed: {err}"));
+                }
+            }
+            "workspace_symbol_picker" => {
+                if let Err(err) = self.backend.request_workspace_symbols("") {
                     self.backend.status_message = Some(format!("workspace symbols failed: {err}"));
                 }
             }
@@ -197,6 +457,68 @@ impl App {
                 };
                 self.goto_column(column.saturating_sub(1));
             }
+            "goto_first_nonwhitespace" => {
+                self.goto_first_nonwhitespace();
+            }
+            "goto_last_modification" => {
+                self.change_list_older();
+            }
+            "goto_word" => {
+                self.move_word_start(true, false);
+            }
+            "goto_window_top" => {
+                self.goto_window_top();
+            }
+            "goto_window_center" => {
+                self.goto_window_center();
+            }
+            "goto_window_bottom" => {
+                self.goto_window_bottom();
+            }
+            "goto_last_accessed_file" => {
+                self.goto_last_accessed_file();
+            }
+            "goto_last_modified_file" => {
+                self.goto_last_modified_file();
+            }
+            "goto_next_diag" => {
+                self.goto_adjacent_diagnostic(true);
+            }
+            "goto_prev_diag" => {
+                self.goto_adjacent_diagnostic(false);
+            }
+            "goto_first_diag" => {
+                self.goto_edge_diagnostic(true);
+            }
+            "goto_last_diag" => {
+                self.goto_edge_diagnostic(false);
+            }
+            "goto_next_function"
+            | "goto_prev_function"
+            | "goto_next_class"
+            | "goto_prev_class"
+            | "goto_next_parameter"
+            | "goto_prev_parameter"
+            | "goto_next_comment"
+            | "goto_prev_comment"
+            | "goto_next_test"
+            | "goto_prev_test"
+            | "goto_next_paragraph"
+            | "goto_prev_paragraph" => {
+                let _ = self.backend.send_edit(head, json!([]));
+            }
+            "goto_next_change" => {
+                self.jump_to_git_hunk(true);
+            }
+            "goto_prev_change" => {
+                self.jump_to_git_hunk(false);
+            }
+            "goto_first_change" => {
+                self.jump_to_git_hunk_edge(true);
+            }
+            "goto_last_change" => {
+                self.jump_to_git_hunk_edge(false);
+            }
             "rename" => {
                 let new_name = parts.collect::<Vec<_>>().join(" ");
                 if new_name.is_empty() {
@@ -208,6 +530,16 @@ impl App {
             }
             "diagnostics" => {
                 self.open_diagnostics_location_list();
+            }
+            "diagnostics_picker" => {
+                self.open_diagnostics_picker();
+                self.enter_normal_mode();
+                return;
+            }
+            "workspace_diagnostics_picker" => {
+                self.open_workspace_diagnostics_picker();
+                self.enter_normal_mode();
+                return;
             }
             "hover" => {
                 let position = Some((self.backend.cursor_line, self.backend.cursor_col));
@@ -232,6 +564,15 @@ impl App {
             }
             "reindent" => {
                 let _ = self.backend.send_edit("reindent", json!([]));
+            }
+            "toggle_comments" => {
+                let _ = self.backend.send_edit("toggle_comment", json!([]));
+            }
+            "toggle_line_comments" => {
+                let _ = self.backend.send_edit("toggle_line_comment", json!([]));
+            }
+            "toggle_block_comments" => {
+                let _ = self.backend.send_edit("toggle_block_comment", json!([]));
             }
             "help" => {
                 self.open_help_picker("Help", Self::help_items());
@@ -317,6 +658,9 @@ impl App {
             "trim_selections" => {
                 let _ = self.backend.send_edit("trim_selections", json!([]));
             }
+            "align_selections" => {
+                let _ = self.backend.send_edit("align_selections", json!([]));
+            }
             "collapse_selection" => {
                 let _ = self.backend.send_edit("collapse_selections", json!([]));
             }
@@ -331,6 +675,79 @@ impl App {
             }
             "remove_primary_selection" => {
                 let _ = self.backend.send_edit("remove_primary_selection", json!([]));
+            }
+            "rotate_selections_backward" => {
+                let _ = self.backend.send_edit("rotate_selections_backward", json!([]));
+            }
+            "rotate_selections_forward" => {
+                let _ = self.backend.send_edit("rotate_selections_forward", json!([]));
+            }
+            "move_line_down" => {
+                if let Err(message) = self.move_current_line_adjacent(true) {
+                    self.backend.status_message = Some(message);
+                }
+            }
+            "move_line_up" => {
+                if let Err(message) = self.move_current_line_adjacent(false) {
+                    self.backend.status_message = Some(message);
+                }
+            }
+            "match_brackets" => {
+                let _ = self.backend.move_to_matching_bracket(false);
+            }
+            "surround_add" => {
+                let Some(pair) = parts.next() else {
+                    self.backend.status_message =
+                        Some("surround_add: usage: :surround_add <pair> [textobject]".to_owned());
+                    self.enter_normal_mode();
+                    return;
+                };
+                let textobject = parts.next().and_then(|arg| arg.chars().next());
+                if let Err(message) = self.surround_add(pair, textobject) {
+                    self.backend.status_message = Some(message);
+                }
+            }
+            "surround_replace" => {
+                let Some(pair) = parts.next() else {
+                    self.backend.status_message =
+                        Some("surround_replace: usage: :surround_replace <pair>".to_owned());
+                    self.enter_normal_mode();
+                    return;
+                };
+                if let Err(message) = self.surround_replace(pair) {
+                    self.backend.status_message = Some(message);
+                }
+            }
+            "surround_delete" => {
+                if let Err(message) = self.surround_delete() {
+                    self.backend.status_message = Some(message);
+                }
+            }
+            "select_textobject_around" => {
+                let Some(spec) = parts.next().and_then(|arg| arg.chars().next()) else {
+                    self.backend.status_message = Some(
+                        "select_textobject_around: usage: :select_textobject_around <specifier>"
+                            .to_owned(),
+                    );
+                    self.enter_normal_mode();
+                    return;
+                };
+                if let Err(message) = self.select_text_object(true, spec) {
+                    self.backend.status_message = Some(message);
+                }
+            }
+            "select_textobject_inner" => {
+                let Some(spec) = parts.next().and_then(|arg| arg.chars().next()) else {
+                    self.backend.status_message = Some(
+                        "select_textobject_inner: usage: :select_textobject_inner <specifier>"
+                            .to_owned(),
+                    );
+                    self.enter_normal_mode();
+                    return;
+                };
+                if let Err(message) = self.select_text_object(false, spec) {
+                    self.backend.status_message = Some(message);
+                }
             }
             "copy_selection_on_next_line" => {
                 let _ = self.backend.send_edit("add_selection_below", json!([]));
@@ -377,14 +794,48 @@ impl App {
             "add_newline_above" => {
                 self.add_newline_above();
             }
+            "extend_char_left" => {
+                let _ = self.backend.send_edit("move_left_and_modify_selection", json!([]));
+            }
+            "extend_char_right" => {
+                let _ = self.backend.send_edit("move_right_and_modify_selection", json!([]));
+            }
+            "extend_line_up" | "extend_visual_line_up" => {
+                let _ = self.backend.send_edit("move_up_and_modify_selection", json!([]));
+            }
+            "extend_line_down" | "extend_visual_line_down" => {
+                let _ = self.backend.send_edit("move_down_and_modify_selection", json!([]));
+            }
+            "extend_line_above" => {
+                let _ = self.backend.send_edit("extend_line_above", json!([]));
+            }
             "extend_line_below" => {
                 self.extend_line_below();
+            }
+            "select_line_above" => {
+                let _ = self.backend.send_edit("select_line_above", json!([]));
+            }
+            "select_line_below" => {
+                let _ = self.backend.send_edit("select_line_below", json!([]));
             }
             "extend_to_line_bounds" => {
                 self.extend_to_line_bounds();
             }
             "shrink_to_line_bounds" => {
                 self.shrink_to_line_bounds();
+            }
+            "goto_file_end" => {
+                let _ = self.backend.send_edit("move_to_end_of_document", json!([]));
+            }
+            "extend_to_file_start" => {
+                let _ = self
+                    .backend
+                    .send_edit("move_to_beginning_of_document_and_modify_selection", json!([]));
+            }
+            "extend_to_file_end" => {
+                let _ = self
+                    .backend
+                    .send_edit("move_to_end_of_document_and_modify_selection", json!([]));
             }
             "join_selections" => {
                 self.join_selections(false);
@@ -516,6 +967,103 @@ impl App {
             }
             "reload_config" | "config_reload" => {
                 self.backend.status_message = Some(match self.reload_runtime_config() {
+                    Ok(message) => message,
+                    Err(message) => message,
+                });
+            }
+            "lsp_restart" => {
+                self.backend.status_message =
+                    Some(match self.backend.restart_plugin(Self::LSP_PLUGIN_NAME) {
+                        Ok(()) => String::from("lsp restart requested"),
+                        Err(err) => format!("lsp restart failed: {err}"),
+                    });
+            }
+            "lsp_stop" => {
+                self.backend.status_message =
+                    Some(match self.backend.stop_plugin(Self::LSP_PLUGIN_NAME) {
+                        Ok(()) => String::from("lsp stop requested"),
+                        Err(err) => format!("lsp stop failed: {err}"),
+                    });
+            }
+            "change_current_directory" | "cd" => {
+                self.backend.status_message = Some(if tail.is_empty() {
+                    String::from("cd: usage: :cd path")
+                } else {
+                    match std::env::set_current_dir(PathBuf::from(tail)) {
+                        Ok(()) => match std::env::current_dir() {
+                            Ok(path) => format!("cwd: {}", path.display()),
+                            Err(err) => format!("cd failed: {err}"),
+                        },
+                        Err(err) => format!("cd failed: {err}"),
+                    }
+                });
+            }
+            "show_directory" | "pwd" => {
+                self.backend.status_message = Some(match std::env::current_dir() {
+                    Ok(path) => format!("cwd: {}", path.display()),
+                    Err(err) => format!("pwd failed: {err}"),
+                });
+            }
+            "pipe" | "|" | "shell_pipe" => {
+                self.backend.status_message = Some(if tail.is_empty() {
+                    format!("{head}: usage: :{head} shell-command")
+                } else {
+                    match self.run_shell_command_on_selections(tail, ShellSelectionMode::Replace) {
+                        Ok(message) => message,
+                        Err(message) => message,
+                    }
+                });
+            }
+            "pipe_to" | "shell_pipe_to" => {
+                self.backend.status_message = Some(if tail.is_empty() {
+                    format!("{head}: usage: :{head} shell-command")
+                } else {
+                    match self
+                        .run_shell_command_on_selections(tail, ShellSelectionMode::IgnoreOutput)
+                    {
+                        Ok(message) => message,
+                        Err(message) => message,
+                    }
+                });
+            }
+            "shell_insert_output" => {
+                self.backend.status_message = Some(if tail.is_empty() {
+                    String::from("shell_insert_output: usage: :shell_insert_output shell-command")
+                } else {
+                    match self
+                        .run_shell_command_on_selections(tail, ShellSelectionMode::InsertBefore)
+                    {
+                        Ok(message) => message,
+                        Err(message) => message,
+                    }
+                });
+            }
+            "shell_append_output" => {
+                self.backend.status_message = Some(if tail.is_empty() {
+                    String::from("shell_append_output: usage: :shell_append_output shell-command")
+                } else {
+                    match self
+                        .run_shell_command_on_selections(tail, ShellSelectionMode::InsertAfter)
+                    {
+                        Ok(message) => message,
+                        Err(message) => message,
+                    }
+                });
+            }
+            "shell_keep_pipe" => {
+                self.backend.status_message = Some(if tail.is_empty() {
+                    String::from("shell_keep_pipe: usage: :shell_keep_pipe shell-command")
+                } else {
+                    match self
+                        .run_shell_command_on_selections(tail, ShellSelectionMode::KeepByStatus)
+                    {
+                        Ok(message) => message,
+                        Err(message) => message,
+                    }
+                });
+            }
+            "reset_diff_change" | "diffget" | "diffg" => {
+                self.backend.status_message = Some(match self.restore_git_hunk() {
                     Ok(message) => message,
                     Err(message) => message,
                 });
@@ -673,23 +1221,9 @@ impl App {
                     }
                 }
             }
-            "bn" | "bnext" => {
-                let old = self.backend.active().id;
-                self.backend.next_buffer();
-                let new = self.backend.active().id;
-                if old != new {
-                    self.tabs.focused_windows_mut().set_focused_buffer(new);
-                    self.viewport = Viewport::default();
-                }
-            }
-            "bp" | "bprev" | "bprevious" => {
-                let old = self.backend.active().id;
-                self.backend.prev_buffer();
-                let new = self.backend.active().id;
-                if old != new {
-                    self.tabs.focused_windows_mut().set_focused_buffer(new);
-                    self.viewport = Viewport::default();
-                }
+            "bn" | "bnext" | "goto_next_buffer" => self.cycle_buffer_command(true),
+            "bp" | "bprev" | "bprevious" | "goto_previous_buffer" => {
+                self.cycle_buffer_command(false);
             }
             "b#" => match self.backend.switch_alternate() {
                 Ok(()) => {
@@ -848,6 +1382,33 @@ impl App {
                 let new_buf = self.tabs.focused_windows().focused_window().buffer_id;
                 let _ = self.backend.switch_to_id(new_buf);
             }
+            "rotate_view" | "cycle_view" => {
+                self.rotate_view();
+            }
+            "jump_view_left" => {
+                self.jump_view(crate::window::ViewDirection::Left);
+            }
+            "jump_view_down" => {
+                self.jump_view(crate::window::ViewDirection::Down);
+            }
+            "jump_view_up" => {
+                self.jump_view(crate::window::ViewDirection::Up);
+            }
+            "jump_view_right" => {
+                self.jump_view(crate::window::ViewDirection::Right);
+            }
+            "swap_view_left" => {
+                self.swap_view(crate::window::ViewDirection::Left);
+            }
+            "swap_view_down" => {
+                self.swap_view(crate::window::ViewDirection::Down);
+            }
+            "swap_view_up" => {
+                self.swap_view(crate::window::ViewDirection::Up);
+            }
+            "swap_view_right" => {
+                self.swap_view(crate::window::ViewDirection::Right);
+            }
             "tabs" => {
                 let info = (0..self.tabs.tab_count())
                     .map(|i| {
@@ -859,26 +1420,49 @@ impl App {
                 self.backend.status_message = Some(info);
             }
             "files" | "Files" => {
-                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                self.picker = Some(PickerState::new_files(cwd));
+                self.open_file_picker_in_current_directory();
+                self.enter_normal_mode();
+                return;
+            }
+            "file_picker" => {
+                self.open_file_picker_for_buffer_directory();
+                self.enter_normal_mode();
+                return;
+            }
+            "file_picker_in_current_directory" => {
+                self.open_file_picker_in_current_directory();
                 self.enter_normal_mode();
                 return;
             }
             "bpick" => {
-                let entries: Vec<_> = self
-                    .backend
-                    .all_bufs()
-                    .iter()
-                    .map(|b| (b.id, b.title(), b.path.clone()))
-                    .collect();
-                self.picker = Some(PickerState::new_buffers(entries));
+                self.open_buffer_picker();
+                self.enter_normal_mode();
+                return;
+            }
+            "buffer_picker" => {
+                self.open_buffer_picker();
+                self.enter_normal_mode();
+                return;
+            }
+            "jumplist_picker" => {
+                self.open_jump_list_picker();
+                self.enter_normal_mode();
+                return;
+            }
+            "changed_file_picker" => {
+                self.open_changed_file_picker();
+                self.enter_normal_mode();
+                return;
+            }
+            "last_picker" => {
+                self.reopen_last_picker();
                 self.enter_normal_mode();
                 return;
             }
             "grep" | "Grep" => {
                 let query = parts.collect::<Vec<_>>().join(" ");
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-                self.picker = Some(PickerState::new_grep(query, cwd));
+                self.open_picker(PickerState::new_grep(query, cwd));
                 self.enter_normal_mode();
                 return;
             }
@@ -1006,9 +1590,11 @@ impl App {
             "buffer_close_others!",
             "bn",
             "bnext",
+            "goto_next_buffer",
             "bp",
             "bprev",
             "bprevious",
+            "goto_previous_buffer",
             "buffers",
             "Buffers",
             "cc",
@@ -1032,11 +1618,21 @@ impl App {
             "d",
             "def",
             "definition",
+            "goto_declaration",
+            "goto_definition",
+            "goto_type_definition",
+            "goto_reference",
+            "goto_implementation",
             "delete",
             "diagnostics",
             "e",
+            "goto_last_accessed_file",
+            "goto_last_modified_file",
             "e!",
             "edit",
+            "goto_window_bottom",
+            "goto_window_center",
+            "goto_window_top",
             "edit!",
             "g",
             "commands",
@@ -1047,15 +1643,42 @@ impl App {
             "delete_word_forward",
             "duplicate_line",
             "files",
+            "file_picker",
+            "file_picker_in_current_directory",
             "Files",
             "format",
             "grep",
             "Grep",
+            "buffer_picker",
+            "changed_file_picker",
             "gblame",
             "gdiff",
             "ghunkdiff",
             "goto",
             "goto_column",
+            "goto_first_change",
+            "goto_first_diag",
+            "goto_first_nonwhitespace",
+            "goto_last_change",
+            "goto_last_diag",
+            "goto_last_modification",
+            "goto_next_change",
+            "goto_next_class",
+            "goto_next_comment",
+            "goto_next_diag",
+            "goto_next_function",
+            "goto_next_paragraph",
+            "goto_next_parameter",
+            "goto_next_test",
+            "goto_prev_change",
+            "goto_prev_class",
+            "goto_prev_comment",
+            "goto_prev_diag",
+            "goto_prev_function",
+            "goto_prev_paragraph",
+            "goto_prev_parameter",
+            "goto_prev_test",
+            "goto_word",
             "lang",
             "hs",
             "hsplit",
@@ -1072,6 +1695,8 @@ impl App {
             "lclose",
             "lfirst",
             "llast",
+            "lsp_restart",
+            "lsp_stop",
             "ln",
             "lnext",
             "lop",
@@ -1090,6 +1715,9 @@ impl App {
             "new",
             "o",
             "open",
+            "pipe",
+            "pipe_to",
+            "pwd",
             "q",
             "q!",
             "qa",
@@ -1101,6 +1729,7 @@ impl App {
             "recover",
             "recoverdel",
             "reload_config",
+            "reset_diff_change",
             "reindent",
             "rename",
             "references",
@@ -1113,17 +1742,24 @@ impl App {
             "redraw",
             "run",
             "run_shell_command",
+            "shell_append_output",
+            "shell_insert_output",
+            "shell_keep_pipe",
+            "shell_pipe",
+            "shell_pipe_to",
             "selection_for_find",
             "selection_for_replace",
             "select_regex",
             "selection_into_lines",
             "set_language",
             "sh",
+            "show_directory",
             "split_selection",
             "split_selection_on_newline",
             "merge_selections",
             "merge_consecutive_selections",
             "trim_selections",
+            "align_selections",
             "collapse_selection",
             "clear_register",
             "flip_selections",
@@ -1131,22 +1767,49 @@ impl App {
             "encoding",
             "ensure_selections_forward",
             "expand_selection",
+            "extend_char_left",
+            "extend_char_right",
+            "extend_line_above",
             "extend_line_below",
+            "extend_line_down",
+            "extend_line_up",
             "extend_to_line_bounds",
+            "extend_to_file_end",
+            "extend_to_file_start",
+            "extend_visual_line_down",
+            "extend_visual_line_up",
             "join_selections",
             "join_selections_space",
+            "jumplist_picker",
             "keep_selections",
             "keep_primary_selection",
+            "last_picker",
+            "match_brackets",
+            "move_line_down",
+            "move_line_up",
+            "goto_file_end",
             "remove_selections",
             "remove_primary_selection",
+            "rotate_selections_backward",
+            "rotate_selections_forward",
+            "select_line_above",
+            "select_line_below",
             "select_all_children",
             "select_all_siblings",
+            "symbol_picker",
+            "select_textobject_around",
+            "select_textobject_inner",
             "select_next_sibling",
             "select_prev_sibling",
             "shrink_selection",
             "shrink_to_line_bounds",
             "copy_selection_on_next_line",
             "copy_selection_on_prev_line",
+            "surround_add",
+            "surround_delete",
+            "surround_replace",
+            "workspace_diagnostics_picker",
+            "workspace_symbol_picker",
             "add_newline_above",
             "add_newline_below",
             "rotate_selection_contents_backward",
@@ -1165,12 +1828,27 @@ impl App {
             "tabprev",
             "tabprevious",
             "tabs",
+            "rotate_view",
+            "cycle_view",
+            "jump_view_left",
+            "jump_view_down",
+            "jump_view_up",
+            "jump_view_right",
+            "swap_view_left",
+            "swap_view_down",
+            "swap_view_up",
+            "swap_view_right",
             "term",
             "terminal",
             "test",
             "transpose",
             "add_selection_above",
             "add_selection_below",
+            "change_current_directory",
+            "cd",
+            "diffget",
+            "diffg",
+            "|",
             "vs",
             "vsplit",
             "w",
@@ -1195,6 +1873,16 @@ impl App {
             "xa!",
             "y",
             "yank",
+            "paste_clipboard_after",
+            "paste_clipboard_before",
+            "yank_to_clipboard",
+            "yank_main_selection_to_clipboard",
+            "replace_selections_with_clipboard",
+            "paste_primary_clipboard_after",
+            "paste_primary_clipboard_before",
+            "yank_to_primary_clipboard",
+            "yank_main_selection_to_primary_clipboard",
+            "replace_selections_with_primary_clipboard",
         ];
         let prefix = self.command_buffer.clone();
         let candidates: Vec<&&str> = COMMANDS.iter().filter(|c| c.starts_with(&*prefix)).collect();
@@ -1204,7 +1892,7 @@ impl App {
     }
 
     fn open_help_picker(&mut self, title: &str, items: Vec<String>) {
-        self.picker = Some(PickerState::new_help(title, items));
+        self.open_picker(PickerState::new_help(title, items));
         self.enter_normal_mode();
     }
 
@@ -1215,6 +1903,165 @@ impl App {
             .cloned()
             .or_else(|| self.highlighter.syntax_name_for_path(buf.path.as_deref()))
             .unwrap_or_else(|| String::from("Plain Text"))
+    }
+
+    fn cycle_buffer_command(&mut self, forward: bool) {
+        let old = self.backend.active().id;
+        if forward {
+            self.backend.next_buffer();
+        } else {
+            self.backend.prev_buffer();
+        }
+        let new = self.backend.active().id;
+        if old != new {
+            self.tabs.focused_windows_mut().set_focused_buffer(new);
+            self.viewport = Viewport::default();
+        }
+    }
+
+    pub(super) fn goto_last_accessed_file(&mut self) {
+        match self.backend.switch_last_accessed() {
+            Ok(()) => {
+                let new = self.backend.active().id;
+                self.tabs.focused_windows_mut().set_focused_buffer(new);
+                self.viewport = Viewport::default();
+            }
+            Err(err) => {
+                self.backend.status_message = Some(err.to_string());
+            }
+        }
+    }
+
+    pub(super) fn goto_last_modified_file(&mut self) {
+        match self.backend.switch_last_modified() {
+            Ok(()) => {
+                let new = self.backend.active().id;
+                self.tabs.focused_windows_mut().set_focused_buffer(new);
+                self.viewport = Viewport::default();
+            }
+            Err(err) => {
+                self.backend.status_message = Some(err.to_string());
+            }
+        }
+    }
+
+    pub(super) fn goto_window_top(&mut self) {
+        self.goto_window_line(WindowLineTarget::Top);
+    }
+
+    pub(super) fn goto_window_center(&mut self) {
+        self.goto_window_line(WindowLineTarget::Center);
+    }
+
+    pub(super) fn goto_window_bottom(&mut self) {
+        self.goto_window_line(WindowLineTarget::Bottom);
+    }
+
+    fn goto_window_line(&mut self, target: WindowLineTarget) {
+        let total_lines = self.backend.lines.len().max(1);
+        let visible_height = self.last_editor_height.max(1);
+        let count =
+            usize::try_from(self.input_state.count()).unwrap_or(usize::MAX).saturating_sub(1);
+        let scrolloff = self.config.scroll_offset.min(visible_height.saturating_sub(1) / 2);
+        let last_visible_line = visible_height.saturating_sub(1);
+        let target_line = match target {
+            WindowLineTarget::Top => self.viewport.top_line + scrolloff + count,
+            WindowLineTarget::Center => self.viewport.top_line + (last_visible_line / 2),
+            WindowLineTarget::Bottom => {
+                self.viewport.top_line + last_visible_line.saturating_sub(scrolloff + count)
+            }
+        }
+        .min(total_lines.saturating_sub(1));
+        self.push_jump();
+        self.move_cursor_to(target_line, 0);
+    }
+
+    fn active_diagnostic_items(&self) -> Vec<(usize, QfEntry)> {
+        let buf = self.backend.active();
+        buf.diagnostics
+            .iter()
+            .map(|diagnostic| {
+                let (line, col) = line_col_for_offset(&buf.lines, diagnostic.range.start);
+                let severity = match diagnostic.severity {
+                    xi_core_lib::plugin_rpc::DiagnosticSeverity::Error => "error",
+                    xi_core_lib::plugin_rpc::DiagnosticSeverity::Warning => "warning",
+                    xi_core_lib::plugin_rpc::DiagnosticSeverity::Information => "info",
+                    xi_core_lib::plugin_rpc::DiagnosticSeverity::Hint => "hint",
+                };
+                (
+                    diagnostic.range.start,
+                    QfEntry {
+                        path: buf.path.clone(),
+                        line,
+                        col,
+                        message: format!("[{severity}] {}", diagnostic.message),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    pub(super) fn populate_diagnostics_location_list(&mut self, selected: usize) -> bool {
+        let items = self.active_diagnostic_items();
+        if items.is_empty() {
+            self.backend.status_message = Some(String::from("no diagnostics"));
+            return false;
+        }
+        let entries = items.into_iter().map(|(_, entry)| entry).collect::<Vec<_>>();
+        let mut list = QfList::new("Diagnostics", entries);
+        let _ = list.select_one_based(selected + 1);
+        self.location_list = Some(list);
+        true
+    }
+
+    pub(super) fn active_cursor_offset(&self) -> usize {
+        let buf = self.backend.active();
+        let line = self.backend.cursor_line.min(buf.lines.len().saturating_sub(1));
+        let prefix = buf.lines.iter().take(line).map(|line| line.len() + 1).sum::<usize>();
+        let col =
+            buf.lines.get(line).map(|line| self.backend.cursor_col.min(line.len())).unwrap_or(0);
+        prefix + col
+    }
+
+    fn goto_adjacent_diagnostic(&mut self, forward: bool) {
+        let items = self.active_diagnostic_items();
+        if items.is_empty() {
+            self.backend.status_message = Some(String::from("no diagnostics"));
+            return;
+        }
+
+        let cursor_offset = self.active_cursor_offset();
+        let target = if forward {
+            items.iter().position(|(start, _)| *start > cursor_offset)
+        } else {
+            items.iter().rposition(|(start, _)| *start < cursor_offset)
+        };
+
+        let Some(selected) = target else {
+            self.backend.status_message = Some(if forward {
+                String::from("no next diagnostic")
+            } else {
+                String::from("no previous diagnostic")
+            });
+            return;
+        };
+
+        let entry = items[selected].1.clone();
+        let _ = self.populate_diagnostics_location_list(selected);
+        self.move_cursor_to(entry.line, entry.col);
+    }
+
+    fn goto_edge_diagnostic(&mut self, first: bool) {
+        let items = self.active_diagnostic_items();
+        if items.is_empty() {
+            self.backend.status_message = Some(String::from("no diagnostics"));
+            return;
+        }
+
+        let selected = if first { 0 } else { items.len().saturating_sub(1) };
+        let entry = items[selected].1.clone();
+        let _ = self.populate_diagnostics_location_list(selected);
+        self.move_cursor_to(entry.line, entry.col);
     }
 
     fn set_current_buffer_language(&mut self, requested: &str) -> Result<String, String> {
@@ -1409,7 +2256,7 @@ impl App {
             "Selections: :select_regex :selection_into_lines :trim_selections :collapse_selection :select_all".to_owned(),
             "Search sets: :multi_find term [term ...]".to_owned(),
             "Shell: :term cmd | :!cmd | :make [args] | :test [args] | :run [args]".to_owned(),
-            "Workspace: :files :bpick :grep :buffers :split :hsplit :vsplit :tabnew :new".to_owned(),
+            "Workspace: :file_picker :file_picker_in_current_directory :buffer_picker :changed_file_picker :symbol_picker :workspace_symbol_picker :diagnostics_picker :workspace_diagnostics_picker :last_picker".to_owned(),
         ]
     }
 
@@ -1428,24 +2275,61 @@ impl App {
             ":open / :o open file in current view | :new create scratch buffer".to_owned(),
             ":hsplit / :hs open file in horizontal split | :goto / :g jump to line".to_owned(),
             ":goto_column <column> move cursor to 1-based display column on current line".to_owned(),
+            ":goto_first_nonwhitespace jump to first non-whitespace character on current line"
+                .to_owned(),
+            ":goto_last_modification jump to previous entry in change list".to_owned(),
+            ":goto_declaration / :goto_definition / :goto_type_definition / :goto_reference / :goto_implementation request LSP navigation at cursor"
+                .to_owned(),
+            ":goto_next_buffer / :goto_previous_buffer cycle open buffers".to_owned(),
+            ":goto_window_top / :goto_window_center / :goto_window_bottom jump cursor inside visible window"
+                .to_owned(),
+            ":goto_last_accessed_file / :goto_last_modified_file switch recent buffers"
+                .to_owned(),
+            ":goto_next_diag / :goto_prev_diag / :goto_first_diag / :goto_last_diag jump active-buffer diagnostics"
+                .to_owned(),
+            ":goto_word move to next word start using normal word semantics".to_owned(),
             ":write! :write_all :write_quit :write_quit_all add Vim-style aliases".to_owned(),
             ":buffer_close :buffer_close_others :buffer_close_all manage buffers".to_owned(),
             ":reload / :reload_all discard edits and reopen from disk".to_owned(),
             ":reload_config refresh frontend config and keymap overrides".to_owned(),
+            ":lsp_restart / :lsp_stop restart or stop language-server plugin".to_owned(),
+            ":change_current_directory / :cd switch current working directory | :show_directory / :pwd print cwd"
+                .to_owned(),
+            ":rotate_view / :cycle_view / :jump_view_* / :swap_view_* manage split focus and ordering"
+                .to_owned(),
             ":set_language / :lang set or show current syntax name".to_owned(),
             ":read / :r insert file contents at cursor".to_owned(),
             ":move / :mv move current buffer to new path".to_owned(),
             ":encoding show or set current buffer encoding metadata".to_owned(),
             ":clear_register [name] clear one register or all registers".to_owned(),
             ":echo print arguments to status line | :redraw clear and repaint UI".to_owned(),
+            ":pipe / :| / :pipe_to run shell commands on current selections".to_owned(),
+            ":shell_insert_output / :shell_append_output insert shell output around selections"
+                .to_owned(),
+            ":shell_keep_pipe keep selections whose shell command exits successfully".to_owned(),
             ":gblame show git blame metadata for current line".to_owned(),
             ":gdiff open git diff for current buffer in scratch view".to_owned(),
             ":ghunkdiff open git diff for current hunk in scratch view".to_owned(),
+            ":goto_next_change / :goto_prev_change / :goto_first_change / :goto_last_change jump across git hunks"
+                .to_owned(),
+            ":reset_diff_change / :diffget / :diffg restore current git hunk from HEAD"
+                .to_owned(),
             ":complete open completion picker from backend suggestions".to_owned(),
             ":codeaction / :code_action open backend code-action picker".to_owned(),
             ":rename new_name request backend rename at cursor".to_owned(),
             ":diagnostics open location list for active-buffer diagnostics".to_owned(),
+            ":file_picker / :file_picker_in_current_directory open file pickers rooted at buffer dir or cwd".to_owned(),
+            ":buffer_picker / :changed_file_picker open buffer or git-changed-file pickers".to_owned(),
+            ":symbol_picker / :workspace_symbol_picker request symbol pickers".to_owned(),
+            ":diagnostics_picker / :workspace_diagnostics_picker open diagnostic pickers".to_owned(),
+            ":jumplist_picker / :last_picker open jump history or reopen prior picker".to_owned(),
             ":reindent run core reindent on current selection or line".to_owned(),
+            ":toggle_comments toggle comments using line comment when available, else block comment"
+                .to_owned(),
+            ":toggle_line_comments force line-comment toggle on current selection or line"
+                .to_owned(),
+            ":toggle_block_comments force block-comment toggle on current selection or line"
+                .to_owned(),
             ":transpose backend transpose at cursor".to_owned(),
             ":duplicate_line backend duplicate current selection line(s)".to_owned(),
             ":increment / :decrement adjust number under cursor".to_owned(),
@@ -1457,19 +2341,38 @@ impl App {
             ":merge_selections / :merge_consecutive_selections combine active selections"
                 .to_owned(),
             ":trim_selections / :collapse_selection normalize current selections".to_owned(),
+            ":align_selections pad selections into aligned columns".to_owned(),
             ":flip_selections / :ensure_selections_forward rewrite selection direction".to_owned(),
-            ":extend_line_below / :extend_to_line_bounds / :shrink_to_line_bounds rewrite line selections"
+            ":move_line_up / :move_line_down swap current line with adjacent line".to_owned(),
+            ":match_brackets jump to matching bracket around cursor".to_owned(),
+            ":extend_char_left / :extend_char_right / :extend_line_up / :extend_line_down / :extend_visual_line_up / :extend_visual_line_down grow selections with motions"
+                .to_owned(),
+            ":extend_line_above / :extend_line_below / :select_line_above / :select_line_below rewrite whole-line selections"
+                .to_owned(),
+            ":goto_file_end / :extend_to_file_start / :extend_to_file_end jump or extend to document edges"
+                .to_owned(),
+            ":extend_to_line_bounds / :shrink_to_line_bounds rewrite line selections"
                 .to_owned(),
             ":join_selections / :join_selections_space join selected lines".to_owned(),
+            ":select_textobject_inner <spec> / :select_textobject_around <spec> select text object at cursor"
+                .to_owned(),
+            ":surround_add <pair> [spec] / :surround_replace <pair> / :surround_delete edit surrounding delimiters"
+                .to_owned(),
             ":keep_selections [regex] / :remove_selections [regex] filter selections"
                 .to_owned(),
-            ":keep_primary_selection / :remove_primary_selection keep or drop rightmost selection"
+            ":keep_primary_selection / :remove_primary_selection keep or drop primary selection"
+                .to_owned(),
+            ":rotate_selections_backward / :rotate_selections_forward cycle primary selection"
                 .to_owned(),
             ":expand_selection / :shrink_selection grow or restore syntax-node selections"
                 .to_owned(),
             ":select_prev_sibling / :select_next_sibling / :select_all_siblings / :select_all_children syntax-tree multi-selection"
                 .to_owned(),
             ":move_parent_node_start / :move_parent_node_end jump cursor to parent syntax node boundary"
+                .to_owned(),
+            ":goto_next_function / :goto_prev_function / :goto_next_class / :goto_prev_class syntax-aware structural jumps"
+                .to_owned(),
+            ":goto_next_parameter / :goto_prev_parameter / :goto_next_comment / :goto_prev_comment / :goto_next_test / :goto_prev_test / :goto_next_paragraph / :goto_prev_paragraph"
                 .to_owned(),
             ":copy_selection_on_next_line / :copy_selection_on_prev_line clone selection to adjacent line"
                 .to_owned(),

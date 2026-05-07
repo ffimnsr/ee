@@ -249,6 +249,9 @@ pub enum CoreRequest {
         #[serde(default)]
         linewise: bool,
     },
+    SelectionsPreview {
+        view_id: ViewId,
+    },
     BlockTextPreview {
         view_id: ViewId,
         start_line: usize,
@@ -490,6 +493,9 @@ pub enum EditNotification {
     Uppercase,
     Lowercase,
     Capitalize,
+    ToggleComment,
+    ToggleLineComment,
+    ToggleBlockComment,
     Reindent,
     Indent,
     Outdent,
@@ -517,12 +523,27 @@ pub enum EditNotification {
     MergeSelections,
     MergeConsecutiveSelections,
     TrimSelections,
+    AlignSelections,
     FlipSelections,
     EnsureSelectionsForward,
     KeepPrimarySelection,
     RemovePrimarySelection,
+    RotateSelectionsBackward,
+    RotateSelectionsForward,
     ExpandSelection,
     ShrinkSelection,
+    GotoNextFunction,
+    GotoPrevFunction,
+    GotoNextClass,
+    GotoPrevClass,
+    GotoNextParameter,
+    GotoPrevParameter,
+    GotoNextComment,
+    GotoPrevComment,
+    GotoNextTest,
+    GotoPrevTest,
+    GotoNextParagraph,
+    GotoPrevParagraph,
     SelectPrevSibling,
     SelectNextSibling,
     SelectAllSiblings,
@@ -539,8 +560,11 @@ pub enum EditNotification {
         #[serde(default)]
         index: Option<usize>,
     },
+    RequestDeclaration,
     RequestDefinition,
+    RequestTypeDefinition,
     RequestReferences,
+    RequestImplementation,
     FormatDocument,
     RequestCodeActions {
         #[serde(default)]
@@ -587,6 +611,9 @@ pub enum EditNotification {
     ExtendLineBelow {
         count: usize,
     },
+    ExtendLineAbove,
+    SelectLineAbove,
+    SelectLineBelow,
     ExtendToLineBounds,
     ShrinkToLineBounds,
     MoveWordStart {
@@ -630,6 +657,7 @@ pub enum EditNotification {
 pub enum PluginNotification {
     Start { view_id: ViewId, plugin_name: String },
     Stop { view_id: ViewId, plugin_name: String },
+    Restart { view_id: ViewId, plugin_name: String },
     PluginRpc { view_id: ViewId, receiver: String, rpc: PlaceholderRpc },
 }
 
@@ -747,5 +775,18 @@ mod tests {
         if let EditNotification::Insert { chars } = cmd.cmd {
             assert_eq!(chars, message);
         }
+    }
+
+    #[test]
+    fn test_deserialize_toggle_comment_commands() {
+        let line: EditCommand<EditNotification> =
+            serde_json::from_str(r#"{"view_id":"view-id-1","method":"toggle_line_comment"}"#)
+                .unwrap();
+        assert!(matches!(line.cmd, EditNotification::ToggleLineComment));
+
+        let block: EditCommand<EditNotification> =
+            serde_json::from_str(r#"{"view_id":"view-id-1","method":"toggle_block_comment"}"#)
+                .unwrap();
+        assert!(matches!(block.cmd, EditNotification::ToggleBlockComment));
     }
 }

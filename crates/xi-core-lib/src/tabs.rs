@@ -136,6 +136,7 @@ struct PendingPluginCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StopReason {
     Manual,
+    Restart,
     SingleInvocation,
     ResourceLimit(PluginTerminationReason),
 }
@@ -296,6 +297,9 @@ impl CoreState {
             Plugin(cmd) => match cmd {
                 PN::Start { view_id, plugin_name } => self.do_start_plugin(view_id, &plugin_name),
                 PN::Stop { view_id, plugin_name } => self.do_stop_plugin(view_id, &plugin_name),
+                PN::Restart { view_id, plugin_name } => {
+                    self.do_restart_plugin(view_id, &plugin_name)
+                }
                 PN::PluginRpc { view_id, receiver, rpc } => {
                     self.do_plugin_rpc(view_id, &receiver, &rpc.method, &rpc.params)
                 }
@@ -334,6 +338,7 @@ impl CoreState {
             SelectedTextPreview { view_id, linewise } => {
                 self.do_selected_text_preview(view_id, linewise)
             }
+            SelectionsPreview { view_id } => self.do_selections_preview(view_id),
             BlockTextPreview { view_id, start_line, end_line, left_col, right_col } => {
                 self.do_block_text_preview(view_id, start_line, end_line, left_col, right_col)
             }
@@ -367,6 +372,13 @@ impl CoreState {
             .make_context(view_id)
             .ok_or_else(|| RemoteError::custom(404, "missing view", None))?;
         Ok(json!(ctx.preview_selected_text(linewise)))
+    }
+
+    fn do_selections_preview(&mut self, view_id: ViewId) -> Result<Value, RemoteError> {
+        let mut ctx = self
+            .make_context(view_id)
+            .ok_or_else(|| RemoteError::custom(404, "missing view", None))?;
+        Ok(json!(ctx.preview_selections()))
     }
 
     fn do_block_text_preview(
@@ -536,6 +548,15 @@ impl CoreState {
         if let Some(plugin) = self.running_plugins.iter().find(|running| running.name == plugin) {
             self.begin_plugin_shutdown(plugin.id, StopReason::Manual);
         }
+    }
+
+    fn do_restart_plugin(&mut self, view_id: ViewId, plugin: &str) {
+        if let Some(plugin) = self.running_plugins.iter().find(|running| running.name == plugin) {
+            self.begin_plugin_shutdown(plugin.id, StopReason::Restart);
+            return;
+        }
+
+        self.do_start_plugin(view_id, plugin);
     }
 
     fn do_plugin_rpc(&mut self, view_id: ViewId, receiver: &str, method: &str, params: &Value) {
@@ -1078,6 +1099,10 @@ impl CoreState {
                 self.notify_plugin_terminated(&plugin.name, &reason);
                 self.scheduled_plugin_restarts.remove(&plugin.name);
                 self.plugin_restart_state.remove(&plugin.name);
+            } else if stop_reason == Some(StopReason::Restart) {
+                self.scheduled_plugin_restarts.remove(&plugin.name);
+                self.plugin_restart_state.remove(&plugin.name);
+                self.restart_plugin(&plugin.name);
             } else if stop_reason.is_none() {
                 self.schedule_plugin_restart(&plugin.name);
             } else {

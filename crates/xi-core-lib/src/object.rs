@@ -18,6 +18,42 @@ pub(crate) enum SyntaxSelectionAction {
     MoveParentNodeEnd,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SyntaxNavigationTarget {
+    Function,
+    Class,
+    Parameter,
+    Comment,
+    Test,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SyntaxNavigationAction {
+    pub(crate) target: SyntaxNavigationTarget,
+    pub(crate) forward: bool,
+}
+
+impl SyntaxNavigationAction {
+    pub(crate) const fn new(target: SyntaxNavigationTarget, forward: bool) -> Self {
+        Self { target, forward }
+    }
+
+    pub(crate) fn method_name(self) -> &'static str {
+        match (self.target, self.forward) {
+            (SyntaxNavigationTarget::Function, true) => "goto_next_function",
+            (SyntaxNavigationTarget::Function, false) => "goto_prev_function",
+            (SyntaxNavigationTarget::Class, true) => "goto_next_class",
+            (SyntaxNavigationTarget::Class, false) => "goto_prev_class",
+            (SyntaxNavigationTarget::Parameter, true) => "goto_next_parameter",
+            (SyntaxNavigationTarget::Parameter, false) => "goto_prev_parameter",
+            (SyntaxNavigationTarget::Comment, true) => "goto_next_comment",
+            (SyntaxNavigationTarget::Comment, false) => "goto_prev_comment",
+            (SyntaxNavigationTarget::Test, true) => "goto_next_test",
+            (SyntaxNavigationTarget::Test, false) => "goto_prev_test",
+        }
+    }
+}
+
 impl SyntaxSelectionAction {
     pub(crate) fn method_name(self) -> &'static str {
         match self {
@@ -40,6 +76,7 @@ pub(crate) enum SyntaxSelectionError {
     ChildAbsent,
     SiblingAbsent,
     ChildrenAbsent,
+    NavigationTargetAbsent,
 }
 
 impl SyntaxSelectionError {
@@ -50,8 +87,42 @@ impl SyntaxSelectionError {
             SyntaxSelectionError::ChildAbsent => "no child syntax node",
             SyntaxSelectionError::SiblingAbsent => "no sibling syntax node",
             SyntaxSelectionError::ChildrenAbsent => "no child syntax nodes",
+            SyntaxSelectionError::NavigationTargetAbsent => "no matching syntax node",
         }
     }
+}
+
+pub(crate) fn apply_syntax_navigation(
+    text: &Rope,
+    current: &Selection,
+    language_name: &str,
+    file_path: Option<&Path>,
+    action: SyntaxNavigationAction,
+) -> Result<Selection, SyntaxSelectionError> {
+    let Some(language) =
+        ts_language_for_name(language_name).or_else(|| syntax_language_for_path(file_path))
+    else {
+        return Err(SyntaxSelectionError::SyntaxTreeUnavailable);
+    };
+    let mut parser = Parser::new();
+    parser.set_language(&language).map_err(|_| SyntaxSelectionError::SyntaxTreeUnavailable)?;
+
+    let source = text.to_string();
+    let Some(tree) = parser.parse(&source, None) else {
+        return Err(SyntaxSelectionError::SyntaxTreeUnavailable);
+    };
+    let root = tree.root_node();
+    let text_len = source.len();
+    let mut selection = Selection::new();
+
+    for &region in current.iter() {
+        let cursor = region.end.min(text_len);
+        let target = find_navigation_target(root, &source, action, cursor)
+            .ok_or(SyntaxSelectionError::NavigationTargetAbsent)?;
+        selection.add_region(SelRegion::caret(target.start_byte()));
+    }
+
+    Ok(selection)
 }
 
 pub(crate) fn apply_syntax_selection(
@@ -316,10 +387,136 @@ fn node_to_region(node: Node<'_>) -> SelRegion {
     SelRegion::new(node.start_byte(), node.end_byte())
 }
 
+fn find_navigation_target<'a>(
+    root: Node<'a>,
+    source: &str,
+    action: SyntaxNavigationAction,
+    cursor: usize,
+) -> Option<Node<'a>> {
+    let mut matches = Vec::new();
+    collect_navigation_nodes(root, source, action.target, &mut matches);
+    matches.sort_by_key(|node| (node.start_byte(), node.end_byte()));
+
+    if action.forward {
+        matches
+            .iter()
+            .copied()
+            .find(|node| node.start_byte() > cursor)
+            .or_else(|| matches.first().copied())
+    } else {
+        matches
+            .iter()
+            .rev()
+            .copied()
+            .find(|node| node.end_byte() <= cursor)
+            .or_else(|| matches.last().copied())
+    }
+}
+
+fn collect_navigation_nodes<'a>(
+    node: Node<'a>,
+    source: &str,
+    target: SyntaxNavigationTarget,
+    out: &mut Vec<Node<'a>>,
+) {
+    if node_matches_target(node, source, target) {
+        out.push(node);
+    }
+
+    for index in 0..node.child_count() {
+        if let Some(child) = node.child(index as u32) {
+            collect_navigation_nodes(child, source, target, out);
+        }
+    }
+}
+
+fn node_matches_target(node: Node<'_>, source: &str, target: SyntaxNavigationTarget) -> bool {
+    match target {
+        SyntaxNavigationTarget::Function => is_function_node(node),
+        SyntaxNavigationTarget::Class => is_class_node(node),
+        SyntaxNavigationTarget::Parameter => is_parameter_node(node),
+        SyntaxNavigationTarget::Comment => node.kind().contains("comment"),
+        SyntaxNavigationTarget::Test => is_test_node(node, source),
+    }
+}
+
+fn is_function_node(node: Node<'_>) -> bool {
+    match node.kind() {
+        "function_item" | "function_definition" => true,
+        "decorated_definition" => first_named_child(node)
+            .map(|child| matches!(child.kind(), "function_definition"))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn is_class_node(node: Node<'_>) -> bool {
+    match node.kind() {
+        "class_definition" | "struct_item" | "enum_item" | "trait_item" | "impl_item"
+        | "union_item" | "type_item" => true,
+        "decorated_definition" => first_named_child(node)
+            .map(|child| matches!(child.kind(), "class_definition"))
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn is_parameter_node(node: Node<'_>) -> bool {
+    let kind = node.kind();
+    (kind.contains("parameter") && kind != "parameters")
+        || matches!(kind, "typed_parameter" | "self_parameter" | "default_parameter")
+}
+
+fn is_test_node(node: Node<'_>, source: &str) -> bool {
+    match node.kind() {
+        "function_item" => rust_function_has_test_attribute(node, source),
+        "function_definition" => python_function_name(node, source)
+            .map(|name| name.starts_with("test_"))
+            .unwrap_or(false),
+        "decorated_definition" => {
+            if let Some(child) = first_named_child(node) {
+                matches!(child.kind(), "function_definition")
+                    && python_function_name(child, source)
+                        .map(|name| name.starts_with("test_"))
+                        .unwrap_or(false)
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn rust_function_has_test_attribute(node: Node<'_>, source: &str) -> bool {
+    let mut sibling = node.prev_named_sibling();
+    while let Some(candidate) = sibling {
+        if candidate.kind() != "attribute_item" {
+            break;
+        }
+        if node_text(candidate, source).contains("test") {
+            return true;
+        }
+        sibling = candidate.prev_named_sibling();
+    }
+    false
+}
+
+fn python_function_name<'a>(node: Node<'a>, source: &'a str) -> Option<&'a str> {
+    let mut cursor = node.walk();
+    node.children(&mut cursor)
+        .find(|child| child.kind() == "identifier")
+        .map(|child| node_text(child, source))
+}
+
+fn node_text<'a>(node: Node<'_>, source: &'a str) -> &'a str {
+    source.get(node.start_byte()..node.end_byte()).unwrap_or("")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        SyntaxSelectionAction, SyntaxSelectionError, apply_syntax_selection, node_to_region,
+        SyntaxNavigationAction, SyntaxNavigationTarget, SyntaxSelectionAction,
+        SyntaxSelectionError, apply_syntax_navigation, apply_syntax_selection, node_to_region,
     };
     use crate::selection::{SelRegion, Selection};
     use crate::tree_sitter_support::ts_language_for_name;
@@ -328,6 +525,10 @@ mod tests {
 
     fn select_range(start: usize, end: usize) -> Selection {
         Selection::new_simple(SelRegion::new(start, end))
+    }
+
+    fn caret(offset: usize) -> Selection {
+        Selection::new_simple(SelRegion::caret(offset))
     }
 
     fn rust_region(source: &str, needle: &str) -> SelRegion {
@@ -520,5 +721,135 @@ mod tests {
         assert_eq!(end.len(), 1);
         assert_eq!(end[0].min(), close_paren);
         assert_eq!(end[0].max(), close_paren);
+    }
+
+    #[test]
+    fn goto_next_and_prev_function_follow_function_items() {
+        let source = "fn alpha() {}\nfn beta() {}\nfn gamma() {}\n";
+        let text = Rope::from(source);
+
+        let next = apply_syntax_navigation(
+            &text,
+            &caret(source.find("alpha").unwrap()),
+            "Rust",
+            None,
+            SyntaxNavigationAction::new(SyntaxNavigationTarget::Function, true),
+        )
+        .unwrap();
+        assert!(super::selection_eq(&next, &caret(source.find("fn beta").unwrap())));
+
+        let prev = apply_syntax_navigation(
+            &text,
+            &caret(source.find("gamma").unwrap()),
+            "Rust",
+            None,
+            SyntaxNavigationAction::new(SyntaxNavigationTarget::Function, false),
+        )
+        .unwrap();
+        assert!(super::selection_eq(&prev, &caret(source.find("fn beta").unwrap())));
+    }
+
+    #[test]
+    fn goto_next_and_prev_class_follow_type_items() {
+        let source = "struct Alpha;\nfn helper() {}\nenum Beta { One }\ntrait Gamma {}\n";
+        let text = Rope::from(source);
+
+        let next = apply_syntax_navigation(
+            &text,
+            &caret(source.find("Alpha").unwrap()),
+            "Rust",
+            None,
+            SyntaxNavigationAction::new(SyntaxNavigationTarget::Class, true),
+        )
+        .unwrap();
+        assert!(super::selection_eq(&next, &caret(source.find("enum Beta").unwrap())));
+
+        let prev = apply_syntax_navigation(
+            &text,
+            &caret(source.find("trait Gamma").unwrap()),
+            "Rust",
+            None,
+            SyntaxNavigationAction::new(SyntaxNavigationTarget::Class, false),
+        )
+        .unwrap();
+        assert!(super::selection_eq(&prev, &caret(source.find("enum Beta").unwrap())));
+    }
+
+    #[test]
+    fn goto_next_and_prev_parameter_follow_parameter_nodes() {
+        let source = "fn alpha(first: usize, second: usize, third: usize) {}\n";
+        let text = Rope::from(source);
+
+        let next = apply_syntax_navigation(
+            &text,
+            &caret(source.find("first").unwrap()),
+            "Rust",
+            None,
+            SyntaxNavigationAction::new(SyntaxNavigationTarget::Parameter, true),
+        )
+        .unwrap();
+        assert!(super::selection_eq(&next, &caret(source.find("second").unwrap())));
+
+        let prev = apply_syntax_navigation(
+            &text,
+            &caret(source.find("third").unwrap()),
+            "Rust",
+            None,
+            SyntaxNavigationAction::new(SyntaxNavigationTarget::Parameter, false),
+        )
+        .unwrap();
+        assert!(super::selection_eq(&prev, &caret(source.find("second").unwrap())));
+    }
+
+    #[test]
+    fn goto_next_and_prev_comment_follow_comment_nodes() {
+        let source = "// alpha\nfn demo() {}\n// beta\n// gamma\n";
+        let text = Rope::from(source);
+
+        let next = apply_syntax_navigation(
+            &text,
+            &caret(0),
+            "Rust",
+            None,
+            SyntaxNavigationAction::new(SyntaxNavigationTarget::Comment, true),
+        )
+        .unwrap();
+        assert!(super::selection_eq(&next, &caret(source.find("// beta").unwrap())));
+
+        let prev = apply_syntax_navigation(
+            &text,
+            &caret(source.find("// gamma").unwrap()),
+            "Rust",
+            None,
+            SyntaxNavigationAction::new(SyntaxNavigationTarget::Comment, false),
+        )
+        .unwrap();
+        assert!(super::selection_eq(&prev, &caret(source.find("// beta").unwrap())));
+    }
+
+    #[test]
+    fn goto_next_and_prev_test_follow_test_functions() {
+        let source = "#[test]\nfn alpha() {}\nfn helper() {}\n#[tokio::test]\nasync fn beta() {}\n";
+        let text = Rope::from(source);
+
+        let next = apply_syntax_navigation(
+            &text,
+            &caret(source.find("alpha").unwrap()),
+            "Rust",
+            None,
+            SyntaxNavigationAction::new(SyntaxNavigationTarget::Test, true),
+        )
+        .unwrap();
+        assert!(super::selection_eq(&next, &caret(source.find("async fn beta").unwrap())));
+
+        let prev = apply_syntax_navigation(
+            &text,
+            &caret(source.find("beta").unwrap()),
+            "Rust",
+            None,
+            SyntaxNavigationAction::new(SyntaxNavigationTarget::Test, false),
+        )
+        .unwrap();
+        assert!(super::selection_eq(&prev, &caret(source.find("fn alpha").unwrap())));
     }
 }

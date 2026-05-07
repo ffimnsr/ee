@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+#[cfg(test)]
+use std::cell::RefCell;
+
 /// Identifies a Vim-style register by its designator character.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) enum RegisterName {
@@ -17,8 +20,16 @@ pub(crate) enum RegisterName {
     BlackHole,
     /// `/` — last search pattern.
     Search,
-    /// `*` or `+` — system clipboard.
+    /// `+` — system clipboard.
     Clipboard,
+    /// `*` — system primary clipboard.
+    PrimaryClipboard,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ClipboardSelection {
+    Clipboard,
+    Primary,
 }
 
 impl RegisterName {
@@ -31,7 +42,8 @@ impl RegisterName {
             'a'..='z' | 'A'..='Z' => Some(Self::Named(c.to_ascii_lowercase())),
             '_' => Some(Self::BlackHole),
             '/' => Some(Self::Search),
-            '*' | '+' => Some(Self::Clipboard),
+            '+' => Some(Self::Clipboard),
+            '*' => Some(Self::PrimaryClipboard),
             _ => None,
         }
     }
@@ -83,7 +95,8 @@ impl RegisterStore {
             RegisterName::Named(c) => self.named.get(c).cloned().unwrap_or_default(),
             RegisterName::BlackHole => String::new(),
             RegisterName::Search => self.search.clone(),
-            RegisterName::Clipboard => read_clipboard(),
+            RegisterName::Clipboard => read_clipboard(ClipboardSelection::Clipboard),
+            RegisterName::PrimaryClipboard => read_clipboard(ClipboardSelection::Primary),
         }
     }
 
@@ -103,7 +116,12 @@ impl RegisterStore {
             return;
         }
         if *target == RegisterName::Clipboard {
-            write_clipboard(&text);
+            write_clipboard(ClipboardSelection::Clipboard, &text);
+            self.unnamed = text;
+            return;
+        }
+        if *target == RegisterName::PrimaryClipboard {
+            write_clipboard(ClipboardSelection::Primary, &text);
             self.unnamed = text;
             return;
         }
@@ -131,7 +149,12 @@ impl RegisterStore {
             return;
         }
         if *target == RegisterName::Clipboard {
-            write_clipboard(&text);
+            write_clipboard(ClipboardSelection::Clipboard, &text);
+            self.unnamed = text;
+            return;
+        }
+        if *target == RegisterName::PrimaryClipboard {
+            write_clipboard(ClipboardSelection::Primary, &text);
             self.unnamed = text;
             return;
         }
@@ -164,31 +187,47 @@ impl RegisterStore {
             }
             Some(RegisterName::BlackHole) => {}
             Some(RegisterName::Search) => self.search.clear(),
-            Some(RegisterName::Clipboard) => write_clipboard(""),
+            Some(RegisterName::Clipboard) => write_clipboard(ClipboardSelection::Clipboard, ""),
+            Some(RegisterName::PrimaryClipboard) => {
+                write_clipboard(ClipboardSelection::Primary, "")
+            }
         }
     }
 }
 
 // ── Clipboard helpers ────────────────────────────────────────────────────────
 
-fn read_clipboard() -> String {
-    // Try xclip first, then xsel.
+fn read_clipboard(selection: ClipboardSelection) -> String {
+    #[cfg(test)]
+    if let Some(text) = test_clipboard_read(selection) {
+        return text;
+    }
+
+    let selection_arg = clipboard_selection_arg(selection);
     let try_read = |cmd: &str, args: &[&str]| -> Option<String> {
         let out = Command::new(cmd).args(args).output().ok()?;
         if out.status.success() { String::from_utf8(out.stdout).ok() } else { None }
     };
-    try_read("xclip", &["-selection", "clipboard", "-o"])
-        .or_else(|| try_read("xsel", &["--clipboard", "--output"]))
+    try_read("xclip", &["-selection", selection_arg, "-o"])
+        .or_else(|| try_read("xsel", &[clipboard_xsel_arg(selection), "--output"]))
         .unwrap_or_default()
 }
 
-fn write_clipboard(text: &str) {
+fn write_clipboard(selection: ClipboardSelection, text: &str) {
+    #[cfg(test)]
+    if test_clipboard_write(selection, text) {
+        return;
+    }
+
     // OSC 52: write to the terminal emulator clipboard.  Works over SSH without
     // needing xclip/xsel on the remote host.  Terminals that do not support
     // OSC 52 simply ignore the escape sequence, so this is always safe to emit.
-    write_clipboard_osc52(text);
+    if selection == ClipboardSelection::Clipboard {
+        write_clipboard_osc52(text);
+    }
 
     // Also try xclip / xsel for X11/Wayland local sessions.
+    let selection_arg = clipboard_selection_arg(selection);
     let try_write = |cmd: &str, args: &[&str]| -> bool {
         let Ok(mut child) = Command::new(cmd).args(args).stdin(Stdio::piped()).spawn() else {
             return false;
@@ -199,8 +238,22 @@ fn write_clipboard(text: &str) {
         let _ = stdin.write_all(text.as_bytes());
         child.wait().map(|s| s.success()).unwrap_or(false)
     };
-    if !try_write("xclip", &["-selection", "clipboard"]) {
-        let _ = try_write("xsel", &["--clipboard", "--input"]);
+    if !try_write("xclip", &["-selection", selection_arg]) {
+        let _ = try_write("xsel", &[clipboard_xsel_arg(selection), "--input"]);
+    }
+}
+
+fn clipboard_selection_arg(selection: ClipboardSelection) -> &'static str {
+    match selection {
+        ClipboardSelection::Clipboard => "clipboard",
+        ClipboardSelection::Primary => "primary",
+    }
+}
+
+fn clipboard_xsel_arg(selection: ClipboardSelection) -> &'static str {
+    match selection {
+        ClipboardSelection::Clipboard => "--clipboard",
+        ClipboardSelection::Primary => "--primary",
     }
 }
 
@@ -250,6 +303,32 @@ fn base64_encode(input: &[u8]) -> String {
     out
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_CLIPBOARDS: RefCell<HashMap<ClipboardSelection, String>> =
+        RefCell::new(HashMap::new());
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_clipboard(selection: ClipboardSelection, text: impl Into<String>) {
+    TEST_CLIPBOARDS.with(|clipboards| {
+        clipboards.borrow_mut().insert(selection, text.into());
+    });
+}
+
+#[cfg(test)]
+fn test_clipboard_read(selection: ClipboardSelection) -> Option<String> {
+    TEST_CLIPBOARDS.with(|clipboards| clipboards.borrow().get(&selection).cloned())
+}
+
+#[cfg(test)]
+fn test_clipboard_write(selection: ClipboardSelection, text: &str) -> bool {
+    TEST_CLIPBOARDS.with(|clipboards| {
+        clipboards.borrow_mut().insert(selection, text.to_owned());
+    });
+    true
+}
+
 // ── LastChange ───────────────────────────────────────────────────────────────
 
 /// The last buffer-modifying change; used by `.` to repeat.
@@ -288,7 +367,8 @@ mod tests {
         assert_eq!(RegisterName::from_char('A'), Some(RegisterName::Named('a')));
         assert_eq!(RegisterName::from_char('_'), Some(RegisterName::BlackHole));
         assert_eq!(RegisterName::from_char('/'), Some(RegisterName::Search));
-        assert_eq!(RegisterName::from_char('*'), Some(RegisterName::Clipboard));
+        assert_eq!(RegisterName::from_char('+'), Some(RegisterName::Clipboard));
+        assert_eq!(RegisterName::from_char('*'), Some(RegisterName::PrimaryClipboard));
         assert_eq!(RegisterName::from_char('?'), None);
     }
 
@@ -344,5 +424,16 @@ mod tests {
         let mut store = RegisterStore::new();
         store.set_search("pattern".into());
         assert_eq!(store.get(&RegisterName::Search), "pattern");
+    }
+
+    #[test]
+    fn clipboard_registers_use_distinct_selections() {
+        let mut store = RegisterStore::new();
+
+        store.yank(&RegisterName::Clipboard, "clip".into(), false);
+        store.yank(&RegisterName::PrimaryClipboard, "primary".into(), false);
+
+        assert_eq!(store.get(&RegisterName::Clipboard), "clip");
+        assert_eq!(store.get(&RegisterName::PrimaryClipboard), "primary");
     }
 }

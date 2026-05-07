@@ -1,5 +1,6 @@
 use std::env;
 use std::io;
+use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -62,15 +63,30 @@ pub(crate) fn parse_command(command: &str) -> Result<Option<TerminalCommand>, &'
 }
 
 pub(crate) fn run_command(command: &TerminalCommand, cwd: &Path) -> io::Result<TerminalRunResult> {
+    run_command_with_input(&command.command, cwd, None)
+}
+
+pub(crate) fn run_command_with_input(
+    command: &str,
+    cwd: &Path,
+    input: Option<&str>,
+) -> io::Result<TerminalRunResult> {
     let started = Instant::now();
-    let output = shell_command(&command.command, cwd)
-        .stdin(Stdio::null())
+    let mut child = shell_command(command, cwd);
+    child
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()?;
+        .stderr(Stdio::piped());
+    let mut child = child.spawn()?;
+    if let Some(input) = input
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        stdin.write_all(input.as_bytes())?;
+    }
+    let output = child.wait_with_output()?;
 
     Ok(TerminalRunResult {
-        command: command.command.clone(),
+        command: command.to_owned(),
         cwd: cwd.display().to_string(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -188,6 +204,15 @@ mod tests {
     fn parse_command_rejects_empty_shell_invocations() {
         assert_eq!(parse_command("!").unwrap_err(), "shell: usage: :!command");
         assert_eq!(parse_command("term").unwrap_err(), "term: usage: :term shell-command");
+    }
+
+    #[test]
+    fn run_command_with_input_writes_to_stdin() {
+        let cwd = std::env::current_dir().unwrap();
+        let result = run_command_with_input("cat", &cwd, Some("alpha")).unwrap();
+
+        assert!(result.success);
+        assert_eq!(result.stdout, "alpha");
     }
 
     #[test]

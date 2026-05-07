@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::mpsc;
 use std::sync::mpsc::TryRecvError;
 use std::thread;
@@ -27,9 +28,9 @@ use crate::backend::{
 };
 use crate::buffer::{BufState, BufferManager};
 use crate::git::{GitBufferCache, GitBufferStatus, GitHunk, GitSign};
-use crate::keymap::{Action, BindingKey, bindings};
+use crate::keymap::{Action, BindingKey, bindings, parse_action_spec};
 use crate::picker::PickerKind;
-use crate::registers::RegisterName;
+use crate::registers::{ClipboardSelection, RegisterName, set_test_clipboard};
 use crate::text::{
     byte_col_to_display_col, display_col_to_byte, find_char_backward, find_char_forward,
     next_char_start, next_word_end, next_word_start, prev_char_start, prev_word_start,
@@ -550,6 +551,48 @@ fn request_definition_emits_backend_edit_notification() {
 }
 
 #[test]
+fn request_declaration_emits_backend_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.request_declaration().expect("declaration request should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "request_declaration");
+}
+
+#[test]
+fn request_type_definition_emits_backend_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.request_type_definition().expect("type definition request should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "request_type_definition");
+}
+
+#[test]
+fn request_implementation_emits_backend_edit_notification() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.request_implementation().expect("implementation request should send");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "request_implementation");
+}
+
+#[test]
 fn request_hover_emits_edit_notification() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
@@ -851,6 +894,30 @@ fn definition_command_uses_backend_edit() {
 }
 
 #[test]
+fn goto_lsp_commands_use_backend_edit() {
+    let commands = [
+        ("goto_declaration", "request_declaration"),
+        ("goto_definition", "request_definition"),
+        ("goto_type_definition", "request_type_definition"),
+        ("goto_reference", "request_references"),
+        ("goto_implementation", "request_implementation"),
+    ];
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for (command, expected) in commands {
+        run_ex(&mut app, command);
+
+        let message = rx.recv().expect("message should be sent");
+        let value: Value = serde_json::from_str(&message).expect("message should be json");
+        assert_eq!(value["method"], "edit");
+        assert_eq!(value["params"]["method"], expected);
+    }
+}
+
+#[test]
 fn codeaction_command_uses_backend_edit() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
@@ -962,6 +1029,119 @@ fn diagnostics_command_opens_location_list() {
 
     assert!(app.location_list_open);
     assert_eq!(app.location_list.as_ref().map(|list| list.len()), Some(1));
+}
+
+#[test]
+fn diagnostics_picker_command_opens_picker() {
+    let mut app = App::from_path(None).unwrap();
+    app.backend.diagnostics = vec![Diagnostic {
+        range: Range { start: 0, end: 3 },
+        severity: DiagnosticSeverity::Warning,
+        message: String::from("warn"),
+        source: Some(String::from("lsp")),
+        code: None,
+    }];
+
+    run_ex(&mut app, "diagnostics_picker");
+
+    let picker = app.picker.as_ref().expect("diagnostics picker should open");
+    assert_eq!(picker.kind, PickerKind::Locations);
+    assert_eq!(picker.title, "Diagnostics");
+    assert_eq!(picker.visible_count(), 1);
+}
+
+#[test]
+fn workspace_diagnostics_picker_command_aggregates_open_buffers() {
+    let first = unique_temp_path("workspace-diag-a");
+    let second = unique_temp_path("workspace-diag-b");
+    fs::write(&first, "alpha\n").unwrap();
+    fs::write(&second, "beta\n").unwrap();
+
+    let mut app = App::from_path(Some(first.clone())).unwrap();
+    let first_id = app.backend.active().id;
+    let second_id = app.backend.open_buffer(Some(second.clone())).unwrap();
+    app.backend.diagnostics = vec![Diagnostic {
+        range: Range { start: 0, end: 1 },
+        severity: DiagnosticSeverity::Warning,
+        message: String::from("first warn"),
+        source: None,
+        code: None,
+    }];
+    app.backend.switch_to_id(second_id).unwrap();
+    app.backend.diagnostics = vec![Diagnostic {
+        range: Range { start: 0, end: 1 },
+        severity: DiagnosticSeverity::Error,
+        message: String::from("second err"),
+        source: None,
+        code: None,
+    }];
+    app.backend.switch_to_id(first_id).unwrap();
+
+    run_ex(&mut app, "workspace_diagnostics_picker");
+
+    let picker = app.picker.as_ref().expect("workspace diagnostics picker should open");
+    assert_eq!(picker.kind, PickerKind::Locations);
+    assert_eq!(picker.visible_count(), 2);
+}
+
+#[test]
+fn jumplist_picker_command_opens_picker() {
+    let mut app = App::from_path(None).unwrap();
+    app.jump_list.push((1, 2));
+    app.jump_list.push((3, 4));
+
+    run_ex(&mut app, "jumplist_picker");
+
+    let picker = app.picker.as_ref().expect("jumplist picker should open");
+    assert_eq!(picker.kind, PickerKind::Locations);
+    assert_eq!(picker.title, "Jumplist");
+    assert_eq!(picker.visible_count(), 2);
+}
+
+#[test]
+fn last_picker_command_reopens_previous_picker() {
+    let mut app = App::from_path(None).unwrap();
+
+    run_ex(&mut app, "buffer_picker");
+    app.picker = None;
+    run_ex(&mut app, "last_picker");
+
+    let picker = app.picker.as_ref().expect("last picker should reopen picker");
+    assert_eq!(picker.kind, PickerKind::Buffers);
+}
+
+#[test]
+fn changed_file_picker_command_opens_picker() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = env::current_dir().unwrap();
+    env::set_current_dir(temp.path()).unwrap();
+
+    let file = temp.path().join("sample.rs");
+    fs::write(&file, "fn main() {}\n").unwrap();
+    Command::new("git").arg("init").current_dir(temp.path()).output().unwrap();
+    Command::new("git")
+        .args(["config", "user.email", "ee@example.com"])
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+    Command::new("git")
+        .args(["config", "user.name", "EE"])
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+    Command::new("git").args(["add", "sample.rs"]).current_dir(temp.path()).output().unwrap();
+    Command::new("git").args(["commit", "-m", "init"]).current_dir(temp.path()).output().unwrap();
+    fs::write(&file, "fn main() { println!(\"hi\"); }\n").unwrap();
+
+    let mut app = App::from_path(Some(file.clone())).unwrap();
+    run_ex(&mut app, "changed_file_picker");
+
+    env::set_current_dir(cwd).unwrap();
+
+    let picker = app.picker.as_ref().expect("changed file picker should open");
+    assert_eq!(picker.kind, PickerKind::Locations);
+    assert_eq!(picker.title, "Changed Files");
+    assert!(picker.visible_items_range(0, 8).iter().any(|item| item.contains("sample.rs")));
 }
 
 #[test]
@@ -1140,6 +1320,57 @@ fn collapse_selection_command_uses_backend_edit() {
 }
 
 #[test]
+fn align_selections_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in ":align_selections".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["params"]["method"], "align_selections");
+}
+
+#[test]
+fn rotate_selections_backward_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in ":rotate_selections_backward".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["params"]["method"], "rotate_selections_backward");
+}
+
+#[test]
+fn rotate_selections_forward_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in ":rotate_selections_forward".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["params"]["method"], "rotate_selections_forward");
+}
+
+#[test]
 fn select_all_command_uses_backend_edit() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
@@ -1242,6 +1473,37 @@ fn extend_line_below_command_emits_linewise_selection_gestures() {
         .expect("message should be json");
     assert_eq!(message["params"]["method"], "extend_line_below");
     assert_eq!(message["params"]["params"]["count"], 1);
+}
+
+#[test]
+fn extend_selection_alias_commands_emit_expected_backend_methods() {
+    let commands = [
+        ("extend_char_left", "move_left_and_modify_selection"),
+        ("extend_char_right", "move_right_and_modify_selection"),
+        ("extend_visual_line_up", "move_up_and_modify_selection"),
+        ("extend_visual_line_down", "move_down_and_modify_selection"),
+        ("extend_line_up", "move_up_and_modify_selection"),
+        ("extend_line_down", "move_down_and_modify_selection"),
+        ("extend_line_above", "extend_line_above"),
+        ("select_line_above", "select_line_above"),
+        ("select_line_below", "select_line_below"),
+        ("goto_file_end", "move_to_end_of_document"),
+        ("extend_to_file_start", "move_to_beginning_of_document_and_modify_selection"),
+        ("extend_to_file_end", "move_to_end_of_document_and_modify_selection"),
+    ];
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for (command, expected) in commands {
+        run_ex(&mut app, command);
+
+        let message = rx.recv().expect("message should be sent");
+        let value: Value = serde_json::from_str(&message).expect("message should be json");
+        assert_eq!(value["method"], "edit");
+        assert_eq!(value["params"]["method"], expected);
+    }
 }
 
 #[test]
@@ -1444,6 +1706,66 @@ fn normal_mode_paste_uses_backend_register_paste() {
 }
 
 #[test]
+fn clipboard_paste_commands_use_expected_clipboard_register() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    set_test_clipboard(ClipboardSelection::Clipboard, "clip");
+    set_test_clipboard(ClipboardSelection::Primary, "prim");
+
+    for (command, expected, before) in [
+        ("paste_clipboard_after", "clip", false),
+        ("paste_clipboard_before", "clip", true),
+        ("paste_primary_clipboard_after", "prim", false),
+        ("paste_primary_clipboard_before", "prim", true),
+    ] {
+        run_ex(&mut app, command);
+
+        let message = rx.recv().expect("message should be sent");
+        let value: Value = serde_json::from_str(&message).expect("message should be json");
+        assert_eq!(value["method"], "edit");
+        assert_eq!(value["params"]["method"], "paste_register");
+        assert_eq!(value["params"]["params"]["chars"], expected);
+        assert_eq!(value["params"]["params"]["before"], before);
+    }
+}
+
+#[test]
+fn clipboard_yank_and_replace_commands_use_test_clipboards() {
+    let mut app = App::from_path(None).unwrap();
+    insert_text(&mut app, "alpha beta");
+    app.backend.pump().unwrap();
+
+    app.backend.set_selections(&[SelectionRange { start: 0, end: 5 }]).unwrap();
+    run_ex(&mut app, "yank_to_clipboard");
+    assert_eq!(app.registers.get(&RegisterName::Clipboard), "alpha");
+
+    app.backend
+        .set_selections(&[
+            SelectionRange { start: 0, end: 5 },
+            SelectionRange { start: 6, end: 10 },
+        ])
+        .unwrap();
+    app.backend.cursor_line = 1;
+    app.backend.cursor_col = 0;
+    run_ex(&mut app, "yank_main_selection_to_primary_clipboard");
+    assert_eq!(app.registers.get(&RegisterName::PrimaryClipboard), "beta");
+
+    set_test_clipboard(ClipboardSelection::Clipboard, "CLIP");
+    app.backend.set_selections(&[SelectionRange { start: 0, end: 5 }]).unwrap();
+    run_ex(&mut app, "replace_selections_with_clipboard");
+    app.backend.pump().unwrap();
+    assert_eq!(app.backend.lines, vec![String::from("CLIP beta")]);
+
+    set_test_clipboard(ClipboardSelection::Primary, "PRIM");
+    app.backend.set_selections(&[SelectionRange { start: 5, end: 9 }]).unwrap();
+    run_ex(&mut app, "replace_selections_with_primary_clipboard");
+    app.backend.pump().unwrap();
+    assert_eq!(app.backend.lines, vec![String::from("CLIP PRIM")]);
+}
+
+#[test]
 fn duplicate_line_command_uses_backend_edit() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
@@ -1462,6 +1784,169 @@ fn duplicate_line_command_uses_backend_edit() {
 }
 
 #[test]
+fn move_line_down_command_swaps_with_next_line() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.lines = vec!["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()];
+    app.backend.cursor_line = 0;
+    app.backend.cursor_col = 2;
+
+    run_ex(&mut app, "move_line_down");
+
+    let first: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+    assert_eq!(first["params"]["method"], "gesture");
+    assert_eq!(first["params"]["params"]["line"], 0);
+    assert_eq!(first["params"]["params"]["col"], 0);
+
+    let second: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+    assert_eq!(second["params"]["method"], "gesture");
+    assert_eq!(second["params"]["params"]["line"], 1);
+    assert_eq!(second["params"]["params"]["col"], 4);
+
+    let third: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+    assert_eq!(third["params"]["method"], "insert");
+    assert_eq!(third["params"]["params"]["chars"], "beta\nalpha");
+
+    let fourth: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+    assert_eq!(fourth["params"]["method"], "gesture");
+    assert_eq!(fourth["params"]["params"]["line"], 1);
+    assert_eq!(fourth["params"]["params"]["col"], 2);
+}
+
+#[test]
+fn move_line_up_command_swaps_with_previous_line() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.lines = vec!["alpha".to_owned(), "beta".to_owned()];
+    app.backend.cursor_line = 1;
+    app.backend.cursor_col = 1;
+
+    run_ex(&mut app, "move_line_up");
+
+    let _ = rx.recv().unwrap();
+    let second: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+    assert_eq!(second["params"]["params"]["col"], 4);
+
+    let third: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+    assert_eq!(third["params"]["method"], "insert");
+    assert_eq!(third["params"]["params"]["chars"], "beta\nalpha");
+
+    let fourth: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+    assert_eq!(fourth["params"]["params"]["line"], 0);
+    assert_eq!(fourth["params"]["params"]["col"], 1);
+}
+
+#[test]
+fn match_brackets_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    run_ex(&mut app, "match_brackets");
+
+    let value: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+    assert_eq!(value["params"]["method"], "move_to_matching_bracket");
+    assert_eq!(value["params"]["params"]["modify_selection"], false);
+}
+
+#[test]
+fn select_textobject_inner_command_selects_requested_range() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.lines = vec!["foo(bar)baz".to_owned()];
+    app.backend.cursor_col = 4;
+
+    run_ex(&mut app, "select_textobject_inner b");
+
+    let first: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+    assert_eq!(first["params"]["method"], "gesture");
+    assert_eq!(first["params"]["params"]["col"], 4);
+
+    let second: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+    assert_eq!(second["params"]["method"], "gesture");
+    assert_eq!(second["params"]["params"]["col"], 7);
+}
+
+#[test]
+fn select_textobject_around_command_selects_outer_range() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.lines = vec!["foo(bar)baz".to_owned()];
+    app.backend.cursor_col = 4;
+
+    run_ex(&mut app, "select_textobject_around b");
+
+    let first: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+    assert_eq!(first["params"]["params"]["col"], 3);
+
+    let second: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+    assert_eq!(second["params"]["params"]["col"], 8);
+}
+
+#[test]
+fn surround_add_command_wraps_textobject() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.lines = vec!["alpha beta".to_owned()];
+    app.backend.cursor_col = 1;
+
+    run_ex(&mut app, "surround_add [ w");
+
+    let _ = rx.recv().unwrap();
+    let _ = rx.recv().unwrap();
+    let third: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+    assert_eq!(third["params"]["method"], "insert");
+    assert_eq!(third["params"]["params"]["chars"], "[alpha]");
+}
+
+#[test]
+fn surround_replace_command_rewrites_current_surround() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.lines = vec!["foo(bar)baz".to_owned()];
+    app.backend.cursor_col = 4;
+
+    run_ex(&mut app, "surround_replace [");
+
+    let _ = rx.recv().unwrap();
+    let _ = rx.recv().unwrap();
+    let third: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+    assert_eq!(third["params"]["method"], "insert");
+    assert_eq!(third["params"]["params"]["chars"], "[bar]");
+}
+
+#[test]
+fn surround_delete_command_rewrites_current_surround() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.lines = vec!["foo(bar)baz".to_owned()];
+    app.backend.cursor_col = 4;
+
+    run_ex(&mut app, "surround_delete");
+
+    let _ = rx.recv().unwrap();
+    let _ = rx.recv().unwrap();
+    let third: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+    assert_eq!(third["params"]["method"], "insert");
+    assert_eq!(third["params"]["params"]["chars"], "bar");
+}
+
+#[test]
 fn reindent_command_uses_backend_edit() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
@@ -1477,6 +1962,27 @@ fn reindent_command_uses_backend_edit() {
     let value: Value = serde_json::from_str(&message).expect("message should be json");
     assert_eq!(value["method"], "edit");
     assert_eq!(value["params"]["method"], "reindent");
+}
+
+#[test]
+fn toggle_comment_commands_use_backend_edit() {
+    for (command, method) in [
+        ("toggle_comments", "toggle_comment"),
+        ("toggle_line_comments", "toggle_line_comment"),
+        ("toggle_block_comments", "toggle_block_comment"),
+    ] {
+        let (tx, rx) = mpsc::channel();
+        let (_backend_tx, backend_rx) = mpsc::channel();
+        let mut app = App::from_path(None).unwrap();
+        app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+        run_ex(&mut app, command);
+
+        let message = rx.recv().expect("message should be sent");
+        let value: Value = serde_json::from_str(&message).expect("message should be json");
+        assert_eq!(value["method"], "edit");
+        assert_eq!(value["params"]["method"], method);
+    }
 }
 
 #[test]
@@ -1757,6 +2263,10 @@ fn parse_action_spec_accepts_requested_motion_aliases() {
         Action::MoveWordStart { forward: true, long_word: false }
     );
     assert_eq!(
+        crate::keymap::parse_action_spec("goto_word").unwrap(),
+        Action::MoveWordStart { forward: true, long_word: false }
+    );
+    assert_eq!(
         crate::keymap::parse_action_spec("move_prev_word_start").unwrap(),
         Action::MoveWordStart { forward: false, long_word: false }
     );
@@ -1830,9 +2340,91 @@ fn parse_action_spec_accepts_requested_command_aliases() {
     );
     assert_eq!(crate::keymap::parse_action_spec("goto_line").unwrap(), Action::GotoLine);
     assert_eq!(crate::keymap::parse_action_spec("goto_column").unwrap(), Action::GotoColumn);
+    assert_eq!(
+        crate::keymap::parse_action_spec("goto_first_nonwhitespace").unwrap(),
+        Action::GotoFirstNonWhitespace
+    );
     assert_eq!(crate::keymap::parse_action_spec("goto_file_start").unwrap(), Action::GotoFileStart);
     assert_eq!(crate::keymap::parse_action_spec("goto_last_line").unwrap(), Action::GotoLastLine);
+    assert_eq!(
+        crate::keymap::parse_action_spec("goto_last_modification").unwrap(),
+        Action::ChangeListOlder
+    );
+    assert_eq!(crate::keymap::parse_action_spec("goto_window_top").unwrap(), Action::GotoWindowTop);
+    assert_eq!(
+        crate::keymap::parse_action_spec("goto_window_center").unwrap(),
+        Action::GotoWindowCenter
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("goto_window_bottom").unwrap(),
+        Action::GotoWindowBottom
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("goto_last_accessed_file").unwrap(),
+        Action::GotoLastAccessedFile
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("goto_last_modified_file").unwrap(),
+        Action::GotoLastModifiedFile
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("goto_declaration").unwrap(),
+        Action::RequestDeclaration
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("goto_definition").unwrap(),
+        Action::RequestDefinition
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("goto_type_definition").unwrap(),
+        Action::RequestTypeDefinition
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("goto_reference").unwrap(),
+        Action::RequestReferences
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("goto_implementation").unwrap(),
+        Action::RequestImplementation
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("goto_next_function").unwrap(),
+        Action::Edit("goto_next_function")
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("goto_prev_paragraph").unwrap(),
+        Action::Edit("goto_prev_paragraph")
+    );
+    assert_eq!(crate::keymap::parse_action_spec("goto_next_change").unwrap(), Action::GitNextHunk);
+    assert_eq!(crate::keymap::parse_action_spec("goto_last_change").unwrap(), Action::GitLastHunk);
     assert_eq!(crate::keymap::parse_action_spec("goto_file").unwrap(), Action::GotoFile);
+    assert_eq!(crate::keymap::parse_action_spec("file_picker").unwrap(), Action::FilePicker);
+    assert_eq!(
+        crate::keymap::parse_action_spec("file_picker_in_current_directory").unwrap(),
+        Action::FilePickerInCurrentDirectory
+    );
+    assert_eq!(crate::keymap::parse_action_spec("buffer_picker").unwrap(), Action::BufferPicker);
+    assert_eq!(
+        crate::keymap::parse_action_spec("jumplist_picker").unwrap(),
+        Action::JumpListPicker
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("changed_file_picker").unwrap(),
+        Action::ChangedFilePicker
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("workspace_symbol_picker").unwrap(),
+        Action::RequestWorkspaceSymbols
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("diagnostics_picker").unwrap(),
+        Action::DiagnosticsPicker
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("workspace_diagnostics_picker").unwrap(),
+        Action::WorkspaceDiagnosticsPicker
+    );
+    assert_eq!(crate::keymap::parse_action_spec("last_picker").unwrap(), Action::LastPicker);
     assert_eq!(
         crate::keymap::parse_action_spec("repeat_last_motion").unwrap(),
         Action::RepeatLastMotion
@@ -1944,8 +2536,48 @@ fn parse_action_spec_accepts_requested_command_aliases() {
     assert_eq!(crate::keymap::parse_action_spec("earlier").unwrap(), Action::Undo);
     assert_eq!(crate::keymap::parse_action_spec("later").unwrap(), Action::Redo);
     assert_eq!(crate::keymap::parse_action_spec("yank").unwrap(), Action::YankSelection);
+    assert_eq!(
+        crate::keymap::parse_action_spec("yank_to_clipboard").unwrap(),
+        Action::YankToClipboard
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("yank_to_primary_clipboard").unwrap(),
+        Action::YankToPrimaryClipboard
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("yank_main_selection_to_clipboard").unwrap(),
+        Action::YankMainSelectionToClipboard
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("yank_main_selection_to_primary_clipboard").unwrap(),
+        Action::YankMainSelectionToPrimaryClipboard
+    );
     assert_eq!(crate::keymap::parse_action_spec("paste_after").unwrap(), Action::PasteAfter);
     assert_eq!(crate::keymap::parse_action_spec("paste_before").unwrap(), Action::PasteBefore);
+    assert_eq!(
+        crate::keymap::parse_action_spec("paste_clipboard_after").unwrap(),
+        Action::PasteClipboardAfter
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("paste_clipboard_before").unwrap(),
+        Action::PasteClipboardBefore
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("paste_primary_clipboard_after").unwrap(),
+        Action::PastePrimaryClipboardAfter
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("paste_primary_clipboard_before").unwrap(),
+        Action::PastePrimaryClipboardBefore
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("replace_selections_with_clipboard").unwrap(),
+        Action::ReplaceSelectionsWithClipboard
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("replace_selections_with_primary_clipboard").unwrap(),
+        Action::ReplaceSelectionsWithPrimaryClipboard
+    );
     assert_eq!(
         crate::keymap::parse_action_spec("select_register").unwrap(),
         Action::RegisterPrefix
@@ -1971,6 +2603,54 @@ fn parse_action_spec_accepts_requested_command_aliases() {
     assert_eq!(
         crate::keymap::parse_action_spec("change_selection_noyank").unwrap(),
         Action::DeleteSelection { yank: false, enter_insert: true }
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("extend_char_left").unwrap(),
+        Action::Edit("move_left_and_modify_selection")
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("extend_char_right").unwrap(),
+        Action::Edit("move_right_and_modify_selection")
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("extend_visual_line_up").unwrap(),
+        Action::Edit("move_up_and_modify_selection")
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("extend_visual_line_down").unwrap(),
+        Action::Edit("move_down_and_modify_selection")
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("extend_line_up").unwrap(),
+        Action::Edit("move_up_and_modify_selection")
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("extend_line_down").unwrap(),
+        Action::Edit("move_down_and_modify_selection")
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("extend_line_above").unwrap(),
+        Action::Edit("extend_line_above")
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("select_line_above").unwrap(),
+        Action::Edit("select_line_above")
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("select_line_below").unwrap(),
+        Action::Edit("select_line_below")
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("goto_file_end").unwrap(),
+        Action::Edit("move_to_end_of_document")
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("extend_to_file_start").unwrap(),
+        Action::Edit("move_to_beginning_of_document_and_modify_selection")
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("extend_to_file_end").unwrap(),
+        Action::Edit("move_to_end_of_document_and_modify_selection")
     );
     assert_eq!(
         crate::keymap::parse_action_spec("extend_line_below").unwrap(),
@@ -2266,6 +2946,247 @@ fn goto_column_command_moves_cursor_to_requested_column() {
     assert_eq!(value["params"]["method"], "goto_column");
     assert_eq!(value["params"]["params"]["display_col"], 2);
     assert_eq!(value["params"]["params"]["modify_selection"], false);
+}
+
+#[test]
+fn goto_first_nonwhitespace_command_moves_to_first_content_column() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.lines = vec![String::from("   foo")];
+
+    run_ex(&mut app, "goto_first_nonwhitespace");
+
+    let value: Value = serde_json::from_str(&rx.recv().expect("message should be sent"))
+        .expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "goto_column");
+    assert_eq!(value["params"]["params"]["display_col"], 3);
+    assert_eq!(value["params"]["params"]["modify_selection"], false);
+}
+
+#[test]
+fn goto_last_modification_command_uses_change_list_position() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.change_list = vec![(4, 7)];
+    app.change_list_idx = 0;
+
+    run_ex(&mut app, "goto_last_modification");
+
+    let value: Value = serde_json::from_str(&rx.recv().expect("message should be sent"))
+        .expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "gesture");
+    assert_eq!(value["params"]["params"]["line"], 4);
+    assert_eq!(value["params"]["params"]["col"], 7);
+}
+
+#[test]
+fn goto_word_command_reuses_word_start_motion() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    run_ex(&mut app, "goto_word");
+
+    let value: Value = serde_json::from_str(&rx.recv().expect("message should be sent"))
+        .expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "move_word_start");
+    assert_eq!(value["params"]["params"]["forward"], true);
+    assert_eq!(value["params"]["params"]["long_word"], false);
+    assert_eq!(value["params"]["params"]["modify_selection"], false);
+}
+
+#[test]
+fn goto_diag_commands_use_active_buffer_diagnostics() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.lines = vec![String::from("abc"), String::from("de"), String::from("fgh")];
+    app.backend.diagnostics = vec![
+        Diagnostic {
+            range: Range { start: 1, end: 2 },
+            severity: DiagnosticSeverity::Warning,
+            message: String::from("first"),
+            source: Some(String::from("lsp")),
+            code: None,
+        },
+        Diagnostic {
+            range: Range { start: 4, end: 5 },
+            severity: DiagnosticSeverity::Warning,
+            message: String::from("second"),
+            source: Some(String::from("lsp")),
+            code: None,
+        },
+        Diagnostic {
+            range: Range { start: 7, end: 8 },
+            severity: DiagnosticSeverity::Warning,
+            message: String::from("third"),
+            source: Some(String::from("lsp")),
+            code: None,
+        },
+    ];
+
+    app.backend.cursor_line = 0;
+    app.backend.cursor_col = 1;
+    run_ex(&mut app, "goto_next_diag");
+
+    let value: Value = serde_json::from_str(&rx.recv().expect("message should be sent"))
+        .expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "gesture");
+    assert_eq!(value["params"]["params"]["line"], 1);
+    assert_eq!(value["params"]["params"]["col"], 0);
+
+    app.backend.cursor_line = 1;
+    app.backend.cursor_col = 0;
+    run_ex(&mut app, "goto_prev_diag");
+
+    let value: Value = serde_json::from_str(&rx.recv().expect("message should be sent"))
+        .expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "gesture");
+    assert_eq!(value["params"]["params"]["line"], 0);
+    assert_eq!(value["params"]["params"]["col"], 1);
+}
+
+#[test]
+fn goto_edge_diag_commands_jump_to_first_and_last_entries() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.lines = vec![String::from("abc"), String::from("de"), String::from("fgh")];
+    app.backend.diagnostics = vec![
+        Diagnostic {
+            range: Range { start: 1, end: 2 },
+            severity: DiagnosticSeverity::Warning,
+            message: String::from("first"),
+            source: Some(String::from("lsp")),
+            code: None,
+        },
+        Diagnostic {
+            range: Range { start: 7, end: 8 },
+            severity: DiagnosticSeverity::Warning,
+            message: String::from("last"),
+            source: Some(String::from("lsp")),
+            code: None,
+        },
+    ];
+
+    run_ex(&mut app, "goto_first_diag");
+
+    let value: Value = serde_json::from_str(&rx.recv().expect("message should be sent"))
+        .expect("message should be json");
+    assert_eq!(value["params"]["method"], "gesture");
+    assert_eq!(value["params"]["params"]["line"], 0);
+    assert_eq!(value["params"]["params"]["col"], 1);
+
+    run_ex(&mut app, "goto_last_diag");
+
+    let value: Value = serde_json::from_str(&rx.recv().expect("message should be sent"))
+        .expect("message should be json");
+    assert_eq!(value["params"]["method"], "gesture");
+    assert_eq!(value["params"]["params"]["line"], 2);
+    assert_eq!(value["params"]["params"]["col"], 0);
+}
+
+#[test]
+fn goto_syntax_and_paragraph_commands_forward_backend_methods() {
+    let commands = [
+        "goto_next_function",
+        "goto_prev_function",
+        "goto_next_class",
+        "goto_prev_class",
+        "goto_next_parameter",
+        "goto_prev_parameter",
+        "goto_next_comment",
+        "goto_prev_comment",
+        "goto_next_test",
+        "goto_prev_test",
+        "goto_next_paragraph",
+        "goto_prev_paragraph",
+    ];
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for command in commands {
+        run_ex(&mut app, command);
+
+        let value: Value = serde_json::from_str(&rx.recv().expect("message should be sent"))
+            .expect("message should be json");
+        assert_eq!(value["method"], "edit");
+        assert_eq!(value["params"]["method"], command);
+    }
+}
+
+#[test]
+fn goto_change_commands_reuse_git_hunk_navigation() {
+    let temp = tempfile::tempdir().unwrap();
+    run_git(temp.path(), &["init"]);
+    run_git(temp.path(), &["config", "user.email", "test@example.com"]);
+    run_git(temp.path(), &["config", "user.name", "Test User"]);
+
+    let path = temp.path().join("sample.rs");
+    fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").unwrap();
+    run_git(temp.path(), &["add", "sample.rs"]);
+    run_git(temp.path(), &["commit", "-m", "init"]);
+
+    let modified_lines = vec![
+        String::from("one"),
+        String::from("two changed"),
+        String::from("three"),
+        String::from("four changed"),
+        String::from("five"),
+    ];
+    let status = crate::git::inspect_buffer(&path, &modified_lines)
+        .unwrap()
+        .expect("git status should exist");
+    assert_eq!(status.hunks.len(), 2);
+
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.path = Some(path);
+    app.backend.lines = modified_lines;
+
+    app.backend.cursor_line = 0;
+    run_ex(&mut app, "goto_next_change");
+    let value: Value = serde_json::from_str(&rx.recv().expect("message should be sent"))
+        .expect("message should be json");
+    assert_eq!(value["params"]["method"], "gesture");
+    assert_eq!(value["params"]["params"]["line"], status.next_hunk_line(0).unwrap());
+
+    app.backend.cursor_line = 4;
+    run_ex(&mut app, "goto_prev_change");
+    let value: Value = serde_json::from_str(&rx.recv().expect("message should be sent"))
+        .expect("message should be json");
+    assert_eq!(value["params"]["params"]["line"], status.prev_hunk_line(4).unwrap());
+
+    run_ex(&mut app, "goto_first_change");
+    let value: Value = serde_json::from_str(&rx.recv().expect("message should be sent"))
+        .expect("message should be json");
+    assert_eq!(value["params"]["params"]["line"], status.first_hunk_line().unwrap());
+
+    run_ex(&mut app, "goto_last_change");
+    let value: Value = serde_json::from_str(&rx.recv().expect("message should be sent"))
+        .expect("message should be json");
+    assert_eq!(value["params"]["params"]["line"], status.last_hunk_line().unwrap());
+}
+
+fn run_git(cwd: &std::path::Path, args: &[&str]) {
+    let status = Command::new("git").args(args).current_dir(cwd).status().unwrap();
+    assert!(status.success(), "git command failed: {args:?}");
 }
 
 #[test]
@@ -2929,6 +3850,22 @@ fn test_buf_state() -> BufState {
     }
 }
 
+fn window_paths(app: &App) -> Vec<PathBuf> {
+    app.tabs
+        .focused_windows()
+        .windows()
+        .iter()
+        .map(|window| {
+            app.backend
+                .all_bufs()
+                .iter()
+                .find(|buf| buf.id == window.buffer_id)
+                .and_then(|buf| buf.path.clone())
+                .unwrap()
+        })
+        .collect()
+}
+
 // ── Insert-entry variants ─────────────────────────────────────────────────────
 
 #[test]
@@ -2967,6 +3904,99 @@ fn open_hsplit_and_new_aliases_work() {
 
     let _ = fs::remove_file(&first);
     let _ = fs::remove_file(&second);
+}
+
+#[test]
+fn view_rotation_and_directional_jump_commands_follow_split_axis() {
+    let first = unique_temp_path("ee-tui-view-a");
+    let second = unique_temp_path("ee-tui-view-b");
+    let third = unique_temp_path("ee-tui-view-c");
+    fs::write(&first, "one\n").unwrap();
+    fs::write(&second, "two\n").unwrap();
+    fs::write(&third, "three\n").unwrap();
+
+    let mut app = App::from_path(Some(first.clone())).unwrap();
+    run_ex(&mut app, &format!("vs {}", second.display()));
+    run_ex(&mut app, &format!("vs {}", third.display()));
+
+    assert_eq!(app.backend.active().path.as_ref(), Some(&third));
+
+    run_ex(&mut app, "jump_view_left");
+    assert_eq!(app.backend.active().path.as_ref(), Some(&second));
+
+    run_ex(&mut app, "jump_view_up");
+    assert_eq!(app.backend.active().path.as_ref(), Some(&second));
+
+    run_ex(&mut app, "jump_view_right");
+    assert_eq!(app.backend.active().path.as_ref(), Some(&third));
+
+    run_ex(&mut app, "rotate_view");
+    assert_eq!(app.backend.active().path.as_ref(), Some(&first));
+
+    run_ex(&mut app, "cycle_view");
+    assert_eq!(app.backend.active().path.as_ref(), Some(&second));
+
+    let _ = fs::remove_file(&first);
+    let _ = fs::remove_file(&second);
+    let _ = fs::remove_file(&third);
+}
+
+#[test]
+fn swap_view_commands_reorder_windows_on_matching_axis() {
+    let first = unique_temp_path("ee-tui-swap-a");
+    let second = unique_temp_path("ee-tui-swap-b");
+    let third = unique_temp_path("ee-tui-swap-c");
+    let fourth = unique_temp_path("ee-tui-swap-d");
+    fs::write(&first, "one\n").unwrap();
+    fs::write(&second, "two\n").unwrap();
+    fs::write(&third, "three\n").unwrap();
+    fs::write(&fourth, "four\n").unwrap();
+
+    let mut vertical = App::from_path(Some(first.clone())).unwrap();
+    run_ex(&mut vertical, &format!("vs {}", second.display()));
+    run_ex(&mut vertical, &format!("vs {}", third.display()));
+    run_ex(&mut vertical, "swap_view_left");
+    assert_eq!(window_paths(&vertical), vec![first.clone(), third.clone(), second.clone()]);
+    assert_eq!(vertical.backend.active().path.as_ref(), Some(&third));
+
+    run_ex(&mut vertical, "swap_view_up");
+    assert_eq!(window_paths(&vertical), vec![first.clone(), third.clone(), second.clone()]);
+    assert_eq!(vertical.backend.active().path.as_ref(), Some(&third));
+
+    let mut horizontal = App::from_path(Some(first.clone())).unwrap();
+    run_ex(&mut horizontal, &format!("hs {}", fourth.display()));
+    run_ex(&mut horizontal, &format!("hs {}", second.display()));
+    run_ex(&mut horizontal, "swap_view_up");
+    assert_eq!(window_paths(&horizontal), vec![first.clone(), second.clone(), fourth.clone()]);
+    assert_eq!(horizontal.backend.active().path.as_ref(), Some(&second));
+
+    run_ex(&mut horizontal, "swap_view_left");
+    assert_eq!(window_paths(&horizontal), vec![first.clone(), second.clone(), fourth.clone()]);
+    assert_eq!(horizontal.backend.active().path.as_ref(), Some(&second));
+
+    let _ = fs::remove_file(&first);
+    let _ = fs::remove_file(&second);
+    let _ = fs::remove_file(&third);
+    let _ = fs::remove_file(&fourth);
+}
+
+#[test]
+fn parse_action_spec_accepts_view_command_names() {
+    assert_eq!(parse_action_spec("rotate_view").unwrap(), Action::RotateView);
+    assert_eq!(parse_action_spec("cycle_view").unwrap(), Action::RotateView);
+    assert_eq!(parse_action_spec("jump_view_left").unwrap(), Action::JumpViewLeft);
+    assert_eq!(parse_action_spec("jump_view_down").unwrap(), Action::JumpViewDown);
+    assert_eq!(parse_action_spec("jump_view_up").unwrap(), Action::JumpViewUp);
+    assert_eq!(parse_action_spec("jump_view_right").unwrap(), Action::JumpViewRight);
+    assert_eq!(parse_action_spec("swap_view_left").unwrap(), Action::SwapViewLeft);
+    assert_eq!(parse_action_spec("swap_view_down").unwrap(), Action::SwapViewDown);
+    assert_eq!(parse_action_spec("swap_view_up").unwrap(), Action::SwapViewUp);
+    assert_eq!(parse_action_spec("swap_view_right").unwrap(), Action::SwapViewRight);
+    assert_eq!(parse_action_spec("shell_pipe").unwrap(), Action::PrefillCommandLine("pipe "));
+    assert_eq!(
+        parse_action_spec("shell_insert_output").unwrap(),
+        Action::PrefillCommandLine("shell_insert_output ")
+    );
 }
 
 #[test]
@@ -3213,6 +4243,105 @@ fn language_encoding_echo_register_and_redraw_commands_update_state() {
 }
 
 #[test]
+fn cd_pwd_and_lsp_commands_update_status() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = env::current_dir().unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+    run_ex(&mut app, &format!("cd {}", temp.path().display()));
+    assert_eq!(std::env::current_dir().unwrap(), temp.path());
+    assert!(
+        app.backend.status_message.as_deref().unwrap().contains(&temp.path().display().to_string())
+    );
+
+    run_ex(&mut app, "pwd");
+    assert!(
+        app.backend.status_message.as_deref().unwrap().contains(&temp.path().display().to_string())
+    );
+
+    run_ex(&mut app, "lsp_restart");
+    assert_eq!(app.backend.status_message.as_deref(), Some("lsp restart requested"));
+
+    run_ex(&mut app, "lsp_stop");
+    assert_eq!(app.backend.status_message.as_deref(), Some("lsp stop requested"));
+
+    env::set_current_dir(cwd).unwrap();
+}
+
+#[test]
+fn pipe_commands_transform_and_filter_selections() {
+    let mut app = App::from_path(None).unwrap();
+    insert_text(&mut app, "ab");
+    app.backend.pump().unwrap();
+
+    app.backend.set_selections(&[SelectionRange { start: 0, end: 2 }]).unwrap();
+    run_ex(&mut app, "| tr a-z A-Z");
+    app.backend.pump().unwrap();
+    assert_eq!(app.backend.lines, vec![String::from("AB")]);
+
+    app.backend.set_selections(&[SelectionRange { start: 0, end: 1 }]).unwrap();
+    run_ex(&mut app, "shell_insert_output printf x");
+    app.backend.pump().unwrap();
+    assert_eq!(app.backend.lines, vec![String::from("xAB")]);
+
+    app.backend
+        .set_selections(&[SelectionRange { start: 0, end: 1 }, SelectionRange { start: 1, end: 2 }])
+        .unwrap();
+    run_ex(&mut app, "shell_keep_pipe grep -q x");
+    let kept = app.backend.selected_text_preview(false).unwrap();
+    assert_eq!(kept, "x");
+}
+
+#[test]
+fn pipe_to_and_append_output_commands_run_shell_without_replacing_buffer() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("pipe.txt");
+
+    let mut app = App::from_path(None).unwrap();
+    insert_text(&mut app, "abc");
+    app.backend.pump().unwrap();
+    app.backend.set_selections(&[SelectionRange { start: 0, end: 3 }]).unwrap();
+
+    run_ex(&mut app, &format!("pipe_to cat > {}", output.display()));
+    assert_eq!(fs::read_to_string(&output).unwrap(), "abc");
+    assert_eq!(app.backend.lines, vec![String::from("abc")]);
+
+    app.backend.set_selections(&[SelectionRange { start: 1, end: 2 }]).unwrap();
+    run_ex(&mut app, "shell_append_output printf z");
+    app.backend.pump().unwrap();
+    assert_eq!(app.backend.lines, vec![String::from("abzc")]);
+}
+
+#[test]
+fn diffget_restores_current_git_hunk_from_head() {
+    let temp = tempfile::tempdir().unwrap();
+    run_git(temp.path(), &["init"]);
+    run_git(temp.path(), &["config", "user.email", "test@example.com"]);
+    run_git(temp.path(), &["config", "user.name", "Test User"]);
+
+    let path = temp.path().join("sample.rs");
+    fs::write(&path, "one\ntwo\nthree\n").unwrap();
+    run_git(temp.path(), &["add", "sample.rs"]);
+    run_git(temp.path(), &["commit", "-m", "init"]);
+
+    let mut app = App::from_path(Some(path)).unwrap();
+    app.backend.set_selections(&[SelectionRange { start: 4, end: 7 }]).unwrap();
+    let _ = app.backend.send_edit("delete_forward", json!([]));
+    let _ = app.backend.send_edit("insert", json!({ "chars": "TWO" }));
+    app.backend.pump().unwrap();
+    app.backend.cursor_line = 1;
+
+    run_ex(&mut app, "diffget");
+    app.backend.pump().unwrap();
+
+    assert!(app.backend.lines.starts_with(&[
+        String::from("one"),
+        String::from("two"),
+        String::from("three"),
+    ]));
+}
+
+#[test]
 fn reload_and_reload_all_aliases_refresh_from_disk() {
     let first = unique_temp_path("ee-tui-reload-first");
     let second = unique_temp_path("ee-tui-reload-second");
@@ -3301,6 +4430,79 @@ fn buffer_close_aliases_and_force_variants_work() {
     let _ = fs::remove_file(&first);
     let _ = fs::remove_file(&second);
     let _ = fs::remove_file(&third);
+}
+
+#[test]
+fn goto_buffer_commands_cycle_open_buffers() {
+    let first = unique_temp_path("ee-tui-goto-buffer-first");
+    let second = unique_temp_path("ee-tui-goto-buffer-second");
+    let third = unique_temp_path("ee-tui-goto-buffer-third");
+    fs::write(&first, "one\n").unwrap();
+    fs::write(&second, "two\n").unwrap();
+    fs::write(&third, "three\n").unwrap();
+
+    let mut app = App::from_path(Some(first.clone())).unwrap();
+    run_ex(&mut app, &format!("e {}", second.display()));
+    run_ex(&mut app, &format!("e {}", third.display()));
+
+    run_ex(&mut app, "goto_next_buffer");
+    assert_eq!(app.backend.active().path.as_ref(), Some(&first));
+
+    run_ex(&mut app, "goto_previous_buffer");
+    assert_eq!(app.backend.active().path.as_ref(), Some(&third));
+
+    let _ = fs::remove_file(&first);
+    let _ = fs::remove_file(&second);
+    let _ = fs::remove_file(&third);
+}
+
+#[test]
+fn goto_recent_file_commands_follow_access_and_modify_history() {
+    let first = unique_temp_path("ee-tui-goto-recent-first");
+    let second = unique_temp_path("ee-tui-goto-recent-second");
+    fs::write(&first, "one\n").unwrap();
+    fs::write(&second, "two\n").unwrap();
+
+    let mut app = App::from_path(Some(first.clone())).unwrap();
+    run_ex(&mut app, &format!("e {}", second.display()));
+
+    run_ex(&mut app, "goto_last_accessed_file");
+    assert_eq!(app.backend.active().path.as_ref(), Some(&first));
+
+    app.push_change();
+    run_ex(&mut app, "goto_next_buffer");
+    app.push_change();
+    run_ex(&mut app, "goto_last_modified_file");
+    assert_eq!(app.backend.active().path.as_ref(), Some(&first));
+
+    let _ = fs::remove_file(&first);
+    let _ = fs::remove_file(&second);
+}
+
+#[test]
+fn goto_window_commands_jump_within_visible_viewport() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.lines = (0..100).map(|idx| format!("line {idx}")).collect();
+    app.viewport.top_line = 10;
+    app.last_editor_height = 20;
+
+    for (command, expected_line) in [
+        ("goto_window_top", 15_u64),
+        ("goto_window_center", 19_u64),
+        ("goto_window_bottom", 24_u64),
+    ] {
+        run_ex(&mut app, command);
+
+        let value: Value = serde_json::from_str(&rx.recv().expect("message should be sent"))
+            .expect("message should be json");
+        assert_eq!(value["method"], "edit");
+        assert_eq!(value["params"]["method"], "gesture");
+        assert_eq!(value["params"]["params"]["line"], expected_line);
+        assert_eq!(value["params"]["params"]["col"], 0);
+    }
 }
 
 #[test]
@@ -3604,6 +4806,20 @@ fn ctrl_r_dispatches_redo() {
 }
 
 #[test]
+fn parse_action_spec_accepts_move_line_aliases() {
+    assert_eq!(crate::keymap::parse_action_spec("move_line_up").unwrap(), Action::Edit("move_up"));
+    assert_eq!(
+        crate::keymap::parse_action_spec("move_line_down").unwrap(),
+        Action::Edit("move_down")
+    );
+}
+
+#[test]
+fn parse_action_spec_accepts_match_brackets_alias() {
+    assert_eq!(crate::keymap::parse_action_spec("match_brackets").unwrap(), Action::MatchingPair);
+}
+
+#[test]
 fn dot_with_no_last_change_is_noop() {
     let mut app = App::from_path(None).unwrap();
     // `.` should not crash when no last_change is recorded.
@@ -3629,6 +4845,14 @@ fn register_prefix_sets_pending_register() {
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('"'), KeyModifiers::NONE)));
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
     assert_eq!(app.input_state.pending_register, Some(RegisterName::Named('a')));
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('"'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE)));
+    assert_eq!(app.input_state.pending_register, Some(RegisterName::Clipboard));
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('"'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('*'), KeyModifiers::NONE)));
+    assert_eq!(app.input_state.pending_register, Some(RegisterName::PrimaryClipboard));
 }
 
 #[test]
@@ -3953,6 +5177,22 @@ fn request_workspace_symbols_emits_edit_notification() {
     assert_eq!(value["method"], "edit");
     assert_eq!(value["params"]["method"], "request_workspace_symbols");
     assert_eq!(value["params"]["params"]["query"], "Foo");
+}
+
+#[test]
+fn plugin_lifecycle_helpers_emit_plugin_notifications() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    client.restart_plugin("plugin-name").unwrap();
+    let restart: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+    assert_eq!(restart["method"], "plugin");
+    assert_eq!(restart["params"]["command"], "restart");
+
+    client.stop_plugin("plugin-name").unwrap();
+    let stop: Value = serde_json::from_str(&rx.recv().unwrap()).unwrap();
+    assert_eq!(stop["params"]["command"], "stop");
 }
 
 #[test]

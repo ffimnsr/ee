@@ -59,6 +59,8 @@ pub struct View {
     size: Size,
     /// The selection state for this view. Invariant: non-empty.
     selection: Selection,
+    /// Index of the primary region within the sorted selection set.
+    primary_selection_idx: usize,
 
     /// Previous syntax-object selections used by `shrink_selection`.
     object_selection_history: Vec<Selection>,
@@ -173,6 +175,7 @@ impl View {
             buffer_id,
             pending_render: false,
             selection: SelRegion::caret(0).into(),
+            primary_selection_idx: 0,
             object_selection_history: Vec::new(),
             scroll_to: Some(0),
             size: Size::default(),
@@ -323,6 +326,8 @@ impl View {
             EnsureSelectionsForward => self.ensure_selections_forward(text),
             KeepPrimarySelection => self.keep_primary_selection(text),
             RemovePrimarySelection => self.remove_primary_selection(text),
+            RotateSelectionsBackward => self.rotate_selections(text, false),
+            RotateSelectionsForward => self.rotate_selections(text, true),
         }
     }
 
@@ -366,7 +371,7 @@ impl View {
     }
 
     fn scroll_to_cursor(&mut self, text: &Rope) {
-        let end = match self.sel_regions().last() {
+        let end = match self.primary_sel_region() {
             Some(region) => region.end,
             None => return,
         };
@@ -376,9 +381,7 @@ impl View {
         } else if self.first_line + self.height <= line {
             self.first_line = line - (self.height - 1);
         }
-        // We somewhat arbitrarily choose the last region for setting the old-style
-        // selection state, and for scrolling it into view if needed. This choice can
-        // likely be improved.
+        // Primary selection drives cursor-oriented state and scroll targets.
         self.scroll_to = Some(end);
     }
 
@@ -418,15 +421,60 @@ impl View {
     /// Sets the selection to a new value, without invalidating.
     fn set_selection_for_edit(&mut self, text: &Rope, sel: Selection) {
         self.selection = sel;
+        self.clamp_primary_selection();
         self.scroll_to_cursor(text);
     }
 
     /// Sets the selection to a new value, invalidating the line cache as needed.
     /// This function does not perform any scrolling.
     fn set_selection_raw(&mut self, text: &Rope, sel: Selection) {
+        let primary_selection_idx = sel.len().saturating_sub(1);
+        self.set_selection_raw_with_primary(text, sel, primary_selection_idx);
+    }
+
+    fn set_selection_raw_with_primary(
+        &mut self,
+        text: &Rope,
+        sel: Selection,
+        primary_selection_idx: usize,
+    ) {
         self.invalidate_selection(text);
         self.selection = sel;
+        self.primary_selection_idx = primary_selection_idx;
+        self.clamp_primary_selection();
         self.invalidate_selection(text);
+    }
+
+    fn clamp_primary_selection(&mut self) {
+        self.primary_selection_idx = if self.selection.is_empty() {
+            0
+        } else {
+            self.primary_selection_idx.min(self.selection.len() - 1)
+        };
+    }
+
+    fn set_primary_selection_idx(&mut self, text: &Rope, primary_selection_idx: usize) {
+        if self.selection.is_empty() {
+            self.primary_selection_idx = 0;
+            return;
+        }
+
+        let primary_selection_idx = primary_selection_idx.min(self.selection.len() - 1);
+        if primary_selection_idx == self.primary_selection_idx {
+            return;
+        }
+
+        self.invalidate_selection(text);
+        self.primary_selection_idx = primary_selection_idx;
+        self.invalidate_selection(text);
+        self.scroll_to_cursor(text);
+    }
+
+    pub(crate) fn primary_sel_region(&self) -> Option<SelRegion> {
+        self.selection
+            .get(self.primary_selection_idx)
+            .copied()
+            .or_else(|| self.selection.last().copied())
     }
 
     /// Invalidate the current selection. Note that we could be even more
@@ -705,10 +753,10 @@ impl View {
     }
 
     fn keep_primary_selection(&mut self, text: &Rope) {
-        let Some(region) = self.selection.last().copied() else {
+        let Some(region) = self.primary_sel_region() else {
             return;
         };
-        self.set_selection_raw(text, region.into());
+        self.set_selection_raw_with_primary(text, region.into(), 0);
     }
 
     fn remove_primary_selection(&mut self, text: &Rope) {
@@ -717,10 +765,28 @@ impl View {
         }
 
         let mut selection = Selection::new();
-        for &region in self.selection[..self.selection.len() - 1].iter() {
-            selection.add_region(region);
+        for (index, &region) in self.selection.iter().enumerate() {
+            if index != self.primary_selection_idx {
+                selection.add_region(region);
+            }
         }
-        self.set_selection_raw(text, selection);
+        let primary_selection_idx =
+            self.primary_selection_idx.min(selection.len().saturating_sub(1));
+        self.set_selection_raw_with_primary(text, selection, primary_selection_idx);
+    }
+
+    fn rotate_selections(&mut self, text: &Rope, forward: bool) {
+        if self.selection.len() < 2 {
+            return;
+        }
+
+        let len = self.selection.len();
+        let next_idx = if forward {
+            (self.primary_selection_idx + 1) % len
+        } else {
+            (self.primary_selection_idx + len - 1) % len
+        };
+        self.set_primary_selection_idx(text, next_idx);
     }
 
     /// Does a drag gesture, setting the selection from a combination of the drag
@@ -1109,11 +1175,11 @@ impl View {
     }
 
     fn do_selection_for_find(&mut self, text: &Rope, case_sensitive: bool) {
-        // set last selection or word under current cursor as search query
-        let search_query = match self.selection.last() {
+        // set primary selection or word under current cursor as search query
+        let search_query = match self.primary_sel_region() {
             Some(region) => {
                 if !region.is_caret() {
-                    text.slice_to_cow(region)
+                    text.slice_to_cow(region.min()..region.max())
                 } else {
                     let (start, end) = {
                         let mut word_cursor = WordCursor::new(text, region.max());
@@ -1288,7 +1354,7 @@ impl View {
         _allow_same: bool,
         modify_selection: &SelectionModifier,
     ) {
-        let (cur_start, cur_end) = match self.selection.last() {
+        let (cur_start, cur_end) = match self.primary_sel_region() {
             Some(sel) => (sel.min(), sel.max()),
             _ => (0, 0),
         };
@@ -1316,11 +1382,11 @@ impl View {
                 SelectionModifier::AddRemovingCurrent => {
                     let mut selection = self.selection.clone();
 
-                    if let Some(last_selection) = self.selection.last() {
-                        if !last_selection.is_caret() {
+                    if let Some(primary_selection) = self.primary_sel_region() {
+                        if !primary_selection.is_caret() {
                             selection.delete_range(
-                                last_selection.min(),
-                                last_selection.max(),
+                                primary_selection.min(),
+                                primary_selection.max(),
                                 false,
                             );
                         }
@@ -1340,11 +1406,11 @@ impl View {
     }
 
     fn do_selection_for_replace(&mut self, text: &Rope) {
-        // set last selection or word under current cursor as replacement string
-        let replacement = match self.selection.last() {
+        // set primary selection or word under current cursor as replacement string
+        let replacement = match self.primary_sel_region() {
             Some(region) => {
                 if !region.is_caret() {
-                    text.slice_to_cow(region)
+                    text.slice_to_cow(region.min()..region.max())
                 } else {
                     let (start, end) = {
                         let mut word_cursor = WordCursor::new(text, region.max());
@@ -1696,7 +1762,33 @@ mod tests {
     }
 
     #[test]
-    fn keep_and_remove_primary_selection_use_last_region() {
+    fn rotate_selections_changes_primary_region_without_reordering_ranges() {
+        let mut view = View::new(1.into(), BufferId::new(2));
+        let text = Rope::from("abcdef");
+        let mut selection = Selection::new();
+        selection.add_region(SelRegion::new(0, 1));
+        selection.add_region(SelRegion::new(2, 3));
+        selection.add_region(SelRegion::new(4, 5));
+        view.set_selection(&text, selection);
+
+        assert_eq!(view.primary_sel_region(), Some(SelRegion::new(4, 5)));
+
+        view.do_edit(&text, ViewEvent::RotateSelectionsBackward);
+        assert_eq!(view.primary_sel_region(), Some(SelRegion::new(2, 3)));
+
+        view.do_edit(&text, ViewEvent::RotateSelectionsForward);
+        assert_eq!(view.primary_sel_region(), Some(SelRegion::new(4, 5)));
+
+        view.do_edit(&text, ViewEvent::RotateSelectionsForward);
+        assert_eq!(view.primary_sel_region(), Some(SelRegion::new(0, 1)));
+        assert_eq!(
+            view.sel_regions(),
+            &[SelRegion::new(0, 1), SelRegion::new(2, 3), SelRegion::new(4, 5)]
+        );
+    }
+
+    #[test]
+    fn keep_and_remove_primary_selection_use_primary_region() {
         let mut view = View::new(1.into(), BufferId::new(2));
         let text = Rope::from("abcdef");
         let mut selection = Selection::new();
@@ -1709,8 +1801,9 @@ mod tests {
         assert_eq!(view.sel_regions(), &[SelRegion::new(4, 5)]);
 
         view.set_selection(&text, selection);
+        view.do_edit(&text, ViewEvent::RotateSelectionsBackward);
         view.do_edit(&text, ViewEvent::RemovePrimarySelection);
-        assert_eq!(view.sel_regions(), &[SelRegion::new(0, 1), SelRegion::new(2, 3)]);
+        assert_eq!(view.sel_regions(), &[SelRegion::new(0, 1), SelRegion::new(4, 5)]);
     }
 
     #[test]

@@ -26,6 +26,7 @@ pub(crate) enum PickerKind {
     Completions,
     CodeActions,
     Symbols,
+    Locations,
 }
 
 /// A single entry in a picker list.
@@ -42,12 +43,14 @@ pub(crate) struct PickerItem {
     pub(crate) buf_id: Option<BufferId>,
     /// 0-based line offset inside `path` for grep results.
     pub(crate) line: Option<usize>,
+    /// 0-based byte column for navigation targets.
+    pub(crate) col: Option<usize>,
     /// 1-based completion or code-action index sent back to the backend.
     pub(crate) choice_index: Option<usize>,
 }
 
 /// Picker overlay state.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct PickerState {
     pub(crate) kind: PickerKind,
     pub(crate) title: String,
@@ -91,6 +94,7 @@ impl PickerState {
                 path,
                 buf_id: Some(id),
                 line: None,
+                col: None,
                 choice_index: None,
             })
             .collect();
@@ -135,6 +139,7 @@ impl PickerState {
                 path: None,
                 buf_id: None,
                 line: None,
+                col: None,
                 choice_index: None,
             })
             .collect();
@@ -160,6 +165,7 @@ impl PickerState {
                 path: None,
                 buf_id: None,
                 line: None,
+                col: None,
                 choice_index: Some(index + 1),
             })
             .collect();
@@ -185,6 +191,7 @@ impl PickerState {
                 path: None,
                 buf_id: None,
                 line: None,
+                col: None,
                 choice_index: Some(index + 1),
             })
             .collect();
@@ -211,12 +218,26 @@ impl PickerState {
                 buf_id: None,
                 // 0-based line for navigation
                 line: Some(sym.line.saturating_sub(1)),
+                col: Some(sym.column.saturating_sub(1)),
                 choice_index: None,
             })
             .collect();
         let filtered = (0..items.len()).collect();
         Self {
             kind: PickerKind::Symbols,
+            title: title.into(),
+            query: String::new(),
+            cwd: PathBuf::from("."),
+            items,
+            filtered,
+            selected: 0,
+        }
+    }
+
+    pub(crate) fn new_locations(title: impl Into<String>, items: Vec<PickerItem>) -> Self {
+        let filtered = (0..items.len()).collect();
+        Self {
+            kind: PickerKind::Locations,
             title: title.into(),
             query: String::new(),
             cwd: PathBuf::from("."),
@@ -327,6 +348,7 @@ fn collect_files(cwd: &Path) -> Vec<PickerItem> {
             path: Some(path),
             buf_id: None,
             line: None,
+            col: None,
             choice_index: None,
         });
         if items.len() >= FILE_LIMIT {
@@ -363,6 +385,7 @@ fn grep_files(query: &str, cwd: &Path) -> Vec<PickerItem> {
                     path: Some(path.clone()),
                     buf_id: None,
                     line: Some(line_num),
+                    col: Some(0),
                     choice_index: None,
                 });
                 if items.len() >= GREP_LIMIT {
