@@ -121,6 +121,7 @@ impl App {
             modifiers: key.modifiers,
             prefix: self.input_state.prefix,
         };
+
         let action = self
             .key_bindings
             .get(&binding_key)
@@ -398,6 +399,13 @@ impl App {
             }
             Action::FilePicker => self.open_file_picker_for_buffer_directory(),
             Action::FilePickerInCurrentDirectory => self.open_file_picker_in_current_directory(),
+            Action::FileExplorer => self.open_file_explorer(),
+            Action::FileExplorerInCurrentBufferDirectory => {
+                self.open_file_explorer_for_buffer_directory()
+            }
+            Action::FileExplorerInCurrentDirectory => {
+                self.open_file_explorer_in_current_directory()
+            }
             Action::BufferPicker => self.open_buffer_picker(),
             Action::JumpListPicker => self.open_jump_list_picker(),
             Action::ChangedFilePicker => self.open_changed_file_picker(),
@@ -665,6 +673,10 @@ impl App {
                 let _ = self.backend.switch_to_id(new_buf);
             }
             Action::RotateView => self.rotate_view(),
+            Action::RotateViewReverse => self.rotate_view_reverse(),
+            Action::TransposeView => self.transpose_view(),
+            Action::WindowClose => self.close_view(),
+            Action::WindowOnly => self.close_other_views(),
             Action::JumpViewLeft => self.jump_view(ViewDirection::Left),
             Action::JumpViewDown => self.jump_view(ViewDirection::Down),
             Action::JumpViewUp => self.jump_view(ViewDirection::Up),
@@ -692,6 +704,9 @@ impl App {
             Action::FoldClose => self.fold_close(),
             Action::FoldOpenAll => self.fold_open_all(),
             Action::FoldCloseAll => self.fold_close_all(),
+            Action::CommitUndoCheckpoint => {
+                let _ = self.backend.send_edit("commit_undo_checkpoint", json!([]));
+            }
         }
     }
 
@@ -1920,6 +1935,28 @@ impl App {
         }
     }
 
+    fn sort_selected_or_all_lines(&mut self) -> Result<String, String> {
+        self.transform_selected_or_all_lines("sort", |lines| lines.sort())
+    }
+
+    fn sort_line_range(&mut self, start_line: usize, end_line: usize) -> Result<String, String> {
+        self.transform_line_range("sort", start_line, end_line, |lines| lines.sort())
+    }
+
+    fn dedup_selected_or_all_lines(&mut self) -> Result<String, String> {
+        self.transform_selected_or_all_lines("dedup", |lines| {
+            let mut seen = std::collections::HashSet::new();
+            lines.retain(|line| seen.insert(line.clone()));
+        })
+    }
+
+    fn dedup_line_range(&mut self, start_line: usize, end_line: usize) -> Result<String, String> {
+        self.transform_line_range("dedup", start_line, end_line, |lines| {
+            let mut seen = std::collections::HashSet::new();
+            lines.retain(|line| seen.insert(line.clone()));
+        })
+    }
+
     fn delete_selection(&mut self, yank: bool, enter_insert: bool) {
         let count = self.input_state.count() as usize;
         let had_visual = self.mode.is_visual();
@@ -2114,11 +2151,117 @@ impl App {
         self.backend.lines.iter().take(line).map(|current| current.len() + 1).sum()
     }
 
+    fn replace_line_block(
+        &mut self,
+        start_line: usize,
+        end_line: usize,
+        lines: &[String],
+    ) -> Result<(), String> {
+        self.backend
+            .replace_line_range(start_line, end_line, lines)
+            .map_err(|err| format!("replace failed: {err}"))
+    }
+
+    fn transform_selected_or_all_lines<F>(
+        &mut self,
+        label: &str,
+        mut transform: F,
+    ) -> Result<String, String>
+    where
+        F: FnMut(&mut Vec<String>),
+    {
+        let selected_text = self
+            .backend
+            .selected_text_preview(false)
+            .map_err(|err| format!("{label}: selection preview failed: {err}"))?;
+        let selected = self
+            .backend
+            .selected_text_preview(true)
+            .map_err(|err| format!("{label}: selection preview failed: {err}"))?;
+
+        let changed = if !selected_text.is_empty() {
+            let original: Vec<String> = selected.lines().map(str::to_owned).collect();
+            let mut updated = original.clone();
+            transform(&mut updated);
+            if original == updated {
+                false
+            } else {
+                let _ = self.backend.send_edit("extend_to_line_bounds", json!([]));
+                let expanded = self
+                    .backend
+                    .selected_text_preview(false)
+                    .map_err(|err| format!("{label}: selection preview failed: {err}"))?;
+                let mut replacement = updated.join("\n");
+                if expanded.ends_with('\n') {
+                    replacement.push('\n');
+                }
+                let _ = self.backend.send_edit("delete_forward", json!([]));
+                if !replacement.is_empty() {
+                    let _ = self.backend.send_edit("insert", json!({ "chars": replacement }));
+                }
+                true
+            }
+        } else {
+            if self.backend.lines.is_empty() {
+                return Ok(format!("{label}: no lines"));
+            }
+
+            let original = self.backend.lines.clone();
+            let mut updated = original.clone();
+            transform(&mut updated);
+            if original == updated {
+                false
+            } else {
+                self.replace_line_block(0, original.len().saturating_sub(1), &updated)?;
+                true
+            }
+        };
+
+        if changed {
+            self.push_change();
+            Ok(format!("{label}: applied"))
+        } else {
+            Ok(format!("{label}: no changes"))
+        }
+    }
+
+    fn transform_line_range<F>(
+        &mut self,
+        label: &str,
+        start_line: usize,
+        end_line: usize,
+        mut transform: F,
+    ) -> Result<String, String>
+    where
+        F: FnMut(&mut Vec<String>),
+    {
+        if self.backend.lines.is_empty() {
+            return Ok(format!("{label}: no lines"));
+        }
+
+        let last_line = self.backend.lines.len().saturating_sub(1);
+        let start_line = start_line.min(last_line);
+        let end_line = end_line.min(last_line).max(start_line);
+        let original = self.backend.lines[start_line..=end_line].to_vec();
+        let mut updated = original.clone();
+        transform(&mut updated);
+
+        if original == updated {
+            return Ok(format!("{label}: no changes"));
+        }
+
+        self.replace_line_block(start_line, end_line, &updated)?;
+
+        self.push_change();
+        Ok(format!("{label}: applied"))
+    }
+
     fn replace_range_with_text(&mut self, range: SelectionRange, text: &str) -> Result<(), String> {
         let is_non_empty = range.start != range.end;
         self.backend
             .set_selections(std::slice::from_ref(&range))
             .map_err(|err| format!("replace failed: {err}"))?;
+        self.backend.sync_pending_events().map_err(|err| format!("replace failed: {err}"))?;
         if is_non_empty {
             let _ = self.backend.send_edit("delete_forward", json!([]));
         }
@@ -2132,6 +2275,7 @@ impl App {
         self.backend
             .set_selections(&[SelectionRange { start: offset, end: offset }])
             .map_err(|err| format!("insert failed: {err}"))?;
+        self.backend.sync_pending_events().map_err(|err| format!("insert failed: {err}"))?;
         if !text.is_empty() {
             let _ = self.backend.send_edit("insert", json!({ "chars": text }));
         }
@@ -2779,6 +2923,7 @@ impl App {
             .backend
             .all_bufs()
             .iter()
+            .filter(|buf| buf.is_fully_cached())
             .map(|buf| (buf.id, buf.path.clone(), buf.lines.clone()))
             .collect::<Vec<_>>();
 
@@ -2811,6 +2956,11 @@ impl App {
 
     fn refresh_active_git_status(&mut self) -> Option<GitBufferStatus> {
         let buf = self.backend.active();
+        if !buf.is_fully_cached() {
+            self.backend.status_message =
+                Some(String::from("git: status unavailable until buffer lines are loaded"));
+            return None;
+        }
         let fingerprint = git::buffer_fingerprint(buf.path.as_deref(), &buf.lines);
         let status = buf
             .path
@@ -2996,6 +3146,16 @@ impl App {
         self.sync_backend_to_focused_window();
     }
 
+    fn rotate_view_reverse(&mut self) {
+        let new_vp = self.tabs.focused_windows_mut().focus_prev(self.viewport);
+        self.viewport = new_vp;
+        self.sync_backend_to_focused_window();
+    }
+
+    fn transpose_view(&mut self) {
+        self.tabs.focused_windows_mut().transpose();
+    }
+
     fn jump_view(&mut self, direction: ViewDirection) {
         let new_vp = self.tabs.focused_windows_mut().focus_direction(direction, self.viewport);
         self.viewport = new_vp;
@@ -3006,6 +3166,19 @@ impl App {
         if self.tabs.focused_windows_mut().swap_focused_with_direction(direction) {
             self.sync_backend_to_focused_window();
         }
+    }
+
+    fn close_view(&mut self) {
+        if let Some(new_vp) = self.tabs.focused_windows_mut().close_focused() {
+            self.viewport = new_vp;
+            self.sync_backend_to_focused_window();
+        }
+    }
+
+    fn close_other_views(&mut self) {
+        let new_vp = self.tabs.focused_windows_mut().close_others(self.viewport);
+        self.viewport = new_vp;
+        self.sync_backend_to_focused_window();
     }
 
     /// Handle a key pressed after `Ctrl-W` in Normal mode.
@@ -3034,28 +3207,19 @@ impl App {
             // Focus next window.
             'w' => self.rotate_view(),
             // Focus previous window.
-            'W' | 'p' => {
-                let new_vp = self.tabs.focused_windows_mut().focus_prev(self.viewport);
-                self.viewport = new_vp;
-                let new_buf = self.tabs.focused_windows_mut().focused_window().buffer_id;
-                let _ = self.backend.switch_to_id(new_buf);
-            }
+            'W' | 'p' => self.rotate_view_reverse(),
             'h' => self.jump_view(ViewDirection::Left),
             'j' => self.jump_view(ViewDirection::Down),
             'k' => self.jump_view(ViewDirection::Up),
             'l' => self.jump_view(ViewDirection::Right),
+            't' => self.transpose_view(),
             'H' => self.swap_view(ViewDirection::Left),
             'J' => self.swap_view(ViewDirection::Down),
             'K' => self.swap_view(ViewDirection::Up),
             'L' => self.swap_view(ViewDirection::Right),
             // Close focused window.
-            'c' | 'q' => {
-                if let Some(new_vp) = self.tabs.focused_windows_mut().close_focused() {
-                    self.viewport = new_vp;
-                    let new_buf = self.tabs.focused_windows_mut().focused_window().buffer_id;
-                    let _ = self.backend.switch_to_id(new_buf);
-                }
-            }
+            'c' | 'q' => self.close_view(),
+            'o' => self.close_other_views(),
             _ => {}
         }
     }

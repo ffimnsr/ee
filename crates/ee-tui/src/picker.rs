@@ -341,6 +341,9 @@ fn collect_files(cwd: &Path) -> Vec<PickerItem> {
             continue;
         }
         let path = entry.into_path();
+        if path.components().any(|component| component.as_os_str() == ".git") {
+            continue;
+        }
         let label = path.strip_prefix(cwd).unwrap_or(&path).to_string_lossy().into_owned();
         items.push(PickerItem {
             label,

@@ -14,8 +14,27 @@ enum WindowLineTarget {
 impl App {
     const LSP_PLUGIN_NAME: &'static str = "xi-lsp-plugin";
 
+    fn current_workspace_root(&self) -> PathBuf {
+        self.backend
+            .active()
+            .path
+            .as_deref()
+            .and_then(|path| crate::config::find_git_root(path.parent().unwrap_or(path)))
+            .or_else(|| {
+                std::env::current_dir().ok().and_then(|cwd| crate::config::find_git_root(&cwd))
+            })
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
     fn current_picker_root(&self) -> Option<PathBuf> {
         self.backend.active().path.as_ref().and_then(|path| path.parent().map(Path::to_path_buf))
+    }
+
+    fn open_file_picker_at(&mut self, cwd: PathBuf, title: &str) {
+        let mut picker = PickerState::new_files(cwd);
+        picker.title = title.to_owned();
+        self.open_picker(picker);
     }
 
     pub(crate) fn open_file_picker_for_buffer_directory(&mut self) {
@@ -23,16 +42,29 @@ impl App {
             .current_picker_root()
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
-        let mut picker = PickerState::new_files(cwd);
-        picker.title = String::from("Files");
-        self.open_picker(picker);
+        self.open_file_picker_at(cwd, "Files");
     }
 
     pub(crate) fn open_file_picker_in_current_directory(&mut self) {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let mut picker = PickerState::new_files(cwd);
-        picker.title = String::from("Files (cwd)");
-        self.open_picker(picker);
+        self.open_file_picker_at(cwd, "Files (cwd)");
+    }
+
+    pub(crate) fn open_file_explorer(&mut self) {
+        self.open_file_picker_at(self.current_workspace_root(), "Explorer");
+    }
+
+    pub(crate) fn open_file_explorer_for_buffer_directory(&mut self) {
+        let cwd = self
+            .current_picker_root()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        self.open_file_picker_at(cwd, "Explorer (buffer dir)");
+    }
+
+    pub(crate) fn open_file_explorer_in_current_directory(&mut self) {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        self.open_file_picker_at(cwd, "Explorer (cwd)");
     }
 
     pub(crate) fn open_buffer_picker(&mut self) {
@@ -596,6 +628,24 @@ impl App {
             }
             "transpose" => {
                 let _ = self.backend.send_edit("transpose", json!([]));
+            }
+            "sort" => {
+                let result = match range {
+                    Some((start, end)) => self.sort_line_range(start, end),
+                    None => self.sort_selected_or_all_lines(),
+                };
+                match result {
+                    Ok(message) | Err(message) => self.backend.status_message = Some(message),
+                }
+            }
+            "uniq" | "dedup" => {
+                let result = match range {
+                    Some((start, end)) => self.dedup_line_range(start, end),
+                    None => self.dedup_selected_or_all_lines(),
+                };
+                match result {
+                    Ok(message) | Err(message) => self.backend.status_message = Some(message),
+                }
             }
             "duplicate_line" => {
                 let _ = self.backend.send_edit("duplicate_line", json!([]));
@@ -1385,6 +1435,18 @@ impl App {
             "rotate_view" | "cycle_view" => {
                 self.rotate_view();
             }
+            "rotate_view_reverse" => {
+                self.rotate_view_reverse();
+            }
+            "transpose_view" => {
+                self.transpose_view();
+            }
+            "wclose" => {
+                self.close_view();
+            }
+            "wonly" => {
+                self.close_other_views();
+            }
             "jump_view_left" => {
                 self.jump_view(crate::window::ViewDirection::Left);
             }
@@ -1409,6 +1471,9 @@ impl App {
             "swap_view_right" => {
                 self.swap_view(crate::window::ViewDirection::Right);
             }
+            "commit_undo_checkpoint" => {
+                let _ = self.backend.send_edit("commit_undo_checkpoint", json!([]));
+            }
             "tabs" => {
                 let info = (0..self.tabs.tab_count())
                     .map(|i| {
@@ -1421,6 +1486,21 @@ impl App {
             }
             "files" | "Files" => {
                 self.open_file_picker_in_current_directory();
+                self.enter_normal_mode();
+                return;
+            }
+            "file_explorer" => {
+                self.open_file_explorer();
+                self.enter_normal_mode();
+                return;
+            }
+            "file_explorer_in_current_buffer_directory" => {
+                self.open_file_explorer_for_buffer_directory();
+                self.enter_normal_mode();
+                return;
+            }
+            "file_explorer_in_current_directory" => {
+                self.open_file_explorer_in_current_directory();
                 self.enter_normal_mode();
                 return;
             }
@@ -1643,6 +1723,9 @@ impl App {
             "delete_word_forward",
             "duplicate_line",
             "files",
+            "file_explorer",
+            "file_explorer_in_current_buffer_directory",
+            "file_explorer_in_current_directory",
             "file_picker",
             "file_picker_in_current_directory",
             "Files",
@@ -1830,6 +1913,10 @@ impl App {
             "tabs",
             "rotate_view",
             "cycle_view",
+            "rotate_view_reverse",
+            "transpose_view",
+            "wclose",
+            "wonly",
             "jump_view_left",
             "jump_view_down",
             "jump_view_up",
@@ -1842,10 +1929,14 @@ impl App {
             "terminal",
             "test",
             "transpose",
+            "sort",
+            "uniq",
+            "dedup",
             "add_selection_above",
             "add_selection_below",
             "change_current_directory",
             "cd",
+            "commit_undo_checkpoint",
             "diffget",
             "diffg",
             "|",
@@ -2257,6 +2348,7 @@ impl App {
             "Search sets: :multi_find term [term ...]".to_owned(),
             "Shell: :term cmd | :!cmd | :make [args] | :test [args] | :run [args]".to_owned(),
             "Workspace: :file_picker :file_picker_in_current_directory :buffer_picker :changed_file_picker :symbol_picker :workspace_symbol_picker :diagnostics_picker :workspace_diagnostics_picker :last_picker".to_owned(),
+            "Explorer: :file_explorer :file_explorer_in_current_buffer_directory :file_explorer_in_current_directory".to_owned(),
         ]
     }
 
@@ -2295,7 +2387,7 @@ impl App {
             ":lsp_restart / :lsp_stop restart or stop language-server plugin".to_owned(),
             ":change_current_directory / :cd switch current working directory | :show_directory / :pwd print cwd"
                 .to_owned(),
-            ":rotate_view / :cycle_view / :jump_view_* / :swap_view_* manage split focus and ordering"
+            ":rotate_view / :rotate_view_reverse / :transpose_view / :jump_view_* / :swap_view_* / :wclose / :wonly manage split focus and ordering"
                 .to_owned(),
             ":set_language / :lang set or show current syntax name".to_owned(),
             ":read / :r insert file contents at cursor".to_owned(),
@@ -2319,6 +2411,7 @@ impl App {
             ":rename new_name request backend rename at cursor".to_owned(),
             ":diagnostics open location list for active-buffer diagnostics".to_owned(),
             ":file_picker / :file_picker_in_current_directory open file pickers rooted at buffer dir or cwd".to_owned(),
+            ":file_explorer / :file_explorer_in_current_buffer_directory / :file_explorer_in_current_directory open explorer-style pickers rooted at workspace, buffer dir, or cwd".to_owned(),
             ":buffer_picker / :changed_file_picker open buffer or git-changed-file pickers".to_owned(),
             ":symbol_picker / :workspace_symbol_picker request symbol pickers".to_owned(),
             ":diagnostics_picker / :workspace_diagnostics_picker open diagnostic pickers".to_owned(),
@@ -2331,6 +2424,8 @@ impl App {
             ":toggle_block_comments force block-comment toggle on current selection or line"
                 .to_owned(),
             ":transpose backend transpose at cursor".to_owned(),
+            ":sort sort selected lines or whole buffer when nothing is selected".to_owned(),
+            ":uniq / :dedup remove duplicate lines from selection or whole buffer".to_owned(),
             ":duplicate_line backend duplicate current selection line(s)".to_owned(),
             ":increment / :decrement adjust number under cursor".to_owned(),
             ":selection_for_find / :selection_for_replace lift selection into find or replace"
@@ -2377,6 +2472,8 @@ impl App {
             ":copy_selection_on_next_line / :copy_selection_on_prev_line clone selection to adjacent line"
                 .to_owned(),
             ":rotate_selection_contents_backward / :rotate_selection_contents_forward cycle selected text"
+                .to_owned(),
+            ":commit_undo_checkpoint split subsequent edits into a fresh undo step"
                 .to_owned(),
             ":select_all select entire buffer".to_owned(),
             ":delete_word_backward / :delete_word_forward delete adjacent word".to_owned(),

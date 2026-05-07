@@ -226,6 +226,10 @@ impl<'a> EventContext<'a> {
                 self.do_apply_line_replacements(&replacements);
                 None
             }
+            SpecialEvent::ReplaceLineRange { start_line, end_line, lines } => {
+                self.do_replace_line_range(start_line, end_line, &lines);
+                None
+            }
             SpecialEvent::SetSelections { selections } => self.do_set_selections(&selections),
             SpecialEvent::GotoColumn { display_col, modify_selection } => {
                 self.do_goto_column(display_col, modify_selection)
@@ -247,6 +251,10 @@ impl<'a> EventContext<'a> {
             }
             SpecialEvent::FindChar { target, forward, inclusive, modify_selection } => {
                 self.do_find_char(target, forward, inclusive, modify_selection)
+            }
+            SpecialEvent::CommitUndoCheckpoint => {
+                self.editor.borrow_mut().commit_undo_checkpoint();
+                None
             }
             SpecialEvent::MoveToMatchingBracket { modify_selection } => {
                 self.do_move_to_matching_bracket(modify_selection)
@@ -1107,6 +1115,16 @@ impl<'a> EventContext<'a> {
         }
     }
 
+    fn do_replace_line_range(&mut self, start_line: usize, end_line: usize, lines: &[String]) {
+        let delta = {
+            let editor = self.editor.borrow();
+            replace_line_range(editor.get_buffer(), start_line, end_line, lines)
+        };
+        if !delta.is_identity() {
+            self.editor.borrow_mut().apply_direct_delta(EditType::Other, delta);
+        }
+    }
+
     fn do_set_selections(&mut self, selections: &[SelectionRange]) -> Option<Selection> {
         if selections.is_empty() {
             return None;
@@ -1462,6 +1480,28 @@ fn apply_line_replacements(text: &Rope, replacements: &[LineReplacement]) -> Rop
         builder.replace(line_content_interval(text, replacement.line), replacement.text.into());
     }
     builder.build()
+}
+
+fn replace_line_range(
+    text: &Rope,
+    start_line: usize,
+    end_line: usize,
+    lines: &[String],
+) -> RopeDelta {
+    let total_lines = text.measure::<LinesMetric>() + 1;
+    let last_line = total_lines.saturating_sub(1);
+    let start_line = start_line.min(last_line);
+    let end_line = end_line.min(last_line).max(start_line);
+    let start_offset = text.offset_of_line(start_line);
+    let end_offset =
+        if end_line + 1 < total_lines { text.offset_of_line(end_line + 1) } else { text.len() };
+
+    let mut replacement = lines.join("\n");
+    if end_line + 1 < total_lines && !lines.is_empty() {
+        replacement.push('\n');
+    }
+
+    replace_interval_with_text(text, Interval::new(start_offset, end_offset), &replacement)
 }
 
 fn selected_text(text: &Rope, regions: &[SelRegion]) -> String {

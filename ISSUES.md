@@ -6,6 +6,30 @@
 
 - [ ] Add property-based tests (`proptest`) in `crates/xi-rope` for delta application, merging, and CRDT invariants.
 
+### Large File Support (Terabytes see Emacs VLF)
+
+- [ ] Define huge-file mode contract in `xi-core-lib`: read-only first, explicit feature gates for editing, search, syntax, git signs, LSP, diagnostics, undo, and save behavior.
+- [ ] Replace `crates/xi-core-lib/src/file.rs` full-file `read_to_end` + `Rope::from` open path with paged file access backed by `mmap` or bounded `pread` windows.
+- [ ] Remove whole-file open path from `crates/xi-core-lib/src/file.rs`; opening a huge file must not require reading entire contents into RAM before first render.
+- [ ] Add file-size thresholds and open policy: normal path for small files, huge-file backend for files above threshold, clear user-facing status when features are disabled.
+- [ ] Build lazy newline index for huge files: page-scanned line starts, cached chunks, background indexing, cancellation, and bounded memory cap.
+- [ ] Add paged text storage backend for huge files using mapped or windowed reads, with bounded cache eviction and viewport-first access patterns.
+- [ ] Change line addressing APIs to tolerate partial line index: viewport-first load, approximate total line count until scan completes, stable updates as index expands.
+- [ ] Keep `ee-tui` line cache sparse for huge files: no `Vec<String>` full-buffer clone, no placeholder strings for all lines, render only loaded viewport lines.
+- [ ] Add backend protocol for chunk/viewport text requests instead of whole-buffer line-cache invalidation ranges.
+- [ ] Limit whitespace and line-ending detection to bounded samples near file start plus later background verification; never scan full 10 GB during open.
+- [ ] Convert indentation and line-ending detection to sampled or incremental probes so huge-file open avoids full-buffer whitespace scans.
+- [ ] Disable or defer syntax parsing, tree-sitter, syntect fallback, and semantic text objects for huge files until visible-range parsing exists.
+- [ ] Disable automatic git hunk diff, blame, and source-control signs for huge files unless an explicit bounded range command is used.
+- [ ] Add huge-file search strategy: streaming search over pages, cancellation, progress reporting, bounded match storage, and viewport-local highlights.
+- [ ] Add huge-file feature gates so git, syntax, search, wrap, and similar full-buffer features are disabled or downgraded before they can trigger global scans.
+- [ ] Design edit strategy for huge files: append-only/read-only milestone first, then sparse overlay edits with piece-table/rope overlay and explicit save-as/rewrite semantics.
+- [ ] Rework save path for huge files: streaming copy with edit overlay application, fsync/rename durability, progress reporting, cancellation policy.
+- [ ] Add memory budget tests: opening 10 GB sparse fixture must keep RSS under configured cap and show first viewport without full scan.
+- [ ] Add performance benchmarks for 100 MB, 1 GB, and 10 GB fixtures covering open-to-first-render, page-down latency, goto-line behavior, and search cancellation.
+- [ ] Add regression tests for huge-file disabled features so frontend never accidentally triggers full-buffer clone, diff, syntax, or line-cache expansion.
+- [ ] Document huge-file mode limitations in `README.md` and command status messages.
+
 ### Optional Future Boundary Work
 
 - [ ] Move text-object range resolution from `crates/ee-tui/src/app/mod.rs` into `xi-core-lib` if we want backend-owned semantic text objects across future frontends.
@@ -147,11 +171,11 @@ different name alias this. Description for the command can be found here: https:
 - global_search
 - command_palette
 - completion (static command)
-- [ ] file_explorer / file_explorer_in_current_buffer_directory / file_explorer_in_current_directory
-- [ ] rotate_view_reverse / transpose_view / wclose / wonly
-- commit_undo_checkpoint
-- sort - this will sort selected lines or all of the lines if nothing is selected
-- uniq / dedup - remove duplicate from selected lines or all of lines
+- [x] file_explorer / file_explorer_in_current_buffer_directory / file_explorer_in_current_directory
+- [x] rotate_view_reverse / transpose_view / wclose / wonly
+- [x] commit_undo_checkpoint
+- [x] sort - this will sort selected lines or all of the lines if nothing is selected
+- [x] uniq / dedup - remove duplicate from selected lines or all of lines
 - [x] lsp_restart
 - [x] lsp_stop
 - [x] change_current_directory / cd and show_directory / pwd

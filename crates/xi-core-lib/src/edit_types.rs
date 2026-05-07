@@ -126,6 +126,11 @@ pub(crate) enum SpecialEvent {
         text: String,
         append: bool,
     },
+    ReplaceLineRange {
+        start_line: usize,
+        end_line: usize,
+        lines: Vec<String>,
+    },
     ApplyLineReplacements {
         replacements: Vec<LineReplacement>,
     },
@@ -167,6 +172,7 @@ pub(crate) enum SpecialEvent {
     MoveToMatchingBracket {
         modify_selection: bool,
     },
+    CommitUndoCheckpoint,
     ToggleComment,
     ToggleLineComment,
     ToggleBlockComment,
@@ -552,6 +558,8 @@ impl From<EditNotification> for EventDomain {
                     text,
                     append,
                 }.into(),
+            ReplaceLineRange { start_line, end_line, lines } =>
+                SpecialEvent::ReplaceLineRange { start_line, end_line, lines }.into(),
             ApplyLineReplacements { replacements } =>
                 SpecialEvent::ApplyLineReplacements { replacements }.into(),
             SetSelections { selections } =>
@@ -589,6 +597,7 @@ impl From<EditNotification> for EventDomain {
             FindChar { target, forward, inclusive, modify_selection } => {
                 SpecialEvent::FindChar { target, forward, inclusive, modify_selection }.into()
             }
+            CommitUndoCheckpoint => SpecialEvent::CommitUndoCheckpoint.into(),
             MoveToMatchingBracket { modify_selection } => {
                 SpecialEvent::MoveToMatchingBracket { modify_selection }.into()
             }
