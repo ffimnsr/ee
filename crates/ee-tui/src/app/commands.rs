@@ -729,6 +729,25 @@ impl App {
             "align_selections" => {
                 let _ = self.backend.send_edit("align_selections", json!([]));
             }
+            "align_it" => {
+                let spec = tail.trim();
+                match parse_align_it_spec(spec) {
+                    Ok(spec) => {
+                        let params = json!({
+                            "pattern": spec.pattern,
+                            "regex": spec.regex,
+                            "occurrence": spec.occurrence,
+                            "all": spec.all,
+                            "format": spec.format,
+                            "range": range.map(|(start, end)| [start as i64, end as i64]),
+                        });
+                        let _ = self.backend.send_edit("align_it", params);
+                    }
+                    Err(message) => {
+                        self.backend.status_message = Some(message);
+                    }
+                }
+            }
             "collapse_selection" => {
                 let _ = self.backend.send_edit("collapse_selections", json!([]));
             }
@@ -1884,6 +1903,7 @@ impl App {
             "merge_consecutive_selections",
             "trim_selections",
             "align_selections",
+            "align_it",
             "collapse_selection",
             "clear_register",
             "flip_selections",
@@ -2568,6 +2588,7 @@ impl App {
                 .to_owned(),
             ":trim_selections / :collapse_selection normalize current selections".to_owned(),
             ":align_selections pad selections into aligned columns".to_owned(),
+            ":align_it [N|*|-N]<delimiter>|/regex/ [l1r1l0] align matched lines tabular-style in selection, range, or contiguous block".to_owned(),
             ":flip_selections / :ensure_selections_forward rewrite selection direction".to_owned(),
             ":move_line_up / :move_line_down swap current line with adjacent line".to_owned(),
             ":match_brackets jump to matching bracket around cursor".to_owned(),
@@ -2640,4 +2661,130 @@ impl App {
             "g; / g, change list older/newer".to_owned(),
         ]
     }
+}
+
+struct AlignItCommandSpec {
+    pattern: String,
+    regex: bool,
+    occurrence: i64,
+    all: bool,
+    format: String,
+}
+
+fn parse_align_it_spec(spec: &str) -> Result<AlignItCommandSpec, String> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Err("align_it: usage: :align_it [N|*|-N]<delimiter>|/regex/ [l1r1l0]".to_owned());
+    }
+
+    let (occurrence, all, rest) = parse_align_it_occurrence(spec)?;
+    let rest = rest.trim_start();
+    if rest.is_empty() {
+        return Err("align_it: usage: :align_it [N|*|-N]<delimiter>|/regex/ [l1r1l0]".to_owned());
+    }
+
+    let (pattern, regex, format) = if let Some(regex_body) = rest.strip_prefix('/') {
+        let Some(end) = find_align_it_regex_end(regex_body) else {
+            return Err("align_it: unterminated regex; use /.../".to_owned());
+        };
+        let pattern = &regex_body[..end];
+        if pattern.is_empty() {
+            return Err(
+                "align_it: usage: :align_it [N|*|-N]<delimiter>|/regex/ [l1r1l0]".to_owned()
+            );
+        }
+        regex::Regex::new(pattern)
+            .map_err(|err| format!("align_it: invalid regex `{pattern}`: {err}"))?;
+        let format = regex_body[end + 1..].trim();
+        (pattern.to_owned(), true, format.to_owned())
+    } else {
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let pattern = parts.next().unwrap_or_default();
+        if pattern.is_empty() {
+            return Err(
+                "align_it: usage: :align_it [N|*|-N]<delimiter>|/regex/ [l1r1l0]".to_owned()
+            );
+        }
+        let format = parts.next().unwrap_or_default().trim().to_owned();
+        (pattern.to_owned(), false, format)
+    };
+
+    if !format.is_empty() {
+        validate_align_it_format(&format)?;
+    }
+
+    Ok(AlignItCommandSpec { pattern, regex, occurrence, all, format })
+}
+
+fn parse_align_it_occurrence(spec: &str) -> Result<(i64, bool, &str), String> {
+    if let Some(rest) = spec.strip_prefix('*') {
+        return Ok((1, true, rest));
+    }
+
+    if let Some(rest) = spec.strip_prefix('-') {
+        let digits = rest.chars().take_while(|ch| ch.is_ascii_digit()).count();
+        if digits == 0 {
+            return Ok((-1, false, rest));
+        }
+        let value: i64 = rest[..digits]
+            .parse()
+            .map_err(|_| "align_it: invalid occurrence selector".to_owned())?;
+        if value == 0 {
+            return Err("align_it: occurrence selector cannot be 0".to_owned());
+        }
+        return Ok((-value, false, &rest[digits..]));
+    }
+
+    let digits = spec.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digits == 0 {
+        return Ok((1, false, spec));
+    }
+    let value: i64 =
+        spec[..digits].parse().map_err(|_| "align_it: invalid occurrence selector".to_owned())?;
+    if value == 0 {
+        return Err("align_it: occurrence selector cannot be 0".to_owned());
+    }
+    Ok((value, false, &spec[digits..]))
+}
+
+fn find_align_it_regex_end(spec: &str) -> Option<usize> {
+    let mut escaped = false;
+    for (index, ch) in spec.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '/' => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn validate_align_it_format(spec: &str) -> Result<(), String> {
+    let bytes = spec.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'l' | b'r' | b'c' => {}
+            _ => {
+                return Err(format!(
+                    "align_it: invalid format `{spec}`; use repeated l|r|c followed by digits"
+                ));
+            }
+        }
+        index += 1;
+        let digit_start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+        if digit_start == index {
+            return Err(format!(
+                "align_it: invalid format `{spec}`; use repeated l|r|c followed by digits"
+            ));
+        }
+    }
+    Ok(())
 }

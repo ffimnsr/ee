@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::borrow::{Borrow, Cow};
-use std::cmp::min;
+use std::cmp::{max, min};
 use std::collections::BTreeSet;
 
 use log::error;
@@ -37,7 +37,7 @@ use crate::plugins::PluginId;
 use crate::plugins::rpc::{
     DataSpan, GetDataResponse, PluginEdit, PluginEditAck, ScopeSpan, TextUnit,
 };
-use crate::rpc::SelectionModifier;
+use crate::rpc::{LineRange, SelectionModifier};
 use crate::selection::{InsertDrift, SelRegion, Selection};
 use crate::view::{Replace, View};
 
@@ -478,6 +478,40 @@ impl Editor {
         }
     }
 
+    fn do_align_it(
+        &mut self,
+        view: &View,
+        config: &BufferItems,
+        pattern: &str,
+        regex: bool,
+        occurrence: i64,
+        all: bool,
+        format: &str,
+        range: Option<LineRange>,
+    ) {
+        let range = range.and_then(|range| {
+            if range.first < 0 || range.last < 0 {
+                return None;
+            }
+            Some((min(range.first, range.last) as usize, max(range.first, range.last) as usize))
+        });
+        let delta = edit_ops::align_it(
+            &self.text,
+            view.sel_regions(),
+            config.tab_size,
+            pattern,
+            regex,
+            occurrence,
+            all,
+            format,
+            range,
+        );
+        if !delta.is_identity() {
+            self.this_edit_type = EditType::Other;
+            self.add_delta(delta);
+        }
+    }
+
     fn do_transform_text<F: Fn(&str) -> String>(&mut self, view: &View, transform_function: F) {
         let delta = edit_ops::transform_text(&self.text, view.sel_regions(), transform_function);
         if !delta.is_identity() {
@@ -599,6 +633,9 @@ impl Editor {
             IncreaseNumber => self.do_change_number(view, |s| s.checked_add(1)),
             DecreaseNumber => self.do_change_number(view, |s| s.checked_sub(1)),
             AlignSelections => self.do_align_selections(view, config),
+            AlignIt { pattern, regex, occurrence, all, format, range } => {
+                self.do_align_it(view, config, &pattern, regex, occurrence, all, &format, range)
+            }
             RotateSelectionContentsBackward => self.do_rotate_selection_contents(view, false),
             RotateSelectionContentsForward => self.do_rotate_selection_contents(view, true),
             ReverseSelectionContents => {
