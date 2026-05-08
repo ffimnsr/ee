@@ -7,7 +7,7 @@
 
 ### Tooling and CI
 
-- [ ] Add property-based tests `proptest` in `crates/xi-rope` for delta application, merging, and CRDT invariants.
+- [x] Add property-based tests `proptest` in `crates/xi-rope` for delta application, merging, and CRDT invariants.
 
 ### Large File Support: VLF Mode (Very Large Files)
 
