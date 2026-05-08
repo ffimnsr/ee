@@ -123,6 +123,10 @@ pub struct VlfMemoryStats {
     pub descriptor_bytes: u64,
     /// Peak overlay bytes (always 0 in the read-only milestone).
     pub peak_overlay_bytes: u64,
+    /// Cumulative raw bytes read from the pager before the first
+    /// [`VlfStore::set_viewport`] call.  Useful for diagnosing how many bytes
+    /// are fetched during open/scan before the first viewport render.
+    pub bytes_before_first_viewport: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +350,9 @@ pub struct VlfStore {
     batch_size: u64,
     /// Peak memory usage counters; updated on every cache write.
     stats: RefCell<VlfMemoryStats>,
+    /// True once `set_viewport` has been called with a non-zero window.
+    /// Used to stop accumulating `bytes_before_first_viewport`.
+    first_viewport_set: std::cell::Cell<bool>,
 }
 
 impl VlfStore {
@@ -370,6 +377,7 @@ impl VlfStore {
             decoded_cache: RefCell::new(DecodedTextCache::new(DEFAULT_DECODED_CACHE_BYTE_CAP)),
             batch_size: DEFAULT_BATCH_SIZE,
             stats: RefCell::new(VlfMemoryStats::default()),
+            first_viewport_set: std::cell::Cell::new(false),
         })
     }
 
@@ -389,6 +397,7 @@ impl VlfStore {
             decoded_cache: RefCell::new(DecodedTextCache::new(budget.decoded_byte_cap)),
             batch_size: DEFAULT_BATCH_SIZE,
             stats: RefCell::new(VlfMemoryStats::default()),
+            first_viewport_set: std::cell::Cell::new(false),
         })
     }
 
@@ -452,6 +461,11 @@ impl VlfStore {
             dirty,
             batch_size: batch,
         };
+
+        // Mark first viewport as set so pre-viewport byte accounting stops.
+        if !self.first_viewport_set.get() && end.0 > start.0 {
+            self.first_viewport_set.set(true);
+        }
     }
 
     /// Return a snapshot of the current viewport state.
@@ -498,6 +512,17 @@ impl VlfStore {
         // peak_overlay_bytes stays 0 in the read-only milestone.
     }
 
+    /// Record a raw pager read of `byte_count` bytes.
+    ///
+    /// If the first viewport has not yet been set, accumulates into
+    /// `stats.bytes_before_first_viewport` so callers can diagnose how many
+    /// bytes are fetched during open/scan before the first render.
+    fn record_pager_read(&self, byte_count: u64) {
+        if !self.first_viewport_set.get() {
+            self.stats.borrow_mut().bytes_before_first_viewport += byte_count;
+        }
+    }
+
     /// Scan the page that begins at `page_start` (rounded down to
     /// `page_size` alignment is the caller's responsibility).
     ///
@@ -517,6 +542,7 @@ impl VlfStore {
         let token = self.pager.current_generation();
         let page_bytes = self.pager.read_at(file_range, token)?;
         let bytes = page_bytes.as_bytes();
+        self.record_pager_read(bytes.len() as u64);
 
         // ---- UTF-8 boundary detection ----------------------------------------
 
@@ -708,6 +734,7 @@ impl VlfStore {
 
         let token = self.pager.current_generation();
         let page_bytes = self.pager.read_at(ByteRange::new(expanded_start, expanded_end), token)?;
+        self.record_pager_read(expanded_end - expanded_start);
         let raw = page_bytes.as_bytes();
 
         // Offsets within `raw`.
@@ -1563,6 +1590,7 @@ mod tests {
             decoded_cache: RefCell::new(DecodedTextCache::new(5)),
             batch_size: 0, // overscan == viewport, so [3,6) is Background when viewport=[0,3)
             stats: RefCell::new(VlfMemoryStats::default()),
+            first_viewport_set: std::cell::Cell::new(false),
         };
 
         // Prime a background entry at [3,6) (before viewport is set).
@@ -1729,6 +1757,26 @@ mod tests {
         store.scan_all().unwrap();
         let _ = store.read_byte_range(ByteRange::new(0, 4));
         assert_eq!(store.memory_stats().peak_overlay_bytes, 0);
+    }
+
+    #[test]
+    fn bytes_before_first_viewport_counts_reads_before_set_viewport() {
+        // bytes_before_first_viewport must accumulate pager reads made before
+        // set_viewport is called, then stop once the viewport is set.
+        let (store, _f) = store_from(b"hello world");
+
+        // Pre-viewport read: 11 bytes.
+        let _ = store.read_byte_range(ByteRange::new(0, 11));
+        let before = store.memory_stats().bytes_before_first_viewport;
+        assert!(before > 0, "expected non-zero pre-viewport byte count, got {before}");
+
+        // Set the viewport; counter must stop.
+        store.set_viewport(ByteOffset(0), ByteOffset(11));
+
+        // Post-viewport read.
+        let _ = store.read_byte_range(ByteRange::new(0, 11));
+        let after = store.memory_stats().bytes_before_first_viewport;
+        assert_eq!(before, after, "bytes_before_first_viewport should not grow after set_viewport");
     }
 
     #[test]

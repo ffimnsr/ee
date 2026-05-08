@@ -138,11 +138,11 @@
   - [x] Show status when editor downgrades from full normal mode to constrained mode.
 - [ ] Wire VLF storage into `crates/xi-core-lib/src/file.rs` open path.
   - [x] Add `VlfStore` and route its reads through `FilePager`.
-  - [ ] Select VLF path from open policy before `try_load_file` uses `read_to_end`.
-  - [ ] Remove `read_to_end` + `Rope::from` from VLF opens.
-  - [ ] Ensure VLF open never constructs a full-buffer `Rope`.
-  - [ ] Guarantee first render does not require reading entire contents into RAM.
-  - [ ] Add open telemetry/debug counters for bytes read before first viewport.
+  - [x] Select VLF path from open policy before `try_load_file` uses `read_to_end`.
+  - [x] Remove `read_to_end` + `Rope::from` from VLF opens.
+  - [x] Ensure VLF open never constructs a full-buffer `Rope`.
+  - [x] Guarantee first render does not require reading entire contents into RAM.
+  - [x] Add open telemetry/debug counters for bytes read before first viewport.
 - [ ] Finish lazy newline index integration for VLF.
   - [x] Scan line starts by page, not whole file.
   - [x] Cache scanned chunks with bounded memory.

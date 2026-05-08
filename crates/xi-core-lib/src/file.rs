@@ -32,6 +32,7 @@ use xi_rpc::RemoteErrorDetails;
 use crate::open_policy::{FileLocation, ModeOverride, OpenDecision, OpenPolicy};
 use crate::tabs::BufferId;
 use crate::text_store::DocumentMode;
+use crate::vlf::store::VlfStore;
 
 #[cfg(feature = "notify")]
 use crate::tabs::OPEN_FILE_EVENT_TOKEN;
@@ -97,6 +98,19 @@ pub enum FileError {
     },
 }
 
+/// Result of opening a file, distinguishing the document mode.
+///
+/// - `Rope` is returned for `Normal` and `ConstrainedNormal` files loaded fully
+///   into memory via `try_load_file`.
+/// - `Vlf` is returned for files above the VLF threshold; the caller must use
+///   the [`VlfStore`] for all reads.  No `Rope` is ever constructed.
+pub enum OpenResult {
+    /// Normal / ConstrainedNormal mode: full file content as a `Rope`.
+    Rope(Rope),
+    /// VLF mode: paged file reader with bounded cache.  No full buffer.
+    Vlf(Box<VlfStore>),
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum CharacterEncoding {
     Utf8,
@@ -157,7 +171,7 @@ impl FileManager {
     }
 
     /// Open a file using `Auto` mode selection (policy decides Normal / ConstrainedNormal / Vlf).
-    pub fn open(&mut self, path: &Path, id: BufferId) -> Result<Rope, FileError> {
+    pub fn open(&mut self, path: &Path, id: BufferId) -> Result<OpenResult, FileError> {
         self.open_with_override(path, id, FileLocation::Local, ModeOverride::Auto)
     }
 
@@ -172,14 +186,14 @@ impl FileManager {
         id: BufferId,
         location: FileLocation,
         mode_override: ModeOverride,
-    ) -> Result<Rope, FileError> {
+    ) -> Result<OpenResult, FileError> {
         // Reject non-UTF-8 paths early: they cannot be round-tripped over the
         // JSON-RPC layer, so any further operations on the buffer would fail.
         if path.to_str().is_none() {
             return Err(FileError::NonUtf8Path(path.to_owned()));
         }
         if !path.exists() {
-            return Ok(Rope::from(""));
+            return Ok(OpenResult::Rope(Rope::from("")));
         }
 
         // Stat the file for size *before* reading any bytes.
@@ -191,14 +205,30 @@ impl FileManager {
             OpenDecision::Open(DocumentMode::Normal)
             | OpenDecision::Open(DocumentMode::ConstrainedNormal) => {
                 // Normal rope load path — both Normal and ConstrainedNormal use
-                // the existing read_to_end + Rope path for now. VLF wiring is
-                // handled in the VlfStore open path (separate issue).
+                // the existing read_to_end + Rope path for now.
             }
             OpenDecision::Open(DocumentMode::Vlf) => {
-                // VLF files must never be loaded into a full Rope. Until the
-                // VLF open wiring in file.rs is complete this returns an error
-                // so callers cannot accidentally fall back to whole-file load.
-                return Err(FileError::MetadataUntrusted(path.to_owned()));
+                // VLF files must never be loaded into a full Rope.
+                // Open via VlfStore which uses bounded pread I/O; the file
+                // is never read_to_end or converted to a Rope.
+                let store = VlfStore::open(path).map_err(|e| FileError::Io(e, path.to_owned()))?;
+
+                // Register file metadata so close/reload work correctly.
+                let info = FileInfo {
+                    encoding: CharacterEncoding::Utf8,
+                    path: path.to_owned(),
+                    mod_time: get_mod_time(path),
+                    has_changed: false,
+                    #[cfg(target_family = "unix")]
+                    permissions: get_permissions(path),
+                    _lock: None, // VLF files are read-only; no write lock needed.
+                };
+                self.open_files.insert(path.to_owned(), id);
+                if self.file_info.insert(id, info).is_none() {
+                    #[cfg(feature = "notify")]
+                    self.watcher.watch(path, false, OPEN_FILE_EVENT_TOKEN);
+                }
+                return Ok(OpenResult::Vlf(Box::new(store)));
             }
             OpenDecision::ConfirmationRequired { reason, mode } => {
                 return Err(FileError::ConfirmationRequired {
@@ -219,7 +249,7 @@ impl FileManager {
             #[cfg(feature = "notify")]
             self.watcher.watch(path, false, OPEN_FILE_EVENT_TOKEN);
         }
-        Ok(rope)
+        Ok(OpenResult::Rope(rope))
     }
 
     pub fn close(&mut self, id: BufferId) {

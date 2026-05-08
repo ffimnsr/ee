@@ -41,7 +41,7 @@ use crate::client::Client;
 use crate::config::{ConfigDomain, ConfigDomainExternal, ConfigManager, Table};
 use crate::editor::Editor;
 use crate::event_context::EventContext;
-use crate::file::FileManager;
+use crate::file::{FileManager, OpenResult};
 use crate::line_ending::LineEnding;
 use crate::plugin_rpc::{PluginNotification, PluginRequest};
 use crate::plugins::rpc::ClientPluginInfo;
@@ -406,12 +406,14 @@ impl CoreState {
         let view_id = self.next_view_id();
         let buffer_id = self.next_buffer_id();
 
-        let rope = match path.as_ref() {
+        let open_result = match path.as_ref() {
             Some(p) => self.file_manager.open(p, buffer_id)?,
-            None => Rope::from(""),
+            None => OpenResult::Rope(Rope::from("")),
         };
-
-        let editor = RefCell::new(Editor::with_text(rope));
+        let editor = match open_result {
+            OpenResult::Rope(rope) => RefCell::new(Editor::with_text(rope)),
+            OpenResult::Vlf(store) => RefCell::new(Editor::with_vlf_store(*store)),
+        };
         let view = RefCell::new(View::new(view_id, buffer_id));
 
         self.editors.insert(buffer_id, editor);
@@ -937,16 +939,22 @@ impl CoreState {
         // A more robust solution would also hash the file's contents.
 
         if has_changes && is_pristine {
-            if let Ok(text) = self.file_manager.open(path, buffer_id) {
-                // this is ugly; we don't map buffer_id -> view_id anywhere
-                // but we know we must have a view.
-                let view_id = self
-                    .views
-                    .values()
-                    .find(|v| v.borrow().get_buffer_id() == buffer_id)
-                    .map(|v| v.borrow().get_view_id())
-                    .unwrap();
-                self.make_context(view_id).unwrap().reload(text);
+            if let Ok(open_result) = self.file_manager.open(path, buffer_id) {
+                match open_result {
+                    OpenResult::Rope(text) => {
+                        // this is ugly; we don't map buffer_id -> view_id anywhere
+                        // but we know we must have a view.
+                        let view_id = self
+                            .views
+                            .values()
+                            .find(|v| v.borrow().get_buffer_id() == buffer_id)
+                            .map(|v| v.borrow().get_view_id())
+                            .unwrap();
+                        self.make_context(view_id).unwrap().reload(text);
+                    }
+                    // VLF files are read-only and paged; reload is a no-op.
+                    OpenResult::Vlf(_) => {}
+                }
             }
         }
     }
