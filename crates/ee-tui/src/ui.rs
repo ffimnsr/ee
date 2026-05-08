@@ -18,69 +18,86 @@ struct RootAreas {
     tab_bar_area: Option<Rect>,
     editor_area: Rect,
     qf_area: Option<Rect>,
+    key_hint_area: Option<Rect>,
     status_area: Rect,
     prompt_area: Rect,
 }
 
 fn split_root_areas(area: Rect, app: &App) -> RootAreas {
     let tab_count = app.tabs.tab_count();
+    let key_hint_visible = app.active_key_sequence_node().is_some();
 
     let qf_panel_visible = (app.quickfix_open && app.quickfix.is_some())
         || (app.location_list_open && app.location_list.is_some());
     const QF_HEIGHT: u16 = 8;
+    const KEY_HINT_HEIGHT: u16 = 4;
 
     let rows = if tab_count > 1 {
         if qf_panel_visible {
-            Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(1),
-                    Constraint::Min(1),
-                    Constraint::Length(QF_HEIGHT),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                ])
-                .split(area)
+            let mut constraints =
+                vec![Constraint::Length(1), Constraint::Min(1), Constraint::Length(QF_HEIGHT)];
+            if key_hint_visible {
+                constraints.push(Constraint::Length(KEY_HINT_HEIGHT));
+            }
+            constraints.push(Constraint::Length(1));
+            constraints.push(Constraint::Length(1));
+            Layout::default().direction(Direction::Vertical).constraints(constraints).split(area)
         } else {
-            Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(1),
-                    Constraint::Min(1),
-                    Constraint::Length(1),
-                    Constraint::Length(1),
-                ])
-                .split(area)
+            let mut constraints = vec![Constraint::Length(1), Constraint::Min(1)];
+            if key_hint_visible {
+                constraints.push(Constraint::Length(KEY_HINT_HEIGHT));
+            }
+            constraints.push(Constraint::Length(1));
+            constraints.push(Constraint::Length(1));
+            Layout::default().direction(Direction::Vertical).constraints(constraints).split(area)
         }
     } else if qf_panel_visible {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(QF_HEIGHT),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .split(area)
+        let mut constraints = vec![Constraint::Min(1), Constraint::Length(QF_HEIGHT)];
+        if key_hint_visible {
+            constraints.push(Constraint::Length(KEY_HINT_HEIGHT));
+        }
+        constraints.push(Constraint::Length(1));
+        constraints.push(Constraint::Length(1));
+        Layout::default().direction(Direction::Vertical).constraints(constraints).split(area)
     } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
-            .split(area)
+        let mut constraints = vec![Constraint::Min(1)];
+        if key_hint_visible {
+            constraints.push(Constraint::Length(KEY_HINT_HEIGHT));
+        }
+        constraints.push(Constraint::Length(1));
+        constraints.push(Constraint::Length(1));
+        Layout::default().direction(Direction::Vertical).constraints(constraints).split(area)
     };
 
-    let (tab_bar_area, editor_area, qf_area, status_area, prompt_area) =
-        if tab_count > 1 && qf_panel_visible {
-            (Some(rows[0]), rows[1], Some(rows[2]), rows[3], rows[4])
-        } else if tab_count > 1 {
-            (Some(rows[0]), rows[1], None, rows[2], rows[3])
-        } else if qf_panel_visible {
-            (None, rows[0], Some(rows[1]), rows[2], rows[3])
-        } else {
-            (None, rows[0], None, rows[1], rows[2])
-        };
+    let mut index = 0;
+    let tab_bar_area = if tab_count > 1 {
+        let area = Some(rows[index]);
+        index += 1;
+        area
+    } else {
+        None
+    };
+    let editor_area = rows[index];
+    index += 1;
+    let qf_area = if qf_panel_visible {
+        let area = Some(rows[index]);
+        index += 1;
+        area
+    } else {
+        None
+    };
+    let key_hint_area = if key_hint_visible {
+        let area = Some(rows[index]);
+        index += 1;
+        area
+    } else {
+        None
+    };
+    let status_area = rows[index];
+    index += 1;
+    let prompt_area = rows[index];
 
-    RootAreas { tab_bar_area, editor_area, qf_area, status_area, prompt_area }
+    RootAreas { tab_bar_area, editor_area, qf_area, key_hint_area, status_area, prompt_area }
 }
 
 /// Return the visible editor row count for the current app state and terminal
@@ -161,6 +178,10 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
 
     render_status(frame, root.status_area, app);
     render_prompt(frame, root.prompt_area, app);
+
+    if let Some(key_hint_area) = root.key_hint_area {
+        render_key_hints(frame, key_hint_area, app);
+    }
 
     // Quickfix / location-list panel (drawn before picker overlay).
     if let Some(qf_rect) = root.qf_area {
@@ -1292,6 +1313,15 @@ fn git_status_span(app: &App) -> Option<Span<'static>> {
 }
 
 fn render_prompt(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
+    if let Some(label) = app.active_key_sequence_label() {
+        frame.render_widget(
+            Paragraph::new(Line::from(format!("keys: {label}")))
+                .style(Style::default().fg(Color::Rgb(166, 173, 200)).bg(Color::Rgb(24, 25, 38))),
+            area,
+        );
+        return;
+    }
+
     let prompt = match app.mode {
         Mode::Normal => Line::from(match app.backend.status_message.as_deref() {
             Some(message) => message.to_owned(),
@@ -1342,6 +1372,149 @@ fn render_prompt(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             .style(Style::default().fg(Color::Rgb(166, 173, 200)).bg(Color::Rgb(24, 25, 38))),
         area,
     );
+}
+
+fn render_key_hints(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
+    let Some(node) = app.active_key_sequence_node() else { return };
+    let Some(label) = app.active_key_sequence_label() else { return };
+
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(Color::Rgb(88, 91, 112)))
+        .title(key_hint_title(&label))
+        .style(Style::default().bg(Color::Rgb(30, 30, 46)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let entries = node.hint_entries();
+    let rows = (inner.height as usize).max(1);
+    let min_cell_width = 24usize;
+    let mut cols = (inner.width as usize / min_cell_width).max(1).min(entries.len().max(1));
+    while cols > 1 && entries.len().div_ceil(cols) > rows {
+        cols -= 1;
+    }
+    let visible_rows = entries.len().div_ceil(cols).max(1).min(rows);
+    let cell_width = (inner.width as usize / cols).max(1);
+    let key_width = entries
+        .iter()
+        .map(|entry| UnicodeWidthStr::width(entry.key.as_str()) + 2)
+        .max()
+        .unwrap_or(5)
+        .min(cell_width.saturating_sub(4).max(5));
+    let desc_width = cell_width.saturating_sub(key_width + 1);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for row in 0..visible_rows {
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut has_content = false;
+        for col in 0..cols {
+            let index = col * visible_rows + row;
+            if index >= entries.len() {
+                break;
+            }
+            let entry = &entries[index];
+            let key_label = pad_or_trim(&entry.key, key_width.saturating_sub(2));
+            let desc_text = if entry.is_group {
+                format!("-> {}", entry.description)
+            } else {
+                entry.description.clone()
+            };
+            let desc_label = pad_or_trim(&desc_text, desc_width);
+
+            spans.push(Span::styled(
+                format!(" {} ", key_label),
+                if entry.is_group {
+                    Style::default().fg(Color::Rgb(250, 179, 135)).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Rgb(137, 220, 235)).add_modifier(Modifier::BOLD)
+                },
+            ));
+            if desc_width > 0 {
+                spans.push(Span::styled(
+                    desc_label,
+                    if entry.is_group {
+                        Style::default()
+                            .fg(Color::Rgb(250, 179, 135))
+                            .bg(Color::Rgb(30, 30, 46))
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Rgb(205, 214, 244)).bg(Color::Rgb(30, 30, 46))
+                    },
+                ));
+            }
+            if col + 1 < cols {
+                spans.push(Span::raw(" "));
+            }
+            has_content = true;
+        }
+        if has_content {
+            lines.push(Line::from(spans));
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from("no child bindings"));
+    }
+
+    lines.truncate(inner.height as usize);
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(Color::Rgb(30, 30, 46))),
+        inner,
+    );
+}
+
+fn key_hint_title(label: &str) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        String::from(" keys "),
+        Style::default()
+            .fg(Color::Rgb(166, 173, 200))
+            .bg(Color::Rgb(30, 30, 46))
+            .add_modifier(Modifier::DIM),
+    )];
+
+    let parts = label.split_whitespace().collect::<Vec<_>>();
+    for (index, part) in parts.iter().enumerate() {
+        let is_last = index + 1 == parts.len();
+        spans.push(Span::styled(
+            format!(" {} ", part),
+            if is_last {
+                Style::default().fg(Color::Rgb(205, 214, 244)).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(Color::Rgb(148, 156, 187))
+                    .add_modifier(Modifier::DIM)
+                    .add_modifier(Modifier::BOLD)
+            },
+        ));
+        spans.push(Span::raw(" "));
+    }
+
+    Line::from(spans)
+}
+
+fn pad_or_trim(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let ch_width = UnicodeWidthStr::width(ch.encode_utf8(&mut [0; 4]));
+        if used + ch_width > width {
+            break;
+        }
+        used += ch_width;
+        out.push(ch);
+    }
+    if used < width {
+        out.push_str(&" ".repeat(width - used));
+    }
+    out
 }
 
 fn cursor_position_for(

@@ -2211,6 +2211,7 @@ impl App {
         let active_path = self.backend.active().path.clone();
         self.config = crate::config::load_config(active_path.as_deref());
         self.key_bindings = crate::keymap::bindings_for(&self.config.keymap);
+        self.key_sequences = crate::keymap::sequence_bindings_for(&self.config.keymap);
         self.backend
             .reload_editor_config()
             .map_err(|err| format!("config reload failed: {err}"))?;
