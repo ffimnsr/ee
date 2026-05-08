@@ -1094,10 +1094,61 @@ mod tests {
     use crate::delta::{Builder, Delta, DeltaElement};
     use crate::multiset::Subset;
     use crate::interval::Interval;
+    use proptest::prelude::*;
+    use proptest::string::string_regex;
     use std::collections::BTreeSet;
     use crate::test_helpers::{parse_subset_list, parse_subset, parse_delta, debug_subsets};
 
     const TEST_STR: &str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+    fn normalized_interval(base_len: usize, raw_start: usize, raw_end: usize) -> Interval {
+        let start = if base_len == 0 { 0 } else { raw_start % (base_len + 1) };
+        let end = start + (raw_end % (base_len + 1 - start));
+        Interval::new(start, end)
+    }
+
+    fn build_simple_delta(base_len: usize, raw_start: usize, raw_end: usize, insert: &str) -> Delta<RopeInfo> {
+        Delta::simple_edit(
+            normalized_interval(base_len, raw_start, raw_end),
+            Rope::from(insert),
+            base_len,
+        )
+    }
+
+    fn seeded_engine(session: u64, initial: &str) -> Engine {
+        let mut engine = Engine::empty();
+        engine.set_session_id((session, 0));
+        engine.merge(&Engine::new(Rope::from(initial)));
+        engine
+    }
+
+    fn merge_one(peers: &mut [Engine], target: usize, source: usize) {
+        let (start, end) = peers.split_at_mut(target);
+        let (dst, rest) = end.split_first_mut().unwrap();
+        let src = if source < target { &mut start[source] } else { &mut rest[source - target - 1] };
+        dst.merge(src);
+    }
+
+    fn synchronize(peers: &mut [Engine]) {
+        let count = peers.len();
+        for _ in 0..count {
+            for target in 0..count {
+                for source in 0..count {
+                    if target != source {
+                        merge_one(peers, target, source);
+                    }
+                }
+            }
+        }
+    }
+
+    fn assert_converged(peers: &[Engine]) -> String {
+        let expected = String::from(peers[0].get_head());
+        for (index, peer) in peers.iter().enumerate().skip(1) {
+            assert_eq!(expected, String::from(peer.get_head()), "peer {} diverged", index);
+        }
+        expected
+    }
 
     fn build_delta_1() -> Delta<RopeInfo> {
         let mut d_builder = Builder::new(TEST_STR.len());
@@ -2088,5 +2139,113 @@ mod tests {
             Assert(0, "adfc".to_owned()),
         ];
         MergeTestState::new(3).run_script(&script[..]);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(48))]
+
+        #[test]
+        fn prop_two_peer_merge_commutes_and_is_idempotent(
+            base in string_regex("[a-z0-9]{0,24}").unwrap(),
+            left_insert in string_regex("[a-z0-9]{0,10}").unwrap(),
+            right_insert in string_regex("[a-z0-9]{0,10}").unwrap(),
+            left_start in any::<usize>(),
+            left_end in any::<usize>(),
+            right_start in any::<usize>(),
+            right_end in any::<usize>(),
+            left_priority in 0usize..8,
+            right_priority in 0usize..8,
+        ) {
+            let base_len = base.len();
+
+            let mut left_first = seeded_engine(11, &base);
+            let mut right_first = seeded_engine(29, &base);
+
+            let common_base = left_first.get_head_rev_id().token();
+            let left_delta = build_simple_delta(base_len, left_start, left_end, &left_insert);
+            let right_delta = build_simple_delta(base_len, right_start, right_end, &right_insert);
+            left_first.edit_rev(left_priority, 1, common_base, left_delta.clone());
+            right_first.edit_rev(right_priority, 2, common_base, right_delta.clone());
+
+            let mut left_second = seeded_engine(11, &base);
+            let mut right_second = seeded_engine(29, &base);
+
+            let common_base_2 = left_second.get_head_rev_id().token();
+            left_second.edit_rev(left_priority, 1, common_base_2, left_delta);
+            right_second.edit_rev(right_priority, 2, common_base_2, right_delta);
+
+            let mut order_a = vec![left_first, right_first];
+            merge_one(&mut order_a, 0, 1);
+            merge_one(&mut order_a, 1, 0);
+            synchronize(&mut order_a);
+
+            let mut order_b = vec![left_second, right_second];
+            merge_one(&mut order_b, 1, 0);
+            merge_one(&mut order_b, 0, 1);
+            synchronize(&mut order_b);
+
+            let head_a = assert_converged(&order_a);
+            let head_b = assert_converged(&order_b);
+            prop_assert_eq!(head_a, head_b.clone());
+
+            synchronize(&mut order_a);
+            let after_repeat = assert_converged(&order_a);
+            prop_assert_eq!(head_b, after_repeat);
+        }
+
+        #[test]
+        fn prop_three_peer_merge_is_associative_and_convergent(
+            base in string_regex("[a-z0-9]{0,24}").unwrap(),
+            insert_a in string_regex("[a-z0-9]{0,8}").unwrap(),
+            insert_b in string_regex("[a-z0-9]{0,8}").unwrap(),
+            insert_c in string_regex("[a-z0-9]{0,8}").unwrap(),
+            start_a in any::<usize>(),
+            end_a in any::<usize>(),
+            start_b in any::<usize>(),
+            end_b in any::<usize>(),
+            start_c in any::<usize>(),
+            end_c in any::<usize>(),
+            priority_a in 0usize..8,
+            priority_b in 0usize..8,
+            priority_c in 0usize..8,
+        ) {
+            let base_len = base.len();
+            let deltas = [
+                build_simple_delta(base_len, start_a, end_a, &insert_a),
+                build_simple_delta(base_len, start_b, end_b, &insert_b),
+                build_simple_delta(base_len, start_c, end_c, &insert_c),
+            ];
+            let priorities = [priority_a, priority_b, priority_c];
+            let sessions = [11u64, 29, 47, 111, 129, 147];
+
+            let mut peers: Vec<Engine> = sessions
+                .iter()
+                .map(|session| seeded_engine(*session, &base))
+                .collect();
+
+            for group_start in [0usize, 3] {
+                let group_base = peers[group_start].get_head_rev_id().token();
+                for offset in 0..3 {
+                    peers[group_start + offset].edit_rev(
+                        priorities[offset],
+                        offset + 1,
+                        group_base,
+                        deltas[offset].clone(),
+                    );
+                }
+            }
+
+            merge_one(&mut peers, 0, 1);
+            merge_one(&mut peers, 0, 2);
+            synchronize(&mut peers[0..3]);
+
+            merge_one(&mut peers, 4, 5);
+            merge_one(&mut peers, 3, 4);
+            synchronize(&mut peers[3..6]);
+
+            let head_left = assert_converged(&peers[0..3]);
+            let head_right = assert_converged(&peers[3..6]);
+            prop_assert_eq!(head_left, head_right);
+        }
     }
 }
