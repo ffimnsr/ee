@@ -43,4 +43,5 @@
 pub mod overlay;
 pub mod page_index;
 pub mod pager;
+pub mod search;
 pub mod store;

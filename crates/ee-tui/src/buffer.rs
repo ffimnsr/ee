@@ -18,7 +18,7 @@ use xi_rpc::RpcLoop;
 
 use crate::backend::{
     BackendEvent, CachedLine, ChannelReader, ChannelWriter, CoreAnnotation, CoreUpdate,
-    CoreUpdateKind, LineSlot, NavigationTarget, PendingRequests, PendingUiAction,
+    CoreUpdateKind, LineSlot, NavigationTarget, PendingRequests, PendingUiAction, VlfSearchRange,
     block_for_response, checked_advance, drain_sync_notifications, invalid_line_ranges,
     normalize_line_text, parse_response, recv_with_timeout, send_rpc_notification,
     send_rpc_request, startup_render_ready, xi_reader_thread,
@@ -81,6 +81,12 @@ pub(crate) struct BufState {
     /// Used to pre-size the line cache while the background index is still
     /// scanning the file.
     pub(crate) vlf_approx_line_count: u64,
+    /// True when `vlf_approx_line_count` is backend-confirmed exact.
+    pub(crate) vlf_line_count_exact: bool,
+    /// True when the next matching VLF response should move cursor to returned tail.
+    pub(crate) pending_vlf_tail_jump: bool,
+    /// Backend-authoritative visible VLF match ranges for current search.
+    pub(crate) vlf_search_ranges: Vec<VlfSearchRange>,
 }
 
 impl BufState {
@@ -236,7 +242,12 @@ impl BufState {
     ///
     /// In VLF mode `lines` is empty; use `line_cache.len()` instead.
     pub(crate) fn line_count(&self) -> usize {
-        if self.is_vlf { self.line_cache.len() } else { self.lines.len() }
+        if self.is_vlf {
+            let reported = usize::try_from(self.vlf_approx_line_count).unwrap_or(usize::MAX);
+            reported.max(self.line_cache.len())
+        } else {
+            self.lines.len()
+        }
     }
 
     /// Return the text of a line by logical index, or `None` if the slot is not loaded.
@@ -265,7 +276,7 @@ impl BufState {
         line_start: u64,
         lines: &[String],
         approximate_line_count: u64,
-        _line_count_exact: bool,
+        line_count_exact: bool,
         _index_progress: f64,
     ) {
         if generation != self.vlf_generation {
@@ -273,11 +284,21 @@ impl BufState {
         }
 
         self.vlf_approx_line_count = approximate_line_count;
+        self.vlf_line_count_exact = line_count_exact;
+        let tail_jump = std::mem::take(&mut self.pending_vlf_tail_jump);
 
         // Grow the line cache to fit the approximate document size.
-        let target_len = (approximate_line_count as usize).max(self.line_cache.len());
+        let target_len = (approximate_line_count as usize)
+            .max(line_start as usize + lines.len())
+            .max(self.line_cache.len());
         if target_len > self.line_cache.len() {
             self.line_cache.resize(target_len, LineSlot::Invalid);
+        }
+        if line_count_exact {
+            let exact_len = usize::try_from(approximate_line_count).unwrap_or(usize::MAX);
+            if self.line_cache.len() > exact_len {
+                self.line_cache.truncate(exact_len);
+            }
         }
 
         // Write the received lines into the cache.
@@ -291,6 +312,10 @@ impl BufState {
                     syntax_spans: Vec::new(),
                 });
             }
+        }
+        if tail_jump && !lines.is_empty() {
+            self.cursor_line = start + lines.len() - 1;
+            self.cursor_col = 0;
         }
     }
 }
@@ -309,10 +334,19 @@ impl PartialEq for BufState {
             && self.status_message == other.status_message
             && self.externally_modified == other.externally_modified
             && self.annotations == other.annotations
+            && self.vlf_search_ranges == other.vlf_search_ranges
     }
 }
 
 impl Eq for BufState {}
+
+fn vlf_viewport_ready(buf: &BufState, first_line: usize, last_line: usize) -> bool {
+    if first_line >= last_line {
+        return true;
+    }
+
+    (first_line..last_line).all(|idx| matches!(buf.line_cache.get(idx), Some(LineSlot::Known(_))))
+}
 
 // ── BufferManager ─────────────────────────────────────────────────────────────
 
@@ -480,6 +514,9 @@ impl BufferManager {
             is_vlf: false,
             vlf_generation: 0,
             vlf_approx_line_count: 0,
+            vlf_line_count_exact: false,
+            pending_vlf_tail_jump: false,
+            vlf_search_ranges: Vec::new(),
         };
 
         let mut view_to_idx = HashMap::new();
@@ -1015,19 +1052,28 @@ impl BufferManager {
     pub(crate) fn notify_scroll(&mut self, first_line: usize, last_line: usize) -> io::Result<()> {
         let range = (first_line, last_line);
         let buf = &mut self.bufs[self.current];
-        if buf.last_scroll == Some(range) || buf.view_id.is_empty() {
+        if buf.view_id.is_empty() {
             return Ok(());
         }
-        buf.last_scroll = Some(range);
         let view_id = buf.view_id.clone();
 
         if buf.is_vlf {
+            if buf.pending_vlf_tail_jump {
+                return Ok(());
+            }
+            if buf.last_scroll == Some(range)
+                && (buf.pending_line_request || vlf_viewport_ready(buf, first_line, last_line))
+            {
+                return Ok(());
+            }
+            buf.last_scroll = Some(range);
             // VLF mode: use the dedicated viewport protocol so the backend
             // only decodes the visible line range from disk.  Increment the
             // generation counter so any in-flight response from the previous
             // scroll position is discarded when it arrives.
             let generation = buf.vlf_generation.wrapping_add(1);
             buf.vlf_generation = generation;
+            buf.pending_line_request = true;
             send_xi_notification(
                 &self.tx,
                 "edit",
@@ -1042,6 +1088,10 @@ impl BufferManager {
                 }),
             )
         } else {
+            if buf.last_scroll == Some(range) {
+                return Ok(());
+            }
+            buf.last_scroll = Some(range);
             send_xi_notification(
                 &self.tx,
                 "edit",
@@ -1052,6 +1102,32 @@ impl BufferManager {
                 }),
             )
         }
+    }
+
+    pub(crate) fn request_vlf_tail_viewport(&mut self, line_count: usize) -> io::Result<()> {
+        let buf = &mut self.bufs[self.current];
+        if !buf.is_vlf || buf.view_id.is_empty() {
+            return Ok(());
+        }
+
+        let generation = buf.vlf_generation.wrapping_add(1);
+        buf.vlf_generation = generation;
+        buf.pending_line_request = true;
+        buf.pending_vlf_tail_jump = true;
+        buf.last_scroll = None;
+        send_xi_notification(
+            &self.tx,
+            "edit",
+            json!({
+                "view_id": buf.view_id,
+                "method": "vlf_viewport",
+                "params": {
+                    "line_start": u64::MAX,
+                    "line_end": line_count.saturating_sub(1) as u64,
+                    "generation": generation,
+                },
+            }),
+        )
     }
 
     pub(crate) fn drain_events(&mut self) -> io::Result<()> {
@@ -1109,6 +1185,10 @@ impl BufferManager {
                     BackendEvent::Update { update, .. } => {
                         let update_started = Instant::now();
                         let buf = &mut self.bufs[idx];
+                        if buf.is_vlf {
+                            buf.pending_line_request = false;
+                            return Ok(());
+                        }
                         buf.pending_line_request = false;
                         let stats = buf.apply_update(update)?;
                         if self.startup_profile_active {
@@ -1182,8 +1262,18 @@ impl BufferManager {
             BackendEvent::DocumentMode { view_id, is_vlf } => {
                 let idx = self.view_to_idx.get(&view_id).copied().unwrap_or(current);
                 self.bufs[idx].is_vlf = is_vlf;
-                // Rebuild lines now that mode is set (no-op in VLF mode).
-                self.bufs[idx].rebuild_lines();
+                if is_vlf {
+                    self.bufs[idx].lines.clear();
+                    self.bufs[idx].line_cache.clear();
+                    self.bufs[idx].pending_line_request = false;
+                    self.bufs[idx].last_scroll = None;
+                    self.bufs[idx].vlf_approx_line_count = 0;
+                    self.bufs[idx].vlf_line_count_exact = false;
+                    self.bufs[idx].pending_vlf_tail_jump = false;
+                } else {
+                    // Rebuild lines now that mode is set.
+                    self.bufs[idx].rebuild_lines();
+                }
             }
             BackendEvent::VlfChunks {
                 view_id,
@@ -1195,14 +1285,55 @@ impl BufferManager {
                 index_progress,
             } => {
                 let idx = self.view_to_idx.get(&view_id).copied().unwrap_or(current);
-                self.bufs[idx].apply_vlf_chunks(
-                    generation,
-                    line_start,
-                    &lines,
-                    approximate_line_count,
-                    line_count_exact,
-                    index_progress,
-                );
+                if generation == self.bufs[idx].vlf_generation {
+                    self.bufs[idx].pending_line_request = false;
+                    self.bufs[idx].apply_vlf_chunks(
+                        generation,
+                        line_start,
+                        &lines,
+                        approximate_line_count,
+                        line_count_exact,
+                        index_progress,
+                    );
+                }
+            }
+            BackendEvent::VlfSearchStatus {
+                view_id,
+                query,
+                scanned_bytes,
+                total_bytes,
+                complete,
+                stored_match_count,
+                ranges,
+            } => {
+                let idx = self.view_to_idx.get(&view_id).copied().unwrap_or(current);
+                self.bufs[idx].vlf_search_ranges = ranges.clone();
+                let preview = ranges
+                    .iter()
+                    .take(3)
+                    .map(|range| {
+                        format!("L{}:{}-{}", range.line + 1, range.start_col + 1, range.end_col + 1)
+                    })
+                    .collect::<Vec<_>>();
+                let progress = format!("{}/{} B", scanned_bytes, total_bytes);
+                self.bufs[idx].status_message = Some(if preview.is_empty() {
+                    format!(
+                        "search {:?}: {} matches, {}{}",
+                        query,
+                        stored_match_count,
+                        progress,
+                        if complete { " complete" } else { " scanning" }
+                    )
+                } else {
+                    format!(
+                        "search {:?}: {} matches, {}, {}{}",
+                        query,
+                        stored_match_count,
+                        progress,
+                        preview.join(", "),
+                        if complete { " complete" } else { " scanning" }
+                    )
+                });
             }
         }
         Ok(())
@@ -1210,7 +1341,7 @@ impl BufferManager {
 
     fn request_invalid_lines(&mut self, idx: usize) -> io::Result<()> {
         let Some(buf) = self.bufs.get_mut(idx) else { return Ok(()) };
-        if buf.pending_line_request || buf.view_id.is_empty() {
+        if buf.is_vlf || buf.pending_line_request || buf.view_id.is_empty() {
             return Ok(());
         }
 
@@ -1236,9 +1367,10 @@ impl BufferManager {
     }
 
     fn has_pending_line_work(&self) -> bool {
-        self.bufs
-            .iter()
-            .any(|buf| buf.pending_line_request || !invalid_line_ranges(&buf.line_cache).is_empty())
+        self.bufs.iter().any(|buf| {
+            !buf.is_vlf
+                && (buf.pending_line_request || !invalid_line_ranges(&buf.line_cache).is_empty())
+        })
     }
 
     fn request_all_invalid_lines(&mut self) -> io::Result<()> {
@@ -1309,6 +1441,9 @@ impl BufferManager {
             is_vlf: false,
             vlf_generation: 0,
             vlf_approx_line_count: 0,
+            vlf_line_count_exact: false,
+            pending_vlf_tail_jump: false,
+            vlf_search_ranges: Vec::new(),
         });
         Ok(buf_id)
     }
@@ -1561,6 +1696,9 @@ impl BufferManager {
             is_vlf: false,
             vlf_generation: 0,
             vlf_approx_line_count: 0,
+            vlf_line_count_exact: false,
+            pending_vlf_tail_jump: false,
+            vlf_search_ranges: Vec::new(),
         };
         let mut view_to_idx = HashMap::new();
         view_to_idx.insert(view_id, 0);
@@ -1677,6 +1815,12 @@ impl BufferManager {
         buf.pristine = true;
         buf.pending_line_request = false;
         buf.last_scroll = None;
+        buf.is_vlf = false;
+        buf.vlf_generation = 0;
+        buf.vlf_approx_line_count = 0;
+        buf.vlf_line_count_exact = false;
+        buf.pending_vlf_tail_jump = false;
+        buf.vlf_search_ranges.clear();
         buf.status_message = Some("reloaded".to_owned());
         buf.mtime = mtime;
         buf.externally_modified = false;

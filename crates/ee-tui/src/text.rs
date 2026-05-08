@@ -1,4 +1,4 @@
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthChar;
 
 #[cfg(test)]
 fn is_word_char(ch: char) -> bool {
@@ -30,23 +30,29 @@ pub(crate) fn previous_char_boundary(line: &str, col: usize) -> usize {
 
 pub(crate) fn byte_col_to_display_col(line: &str, byte_col: usize) -> usize {
     let safe = previous_char_boundary(line, byte_col.min(line.len()));
-    if line.is_ascii() {
-        return safe;
+    let mut col = 0usize;
+    for ch in line[..safe].chars() {
+        if ch == '\t' {
+            let tab_width = 4 - (col % 4);
+            col += tab_width;
+        } else {
+            col += UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
     }
-    UnicodeWidthStr::width(&line[..safe])
+    col
 }
 
 pub(crate) fn display_col_to_byte(line: &str, display_col: usize) -> usize {
-    if line.is_ascii() {
-        return display_col.min(line.len());
-    }
-
     let mut col = 0usize;
     for (byte_idx, ch) in line.char_indices() {
         if col >= display_col {
             return byte_idx;
         }
-        col += UnicodeWidthChar::width(ch).unwrap_or(0);
+        if ch == '\t' {
+            col += 4 - (col % 4);
+        } else {
+            col += UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
     }
     line.len()
 }

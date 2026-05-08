@@ -8,6 +8,24 @@
 
 ### Large File Support: VLF Mode (Very Large Files)
 
+- [ ] Apply Helix deep-research takeaways where they improve ee's VLF design.
+  - [ ] Keep `TextStore` as the stable document API; normal and constrained buffers may use full `Rope`, but VLF must stay paged/out-of-core and never degrade to Helix-style full in-memory storage.
+  - [ ] Preserve viewport-local rendering as a hard invariant: render, syntax decoration, search highlights, diagnostics, git signs, and scroll notifications must operate on visible ranges plus bounded overscan.
+  - [ ] Use chunk-native I/O everywhere possible: read from `TextStore::iter_chunks` / `read_byte_range`, save from rope chunks or VLF pieces, and avoid flattening into `String` / `Vec<String>` except where mode policy explicitly allows it.
+  - [ ] Make normal/constrained save follow Helix's snapshot model: clone cheap `Rope` snapshot, then write outside the interactive render/input hot path.
+  - [ ] Re-enable VLF syntax only as visible-range incremental parsing with hard timeout and match/capture limits; never parse whole VLF files for highlighting or text objects.
+  - [ ] Keep edit history as structured deltas above storage: normal mode uses existing rope/CRDT engine; VLF editing maps overlay deltas to the same revision/undo grouping without full-buffer snapshots.
+  - [ ] Coalesce redraw/background notifications like Helix's event-loop model so LSP, syntax, search, source-control, and VLF indexing cannot force one expensive frame per message.
+  - [ ] Treat Helix's lack of explicit large-file mode as a caution: keep ee thresholds, feature gates, user-visible downgrade reasons, and hard VLF guardrails.
+
+- [ ] Improve large-buffer quit latency.
+  - [ ] Exit event loop immediately after `handle_event` sets `should_quit`, before another expensive frame, scroll notification, source-control refresh, or external-change scan.
+  - [ ] Add explicit fast app-shutdown path for `BufferManager` that stops reader/core threads without best-effort `close_view` cleanup work.
+  - [ ] Keep interactive buffer-close commands (`:bc`, window close, tab close) on normal close semantics; use fast shutdown only for whole-app exit.
+  - [ ] Avoid full-buffer close/render/plugin cleanup for large `ConstrainedNormal` buffers during app exit.
+  - [ ] Re-evaluate exact-threshold behavior for 20 MiB fixtures: either make exact 20 MiB enter VLF, or keep constrained-normal and ensure teardown stays non-blocking.
+  - [ ] Add regression coverage proving `:q` on pristine large buffers does not save, does not close-buffer synchronously, and exits within quit budget.
+
 - [ ] Add hybrid paged-rope architecture seam.
   - [x] Add `TextStore` trait as stable document API for normal, constrained, and VLF modes.
     - [x] Place trait and shared position/result types in `crates/xi-core-lib/src/text_store.rs`.
@@ -182,13 +200,13 @@
   - [x] Disable blame and source-control signs unless command is explicitly range-bounded.
   - [x] Ensure VLF open cannot trigger global diff scans.
   - [x] Show disabled reason in command/status UI.
-- [ ] Add VLF search strategy.
-  - [ ] Stream search over pages with cancellation.
-  - [ ] Search with seam overlap/slop so matches across chunk boundaries are not missed.
-  - [ ] Report progress by bytes scanned and matched ranges.
-  - [ ] Bound stored matches and page-local highlights.
-  - [ ] Prioritize viewport-local highlights before full-file search completes.
-  - [ ] Add search cancellation test for large fixture.
+- [x] Add VLF search strategy.
+  - [x] Stream search over pages with cancellation.
+  - [x] Search with seam overlap/slop so matches across chunk boundaries are not missed.
+  - [x] Report progress by bytes scanned and matched ranges.
+  - [x] Bound stored matches and page-local highlights.
+  - [x] Prioritize viewport-local highlights before full-file search completes.
+  - [x] Add search cancellation test for large fixture.
 - [ ] Design VLF editing path after read-only milestone.
   - [ ] Graduate existing overlay model from read-only to append/current-window edits, then arbitrary sparse edits.
   - [ ] Track encoded byte-length deltas per dirty window before save.
@@ -196,6 +214,7 @@
   - [ ] Define undo limits and memory cap behavior for overlay edits.
   - [ ] Require explicit save-as/rewrite semantics for large rewritten files.
 - [ ] Rework VLF save path.
+  - [ ] Share one streaming save abstraction for normal/constrained rope snapshots and VLF overlay pieces where practical.
   - [ ] Start with temp-file streaming rewrite for editable VLF; no in-place mutation in first editable milestone.
   - [ ] Stream copy base file with edit overlay application.
   - [ ] Add same-size in-place overwrite only as later optimization after crash-consistency tests pass.
@@ -379,7 +398,7 @@ different name alias this. Description for the command can be found here: https:
 - [x] extend_line_above / select_line_below
 - [x] goto_file_end / extend_to_file_start / extend_to_file_end
 - [x] goto_declaration
-
+- [ ] create_directory - creates directory on current workspace, can create parent directory under workspace if missing
 
 ### Already Implemented But Missing From Tracker
 

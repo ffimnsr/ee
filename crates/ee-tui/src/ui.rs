@@ -2,10 +2,11 @@ use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use unicode_width::UnicodeWidthStr;
 use xi_core_lib::plugin_rpc::DiagnosticSeverity;
 
 use crate::app::{App, Mode, Viewport, smart_case_sensitive};
-use crate::backend::{CoreAnnotation, LineSlot};
+use crate::backend::{CoreAnnotation, LineSlot, VlfSearchRange};
 use crate::buffer::BufState;
 use crate::config::{NumberStyle, StatuslineFormat};
 use crate::picker::PickerKind;
@@ -291,6 +292,43 @@ fn apply_color_column(spans: Vec<Span<'static>>, screen_col: usize) -> Vec<Span<
     out
 }
 
+fn pad_spans_to_width(
+    mut spans: Vec<Span<'static>>,
+    width: usize,
+    style: Style,
+) -> Vec<Span<'static>> {
+    let used =
+        spans.iter().map(|span| UnicodeWidthStr::width(span.content.as_ref())).sum::<usize>();
+    if used < width {
+        spans.push(Span::styled(" ".repeat(width - used), style));
+    }
+    spans
+}
+
+fn expand_tabs_in_spans(spans: Vec<Span<'static>>, tab_width: usize) -> Vec<Span<'static>> {
+    let tab_width = tab_width.max(1);
+    let mut out = Vec::with_capacity(spans.len());
+    let mut col = 0usize;
+    for span in spans {
+        let style = span.style;
+        let mut text = String::new();
+        for ch in span.content.chars() {
+            if ch == '\t' {
+                let width = tab_width - (col % tab_width);
+                text.push_str(&" ".repeat(width));
+                col += width;
+            } else {
+                text.push(ch);
+                col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            }
+        }
+        if !text.is_empty() {
+            out.push(Span::styled(text, style));
+        }
+    }
+    out
+}
+
 /// Overlay visual-mode selection highlight on a rendered span list.
 ///
 /// `col_start`/`col_end` are display-column bounds (inclusive); pass `None`
@@ -545,6 +583,10 @@ fn payload_marker_for_value(value: &serde_json::Value) -> Option<char> {
 fn annotation_marker_for_line(buf: &BufState, line_index: usize) -> Option<(char, Color)> {
     let mut best: Option<(u8, char, Color)> = None;
 
+    if buf.is_vlf && buf.vlf_search_ranges.iter().any(|range| range.line as usize == line_index) {
+        best = Some((annotation_priority("find"), '•', annotation_marker_color("find")));
+    }
+
     for annotation in &buf.annotations {
         if matches!(annotation.annotation_type.as_str(), "selection" | "find") {
             continue;
@@ -707,6 +749,19 @@ fn apply_core_annotations(
             left,
             segment.visual,
         );
+    }
+    spans
+}
+
+fn apply_vlf_search_ranges(
+    mut spans: Vec<Span<'static>>,
+    log_idx: usize,
+    ranges: &[VlfSearchRange],
+    left: usize,
+) -> Vec<Span<'static>> {
+    let visual = annotation_visual("find");
+    for range in ranges.iter().filter(|range| range.line as usize == log_idx) {
+        spans = apply_annotation_overlay(spans, range.start_col, range.end_col, left, visual);
     }
     spans
 }
@@ -1032,11 +1087,16 @@ fn render_buffer(
 
             if !is_fold_header {
                 spans = apply_core_annotations(spans, line, log_idx, &buf.annotations, left);
+                if buf.is_vlf {
+                    spans = apply_vlf_search_ranges(spans, log_idx, &buf.vlf_search_ranges, left);
+                }
             }
+
+            spans = expand_tabs_in_spans(spans, app.config.tab_width);
 
             // Apply search match highlighting over the rendered spans.
             if let Some(ref pat) = app.search_pattern {
-                if !is_fold_header {
+                if !is_fold_header && !buf.is_vlf {
                     spans = apply_search_highlights(spans, line, pat, byte_start, byte_end, bg);
                 }
             }
@@ -1077,6 +1137,8 @@ fn render_buffer(
                     spans = apply_visual_highlight(spans, col_start, col_end, left);
                 }
             }
+
+            spans = pad_spans_to_width(spans, viewport_width, Style::default().bg(bg));
 
             let mut l = Line::from(spans);
             if is_cursor && app.config.cursor_line {
@@ -1121,18 +1183,32 @@ fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             Style::default().fg(Color::Rgb(250, 179, 135)).bg(Color::Rgb(49, 54, 68)),
         )
     };
+    let vlf_gap = if app.backend.active().is_vlf {
+        Span::styled(" ", Style::default().bg(Color::Rgb(49, 54, 68)))
+    } else {
+        Span::raw("")
+    };
+    let vlf = if app.backend.active().is_vlf {
+        Span::styled(
+            " VLF ",
+            Style::default().fg(Color::Rgb(22, 24, 31)).bg(Color::Rgb(250, 179, 135)),
+        )
+    } else {
+        Span::raw("")
+    };
+    let position_text =
+        format!("  Ln {}, Col {} ", app.backend.cursor_line + 1, app.backend.cursor_col + 1);
     let position = Span::styled(
-        format!("  Ln {}, Col {} ", app.backend.cursor_line + 1, app.backend.cursor_col + 1),
+        position_text.as_str(),
         Style::default().fg(Color::Rgb(186, 194, 222)).bg(Color::Rgb(49, 54, 68)),
     );
 
-    let spans = match app.config.statusline_format {
+    let mut spans = match app.config.statusline_format {
         StatuslineFormat::Minimal => {
-            let mut spans = vec![mode, file, modified];
+            let mut spans = vec![mode, file, modified, vlf_gap, vlf];
             if let Some(git_span) = git_status_span(app) {
                 spans.push(git_span);
             }
-            spans.push(position);
             spans
         }
         StatuslineFormat::Default => {
@@ -1164,16 +1240,26 @@ fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
                     Style::default().fg(Color::Rgb(100, 120, 150)).bg(Color::Rgb(49, 54, 68)),
                 )
             };
-            let mut spans = vec![mode, file, modified];
+            let mut spans = vec![mode, file, modified, vlf_gap, vlf];
             if let Some(git_span) = git_status_span(app) {
                 spans.push(git_span);
             }
             spans.push(buf_indicator);
             spans.push(flag_span);
-            spans.push(position);
             spans
         }
     };
+    let left_width =
+        spans.iter().map(|span| UnicodeWidthStr::width(span.content.as_ref())).sum::<usize>();
+    let position_width = UnicodeWidthStr::width(position_text.as_str());
+    let status_width = area.width as usize;
+    if left_width + position_width < status_width {
+        spans.push(Span::styled(
+            " ".repeat(status_width - left_width - position_width),
+            Style::default().bg(Color::Rgb(49, 54, 68)),
+        ));
+    }
+    spans.push(position);
 
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(49, 54, 68))),
@@ -1271,7 +1357,7 @@ fn cursor_position_for(
     let max_x = editor_area.right().saturating_sub(1);
     let max_y = editor_area.bottom().saturating_sub(1);
 
-    let line = buf.lines.get(buf.cursor_line).map(|s| s.as_str()).unwrap_or("");
+    let line = buf.get_line(buf.cursor_line).unwrap_or("");
     let display_col = byte_col_to_display_col(line, buf.cursor_col);
 
     let screen_line = buf.cursor_line.saturating_sub(vp.top_line);
@@ -1487,6 +1573,8 @@ fn diagnostic_rank(severity: &DiagnosticSeverity) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn apply_annotation_overlay_styles_target_range() {
@@ -1596,8 +1684,81 @@ mod tests {
             is_vlf: false,
             vlf_generation: 0,
             vlf_approx_line_count: 0,
+            vlf_line_count_exact: false,
+            pending_vlf_tail_jump: false,
+            vlf_search_ranges: Vec::new(),
         };
 
         assert_eq!(annotation_marker_for_line(&buf, 0), Some(('T', Color::Rgb(166, 227, 161))));
+    }
+
+    #[test]
+    fn vlf_search_ranges_render_with_find_highlight() {
+        let mut app = App::from_path(None).unwrap();
+        app.backend.is_vlf = true;
+        app.backend.line_cache = vec![LineSlot::Known(crate::backend::CachedLine {
+            text: String::from("alpha needle omega"),
+            cursors: vec![],
+            syntax_spans: vec![],
+        })];
+        app.backend.vlf_search_ranges = vec![VlfSearchRange { line: 0, start_col: 6, end_col: 12 }];
+
+        let width: u16 = 40;
+        let height: u16 = 8;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| ui(frame, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+
+        let find_bg = ratatui::style::Color::Rgb(250, 179, 135);
+        let gutter_width: u16 = 5;
+        let highlighted =
+            (gutter_width + 6..gutter_width + 12).any(|x| buf.cell((x, 0)).unwrap().bg == find_bg);
+
+        assert!(highlighted, "VLF search range should render using find highlight");
+        assert_eq!(buf.cell((1, 0)).unwrap().symbol(), "•");
+    }
+
+    #[test]
+    fn vlf_cursor_position_uses_line_cache_text() {
+        let mut app = App::from_path(None).unwrap();
+        app.backend.is_vlf = true;
+        app.backend.cursor_line = 0;
+        app.backend.cursor_col = 3;
+        app.backend.line_cache = vec![LineSlot::Known(crate::backend::CachedLine {
+            text: String::from("abcdef"),
+            cursors: vec![],
+            syntax_spans: vec![],
+        })];
+
+        let pos = cursor_position_for(
+            app.backend.active(),
+            app.viewport,
+            &app,
+            Rect { x: 5, y: 2, width: 20, height: 4 },
+            Rect { x: 0, y: 7, width: 20, height: 1 },
+        );
+
+        assert_eq!(pos, Position::new(8, 2));
+    }
+
+    #[test]
+    fn rendered_spans_pad_to_viewport_width() {
+        let spans = vec![Span::styled("short", Style::default().fg(Color::Green))];
+        let padded = pad_spans_to_width(spans, 8, Style::default().bg(Color::Black));
+        let joined = padded.iter().map(|span| span.content.as_ref()).collect::<String>();
+
+        assert_eq!(joined, "short   ");
+        assert_eq!(padded.last().unwrap().style.bg, Some(Color::Black));
+    }
+
+    #[test]
+    fn rendered_spans_expand_tabs_to_spaces() {
+        let spans = vec![Span::styled("ab\tcd", Style::default().fg(Color::Green))];
+        let expanded = expand_tabs_in_spans(spans, 4);
+        let joined = expanded.iter().map(|span| span.content.as_ref()).collect::<String>();
+
+        assert_eq!(joined, "ab  cd");
+        assert_eq!(expanded[0].style.fg, Some(Color::Green));
     }
 }

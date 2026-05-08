@@ -125,7 +125,7 @@ pub struct OpenThresholds {
     /// or above `vlf_bytes` use `Vlf`.  This value should be set to a size
     /// that the editor can comfortably keep in RAM.
     ///
-    /// Default: 256 MiB.
+    /// Default: 20 MiB + 1 byte, so files greater than 20 MiB enter VLF.
     pub vlf_bytes: u64,
 
     /// Hard-open confirmation threshold for **local** files.
@@ -152,7 +152,7 @@ impl Default for OpenThresholds {
         OpenThresholds {
             normal_bytes: 20 * 1024 * 1024,
             normal_lines: 300_000,
-            vlf_bytes: 256 * 1024 * 1024,
+            vlf_bytes: (20 * 1024 * 1024) + 1,
             confirm_local_bytes: 1024 * 1024 * 1024,
             confirm_remote_bytes: 10 * 1024 * 1024,
             confirm_web_bytes: 50 * 1024 * 1024,
@@ -396,6 +396,20 @@ mod tests {
     }
 
     #[test]
+    fn file_just_above_normal_threshold_opens_vlf_by_default() {
+        let size = OpenThresholds::default().normal_bytes + 1;
+        let d = policy().decide(Some(size), None, None, FileLocation::Local, ModeOverride::Auto);
+        assert_eq!(d, OpenDecision::Open(DocumentMode::Vlf));
+    }
+
+    #[test]
+    fn exact_100_mib_file_opens_vlf_by_default() {
+        let size = 100 * 1024 * 1024u64;
+        let d = policy().decide(Some(size), None, None, FileLocation::Local, ModeOverride::Auto);
+        assert_eq!(d, OpenDecision::Open(DocumentMode::Vlf));
+    }
+
+    #[test]
     fn large_file_exceeding_available_memory_opens_vlf() {
         // 100 MiB file, only 100 MiB available → file >= avail/2.
         let size = 100 * 1024 * 1024u64;
@@ -407,8 +421,8 @@ mod tests {
 
     #[test]
     fn file_using_less_than_half_memory_is_constrained_not_vlf() {
-        // 30 MiB file, 512 MiB available → 30 < 256 → ConstrainedNormal.
-        let size = 30 * 1024 * 1024u64;
+        // Exact 20 MiB stays ConstrainedNormal; greater than 20 MiB enters VLF.
+        let size = OpenThresholds::default().normal_bytes;
         let avail = 512 * 1024 * 1024u64;
         let d =
             policy().decide(Some(size), None, Some(avail), FileLocation::Local, ModeOverride::Auto);
@@ -442,8 +456,8 @@ mod tests {
     fn web_file_just_below_50mb_does_not_require_confirmation() {
         let size = OpenThresholds::default().confirm_web_bytes - 1;
         let d = policy().decide(Some(size), None, None, FileLocation::Web, ModeOverride::Auto);
-        // Above normal (20 MiB) but below confirmation (50 MiB) → ConstrainedNormal.
-        assert_eq!(d, OpenDecision::Open(DocumentMode::ConstrainedNormal));
+        // Above normal (20 MiB) but below confirmation (50 MiB) opens VLF.
+        assert_eq!(d, OpenDecision::Open(DocumentMode::Vlf));
     }
 
     // --- Fail-closed ---
