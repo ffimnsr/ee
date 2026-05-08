@@ -30,10 +30,17 @@ pub(crate) fn previous_char_boundary(line: &str, col: usize) -> usize {
 
 pub(crate) fn byte_col_to_display_col(line: &str, byte_col: usize) -> usize {
     let safe = previous_char_boundary(line, byte_col.min(line.len()));
+    if line.is_ascii() {
+        return safe;
+    }
     UnicodeWidthStr::width(&line[..safe])
 }
 
 pub(crate) fn display_col_to_byte(line: &str, display_col: usize) -> usize {
+    if line.is_ascii() {
+        return display_col.min(line.len());
+    }
+
     let mut col = 0usize;
     for (byte_idx, ch) in line.char_indices() {
         if col >= display_col {

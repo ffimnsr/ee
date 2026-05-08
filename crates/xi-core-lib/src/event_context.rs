@@ -295,6 +295,10 @@ impl<'a> EventContext<'a> {
     }
 
     fn do_syntax_selection(&mut self, action: SyntaxSelectionAction) {
+        if self.alert_if_vlf_syntax_disabled(action.method_name()) {
+            return;
+        }
+
         let language = self.language.clone();
         let file_path = self.info.map(|info| info.path.clone());
         let result = self.with_view(|view, text| {
@@ -316,6 +320,10 @@ impl<'a> EventContext<'a> {
     }
 
     fn do_syntax_navigation(&mut self, action: SyntaxNavigationAction) {
+        if self.alert_if_vlf_syntax_disabled(action.method_name()) {
+            return;
+        }
+
         let language = self.language.clone();
         let file_path = self.info.map(|info| info.path.clone());
         let result = self.with_view(|view, text| {
@@ -333,6 +341,16 @@ impl<'a> EventContext<'a> {
         if let Err(err) = result {
             self.client.alert(format!("{}: {}", action.method_name(), err.message()));
         }
+    }
+
+    fn alert_if_vlf_syntax_disabled(&self, method_name: &str) -> bool {
+        if !self.editor.borrow().is_vlf() {
+            return false;
+        }
+
+        self.client
+            .alert(format!("{method_name}: disabled in VLF until visible-range parsing exists"));
+        true
     }
 
     fn do_goto_paragraph(&mut self, forward: bool) {
@@ -2291,6 +2309,7 @@ mod tests {
     use super::*;
     use crate::config::ConfigManager;
     use crate::core::dummy_weak_core;
+    use crate::object::SyntaxNavigationTarget;
     use crate::plugins::PluginPid;
     use crate::plugins::rpc::{
         CodeActionRequest, Diagnostic, DiagnosticSeverity, FormatDocumentRequest,
@@ -4167,5 +4186,50 @@ mod tests {
             !notifications.iter().any(|(m, _)| m == "vlf_chunks"),
             "vlf_chunks must not be sent for normal (non-VLF) buffers: {notifications:?}"
         );
+    }
+
+    #[test]
+    fn vlf_syntax_selection_alerts_until_visible_range_parsing_exists() {
+        let (harness, _f) = vlf_harness(b"fn alpha() {}\nfn beta() {}\n");
+        harness.take_notifications();
+        let before = harness.debug_render();
+        let mut ctx = harness.make_context();
+
+        ctx.do_syntax_selection(SyntaxSelectionAction::SelectNextSibling);
+
+        let notifications = harness.take_notifications();
+        let (_, params) = notifications
+            .iter()
+            .find(|(method, _)| method == "alert")
+            .expect("expected alert notification");
+        assert_eq!(
+            params["msg"].as_str(),
+            Some("select_next_sibling: disabled in VLF until visible-range parsing exists")
+        );
+        assert_eq!(harness.debug_render(), before);
+    }
+
+    #[test]
+    fn vlf_syntax_navigation_alerts_until_visible_range_parsing_exists() {
+        let (harness, _f) = vlf_harness(b"fn alpha() {}\nfn beta() {}\n");
+        harness.take_notifications();
+        let before = harness.debug_render();
+        let mut ctx = harness.make_context();
+
+        ctx.do_syntax_navigation(SyntaxNavigationAction::new(
+            SyntaxNavigationTarget::Function,
+            true,
+        ));
+
+        let notifications = harness.take_notifications();
+        let (_, params) = notifications
+            .iter()
+            .find(|(method, _)| method == "alert")
+            .expect("expected alert notification");
+        assert_eq!(
+            params["msg"].as_str(),
+            Some("goto_next_function: disabled in VLF until visible-range parsing exists")
+        );
+        assert_eq!(harness.debug_render(), before);
     }
 }

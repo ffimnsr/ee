@@ -29,10 +29,12 @@ use log::warn;
 use xi_rope::Rope;
 use xi_rpc::RemoteErrorDetails;
 
+use crate::line_ending::{LineEnding, LineEndingError};
 use crate::open_policy::{FileLocation, ModeOverride, OpenDecision, OpenPolicy};
 use crate::tabs::BufferId;
 use crate::text_store::DocumentMode;
 use crate::vlf::store::VlfStore;
+use crate::whitespace::{Indentation, MixedIndentError};
 
 #[cfg(feature = "notify")]
 use crate::tabs::OPEN_FILE_EVENT_TOKEN;
@@ -42,6 +44,7 @@ use crate::watcher::FileWatcher;
 use std::{fs::Permissions, os::unix::fs::PermissionsExt};
 
 const UTF8_BOM: &str = "\u{feff}";
+const MAX_FORMATTING_PROBE_BYTES: usize = 65_536;
 
 /// Tracks all state related to open files.
 pub struct FileManager {
@@ -59,6 +62,7 @@ pub struct FileInfo {
     pub path: PathBuf,
     pub mod_time: Option<SystemTime>,
     pub has_changed: bool,
+    pub open_analysis: FileOpenAnalysis,
     #[cfg(target_family = "unix")]
     pub permissions: Option<u32>,
     /// Advisory exclusive lock held for the lifetime of this open buffer.
@@ -73,7 +77,105 @@ impl fmt::Debug for FileInfo {
             .field("path", &self.path)
             .field("mod_time", &self.mod_time)
             .field("has_changed", &self.has_changed)
+            .field("open_analysis", &self.open_analysis)
             .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SampledIndentation {
+    Tabs,
+    Spaces(usize),
+    Mixed,
+    None,
+}
+
+impl From<Result<Option<Indentation>, MixedIndentError>> for SampledIndentation {
+    fn from(value: Result<Option<Indentation>, MixedIndentError>) -> Self {
+        match value {
+            Ok(Some(Indentation::Tabs)) => Self::Tabs,
+            Ok(Some(Indentation::Spaces(width))) => Self::Spaces(width),
+            Ok(None) => Self::None,
+            Err(_) => Self::Mixed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SampledLineEnding {
+    CrLf,
+    Lf,
+    Mixed,
+    LegacyCr,
+    None,
+}
+
+impl From<Result<Option<LineEnding>, LineEndingError>> for SampledLineEnding {
+    fn from(value: Result<Option<LineEnding>, LineEndingError>) -> Self {
+        match value {
+            Ok(Some(LineEnding::CrLf)) => Self::CrLf,
+            Ok(Some(LineEnding::Lf)) => Self::Lf,
+            Ok(None) => Self::None,
+            Err(LineEndingError::Mixed) => Self::Mixed,
+            Err(LineEndingError::LegacyCr) => Self::LegacyCr,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileOpenAnalysis {
+    pub indentation: SampledIndentation,
+    pub line_ending: SampledLineEnding,
+    pub line_ending_complete: bool,
+}
+
+impl Default for FileOpenAnalysis {
+    fn default() -> Self {
+        Self {
+            indentation: SampledIndentation::None,
+            line_ending: SampledLineEnding::None,
+            line_ending_complete: true,
+        }
+    }
+}
+
+impl FileOpenAnalysis {
+    fn from_bytes(bytes: &[u8], encoding: CharacterEncoding) -> Self {
+        let Some(sample) = formatting_probe_str(bytes, encoding) else {
+            return Self::default();
+        };
+
+        let sample_rope = Rope::from(sample);
+        let indentation =
+            SampledIndentation::from(Indentation::parse_bounded(&sample_rope, usize::MAX));
+        let line_ending =
+            SampledLineEnding::from(LineEnding::parse_bounded(&sample_rope, usize::MAX));
+        let skipped_bom =
+            usize::from(matches!(encoding, CharacterEncoding::Utf8WithBom)) * UTF8_BOM.len();
+        let line_ending_complete =
+            bytes.len().saturating_sub(skipped_bom) <= MAX_FORMATTING_PROBE_BYTES;
+
+        Self { indentation, line_ending, line_ending_complete }
+    }
+
+    pub fn needs_line_ending_verification(self) -> bool {
+        !self.line_ending_complete
+    }
+}
+
+fn formatting_probe_str(bytes: &[u8], encoding: CharacterEncoding) -> Option<&str> {
+    let bytes = match encoding {
+        CharacterEncoding::Utf8WithBom if bytes.starts_with(UTF8_BOM.as_bytes()) => {
+            &bytes[UTF8_BOM.len()..]
+        }
+        _ => bytes,
+    };
+
+    let probe = &bytes[..bytes.len().min(MAX_FORMATTING_PROBE_BYTES)];
+    match str::from_utf8(probe) {
+        Ok(text) => Some(text),
+        Err(err) if err.valid_up_to() > 0 => str::from_utf8(&probe[..err.valid_up_to()]).ok(),
+        Err(_) => None,
     }
 }
 
@@ -223,6 +325,7 @@ impl FileManager {
                     path: path.to_owned(),
                     mod_time: get_mod_time(path),
                     has_changed: false,
+                    open_analysis: FileOpenAnalysis::default(),
                     #[cfg(target_family = "unix")]
                     permissions: get_permissions(path),
                     _lock: None, // VLF files are read-only; no write lock needed.
@@ -287,6 +390,7 @@ impl FileManager {
             path: path.to_owned(),
             mod_time: get_mod_time(path),
             has_changed: false,
+            open_analysis: FileOpenAnalysis::default(),
             #[cfg(target_family = "unix")]
             permissions: get_permissions(path),
             _lock: lock,
@@ -356,10 +460,12 @@ where
     });
 
     let encoding = CharacterEncoding::guess(&bytes);
+    let open_analysis = FileOpenAnalysis::from_bytes(&bytes, encoding);
     let rope = try_decode(bytes, encoding, path.as_ref())?;
     let info = FileInfo {
         encoding,
         mod_time: get_mod_time(&path),
+        open_analysis,
         #[cfg(target_family = "unix")]
         permissions: get_permissions(&path),
         path: path.as_ref().to_owned(),
@@ -510,11 +616,14 @@ mod tests {
 
     use xi_rpc::RemoteError;
 
-    use super::FileError;
+    use super::{
+        CharacterEncoding, FileError, FileOpenAnalysis, SampledIndentation, SampledLineEnding,
+    };
 
     #[cfg(all(target_family = "unix", not(feature = "notify")))]
     #[test]
     fn open_rejects_non_utf8_path() {
+        use super::FileManager;
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
 
@@ -584,7 +693,7 @@ mod tests {
     #[cfg(all(target_family = "unix", not(feature = "notify")))]
     #[test]
     fn file_above_confirmation_threshold_requires_confirmation() {
-        use super::{FileError, FileManager};
+        use super::FileManager;
         use crate::open_policy::{FileLocation, ModeOverride, OpenPolicy, OpenThresholds};
         use std::io::Write;
 
@@ -614,5 +723,28 @@ mod tests {
             "expected ConfirmationRequired, got: {:?}",
             result.err().map(|e| e.to_string())
         );
+    }
+
+    #[test]
+    fn open_analysis_detects_small_complete_sample() {
+        let bytes = b"  alpha\r\n  beta\r\n";
+        let analysis = FileOpenAnalysis::from_bytes(bytes, CharacterEncoding::Utf8);
+
+        assert_eq!(analysis.indentation, SampledIndentation::Spaces(2));
+        assert_eq!(analysis.line_ending, SampledLineEnding::CrLf);
+        assert!(analysis.line_ending_complete);
+    }
+
+    #[test]
+    fn open_analysis_uses_head_sample_and_defers_line_ending_verification() {
+        let head: String = (0..10_000).map(|_| "  item\n").collect();
+        let tail = "tail\r\n";
+        let bytes = format!("{head}{tail}").into_bytes();
+
+        let analysis = FileOpenAnalysis::from_bytes(&bytes, CharacterEncoding::Utf8);
+
+        assert_eq!(analysis.indentation, SampledIndentation::Spaces(2));
+        assert_eq!(analysis.line_ending, SampledLineEnding::Lf);
+        assert!(analysis.needs_line_ending_verification());
     }
 }

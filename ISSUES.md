@@ -123,10 +123,12 @@
   - [x] Fail closed when file metadata cannot be trusted; never fall back to whole-file load for huge files.
 - [ ] Keep normal mode fully featured up to 20 MB or 300K LOC without staggering.
   - [ ] Add performance budget: open-to-first-render under 250 ms warm cache and under 750 ms cold cache for 20 MB fixtures.
-  - [ ] Add scroll budget: page-down and cursor movement stay under one frame at 60 Hz for 300K-line fixtures.
-  - [ ] Keep syntax, tree-sitter, search, diagnostics, git signs, wrap, undo, and save enabled below normal-mode threshold.
+    - Note: scroll budget and below-threshold full-feature coverage are already validated; open budget remains pending until startup optimization is proven by non-ignored probes.
+  - [x] Add scroll budget: page-down and cursor movement stay under one frame at 60 Hz for 300K-line fixtures.
+  - [x] Keep syntax, tree-sitter, search, diagnostics, git signs, wrap, undo, and save enabled below normal-mode threshold.
   - [x] Convert expensive open-time probes to bounded or cached passes so full features do not block first render.
   - [ ] Defer noncritical work after first render: full syntax tree, diagnostics refresh, git diff signs, and global search indexes.
+    - Note: startup no longer waits on noncritical frontend notifications and git refresh now lands after frame one, but 20 MiB warm probes still bottleneck in xi-core open/init (`new_view` ~192-197 ms, `pump_init` ~124 ms, `rebuild_lines` ~1.5-2.1 ms).
   - [x] Add fixture matrix: 20 MB long-line file, 20 MB many-line file, 300K LOC source file, and mixed CRLF/LF file.
   - [x] Add regression tests for no full-buffer `Vec<String>` clone in `ee-tui` render path even in normal mode.
   - [x] Add benchmark counters for allocations, peak RSS, bytes scanned before first render, and render invalidation count.
@@ -165,21 +167,21 @@
   - [x] Return chunk text, byte ranges, line ranges, and partial-index metadata.
   - [x] Add cancellation token or generation id to drop stale viewport responses.
   - [x] Preserve normal-buffer protocol behavior for small files.
-- [ ] Bound file analysis on open.
-  - [ ] Limit whitespace detection to sampled bytes near file start.
-  - [ ] Limit line-ending detection to bounded samples plus background verification.
-  - [ ] Convert indentation detection to sampled or incremental probes.
-  - [ ] Never scan a full 10 GB file during open for formatting detection.
-- [ ] Gate syntax and semantic features in VLF.
-  - [ ] Disable tree-sitter for VLF until visible-range parsing exists.
-  - [ ] Disable syntect fallback for VLF unless bounded to visible range.
-  - [ ] Disable semantic text objects when they require full parse.
-  - [ ] Add visible-range parsing design before re-enabling syntax.
-- [ ] Gate source-control features in VLF.
-  - [ ] Disable automatic git hunk diff for VLF.
-  - [ ] Disable blame and source-control signs unless command is explicitly range-bounded.
-  - [ ] Ensure VLF open cannot trigger global diff scans.
-  - [ ] Show disabled reason in command/status UI.
+- [x] Bound file analysis on open.
+  - [x] Limit whitespace detection to sampled bytes near file start.
+  - [x] Limit line-ending detection to bounded samples plus background verification.
+  - [x] Convert indentation detection to sampled or incremental probes.
+  - [x] Never scan a full GB (large file) file during open for formatting detection.
+- [x] Gate syntax and semantic features in VLF.
+  - [x] Disable tree-sitter for VLF until visible-range parsing exists.
+  - [x] Disable syntect fallback for VLF unless bounded to visible range.
+  - [x] Disable semantic text objects when they require full parse.
+  - [x] Add visible-range parsing design before re-enabling syntax.
+- [x] Gate source-control features in VLF.
+  - [x] Disable automatic git hunk diff for VLF.
+  - [x] Disable blame and source-control signs unless command is explicitly range-bounded.
+  - [x] Ensure VLF open cannot trigger global diff scans.
+  - [x] Show disabled reason in command/status UI.
 - [ ] Add VLF search strategy.
   - [ ] Stream search over pages with cancellation.
   - [ ] Search with seam overlap/slop so matches across chunk boundaries are not missed.

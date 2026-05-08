@@ -16,6 +16,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use serde_json::{Value, json};
+use xi_core_lib::open_policy::OpenThresholds;
 use xi_core_lib::plugin_rpc::{
     CodeActionDescriptor, Diagnostic, DiagnosticSeverity, Range, SelectionRange, SymbolItem,
 };
@@ -216,11 +217,12 @@ fn ui_render_shows_scrolled_gutter_after_many_enters() {
 
 #[test]
 fn ui_render_prefers_backend_syntax_spans_over_syntect_fallback() {
-    fn render_numeric_fg(with_backend_syntax: bool) -> ratatui::style::Color {
+    fn render_numeric_fg(with_backend_syntax: bool, is_vlf: bool) -> ratatui::style::Color {
         let mut app = App::from_path(None).unwrap();
         let line = String::from("let answer = 42;");
 
-        app.backend.lines = vec![line.clone()];
+        app.backend.is_vlf = is_vlf;
+        app.backend.lines = if is_vlf { Vec::new() } else { vec![line.clone()] };
         app.backend.path = Some(PathBuf::from("sample.rs"));
         app.backend.line_cache = vec![LineSlot::Known(CachedLine {
             text: line,
@@ -247,11 +249,14 @@ fn ui_render_prefers_backend_syntax_spans_over_syntect_fallback() {
         buf.cell((four_x, 0)).unwrap().fg
     }
 
-    let syntect_fg = render_numeric_fg(false);
-    let backend_fg = render_numeric_fg(true);
+    let syntect_fg = render_numeric_fg(false, false);
+    let backend_fg = render_numeric_fg(true, false);
+    let vlf_fg = render_numeric_fg(false, true);
 
     assert_ne!(backend_fg, syntect_fg);
     assert_eq!(backend_fg, ratatui::style::Color::Rgb(211, 120, 70));
+    assert_ne!(vlf_fg, syntect_fg);
+    assert_eq!(vlf_fg, ratatui::style::Color::Rgb(213, 216, 224));
 }
 
 #[test]
@@ -395,6 +400,40 @@ fn source_control_skips_lazy_line_cache() {
 }
 
 #[test]
+fn source_control_skips_vlf_buffers_and_clears_stale_cache() {
+    let mut app = App::from_path(None).unwrap();
+    let buf_id = app.backend.active().id;
+    app.backend.is_vlf = true;
+    app.backend.line_cache = vec![LineSlot::Known(CachedLine {
+        text: String::from("visible"),
+        cursors: Vec::new(),
+        syntax_spans: Vec::new(),
+    })];
+    app.source_control.insert(
+        buf_id,
+        GitBufferCache {
+            fingerprint: 123,
+            path: Some(PathBuf::from("/tmp/stale.rs")),
+            last_refresh: Instant::now(),
+            status: Some(GitBufferStatus {
+                repo_root: PathBuf::from("/tmp/repo"),
+                repo_name: String::from("repo"),
+                repo_relative: String::from("src/lib.rs"),
+                branch: String::from("main"),
+                tracked: true,
+                dirty: true,
+                hunks: Vec::new(),
+                line_signs: HashMap::from([(0, GitSign::Modified)]),
+            }),
+        },
+    );
+
+    app.refresh_source_control();
+
+    assert!(app.source_control.is_empty());
+}
+
+#[test]
 fn parse_notification_decodes_syntax_spans_in_update_lines() {
     let event = parse_notification(
         "update",
@@ -439,6 +478,50 @@ fn open_file_bootstraps_visible_lines_lazily() {
     assert_eq!(&app.backend.lines[..12], &expected[..12]);
     assert_eq!(app.backend.lines.len(), expected.len());
     assert_eq!(invalid_line_ranges(&app.backend.line_cache), vec![(12, 24)]);
+}
+
+#[test]
+#[ignore = "manual perf budget probe; debug-profile runtime varies by machine"]
+fn open_many_line_20mb_fixture_meets_first_render_budget() {
+    assert_open_to_first_render_budget("many-line", budget_many_line);
+}
+
+#[test]
+#[ignore = "manual perf budget probe; debug-profile runtime varies by machine"]
+fn open_long_line_20mb_fixture_meets_first_render_budget() {
+    assert_open_to_first_render_budget("long-line", budget_long_line);
+}
+
+#[test]
+#[ignore = "manual perf breakdown probe"]
+fn open_many_line_20mb_fixture_reports_startup_breakdown() {
+    report_open_to_first_render_breakdown("many-line", budget_many_line);
+}
+
+#[test]
+#[ignore = "manual perf breakdown probe"]
+fn open_long_line_20mb_fixture_reports_startup_breakdown() {
+    report_open_to_first_render_breakdown("long-line", budget_long_line);
+}
+
+#[test]
+fn backend_event_marks_only_render_critical_startup_work() {
+    assert!(
+        BackendEvent::Update {
+            view_id: String::from("view"),
+            update: CoreUpdate { ops: Vec::new(), pristine: true, annotations: Vec::new() },
+        }
+        .is_startup_critical()
+    );
+    assert!(
+        BackendEvent::DocumentMode { view_id: String::from("view"), is_vlf: false }
+            .is_startup_critical()
+    );
+    assert!(
+        !BackendEvent::Diagnostics { view_id: String::from("view"), diagnostics: Vec::new() }
+            .is_startup_critical()
+    );
+    assert!(!BackendEvent::Alert(String::from("plugin started")).is_startup_critical());
 }
 
 #[test]
@@ -3603,6 +3686,58 @@ fn ui_render_shows_git_gutter_sign() {
 }
 
 #[test]
+fn ui_render_hides_git_signs_and_shows_vlf_disabled_marker() {
+    let mut app = App::from_path(None).unwrap();
+    let line = String::from("alpha");
+    let buf_id = app.backend.active().id;
+    app.backend.is_vlf = true;
+    app.backend.lines = Vec::new();
+    app.backend.line_cache = vec![LineSlot::Known(CachedLine {
+        text: line,
+        cursors: vec![0],
+        syntax_spans: Vec::new(),
+    })];
+    app.source_control.insert(
+        buf_id,
+        GitBufferCache {
+            fingerprint: 0,
+            path: None,
+            last_refresh: Instant::now(),
+            status: Some(GitBufferStatus {
+                repo_root: PathBuf::from("/tmp/repo"),
+                repo_name: String::from("repo"),
+                repo_relative: String::from("src/lib.rs"),
+                branch: String::from("main"),
+                tracked: true,
+                dirty: true,
+                hunks: vec![GitHunk {
+                    old_start: 0,
+                    old_count: 1,
+                    new_start: 0,
+                    new_count: 1,
+                    display_line: 0,
+                    sign: GitSign::Modified,
+                    lines: Vec::new(),
+                }],
+                line_signs: HashMap::from([(0, GitSign::Modified)]),
+            }),
+        },
+    );
+
+    let backend = TestBackend::new(40, 6);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let gutter = (0..6).map(|x| buffer.cell((x, 0)).unwrap().symbol()).collect::<String>();
+    let status = (0..40).map(|x| buffer.cell((x, 4)).unwrap().symbol()).collect::<String>();
+
+    assert!(!gutter.contains("~"), "gutter row was {gutter:?}");
+    assert!(status.contains("git:off(vlf)"), "status row was {status:?}");
+    assert!(!status.contains("main"), "status row was {status:?}");
+}
+
+#[test]
 fn ctrl_up_and_down_bind_multi_cursor_actions() {
     let b = bindings();
     let up = b
@@ -3932,6 +4067,164 @@ fn completion_suggestion_deserializes_optional_fields() {
 fn unique_temp_path(prefix: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     env::temp_dir().join(format!("{prefix}-{nanos}.txt"))
+}
+
+fn write_exact_size_ascii_fixture(
+    path: &std::path::Path,
+    target_bytes: usize,
+    line_builder: fn(usize) -> String,
+) -> usize {
+    let mut bytes = Vec::with_capacity(target_bytes);
+    let mut index = 0usize;
+
+    while bytes.len() < target_bytes {
+        let remaining = target_bytes - bytes.len();
+        if remaining == 1 {
+            bytes.push(b'x');
+            break;
+        }
+
+        let mut line = line_builder(index).into_bytes();
+        let max_line_len = remaining.saturating_sub(1);
+        if line.len() > max_line_len {
+            line.truncate(max_line_len);
+        }
+        if line.is_empty() {
+            line.push(b'x');
+        }
+
+        bytes.extend_from_slice(&line);
+        if bytes.len() < target_bytes {
+            bytes.push(b'\n');
+        }
+        index += 1;
+    }
+
+    let line_count = bytes.split(|&byte| byte == b'\n').count();
+    fs::write(path, bytes).unwrap();
+    line_count
+}
+
+fn timed_open_to_first_render(path: &std::path::Path) -> (App, Duration) {
+    let start = Instant::now();
+    let app = App::from_path(Some(path.to_path_buf())).unwrap();
+
+    let backend = TestBackend::new(120, 50);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+
+    (app, start.elapsed())
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+struct OpenToFirstRenderBreakdown {
+    open: Duration,
+    draw: Duration,
+    total: Duration,
+    startup: crate::buffer::StartupProfile,
+}
+
+fn timed_open_to_first_render_breakdown(
+    path: &std::path::Path,
+) -> (App, OpenToFirstRenderBreakdown) {
+    let open_started = Instant::now();
+    let app = App::from_path(Some(path.to_path_buf())).unwrap();
+    let open = open_started.elapsed();
+    let startup = app.backend.startup_profile().clone();
+
+    let backend = TestBackend::new(120, 50);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let draw_started = Instant::now();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let draw = draw_started.elapsed();
+
+    (app, OpenToFirstRenderBreakdown { startup, open, draw, total: open + draw })
+}
+
+fn budget_many_line(i: usize) -> String {
+    format!("fn item_{i:06}() {{ let value = {}; }} // {:0>180}", i % 10, i % 100_000)
+}
+
+fn budget_long_line(i: usize) -> String {
+    if i % 2 == 0 {
+        format!("const LINE_{i}: &str = \"{}\";", "x".repeat(512))
+    } else {
+        format!("let line_{i} = {i};")
+    }
+}
+
+fn assert_open_to_first_render_budget(label: &str, line_builder: fn(usize) -> String) {
+    const WARM_BUDGET_MS: u128 = 250;
+    const COLD_BUDGET_MS: u128 = 750;
+
+    let thresholds = OpenThresholds::default();
+    let target_bytes = thresholds.normal_bytes as usize - 4096;
+    let path = unique_temp_path(&format!("ee-tui-open-budget-{label}"));
+    let line_count = write_exact_size_ascii_fixture(&path, target_bytes, line_builder);
+
+    assert!(
+        line_count < thresholds.normal_lines as usize,
+        "fixture {label} produced {line_count} lines, expected < {}",
+        thresholds.normal_lines
+    );
+
+    // Warm one-time editor/runtime initialization outside the measured passes.
+    drop(App::from_path(None).unwrap());
+
+    let (cold_app, cold_elapsed) = timed_open_to_first_render(&path);
+    let (warm_app, warm_elapsed) = timed_open_to_first_render(&path);
+
+    fs::remove_file(&path).unwrap();
+
+    assert!(!cold_app.backend.is_vlf, "fixture {label} unexpectedly opened in VLF mode");
+    assert_eq!(
+        cold_app.backend.lines.len(),
+        line_count,
+        "fixture {label} did not stay in normal-mode line cache path"
+    );
+    assert!(
+        !warm_app.backend.is_vlf,
+        "fixture {label} unexpectedly opened in VLF mode on warm pass"
+    );
+    assert_eq!(
+        warm_app.backend.lines.len(),
+        line_count,
+        "fixture {label} warm pass did not stay in normal-mode line cache path"
+    );
+
+    assert!(
+        cold_elapsed.as_millis() < COLD_BUDGET_MS,
+        "cold open-to-first-render for {label} fixture took {}ms, expected < {COLD_BUDGET_MS}ms",
+        cold_elapsed.as_millis()
+    );
+    assert!(
+        warm_elapsed.as_millis() < WARM_BUDGET_MS,
+        "warm open-to-first-render for {label} fixture took {}ms, expected < {WARM_BUDGET_MS}ms",
+        warm_elapsed.as_millis()
+    );
+}
+
+fn report_open_to_first_render_breakdown(label: &str, line_builder: fn(usize) -> String) {
+    let thresholds = OpenThresholds::default();
+    let target_bytes = thresholds.normal_bytes as usize - 4096;
+    let path = unique_temp_path(&format!("ee-tui-open-breakdown-{label}"));
+    let line_count = write_exact_size_ascii_fixture(&path, target_bytes, line_builder);
+
+    assert!(
+        line_count < thresholds.normal_lines as usize,
+        "fixture {label} produced {line_count} lines, expected < {}",
+        thresholds.normal_lines
+    );
+
+    drop(App::from_path(None).unwrap());
+
+    let (_cold_app, cold) = timed_open_to_first_render_breakdown(&path);
+    let (_warm_app, warm) = timed_open_to_first_render_breakdown(&path);
+    fs::remove_file(&path).unwrap();
+
+    eprintln!("cold {label} breakdown: {cold:#?}");
+    eprintln!("warm {label} breakdown: {warm:#?}");
 }
 
 fn run_ex(app: &mut App, command: &str) {
@@ -4559,6 +4852,30 @@ fn diffget_restores_current_git_hunk_from_head() {
         String::from("two"),
         String::from("three"),
     ]));
+}
+
+#[test]
+fn vlf_source_control_commands_report_disabled_reason() {
+    let mut app = App::from_path(None).unwrap();
+    app.backend.is_vlf = true;
+    app.backend.path = Some(PathBuf::from("/tmp/huge.rs"));
+    app.backend.line_cache = vec![LineSlot::Known(CachedLine {
+        text: String::from("visible"),
+        cursors: vec![0],
+        syntax_spans: Vec::new(),
+    })];
+
+    for command in ["goto_next_change", "gblame", "gdiff", "ghunkdiff", "diffget"] {
+        app.backend.status_message = None;
+        run_ex(&mut app, command);
+
+        let message = app.backend.status_message.clone().unwrap_or_default();
+        assert!(message.contains("disabled in VLF"), "command {command} message was {message:?}");
+        assert!(
+            message.contains("whole-buffer diff/blame scans"),
+            "command {command} message was {message:?}"
+        );
+    }
 }
 
 #[test]
@@ -5681,6 +5998,29 @@ fn render_long_line_fixture_under_one_frame_budget() {
     assert!(
         elapsed.as_millis() < FRAME_BUDGET_MS,
         "render of {LINES} long-line fixture took {}ms, expected < {FRAME_BUDGET_MS}ms",
+        elapsed.as_millis()
+    );
+}
+
+#[test]
+fn render_single_very_long_ascii_line_under_budget() {
+    const LINE_LEN: usize = 1_000_000;
+    const FRAME_BUDGET_MS: u128 = 50;
+
+    let mut app = App::from_path(None).unwrap();
+    app.backend.lines = vec!["3".repeat(LINE_LEN)];
+    app.viewport.left_col = 100_000;
+
+    let backend = TestBackend::new(120, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let start = std::time::Instant::now();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < FRAME_BUDGET_MS,
+        "render of {LINE_LEN}-byte line took {}ms, expected < {FRAME_BUDGET_MS}ms",
         elapsed.as_millis()
     );
 }

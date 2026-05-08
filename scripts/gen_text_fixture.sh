@@ -4,13 +4,14 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: scripts/gen_text_fixture.sh [--seed N] [--line-min N] [--line-max N] SIZE OUTPUT
+Usage: scripts/gen_text_fixture.sh [--seed N] [--line-min N] [--line-max N] [--progress|--no-progress] SIZE OUTPUT
 
 Generate random sentence-like text fixture with exact target size.
 
 Examples:
   scripts/gen_text_fixture.sh 512kb test_assets/sample.txt
   scripts/gen_text_fixture.sh --seed 7 --line-min 20 --line-max 60 1.5mb /tmp/big.txt
+  scripts/gen_text_fixture.sh --progress 256mb /tmp/huge.txt
 EOF
 }
 
@@ -47,6 +48,7 @@ parse_size() {
 line_min=40
 line_max=120
 seed=""
+progress_mode="auto"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -61,6 +63,14 @@ while [[ $# -gt 0 ]]; do
         --line-max)
             line_max="${2:?missing value for --line-max}"
             shift 2
+            ;;
+        --progress)
+            progress_mode="on"
+            shift
+            ;;
+        --no-progress)
+            progress_mode="off"
+            shift
             ;;
         -h|--help)
             usage
@@ -100,13 +110,30 @@ size_text="$1"
 output_path="$2"
 size_bytes="$(parse_size "$size_text")"
 
+case "$progress_mode" in
+    auto)
+        if [[ -t 2 ]]; then
+            progress_enabled=1
+        else
+            progress_enabled=0
+        fi
+        ;;
+    on)
+        progress_enabled=1
+        ;;
+    off)
+        progress_enabled=0
+        ;;
+esac
+
 mkdir -p "$(dirname "$output_path")"
 
 awk \
     -v target="$size_bytes" \
     -v min_cols="$line_min" \
     -v max_cols="$line_max" \
-    -v seed_value="$seed" '
+    -v seed_value="$seed" \
+    -v progress_enabled="$progress_enabled" '
 BEGIN {
     if (seed_value == "") {
         srand()
@@ -114,7 +141,18 @@ BEGIN {
         srand(seed_value)
     }
 
+    progress_enabled = progress_enabled + 0
+    progress_step = int(target / 100)
+    if (progress_step < 1) {
+        progress_step = 1
+    }
+    next_progress = progress_step
     bytes_written = 0
+
+    if (progress_enabled) {
+        render_progress(0)
+    }
+
     while (bytes_written < target) {
         remaining = target - bytes_written
         line = random_sentence(min_cols, max_cols)
@@ -123,6 +161,21 @@ BEGIN {
         }
         printf "%s", line
         bytes_written += length(line)
+
+        if (progress_enabled && (bytes_written >= next_progress || bytes_written >= target)) {
+            render_progress(bytes_written)
+            while (next_progress <= bytes_written) {
+                next_progress += progress_step
+            }
+        }
+    }
+
+    if (progress_enabled) {
+        if (bytes_written < target) {
+            render_progress(target)
+        }
+        printf "\n" > "/dev/stderr"
+        fflush("/dev/stderr")
     }
 }
 
@@ -152,6 +205,27 @@ function punctuation() {
         return "!"
     }
     return "?"
+}
+
+function render_progress(current,    bar_width, filled, i, bar, percent) {
+    bar_width = 32
+    filled = target == 0 ? bar_width : int((current * bar_width) / target)
+    if (filled > bar_width) {
+        filled = bar_width
+    }
+
+    bar = ""
+    for (i = 0; i < bar_width; i++) {
+        bar = bar (i < filled ? "#" : "-")
+    }
+
+    percent = target == 0 ? 100 : int((current * 100) / target)
+    if (percent > 100) {
+        percent = 100
+    }
+
+    printf "\r[%s] %3d%% %d/%d bytes", bar, percent, current, target > "/dev/stderr"
+    fflush("/dev/stderr")
 }
 
 function random_sentence(min_value, max_value,    target_width, sentence, word, candidate) {

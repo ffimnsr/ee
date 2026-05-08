@@ -23,4 +23,10 @@ invalid_output="$(
 )"
 [[ "$invalid_output" == *"invalid size"* ]]
 
+progress_output="$(
+    bash "$script_path" --seed 7 --progress 2kb "$tmpdir/progress.txt" 2>&1 >/dev/null
+)"
+[[ "$progress_output" == *"100%"* ]]
+[[ "$progress_output" == *"/2048 bytes"* ]]
+
 printf 'shell fixture generator test passed\n'

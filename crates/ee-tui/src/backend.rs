@@ -110,6 +110,18 @@ pub(crate) enum BackendEvent {
     },
 }
 
+impl BackendEvent {
+    pub(crate) fn is_startup_critical(&self) -> bool {
+        matches!(
+            self,
+            Self::Update { .. }
+                | Self::ScrollTo { .. }
+                | Self::DocumentMode { .. }
+                | Self::VlfChunks { .. }
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PendingUiAction {
     Hover { view_id: String, content: String },
@@ -590,18 +602,35 @@ impl XiClient {
     }
 
     fn pump_init(&mut self) -> io::Result<()> {
+        let mut idle_rounds = 0;
         loop {
             if invalid_line_ranges(&self.line_cache).is_empty() {
                 break;
             }
             match recv_with_timeout(&mut self.backend_rx, Duration::from_millis(20)) {
                 Some(event) => {
+                    let mut saw_critical = event.is_startup_critical();
                     self.apply_backend_event(event)?;
                     while let Ok(event) = self.backend_rx.try_recv() {
+                        saw_critical |= event.is_startup_critical();
                         self.apply_backend_event(event)?;
                     }
+
+                    if saw_critical {
+                        idle_rounds = 0;
+                    } else {
+                        idle_rounds += 1;
+                        if idle_rounds >= 6 {
+                            break;
+                        }
+                    }
                 }
-                None => break,
+                None => {
+                    idle_rounds += 1;
+                    if idle_rounds >= 6 {
+                        break;
+                    }
+                }
             }
         }
         Ok(())
