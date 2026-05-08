@@ -51,6 +51,14 @@ pub struct Editor {
     /// The CRDT engine, which tracks edit history and manages concurrent edits.
     engine: Engine,
 
+    /// VLF store for large files opened in VLF mode.
+    ///
+    /// When `Some`, this editor was opened in VLF mode. `text` is an empty
+    /// placeholder; all content reads go through `vlf_store`.
+    /// `None` for Normal / ConstrainedNormal editors.
+    #[expect(dead_code, reason = "used during VLF render wiring; render path not yet migrated")]
+    pub(crate) vlf_store: Option<Box<crate::vlf::store::VlfStore>>,
+
     /// The most recent revision.
     last_rev_id: RevId,
     /// The revision of the last save.
@@ -105,6 +113,34 @@ impl Editor {
             this_edit_type: EditType::Other,
             layers: Layers::default(),
             revs_in_flight: 0,
+            vlf_store: None,
+        }
+    }
+
+    /// Creates a new `Editor` for a VLF file.
+    ///
+    /// The `text` buffer starts empty; all content reads must go through the
+    /// `VlfStore`.  The editor is read-only in VLF mode (first milestone).
+    pub fn with_vlf_store(store: crate::vlf::store::VlfStore) -> Editor {
+        let engine = Engine::new(Rope::from(""));
+        let buffer = engine.get_head().clone();
+        let last_rev_id = engine.get_head_rev_id();
+        Editor {
+            text: buffer,
+            engine,
+            last_rev_id,
+            pristine_rev_id: last_rev_id,
+            undo_group_id: 1,
+            live_undos: vec![0],
+            cur_undo: 1,
+            undos: BTreeSet::new(),
+            gc_undos: BTreeSet::new(),
+            force_undo_group: false,
+            last_edit_type: EditType::Other,
+            this_edit_type: EditType::Other,
+            layers: Layers::default(),
+            revs_in_flight: 0,
+            vlf_store: Some(Box::new(store)),
         }
     }
 
