@@ -2,9 +2,12 @@
 
 ## New World
 
+- [ ] Remove commands that's capitalize like `Grep` should only retain `grep`
+- [ ] Use ripgrep crates for `grep` as its battle tested for grepping files
+
 ### Tooling and CI
 
-- [ ] Add property-based tests (`proptest`) in `crates/xi-rope` for delta application, merging, and CRDT invariants.
+- [ ] Add property-based tests `proptest` in `crates/xi-rope` for delta application, merging, and CRDT invariants.
 
 ### Large File Support: VLF Mode (Very Large Files)
 
@@ -372,14 +375,6 @@ different name alias this. Description for the command can be found here: https:
 - [x] paste_primary_clipboard_after / paste_primary_clipboard_before
 - [x] yank_to_primary_clipboard / yank_main_selection_to_primary_clipboard
 - [x] replace_selections_with_primary_clipboard
-- [ ] reverse_selection_contents
-- rename_symbol
-- select_references_to_symbol_under_cursor
-- hover (static command)
-- insert_register
-- global_search
-- command_palette
-- completion (static command)
 - [x] file_explorer / file_explorer_in_current_buffer_directory / file_explorer_in_current_directory
 - [x] rotate_view_reverse / transpose_view / wclose / wonly
 - [x] commit_undo_checkpoint
@@ -399,6 +394,14 @@ different name alias this. Description for the command can be found here: https:
 - [x] goto_file_end / extend_to_file_start / extend_to_file_end
 - [x] goto_declaration
 - [ ] create_directory - creates directory on current workspace, can create parent directory under workspace if missing
+- [ ] reverse_selection_contents
+- rename_symbol
+- select_references_to_symbol_under_cursor
+- hover (static command)
+- insert_register
+- global_search
+- command_palette
+- completion (static command)
 
 ### Already Implemented But Missing From Tracker
 
