@@ -271,6 +271,20 @@ impl Client {
         )
     }
 
+    /// Notify the client about the document mode for a view.
+    ///
+    /// Called once on initial open so the frontend can switch to sparse
+    /// rendering for VLF buffers without making a full-buffer clone.
+    pub fn document_mode_changed(&self, view_id: ViewId, is_vlf: bool) {
+        self.0.send_rpc_notification(
+            "document_mode",
+            &json!({
+                "view_id": view_id,
+                "is_vlf": is_vlf,
+            }),
+        );
+    }
+
     pub fn schedule_idle(&self, token: usize) {
         self.0.schedule_idle(token)
     }

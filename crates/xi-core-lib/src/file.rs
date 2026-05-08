@@ -213,6 +213,10 @@ impl FileManager {
                 // is never read_to_end or converted to a Rope.
                 let store = VlfStore::open(path).map_err(|e| FileError::Io(e, path.to_owned()))?;
 
+                // Kick off background indexing immediately so line-count
+                // estimates become available without blocking the first render.
+                store.start_background_indexing();
+
                 // Register file metadata so close/reload work correctly.
                 let info = FileInfo {
                     encoding: CharacterEncoding::Utf8,

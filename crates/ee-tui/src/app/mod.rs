@@ -831,11 +831,13 @@ impl App {
                 else {
                     return;
                 };
-                let line_count = self.backend.lines.len();
+                let line_count = self.backend.line_count();
                 if row < line_count {
-                    let line = &self.backend.lines[row];
-                    // Convert display column back to a byte offset.
-                    let byte_col = crate::text::display_col_to_byte(line, col);
+                    let byte_col = if let Some(line) = self.backend.get_line(row) {
+                        crate::text::display_col_to_byte(line, col)
+                    } else {
+                        0
+                    };
                     let _ = self.backend.send_edit(
                         "gesture",
                         json!({
@@ -860,10 +862,13 @@ impl App {
                 else {
                     return;
                 };
-                let line_count = self.backend.lines.len();
+                let line_count = self.backend.line_count();
                 if row < line_count {
-                    let line = &self.backend.lines[row];
-                    let byte_col = crate::text::display_col_to_byte(line, col);
+                    let byte_col = if let Some(line) = self.backend.get_line(row) {
+                        crate::text::display_col_to_byte(line, col)
+                    } else {
+                        0
+                    };
                     let _ = self.backend.send_edit(
                         "gesture",
                         json!({
@@ -2424,7 +2429,7 @@ impl App {
     }
 
     fn yank_line_range_into_register(&mut self, start: usize, end: usize, reg: RegisterName) {
-        let line_count = self.backend.lines.len();
+        let line_count = self.backend.line_count();
         if line_count == 0 {
             return;
         }

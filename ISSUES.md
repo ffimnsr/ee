@@ -147,19 +147,19 @@
   - [x] Scan line starts by page, not whole file.
   - [x] Cache scanned chunks with bounded memory.
   - [x] Run viewport-first indexing with cancellation support.
-  - [ ] Run background indexing task from real VLF open path.
+  - [x] Run background indexing task from real VLF open path.
   - [x] Report approximate total line count until scan completes.
-  - [ ] Keep line numbers stable as index expands.
+  - [x] Keep line numbers stable as index expands.
 - [ ] Finish line addressing for partial indexes.
   - [x] Add explicit partial-data status instead of pretending full buffer exists.
   - [x] Avoid `TextStore` APIs that require `Vec<String>` or whole-buffer materialization.
-  - [ ] Allow viewport-first line lookup before full newline index exists.
-  - [ ] Add approximate goto-line behavior while indexing remains incomplete.
-- [ ] Keep `ee-tui` rendering sparse in VLF mode.
-  - [ ] Remove full-buffer `Vec<String>` clone path for VLF buffers.
-  - [ ] Avoid placeholder strings for all lines.
-  - [ ] Render only loaded viewport lines plus small overscan.
-  - [ ] Show loading/status rows for missing chunks without blocking UI.
+  - [x] Allow viewport-first line lookup before full newline index exists.
+  - [x] Add approximate goto-line behavior while indexing remains incomplete.
+- [x] Keep `ee-tui` rendering sparse in VLF mode.
+  - [x] Remove full-buffer `Vec<String>` clone path for VLF buffers.
+  - [x] Avoid placeholder strings for all lines.
+  - [x] Render only loaded viewport lines plus small overscan.
+  - [x] Show loading/status rows for missing chunks without blocking UI.
 - [ ] Add backend protocol for VLF viewport requests.
   - [ ] Request text by viewport/page range instead of whole-buffer invalidation.
   - [ ] Return chunk text, byte ranges, line ranges, and partial-index metadata.

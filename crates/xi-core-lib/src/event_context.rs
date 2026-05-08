@@ -668,6 +668,11 @@ impl<'a> EventContext<'a> {
 
         self.client.language_changed(self.view_id, &self.language);
 
+        // Notify the frontend about document mode so it can switch to sparse
+        // rendering for VLF buffers without making a full-buffer Vec<String> clone.
+        let is_vlf = self.editor.borrow().is_vlf();
+        self.client.document_mode_changed(self.view_id, is_vlf);
+
         // Rewrap and request a render.
         // This is largely similar to update_wrap_settings(), the only difference
         // being that the view is expected to be already initialized.

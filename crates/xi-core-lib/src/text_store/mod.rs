@@ -125,6 +125,13 @@ pub enum KnownLineCount {
 pub enum LineLookup {
     /// The exact byte offset at the start of the requested line.
     Exact(ByteOffset),
+    /// An estimated byte offset computed by linear interpolation from the
+    /// partially-scanned index.  The caller may use this for immediate
+    /// goto-line positioning while background scanning catches up.
+    ///
+    /// The inner value is a best-effort approximation; it will converge to
+    /// the exact offset as more pages are indexed.
+    Approximate(ByteOffset),
     /// The required index region has not yet been scanned.
     Pending,
     /// The requested line number is outside the known document range.

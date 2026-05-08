@@ -241,7 +241,7 @@ impl App {
 
         // Parse an optional line-address range from the front of the command.
         let cursor_line = self.backend.cursor_line;
-        let line_count = self.backend.lines.len().max(1);
+        let line_count = self.backend.line_count().max(1);
         let (range, rest) = parse_ex_range(&raw, cursor_line, line_count, &self.marks);
         let command = rest.trim_start();
 
@@ -2049,7 +2049,7 @@ impl App {
     }
 
     fn goto_window_line(&mut self, target: WindowLineTarget) {
-        let total_lines = self.backend.lines.len().max(1);
+        let total_lines = self.backend.line_count().max(1);
         let visible_height = self.last_editor_height.max(1);
         let count =
             usize::try_from(self.input_state.count()).unwrap_or(usize::MAX).saturating_sub(1);
@@ -2107,7 +2107,7 @@ impl App {
 
     pub(super) fn active_cursor_offset(&self) -> usize {
         let buf = self.backend.active();
-        let line = self.backend.cursor_line.min(buf.lines.len().saturating_sub(1));
+        let line = self.backend.cursor_line.min(buf.line_count().saturating_sub(1));
         let prefix = buf.lines.iter().take(line).map(|line| line.len() + 1).sum::<usize>();
         let col =
             buf.lines.get(line).map(|line| self.backend.cursor_col.min(line.len())).unwrap_or(0);

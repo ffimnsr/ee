@@ -373,7 +373,7 @@ impl FilePager {
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
-fn pread_exact(file: &File, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+pub(crate) fn pread_exact(file: &File, offset: u64, len: usize) -> io::Result<Vec<u8>> {
     use std::os::unix::fs::FileExt;
     let mut buf = vec![0u8; len];
     let n = file.read_at(&mut buf, offset)?;
@@ -382,7 +382,7 @@ fn pread_exact(file: &File, offset: u64, len: usize) -> io::Result<Vec<u8>> {
 }
 
 #[cfg(windows)]
-fn pread_exact(file: &File, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+pub(crate) fn pread_exact(file: &File, offset: u64, len: usize) -> io::Result<Vec<u8>> {
     use std::os::windows::fs::FileExt;
     let mut buf = vec![0u8; len];
     let n = file.seek_read(&mut buf, offset)?;
@@ -391,7 +391,7 @@ fn pread_exact(file: &File, offset: u64, len: usize) -> io::Result<Vec<u8>> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn pread_exact(_file: &File, _offset: u64, _len: usize) -> io::Result<Vec<u8>> {
+pub(crate) fn pread_exact(_file: &File, _offset: u64, _len: usize) -> io::Result<Vec<u8>> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "positioned I/O (pread) is not supported on this platform",

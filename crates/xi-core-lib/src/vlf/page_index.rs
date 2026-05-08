@@ -278,6 +278,42 @@ impl PageIndex {
         self.progress
     }
 
+    /// Estimate the byte offset for `line` using linear interpolation over
+    /// the scanned portion of the file.
+    ///
+    /// Returns `Some(ByteOffset)` when there is enough scan data to produce a
+    /// meaningful estimate, or `None` when no pages have been scanned yet.
+    ///
+    /// The estimate assumes uniform line density across the file.  It is only
+    /// a lower-bound approximation; callers should treat it as a navigation
+    /// hint and re-resolve once the index catches up.
+    pub fn approximate_byte_for_line(&self, line: u64) -> Option<crate::text_store::ByteOffset> {
+        if self.progress.scanned_bytes == 0 || self.progress.total_bytes == 0 {
+            return None;
+        }
+        let scanned_nl: u64 = self
+            .descriptors
+            .values()
+            .filter(|d| d.scan_state == ScanState::Scanned)
+            .map(|d| d.newline_count)
+            .sum();
+        if scanned_nl == 0 {
+            // No newlines yet; can't interpolate meaningfully beyond byte 0.
+            return Some(crate::text_store::ByteOffset(0));
+        }
+        // Extrapolate total line count from scanned density.
+        let estimated_total_nl = (scanned_nl as f64 / self.progress.scanned_bytes as f64
+            * self.progress.total_bytes as f64)
+            .max(scanned_nl as f64) as u64;
+        // Clamp to line 0 = byte 0; interpolate for higher lines.
+        if line == 0 {
+            return Some(crate::text_store::ByteOffset(0));
+        }
+        let frac = (line as f64) / (estimated_total_nl.saturating_add(1) as f64);
+        let approx = (frac * self.progress.total_bytes as f64) as u64;
+        Some(crate::text_store::ByteOffset(approx.min(self.progress.total_bytes)))
+    }
+
     /// Bump the cancellation generation and return the new value.
     ///
     /// Background scan tasks should check [`cancel_gen`](Self::cancel_gen)
@@ -496,5 +532,40 @@ mod tests {
         idx.insert(scanned_desc(0, 100, 0));
         assert!(idx.scan_progress().is_complete());
         assert!((idx.scan_progress().fraction() - 1.0).abs() < f64::EPSILON);
+    }
+
+    // ---- approximate_byte_for_line ------------------------------------
+
+    #[test]
+    fn approximate_byte_for_line_zero_returns_byte_zero() {
+        let mut idx = PageIndex::new(1000);
+        idx.insert(scanned_desc(0, 500, 10));
+        assert_eq!(idx.approximate_byte_for_line(0), Some(ByteOffset(0)));
+    }
+
+    #[test]
+    fn approximate_byte_for_line_none_when_no_scan_data() {
+        let idx = PageIndex::new(1000);
+        assert_eq!(idx.approximate_byte_for_line(5), None);
+    }
+
+    #[test]
+    fn approximate_byte_for_line_midfile_estimate_in_range() {
+        // 1000 bytes total; first 500 scanned with 10 newlines.
+        // Estimated total newlines ≈ 20; line 10 ≈ 50% → ~500 bytes.
+        let mut idx = PageIndex::new(1000);
+        idx.insert(scanned_desc(0, 500, 10));
+        let approx = idx.approximate_byte_for_line(10).unwrap();
+        assert!(approx.0 <= 1000, "offset must not exceed file size");
+        assert!(approx.0 > 0, "mid-file line offset must be > 0");
+    }
+
+    #[test]
+    fn approximate_byte_for_line_clamped_to_file_size() {
+        // Requesting a line far beyond estimated total should be clamped.
+        let mut idx = PageIndex::new(100);
+        idx.insert(scanned_desc(0, 100, 5));
+        let approx = idx.approximate_byte_for_line(9999).unwrap();
+        assert!(approx.0 <= 100);
     }
 }

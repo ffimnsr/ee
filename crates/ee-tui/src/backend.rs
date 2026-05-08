@@ -53,15 +53,48 @@ pub(crate) type PendingRequests =
 
 #[derive(Debug)]
 pub(crate) enum BackendEvent {
-    Update { view_id: String, update: CoreUpdate },
+    Update {
+        view_id: String,
+        update: CoreUpdate,
+    },
     Alert(String),
-    Hover { view_id: String, content: String },
-    Completions { view_id: String, items: Vec<CompletionSuggestion> },
-    Locations { view_id: String, title: String, locations: Vec<NavigationTarget> },
-    Symbols { view_id: String, title: String, symbols: Vec<SymbolItem> },
-    Diagnostics { view_id: String, diagnostics: Vec<Diagnostic> },
-    CodeActions { view_id: String, actions: Vec<CodeActionDescriptor> },
-    ScrollTo { view_id: String, line: usize, col: usize },
+    Hover {
+        view_id: String,
+        content: String,
+    },
+    Completions {
+        view_id: String,
+        items: Vec<CompletionSuggestion>,
+    },
+    Locations {
+        view_id: String,
+        title: String,
+        locations: Vec<NavigationTarget>,
+    },
+    Symbols {
+        view_id: String,
+        title: String,
+        symbols: Vec<SymbolItem>,
+    },
+    Diagnostics {
+        view_id: String,
+        diagnostics: Vec<Diagnostic>,
+    },
+    CodeActions {
+        view_id: String,
+        actions: Vec<CodeActionDescriptor>,
+    },
+    ScrollTo {
+        view_id: String,
+        line: usize,
+        col: usize,
+    },
+    /// Backend notified the frontend about the document mode for a view.
+    /// `is_vlf` is `true` for Very Large File buffers that require sparse rendering.
+    DocumentMode {
+        view_id: String,
+        is_vlf: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -183,6 +216,9 @@ pub(crate) struct XiClient {
     pub(crate) annotations: Vec<CoreAnnotation>,
     /// Pending symbol results waiting to be opened in a picker.
     pub(crate) pending_symbols: Vec<(String, String, Vec<SymbolItem>)>,
+    /// True when the backend opened this buffer in VLF mode.
+    /// `lines` is never materialized; rendering reads `line_cache` directly.
+    pub(crate) is_vlf: bool,
 }
 
 #[allow(dead_code)]
@@ -244,6 +280,7 @@ impl XiClient {
             diagnostics: Vec::new(),
             annotations: Vec::new(),
             pending_symbols: Vec::new(),
+            is_vlf: false,
         };
 
         for event in init_events {
@@ -613,6 +650,9 @@ impl XiClient {
                     format!("code actions: {}", actions.len())
                 });
             }
+            BackendEvent::DocumentMode { is_vlf, .. } => {
+                self.is_vlf = is_vlf;
+            }
         }
         Ok(())
     }
@@ -634,6 +674,15 @@ impl XiClient {
     }
 
     fn clamp_cursor(&mut self) {
+        if self.is_vlf {
+            // In VLF mode `lines` is empty; clamp against the cache length.
+            self.cursor_line = self.cursor_line.min(self.line_cache.len().saturating_sub(1));
+            if let Some(LineSlot::Known(line)) = self.line_cache.get(self.cursor_line) {
+                self.cursor_col = previous_char_boundary(&line.text, self.cursor_col);
+            }
+            return;
+        }
+
         if self.lines.is_empty() {
             self.cursor_line = 0;
             self.cursor_col = 0;
@@ -725,6 +774,12 @@ impl XiClient {
     }
 
     pub(crate) fn rebuild_lines(&mut self) {
+        // VLF mode: skip full-buffer clone; `lines` stays empty.
+        // Rendering reads `line_cache` directly for the viewport range.
+        if self.is_vlf {
+            return;
+        }
+
         self.lines = self
             .line_cache
             .iter()
@@ -1052,6 +1107,11 @@ pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendE
                 serde_json::from_value::<Vec<CodeActionDescriptor>>(params.get("actions")?.clone())
                     .ok()?;
             Some(BackendEvent::CodeActions { view_id, actions })
+        }
+        "document_mode" => {
+            let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
+            let is_vlf = params.get("is_vlf").and_then(Value::as_bool).unwrap_or(false);
+            Some(BackendEvent::DocumentMode { view_id, is_vlf })
         }
         _ => None,
     }

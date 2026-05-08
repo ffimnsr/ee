@@ -3969,6 +3969,7 @@ fn test_buf_state() -> BufState {
         externally_modified: false,
         diagnostics: Vec::new(),
         annotations: Vec::new(),
+        is_vlf: false,
     }
 }
 

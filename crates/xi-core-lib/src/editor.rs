@@ -56,7 +56,6 @@ pub struct Editor {
     /// When `Some`, this editor was opened in VLF mode. `text` is an empty
     /// placeholder; all content reads go through `vlf_store`.
     /// `None` for Normal / ConstrainedNormal editors.
-    #[expect(dead_code, reason = "used during VLF render wiring; render path not yet migrated")]
     pub(crate) vlf_store: Option<Box<crate::vlf::store::VlfStore>>,
 
     /// The most recent revision.
@@ -142,6 +141,11 @@ impl Editor {
             revs_in_flight: 0,
             vlf_store: Some(Box::new(store)),
         }
+    }
+
+    /// Returns `true` when this editor was opened in VLF mode.
+    pub(crate) fn is_vlf(&self) -> bool {
+        self.vlf_store.is_some()
     }
 
     pub(crate) fn get_buffer(&self) -> &Rope {

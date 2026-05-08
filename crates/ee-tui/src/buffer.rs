@@ -51,6 +51,10 @@ pub(crate) struct BufState {
     pub(crate) externally_modified: bool,
     pub(crate) diagnostics: Vec<Diagnostic>,
     pub(crate) annotations: Vec<CoreAnnotation>,
+    /// True when the backend opened this buffer in VLF (Very Large File) mode.
+    /// In VLF mode `lines` is never materialized; rendering reads `line_cache`
+    /// directly for the visible viewport range only.
+    pub(crate) is_vlf: bool,
 }
 
 impl BufState {
@@ -141,6 +145,12 @@ impl BufState {
     }
 
     pub(crate) fn rebuild_lines(&mut self) {
+        // VLF mode: skip full-buffer clone; `lines` stays empty.
+        // Rendering reads `line_cache` directly for the visible viewport range.
+        if self.is_vlf {
+            return;
+        }
+
         self.lines = self
             .line_cache
             .iter()
@@ -172,6 +182,15 @@ impl BufState {
     }
 
     pub(crate) fn clamp_cursor(&mut self) {
+        if self.is_vlf {
+            // In VLF mode `lines` is empty; clamp against the cache length.
+            self.cursor_line = self.cursor_line.min(self.line_cache.len().saturating_sub(1));
+            if let Some(LineSlot::Known(line)) = self.line_cache.get(self.cursor_line) {
+                self.cursor_col = previous_char_boundary(&line.text, self.cursor_col);
+            }
+            return;
+        }
+
         if self.lines.is_empty() {
             self.cursor_line = 0;
             self.cursor_col = 0;
@@ -183,6 +202,28 @@ impl BufState {
 
     pub(crate) fn is_fully_cached(&self) -> bool {
         self.line_cache.iter().all(|slot| matches!(slot, LineSlot::Known(_)))
+    }
+
+    /// Return the total line count regardless of mode.
+    ///
+    /// In VLF mode `lines` is empty; use `line_cache.len()` instead.
+    pub(crate) fn line_count(&self) -> usize {
+        if self.is_vlf { self.line_cache.len() } else { self.lines.len() }
+    }
+
+    /// Return the text of a line by logical index, or `None` if the slot is not loaded.
+    ///
+    /// In normal mode reads from `lines`.  In VLF mode reads from `line_cache`
+    /// and returns `None` for `LineSlot::Invalid` (show a loading indicator).
+    pub(crate) fn get_line(&self, idx: usize) -> Option<&str> {
+        if self.is_vlf {
+            match self.line_cache.get(idx)? {
+                LineSlot::Known(line) => Some(&line.text),
+                LineSlot::Invalid => None,
+            }
+        } else {
+            self.lines.get(idx).map(|s| s.as_str())
+        }
     }
 }
 
@@ -352,6 +393,7 @@ impl BufferManager {
             externally_modified: false,
             diagnostics: Vec::new(),
             annotations: Vec::new(),
+            is_vlf: false,
         };
 
         let mut view_to_idx = HashMap::new();
@@ -990,6 +1032,12 @@ impl BufferManager {
                     format!("code actions: {count}")
                 });
             }
+            BackendEvent::DocumentMode { view_id, is_vlf } => {
+                let idx = self.view_to_idx.get(&view_id).copied().unwrap_or(current);
+                self.bufs[idx].is_vlf = is_vlf;
+                // Rebuild lines now that mode is set (no-op in VLF mode).
+                self.bufs[idx].rebuild_lines();
+            }
         }
         Ok(())
     }
@@ -1092,6 +1140,7 @@ impl BufferManager {
             externally_modified: false,
             diagnostics: Vec::new(),
             annotations: Vec::new(),
+            is_vlf: false,
         });
         Ok(buf_id)
     }
@@ -1341,6 +1390,7 @@ impl BufferManager {
             externally_modified: false,
             diagnostics: Vec::new(),
             annotations: Vec::new(),
+            is_vlf: false,
         };
         let mut view_to_idx = HashMap::new();
         view_to_idx.insert(view_id, 0);
