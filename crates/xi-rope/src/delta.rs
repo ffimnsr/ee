@@ -708,6 +708,8 @@ mod tests {
 
     const TEST_STR: &str = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
+    type RawEdit = (usize, usize, String);
+
     fn normalized_interval(base_len: usize, raw_start: usize, raw_end: usize) -> Interval {
         let start = if base_len == 0 { 0 } else { raw_start % (base_len + 1) };
         let end = start + (raw_end % (base_len + 1 - start));
@@ -717,6 +719,34 @@ mod tests {
     fn apply_simple_edit(base: &str, raw_start: usize, raw_end: usize, insert: &str) -> String {
         let interval = normalized_interval(base.len(), raw_start, raw_end);
         format!("{}{}{}", &base[..interval.start()], insert, &base[interval.end()..])
+    }
+
+    fn build_script_delta(base: &str, edits: &[RawEdit]) -> (Delta<RopeInfo>, String) {
+        let mut builder = Builder::new(base.len());
+        let mut expected = String::new();
+        let mut cursor = 0;
+
+        for (raw_gap, raw_del_len, insert) in edits {
+            let remaining = base.len() - cursor;
+            let start = cursor + (raw_gap % (remaining + 1));
+            let delete_len = raw_del_len % (base.len() + 1 - start);
+            let end = start + delete_len;
+
+            expected.push_str(&base[cursor..start]);
+            expected.push_str(insert);
+
+            let interval = Interval::new(start, end);
+            if insert.is_empty() {
+                builder.delete(interval);
+            } else {
+                builder.replace(interval, Rope::from(insert.as_str()));
+            }
+
+            cursor = end;
+        }
+
+        expected.push_str(&base[cursor..]);
+        (builder.build(), expected)
     }
 
     #[test]
@@ -920,6 +950,47 @@ mod tests {
             let interval = normalized_interval(base.len(), raw_start, raw_end);
             let delta = Delta::simple_edit(interval, Rope::from(insert.as_str()), base.len());
             let expected = apply_simple_edit(&base, raw_start, raw_end, &insert);
+            let (insert_delta, deletes) = delta.clone().factor();
+            let inserts = insert_delta.inserted_subset();
+            let expanded_deletes = deletes.transform_expand(&inserts);
+            let union = insert_delta.apply(&Rope::from(base.as_str()));
+            let tombstones = inserts.complement().delete_from(&union);
+            let rebuilt = Delta::synthesize(&tombstones, &inserts, &expanded_deletes);
+
+            prop_assert_eq!(expected.clone(), delta.apply_to_string(&base));
+            prop_assert_eq!(expected, rebuilt.apply_to_string(&base));
+        }
+
+        #[test]
+        fn prop_builder_delta_apply_matches_manual_script(
+            base in string_regex("[a-z0-9]{0,24}").unwrap(),
+            edits in proptest::collection::vec(
+                (
+                    any::<usize>(),
+                    any::<usize>(),
+                    string_regex("[a-z0-9]{0,8}").unwrap(),
+                ),
+                0..8,
+            ),
+        ) {
+            let (delta, expected) = build_script_delta(&base, &edits);
+
+            prop_assert_eq!(expected, delta.apply_to_string(&base));
+        }
+
+        #[test]
+        fn prop_builder_delta_factor_and_synthesize_round_trip(
+            base in string_regex("[a-z0-9]{0,24}").unwrap(),
+            edits in proptest::collection::vec(
+                (
+                    any::<usize>(),
+                    any::<usize>(),
+                    string_regex("[a-z0-9]{0,8}").unwrap(),
+                ),
+                0..8,
+            ),
+        ) {
+            let (delta, expected) = build_script_delta(&base, &edits);
             let (insert_delta, deletes) = delta.clone().factor();
             let inserts = insert_delta.inserted_subset();
             let expanded_deletes = deletes.transform_expand(&inserts);
