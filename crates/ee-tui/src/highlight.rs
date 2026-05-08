@@ -13,6 +13,8 @@ use syntect::parsing::SyntaxSet;
 
 use crate::backend::CoreSyntaxSpan;
 
+const MAX_STATEFUL_HIGHLIGHT_LOOKBACK: usize = 256;
+
 /// A highlighted span: a foreground color and the text of that span.
 pub(crate) type HlSpan = (Color, String);
 
@@ -88,11 +90,22 @@ impl Highlighter {
             .or_else(|| extension.and_then(|ext| self.syntax_set.find_syntax_by_extension(ext)))
             .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
 
-        let mut hl = HighlightLines::new(syntax, &self.theme);
         let visible_end = (top + count).min(lines.len());
+        if top >= visible_end {
+            return Vec::new();
+        }
+
+        if syntax.name == self.syntax_set.find_syntax_plain_text().name
+            || is_slow_fallback_syntax(syntax.name.as_ref(), extension)
+        {
+            return self.plain_visible_lines(lines, top, visible_end);
+        }
+
+        let mut hl = HighlightLines::new(syntax, &self.theme);
+        let parse_start = top.saturating_sub(MAX_STATEFUL_HIGHLIGHT_LOOKBACK);
         let mut result = Vec::with_capacity(visible_end.saturating_sub(top));
 
-        for (i, line) in lines.iter().enumerate().take(visible_end) {
+        for (i, line) in lines.iter().enumerate().take(visible_end).skip(parse_start) {
             // syntect expects a trailing newline for accurate state transitions
             // in some grammars (e.g. multi-line string detection).
             let owned;
@@ -126,6 +139,21 @@ impl Highlighter {
         }
 
         result
+    }
+
+    fn plain_visible_lines(
+        &self,
+        lines: &[String],
+        top: usize,
+        visible_end: usize,
+    ) -> Vec<Vec<HlSpan>> {
+        let fg = self
+            .theme
+            .settings
+            .foreground
+            .map(|color| Color::Rgb(color.r, color.g, color.b))
+            .unwrap_or(Color::Rgb(213, 216, 224));
+        lines[top..visible_end].iter().map(|line| vec![(fg, line.clone())]).collect()
     }
 
     /// Produce `ratatui` [`Span`]s from pre-computed `HlSpan`s, applying
@@ -304,6 +332,11 @@ fn normalize_syntax_key(value: &str) -> String {
     value.chars().filter(|ch| !matches!(ch, '-' | '_' | ' ')).flat_map(char::to_lowercase).collect()
 }
 
+fn is_slow_fallback_syntax(syntax_name: &str, extension: Option<&str>) -> bool {
+    matches!(normalize_syntax_key(syntax_name).as_str(), "lisp")
+        || matches!(extension, Some("lisp" | "lsp" | "cl" | "el" | "scm" | "ss" | "rkt"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +399,52 @@ mod tests {
         assert_eq!(result.len(), 1);
         let joined: String = result[0].iter().map(|(_, t)| t.as_str()).collect();
         assert_eq!(joined, "hello world");
+    }
+
+    #[test]
+    fn highlight_visible_plain_text_skips_preceding_lines() {
+        let hl = make_highlighter();
+        let lines: Vec<String> = (0..30_000).map(|i| format!("line {i}")).collect();
+        let result = hl.highlight_visible(&lines, None, Some("txt"), 29_990, 3);
+
+        assert_eq!(result.len(), 3);
+        let joined = result
+            .iter()
+            .map(|spans| spans.iter().map(|(_, text)| text.as_str()).collect::<String>())
+            .collect::<Vec<_>>();
+        assert_eq!(joined, vec!["line 29990", "line 29991", "line 29992"]);
+    }
+
+    #[test]
+    fn highlight_visible_stateful_syntax_uses_bounded_lookback() {
+        let hl = make_highlighter();
+        let lines: Vec<String> = (0..30_000).map(|i| format!("int line_{i};")).collect();
+        let result = hl.highlight_visible(&lines, None, Some("c"), 29_990, 3);
+
+        assert_eq!(result.len(), 3);
+        let joined = result
+            .iter()
+            .map(|spans| spans.iter().map(|(_, text)| text.as_str()).collect::<String>())
+            .collect::<Vec<_>>();
+        assert_eq!(joined, vec!["int line_29990;", "int line_29991;", "int line_29992;"]);
+    }
+
+    #[test]
+    fn highlight_visible_lisp_uses_plain_fallback() {
+        let hl = make_highlighter();
+        let lines: Vec<String> = (0..30_000).map(|i| format!("(defun line-{i} ())")).collect();
+        let result = hl.highlight_visible(&lines, None, Some("lisp"), 29_990, 3);
+
+        assert_eq!(result.len(), 3);
+        assert!(result.iter().all(|spans| spans.len() == 1));
+        let joined = result
+            .iter()
+            .map(|spans| spans.iter().map(|(_, text)| text.as_str()).collect::<String>())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            joined,
+            vec!["(defun line-29990 ())", "(defun line-29991 ())", "(defun line-29992 ())"]
+        );
     }
 
     #[test]

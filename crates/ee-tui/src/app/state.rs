@@ -246,6 +246,8 @@ pub(crate) struct App {
     pub(crate) substitute_pending: Option<SubstitutePending>,
     /// Force next frame to clear and redraw the terminal surface.
     pub(crate) redraw_requested: bool,
+    /// Per-session render observability counters.
+    pub(crate) render_metrics: crate::render_metrics::RenderMetrics,
 }
 
 impl App {
@@ -318,6 +320,7 @@ impl App {
             source_control: HashMap::new(),
             substitute_pending: None,
             redraw_requested: false,
+            render_metrics: crate::render_metrics::RenderMetrics::new(),
         })
     }
 }

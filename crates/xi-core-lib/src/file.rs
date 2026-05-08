@@ -29,7 +29,9 @@ use log::warn;
 use xi_rope::Rope;
 use xi_rpc::RemoteErrorDetails;
 
+use crate::open_policy::{FileLocation, ModeOverride, OpenDecision, OpenPolicy};
 use crate::tabs::BufferId;
+use crate::text_store::DocumentMode;
 
 #[cfg(feature = "notify")]
 use crate::tabs::OPEN_FILE_EVENT_TOKEN;
@@ -44,6 +46,8 @@ const UTF8_BOM: &str = "\u{feff}";
 pub struct FileManager {
     open_files: HashMap<PathBuf, BufferId>,
     file_info: HashMap<BufferId, FileInfo>,
+    /// Open-mode policy applied before every file load.
+    open_policy: OpenPolicy,
     /// A monitor of filesystem events, for things like reloading changed files.
     #[cfg(feature = "notify")]
     watcher: FileWatcher,
@@ -78,6 +82,19 @@ pub enum FileError {
     HasChanged(PathBuf),
     /// The path contains non-UTF-8 bytes and cannot be used as an RPC string.
     NonUtf8Path(PathBuf),
+    /// File size could not be determined; refusing to load to avoid memory exhaustion.
+    MetadataUntrusted(PathBuf),
+    /// File exceeds the hard-open confirmation threshold for its location.
+    ///
+    /// The caller must surface `reason` to the user.  If the user accepts, retry
+    /// with [`FileManager::open_with_override`] passing the appropriate
+    /// [`ModeOverride`].
+    ConfirmationRequired {
+        path: PathBuf,
+        reason: &'static str,
+        /// The mode that would be used after confirmation.
+        mode: DocumentMode,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -89,12 +106,28 @@ pub enum CharacterEncoding {
 impl FileManager {
     #[cfg(feature = "notify")]
     pub fn new(watcher: FileWatcher) -> Self {
-        FileManager { open_files: HashMap::new(), file_info: HashMap::new(), watcher }
+        FileManager {
+            open_files: HashMap::new(),
+            file_info: HashMap::new(),
+            open_policy: OpenPolicy::default(),
+            watcher,
+        }
     }
 
     #[cfg(not(feature = "notify"))]
     pub fn new() -> Self {
-        FileManager { open_files: HashMap::new(), file_info: HashMap::new() }
+        FileManager {
+            open_files: HashMap::new(),
+            file_info: HashMap::new(),
+            open_policy: OpenPolicy::default(),
+        }
+    }
+
+    /// Replace the open policy used for subsequent [`open`] calls.
+    ///
+    /// [`open`]: FileManager::open
+    pub fn set_open_policy(&mut self, policy: OpenPolicy) {
+        self.open_policy = policy;
     }
 
     #[cfg(feature = "notify")]
@@ -123,7 +156,23 @@ impl FileManager {
         false
     }
 
+    /// Open a file using `Auto` mode selection (policy decides Normal / ConstrainedNormal / Vlf).
     pub fn open(&mut self, path: &Path, id: BufferId) -> Result<Rope, FileError> {
+        self.open_with_override(path, id, FileLocation::Local, ModeOverride::Auto)
+    }
+
+    /// Open a file with an explicit mode override and location hint.
+    ///
+    /// Use this when the caller has already shown the user a confirmation
+    /// dialog (i.e. after receiving [`FileError::ConfirmationRequired`]) and
+    /// wants to proceed with the policy-suggested mode.
+    pub fn open_with_override(
+        &mut self,
+        path: &Path,
+        id: BufferId,
+        location: FileLocation,
+        mode_override: ModeOverride,
+    ) -> Result<Rope, FileError> {
         // Reject non-UTF-8 paths early: they cannot be round-tripped over the
         // JSON-RPC layer, so any further operations on the buffer would fail.
         if path.to_str().is_none() {
@@ -131,6 +180,36 @@ impl FileManager {
         }
         if !path.exists() {
             return Ok(Rope::from(""));
+        }
+
+        // Stat the file for size *before* reading any bytes.
+        // Fail-closed: if metadata is unavailable, refuse to proceed.
+        // Note: we already returned early for non-existent paths above.
+        let size_opt = fs::metadata(path).ok().map(|m| m.len());
+
+        match self.open_policy.decide(size_opt, None, None, location, mode_override) {
+            OpenDecision::Open(DocumentMode::Normal)
+            | OpenDecision::Open(DocumentMode::ConstrainedNormal) => {
+                // Normal rope load path — both Normal and ConstrainedNormal use
+                // the existing read_to_end + Rope path for now. VLF wiring is
+                // handled in the VlfStore open path (separate issue).
+            }
+            OpenDecision::Open(DocumentMode::Vlf) => {
+                // VLF files must never be loaded into a full Rope. Until the
+                // VLF open wiring in file.rs is complete this returns an error
+                // so callers cannot accidentally fall back to whole-file load.
+                return Err(FileError::MetadataUntrusted(path.to_owned()));
+            }
+            OpenDecision::ConfirmationRequired { reason, mode } => {
+                return Err(FileError::ConfirmationRequired {
+                    path: path.to_owned(),
+                    reason,
+                    mode,
+                });
+            }
+            OpenDecision::Reject { reason: _ } => {
+                return Err(FileError::MetadataUntrusted(path.to_owned()));
+            }
         }
 
         let (rope, info) = try_load_file(path)?;
@@ -357,6 +436,8 @@ impl RemoteErrorDetails for FileError {
             FileError::UnknownEncoding(_) => 6,
             FileError::HasChanged(_) => 7,
             FileError::NonUtf8Path(_) => 8,
+            FileError::MetadataUntrusted(_) => 9,
+            FileError::ConfirmationRequired { .. } => 10,
         }
     }
 }
@@ -376,6 +457,14 @@ impl fmt::Display for FileError {
             ),
             FileError::NonUtf8Path(p) => {
                 write!(f, "File path contains non-UTF-8 bytes and cannot be used: {}", p.display())
+            }
+            FileError::MetadataUntrusted(p) => write!(
+                f,
+                "File size could not be determined safely; refusing to load: {}",
+                p.display()
+            ),
+            FileError::ConfirmationRequired { path, reason, .. } => {
+                write!(f, "{} ({})", reason, path.display())
             }
         }
     }
@@ -420,6 +509,76 @@ mod tests {
                 "Error decoding UTF-8 file contents: /tmp/demo.txt",
                 None::<serde_json::Value>,
             )
+        );
+    }
+
+    #[test]
+    fn metadata_untrusted_has_correct_code() {
+        let err = FileError::MetadataUntrusted(PathBuf::from("/tmp/big.bin"));
+        use xi_rpc::RemoteErrorDetails;
+        assert_eq!(err.remote_error_code(), 9);
+        assert!(err.to_string().contains("refusing to load"));
+    }
+
+    #[test]
+    fn confirmation_required_has_correct_code() {
+        use crate::text_store::DocumentMode;
+        use xi_rpc::RemoteErrorDetails;
+        let err = FileError::ConfirmationRequired {
+            path: PathBuf::from("/tmp/huge.bin"),
+            reason: "file exceeds 1 GiB",
+            mode: DocumentMode::Vlf,
+        };
+        assert_eq!(err.remote_error_code(), 10);
+        assert!(err.to_string().contains("file exceeds 1 GiB"));
+    }
+
+    #[cfg(all(target_family = "unix", not(feature = "notify")))]
+    #[test]
+    fn small_real_file_opens_normally() {
+        use super::FileManager;
+        use std::io::Write;
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        writeln!(tmp, "hello world").unwrap();
+        let path = tmp.path();
+        let mut mgr = FileManager::new();
+        let rope = mgr.open(path, crate::tabs::BufferId(1)).unwrap();
+        assert!(rope.len() > 0);
+    }
+
+    #[cfg(all(target_family = "unix", not(feature = "notify")))]
+    #[test]
+    fn file_above_confirmation_threshold_requires_confirmation() {
+        use super::{FileError, FileManager};
+        use crate::open_policy::{FileLocation, ModeOverride, OpenPolicy, OpenThresholds};
+        use std::io::Write;
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        // Write a few bytes — we override the thresholds to be tiny.
+        writeln!(tmp, "data").unwrap();
+
+        let thresholds = OpenThresholds {
+            normal_bytes: 1,
+            normal_lines: 1,
+            vlf_bytes: 2,
+            confirm_local_bytes: 3, // 3-byte file triggers confirmation
+            confirm_remote_bytes: 3,
+            confirm_web_bytes: 3,
+        };
+        let mut mgr = FileManager::new();
+        mgr.set_open_policy(OpenPolicy::new(thresholds));
+
+        let result = mgr.open_with_override(
+            tmp.path(),
+            crate::tabs::BufferId(2),
+            FileLocation::Local,
+            ModeOverride::Auto,
+        );
+        assert!(
+            matches!(result, Err(FileError::ConfirmationRequired { .. })),
+            "expected ConfirmationRequired, got: {:?}",
+            result.err().map(|e| e.to_string())
         );
     }
 }

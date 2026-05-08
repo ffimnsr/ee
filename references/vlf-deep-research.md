@@ -336,6 +336,108 @@ Borrow ee’s patterns when you need **global editor semantics**, not just huge-
 
 The strongest hybrid architecture for a new editor would be: **paged storage layer + rope/view/cache layer above it**. The rope would not hold all text eagerly; it would hold page descriptors or lazily loaded leaves, while views/search/save would operate against a stable logical document model. That is harder than either repo individually, but it combines VLF’s scalability with ee’s semantics.
 
+### How to build the hybrid paged-rope architecture
+
+The clean implementation path is not "make `Rope` sometimes lazy" first. The safer path is to add a storage abstraction below the editor model, then move rendering/search/save onto that abstraction before replacing eager rope leaves. Current `xi-rope` assumes `NodeInfo::L = String`, and the generic tree expects cloneable leaves with immediate length/info. A lazy leaf can fit that API only if its metadata is complete without loading text. That means every page descriptor must know byte length, UTF-16 length, newline count, line-start summary, and boundary flags before it can safely participate in rope metrics.
+
+Recommended layers:
+
+| Layer | Responsibility | Huge-file behavior |
+|---|---|---|
+| `FilePager` | Own file handle, mmap/pread windows, byte cache, cancellation | Reads bounded byte ranges only |
+| `PageIndex` | Tracks page descriptors, newline summaries, UTF-8 seam validity, scan progress | Built lazily, viewport-first |
+| `TextStore` | Stable logical document API: byte/line/UTF-16 conversions, chunk reads, snapshots | Returns loaded chunks or pending status |
+| `Overlay` | Stores edits as inserted text plus references to original byte ranges | Keeps base file out-of-core |
+| `DocumentModel` | Normal/VLF mode policy, revision IDs, undo groups, dirty state | Same API for normal and VLF |
+| `ViewCache` | Sparse viewport lines, highlights, wrap rows, status rows | Never materializes full `Vec<String>` |
+
+Core types:
+
+```rust
+enum DocumentMode {
+    Normal,
+    ConstrainedNormal,
+    Vlf,
+}
+
+trait TextStore {
+    fn mode(&self) -> DocumentMode;
+    fn len_bytes(&self) -> u64;
+    fn known_line_count(&self) -> KnownLineCount;
+    fn read_byte_range(&self, range: ByteRange, token: CancelToken) -> TextChunkResult;
+    fn line_to_byte(&self, line: u64, bias: LookupBias) -> LineLookup;
+    fn byte_to_line(&self, byte: u64) -> LineLookup;
+    fn iter_chunks(&self, range: ByteRange, token: CancelToken) -> ChunkStream;
+}
+
+struct PageDescriptor {
+    file_range: ByteRange,
+    decoded_range: ByteRange,
+    byte_len: u32,
+    utf16_len: u32,
+    newline_count: u32,
+    first_line_prefix_len: u32,
+    last_line_suffix_len: u32,
+    starts_at_utf8_boundary: bool,
+    ends_at_utf8_boundary: bool,
+    scan_state: PageScanState,
+}
+
+enum Piece {
+    Original { file_range: ByteRange },
+    Inserted { buffer_id: InsertBufferId, range: ByteRange },
+}
+```
+
+`TextStore` is the important seam. Normal mode can implement it with existing `Rope`. VLF mode can implement it with `FilePager + PageIndex + Overlay`. Views, search, syntax, and save should depend on `TextStore`, not `Rope`, wherever full-buffer ownership is not required. This keeps migration incremental and prevents huge-file support from infecting every call site at once.
+
+Do not make the first VLF version fully editable. First milestone should be read-only with stable line/byte addressing and sparse rendering. Second milestone should add append-only or current-window edits through `Overlay`. Third milestone should add arbitrary sparse edits and streaming save. This sequence avoids mixing hardest problems: lazy indexing, revision semantics, and out-of-core persistence.
+
+Lazy rope leaf strategy:
+
+| Option | Fit | Problem |
+|---|---|---|
+| `String` leaves only | Current code; safe | Eager RAM use |
+| `enum Leaf { Loaded(String), Page(PageId) }` | Minimal conceptual change | Current `Metric` methods need `&String`; APIs assume immediate text |
+| `PageDescriptor` leaves plus resolver | Best long-term | Requires new tree/metric API that separates metadata from loaded bytes |
+| Piece tree over page descriptors | Good for VLF edits | Different from current `xi-rope::Node`; more rewrite upfront |
+
+Best route for ee is `TextStore` first, then a new `PagedRope` or `PieceTreeStore` behind it. Trying to retrofit lazy page leaves into current `xi-rope::Rope` will fight `String`-based metrics, UTF-8 boundary checks, and borrowed `&str` chunk APIs.
+
+Search should run against `TextStore::iter_chunks` with overlap. Each chunk must include a small seam slop from previous/next chunk, enough for UTF-8 boundary validation and bounded regex lookbehind policy. Store matches as byte ranges, not line/column pairs. Convert to viewport coordinates only when rendering. Keep global match storage capped; spill or summarize beyond cap.
+
+Syntax should be range-first. Tree-sitter normally wants a stable full document callback; provide a callback that can read byte ranges from `TextStore`, but gate it to visible ranges until parse invalidation is proven bounded. For VLF, parse only viewport plus overscan and invalidate by byte range. For normal mode under 20 MB/300K LOC, keep full syntax enabled but defer full parse after first render.
+
+Save should be piece-streaming. For read-only VLF, save is disabled. For editable VLF, stream pieces in logical order into a temp file, applying inserted buffers and original file ranges without loading original whole file. Same-byte-length in-place overwrite can be an optimization later, but temp rewrite is simpler and safer first. Only add in-place tail shifting after differential and crash-consistency tests exist.
+
+Migration plan for ee:
+
+1. Add `DocumentMode` and `TextStore` trait while current `Rope` remains normal-mode implementation.
+2. Change `ee-tui` viewport rendering to request sparse lines/chunks through `TextStore`-style APIs; remove render-time full-buffer clones.
+3. Add file-size policy: `Normal <= 20 MB && <= 300K LOC`, `ConstrainedNormal` above normal threshold but still in-memory, `Vlf` above configured VLF threshold or forced.
+4. Implement read-only `VlfStore` with `FilePager`, sampled encoding detection, decode-safe page reads, and lazy newline index.
+5. Add viewport protocol responses carrying byte ranges, line ranges, approximate line count, loaded/pending status, and generation id.
+6. Move search onto chunk streaming with cancellation and seam overlap.
+7. Add sparse edit overlay and temp-file streaming save.
+8. Only after these seams stabilize, consider replacing eager `Rope` internals with descriptor leaves or a piece tree.
+
+Non-negotiable invariants:
+
+- Logical positions must have explicit unit: byte, UTF-16, line, visual row.
+- VLF source-of-truth is original file plus overlay, not loaded text.
+- Page boundaries must be UTF-8 safe before exposing `&str`.
+- Line count may be approximate until indexing completes.
+- UI must tolerate pending chunks without blocking input.
+- No command may call "get full text" on a VLF document.
+- Save must be crash-safe before edit mode becomes default.
+
+Primary references used for this design:
+
+- VS Code piece tree: avoids per-line objects, stores original content in chunks, tracks line starts, and uses a tree of pieces for stable edits.
+- Xi rope metrics: stores byte, UTF-16, and line metrics in B-tree nodes for O(log n) conversions.
+- Ropey APIs: expose chunk iterators and byte/char/line conversions as low-level building blocks.
+- Emacs VLF: keeps byte windows over disk as source of truth and adjusts decode seams.
+
 ## Risks, testing, and benchmarks
 
 The biggest pitfall in a VLF-style implementation is **confusing character count with byte count**. All save, seek, overlap, and match-boundary logic must be driven by encoded byte offsets, not logical characters. The next biggest pitfall is seam handling: multibyte UTF-8, BOM handling, CRLF normalization, and regex matches that cross chunk boundaries will all fail in subtle ways unless you add slop/overlap and validate decode boundaries explicitly. VLF’s own code is full of these compensating mechanisms, which is exactly why they need to be first-class in any reimplementation. citeturn22view0turn36search0turn34view4turn35view0
