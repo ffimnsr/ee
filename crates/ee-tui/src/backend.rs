@@ -122,6 +122,10 @@ impl BackendEvent {
     }
 }
 
+pub(crate) fn startup_render_ready(line_cache: &[LineSlot]) -> bool {
+    line_cache.first().is_some_and(|slot| matches!(slot, LineSlot::Known(_)))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PendingUiAction {
     Hover { view_id: String, content: String },
@@ -604,6 +608,9 @@ impl XiClient {
     fn pump_init(&mut self) -> io::Result<()> {
         let mut idle_rounds = 0;
         loop {
+            if startup_render_ready(&self.line_cache) {
+                break;
+            }
             if invalid_line_ranges(&self.line_cache).is_empty() {
                 break;
             }
@@ -1332,7 +1339,9 @@ pub(crate) fn drain_sync_notifications(
     tx: &mpsc::Sender<String>,
 ) -> Vec<BackendEvent> {
     let mut events = Vec::new();
-    while let Some(raw) = recv_with_timeout(rx, Duration::from_millis(20)) {
+    let mut timeout = Duration::from_millis(20);
+    while let Some(raw) = recv_with_timeout(rx, timeout) {
+        timeout = Duration::from_millis(1);
         let msg: Value = match serde_json::from_str(&raw) {
             Ok(value) => value,
             Err(_) => continue,

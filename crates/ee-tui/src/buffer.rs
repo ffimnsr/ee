@@ -21,7 +21,7 @@ use crate::backend::{
     CoreUpdateKind, LineSlot, NavigationTarget, PendingRequests, PendingUiAction,
     block_for_response, checked_advance, drain_sync_notifications, invalid_line_ranges,
     normalize_line_text, parse_response, recv_with_timeout, send_rpc_notification,
-    send_rpc_request, xi_reader_thread,
+    send_rpc_request, startup_render_ready, xi_reader_thread,
 };
 use crate::text::previous_char_boundary;
 
@@ -1064,6 +1064,9 @@ impl BufferManager {
     fn pump_init(&mut self) -> io::Result<()> {
         let mut idle_rounds = 0;
         loop {
+            if startup_render_ready(&self.bufs[self.current].line_cache) {
+                break;
+            }
             if invalid_line_ranges(&self.bufs[self.current].line_cache).is_empty() {
                 break;
             }

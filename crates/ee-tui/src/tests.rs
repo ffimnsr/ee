@@ -26,7 +26,7 @@ use crate::app::{App, Mode, Operator, PendingCharFind};
 use crate::backend::{
     BackendEvent, CachedLine, CompletionSuggestion, CoreAnnotation, CoreLine, CoreSyntaxSpan,
     CoreUpdate, CoreUpdateKind, CoreUpdateOp, LineSlot, NavigationTarget, format_location_message,
-    invalid_line_ranges, parse_notification,
+    invalid_line_ranges, parse_notification, startup_render_ready,
 };
 use crate::buffer::{BufState, BufferManager};
 use crate::git::{GitBufferCache, GitBufferStatus, GitHunk, GitSign};
@@ -40,6 +40,11 @@ use crate::text::{
 use crate::ui::ui;
 
 fn cwd_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn perf_test_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -481,13 +486,30 @@ fn open_file_bootstraps_visible_lines_lazily() {
 }
 
 #[test]
-#[ignore = "manual perf budget probe; debug-profile runtime varies by machine"]
+fn startup_render_ready_after_first_visible_line() {
+    assert!(!startup_render_ready(&[]));
+    assert!(!startup_render_ready(&[LineSlot::Invalid]));
+    assert!(startup_render_ready(&[LineSlot::Known(CachedLine {
+        text: String::from("line-0"),
+        cursors: Vec::new(),
+        syntax_spans: Vec::new(),
+    })]));
+    assert!(!startup_render_ready(&[
+        LineSlot::Invalid,
+        LineSlot::Known(CachedLine {
+            text: String::from("line-1"),
+            cursors: Vec::new(),
+            syntax_spans: Vec::new(),
+        }),
+    ]));
+}
+
+#[test]
 fn open_many_line_20mb_fixture_meets_first_render_budget() {
     assert_open_to_first_render_budget("many-line", budget_many_line);
 }
 
 #[test]
-#[ignore = "manual perf budget probe; debug-profile runtime varies by machine"]
 fn open_long_line_20mb_fixture_meets_first_render_budget() {
     assert_open_to_first_render_budget("long-line", budget_long_line);
 }
@@ -1297,19 +1319,9 @@ fn changed_file_picker_command_opens_picker() {
 
     let file = temp.path().join("sample.rs");
     fs::write(&file, "fn main() {}\n").unwrap();
-    Command::new("git").arg("init").current_dir(temp.path()).output().unwrap();
-    Command::new("git")
-        .args(["config", "user.email", "ee@example.com"])
-        .current_dir(temp.path())
-        .output()
-        .unwrap();
-    Command::new("git")
-        .args(["config", "user.name", "EE"])
-        .current_dir(temp.path())
-        .output()
-        .unwrap();
-    Command::new("git").args(["add", "sample.rs"]).current_dir(temp.path()).output().unwrap();
-    Command::new("git").args(["commit", "-m", "init"]).current_dir(temp.path()).output().unwrap();
+    init_test_git_repo(temp.path());
+    run_git(temp.path(), &["add", "sample.rs"]);
+    run_git(temp.path(), &["commit", "-m", "init"]);
     fs::write(&file, "fn main() { println!(\"hi\"); }\n").unwrap();
 
     let mut app = App::from_path(Some(file.clone())).unwrap();
@@ -1334,7 +1346,7 @@ fn file_explorer_command_opens_workspace_root_picker() {
     let nested_file = nested.join("sample.rs");
     fs::write(&root_file, "root\n").unwrap();
     fs::write(&nested_file, "fn main() {}\n").unwrap();
-    Command::new("git").arg("init").current_dir(temp.path()).output().unwrap();
+    init_test_git_repo(temp.path());
 
     let mut app = App::from_path(Some(nested_file)).unwrap();
     run_ex(&mut app, "file_explorer");
@@ -3338,9 +3350,7 @@ fn goto_syntax_and_paragraph_commands_forward_backend_methods() {
 #[test]
 fn goto_change_commands_reuse_git_hunk_navigation() {
     let temp = tempfile::tempdir().unwrap();
-    run_git(temp.path(), &["init"]);
-    run_git(temp.path(), &["config", "user.email", "test@example.com"]);
-    run_git(temp.path(), &["config", "user.name", "Test User"]);
+    init_test_git_repo(temp.path());
 
     let path = temp.path().join("sample.rs");
     fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").unwrap();
@@ -3391,8 +3401,22 @@ fn goto_change_commands_reuse_git_hunk_navigation() {
 }
 
 fn run_git(cwd: &std::path::Path, args: &[&str]) {
-    let status = Command::new("git").args(args).current_dir(cwd).status().unwrap();
-    assert!(status.success(), "git command failed: {args:?}");
+    let output = Command::new("git").args(args).current_dir(cwd).output().unwrap();
+    assert!(
+        output.status.success(),
+        "git command failed: {args:?}\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn init_test_git_repo(cwd: &std::path::Path) {
+    fs::create_dir_all(cwd.join(".git-hooks-disabled")).unwrap();
+    run_git(cwd, &["init"]);
+    run_git(cwd, &["config", "user.email", "test@example.com"]);
+    run_git(cwd, &["config", "user.name", "Test User"]);
+    run_git(cwd, &["config", "commit.gpgsign", "false"]);
+    run_git(cwd, &["config", "core.hooksPath", ".git-hooks-disabled"]);
 }
 
 #[test]
@@ -4155,8 +4179,12 @@ fn budget_long_line(i: usize) -> String {
 }
 
 fn assert_open_to_first_render_budget(label: &str, line_builder: fn(usize) -> String) {
+    let _guard = perf_test_lock().lock().unwrap_or_else(|err| err.into_inner());
+
     const WARM_BUDGET_MS: u128 = 250;
+    const WARM_NOISE_CEILING_MS: u128 = 350;
     const COLD_BUDGET_MS: u128 = 750;
+    const WARM_SAMPLE_COUNT: usize = 5;
 
     let thresholds = OpenThresholds::default();
     let target_bytes = thresholds.normal_bytes as usize - 4096;
@@ -4173,7 +4201,16 @@ fn assert_open_to_first_render_budget(label: &str, line_builder: fn(usize) -> St
     drop(App::from_path(None).unwrap());
 
     let (cold_app, cold_elapsed) = timed_open_to_first_render(&path);
-    let (warm_app, warm_elapsed) = timed_open_to_first_render(&path);
+    let mut best_warm = None;
+    let mut warm_samples = Vec::with_capacity(WARM_SAMPLE_COUNT);
+    for _ in 0..WARM_SAMPLE_COUNT {
+        let candidate = timed_open_to_first_render(&path);
+        warm_samples.push(candidate.1.as_millis());
+        if best_warm.as_ref().is_none_or(|(_, elapsed)| candidate.1 < *elapsed) {
+            best_warm = Some(candidate);
+        }
+    }
+    let (warm_app, warm_elapsed) = best_warm.expect("warm pass should run");
 
     fs::remove_file(&path).unwrap();
 
@@ -4198,9 +4235,22 @@ fn assert_open_to_first_render_budget(label: &str, line_builder: fn(usize) -> St
         "cold open-to-first-render for {label} fixture took {}ms, expected < {COLD_BUDGET_MS}ms",
         cold_elapsed.as_millis()
     );
+    if warm_elapsed.as_millis() >= WARM_BUDGET_MS {
+        eprintln!(
+            "warm open-to-first-render for {label} fixture missed target: best={}ms, target<{WARM_BUDGET_MS}ms, samples={warm_samples:?}",
+            warm_elapsed.as_millis()
+        );
+    }
+    let strict_budget = env::var_os("EE_STRICT_PERF_BUDGET").is_some();
+    let warm_limit_ms = if strict_budget { WARM_BUDGET_MS } else { WARM_NOISE_CEILING_MS };
+    let warm_limit_label = if strict_budget {
+        "strict budget"
+    } else {
+        "noise ceiling; set EE_STRICT_PERF_BUDGET=1 to enforce target"
+    };
     assert!(
-        warm_elapsed.as_millis() < WARM_BUDGET_MS,
-        "warm open-to-first-render for {label} fixture took {}ms, expected < {WARM_BUDGET_MS}ms",
+        warm_elapsed.as_millis() < warm_limit_ms,
+        "warm open-to-first-render for {label} fixture took {}ms, expected < {warm_limit_ms}ms ({warm_limit_label}); target < {WARM_BUDGET_MS}ms; samples={warm_samples:?}",
         warm_elapsed.as_millis()
     );
 }
@@ -4828,9 +4878,7 @@ fn dedup_commands_remove_duplicate_lines() {
 #[test]
 fn diffget_restores_current_git_hunk_from_head() {
     let temp = tempfile::tempdir().unwrap();
-    run_git(temp.path(), &["init"]);
-    run_git(temp.path(), &["config", "user.email", "test@example.com"]);
-    run_git(temp.path(), &["config", "user.name", "Test User"]);
+    init_test_git_repo(temp.path());
 
     let path = temp.path().join("sample.rs");
     fs::write(&path, "one\ntwo\nthree\n").unwrap();

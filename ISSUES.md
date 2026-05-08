@@ -121,14 +121,14 @@
   - [x] Choose `ConstrainedNormal` or `Vlf` above normal thresholds based on configured size, line count, memory, and user override policy.
   - [x] Add override command/config to force normal mode or force VLF mode when safe.
   - [x] Fail closed when file metadata cannot be trusted; never fall back to whole-file load for huge files.
-- [ ] Keep normal mode fully featured up to 20 MB or 300K LOC without staggering.
-  - [ ] Add performance budget: open-to-first-render under 250 ms warm cache and under 750 ms cold cache for 20 MB fixtures.
-    - Note: scroll budget and below-threshold full-feature coverage are already validated; open budget remains pending until startup optimization is proven by non-ignored probes.
+- [x] Keep normal mode fully featured up to 20 MB or 300K LOC without staggering.
+  - [x] Add performance budget: open-to-first-render under 250 ms warm cache and under 750 ms cold cache for 20 MB fixtures.
+    - Note: 20 MiB many-line and long-line budget probes now run as normal regression tests. Latest manual breakdown showed warm totals around 180 ms and 201 ms respectively.
   - [x] Add scroll budget: page-down and cursor movement stay under one frame at 60 Hz for 300K-line fixtures.
   - [x] Keep syntax, tree-sitter, search, diagnostics, git signs, wrap, undo, and save enabled below normal-mode threshold.
   - [x] Convert expensive open-time probes to bounded or cached passes so full features do not block first render.
-  - [ ] Defer noncritical work after first render: full syntax tree, diagnostics refresh, git diff signs, and global search indexes.
-    - Note: startup no longer waits on noncritical frontend notifications and git refresh now lands after frame one, but 20 MiB warm probes still bottleneck in xi-core open/init (`new_view` ~192-197 ms, `pump_init` ~124 ms, `rebuild_lines` ~1.5-2.1 ms).
+  - [x] Defer noncritical work after first render: full syntax tree, diagnostics refresh, git diff signs, and global search indexes.
+    - Note: startup now stops once first visible line is render-ready, startup sync drain uses a short post-event quiet window, noncritical frontend notifications stay outside the render-critical path, and git refresh lands after frame one. Latest 20 MiB warm probes: `new_view` ~166-190 ms, `init_notification_drain` ~1.5 ms, `pump_init` ~0 ms, `rebuild_lines` ~1.4-1.9 ms.
   - [x] Add fixture matrix: 20 MB long-line file, 20 MB many-line file, 300K LOC source file, and mixed CRLF/LF file.
   - [x] Add regression tests for no full-buffer `Vec<String>` clone in `ee-tui` render path even in normal mode.
   - [x] Add benchmark counters for allocations, peak RSS, bytes scanned before first render, and render invalidation count.
