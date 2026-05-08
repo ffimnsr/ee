@@ -55,6 +55,16 @@ pub(crate) struct BufState {
     /// In VLF mode `lines` is never materialized; rendering reads `line_cache`
     /// directly for the visible viewport range only.
     pub(crate) is_vlf: bool,
+    /// Monotone counter incremented on every VLF viewport scroll.
+    ///
+    /// Each `vlf_viewport` request carries this counter; `vlf_chunks` responses
+    /// with a different generation are discarded so stale out-of-order data
+    /// never overwrites a newer scroll position in the line cache.
+    pub(crate) vlf_generation: u64,
+    /// Last approximate total line count reported by a `vlf_chunks` response.
+    /// Used to pre-size the line cache while the background index is still
+    /// scanning the file.
+    pub(crate) vlf_approx_line_count: u64,
 }
 
 impl BufState {
@@ -223,6 +233,46 @@ impl BufState {
             }
         } else {
             self.lines.get(idx).map(|s| s.as_str())
+        }
+    }
+
+    /// Apply a `vlf_chunks` response to the line cache.
+    ///
+    /// Silently drops the response when `generation` does not match
+    /// `vlf_generation`; this prevents an out-of-order reply from a superseded
+    /// viewport scroll from overwriting data for the current position.
+    pub(crate) fn apply_vlf_chunks(
+        &mut self,
+        generation: u64,
+        line_start: u64,
+        lines: &[String],
+        approximate_line_count: u64,
+        _line_count_exact: bool,
+        _index_progress: f64,
+    ) {
+        if generation != self.vlf_generation {
+            return;
+        }
+
+        self.vlf_approx_line_count = approximate_line_count;
+
+        // Grow the line cache to fit the approximate document size.
+        let target_len = (approximate_line_count as usize).max(self.line_cache.len());
+        if target_len > self.line_cache.len() {
+            self.line_cache.resize(target_len, LineSlot::Invalid);
+        }
+
+        // Write the received lines into the cache.
+        let start = line_start as usize;
+        for (i, text) in lines.iter().enumerate() {
+            let idx = start + i;
+            if idx < self.line_cache.len() {
+                self.line_cache[idx] = LineSlot::Known(CachedLine {
+                    text: text.clone(),
+                    cursors: Vec::new(),
+                    syntax_spans: Vec::new(),
+                });
+            }
         }
     }
 }
@@ -394,6 +444,8 @@ impl BufferManager {
             diagnostics: Vec::new(),
             annotations: Vec::new(),
             is_vlf: false,
+            vlf_generation: 0,
+            vlf_approx_line_count: 0,
         };
 
         let mut view_to_idx = HashMap::new();
@@ -918,15 +970,38 @@ impl BufferManager {
         }
         buf.last_scroll = Some(range);
         let view_id = buf.view_id.clone();
-        send_xi_notification(
-            &self.tx,
-            "edit",
-            json!({
-                "view_id": view_id,
-                "method": "scroll",
-                "params": [first_line, last_line],
-            }),
-        )
+
+        if buf.is_vlf {
+            // VLF mode: use the dedicated viewport protocol so the backend
+            // only decodes the visible line range from disk.  Increment the
+            // generation counter so any in-flight response from the previous
+            // scroll position is discarded when it arrives.
+            let generation = buf.vlf_generation.wrapping_add(1);
+            buf.vlf_generation = generation;
+            send_xi_notification(
+                &self.tx,
+                "edit",
+                json!({
+                    "view_id": view_id,
+                    "method": "vlf_viewport",
+                    "params": {
+                        "line_start": first_line as u64,
+                        "line_end": last_line as u64,
+                        "generation": generation,
+                    },
+                }),
+            )
+        } else {
+            send_xi_notification(
+                &self.tx,
+                "edit",
+                json!({
+                    "view_id": view_id,
+                    "method": "scroll",
+                    "params": [first_line, last_line],
+                }),
+            )
+        }
     }
 
     pub(crate) fn drain_events(&mut self) -> io::Result<()> {
@@ -1038,6 +1113,25 @@ impl BufferManager {
                 // Rebuild lines now that mode is set (no-op in VLF mode).
                 self.bufs[idx].rebuild_lines();
             }
+            BackendEvent::VlfChunks {
+                view_id,
+                generation,
+                line_start,
+                lines,
+                approximate_line_count,
+                line_count_exact,
+                index_progress,
+            } => {
+                let idx = self.view_to_idx.get(&view_id).copied().unwrap_or(current);
+                self.bufs[idx].apply_vlf_chunks(
+                    generation,
+                    line_start,
+                    &lines,
+                    approximate_line_count,
+                    line_count_exact,
+                    index_progress,
+                );
+            }
         }
         Ok(())
     }
@@ -1141,6 +1235,8 @@ impl BufferManager {
             diagnostics: Vec::new(),
             annotations: Vec::new(),
             is_vlf: false,
+            vlf_generation: 0,
+            vlf_approx_line_count: 0,
         });
         Ok(buf_id)
     }
@@ -1391,6 +1487,8 @@ impl BufferManager {
             diagnostics: Vec::new(),
             annotations: Vec::new(),
             is_vlf: false,
+            vlf_generation: 0,
+            vlf_approx_line_count: 0,
         };
         let mut view_to_idx = HashMap::new();
         view_to_idx.insert(view_id, 0);

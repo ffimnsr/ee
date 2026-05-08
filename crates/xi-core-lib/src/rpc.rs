@@ -654,6 +654,16 @@ pub enum EditNotification {
     DecreaseNumber,
     CommitUndoCheckpoint,
     CollapseSelections,
+    /// Request visible line content for a VLF (Very Large File) buffer.
+    ///
+    /// The frontend sends this instead of `scroll` when `is_vlf` is true.
+    /// `generation` is a monotone counter that lets the backend skip stale
+    /// requests that have already been superseded by a newer scroll.
+    VlfViewport {
+        line_start: u64,
+        line_end: u64,
+        generation: u64,
+    },
 }
 
 /// The plugin related notifications.
