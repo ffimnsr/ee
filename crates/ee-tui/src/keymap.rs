@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::app::{Mode, Operator};
 
@@ -232,6 +232,137 @@ pub(crate) enum Action {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) struct KeyPress {
+    pub(crate) key: KeyCode,
+    pub(crate) modifiers: KeyModifiers,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SequenceBinding {
+    pub(crate) mode: Mode,
+    pub(crate) sequence: Vec<KeyPress>,
+    pub(crate) action: Action,
+    pub(crate) description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeyHintEntry {
+    pub(crate) key: String,
+    pub(crate) description: String,
+    pub(crate) is_group: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct SequenceNode {
+    pub(crate) action: Option<Action>,
+    pub(crate) description: Option<String>,
+    pub(crate) children: HashMap<KeyPress, SequenceNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct SequenceBindings {
+    roots: HashMap<Mode, SequenceNode>,
+}
+
+impl SequenceNode {
+    fn insert(&mut self, sequence: &[KeyPress], action: Action, description: String) {
+        if let Some((head, tail)) = sequence.split_first() {
+            self.children.entry(*head).or_default().insert(tail, action, description);
+            return;
+        }
+        self.action = Some(action);
+        self.description = Some(description);
+    }
+
+    fn collect_descriptions(&self, out: &mut Vec<String>, limit: usize) {
+        if out.len() >= limit {
+            return;
+        }
+        if let Some(description) = &self.description
+            && !out.iter().any(|existing| existing == description)
+        {
+            out.push(description.clone());
+        }
+        for child in self.children.values() {
+            if out.len() >= limit {
+                break;
+            }
+            child.collect_descriptions(out, limit);
+        }
+    }
+
+    fn hint_description(&self) -> String {
+        if let Some(description) = &self.description {
+            return description.clone();
+        }
+
+        let mut collected = Vec::new();
+        self.collect_descriptions(&mut collected, 3);
+        if collected.is_empty() {
+            return String::from("prefix");
+        }
+
+        let mut summary = collected.join(", ");
+        if self.children.len() > collected.len() {
+            summary.push_str(", ...");
+        }
+        summary
+    }
+
+    pub(crate) fn hint_entries(&self) -> Vec<KeyHintEntry> {
+        let mut entries = self
+            .children
+            .iter()
+            .map(|(key, child)| KeyHintEntry {
+                key: format_key_press(*key),
+                description: child.hint_description(),
+                is_group: !child.children.is_empty(),
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.key.cmp(&right.key));
+        entries
+    }
+}
+
+impl SequenceBindings {
+    pub(crate) fn has_mode(&self, mode: Mode) -> bool {
+        self.roots.contains_key(&mode)
+    }
+
+    pub(crate) fn node_for_sequence(
+        &self,
+        mode: Mode,
+        sequence: &[KeyPress],
+    ) -> Option<&SequenceNode> {
+        let mut node = self.roots.get(&mode)?;
+        for key in sequence {
+            node = node.children.get(key)?;
+        }
+        Some(node)
+    }
+
+    pub(crate) fn advance(
+        &self,
+        mode: Mode,
+        sequence: &[KeyPress],
+        key: KeyPress,
+    ) -> Option<(Vec<KeyPress>, &SequenceNode)> {
+        let node = self.node_for_sequence(mode, sequence)?;
+        let matched = node.children.get(&key).map(|child| (key, child)).or_else(|| {
+            if key.modifiers == KeyModifiers::NONE {
+                None
+            } else {
+                let fallback = KeyPress { modifiers: KeyModifiers::NONE, ..key };
+                node.children.get(&fallback).map(|child| (fallback, child))
+            }
+        })?;
+        let mut next = sequence.to_vec();
+        next.push(matched.0);
+        Some((next, matched.1))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct BindingKey {
     pub(crate) mode: Mode,
     pub(crate) key: KeyCode,
@@ -242,12 +373,21 @@ pub(crate) struct BindingKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct KeymapSettings {
     pub(crate) inherit_defaults: bool,
+    /// Timeout in milliseconds before an in-progress key sequence is cancelled.
+    /// `0` disables the timeout.
+    pub(crate) sequence_timeout_ms: u64,
     pub(crate) operations: Vec<KeymapOperation>,
+    pub(crate) sequence_bindings: Vec<SequenceBinding>,
 }
 
 impl Default for KeymapSettings {
     fn default() -> Self {
-        Self { inherit_defaults: true, operations: Vec::new() }
+        Self {
+            inherit_defaults: true,
+            sequence_timeout_ms: 1_000,
+            operations: Vec::new(),
+            sequence_bindings: Vec::new(),
+        }
     }
 }
 
@@ -279,15 +419,191 @@ pub(crate) fn bindings_for(settings: &KeymapSettings) -> HashMap<BindingKey, Act
     map
 }
 
+pub(crate) fn sequence_bindings_for(settings: &KeymapSettings) -> SequenceBindings {
+    let mut roots = HashMap::new();
+    let bindings = if settings.inherit_defaults {
+        let mut bindings = default_sequence_bindings().clone();
+        bindings.extend(settings.sequence_bindings.iter().cloned());
+        bindings
+    } else {
+        settings.sequence_bindings.clone()
+    };
+
+    for binding in &bindings {
+        roots
+            .entry(binding.mode)
+            .or_insert_with(|| SequenceNode {
+                action: None,
+                description: None,
+                children: HashMap::new(),
+            })
+            .insert(&binding.sequence, binding.action.clone(), binding.description.clone());
+    }
+    SequenceBindings { roots }
+}
+
+pub(crate) fn key_press_from_event(key: KeyEvent) -> KeyPress {
+    KeyPress { key: key.code, modifiers: key.modifiers }
+}
+
+pub(crate) fn parse_key_sequence_spec(specs: &[String]) -> Result<Vec<KeyPress>, String> {
+    if specs.is_empty() {
+        return Err(String::from("keys must contain at least one entry"));
+    }
+    specs.iter().map(|spec| parse_key_press_spec(spec)).collect()
+}
+
+pub(crate) fn format_key_sequence(sequence: &[KeyPress]) -> String {
+    sequence.iter().map(|key| format_key_press(*key)).collect::<Vec<_>>().join(" ")
+}
+
+pub(crate) fn format_key_press(key: KeyPress) -> String {
+    let mut parts = Vec::new();
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        parts.push("Ctrl".to_owned());
+    }
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        parts.push("Alt".to_owned());
+    }
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        parts.push("Shift".to_owned());
+    }
+
+    let key_name = match key.key {
+        KeyCode::Left => String::from("Left"),
+        KeyCode::Right => String::from("Right"),
+        KeyCode::Up => String::from("Up"),
+        KeyCode::Down => String::from("Down"),
+        KeyCode::Enter => String::from("Enter"),
+        KeyCode::Backspace => String::from("Backspace"),
+        KeyCode::Tab => String::from("Tab"),
+        KeyCode::BackTab => String::from("BackTab"),
+        KeyCode::Esc => String::from("Esc"),
+        KeyCode::Char(' ') => String::from("SPC"),
+        KeyCode::Char(ch) => ch.to_string(),
+        other => format!("{other:?}"),
+    };
+
+    if parts.is_empty() {
+        key_name
+    } else {
+        parts.push(key_name);
+        parts.join("+")
+    }
+}
+
+fn default_sequence_bindings() -> &'static Vec<SequenceBinding> {
+    static BINDINGS: OnceLock<Vec<SequenceBinding>> = OnceLock::new();
+    BINDINGS.get_or_init(build_default_sequence_bindings)
+}
+
+fn build_default_sequence_bindings() -> Vec<SequenceBinding> {
+    use Action::*;
+
+    fn sequence(keys: &[&str]) -> Vec<KeyPress> {
+        keys.iter()
+            .map(|key| parse_key_press_spec(key).expect("default key sequence must parse"))
+            .collect()
+    }
+
+    fn bind(
+        modes: &[Mode],
+        keys: &[&str],
+        action: Action,
+        description: &str,
+    ) -> Vec<SequenceBinding> {
+        let sequence = sequence(keys);
+        modes
+            .iter()
+            .copied()
+            .map(|mode| SequenceBinding {
+                mode,
+                sequence: sequence.clone(),
+                action: action.clone(),
+                description: description.to_owned(),
+            })
+            .collect()
+    }
+
+    let normal_modes = [Mode::Normal, Mode::Visual, Mode::VisualLine, Mode::VisualBlock];
+
+    let mut bindings = Vec::new();
+    bindings.extend(bind(&normal_modes, &["space", "f"], NoOp, "files"));
+    bindings.extend(bind(&normal_modes, &["space", "f", "f"], FilePicker, "find files"));
+    bindings.extend(bind(
+        &normal_modes,
+        &["space", "f", "d"],
+        FilePickerInCurrentDirectory,
+        "files in cwd",
+    ));
+    bindings.extend(bind(&normal_modes, &["space", "f", "e"], FileExplorer, "file explorer"));
+    bindings.extend(bind(&normal_modes, &["space", "f", "r"], ChangedFilePicker, "recent changes"));
+    bindings.extend(bind(&normal_modes, &["space", "b"], NoOp, "buffers"));
+    bindings.extend(bind(&normal_modes, &["space", "b", "b"], BufferPicker, "switch buffer"));
+    bindings.extend(bind(
+        &normal_modes,
+        &["space", "b", "d"],
+        DiagnosticsPicker,
+        "buffer diagnostics",
+    ));
+    bindings.extend(bind(&normal_modes, &["space", "b", "l"], LastPicker, "last picker"));
+    bindings.extend(bind(&normal_modes, &["space", "s"], NoOp, "search"));
+    bindings.extend(bind(&normal_modes, &["space", "s", "s"], GlobalSearch, "search workspace"));
+    bindings.extend(bind(
+        &normal_modes,
+        &["space", "s", "d"],
+        RequestDocumentSymbols,
+        "document symbols",
+    ));
+    bindings.extend(bind(
+        &normal_modes,
+        &["space", "s", "w"],
+        RequestWorkspaceSymbols,
+        "workspace symbols",
+    ));
+    bindings.extend(bind(&normal_modes, &["space", "g"], NoOp, "git"));
+    bindings.extend(bind(&normal_modes, &["space", "g", "b"], GitBlame, "git blame"));
+    bindings.extend(bind(&normal_modes, &["space", "g", "d"], GitDiff, "git diff"));
+    bindings.extend(bind(&normal_modes, &["space", "g", "n"], GitNextHunk, "next hunk"));
+    bindings.extend(bind(&normal_modes, &["space", "g", "p"], GitPrevHunk, "previous hunk"));
+    bindings.extend(bind(&normal_modes, &["space", "c"], NoOp, "code"));
+    bindings.extend(bind(&normal_modes, &["space", "c", "a"], RequestCodeActions, "code actions"));
+    bindings.extend(bind(&normal_modes, &["space", "c", "h"], RequestHover, "hover"));
+    bindings.extend(bind(&normal_modes, &["space", "c", "d"], RequestDefinition, "definition"));
+    bindings.extend(bind(&normal_modes, &["space", "c", "r"], RequestReferences, "references"));
+    bindings.extend(bind(
+        &normal_modes,
+        &["space", "c", "i"],
+        RequestImplementation,
+        "implementation",
+    ));
+    bindings.extend(bind(&normal_modes, &["space", "w"], NoOp, "windows"));
+    bindings.extend(bind(&normal_modes, &["space", "w", "h"], JumpViewLeft, "focus left"));
+    bindings.extend(bind(&normal_modes, &["space", "w", "j"], JumpViewDown, "focus down"));
+    bindings.extend(bind(&normal_modes, &["space", "w", "k"], JumpViewUp, "focus up"));
+    bindings.extend(bind(&normal_modes, &["space", "w", "l"], JumpViewRight, "focus right"));
+    bindings.extend(bind(&normal_modes, &["space", "w", "r"], RotateView, "rotate windows"));
+    bindings.extend(bind(&normal_modes, &["space", "w", "o"], WindowOnly, "only window"));
+    bindings.extend(bind(&normal_modes, &["space", "p"], NoOp, "project"));
+    bindings.extend(bind(&normal_modes, &["space", "p", "p"], CommandPalette, "command palette"));
+    bindings.extend(bind(&normal_modes, &["space", "p", "f"], FilePicker, "project files"));
+
+    bindings
+}
+
 pub(crate) fn parse_binding_spec(
     mode: &str,
     key: &str,
     prefix: Option<&str>,
 ) -> Result<BindingKey, String> {
-    let mode = parse_binding_mode_spec(mode).ok_or_else(|| format!("unknown mode `{mode}`"))?;
-    let (key, modifiers) = parse_key_spec(key)?;
+    let mode = parse_binding_mode(mode)?;
+    let key_press = parse_key_press_spec(key)?;
     let prefix = parse_prefix_spec(prefix)?;
-    Ok(BindingKey { mode, key, modifiers, prefix })
+    Ok(BindingKey { mode, key: key_press.key, modifiers: key_press.modifiers, prefix })
+}
+
+pub(crate) fn parse_binding_mode(spec: &str) -> Result<Mode, String> {
+    parse_binding_mode_spec(spec).ok_or_else(|| format!("unknown mode `{spec}`"))
 }
 
 pub(crate) fn parse_action_spec(spec: &str) -> Result<Action, String> {
@@ -755,6 +1071,11 @@ fn parse_prefix_char(spec: &str) -> Result<char, String> {
         return Err(String::from("prefix must contain exactly one character"));
     }
     Ok(ch)
+}
+
+fn parse_key_press_spec(spec: &str) -> Result<KeyPress, String> {
+    let (key, modifiers) = parse_key_spec(spec)?;
+    Ok(KeyPress { key, modifiers })
 }
 
 fn parse_key_spec(spec: &str) -> Result<(KeyCode, KeyModifiers), String> {

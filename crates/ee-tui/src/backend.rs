@@ -1054,7 +1054,7 @@ impl LineSlot {
         match self {
             LineSlot::Known(mut line) => {
                 if let Some(text) = update.text {
-                    line.text = text;
+                    line.text = normalize_line_text(Some(text));
                 }
                 line.cursors = update.cursor;
                 if let Some(syntax_spans) = update.syntax_spans {

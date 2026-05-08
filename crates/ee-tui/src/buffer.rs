@@ -424,6 +424,10 @@ impl Drop for BufferManager {
 impl BufferManager {
     const SYNC_IDLE_LIMIT: usize = 6;
 
+    fn buffer_index_for_view(&self, view_id: &str) -> Option<usize> {
+        self.view_to_idx.get(view_id).copied()
+    }
+
     /// Create a new xi-core process using already-computed config tables for
     /// the initial buffer. Reusing these tables avoids repeating config and
     /// editorconfig scans during startup.
@@ -1180,17 +1184,24 @@ impl BufferManager {
         match event {
             BackendEvent::Update { ref view_id, .. }
             | BackendEvent::ScrollTo { ref view_id, .. } => {
-                let idx = self.view_to_idx.get(view_id).copied().unwrap_or(current);
+                let Some(idx) = self.buffer_index_for_view(view_id) else {
+                    return Ok(());
+                };
                 match event {
                     BackendEvent::Update { update, .. } => {
                         let update_started = Instant::now();
+                        let update_pristine = update.pristine;
                         let buf = &mut self.bufs[idx];
+                        let was_pristine = buf.pristine;
                         if buf.is_vlf {
                             buf.pending_line_request = false;
                             return Ok(());
                         }
                         buf.pending_line_request = false;
                         let stats = buf.apply_update(update)?;
+                        if was_pristine && update_pristine {
+                            self.finish_external_reload(idx);
+                        }
                         if self.startup_profile_active {
                             self.startup_profile.update_apply += update_started.elapsed();
                             self.startup_profile.rebuild_lines += stats.rebuild_lines;
@@ -1217,12 +1228,16 @@ impl BufferManager {
                 self.bufs[current].status_message = Some(msg);
             }
             BackendEvent::Hover { view_id, content } => {
-                let idx = self.view_to_idx.get(&view_id).copied().unwrap_or(current);
+                let Some(idx) = self.buffer_index_for_view(&view_id) else {
+                    return Ok(());
+                };
                 self.pending_ui_actions.push(PendingUiAction::Hover { view_id, content });
                 self.bufs[idx].status_message = Some(String::from("hover ready"));
             }
             BackendEvent::Completions { view_id, items } => {
-                let idx = self.view_to_idx.get(&view_id).copied().unwrap_or(current);
+                let Some(idx) = self.buffer_index_for_view(&view_id) else {
+                    return Ok(());
+                };
                 let count = items.len();
                 self.pending_ui_actions.push(PendingUiAction::Completions { view_id, items });
                 self.bufs[idx].status_message = Some(if count == 0 {
@@ -1232,15 +1247,23 @@ impl BufferManager {
                 });
             }
             BackendEvent::Locations { view_id, title, locations } => {
+                if self.buffer_index_for_view(&view_id).is_none() {
+                    return Ok(());
+                }
                 // Collect for the App to dispatch to the quickfix list.
                 self.pending_locations.push((view_id, title, locations));
             }
             BackendEvent::Symbols { view_id, title, symbols } => {
+                if self.buffer_index_for_view(&view_id).is_none() {
+                    return Ok(());
+                }
                 // Collect for the App to dispatch to the symbols picker.
                 self.pending_symbols.push((view_id, title, symbols));
             }
             BackendEvent::Diagnostics { view_id, diagnostics } => {
-                let idx = self.view_to_idx.get(&view_id).copied().unwrap_or(current);
+                let Some(idx) = self.buffer_index_for_view(&view_id) else {
+                    return Ok(());
+                };
                 let count = diagnostics.len();
                 self.bufs[idx].diagnostics = diagnostics;
                 self.bufs[idx].status_message = Some(if count == 0 {
@@ -1250,7 +1273,9 @@ impl BufferManager {
                 });
             }
             BackendEvent::CodeActions { view_id, actions } => {
-                let idx = self.view_to_idx.get(&view_id).copied().unwrap_or(current);
+                let Some(idx) = self.buffer_index_for_view(&view_id) else {
+                    return Ok(());
+                };
                 let count = actions.len();
                 self.pending_ui_actions.push(PendingUiAction::CodeActions { view_id, actions });
                 self.bufs[idx].status_message = Some(if count == 0 {
@@ -1260,7 +1285,9 @@ impl BufferManager {
                 });
             }
             BackendEvent::DocumentMode { view_id, is_vlf } => {
-                let idx = self.view_to_idx.get(&view_id).copied().unwrap_or(current);
+                let Some(idx) = self.buffer_index_for_view(&view_id) else {
+                    return Ok(());
+                };
                 self.bufs[idx].is_vlf = is_vlf;
                 if is_vlf {
                     self.bufs[idx].lines.clear();
@@ -1284,7 +1311,9 @@ impl BufferManager {
                 line_count_exact,
                 index_progress,
             } => {
-                let idx = self.view_to_idx.get(&view_id).copied().unwrap_or(current);
+                let Some(idx) = self.buffer_index_for_view(&view_id) else {
+                    return Ok(());
+                };
                 if generation == self.bufs[idx].vlf_generation {
                     self.bufs[idx].pending_line_request = false;
                     self.bufs[idx].apply_vlf_chunks(
@@ -1306,7 +1335,9 @@ impl BufferManager {
                 stored_match_count,
                 ranges,
             } => {
-                let idx = self.view_to_idx.get(&view_id).copied().unwrap_or(current);
+                let Some(idx) = self.buffer_index_for_view(&view_id) else {
+                    return Ok(());
+                };
                 self.bufs[idx].vlf_search_ranges = ranges.clone();
                 let preview = ranges
                     .iter()
@@ -1337,6 +1368,24 @@ impl BufferManager {
             }
         }
         Ok(())
+    }
+
+    fn finish_external_reload(&mut self, idx: usize) {
+        let Some(buf) = self.bufs.get_mut(idx) else {
+            return;
+        };
+        if !buf.externally_modified {
+            return;
+        }
+        let Some(path) = buf.path.as_ref() else {
+            return;
+        };
+        let Some(mtime) = std::fs::metadata(path).ok().and_then(|meta| meta.modified().ok()) else {
+            return;
+        };
+        buf.mtime = Some(mtime);
+        buf.externally_modified = false;
+        buf.status_message = Some(String::from("reloaded"));
     }
 
     fn request_invalid_lines(&mut self, idx: usize) -> io::Result<()> {

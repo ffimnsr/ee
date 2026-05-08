@@ -41,9 +41,8 @@ use crate::text::{
 };
 use crate::ui::ui;
 
-fn cwd_test_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
+fn cwd_test_lock() -> &'static crate::config::TestCwdLock {
+    crate::config::test_cwd_lock()
 }
 
 fn perf_test_lock() -> &'static Mutex<()> {
@@ -348,6 +347,111 @@ fn apply_update_merges_copy_update_insert_and_invalidate() {
     assert_eq!(invalid_line_ranges(&client.line_cache), vec![(3, 5)]);
     assert_eq!(client.annotations.len(), 1);
     assert!(!client.pristine);
+}
+
+#[test]
+fn update_merge_normalizes_line_text() {
+    let slot = LineSlot::Known(CachedLine {
+        text: String::from("alpha"),
+        cursors: Vec::new(),
+        syntax_spans: Vec::new(),
+    });
+
+    let merged = slot
+        .merge(CoreLine {
+            text: Some(String::from("beta\n")),
+            cursor: Vec::new(),
+            syntax_spans: None,
+        })
+        .expect("update merge should succeed");
+
+    let LineSlot::Known(line) = merged else { panic!("expected known line") };
+    assert_eq!(line.text, "beta");
+}
+
+#[test]
+fn pristine_external_reload_update_clears_changed_flag_for_trailing_blank_line_removal() {
+    let path = unique_temp_path("ee-tui-external-reload-state");
+    fs::write(&path, "alpha\n\n").unwrap();
+
+    let (tx, _rx) = mpsc::channel();
+    let (backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    let buf_id = client.active().id;
+    client.set_buffer_path(buf_id, path.clone()).unwrap();
+    client.line_cache = vec![
+        LineSlot::Known(CachedLine {
+            text: String::from("alpha"),
+            cursors: Vec::new(),
+            syntax_spans: Vec::new(),
+        }),
+        LineSlot::Known(CachedLine {
+            text: String::new(),
+            cursors: Vec::new(),
+            syntax_spans: Vec::new(),
+        }),
+        LineSlot::Known(CachedLine {
+            text: String::new(),
+            cursors: Vec::new(),
+            syntax_spans: Vec::new(),
+        }),
+    ];
+    client.rebuild_lines();
+
+    let previous_mtime = client.mtime;
+    thread::sleep(Duration::from_millis(25));
+    fs::write(&path, "alpha\n").unwrap();
+    client.check_external_changes();
+    assert!(client.externally_modified);
+
+    backend_tx
+        .send(BackendEvent::Update {
+            view_id: String::from("view-id-1"),
+            update: CoreUpdate {
+                pristine: true,
+                annotations: Vec::new(),
+                ops: vec![CoreUpdateOp { op: CoreUpdateKind::Copy, n: 2, lines: Vec::new() }],
+            },
+        })
+        .unwrap();
+
+    client.drain_events().unwrap();
+
+    assert!(!client.externally_modified);
+    assert_eq!(client.status_message.as_deref(), Some("reloaded"));
+    assert_eq!(client.lines, vec![String::from("alpha"), String::new()]);
+    assert_ne!(client.mtime, previous_mtime);
+
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn stale_view_updates_are_ignored() {
+    let (tx, _rx) = mpsc::channel();
+    let (backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("live-view"));
+    client.line_cache = vec![LineSlot::Known(CachedLine {
+        text: String::from("alpha"),
+        cursors: Vec::new(),
+        syntax_spans: Vec::new(),
+    })];
+    client.rebuild_lines();
+
+    backend_tx
+        .send(BackendEvent::Update {
+            view_id: String::from("stale-view"),
+            update: CoreUpdate {
+                pristine: true,
+                annotations: Vec::new(),
+                ops: vec![CoreUpdateOp { op: CoreUpdateKind::Skip, n: 2, lines: Vec::new() }],
+            },
+        })
+        .unwrap();
+
+    client.drain_events().unwrap();
+
+    assert_eq!(client.lines, vec![String::from("alpha")]);
+    assert_eq!(client.line_cache.len(), 1);
 }
 
 #[test]
@@ -4305,6 +4409,312 @@ action = "substitute_confirm_apply"
 }
 
 #[test]
+fn configured_keymap_can_execute_nested_sequences() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(".ee.toml"),
+        r#"
+[keymap]
+inherit_defaults = true
+
+[[keymap.sequence_bindings]]
+mode = "normal"
+keys = ["space", "f", "f"]
+action = "command_palette"
+description = "command palette"
+
+[[keymap.sequence_bindings]]
+mode = "normal"
+keys = ["space", "f", "b"]
+action = "buffer_picker"
+description = "buffer picker"
+"#,
+    )
+    .unwrap();
+
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    env::set_current_dir(temp.path()).unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+    assert_eq!(app.active_key_sequence_label().as_deref(), Some("SPC"));
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)));
+    assert_eq!(app.active_key_sequence_label().as_deref(), Some("SPC f"));
+    assert!(app.active_key_sequence_node().is_some());
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)));
+
+    let picker = app.picker.as_ref().expect("command palette should open");
+    assert_eq!(picker.kind, PickerKind::Help);
+    assert_eq!(picker.title, "Command Palette");
+    assert!(app.active_key_sequence_node().is_none());
+}
+
+#[test]
+fn default_spc_tree_times_out_after_idle() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+    assert_eq!(app.active_key_sequence_label().as_deref(), Some("SPC"));
+
+    let now = Instant::now();
+    let timeout = Duration::from_millis(app.config.keymap.sequence_timeout_ms);
+    app.input_state.key_sequence_last_input_at = Some(now - timeout - Duration::from_millis(1));
+
+    app.expire_key_sequence_if_idle_at(now);
+
+    assert!(app.active_key_sequence_node().is_none());
+    assert!(app.active_key_sequence_label().is_none());
+}
+
+#[test]
+fn configured_key_sequence_timeout_is_applied() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(".ee.toml"),
+        r#"
+[keymap]
+inherit_defaults = true
+sequence_timeout_ms = 25
+
+[[keymap.sequence_bindings]]
+mode = "normal"
+keys = ["space", "f", "f"]
+action = "command_palette"
+description = "command palette"
+"#,
+    )
+    .unwrap();
+
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    env::set_current_dir(temp.path()).unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+    assert_eq!(app.config.keymap.sequence_timeout_ms, 25);
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+    assert_eq!(app.active_key_sequence_label().as_deref(), Some("SPC"));
+
+    let now = Instant::now();
+    app.input_state.key_sequence_last_input_at = Some(now - Duration::from_millis(26));
+
+    app.expire_key_sequence_if_idle_at(now);
+
+    assert!(app.active_key_sequence_node().is_none());
+    assert!(app.active_key_sequence_label().is_none());
+}
+
+#[test]
+fn default_spc_tree_exposes_root_categories() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+
+    let hints = app.active_key_sequence_node().expect("default SPC tree should activate");
+    let descriptions =
+        hints.hint_entries().into_iter().map(|entry| entry.description).collect::<Vec<_>>();
+
+    assert!(descriptions.iter().any(|description| description == "files"));
+    assert!(descriptions.iter().any(|description| description == "buffers"));
+    assert!(descriptions.iter().any(|description| description == "code"));
+}
+
+#[test]
+fn default_spc_tree_can_open_command_palette() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)));
+
+    let picker = app.picker.as_ref().expect("command palette should open");
+    assert_eq!(picker.kind, PickerKind::Help);
+    assert_eq!(picker.title, "Command Palette");
+}
+
+#[test]
+fn default_spc_tree_works_in_visual_mode() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Visual);
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)));
+
+    let picker = app.picker.as_ref().expect("command palette should open from visual mode");
+    assert_eq!(picker.kind, PickerKind::Help);
+    assert_eq!(picker.title, "Command Palette");
+}
+
+#[test]
+fn default_spc_tree_stays_disabled_in_insert_mode() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Insert);
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+    assert!(app.active_key_sequence_node().is_none());
+    assert!(app.active_key_sequence_label().is_none());
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)));
+    app.backend.pump().unwrap();
+
+    assert_eq!(app.mode, Mode::Insert);
+    assert_eq!(app.backend.lines, vec![String::from(" pp")]);
+    assert!(app.picker.is_none());
+    assert!(app.active_key_sequence_node().is_none());
+}
+
+#[test]
+fn nested_sequence_hints_render_in_bottom_panel() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(".ee.toml"),
+        r#"
+[keymap]
+inherit_defaults = true
+
+[[keymap.sequence_bindings]]
+mode = "normal"
+keys = ["space", "f", "f"]
+action = "file_picker"
+description = "find files"
+
+[[keymap.sequence_bindings]]
+mode = "normal"
+keys = ["space", "f", "b"]
+action = "buffer_picker"
+description = "list buffers"
+"#,
+    )
+    .unwrap();
+
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    env::set_current_dir(temp.path()).unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)));
+
+    let backend = TestBackend::new(80, 12);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut screen = String::new();
+    for y in 0..12 {
+        for x in 0..80 {
+            screen.push_str(buffer.cell((x, y)).unwrap().symbol());
+        }
+        screen.push('\n');
+    }
+
+    assert!(screen.contains("keys"), "screen missing active sequence title label: {screen}");
+    assert!(screen.contains("SPC"), "screen missing active sequence prefix: {screen}");
+    assert!(screen.contains("f"), "screen missing active sequence tail: {screen}");
+    assert!(screen.contains("find files"), "screen missing leaf description: {screen}");
+    assert!(screen.contains("list buffers"), "screen missing sibling description: {screen}");
+}
+
+#[test]
+fn nested_sequence_hints_fill_columns_top_to_bottom_and_mute_prefix_title() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(".ee.toml"),
+        r#"
+[keymap]
+inherit_defaults = false
+
+[[keymap.sequence_bindings]]
+mode = "normal"
+keys = ["space", "f"]
+action = "no_op"
+description = "files"
+
+[[keymap.sequence_bindings]]
+mode = "normal"
+keys = ["space", "f", "a"]
+action = "file_picker"
+description = "alpha"
+
+[[keymap.sequence_bindings]]
+mode = "normal"
+keys = ["space", "f", "b"]
+action = "buffer_picker"
+description = "beta"
+
+[[keymap.sequence_bindings]]
+mode = "normal"
+keys = ["space", "f", "c"]
+action = "command_palette"
+description = "gamma"
+
+[[keymap.sequence_bindings]]
+mode = "normal"
+keys = ["space", "f", "d"]
+action = "global_search"
+description = "delta"
+"#,
+    )
+    .unwrap();
+
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    env::set_current_dir(temp.path()).unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)));
+
+    let backend = TestBackend::new(50, 12);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    let mut screen = String::new();
+    for y in 0..12 {
+        for x in 0..50 {
+            screen.push_str(buffer.cell((x, y)).unwrap().symbol());
+        }
+        screen.push('\n');
+    }
+
+    assert!(screen.contains("keys"), "screen missing title label: {screen}");
+    assert!(screen.contains("SPC"), "screen missing sequence prefix in title: {screen}");
+    assert!(screen.contains("f"), "screen missing current sequence key in title: {screen}");
+    let alpha_row = screen.lines().position(|line| line.contains("alpha")).unwrap();
+    let beta_row = screen.lines().position(|line| line.contains("beta")).unwrap();
+    let gamma_row = screen.lines().position(|line| line.contains("gamma")).unwrap();
+    let delta_row = screen.lines().position(|line| line.contains("delta")).unwrap();
+    assert_eq!(
+        alpha_row, gamma_row,
+        "expected first row to hold alpha and gamma columns: {screen}"
+    );
+    assert_eq!(beta_row, delta_row, "expected second row to hold beta and delta columns: {screen}");
+
+    let (title_y, title_line) = screen
+        .lines()
+        .enumerate()
+        .find(|(_, line)| line.contains("keys") && line.contains("SPC") && line.contains("f"))
+        .unwrap();
+    let spc_x = title_line.find("SPC").unwrap() as u16;
+    let f_x =
+        title_line[spc_x as usize + 3..].find('f').map(|offset| spc_x + 3 + offset as u16).unwrap();
+    let spc_cell = buffer.cell((spc_x, title_y as u16)).unwrap();
+    let f_cell = buffer.cell((f_x, title_y as u16)).unwrap();
+    assert_eq!(spc_cell.bg, f_cell.bg, "title keys should not use different background fills");
+    assert_ne!(spc_cell.fg, f_cell.fg, "prefix key should be more muted than current key");
+}
+
+#[test]
 fn count_digits_accumulate_in_normal_mode() {
     let mut app = App::from_path(None).unwrap();
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE)));
@@ -5198,6 +5608,61 @@ fn reload_config_refreshes_runtime_settings() {
 
     assert!(app.config.cursor_line);
     assert_eq!(app.backend.status_message.as_deref(), Some("config reloaded"));
+}
+
+#[test]
+fn reload_config_refreshes_runtime_sequence_keymap() {
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(".ee.toml"),
+        r#"
+[keymap]
+inherit_defaults = true
+
+[[keymap.sequence_bindings]]
+mode = "normal"
+keys = ["space", "f", "f"]
+action = "file_picker"
+description = "find files"
+"#,
+    )
+    .unwrap();
+
+    env::set_current_dir(temp.path()).unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)));
+    let hints = app.active_key_sequence_node().expect("sequence hints should be active");
+    let descriptions =
+        hints.hint_entries().into_iter().map(|entry| entry.description).collect::<Vec<_>>();
+    assert!(descriptions.iter().any(|description| description == "find files"));
+
+    fs::write(
+        temp.path().join(".ee.toml"),
+        r#"
+[keymap]
+inherit_defaults = true
+
+[[keymap.sequence_bindings]]
+mode = "normal"
+keys = ["space", "f", "f"]
+action = "file_picker"
+description = "project files"
+"#,
+    )
+    .unwrap();
+
+    app.input_state.reset();
+    run_ex(&mut app, "reload_config");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE)));
+    let hints = app.active_key_sequence_node().expect("reloaded sequence hints should be active");
+    let descriptions =
+        hints.hint_entries().into_iter().map(|entry| entry.description).collect::<Vec<_>>();
+    assert!(descriptions.iter().any(|description| description == "project files"));
 }
 
 #[test]

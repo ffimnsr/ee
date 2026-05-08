@@ -325,6 +325,7 @@ fn run_app(
     while !app.should_quit && !shutdown.load(Ordering::Relaxed) {
         app.backend.drain_events()?;
         app.handle_pending_ui_actions();
+        app.expire_key_sequence_if_idle();
         // Dispatch pending location results (definition, references, …) to the
         // quickfix list before drawing so the panel opens in the same frame.
         app.handle_pending_locations();

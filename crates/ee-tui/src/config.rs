@@ -12,12 +12,17 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+#[cfg(test)]
+use std::cell::Cell;
+#[cfg(test)]
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+
 use globset::GlobBuilder;
 use serde::Deserialize;
 use serde_json::Value;
 use xi_core_lib::config::Table as XiConfigTable;
 
-use crate::keymap::{self, KeymapOperation, KeymapSettings};
+use crate::keymap::{self, KeymapOperation, KeymapSettings, SequenceBinding};
 
 // ── Public settings ───────────────────────────────────────────────────────────
 
@@ -215,10 +220,13 @@ pub(crate) struct EeToml {
 #[serde(deny_unknown_fields)]
 pub(crate) struct KeymapToml {
     pub inherit_defaults: Option<bool>,
+    pub sequence_timeout_ms: Option<u64>,
     #[serde(default)]
     pub unbind: Vec<KeyBindingTargetToml>,
     #[serde(default)]
     pub bindings: Vec<KeyBindingEntryToml>,
+    #[serde(default)]
+    pub sequence_bindings: Vec<KeySequenceBindingToml>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -236,6 +244,15 @@ pub(crate) struct KeyBindingEntryToml {
     pub key: String,
     pub prefix: Option<String>,
     pub action: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct KeySequenceBindingToml {
+    pub mode: String,
+    pub keys: Vec<String>,
+    pub action: String,
+    pub description: Option<String>,
 }
 
 // ── Merging ───────────────────────────────────────────────────────────────────
@@ -317,6 +334,9 @@ impl EditorSettings {
         if let Some(inherit_defaults) = patch.inherit_defaults {
             self.keymap.inherit_defaults = inherit_defaults;
         }
+        if let Some(sequence_timeout_ms) = patch.sequence_timeout_ms {
+            self.keymap.sequence_timeout_ms = sequence_timeout_ms;
+        }
 
         for entry in &patch.unbind {
             match keymap::parse_binding_spec(&entry.mode, &entry.key, entry.prefix.as_deref()) {
@@ -356,6 +376,40 @@ impl EditorSettings {
                 }
             };
             self.keymap.operations.push(KeymapOperation::Bind { binding, action });
+        }
+
+        for entry in &patch.sequence_bindings {
+            let mode = match keymap::parse_binding_mode(&entry.mode) {
+                Ok(mode) => mode,
+                Err(err) => {
+                    eprintln!("ee: warning: invalid keymap sequence mode ({}): {err}", entry.mode);
+                    continue;
+                }
+            };
+            let sequence = match keymap::parse_key_sequence_spec(&entry.keys) {
+                Ok(sequence) => sequence,
+                Err(err) => {
+                    eprintln!("ee: warning: invalid keymap sequence ({:?}): {err}", entry.keys);
+                    continue;
+                }
+            };
+            let action = match keymap::parse_action_spec(&entry.action) {
+                Ok(action) => action,
+                Err(err) => {
+                    eprintln!(
+                        "ee: warning: invalid keymap sequence action ({}, {}): {err}",
+                        entry.mode, entry.action
+                    );
+                    continue;
+                }
+            };
+            let description = entry.description.clone().unwrap_or_else(|| entry.action.clone());
+            self.keymap.sequence_bindings.push(SequenceBinding {
+                mode,
+                sequence,
+                action,
+                description,
+            });
         }
     }
 }
@@ -550,6 +604,9 @@ pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
 
 /// Load and merge all config layers for the given open file (if any).
 pub(crate) fn load_config(file_path: Option<&Path>) -> EditorSettings {
+    #[cfg(test)]
+    let _cwd_lock = test_cwd_lock().lock().unwrap();
+
     let mut settings = EditorSettings::default();
 
     // 1. User home config.
@@ -575,6 +632,60 @@ pub(crate) fn load_config(file_path: Option<&Path>) -> EditorSettings {
     }
 
     settings
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CWD_LOCK_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) struct TestCwdLock {
+    inner: Mutex<()>,
+}
+
+#[cfg(test)]
+pub(crate) struct TestCwdGuard {
+    _guard: Option<MutexGuard<'static, ()>>,
+}
+
+#[cfg(test)]
+impl TestCwdLock {
+    pub(crate) fn lock(
+        &'static self,
+    ) -> Result<TestCwdGuard, PoisonError<MutexGuard<'static, ()>>> {
+        if TEST_CWD_LOCK_DEPTH.with(|depth| {
+            let current = depth.get();
+            if current == 0 {
+                return false;
+            }
+            depth.set(current + 1);
+            true
+        }) {
+            return Ok(TestCwdGuard { _guard: None });
+        }
+
+        let guard = self.inner.lock()?;
+        TEST_CWD_LOCK_DEPTH.with(|depth| depth.set(1));
+        Ok(TestCwdGuard { _guard: Some(guard) })
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestCwdGuard {
+    fn drop(&mut self) {
+        TEST_CWD_LOCK_DEPTH.with(|depth| {
+            let current = depth.get();
+            debug_assert!(current > 0, "cwd lock depth underflow");
+            depth.set(current.saturating_sub(1));
+        });
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_cwd_lock() -> &'static TestCwdLock {
+    static LOCK: OnceLock<TestCwdLock> = OnceLock::new();
+    LOCK.get_or_init(|| TestCwdLock { inner: Mutex::new(()) })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -697,5 +808,28 @@ key = "K"
 
         assert!(!settings.keymap.inherit_defaults);
         assert_eq!(settings.keymap.operations.len(), 2);
+    }
+
+    #[test]
+    fn ee_toml_parses_key_sequence_overrides() {
+        let toml = r#"
+[keymap]
+inherit_defaults = true
+sequence_timeout_ms = 250
+
+[[keymap.sequence_bindings]]
+mode = "normal"
+keys = ["space", "f", "f"]
+action = "file_picker"
+description = "find files"
+"#;
+        let raw: EeToml = toml::from_str(toml).unwrap();
+        let mut settings = EditorSettings::default();
+        settings.merge_toml(&raw);
+
+        assert_eq!(settings.keymap.sequence_bindings.len(), 1);
+        assert_eq!(settings.keymap.sequence_timeout_ms, 250);
+        assert_eq!(settings.keymap.sequence_bindings[0].description, "find files");
+        assert_eq!(settings.keymap.sequence_bindings[0].sequence.len(), 3);
     }
 }

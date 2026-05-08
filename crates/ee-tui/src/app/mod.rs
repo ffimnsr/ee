@@ -16,7 +16,7 @@ use crate::backend::{CompletionSuggestion, PendingUiAction};
 use crate::buffer::BufferManager;
 use crate::folds::{FoldStore, indent_fold_extent};
 use crate::git::{self, GitBufferCache, GitBufferStatus};
-use crate::keymap::{Action, BindingKey};
+use crate::keymap::{Action, BindingKey, SequenceNode};
 use crate::picker::PickerState;
 use crate::quickfix::{QfEntry, QfList};
 use crate::registers::{BlockInsert, LastChange, RegisterName, RegisterStore};
@@ -54,6 +54,7 @@ impl App {
     }
 
     pub(crate) fn handle_event(&mut self, event: Event) {
+        self.expire_key_sequence_if_idle();
         self.last_input_at = Instant::now();
 
         match event {
@@ -117,8 +118,6 @@ impl App {
         if self.macro_register.is_some() && !self.macro_replaying {
             self.macro_buffer.push(key);
         }
-
-        let action = self.lookup_action(key, self.mode, self.input_state.prefix);
 
         // Two-char awaiting states consume the next key unconditionally.
         if self.input_state.awaiting_register {
@@ -202,6 +201,12 @@ impl App {
             return;
         }
 
+        if self.handle_key_sequence(key) {
+            return;
+        }
+
+        let action = self.lookup_action(key, self.mode, self.input_state.prefix);
+
         if let Some(action) = action {
             self.dispatch(action, key);
             if self.mode == Mode::Normal
@@ -237,6 +242,147 @@ impl App {
                 }
             })
             .cloned()
+    }
+
+    pub(crate) fn active_key_sequence_node(&self) -> Option<&SequenceNode> {
+        if self.input_state.key_sequence.is_empty() {
+            return None;
+        }
+        self.key_sequences.node_for_sequence(self.mode, &self.input_state.key_sequence)
+    }
+
+    pub(crate) fn active_key_sequence_label(&self) -> Option<String> {
+        self.active_key_sequence_node()?;
+        Some(crate::keymap::format_key_sequence(&self.input_state.key_sequence))
+    }
+
+    pub(crate) fn expire_key_sequence_if_idle(&mut self) {
+        self.expire_key_sequence_if_idle_at(Instant::now());
+    }
+
+    pub(crate) fn expire_key_sequence_if_idle_at(&mut self, now: Instant) {
+        let Some(last_input_at) = self.input_state.key_sequence_last_input_at else {
+            return;
+        };
+        let timeout_ms = self.config.keymap.sequence_timeout_ms;
+        if timeout_ms == 0 {
+            return;
+        }
+        if now.duration_since(last_input_at) >= Duration::from_millis(timeout_ms) {
+            self.clear_active_key_sequence();
+        }
+    }
+
+    fn clear_active_key_sequence(&mut self) {
+        self.input_state.key_sequence.clear();
+        self.input_state.key_sequence_last_input_at = None;
+    }
+
+    fn can_start_key_sequence(&self) -> bool {
+        matches!(
+            self.mode,
+            Mode::Normal | Mode::Insert | Mode::Visual | Mode::VisualLine | Mode::VisualBlock
+        ) && self.input_state.pending_find.is_none()
+            && self.input_state.pending_operator.is_none()
+            && self.input_state.text_obj_inclusive.is_none()
+            && self.input_state.prefix.is_none()
+            && !self.input_state.awaiting_register
+            && !self.input_state.awaiting_register_insert
+            && !self.input_state.awaiting_mark_set
+            && self.input_state.awaiting_mark_jump.is_none()
+            && !self.input_state.awaiting_macro_record
+            && !self.input_state.awaiting_macro_replay
+            && !self.input_state.awaiting_window_cmd
+            && !self.input_state.awaiting_replace_char
+            && self.mode != Mode::OperatorPending
+    }
+
+    fn handle_key_sequence(&mut self, key: KeyEvent) -> bool {
+        let now = Instant::now();
+
+        if !self.key_sequences.has_mode(self.mode) {
+            self.clear_active_key_sequence();
+            return false;
+        }
+
+        if key.code == KeyCode::Esc && !self.input_state.key_sequence.is_empty() {
+            self.clear_active_key_sequence();
+            self.backend.status_message = Some(String::from("key sequence cancelled"));
+            return true;
+        }
+
+        if self.input_state.key_sequence.is_empty() && !self.can_start_key_sequence() {
+            return false;
+        }
+
+        let key_press = crate::keymap::key_press_from_event(key);
+        let attempted = if self.input_state.key_sequence.is_empty() {
+            vec![key_press]
+        } else {
+            let mut sequence = self.input_state.key_sequence.clone();
+            sequence.push(key_press);
+            sequence
+        };
+
+        let Some((matched_sequence, has_children, action)) = self
+            .key_sequences
+            .advance(self.mode, &self.input_state.key_sequence, key_press)
+            .map(|(matched_sequence, node)| {
+                (matched_sequence, !node.children.is_empty(), node.action.clone())
+            })
+        else {
+            if self.input_state.key_sequence.is_empty() {
+                return false;
+            }
+            if self.mode == Mode::Insert
+                && let Some(text) = self.literal_text_for_key_sequence(&attempted)
+            {
+                self.clear_active_key_sequence();
+                self.insert_buffer.push_str(&text);
+                let _ = self.backend.send_edit("insert", json!({ "chars": text }));
+                self.backend.status_message = None;
+                return true;
+            }
+            self.clear_active_key_sequence();
+            self.backend.status_message =
+                Some(format!("no binding: {}", crate::keymap::format_key_sequence(&attempted)));
+            return true;
+        };
+
+        self.input_state.key_sequence = matched_sequence;
+        self.input_state.key_sequence_last_input_at = Some(now);
+        self.backend.status_message = None;
+
+        if !has_children {
+            let Some(action) = action else {
+                self.clear_active_key_sequence();
+                return true;
+            };
+            self.clear_active_key_sequence();
+            self.dispatch(action, key);
+        }
+
+        true
+    }
+
+    fn literal_text_for_key_sequence(
+        &self,
+        sequence: &[crate::keymap::KeyPress],
+    ) -> Option<String> {
+        let mut text = String::new();
+        for key in sequence {
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT)
+            {
+                return None;
+            }
+            match key.key {
+                KeyCode::Char(ch) => text.push(ch),
+                KeyCode::Enter => text.push('\n'),
+                _ => return None,
+            }
+        }
+        Some(text)
     }
 
     fn dispatch_context_key(&mut self, key: KeyEvent, mode: Mode) -> bool {

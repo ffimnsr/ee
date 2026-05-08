@@ -101,6 +101,8 @@ pub(crate) enum RepeatableMotion {
 pub(crate) struct InputState {
     pub(crate) count_digits: Vec<u8>,
     pub(crate) prefix: Option<char>,
+    pub(crate) key_sequence: Vec<crate::keymap::KeyPress>,
+    pub(crate) key_sequence_last_input_at: Option<Instant>,
     pub(crate) pending_find: Option<PendingCharFind>,
     pub(crate) pending_operator: Option<Operator>,
     pub(crate) text_obj_inclusive: Option<bool>,
@@ -137,6 +139,8 @@ impl InputState {
     pub(crate) fn reset(&mut self) {
         self.count_digits.clear();
         self.prefix = None;
+        self.key_sequence.clear();
+        self.key_sequence_last_input_at = None;
         self.pending_find = None;
         self.pending_operator = None;
         self.text_obj_inclusive = None;
@@ -156,6 +160,7 @@ impl InputState {
 pub(crate) struct App {
     pub(crate) config: crate::config::EditorSettings,
     pub(crate) key_bindings: HashMap<crate::keymap::BindingKey, crate::keymap::Action>,
+    pub(crate) key_sequences: crate::keymap::SequenceBindings,
     pub(crate) backend: BufferManager,
     pub(crate) tabs: TabManager,
     pub(crate) mode: Mode,
@@ -273,6 +278,7 @@ impl App {
         let (config, general_config, initial_overrides) =
             crate::config::xi_config_tables_for_file(path.as_deref());
         let key_bindings = crate::keymap::bindings_for(&config.keymap);
+        let key_sequences = crate::keymap::sequence_bindings_for(&config.keymap);
         let mut backend =
             BufferManager::new_with_initial_config(path, general_config, initial_overrides)?;
         let initial_buf_id = backend.active().id;
@@ -292,6 +298,7 @@ impl App {
         Ok(Self {
             config,
             key_bindings,
+            key_sequences,
             backend,
             tabs: TabManager::new(initial_buf_id),
             mode: Mode::Normal,
