@@ -95,6 +95,19 @@ pub(crate) enum BackendEvent {
         view_id: String,
         is_vlf: bool,
     },
+    /// Backend responded to a `vlf_viewport` request with decoded line content.
+    ///
+    /// `generation` echoes the request token; responses with a stale generation
+    /// are discarded before updating the line cache.
+    VlfChunks {
+        view_id: String,
+        generation: u64,
+        line_start: u64,
+        lines: Vec<String>,
+        approximate_line_count: u64,
+        line_count_exact: bool,
+        index_progress: f64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -219,6 +232,11 @@ pub(crate) struct XiClient {
     /// True when the backend opened this buffer in VLF mode.
     /// `lines` is never materialized; rendering reads `line_cache` directly.
     pub(crate) is_vlf: bool,
+    /// Monotone counter incremented on every VLF viewport scroll; see
+    /// [`BufState::vlf_generation`] for the full design note.
+    pub(crate) vlf_generation: u64,
+    /// Last approximate total line count from a `vlf_chunks` response.
+    pub(crate) vlf_approx_line_count: u64,
 }
 
 #[allow(dead_code)]
@@ -281,6 +299,8 @@ impl XiClient {
             annotations: Vec::new(),
             pending_symbols: Vec::new(),
             is_vlf: false,
+            vlf_generation: 0,
+            vlf_approx_line_count: 0,
         };
 
         for event in init_events {
@@ -653,6 +673,35 @@ impl XiClient {
             BackendEvent::DocumentMode { is_vlf, .. } => {
                 self.is_vlf = is_vlf;
             }
+            BackendEvent::VlfChunks {
+                generation,
+                line_start,
+                lines,
+                approximate_line_count,
+                line_count_exact,
+                index_progress,
+                ..
+            } => {
+                if generation == self.vlf_generation {
+                    self.vlf_approx_line_count = approximate_line_count;
+                    let target_len = (approximate_line_count as usize).max(self.line_cache.len());
+                    if target_len > self.line_cache.len() {
+                        self.line_cache.resize(target_len, LineSlot::Invalid);
+                    }
+                    let start = line_start as usize;
+                    for (i, text) in lines.into_iter().enumerate() {
+                        let idx = start + i;
+                        if idx < self.line_cache.len() {
+                            self.line_cache[idx] = LineSlot::Known(CachedLine {
+                                text,
+                                cursors: Vec::new(),
+                                syntax_spans: Vec::new(),
+                            });
+                        }
+                    }
+                    let _ = (line_count_exact, index_progress);
+                }
+            }
         }
         Ok(())
     }
@@ -663,14 +712,31 @@ impl XiClient {
             return Ok(());
         }
         self.last_scroll = Some(range);
-        self.send_notification(
-            "edit",
-            json!({
-                "view_id": self.view_id,
-                "method": "scroll",
-                "params": [first_line, last_line],
-            }),
-        )
+        if self.is_vlf {
+            let generation = self.vlf_generation.wrapping_add(1);
+            self.vlf_generation = generation;
+            self.send_notification(
+                "edit",
+                json!({
+                    "view_id": self.view_id,
+                    "method": "vlf_viewport",
+                    "params": {
+                        "line_start": first_line as u64,
+                        "line_end": last_line as u64,
+                        "generation": generation,
+                    },
+                }),
+            )
+        } else {
+            self.send_notification(
+                "edit",
+                json!({
+                    "view_id": self.view_id,
+                    "method": "scroll",
+                    "params": [first_line, last_line],
+                }),
+            )
+        }
     }
 
     fn clamp_cursor(&mut self) {
@@ -1112,6 +1178,32 @@ pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendE
             let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
             let is_vlf = params.get("is_vlf").and_then(Value::as_bool).unwrap_or(false);
             Some(BackendEvent::DocumentMode { view_id, is_vlf })
+        }
+        "vlf_chunks" => {
+            let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
+            let generation = params.get("generation").and_then(Value::as_u64)?;
+            let line_start = params.get("line_start").and_then(Value::as_u64)?;
+            let lines = params
+                .get("lines")?
+                .as_array()?
+                .iter()
+                .map(|v| v.as_str().unwrap_or("").to_owned())
+                .collect();
+            let approximate_line_count =
+                params.get("approximate_line_count").and_then(Value::as_u64).unwrap_or(0);
+            let line_count_exact =
+                params.get("line_count_exact").and_then(Value::as_bool).unwrap_or(false);
+            let index_progress =
+                params.get("index_progress").and_then(Value::as_f64).unwrap_or(0.0);
+            Some(BackendEvent::VlfChunks {
+                view_id,
+                generation,
+                line_start,
+                lines,
+                approximate_line_count,
+                line_count_exact,
+                index_progress,
+            })
         }
         _ => None,
     }

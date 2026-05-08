@@ -1570,6 +1570,8 @@ mod tests {
                 payloads: Some(vec![serde_json::Value::String(String::from("todo"))]),
             }],
             is_vlf: false,
+            vlf_generation: 0,
+            vlf_approx_line_count: 0,
         };
 
         assert_eq!(annotation_marker_for_line(&buf, 0), Some(('T', Color::Rgb(166, 227, 161))));

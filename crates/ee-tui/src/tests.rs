@@ -3970,6 +3970,8 @@ fn test_buf_state() -> BufState {
         diagnostics: Vec::new(),
         annotations: Vec::new(),
         is_vlf: false,
+        vlf_generation: 0,
+        vlf_approx_line_count: 0,
     }
 }
 
@@ -5713,4 +5715,99 @@ fn render_source_fixture_under_one_frame_budget() {
         "render of {LINES}-line source fixture took {}ms, expected < {FRAME_BUDGET_MS}ms",
         elapsed.as_millis()
     );
+}
+
+// ── VLF viewport protocol ──────────────────────────────────────────────────
+
+#[test]
+fn apply_vlf_chunks_populates_line_cache() {
+    let mut buf = test_buf_state();
+    buf.is_vlf = true;
+    buf.vlf_generation = 7;
+    buf.line_cache = vec![LineSlot::Invalid; 3];
+
+    let lines = vec![String::from("alpha"), String::from("beta")];
+    buf.apply_vlf_chunks(7, 0, &lines, 3, true, 1.0);
+
+    assert_eq!(
+        buf.line_cache[0],
+        LineSlot::Known(CachedLine {
+            text: String::from("alpha"),
+            cursors: vec![],
+            syntax_spans: vec![]
+        })
+    );
+    assert_eq!(
+        buf.line_cache[1],
+        LineSlot::Known(CachedLine {
+            text: String::from("beta"),
+            cursors: vec![],
+            syntax_spans: vec![]
+        })
+    );
+    // Slot 2 untouched (not in the chunk).
+    assert_eq!(buf.line_cache[2], LineSlot::Invalid);
+}
+
+#[test]
+fn apply_vlf_chunks_stale_generation_discarded() {
+    let mut buf = test_buf_state();
+    buf.is_vlf = true;
+    buf.vlf_generation = 5;
+    buf.line_cache = vec![LineSlot::Invalid; 2];
+
+    let lines = vec![String::from("stale")];
+    // Send with generation 3 (older than current 5) — must be ignored.
+    buf.apply_vlf_chunks(3, 0, &lines, 2, false, 0.5);
+
+    assert_eq!(buf.line_cache[0], LineSlot::Invalid, "stale response must not update cache");
+}
+
+#[test]
+fn apply_vlf_chunks_grows_cache_to_approximate_count() {
+    let mut buf = test_buf_state();
+    buf.is_vlf = true;
+    buf.vlf_generation = 1;
+    buf.line_cache = Vec::new(); // start empty
+
+    let lines: Vec<String> = Vec::new();
+    buf.apply_vlf_chunks(1, 0, &lines, 1000, false, 0.1);
+
+    assert_eq!(buf.line_cache.len(), 1000, "cache should grow to approximate_line_count");
+    assert!(buf.line_cache.iter().all(|s| *s == LineSlot::Invalid));
+    assert_eq!(buf.vlf_approx_line_count, 1000);
+}
+
+#[test]
+fn vlf_chunks_backend_event_parsed() {
+    let params = json!({
+        "view_id": "view-1",
+        "generation": 42,
+        "line_start": 10,
+        "lines": ["hello", "world"],
+        "approximate_line_count": 500,
+        "line_count_exact": false,
+        "index_progress": 0.42,
+    });
+    let event = parse_notification("vlf_chunks", params).expect("should parse vlf_chunks");
+    match event {
+        BackendEvent::VlfChunks {
+            view_id,
+            generation,
+            line_start,
+            lines,
+            approximate_line_count,
+            line_count_exact,
+            index_progress,
+        } => {
+            assert_eq!(view_id, "view-1");
+            assert_eq!(generation, 42);
+            assert_eq!(line_start, 10);
+            assert_eq!(lines, vec!["hello", "world"]);
+            assert_eq!(approximate_line_count, 500);
+            assert!(!line_count_exact);
+            assert!((index_progress - 0.42).abs() < 1e-9);
+        }
+        other => panic!("expected VlfChunks, got {:?}", other),
+    }
 }

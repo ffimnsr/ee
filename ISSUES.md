@@ -160,11 +160,11 @@
   - [x] Avoid placeholder strings for all lines.
   - [x] Render only loaded viewport lines plus small overscan.
   - [x] Show loading/status rows for missing chunks without blocking UI.
-- [ ] Add backend protocol for VLF viewport requests.
-  - [ ] Request text by viewport/page range instead of whole-buffer invalidation.
-  - [ ] Return chunk text, byte ranges, line ranges, and partial-index metadata.
-  - [ ] Add cancellation token or generation id to drop stale viewport responses.
-  - [ ] Preserve normal-buffer protocol behavior for small files.
+- [x] Add backend protocol for VLF viewport requests.
+  - [x] Request text by viewport/page range instead of whole-buffer invalidation.
+  - [x] Return chunk text, byte ranges, line ranges, and partial-index metadata.
+  - [x] Add cancellation token or generation id to drop stale viewport responses.
+  - [x] Preserve normal-buffer protocol behavior for small files.
 - [ ] Bound file analysis on open.
   - [ ] Limit whitespace detection to sampled bytes near file start.
   - [ ] Limit line-ending detection to bounded samples plus background verification.

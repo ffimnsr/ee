@@ -285,6 +285,37 @@ impl Client {
         );
     }
 
+    /// Respond to a [`vlf_viewport`] request with decoded line content.
+    ///
+    /// `generation` echoes the request's generation id so the frontend can
+    /// discard responses that have been superseded by a newer viewport scroll.
+    ///
+    /// An empty `lines` slice signals that the index is not yet ready for the
+    /// requested position; the frontend should retry on the next repaint.
+    pub fn vlf_chunks(
+        &self,
+        view_id: ViewId,
+        generation: u64,
+        line_start: u64,
+        lines: &[String],
+        approximate_line_count: u64,
+        line_count_exact: bool,
+        index_progress: f64,
+    ) {
+        self.0.send_rpc_notification(
+            "vlf_chunks",
+            &json!({
+                "view_id": view_id,
+                "generation": generation,
+                "line_start": line_start,
+                "lines": lines,
+                "approximate_line_count": approximate_line_count,
+                "line_count_exact": line_count_exact,
+                "index_progress": index_progress,
+            }),
+        );
+    }
+
     pub fn schedule_idle(&self, token: usize) {
         self.0.schedule_idle(token)
     }
