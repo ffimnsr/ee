@@ -162,6 +162,27 @@ pub enum FullTextPolicy {
 // Feature gate matrix
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// ConstrainedNormal threshold constants
+// ---------------------------------------------------------------------------
+
+/// Maximum file size, in bytes, for which LSP full-document sync is enabled in
+/// `ConstrainedNormal` mode.
+///
+/// Above this threshold the editor will not push whole-document text to the
+/// LSP server unless the server explicitly advertises bounded range-sync
+/// support.  The threshold mirrors the default hard-open threshold for
+/// web/unknown files (50 MiB).
+pub const CONSTRAINED_LSP_SYNC_MAX_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Maximum document length, in Unicode scalar values (chars), for which
+/// heap-heavy whole-document operations (global indent, format-document,
+/// whole-file diff, …) remain enabled in `ConstrainedNormal` mode.
+///
+/// Above this threshold those operations are disabled to prevent UI stalls
+/// caused by allocating a single large buffer for the entire document.
+pub const CONSTRAINED_WHOLE_DOC_MAX_CHARS: u64 = 256_000_000;
+
 /// Availability of editor features for a given [`DocumentMode`].
 ///
 /// Every field is `true` when the feature is enabled for the mode and `false`
@@ -186,10 +207,25 @@ pub struct VlfFeatureGates {
     pub git_signs: bool,
     /// LSP features (hover, completion, go-to-definition, …) are active.
     pub lsp: bool,
+    /// LSP full-document sync is enabled.
+    ///
+    /// When `false` (ConstrainedNormal above 50 MB), the editor skips
+    /// whole-document text pushes to LSP servers that have not advertised
+    /// bounded range-sync support.  Hover, completion, and diagnostics that
+    /// arrive without requiring a full sync are still shown (`lsp` remains
+    /// `true`).
+    pub lsp_full_sync: bool,
     /// Diagnostic annotations (errors, warnings) are displayed.
     pub diagnostics: bool,
     /// Visual line-wrap is permitted.
     pub wrap: bool,
+    /// Heap-heavy whole-document operations are enabled.
+    ///
+    /// When `false` (ConstrainedNormal above 256 M chars), commands such as
+    /// global indent, format-document, whole-file diff, and similar operations
+    /// that allocate a single large buffer for the entire document are
+    /// disabled to prevent UI stalls.
+    pub whole_doc_ops: bool,
 }
 
 impl VlfFeatureGates {
@@ -206,8 +242,10 @@ impl VlfFeatureGates {
             (!self.syntax).then_some("syntax"),
             (!self.git_signs).then_some("git-signs"),
             (!self.lsp).then_some("lsp"),
+            (!self.lsp_full_sync).then_some("lsp-full-sync"),
             (!self.diagnostics).then_some("diagnostics"),
             (!self.wrap).then_some("wrap"),
+            (!self.whole_doc_ops).then_some("whole-doc-ops"),
         ]
         .into_iter()
         .flatten()
@@ -218,10 +256,10 @@ impl DocumentMode {
     /// Feature gate matrix for this document mode.
     ///
     /// - `Normal` — all features enabled.
-    /// - `ConstrainedNormal` — editing and navigation enabled; some
-    ///   background-heavy features (LSP range sync, whole-document
-    ///   operations) are excluded from this matrix as they are controlled
-    ///   by file-size thresholds rather than a hard gate.
+    /// - `ConstrainedNormal` — editing and navigation enabled; LSP full-document
+    ///   sync and heap-heavy whole-document operations are disabled to prevent
+    ///   UI stalls for files above [`CONSTRAINED_LSP_SYNC_MAX_BYTES`] /
+    ///   [`CONSTRAINED_WHOLE_DOC_MAX_CHARS`] respectively.
     /// - `Vlf` — read-only; only search is permitted.
     pub fn feature_gates(self) -> VlfFeatureGates {
         match self {
@@ -233,9 +271,13 @@ impl DocumentMode {
                 syntax: true,
                 git_signs: true,
                 lsp: true,
+                lsp_full_sync: true,
                 diagnostics: true,
                 wrap: true,
+                whole_doc_ops: true,
             },
+            // ConstrainedNormal: editing-capable; background-heavy features
+            // that can stall the UI on large files are downgraded.
             DocumentMode::ConstrainedNormal => VlfFeatureGates {
                 editing: true,
                 save: true,
@@ -244,8 +286,15 @@ impl DocumentMode {
                 syntax: true,
                 git_signs: true,
                 lsp: true,
+                // Disabled: whole-document LSP sync causes server OOM and
+                // network stalls above CONSTRAINED_LSP_SYNC_MAX_BYTES.
+                lsp_full_sync: false,
                 diagnostics: true,
                 wrap: true,
+                // Disabled: format-document, global indent, whole-file diff
+                // allocate a single large buffer above
+                // CONSTRAINED_WHOLE_DOC_MAX_CHARS.
+                whole_doc_ops: false,
             },
             // VLF: read-only milestone — search/navigation only.
             DocumentMode::Vlf => VlfFeatureGates {
@@ -256,9 +305,27 @@ impl DocumentMode {
                 syntax: false,
                 git_signs: false,
                 lsp: false,
+                lsp_full_sync: false,
                 diagnostics: false,
                 wrap: false,
+                whole_doc_ops: false,
             },
+        }
+    }
+
+    /// A user-facing status notice emitted when the editor downgrades from
+    /// full `Normal` mode to `ConstrainedNormal` mode.
+    ///
+    /// Returns `Some(message)` only for `ConstrainedNormal`; `None` for
+    /// `Normal` (no downgrade) and `Vlf` (handled by VLF status overlay).
+    pub fn downgrade_notice(self) -> Option<&'static str> {
+        match self {
+            DocumentMode::ConstrainedNormal => Some(
+                "Editor switched to constrained-normal mode: \
+                 LSP full-sync and whole-document operations are disabled \
+                 for this file size.",
+            ),
+            DocumentMode::Normal | DocumentMode::Vlf => None,
         }
     }
 }
@@ -278,16 +345,24 @@ impl DocumentMode {
 pub struct DocStatus {
     /// Total file size in bytes as reported by the storage backend.
     pub file_size_bytes: u64,
-    /// Human-readable mode label (e.g. `"normal"`, `"vlf"`).
+    /// Human-readable mode label (e.g. `"normal"`, `"constrained-normal"`, `"vlf"`).
     pub mode_name: &'static str,
     /// Features disabled in this mode, as stable identifiers.
     ///
-    /// Empty for `Normal` and `ConstrainedNormal` modes.
+    /// Empty for `Normal`.  Non-empty for `ConstrainedNormal` (lists
+    /// `"lsp-full-sync"` and `"whole-doc-ops"`) and `Vlf`.
     pub disabled_features: Vec<&'static str>,
     /// Background newline-index scan progress in the range `[0.0, 1.0]`.
     ///
     /// `1.0` for fully indexed or non-VLF documents.
     pub indexing_progress: f64,
+    /// A one-line notice to display in the status bar when the editor
+    /// downgrades from full Normal mode to ConstrainedNormal mode.
+    ///
+    /// `None` for `Normal` (no downgrade occurred) and `Vlf` (VLF status
+    /// overlay handles messaging).  `Some(msg)` for `ConstrainedNormal`;
+    /// callers should display this once and then dismiss.
+    pub downgrade_notice: Option<&'static str>,
 }
 
 // ---------------------------------------------------------------------------
@@ -441,16 +516,18 @@ pub trait TextStore {
     /// should override this to expose indexing progress and accurate file
     /// sizes.
     fn doc_status(&self) -> DocStatus {
-        let gates = self.mode().feature_gates();
+        let mode = self.mode();
+        let gates = mode.feature_gates();
         DocStatus {
             file_size_bytes: self.len_bytes(),
-            mode_name: match self.mode() {
+            mode_name: match mode {
                 DocumentMode::Normal => "normal",
                 DocumentMode::ConstrainedNormal => "constrained-normal",
                 DocumentMode::Vlf => "vlf",
             },
             disabled_features: gates.disabled_features().collect(),
             indexing_progress: 1.0,
+            downgrade_notice: mode.downgrade_notice(),
         }
     }
 }
@@ -504,8 +581,54 @@ mod tests {
     }
 
     #[test]
-    fn constrained_normal_all_features_enabled() {
+    fn constrained_normal_editing_enabled() {
         let gates = DocumentMode::ConstrainedNormal.feature_gates();
-        assert_eq!(gates.disabled_features().count(), 0);
+        assert!(gates.editing, "editing must be enabled in constrained-normal");
+        assert!(gates.save, "save must be enabled in constrained-normal");
+        assert!(gates.undo, "undo must be enabled in constrained-normal");
+        assert!(gates.search, "search must be enabled in constrained-normal");
+        assert!(gates.syntax, "syntax must be enabled in constrained-normal");
+        assert!(gates.git_signs, "git-signs must be enabled in constrained-normal");
+        assert!(gates.lsp, "lsp must be enabled in constrained-normal");
+        assert!(gates.diagnostics, "diagnostics must be enabled in constrained-normal");
+        assert!(gates.wrap, "wrap must be enabled in constrained-normal");
+    }
+
+    #[test]
+    fn constrained_normal_background_features_disabled() {
+        let gates = DocumentMode::ConstrainedNormal.feature_gates();
+        assert!(!gates.lsp_full_sync, "lsp-full-sync must be disabled in constrained-normal");
+        assert!(!gates.whole_doc_ops, "whole-doc-ops must be disabled in constrained-normal");
+        let disabled: Vec<&str> = gates.disabled_features().collect();
+        assert!(disabled.contains(&"lsp-full-sync"));
+        assert!(disabled.contains(&"whole-doc-ops"));
+    }
+
+    #[test]
+    fn constrained_normal_downgrade_notice_is_some() {
+        assert!(
+            DocumentMode::ConstrainedNormal.downgrade_notice().is_some(),
+            "downgrade_notice must return a message for ConstrainedNormal"
+        );
+    }
+
+    #[test]
+    fn normal_and_vlf_downgrade_notice_is_none() {
+        assert!(DocumentMode::Normal.downgrade_notice().is_none());
+        assert!(DocumentMode::Vlf.downgrade_notice().is_none());
+    }
+
+    #[test]
+    fn constrained_normal_doc_status_has_downgrade_notice() {
+        use crate::text_store::rope_store::RopeTextStore;
+        use xi_rope::Rope;
+        // Force constrained-normal mode by using the policy-override path.
+        let rope = Rope::from("hello world");
+        let store = RopeTextStore::new_with_mode(rope, DocumentMode::ConstrainedNormal);
+        let status = store.doc_status();
+        assert_eq!(status.mode_name, "constrained-normal");
+        assert!(status.downgrade_notice.is_some());
+        assert!(status.disabled_features.contains(&"lsp-full-sync"));
+        assert!(status.disabled_features.contains(&"whole-doc-ops"));
     }
 }

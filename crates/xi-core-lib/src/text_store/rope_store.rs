@@ -40,15 +40,27 @@ pub struct RopeTextStore {
     rope: Rope,
     /// Opaque revision token sourced from `Engine::get_head_rev_id().token()`.
     snapshot_id: u64,
+    /// The document mode for this store. Defaults to `Normal`; callers that
+    /// open a file in `ConstrainedNormal` mode can override via
+    /// [`RopeTextStore::new_with_mode`].
+    mode: DocumentMode,
 }
 
 impl RopeTextStore {
-    /// Create a new `RopeTextStore` wrapping `rope`.
+    /// Create a new `RopeTextStore` wrapping `rope` in `Normal` mode.
     ///
     /// `snapshot_id` should be the current engine revision token so that
     /// callers can detect when the content has changed.
     pub fn new(rope: Rope, snapshot_id: u64) -> Self {
-        RopeTextStore { rope, snapshot_id }
+        RopeTextStore { rope, snapshot_id, mode: DocumentMode::Normal }
+    }
+
+    /// Create a `RopeTextStore` with an explicit document mode.
+    ///
+    /// Use this when the open policy selects `ConstrainedNormal` for files
+    /// near the normal-mode threshold that still fit in RAM.
+    pub fn new_with_mode(rope: Rope, mode: DocumentMode) -> Self {
+        RopeTextStore { rope, snapshot_id: 0, mode }
     }
 
     /// Borrow the underlying `Rope`.
@@ -59,7 +71,7 @@ impl RopeTextStore {
 
 impl TextStore for RopeTextStore {
     fn mode(&self) -> DocumentMode {
-        DocumentMode::Normal
+        self.mode
     }
 
     fn len_bytes(&self) -> u64 {

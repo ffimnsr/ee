@@ -130,12 +130,12 @@
   - [x] Add fixture matrix: 20 MB long-line file, 20 MB many-line file, 300K LOC source file, and mixed CRLF/LF file.
   - [x] Add regression tests for no full-buffer `Vec<String>` clone in `ee-tui` render path even in normal mode.
   - [x] Add benchmark counters for allocations, peak RSS, bytes scanned before first render, and render invalidation count.
-- [ ] Add transition mode between normal and VLF.
-  - [ ] Introduce `LargeNormal` or `ConstrainedNormal` policy for files near thresholds that still fit in RAM.
-  - [ ] Keep editing enabled in transition mode, but downgrade background-heavy features before UI stalls.
-  - [ ] Disable worker/LSP sync above 50 MB unless server advertises bounded range sync.
-  - [ ] Disable heap-heavy whole-document operations above 256M chars.
-  - [ ] Show status when editor downgrades from full normal mode to constrained mode.
+- [x] Add transition mode between normal and VLF.
+  - [x] Introduce `LargeNormal` or `ConstrainedNormal` policy for files near thresholds that still fit in RAM.
+  - [x] Keep editing enabled in transition mode, but downgrade background-heavy features before UI stalls.
+  - [x] Disable worker/LSP sync above 50 MB unless server advertises bounded range sync.
+  - [x] Disable heap-heavy whole-document operations above 256M chars.
+  - [x] Show status when editor downgrades from full normal mode to constrained mode.
 - [ ] Wire VLF storage into `crates/xi-core-lib/src/file.rs` open path.
   - [x] Add `VlfStore` and route its reads through `FilePager`.
   - [ ] Select VLF path from open policy before `try_load_file` uses `read_to_end`.

@@ -975,6 +975,7 @@ impl TextStore for VlfStore {
             mode_name: "vlf",
             disabled_features: gates.disabled_features().collect(),
             indexing_progress: progress.fraction(),
+            downgrade_notice: None,
         }
     }
 }
