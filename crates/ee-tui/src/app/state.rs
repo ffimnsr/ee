@@ -25,6 +25,12 @@ pub(crate) enum Mode {
     OperatorPending,
     CommandLine,
     Search,
+    /// Picker overlay focus.
+    Picker,
+    /// Quickfix panel focus.
+    Quickfix,
+    /// Location-list panel focus.
+    LocationList,
     /// Awaiting `y`/`n`/`a`/`q` confirmation for a `:s///c` substitute.
     SubstituteConfirm,
 }
@@ -40,6 +46,9 @@ impl Mode {
             Mode::OperatorPending => "OPR",
             Mode::CommandLine => "CMD",
             Mode::Search => "SRC",
+            Mode::Picker => "PIC",
+            Mode::Quickfix => "QFX",
+            Mode::LocationList => "LOC",
             Mode::SubstituteConfirm => "SUB",
         }
     }
@@ -97,6 +106,8 @@ pub(crate) struct InputState {
     pub(crate) text_obj_inclusive: Option<bool>,
     /// Set when `"` is pressed; next char selects the target register.
     pub(crate) awaiting_register: bool,
+    /// Set when `insert_register` is waiting for register name.
+    pub(crate) awaiting_register_insert: bool,
     /// Register selected via `"<char>` prefix; `None` = unnamed.
     pub(crate) pending_register: Option<RegisterName>,
     /// Set when `m` is pressed in Normal mode; next char sets a mark.
@@ -130,6 +141,7 @@ impl InputState {
         self.pending_operator = None;
         self.text_obj_inclusive = None;
         self.awaiting_register = false;
+        self.awaiting_register_insert = false;
         self.pending_register = None;
         self.awaiting_mark_set = false;
         self.awaiting_mark_jump = None;

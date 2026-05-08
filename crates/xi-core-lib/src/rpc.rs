@@ -552,6 +552,7 @@ pub enum EditNotification {
     MoveParentNodeEnd,
     RotateSelectionContentsBackward,
     RotateSelectionContentsForward,
+    ReverseSelectionContents,
     RequestHover {
         request_id: usize,
         position: Option<Position>,

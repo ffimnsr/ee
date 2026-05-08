@@ -545,6 +545,10 @@ pub fn rotate_selection_contents(base: &Rope, regions: &[SelRegion], forward: bo
     builder.build()
 }
 
+pub fn reverse_selection_contents(base: &Rope, regions: &[SelRegion]) -> RopeDelta {
+    transform_text(base, regions, |text| text.chars().rev().collect())
+}
+
 pub fn align_selections(base: &Rope, regions: &[SelRegion], tab_size: usize) -> RopeDelta {
     if regions.len() < 2 {
         return identity_delta(base);
@@ -748,7 +752,10 @@ fn n_spaces(n: usize) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{align_selections, delete_backward, rotate_selection_contents, transpose};
+    use super::{
+        align_selections, delete_backward, reverse_selection_contents, rotate_selection_contents,
+        transpose,
+    };
     use crate::config::BufferItems;
     use crate::selection::SelRegion;
     use xi_rope::Rope;
@@ -826,6 +833,26 @@ mod tests {
         let delta = rotate_selection_contents(&text, &regions, false);
 
         assert_eq!(String::from(delta.apply(&text)), "bb cc aa");
+    }
+
+    #[test]
+    fn reverse_selection_contents_reverses_each_selection() {
+        let text: Rope = "ab cde z".into();
+        let regions = [SelRegion::new(0, 2), SelRegion::new(3, 6)];
+
+        let delta = reverse_selection_contents(&text, &regions);
+
+        assert_eq!(String::from(delta.apply(&text)), "ba edc z");
+    }
+
+    #[test]
+    fn reverse_selection_contents_preserves_utf8_codepoints() {
+        let text: Rope = "aéß".into();
+        let regions = [SelRegion::new(0, text.len())];
+
+        let delta = reverse_selection_contents(&text, &regions);
+
+        assert_eq!(String::from(delta.apply(&text)), "ßéa");
     }
 
     #[test]

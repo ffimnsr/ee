@@ -93,6 +93,7 @@ pub(crate) enum BufferEvent {
     AlignSelections,
     RotateSelectionContentsBackward,
     RotateSelectionContentsForward,
+    ReverseSelectionContents,
 }
 
 /// An event that needs special handling
@@ -612,6 +613,7 @@ impl From<EditNotification> for EventDomain {
             DecreaseNumber => BufferEvent::DecreaseNumber.into(),
             RotateSelectionContentsBackward => BufferEvent::RotateSelectionContentsBackward.into(),
             RotateSelectionContentsForward => BufferEvent::RotateSelectionContentsForward.into(),
+            ReverseSelectionContents => BufferEvent::ReverseSelectionContents.into(),
             CollapseSelections => ViewEvent::CollapseSelections.into(),
             VlfViewport { line_start, line_end, generation } =>
                 SpecialEvent::VlfViewport { line_start, line_end, generation }.into(),
