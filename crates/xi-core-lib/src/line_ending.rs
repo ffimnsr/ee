@@ -88,7 +88,7 @@ impl LineEnding {
                 Ok(None) => (),
                 Err(e) => return Err(e),
             }
-            seen += chunk.len();
+            seen += end;
         }
 
         match (crlf, lf) {

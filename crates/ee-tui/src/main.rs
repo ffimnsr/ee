@@ -287,7 +287,9 @@ fn run_app(
         app.handle_pending_locations();
         // Dispatch pending symbol results (document/workspace symbols) to picker.
         app.handle_pending_symbols();
-        app.refresh_source_control();
+        if !app.startup_deferred_work_pending {
+            app.refresh_source_control();
+        }
         // Periodically check for external file changes.
         app.backend.check_external_changes();
         // Warn the user when a backing file has been modified externally.
@@ -319,6 +321,10 @@ fn run_app(
 
         terminal.draw(|frame| ui(frame, app))?;
         app.render_metrics.record_render();
+        if app.startup_deferred_work_pending {
+            app.startup_deferred_work_pending = false;
+            app.refresh_source_control();
+        }
 
         if event::poll(Duration::from_millis(16))? {
             match event::read()? {

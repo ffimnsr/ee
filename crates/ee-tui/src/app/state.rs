@@ -241,6 +241,8 @@ pub(crate) struct App {
     pub(crate) hover_popup: Option<HoverPopup>,
     /// Cached git state keyed by buffer id.
     pub(crate) source_control: HashMap<crate::buffer::BufferId, crate::git::GitBufferCache>,
+    /// Noncritical startup work that should run only after first frame lands.
+    pub(crate) startup_deferred_work_pending: bool,
     // ── Substitute confirm state ──────────────────────────────────────────────────
     /// Pending substitutions awaiting `y`/`n`/`a`/`q` confirmation.
     pub(crate) substitute_pending: Option<SubstitutePending>,
@@ -252,9 +254,11 @@ pub(crate) struct App {
 
 impl App {
     pub(crate) fn from_path(path: Option<PathBuf>) -> io::Result<Self> {
-        let config = crate::config::load_config(path.as_deref());
+        let (config, general_config, initial_overrides) =
+            crate::config::xi_config_tables_for_file(path.as_deref());
         let key_bindings = crate::keymap::bindings_for(&config.keymap);
-        let mut backend = BufferManager::new(path)?;
+        let mut backend =
+            BufferManager::new_with_initial_config(path, general_config, initial_overrides)?;
         let initial_buf_id = backend.active().id;
 
         // Notify user if a crash-recovery artifact exists for this file.
@@ -318,6 +322,7 @@ impl App {
             search_backward: false,
             hover_popup: None,
             source_control: HashMap::new(),
+            startup_deferred_work_pending: true,
             substitute_pending: None,
             redraw_requested: false,
             render_metrics: crate::render_metrics::RenderMetrics::new(),

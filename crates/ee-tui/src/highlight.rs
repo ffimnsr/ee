@@ -7,6 +7,7 @@
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 use std::path::Path;
+use std::sync::OnceLock;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
@@ -20,8 +21,8 @@ pub(crate) type HlSpan = (Color, String);
 
 /// Loaded once at startup; passed by reference into `render_buffer`.
 pub(crate) struct Highlighter {
-    syntax_set: SyntaxSet,
-    theme: Theme,
+    syntax_set: &'static SyntaxSet,
+    theme: &'static Theme,
 }
 
 impl std::fmt::Debug for Highlighter {
@@ -33,14 +34,8 @@ impl std::fmt::Debug for Highlighter {
 impl Highlighter {
     /// Build a `Highlighter` using bundled grammars and the "base16-ocean.dark" theme.
     pub(crate) fn new() -> Self {
-        let syntax_set = SyntaxSet::load_defaults_newlines();
-        let theme_set = ThemeSet::load_defaults();
-        // "base16-ocean.dark" ships with syntect's default theme set and works
-        // well on a dark terminal background.
-        let theme = theme_set.themes.get("base16-ocean.dark").cloned().unwrap_or_else(|| {
-            theme_set.themes.values().next().cloned().expect("syntect default themes are empty")
-        });
-        Self { syntax_set, theme }
+        let assets = shared_assets();
+        Self { syntax_set: &assets.syntax_set, theme: &assets.theme }
     }
 
     pub(crate) fn canonical_syntax_name(&self, requested: &str) -> Option<String> {
@@ -101,7 +96,7 @@ impl Highlighter {
             return self.plain_visible_lines(lines, top, visible_end);
         }
 
-        let mut hl = HighlightLines::new(syntax, &self.theme);
+        let mut hl = HighlightLines::new(syntax, self.theme);
         let parse_start = top.saturating_sub(MAX_STATEFUL_HIGHLIGHT_LOOKBACK);
         let mut result = Vec::with_capacity(visible_end.saturating_sub(top));
 
@@ -116,7 +111,7 @@ impl Highlighter {
                 &owned
             };
 
-            match hl.highlight_line(line_str, &self.syntax_set) {
+            match hl.highlight_line(line_str, self.syntax_set) {
                 Ok(ranges) if i >= top => {
                     let spans: Vec<HlSpan> = ranges
                         .iter()
@@ -163,9 +158,10 @@ impl Highlighter {
     /// the visible viewport begins (as returned by `display_col_to_byte`).
     /// Spans that fall entirely to the left of `byte_start` are discarded;
     /// spans that straddle `byte_start` are sliced at the boundary.
-    pub(crate) fn spans_with_offset(
+    pub(crate) fn spans_with_range(
         hl_spans: &[HlSpan],
         byte_start: usize,
+        byte_end: usize,
     ) -> Vec<ratatui::text::Span<'static>> {
         let mut out = Vec::new();
         let mut offset = 0usize;
@@ -176,11 +172,15 @@ impl Highlighter {
                 offset = end;
                 continue;
             }
+            if offset >= byte_end {
+                break;
+            }
             let slice_start = byte_start.saturating_sub(offset);
+            let slice_end = byte_end.saturating_sub(offset).min(text.len());
             // Safety: `byte_start` is a char boundary in the full line, and
             // `offset` tracks exact byte positions of syntect span boundaries
             // (which are also char boundaries), so `slice_start` is valid.
-            let visible = &text[slice_start..];
+            let visible = &text[slice_start..slice_end];
             if !visible.is_empty() {
                 out.push(Span::styled(visible.to_owned(), Style::default().fg(*color)));
             }
@@ -190,13 +190,15 @@ impl Highlighter {
         out
     }
 
-    pub(crate) fn scope_spans_with_offset(
+    pub(crate) fn scope_spans_in_range(
         line: &str,
         syntax_spans: &[CoreSyntaxSpan],
         byte_start: usize,
+        byte_end: usize,
     ) -> Vec<Span<'static>> {
         let mut out = Vec::new();
         let mut cursor = 0usize;
+        let byte_end = byte_end.min(line.len());
 
         for span in syntax_spans {
             let start = span.start_byte.min(line.len());
@@ -205,7 +207,15 @@ impl Highlighter {
                 continue;
             }
             if cursor < start {
-                Self::push_segment(&mut out, line, cursor, start, byte_start, Style::default());
+                Self::push_segment(
+                    &mut out,
+                    line,
+                    cursor,
+                    start,
+                    byte_start,
+                    byte_end,
+                    Style::default(),
+                );
             }
             Self::push_segment(
                 &mut out,
@@ -213,17 +223,26 @@ impl Highlighter {
                 start,
                 end,
                 byte_start,
+                byte_end,
                 Self::style_for_scope(&span.scope),
             );
             cursor = end;
         }
 
         if cursor < line.len() {
-            Self::push_segment(&mut out, line, cursor, line.len(), byte_start, Style::default());
+            Self::push_segment(
+                &mut out,
+                line,
+                cursor,
+                line.len(),
+                byte_start,
+                byte_end,
+                Style::default(),
+            );
         }
 
-        if out.is_empty() && byte_start <= line.len() {
-            out.push(Span::styled(line[byte_start..].to_owned(), Style::default()));
+        if out.is_empty() && byte_start < byte_end {
+            out.push(Span::styled(line[byte_start..byte_end].to_owned(), Style::default()));
         }
 
         out
@@ -235,13 +254,15 @@ impl Highlighter {
         start: usize,
         end: usize,
         byte_start: usize,
+        byte_end: usize,
         style: Style,
     ) {
-        if end <= start || end <= byte_start {
+        if end <= start || end <= byte_start || start >= byte_end {
             return;
         }
         let visible_start = start.max(byte_start);
-        let Some(text) = line.get(visible_start..end) else {
+        let visible_end = end.min(byte_end);
+        let Some(text) = line.get(visible_start..visible_end) else {
             return;
         };
         if !text.is_empty() {
@@ -328,6 +349,25 @@ impl Highlighter {
     }
 }
 
+struct HighlightAssets {
+    syntax_set: SyntaxSet,
+    theme: Theme,
+}
+
+fn shared_assets() -> &'static HighlightAssets {
+    static ASSETS: OnceLock<HighlightAssets> = OnceLock::new();
+    ASSETS.get_or_init(|| {
+        let syntax_set = SyntaxSet::load_defaults_newlines();
+        let theme_set = ThemeSet::load_defaults();
+        // "base16-ocean.dark" ships with syntect's default theme set and works
+        // well on a dark terminal background.
+        let theme = theme_set.themes.get("base16-ocean.dark").cloned().unwrap_or_else(|| {
+            theme_set.themes.values().next().cloned().expect("syntect default themes are empty")
+        });
+        HighlightAssets { syntax_set, theme }
+    })
+}
+
 fn normalize_syntax_key(value: &str) -> String {
     value.chars().filter(|ch| !matches!(ch, '-' | '_' | ' ')).flat_map(char::to_lowercase).collect()
 }
@@ -343,6 +383,15 @@ mod tests {
 
     fn make_highlighter() -> Highlighter {
         Highlighter::new()
+    }
+
+    #[test]
+    fn highlighter_reuses_shared_syntect_assets() {
+        let first = make_highlighter();
+        let second = make_highlighter();
+
+        assert!(std::ptr::eq(first.syntax_set, second.syntax_set));
+        assert!(std::ptr::eq(first.theme, second.theme));
     }
 
     #[test]
@@ -448,36 +497,44 @@ mod tests {
     }
 
     #[test]
-    fn spans_with_offset_trims_left() {
+    fn spans_with_range_trims_left() {
         let spans = vec![
             (Color::Rgb(255, 0, 0), "hello ".to_owned()),
             (Color::Rgb(0, 255, 0), "world".to_owned()),
         ];
         // byte_start = 6 should skip "hello " entirely
-        let result = Highlighter::spans_with_offset(&spans, 6);
+        let result = Highlighter::spans_with_range(&spans, 6, usize::MAX);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].content, "world");
     }
 
     #[test]
-    fn spans_with_offset_splits_span() {
+    fn spans_with_range_splits_span() {
         let spans = vec![(Color::Rgb(255, 0, 0), "hello world".to_owned())];
         // byte_start = 6 should yield "world"
-        let result = Highlighter::spans_with_offset(&spans, 6);
+        let result = Highlighter::spans_with_range(&spans, 6, usize::MAX);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].content, "world");
     }
 
     #[test]
-    fn spans_with_offset_zero_noop() {
+    fn spans_with_range_zero_noop() {
         let spans = vec![(Color::Rgb(255, 0, 0), "hello".to_owned())];
-        let result = Highlighter::spans_with_offset(&spans, 0);
+        let result = Highlighter::spans_with_range(&spans, 0, usize::MAX);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].content, "hello");
     }
 
     #[test]
-    fn scope_spans_with_offset_uses_backend_ranges() {
+    fn spans_with_range_trims_right() {
+        let spans = vec![(Color::Rgb(255, 0, 0), "hello world".to_owned())];
+        let result = Highlighter::spans_with_range(&spans, 0, 5);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].content, "hello");
+    }
+
+    #[test]
+    fn scope_spans_in_range_uses_backend_ranges() {
         let line = "let answer = 42;";
         let spans = vec![
             CoreSyntaxSpan { start_byte: 0, end_byte: 3, scope: "keyword.control.rust".into() },
@@ -488,7 +545,7 @@ mod tests {
             },
         ];
 
-        let result = Highlighter::scope_spans_with_offset(line, &spans, 0);
+        let result = Highlighter::scope_spans_in_range(line, &spans, 0, line.len());
         let joined: String = result.iter().map(|span| span.content.as_ref()).collect();
         assert_eq!(joined, line);
         assert_eq!(result[0].content, "let");
@@ -496,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_spans_with_offset_respects_scroll_offset() {
+    fn scope_spans_in_range_respects_scroll_offset() {
         let line = "let answer = 42;";
         let spans = vec![CoreSyntaxSpan {
             start_byte: 13,
@@ -504,9 +561,23 @@ mod tests {
             scope: "constant.numeric.decimal.rust".into(),
         }];
 
-        let result = Highlighter::scope_spans_with_offset(line, &spans, 4);
+        let result = Highlighter::scope_spans_in_range(line, &spans, 4, line.len());
         let joined: String = result.iter().map(|span| span.content.as_ref()).collect();
         assert_eq!(joined, "answer = 42;");
+    }
+
+    #[test]
+    fn scope_spans_in_range_trims_right() {
+        let line = "let answer = 42;";
+        let spans = vec![CoreSyntaxSpan {
+            start_byte: 0,
+            end_byte: 3,
+            scope: "keyword.control.rust".into(),
+        }];
+
+        let result = Highlighter::scope_spans_in_range(line, &spans, 0, 3);
+        let joined: String = result.iter().map(|span| span.content.as_ref()).collect();
+        assert_eq!(joined, "let");
     }
 
     #[test]

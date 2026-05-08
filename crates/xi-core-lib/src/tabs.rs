@@ -41,7 +41,7 @@ use crate::client::Client;
 use crate::config::{ConfigDomain, ConfigDomainExternal, ConfigManager, Table};
 use crate::editor::Editor;
 use crate::event_context::EventContext;
-use crate::file::{FileManager, OpenResult};
+use crate::file::{FileManager, OpenResult, SampledIndentation, SampledLineEnding};
 use crate::line_ending::LineEnding;
 use crate::plugin_rpc::{PluginNotification, PluginRequest};
 use crate::plugins::rpc::ClientPluginInfo;
@@ -82,6 +82,7 @@ pub(crate) const REWRAP_VIEW_IDLE_MASK: usize = 1 << 26;
 pub(crate) const FIND_VIEW_IDLE_MASK: usize = 1 << 27;
 
 const NEW_VIEW_IDLE_TOKEN: usize = 1001;
+const VERIFY_LINE_ENDINGS_IDLE_TOKEN: usize = 1003;
 
 /// xi_rpc idle Token for watcher related idle scheduling.
 pub(crate) const WATCH_IDLE_TOKEN: usize = 1002;
@@ -113,6 +114,7 @@ pub struct CoreState {
     self_ref: Option<WeakXiCore>,
     /// Views which need to have setup finished.
     pending_views: Vec<(ViewId, Table)>,
+    pending_line_ending_verifications: Vec<BufferId>,
     peer: Client,
     id_counter: Counter,
     plugins: PluginCatalog,
@@ -177,6 +179,7 @@ impl CoreState {
             config_manager,
             self_ref: None,
             pending_views: Vec::new(),
+            pending_line_ending_verifications: Vec::new(),
             peer: Client::new(peer.clone()),
             id_counter: Counter::default(),
             plugins: PluginCatalog::default(),
@@ -776,6 +779,7 @@ impl CoreState {
     pub(crate) fn handle_idle(&mut self, token: usize) {
         match token {
             NEW_VIEW_IDLE_TOKEN => self.finalize_new_views(),
+            VERIFY_LINE_ENDINGS_IDLE_TOKEN => self.verify_pending_line_endings(),
             WATCH_IDLE_TOKEN => self.handle_fs_events(),
             other if (other & RENDER_VIEW_IDLE_MASK) != 0 => {
                 self.handle_render_timer(other ^ RENDER_VIEW_IDLE_MASK)
@@ -820,29 +824,53 @@ impl CoreState {
         }
 
         let mut changes = Table::new();
-        let indentation = Indentation::parse(editor.borrow().get_buffer());
+        let open_analysis = self.file_manager.get_info(buffer_id).map(|info| info.open_analysis);
+
+        let indentation = open_analysis.map(|analysis| analysis.indentation).unwrap_or_else(|| {
+            SampledIndentation::from(Indentation::parse(editor.borrow().get_buffer()))
+        });
         match indentation {
-            Ok(Some(Indentation::Tabs)) => {
+            SampledIndentation::Tabs => {
                 changes.insert("translate_tabs_to_spaces".into(), false.into());
             }
-            Ok(Some(Indentation::Spaces(n))) => {
+            SampledIndentation::Spaces(n) => {
                 changes.insert("translate_tabs_to_spaces".into(), true.into());
                 changes.insert("tab_size".into(), n.into());
             }
-            Err(_) => info!("detected mixed indentation"),
-            Ok(None) => info!("file contains no indentation"),
+            SampledIndentation::Mixed => info!("detected mixed indentation"),
+            SampledIndentation::None => info!("file contains no indentation"),
         }
 
-        let line_ending = LineEnding::parse(editor.borrow().get_buffer());
-        match line_ending {
-            Ok(Some(LineEnding::CrLf)) => {
-                changes.insert("line_ending".into(), "\r\n".into());
+        match open_analysis {
+            Some(analysis) if analysis.needs_line_ending_verification() => {
+                self.schedule_line_ending_verification(buffer_id);
             }
-            Ok(Some(LineEnding::Lf)) => {
-                changes.insert("line_ending".into(), "\n".into());
-            }
-            Err(_) => info!("detected mixed line endings"),
-            Ok(None) => info!("file contains no supported line endings"),
+            Some(analysis) => match analysis.line_ending {
+                SampledLineEnding::CrLf => {
+                    changes.insert("line_ending".into(), "\r\n".into());
+                }
+                SampledLineEnding::Lf => {
+                    changes.insert("line_ending".into(), "\n".into());
+                }
+                SampledLineEnding::Mixed | SampledLineEnding::LegacyCr => {
+                    info!("detected mixed line endings")
+                }
+                SampledLineEnding::None => info!("file contains no supported line endings"),
+            },
+            None => match LineEnding::parse(editor.borrow().get_buffer()) {
+                Ok(Some(LineEnding::CrLf)) => {
+                    changes.insert("line_ending".into(), "\r\n".into());
+                }
+                Ok(Some(LineEnding::Lf)) => {
+                    changes.insert("line_ending".into(), "\n".into());
+                }
+                Err(_) => info!("detected mixed line endings"),
+                Ok(None) => info!("file contains no supported line endings"),
+            },
+        }
+
+        if changes.is_empty() {
+            return None;
         }
 
         let config_delta =
@@ -869,6 +897,61 @@ impl CoreState {
             Err(err) => {
                 warn!("detect_whitespace failed to update config: {:?}", err);
                 None
+            }
+        }
+    }
+
+    fn schedule_line_ending_verification(&mut self, buffer_id: BufferId) {
+        if self.pending_line_ending_verifications.contains(&buffer_id) {
+            return;
+        }
+        self.pending_line_ending_verifications.push(buffer_id);
+        self.peer.schedule_idle(VERIFY_LINE_ENDINGS_IDLE_TOKEN);
+    }
+
+    fn verify_pending_line_endings(&mut self) {
+        let pending = mem::take(&mut self.pending_line_ending_verifications);
+
+        for buffer_id in pending {
+            let Some(editor) = self.editors.get(&buffer_id) else {
+                continue;
+            };
+            let line_ending = {
+                let editor = editor.borrow();
+                if editor.is_vlf() || editor.get_buffer().is_empty() {
+                    continue;
+                }
+                if !self.config_manager.get_buffer_config(buffer_id).items.autodetect_whitespace {
+                    continue;
+                }
+                LineEnding::parse_bounded(editor.get_buffer(), usize::MAX)
+            };
+
+            let mut changes = Table::new();
+            match line_ending {
+                Ok(Some(LineEnding::CrLf)) => {
+                    changes.insert("line_ending".into(), "\r\n".into());
+                }
+                Ok(Some(LineEnding::Lf)) => {
+                    changes.insert("line_ending".into(), "\n".into());
+                }
+                Err(_) => info!("detected mixed line endings"),
+                Ok(None) => info!("file contains no supported line endings"),
+            }
+
+            if changes.is_empty() {
+                continue;
+            }
+
+            let config_delta =
+                self.config_manager.table_for_update(ConfigDomain::SysOverride(buffer_id), changes);
+            match self
+                .config_manager
+                .set_user_config(ConfigDomain::SysOverride(buffer_id), config_delta)
+            {
+                Ok(changes) if !changes.is_empty() => self.handle_config_changes(changes),
+                Ok(_) => {}
+                Err(err) => warn!("line ending verification failed to update config: {:?}", err),
             }
         }
     }
@@ -1377,14 +1460,18 @@ impl BufferId {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::time::Duration;
 
     use serde::Deserialize;
     use serde_json::json;
-    use xi_rpc::Peer;
     use xi_rpc::test_utils::DummyPeer;
+    use xi_rpc::{Handler, Peer, RpcCtx};
 
-    use super::{CoreState, PLUGIN_RESTART_MAX_DELAY_MS, ViewId, stderr_is_user_visible};
+    use super::{
+        CoreState, NEW_VIEW_IDLE_TOKEN, PLUGIN_RESTART_MAX_DELAY_MS,
+        VERIFY_LINE_ENDINGS_IDLE_TOKEN, ViewId, stderr_is_user_visible,
+    };
 
     #[test]
     fn begin_plugin_launch_blocks_duplicate_starts() {
@@ -1425,5 +1512,39 @@ mod tests {
 
         let de = json!("not-a-view-id");
         assert!(ViewId::deserialize(&de).unwrap_err().is_data());
+    }
+
+    #[test]
+    fn large_file_line_ending_detection_is_deferred_after_open() {
+        let peer = Box::new(DummyPeer);
+        let ctx = RpcCtx::new(peer.box_clone());
+        let mut core = crate::XiCore::new();
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::ClientStarted {
+                config_dir: None,
+                client_extras_dir: None,
+            },
+        );
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        for _ in 0..10_000 {
+            tmp.write_all(b"  item\r\n").unwrap();
+        }
+        tmp.flush().unwrap();
+
+        let view_id_value = core.inner().do_new_view(Some(tmp.path().to_path_buf())).unwrap();
+        let view_id: ViewId = serde_json::from_value(view_id_value).unwrap();
+        core.inner().handle_idle(NEW_VIEW_IDLE_TOKEN);
+
+        let buffer_id = core.inner().views.get(&view_id).unwrap().borrow().get_buffer_id();
+        let initial = core.inner().config_manager.get_buffer_config(buffer_id).items.clone();
+        assert!(initial.translate_tabs_to_spaces);
+        assert_eq!(initial.tab_size, 2);
+        assert_eq!(initial.line_ending, "\n");
+
+        core.inner().handle_idle(VERIFY_LINE_ENDINGS_IDLE_TOKEN);
+
+        let verified = core.inner().config_manager.get_buffer_config(buffer_id).items.clone();
+        assert_eq!(verified.line_ending, "\r\n");
     }
 }

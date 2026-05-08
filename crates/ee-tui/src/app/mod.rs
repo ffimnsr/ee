@@ -27,6 +27,8 @@ mod commands;
 mod parsing;
 mod state;
 
+const VLF_SOURCE_CONTROL_DISABLED_REASON: &str = "requires whole-buffer diff/blame scans";
+
 pub(crate) use parsing::{
     line_col_for_offset, parse_ex_range, parse_substitute_cmd, smart_case_sensitive,
     text_obj_bracket, text_obj_quote, text_obj_tag, text_obj_word,
@@ -2362,6 +2364,10 @@ impl App {
     }
 
     fn restore_git_hunk(&mut self) -> Result<String, String> {
+        if self.block_active_vlf_source_control("git hunk reset") {
+            return Err(Self::source_control_disabled_message("git hunk reset"));
+        }
+
         let status = self
             .refresh_active_git_status()
             .ok_or_else(|| String::from("git: current buffer not in repository"))?;
@@ -2923,12 +2929,23 @@ impl App {
     }
 
     pub(crate) fn refresh_source_control(&mut self) {
+        let vlf_buf_ids = self
+            .backend
+            .all_bufs()
+            .iter()
+            .filter(|buf| buf.is_vlf)
+            .map(|buf| buf.id)
+            .collect::<Vec<_>>();
+        for buf_id in vlf_buf_ids {
+            self.source_control.remove(&buf_id);
+        }
+
         let now = Instant::now();
         let snapshots = self
             .backend
             .all_bufs()
             .iter()
-            .filter(|buf| buf.is_fully_cached())
+            .filter(|buf| !buf.is_vlf && buf.is_fully_cached())
             .map(|buf| (buf.id, buf.path.clone(), buf.lines.clone()))
             .collect::<Vec<_>>();
 
@@ -2952,6 +2969,10 @@ impl App {
     }
 
     pub(crate) fn git_status(&self, buf_id: crate::buffer::BufferId) -> Option<&GitBufferStatus> {
+        if self.backend.all_bufs().iter().any(|buf| buf.id == buf_id && buf.is_vlf) {
+            return None;
+        }
+
         self.source_control.get(&buf_id).and_then(|cached| cached.status.as_ref())
     }
 
@@ -2960,6 +2981,10 @@ impl App {
     }
 
     fn refresh_active_git_status(&mut self) -> Option<GitBufferStatus> {
+        if self.block_active_vlf_source_control("git status") {
+            return None;
+        }
+
         let buf = self.backend.active();
         if !buf.is_fully_cached() {
             self.backend.status_message =
@@ -2986,8 +3011,10 @@ impl App {
     fn jump_to_git_hunk(&mut self, forward: bool) {
         self.last_repeatable_motion = Some(RepeatableMotion::GitHunk { forward });
         let Some(status) = self.refresh_active_git_status() else {
-            self.backend.status_message =
-                Some(String::from("git: current buffer not in repository"));
+            if self.backend.status_message.is_none() {
+                self.backend.status_message =
+                    Some(String::from("git: current buffer not in repository"));
+            }
             return;
         };
         if status.hunks.is_empty() {
@@ -3012,8 +3039,10 @@ impl App {
 
     fn jump_to_git_hunk_edge(&mut self, first: bool) {
         let Some(status) = self.refresh_active_git_status() else {
-            self.backend.status_message =
-                Some(String::from("git: current buffer not in repository"));
+            if self.backend.status_message.is_none() {
+                self.backend.status_message =
+                    Some(String::from("git: current buffer not in repository"));
+            }
             return;
         };
         if status.hunks.is_empty() {
@@ -3033,6 +3062,10 @@ impl App {
     }
 
     fn show_git_blame(&mut self) {
+        if self.block_active_vlf_source_control("git blame") {
+            return;
+        }
+
         let Some(path) = self.backend.active().path.clone() else {
             self.backend.status_message =
                 Some(String::from("git blame unavailable for scratch buffer"));
@@ -3101,9 +3134,16 @@ impl App {
     }
 
     fn open_git_diff_view(&mut self, current_hunk_only: bool) {
+        let feature = if current_hunk_only { "git hunk diff" } else { "git diff" };
+        if self.block_active_vlf_source_control(feature) {
+            return;
+        }
+
         let Some(status) = self.refresh_active_git_status() else {
-            self.backend.status_message =
-                Some(String::from("git diff unavailable for current buffer"));
+            if self.backend.status_message.is_none() {
+                self.backend.status_message =
+                    Some(String::from("git diff unavailable for current buffer"));
+            }
             return;
         };
         let selected_hunk =
@@ -3115,6 +3155,24 @@ impl App {
         let title = if current_hunk_only { "git hunk diff" } else { "git diff" };
         let rendered = git::render_diff(&status, selected_hunk);
         self.open_generated_buffer(title, &rendered);
+    }
+
+    fn source_control_disabled_message(feature: &str) -> String {
+        format!("{feature} disabled in VLF: {VLF_SOURCE_CONTROL_DISABLED_REASON}")
+    }
+
+    fn block_active_vlf_source_control(&mut self, feature: &str) -> bool {
+        let (is_vlf, buf_id) = {
+            let buf = self.backend.active();
+            (buf.is_vlf, buf.id)
+        };
+        if !is_vlf {
+            return false;
+        }
+
+        self.source_control.remove(&buf_id);
+        self.backend.status_message = Some(Self::source_control_disabled_message(feature));
+        true
     }
 
     // ── Recording helpers ──────────────────────────────────────────────────

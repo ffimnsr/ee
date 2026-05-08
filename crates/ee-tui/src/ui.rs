@@ -389,13 +389,14 @@ fn apply_visual_highlight(
 /// Overlay search match highlighting on an already-rendered span list.
 ///
 /// `line` is the full line byte string, `pattern` is the raw search query,
-/// `left` is the horizontal scroll offset (bytes already skipped), `bg` is
-/// the background colour inherited from the cursor-line flag.
+/// `byte_start..byte_end` is the rendered slice, and `bg` is the background
+/// colour inherited from the cursor-line flag.
 fn apply_search_highlights(
     spans: Vec<Span<'static>>,
     line: &str,
     pattern: &str,
-    left: usize,
+    byte_start: usize,
+    byte_end: usize,
     bg: Color,
 ) -> Vec<Span<'static>> {
     // Build case-aware regex from the plain-text pattern.
@@ -410,8 +411,14 @@ fn apply_search_highlights(
         Err(_) => return spans,
     };
 
-    // Collect all match byte ranges over the full line.
-    let matches: Vec<(usize, usize)> = re.find_iter(line).map(|m| (m.start(), m.end())).collect();
+    let Some(search_slice) = line.get(byte_start..byte_end.min(line.len())) else {
+        return spans;
+    };
+
+    let matches: Vec<(usize, usize)> = re
+        .find_iter(search_slice)
+        .map(|m| (byte_start + m.start(), byte_start + m.end()))
+        .collect();
     if matches.is_empty() {
         return spans;
     }
@@ -421,13 +428,11 @@ fn apply_search_highlights(
         .bg(Color::Rgb(250, 179, 135)) // warm orange highlight
         .add_modifier(Modifier::BOLD);
 
-    // Re-build spans, splitting on match boundaries (byte offsets relative to
-    // the displayed slice starting at `left`).
+    // Re-build spans, splitting on match boundaries inside the rendered slice.
     let mut out: Vec<Span<'static>> = Vec::new();
     // Accumulate raw bytes across all input spans so we can apply match ranges.
     // Build a flat (byte_offset, char_group, style) representation first.
     let mut flat: Vec<(String, Style)> = Vec::new();
-    let _cursor = left; // current byte position in `line` (unused but documents intent)
     for span in &spans {
         let content = span.content.as_ref();
         let style = span.style;
@@ -435,7 +440,7 @@ fn apply_search_highlights(
     }
 
     // Re-emit spans split by match ranges.
-    let mut byte_pos = left; // position in `line` of the start of the current flat span
+    let mut byte_pos = byte_start; // position in `line` of the start of the current flat span
     for (content, base_style) in flat {
         let span_start = byte_pos;
         let span_end = byte_pos + content.len();
@@ -869,6 +874,7 @@ fn render_buffer(
     let height = area.height as usize;
     let top = vp.top_line;
     let left = vp.left_col;
+    let viewport_width = area.width as usize;
     let cursor_line = buf.cursor_line;
     let cursor_line_bg = Color::Rgb(35, 38, 50);
     let buf_bg = Color::Rgb(22, 24, 31);
@@ -914,9 +920,12 @@ fn render_buffer(
 
     let hl_span = visible.last().copied().unwrap_or(top).saturating_sub(top) + 1;
     let syntax_name = app.syntax_overrides.get(&buf.id).map(String::as_str);
+    let highlight_bytes: usize =
+        visible.iter().filter_map(|&idx| buf.get_line(idx)).map(str::len).sum();
+    const MAX_SYNC_HIGHLIGHT_BYTES: usize = 65_536;
     // In VLF mode `lines` is empty; skip the server-side syntax pass (tree-sitter
     // is disabled for VLF until visible-range parsing exists).
-    let hl_lines = if buf.is_vlf {
+    let hl_lines = if buf.is_vlf || highlight_bytes > MAX_SYNC_HIGHLIGHT_BYTES {
         vec![]
     } else {
         app.highlighter.highlight_visible(&buf.lines, syntax_name, extension, top, hl_span)
@@ -945,6 +954,9 @@ fn render_buffer(
 
             let line = line_opt.unwrap_or("");
             let is_fold_header = app.folds.fold_at(buf.id, log_idx).is_some();
+            let byte_start = display_col_to_byte(line, left);
+            let byte_end =
+                display_col_to_byte(line, left.saturating_add(viewport_width).saturating_add(1));
 
             let mut spans: Vec<Span<'static>> = if is_fold_header {
                 // Show fold marker line (abbreviated first line + fold indicator).
@@ -957,7 +969,6 @@ fn render_buffer(
                         .add_modifier(Modifier::ITALIC),
                 )]
             } else {
-                let byte_start = display_col_to_byte(line, left);
                 let backend_syntax = match buf.line_cache.get(log_idx) {
                     Some(LineSlot::Known(cached_line)) if !cached_line.syntax_spans.is_empty() => {
                         Some(cached_line.syntax_spans.as_slice())
@@ -966,10 +977,11 @@ fn render_buffer(
                 };
 
                 if let Some(syntax_spans) = backend_syntax {
-                    crate::highlight::Highlighter::scope_spans_with_offset(
+                    crate::highlight::Highlighter::scope_spans_in_range(
                         line,
                         syntax_spans,
                         byte_start,
+                        byte_end,
                     )
                     .into_iter()
                     .map(|s| {
@@ -986,24 +998,29 @@ fn render_buffer(
                     if let Some(spans_ref) = raw {
                         if spans_ref.is_empty() {
                             vec![Span::styled(
-                                line[byte_start..].to_owned(),
+                                line[byte_start..byte_end].to_owned(),
                                 Style::default().bg(bg),
                             )]
                         } else {
-                            crate::highlight::Highlighter::spans_with_offset(spans_ref, byte_start)
-                                .into_iter()
-                                .map(|s| {
-                                    let style = if is_cursor && app.config.cursor_line {
-                                        s.style.bg(bg)
-                                    } else {
-                                        s.style
-                                    };
-                                    Span::styled(s.content.into_owned(), style)
-                                })
-                                .collect()
+                            crate::highlight::Highlighter::spans_with_range(
+                                spans_ref, byte_start, byte_end,
+                            )
+                            .into_iter()
+                            .map(|s| {
+                                let style = if is_cursor && app.config.cursor_line {
+                                    s.style.bg(bg)
+                                } else {
+                                    s.style
+                                };
+                                Span::styled(s.content.into_owned(), style)
+                            })
+                            .collect()
                         }
                     } else {
-                        vec![Span::styled(line[byte_start..].to_owned(), Style::default().bg(bg))]
+                        vec![Span::styled(
+                            line[byte_start..byte_end].to_owned(),
+                            Style::default().bg(bg),
+                        )]
                     }
                 }
             };
@@ -1020,7 +1037,7 @@ fn render_buffer(
             // Apply search match highlighting over the rendered spans.
             if let Some(ref pat) = app.search_pattern {
                 if !is_fold_header {
-                    spans = apply_search_highlights(spans, line, pat, left, bg);
+                    spans = apply_search_highlights(spans, line, pat, byte_start, byte_end, bg);
                 }
             }
 
@@ -1173,6 +1190,13 @@ fn git_sign_color(sign: crate::git::GitSign) -> Color {
 }
 
 fn git_status_span(app: &App) -> Option<Span<'static>> {
+    if app.backend.active().is_vlf {
+        return Some(Span::styled(
+            "  git:off(vlf)",
+            Style::default().fg(Color::Rgb(250, 179, 135)).bg(Color::Rgb(49, 54, 68)),
+        ));
+    }
+
     let status = app.current_git_status()?;
     let dirty = if status.dirty { '*' } else { ' ' };
     Some(Span::styled(

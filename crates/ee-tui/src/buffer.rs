@@ -6,7 +6,7 @@ use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -26,6 +26,22 @@ use crate::backend::{
 use crate::text::previous_char_boundary;
 
 pub(crate) type BufferId = u32;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct StartupProfile {
+    pub(crate) new_view_rpc: Duration,
+    pub(crate) init_notification_drain: Duration,
+    pub(crate) init_event_apply: Duration,
+    pub(crate) pump_init: Duration,
+    pub(crate) update_apply: Duration,
+    pub(crate) rebuild_lines: Duration,
+    pub(crate) config_sync: Duration,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ApplyUpdateStats {
+    pub(crate) rebuild_lines: Duration,
+}
 
 // ── Per-view buffer state ─────────────────────────────────────────────────────
 
@@ -80,7 +96,7 @@ impl BufState {
             .to_owned()
     }
 
-    pub(crate) fn apply_update(&mut self, update: CoreUpdate) -> io::Result<()> {
+    pub(crate) fn apply_update(&mut self, update: CoreUpdate) -> io::Result<ApplyUpdateStats> {
         let CoreUpdate { ops, pristine, annotations } = update;
         let previous = std::mem::take(&mut self.line_cache);
         let mut next_cache = Vec::new();
@@ -149,9 +165,11 @@ impl BufState {
         }
 
         self.line_cache = next_cache;
+        let rebuild_started = Instant::now();
         self.rebuild_lines();
+        let rebuild_lines = rebuild_started.elapsed();
         self.sync_cursor_from_cache();
-        Ok(())
+        Ok(ApplyUpdateStats { rebuild_lines })
     }
 
     pub(crate) fn rebuild_lines(&mut self) {
@@ -331,6 +349,8 @@ pub(crate) struct BufferManager {
     /// Symbol results awaiting dispatch to the App-level picker.
     pub(crate) pending_symbols: Vec<(String, String, Vec<SymbolItem>)>,
     pub(crate) pending_ui_actions: Vec<PendingUiAction>,
+    startup_profile: StartupProfile,
+    startup_profile_active: bool,
 }
 
 impl std::ops::Deref for BufferManager {
@@ -370,9 +390,14 @@ impl Drop for BufferManager {
 impl BufferManager {
     const SYNC_IDLE_LIMIT: usize = 6;
 
-    /// Create a new xi-core process and open `path` (or a scratch buffer) as
-    /// the initial view.
-    pub(crate) fn new(path: Option<PathBuf>) -> io::Result<Self> {
+    /// Create a new xi-core process using already-computed config tables for
+    /// the initial buffer. Reusing these tables avoids repeating config and
+    /// editorconfig scans during startup.
+    pub(crate) fn new_with_initial_config(
+        path: Option<PathBuf>,
+        general_config: Table,
+        initial_overrides: Table,
+    ) -> io::Result<Self> {
         let (to_core_tx, to_core_rx) = mpsc::channel::<String>(256);
         let (from_core_tx, from_core_rx) = std_mpsc::channel::<String>();
         let (backend_tx, backend_rx) = std_mpsc::channel::<BackendEvent>();
@@ -385,10 +410,10 @@ impl BufferManager {
 
         send_rpc_notification(&to_core_tx, "client_started", json!({}))?;
 
-        let (_, general_config, _) = crate::config::xi_config_tables_for_file(path.as_deref());
         send_config_notification(&to_core_tx, json!("general"), general_config)?;
 
         let new_view_id = 1_u64;
+        let new_view_started = Instant::now();
         send_rpc_request(
             &to_core_tx,
             new_view_id,
@@ -398,6 +423,7 @@ impl BufferManager {
 
         let mut from_core_rx = from_core_rx;
         let view_id_val = block_for_response(&mut from_core_rx, &to_core_tx, new_view_id)?;
+        let new_view_rpc = new_view_started.elapsed();
         let view_id = view_id_val
             .as_str()
             .ok_or_else(|| {
@@ -405,7 +431,15 @@ impl BufferManager {
             })?
             .to_owned();
 
+        send_config_notification(
+            &to_core_tx,
+            json!({ "user_override": view_id }),
+            initial_overrides,
+        )?;
+
+        let init_drain_started = Instant::now();
         let init_events = drain_sync_notifications(&mut from_core_rx, &to_core_tx);
+        let init_notification_drain = init_drain_started.elapsed();
 
         let pending: PendingRequests = Arc::new(Mutex::new(HashMap::new()));
         let pending_clone = Arc::clone(&pending);
@@ -427,7 +461,7 @@ impl BufferManager {
             path: path.clone(),
             display_name: None,
             view_id: view_id.clone(),
-            editor_config_synced: false,
+            editor_config_synced: true,
             pending_line_request: false,
             line_cache: Vec::new(),
             lines: Vec::new(),
@@ -469,13 +503,29 @@ impl BufferManager {
             pending_locations: Vec::new(),
             pending_symbols: Vec::new(),
             pending_ui_actions: Vec::new(),
+            startup_profile: StartupProfile {
+                new_view_rpc,
+                init_notification_drain,
+                ..StartupProfile::default()
+            },
+            startup_profile_active: true,
         };
 
+        let init_apply_started = Instant::now();
         for event in init_events {
             mgr.apply_event_to_buffer(event)?;
         }
+        mgr.startup_profile.init_event_apply = init_apply_started.elapsed();
+        let pump_init_started = Instant::now();
         mgr.pump_init()?;
+        mgr.startup_profile.pump_init = pump_init_started.elapsed();
+        mgr.startup_profile_active = false;
         Ok(mgr)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn startup_profile(&self) -> &StartupProfile {
+        &self.startup_profile
     }
 
     pub(crate) fn active(&self) -> &BufState {
@@ -1019,10 +1069,20 @@ impl BufferManager {
             }
             match recv_with_timeout(&mut self.backend_rx, Duration::from_millis(20)) {
                 Some(event) => {
-                    idle_rounds = 0;
+                    let mut saw_critical = event.is_startup_critical();
                     self.apply_event_to_buffer(event)?;
                     while let Ok(event) = self.backend_rx.try_recv() {
+                        saw_critical |= event.is_startup_critical();
                         self.apply_event_to_buffer(event)?;
+                    }
+
+                    if saw_critical {
+                        idle_rounds = 0;
+                    } else {
+                        idle_rounds += 1;
+                        if idle_rounds >= Self::SYNC_IDLE_LIMIT {
+                            break;
+                        }
                     }
                 }
                 None => {
@@ -1044,9 +1104,14 @@ impl BufferManager {
                 let idx = self.view_to_idx.get(view_id).copied().unwrap_or(current);
                 match event {
                     BackendEvent::Update { update, .. } => {
+                        let update_started = Instant::now();
                         let buf = &mut self.bufs[idx];
                         buf.pending_line_request = false;
-                        buf.apply_update(update)?;
+                        let stats = buf.apply_update(update)?;
+                        if self.startup_profile_active {
+                            self.startup_profile.update_apply += update_started.elapsed();
+                            self.startup_profile.rebuild_lines += stats.rebuild_lines;
+                        }
                     }
                     BackendEvent::ScrollTo { line, col, .. } => {
                         let buf = &mut self.bufs[idx];
@@ -1058,7 +1123,11 @@ impl BufferManager {
                 }
 
                 if !self.bufs[idx].editor_config_synced {
+                    let config_sync_started = Instant::now();
                     self.sync_buffer_editor_config(idx)?;
+                    if self.startup_profile_active {
+                        self.startup_profile.config_sync += config_sync_started.elapsed();
+                    }
                 }
             }
             BackendEvent::Alert(msg) => {
@@ -1510,6 +1579,8 @@ impl BufferManager {
             pending_locations: Vec::new(),
             pending_symbols: Vec::new(),
             pending_ui_actions: Vec::new(),
+            startup_profile: StartupProfile::default(),
+            startup_profile_active: false,
         }
     }
 
