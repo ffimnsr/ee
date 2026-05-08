@@ -121,7 +121,7 @@ pub(crate) fn hit_test_buffer_cell(
 
     let buf = app.backend.all_bufs().iter().find(|b| b.id == buf_id)?;
     let vp = app.tabs.focused_windows().viewport_for_window(win_id, app.viewport);
-    let [_, buffer_area] = window_chunks(app, win_rect, buf.lines.len());
+    let [_, buffer_area] = window_chunks(app, win_rect, buf.line_count());
     let line = vp.top_line + usize::from(row.saturating_sub(buffer_area.y));
     let display_col =
         if column < buffer_area.x { 0 } else { vp.left_col + usize::from(column - buffer_area.x) };
@@ -147,7 +147,7 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
             continue;
         };
         let vp = app.tabs.focused_windows().viewport_for_window(win_id, app.viewport);
-        let editor = window_chunks(app, win_rect, buf.lines.len());
+        let editor = window_chunks(app, win_rect, buf.line_count());
 
         render_gutter(frame, editor[0], buf, vp, app);
         render_buffer(frame, editor[1], buf, vp, app);
@@ -199,7 +199,7 @@ fn gutter_width(app: &App, line_count: usize) -> u16 {
 /// `scroll_into_view` so the horizontal viewport is clamped correctly.
 pub(crate) fn compute_editor_width(terminal_size: ratatui::layout::Rect, app: &App) -> usize {
     let area = split_root_areas(terminal_size, app).editor_area;
-    let line_count = app.backend.lines.len().max(1);
+    let line_count = app.backend.line_count().max(1);
     let gw = gutter_width(app, line_count);
     area.width.saturating_sub(gw) as usize
 }
@@ -747,7 +747,7 @@ fn render_gutter(
     app: &App,
 ) {
     let height = area.height as usize;
-    let line_count = buf.lines.len().max(1);
+    let line_count = buf.line_count().max(1);
     let cursor_line = buf.cursor_line;
     let top = vp.top_line;
     let sign_col = app.config.sign_column;
@@ -883,7 +883,7 @@ fn render_buffer(
         None
     };
 
-    if buf.lines.is_empty() && top == 0 {
+    if buf.line_count() == 0 && top == 0 {
         let text = vec![Line::from(Span::styled(
             "empty buffer",
             Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
@@ -899,10 +899,11 @@ fn render_buffer(
 
     let extension = buf.path.as_ref().and_then(|p| p.extension()).and_then(|e| e.to_str());
 
-    // Collect visible logical lines (fold-aware).
+    // Collect visible logical lines (fold-aware).  Use line_count() so VLF
+    // buffers iterate over `line_cache` size rather than the empty `lines` vec.
     let mut visible: Vec<usize> = Vec::with_capacity(height);
     let mut li = top;
-    while visible.len() < height && li < buf.lines.len() {
+    while visible.len() < height && li < buf.line_count() {
         visible.push(li);
         if let Some((_, end)) = app.folds.fold_at(buf.id, li) {
             li = end + 1;
@@ -913,16 +914,37 @@ fn render_buffer(
 
     let hl_span = visible.last().copied().unwrap_or(top).saturating_sub(top) + 1;
     let syntax_name = app.syntax_overrides.get(&buf.id).map(String::as_str);
-    let hl_lines =
-        app.highlighter.highlight_visible(&buf.lines, syntax_name, extension, top, hl_span);
+    // In VLF mode `lines` is empty; skip the server-side syntax pass (tree-sitter
+    // is disabled for VLF until visible-range parsing exists).
+    let hl_lines = if buf.is_vlf {
+        vec![]
+    } else {
+        app.highlighter.highlight_visible(&buf.lines, syntax_name, extension, top, hl_span)
+    };
+
+    // Style for lines not yet loaded in VLF mode.
+    let loading_style = Style::default().fg(Color::Rgb(90, 95, 115)).add_modifier(Modifier::ITALIC);
 
     let text: Vec<Line> = visible
         .iter()
         .map(|&log_idx| {
             let is_cursor = log_idx == cursor_line;
-            let is_fold_header = app.folds.fold_at(buf.id, log_idx).is_some();
-            let line = buf.lines.get(log_idx).map(|s| s.as_str()).unwrap_or("");
             let bg = if is_cursor && app.config.cursor_line { cursor_line_bg } else { buf_bg };
+
+            // In VLF mode, a `None` return means the page is not yet loaded.
+            // Render a non-blocking "Loading…" row instead of an empty placeholder.
+            let line_opt = buf.get_line(log_idx);
+            if buf.is_vlf && line_opt.is_none() {
+                let loading_text = "  Loading…";
+                let mut l = Line::from(Span::styled(loading_text, loading_style));
+                if is_cursor && app.config.cursor_line {
+                    l = l.style(Style::default().bg(bg));
+                }
+                return l;
+            }
+
+            let line = line_opt.unwrap_or("");
+            let is_fold_header = app.folds.fold_at(buf.id, log_idx).is_some();
 
             let mut spans: Vec<Span<'static>> = if is_fold_header {
                 // Show fold marker line (abbreviated first line + fold indicator).
@@ -998,8 +1020,7 @@ fn render_buffer(
             // Apply search match highlighting over the rendered spans.
             if let Some(ref pat) = app.search_pattern {
                 if !is_fold_header {
-                    let full_line = buf.lines.get(log_idx).map(|s| s.as_str()).unwrap_or("");
-                    spans = apply_search_highlights(spans, full_line, pat, left, bg);
+                    spans = apply_search_highlights(spans, line, pat, left, bg);
                 }
             }
 
@@ -1548,6 +1569,7 @@ mod tests {
                 ranges: vec![[0, 0, 0, 3]],
                 payloads: Some(vec![serde_json::Value::String(String::from("todo"))]),
             }],
+            is_vlf: false,
         };
 
         assert_eq!(annotation_marker_for_line(&buf, 0), Some(('T', Color::Rgb(166, 227, 161))));

@@ -40,10 +40,15 @@
 //! before decoding.  The `TextChunk::byte_range` in the result always reflects
 //! the **adjusted** (decoded) range, not the original request.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
+use std::fs::File;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::thread;
 
 use crate::text_store::{
     ByteOffset, ByteRange, DocumentMode, EditPermission, FullTextPolicy, KnownLineCount,
@@ -51,7 +56,7 @@ use crate::text_store::{
 };
 
 use super::page_index::{PageDescriptor, PageIndex, ScanState};
-use super::pager::{DEFAULT_CACHE_BYTE_CAP, FilePager};
+use super::pager::{DEFAULT_CACHE_BYTE_CAP, FilePager, pread_exact};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -352,7 +357,20 @@ pub struct VlfStore {
     stats: RefCell<VlfMemoryStats>,
     /// True once `set_viewport` has been called with a non-zero window.
     /// Used to stop accumulating `bytes_before_first_viewport`.
-    first_viewport_set: std::cell::Cell<bool>,
+    first_viewport_set: Cell<bool>,
+    /// Receiver for descriptors produced by the background indexing thread.
+    ///
+    /// `None` until [`start_background_indexing`](Self::start_background_indexing)
+    /// is called.  `drain_incoming` drains the channel into `self.index`.
+    scan_rx: RefCell<Option<mpsc::Receiver<PageDescriptor>>>,
+    /// Set to `true` when the `VlfStore` is dropped, signalling the background
+    /// scanner thread to stop.
+    bg_cancel: Arc<AtomicBool>,
+    /// Monotone lower bound on the approximate line count.
+    ///
+    /// Ensures that `known_line_count` returns an `Approximate` value that
+    /// never decreases as more pages are scanned, keeping the status bar stable.
+    approx_line_floor: Cell<u64>,
 }
 
 impl VlfStore {
@@ -377,7 +395,10 @@ impl VlfStore {
             decoded_cache: RefCell::new(DecodedTextCache::new(DEFAULT_DECODED_CACHE_BYTE_CAP)),
             batch_size: DEFAULT_BATCH_SIZE,
             stats: RefCell::new(VlfMemoryStats::default()),
-            first_viewport_set: std::cell::Cell::new(false),
+            first_viewport_set: Cell::new(false),
+            scan_rx: RefCell::new(None),
+            bg_cancel: Arc::new(AtomicBool::new(false)),
+            approx_line_floor: Cell::new(0),
         })
     }
 
@@ -397,7 +418,10 @@ impl VlfStore {
             decoded_cache: RefCell::new(DecodedTextCache::new(budget.decoded_byte_cap)),
             batch_size: DEFAULT_BATCH_SIZE,
             stats: RefCell::new(VlfMemoryStats::default()),
-            first_viewport_set: std::cell::Cell::new(false),
+            first_viewport_set: Cell::new(false),
+            scan_rx: RefCell::new(None),
+            bg_cancel: Arc::new(AtomicBool::new(false)),
+            approx_line_floor: Cell::new(0),
         })
     }
 
@@ -709,6 +733,47 @@ impl VlfStore {
         self.index.borrow()
     }
 
+    /// Drain any descriptors produced by the background indexing thread into
+    /// the local page index.
+    ///
+    /// Called at the start of every API method that depends on the scan state
+    /// so callers always see the most up-to-date index without requiring locks.
+    fn drain_incoming(&self) {
+        let rx = self.scan_rx.borrow();
+        if let Some(receiver) = rx.as_ref() {
+            while let Ok(desc) = receiver.try_recv() {
+                self.index.borrow_mut().insert(desc);
+            }
+        }
+    }
+
+    /// Start a background thread that scans the file sequentially from byte 0,
+    /// sending [`PageDescriptor`]s through a channel that is drained by
+    /// [`drain_incoming`](Self::drain_incoming).
+    ///
+    /// The scan stops automatically when the file is fully covered or when
+    /// `self` is dropped.  Calling this method more than once is a no-op.
+    pub fn start_background_indexing(&self) {
+        // Guard: don't start a second scanner if one is already running.
+        if self.scan_rx.borrow().is_some() {
+            return;
+        }
+
+        let (tx, rx) = mpsc::channel();
+        *self.scan_rx.borrow_mut() = Some(rx);
+
+        let path = self.pager.canonical_path().to_owned();
+        let page_size = self.page_size;
+        let cancel = self.bg_cancel.clone();
+
+        thread::Builder::new()
+            .name("vlf-indexer".into())
+            .spawn(move || {
+                BackgroundScanner { path, page_size, cancel }.run(tx);
+            })
+            .ok(); // Ignore spawn failure; indexing simply won't happen.
+    }
+
     // ------------------------------------------------------------------
     // Internal read helpers
     // ------------------------------------------------------------------
@@ -816,10 +881,24 @@ impl VlfStore {
 
     /// Resolve line → byte using page index + sub-page decode.
     fn line_to_byte_internal(&self, line: u64) -> LineLookup {
+        // Fast path: line 0 always starts at byte 0 for non-empty files.
+        if line == 0 && self.pager.file_size() > 0 {
+            return LineLookup::Exact(ByteOffset(0));
+        }
+
         // Phase 1: find the page and its line base, under borrow.
         let phase1 = {
             let index = self.index.borrow();
             match index.find_page_for_line(line) {
+                Err(LineLookup::Pending) => {
+                    // Exact lookup failed; fall back to linear interpolation so
+                    // goto-line has an immediate approximate position to jump to
+                    // while background indexing continues.
+                    return match index.approximate_byte_for_line(line) {
+                        Some(approx) => LineLookup::Approximate(approx),
+                        None => LineLookup::Pending,
+                    };
+                }
                 Err(lookup) => return lookup,
                 Ok(loc) => (loc.page.file_range, loc.lines_before_page),
             }
@@ -854,6 +933,133 @@ impl VlfStore {
 }
 
 // ---------------------------------------------------------------------------
+// Drop: cancel the background indexer when the store is dropped
+// ---------------------------------------------------------------------------
+
+impl Drop for VlfStore {
+    fn drop(&mut self) {
+        // Signal the background thread to stop.  The thread checks this flag
+        // before every page scan and exits when it is set.
+        self.bg_cancel.store(true, Ordering::Release);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BackgroundScanner
+// ---------------------------------------------------------------------------
+
+/// A background file-scanner that produces [`PageDescriptor`]s and sends them
+/// to a [`VlfStore`] via an [`mpsc`] channel.
+///
+/// `BackgroundScanner` opens its own `File` handle so it runs independently of
+/// the `VlfStore` (which stays on the main thread and uses `RefCell` for
+/// interior mutability).  The scan proceeds sequentially from byte 0, which
+/// ensures correct CRLF seam detection at every page boundary.
+struct BackgroundScanner {
+    path: PathBuf,
+    page_size: u64,
+    /// Shared with the owning `VlfStore`; set to `true` on drop.
+    cancel: Arc<AtomicBool>,
+}
+
+impl BackgroundScanner {
+    fn run(self, tx: mpsc::Sender<PageDescriptor>) {
+        let file = match File::open(&self.path) {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let file_size = match file.metadata() {
+            Ok(m) => m.len(),
+            Err(_) => return,
+        };
+
+        let mut pos = 0u64;
+        // Track the previous page's CRLF tail flag for seam detection without
+        // needing to look up the index (which lives on the main thread).
+        let mut prev_ends_with_cr: bool = false;
+
+        while pos < file_size {
+            if self.cancel.load(Ordering::Acquire) {
+                return;
+            }
+
+            let page_end = (pos + self.page_size).min(file_size);
+            let len = (page_end - pos) as usize;
+
+            let bytes = match pread_exact(&file, pos, len) {
+                Ok(b) => b,
+                Err(_) => return,
+            };
+
+            // ---- UTF-8 boundary detection -----------------------------------
+
+            let starts_at_utf8_boundary = pos == 0 || is_utf8_leading(bytes.first().copied());
+            let ends_at_utf8_boundary = ends_on_utf8_boundary(&bytes);
+
+            // ---- CRLF seam detection ----------------------------------------
+
+            let ends_with_cr_before_lf = if bytes.last() == Some(&b'\r') && page_end < file_size {
+                // Peek at the first byte of the next page.
+                match pread_exact(&file, page_end, 1) {
+                    Ok(peek) => peek.first() == Some(&b'\n'),
+                    Err(_) => false,
+                }
+            } else {
+                false
+            };
+
+            // The leading \n is the LF half of a \r\n split from the previous
+            // page when the previous page ended with a lone \r.
+            let starts_with_lf_of_crlf =
+                bytes.first() == Some(&b'\n') && pos > 0 && prev_ends_with_cr;
+
+            // ---- Byte analysis ----------------------------------------------
+
+            let (newline_count, utf16_len, first_line_prefix_len, last_line_suffix_len) =
+                analyse_bytes(&bytes, starts_with_lf_of_crlf, ends_with_cr_before_lf);
+
+            // ---- Decoded range (seam-adjusted) ------------------------------
+
+            let decoded_start = if starts_at_utf8_boundary {
+                pos
+            } else {
+                pos + leading_continuation_bytes(&bytes) as u64
+            };
+            let decoded_end = if ends_at_utf8_boundary {
+                page_end
+            } else {
+                page_end - trailing_incomplete_bytes(&bytes) as u64
+            };
+
+            let file_range = ByteRange::new(pos, page_end);
+            let desc = PageDescriptor {
+                file_range,
+                decoded_range: ByteRange::new(decoded_start, decoded_end),
+                byte_len: page_end - pos,
+                utf16_len,
+                newline_count,
+                first_line_prefix_len,
+                last_line_suffix_len,
+                starts_at_utf8_boundary,
+                ends_at_utf8_boundary,
+                starts_with_lf_of_crlf,
+                ends_with_cr_before_lf,
+                scan_state: ScanState::Scanned,
+            };
+
+            prev_ends_with_cr = ends_with_cr_before_lf;
+
+            if tx.send(desc).is_err() {
+                // Receiver (VlfStore) was dropped; stop scanning.
+                return;
+            }
+
+            pos += self.page_size;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TextStore impl
 // ---------------------------------------------------------------------------
 
@@ -867,6 +1073,7 @@ impl TextStore for VlfStore {
     }
 
     fn known_line_count(&self) -> KnownLineCount {
+        self.drain_incoming();
         let index = self.index.borrow();
         let progress = index.scan_progress();
         if progress.is_complete() {
@@ -888,7 +1095,12 @@ impl TextStore for VlfStore {
             }
             let estimated = (scanned_nl as f64 / progress.scanned_bytes as f64
                 * progress.total_bytes as f64) as u64;
-            KnownLineCount::Approximate(estimated.max(1))
+            // Apply a monotone floor so the displayed approximate count never
+            // decreases as more pages are scanned (stable line numbers).
+            let floor = self.approx_line_floor.get();
+            let stabilized = estimated.max(1).max(floor);
+            self.approx_line_floor.set(stabilized);
+            KnownLineCount::Approximate(stabilized)
         }
     }
 
@@ -911,6 +1123,7 @@ impl TextStore for VlfStore {
     }
 
     fn line_to_byte(&self, line: LogicalLine) -> LineLookup {
+        self.drain_incoming();
         self.line_to_byte_internal(line.0)
     }
 
@@ -918,6 +1131,7 @@ impl TextStore for VlfStore {
         if offset.0 > self.pager.file_size() {
             return None;
         }
+        self.drain_incoming();
         self.byte_to_line_internal(offset.0)
     }
 
@@ -1154,7 +1368,6 @@ mod tests {
     use super::super::pager::DEFAULT_MAX_READ_SIZE;
     use super::*;
     use crate::text_store::TextStore;
-
     fn store_from(content: &[u8]) -> (VlfStore, NamedTempFile) {
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(content).unwrap();
@@ -1266,9 +1479,39 @@ mod tests {
     // ---- line_to_byte / byte_to_line --------------------------------
 
     #[test]
-    fn line_to_byte_pending_before_scan() {
+    fn line_to_byte_line_zero_exact_without_scan() {
+        // Line 0 always maps to byte 0 for non-empty files; no scanning needed.
         let (store, _f) = store_from(b"a\nb\nc");
-        assert_eq!(store.line_to_byte(LogicalLine(0)), LineLookup::Pending);
+        assert_eq!(store.line_to_byte(LogicalLine(0)), LineLookup::Exact(ByteOffset(0)));
+    }
+
+    #[test]
+    fn line_to_byte_non_zero_approximate_before_full_scan() {
+        // Line 2 is not in the scanned prefix; expect Approximate (not Pending)
+        // once at least one page is scanned so the interpolation has data.
+        let content = b"hello\nworld\nfoo";
+        let (store, _f) = store_from(content);
+        store.scan_page_at(0).unwrap(); // scan first (and only) page
+        match store.line_to_byte(LogicalLine(2)) {
+            LineLookup::Exact(_) | LineLookup::Approximate(_) => {}
+            other => panic!("expected Exact or Approximate before full scan, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn line_to_byte_approximate_before_scan_with_data() {
+        // Before scanning, line 1 of a multi-page file returns Approximate (with
+        // data from at least partial scan) or Pending when no scan data exists.
+        let content = b"line1\nline2\nline3";
+        let (store, _f) = store_from(content);
+        // No pages scanned yet: line 1 is Pending (no interpolation data).
+        match store.line_to_byte(LogicalLine(1)) {
+            LineLookup::Pending | LineLookup::Approximate(_) => {}
+            other => panic!("expected Pending or Approximate, got {:?}", other),
+        }
+        // Scan the single page; now line 1 is resolvable as Exact.
+        store.scan_page_at(0).unwrap();
+        assert_eq!(store.line_to_byte(LogicalLine(1)), LineLookup::Exact(ByteOffset(6)));
     }
 
     #[test]
@@ -1287,6 +1530,72 @@ mod tests {
         let (store, _f) = store_from(content);
         store.scan_all().unwrap();
         assert_eq!(store.line_to_byte(LogicalLine(99)), LineLookup::OutOfRange);
+    }
+
+    #[test]
+    fn approximate_goto_line_with_partial_index() {
+        // Build a file large enough to span multiple 64-byte pages.
+        // Each line is "line_NNNNN\n" (10 bytes); 200 lines = 2000 bytes → ~31 pages.
+        let mut content = Vec::new();
+        for i in 0u32..200 {
+            content.extend_from_slice(format!("line_{:05}\n", i).as_bytes());
+        }
+        let (store, _f) = store_from(&content);
+        // Scan only the first page (bytes 0..64).
+        store.scan_page_at(0).unwrap();
+
+        // Line 0: always Exact.
+        assert_eq!(store.line_to_byte(LogicalLine(0)), LineLookup::Exact(ByteOffset(0)));
+
+        // Line 100 (mid-file): index can't resolve it exactly yet, but should
+        // return Approximate rather than Pending once we have scan data.
+        match store.line_to_byte(LogicalLine(100)) {
+            LineLookup::Approximate(ByteOffset(off)) => {
+                // Offset should be somewhere in the middle of the file, not 0
+                // and not past the end.
+                assert!(off > 0, "approximate offset should be > 0 for line 100");
+                assert!(
+                    off <= content.len() as u64,
+                    "approximate offset must not exceed file size"
+                );
+            }
+            // Exact is acceptable if the index happened to cover it.
+            LineLookup::Exact(_) => {}
+            other => panic!("expected Approximate or Exact, got {:?}", other),
+        }
+
+        // After full scan, the result must be Exact.
+        store.scan_all().unwrap();
+        let expected_byte = 100 * 11; // "line_{:05}\n" = 11 bytes per line
+        assert_eq!(
+            store.line_to_byte(LogicalLine(100)),
+            LineLookup::Exact(ByteOffset(expected_byte))
+        );
+    }
+
+    #[test]
+    fn viewport_first_line_lookup_resolves_within_scanned_prefix() {
+        // File spans multiple pages; scan only the first page which covers
+        // the first few lines.  Those lines should resolve as Exact, while
+        // lines beyond the scanned prefix return Approximate (not Pending).
+        let mut content = Vec::new();
+        for i in 0u32..200 {
+            content.extend_from_slice(format!("line_{:05}\n", i).as_bytes());
+        }
+        let (store, _f) = store_from(&content);
+        store.scan_page_at(0).unwrap();
+
+        // Lines within the first 64-byte page are Exact.
+        // Page size=64; each line is 11 bytes: lines 0..=4 fit (55 bytes), line 5 partly.
+        assert_eq!(store.line_to_byte(LogicalLine(0)), LineLookup::Exact(ByteOffset(0)));
+        assert_eq!(store.line_to_byte(LogicalLine(1)), LineLookup::Exact(ByteOffset(11)));
+
+        // Lines well beyond the scanned prefix: Approximate (not Pending).
+        match store.line_to_byte(LogicalLine(150)) {
+            LineLookup::Approximate(_) | LineLookup::Exact(_) => {}
+            LineLookup::Pending => panic!("expected Approximate not Pending for line 150"),
+            other => panic!("unexpected result {:?}", other),
+        }
     }
 
     #[test]
@@ -1590,7 +1899,10 @@ mod tests {
             decoded_cache: RefCell::new(DecodedTextCache::new(5)),
             batch_size: 0, // overscan == viewport, so [3,6) is Background when viewport=[0,3)
             stats: RefCell::new(VlfMemoryStats::default()),
-            first_viewport_set: std::cell::Cell::new(false),
+            first_viewport_set: Cell::new(false),
+            scan_rx: RefCell::new(None),
+            bg_cancel: Arc::new(AtomicBool::new(false)),
+            approx_line_floor: Cell::new(0),
         };
 
         // Prime a background entry at [3,6) (before viewport is set).
@@ -1840,5 +2152,150 @@ mod tests {
         store.scan_all().unwrap();
         let status = store.doc_status();
         assert!((status.indexing_progress - 1.0).abs() < f64::EPSILON);
+    }
+
+    // ---- Background indexing ----------------------------------------
+
+    #[test]
+    fn start_background_indexing_eventually_completes() {
+        // Create content with several pages' worth of data.
+        let content: Vec<u8> =
+            (0..20).flat_map(|i| format!("line {i:04}\n").into_bytes()).collect();
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(&content).unwrap();
+        f.flush().unwrap();
+
+        let store = VlfStore::open_with_config(f.path(), 16, 1024 * 1024).unwrap();
+        store.start_background_indexing();
+
+        // Poll with a timeout to wait for background scan to complete.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            store.drain_incoming();
+            if store.index().scan_progress().is_complete() {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("background indexing did not complete within 5 s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        // Line count must be exact after full scan.
+        match store.known_line_count() {
+            KnownLineCount::Exact(_) => {}
+            other => panic!("expected Exact line count after full scan, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn start_background_indexing_idempotent() {
+        // Calling start_background_indexing twice must not panic or spawn two threads.
+        let (store, _f) = store_from(b"hello\nworld\n");
+        store.start_background_indexing();
+        store.start_background_indexing(); // second call is a no-op
+    }
+
+    #[test]
+    fn background_indexing_produces_correct_newline_count() {
+        let content = b"a\nb\nc\nd\ne\n";
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content).unwrap();
+        f.flush().unwrap();
+
+        // page_size=4 → pages overlap different newlines.
+        let store = VlfStore::open_with_config(f.path(), 4, 1024 * 1024).unwrap();
+        store.start_background_indexing();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            store.drain_incoming();
+            if store.index().scan_progress().is_complete() {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("background indexing did not complete within 5 s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        // Content has 5 newlines → 6 lines.
+        match store.known_line_count() {
+            KnownLineCount::Exact(n) => assert_eq!(n, 6, "expected 6 lines"),
+            other => panic!("expected Exact, got {:?}", other),
+        }
+    }
+
+    // ---- Stable line numbers (approx_line_floor) --------------------
+
+    #[test]
+    fn approximate_line_count_never_decreases() {
+        // Construct a file where the first page is denser with newlines than
+        // the rest, so the extrapolated estimate would drop as more pages are
+        // scanned.  The floor must prevent any decrease.
+        //
+        // Page 0 (8 bytes): "a\nb\nc\n\n" — 4 newlines in 8 bytes (dense).
+        // Page 1 (8 bytes): "xxxxxxxx" — 0 newlines in 8 bytes (sparse).
+        // Total = 16 bytes, 4 newlines → Exact(5) after full scan.
+        // After page 0 only: estimate = 4/8 * 16 = 8 lines (over-estimate).
+        // After pages 0+1: scan is complete → Exact(5).
+        // The floor ensures the Approximate value only increased until exact.
+        let content = b"a\nb\nc\n\nxxxxxxxx";
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content).unwrap();
+        f.flush().unwrap();
+
+        let store = VlfStore::open_with_config(f.path(), 8, 1024 * 1024).unwrap();
+
+        // Scan only the first page and observe the approximate count.
+        store.scan_page_at(0).unwrap();
+        let first_approx = match store.known_line_count() {
+            KnownLineCount::Approximate(n) => n,
+            // If the single-page scan already produced Exact, the floor test
+            // is vacuous — the index was fully covered in one pass.
+            KnownLineCount::Exact(_) | KnownLineCount::Unknown => return,
+        };
+
+        // Scan the second page; the returned value must be >= first_approx
+        // **unless** we now have an Exact value (which is always authoritative).
+        store.scan_page_at(8).unwrap();
+        match store.known_line_count() {
+            KnownLineCount::Approximate(n) => {
+                assert!(
+                    n >= first_approx,
+                    "Approximate line count decreased from {first_approx} to {n}"
+                );
+            }
+            // Exact is always authoritative; no floor assertion needed.
+            KnownLineCount::Exact(_) | KnownLineCount::Unknown => {}
+        }
+    }
+
+    #[test]
+    fn floor_preserved_across_multiple_drain_calls() {
+        // After establishing a floor via known_line_count, subsequent calls
+        // must not return a lower value even before the scan is complete.
+        let content: Vec<u8> = b"line\n".repeat(100);
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(&content).unwrap();
+        f.flush().unwrap();
+
+        let store = VlfStore::open_with_config(f.path(), 10, 1024 * 1024).unwrap();
+        store.scan_page_at(0).unwrap(); // scan first page only
+
+        let first = match store.known_line_count() {
+            KnownLineCount::Approximate(n) => n,
+            KnownLineCount::Exact(_) => return, // already done; test not applicable
+            KnownLineCount::Unknown => return,
+        };
+
+        // Second call must return >= first (floor is preserved).
+        match store.known_line_count() {
+            KnownLineCount::Approximate(n) => {
+                assert!(n >= first, "second call returned {n} < {first}");
+            }
+            // Exact is authoritative; no floor assertion needed.
+            KnownLineCount::Exact(_) | KnownLineCount::Unknown => {}
+        }
     }
 }

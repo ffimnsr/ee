@@ -37,6 +37,7 @@ fn test_startup() {
     assert_eq!(rx.expect_response(), Ok(json!("view-id-1")));
     rx.expect_rpc("available_plugins");
     rx.expect_rpc("language_changed");
+    rx.expect_rpc("document_mode");
     rx.expect_rpc("update");
     rx.expect_rpc("scroll_to");
     rx.expect_nothing();
@@ -265,6 +266,7 @@ fn move_parent_node_start_rpc_updates_selection_annotation() {
     assert_eq!(rx.expect_response(), Ok(json!("view-id-1")));
     rx.expect_rpc("available_plugins");
     rx.expect_rpc("language_changed");
+    rx.expect_rpc("document_mode");
     rx.expect_rpc("update");
     rx.expect_rpc("scroll_to");
     rx.expect_nothing();
@@ -306,6 +308,7 @@ fn move_parent_node_end_rpc_updates_selection_annotation() {
     assert_eq!(rx.expect_response(), Ok(json!("view-id-1")));
     rx.expect_rpc("available_plugins");
     rx.expect_rpc("language_changed");
+    rx.expect_rpc("document_mode");
     rx.expect_rpc("update");
     rx.expect_rpc("scroll_to");
     rx.expect_nothing();
