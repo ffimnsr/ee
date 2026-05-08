@@ -1786,6 +1786,86 @@ fn align_selections_command_uses_backend_edit() {
 }
 
 #[test]
+fn align_it_command_uses_backend_edit_with_pattern_params() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    run_ex(&mut app, "align_it =");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["params"]["method"], "align_it");
+    assert_eq!(value["params"]["params"]["pattern"], "=");
+    assert_eq!(value["params"]["params"]["regex"], false);
+    assert_eq!(value["params"]["params"]["occurrence"], 1);
+    assert_eq!(value["params"]["params"]["all"], false);
+    assert_eq!(value["params"]["params"]["format"], "");
+}
+
+#[test]
+fn align_it_command_supports_nth_and_format_params() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    run_ex(&mut app, "align_it 2= l0r0l0");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["params"]["params"]["pattern"], "=");
+    assert_eq!(value["params"]["params"]["occurrence"], 2);
+    assert_eq!(value["params"]["params"]["all"], false);
+    assert_eq!(value["params"]["params"]["format"], "l0r0l0");
+}
+
+#[test]
+fn align_it_command_supports_all_matches_selector() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    run_ex(&mut app, "align_it *= r1c1l0");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["params"]["params"]["pattern"], "=");
+    assert_eq!(value["params"]["params"]["all"], true);
+    assert_eq!(value["params"]["params"]["format"], "r1c1l0");
+}
+
+#[test]
+fn align_it_command_rejects_invalid_regex() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    run_ex(&mut app, "align_it /[/");
+
+    let status = app.backend.status_message.as_deref().expect("status message should be set");
+    assert!(status.contains("align_it: invalid regex"));
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
+fn align_it_command_rejects_invalid_format() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    run_ex(&mut app, "align_it = x1");
+
+    let status = app.backend.status_message.as_deref().expect("status message should be set");
+    assert!(status.contains("align_it: invalid format"));
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
 fn reverse_selection_contents_command_uses_backend_edit() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();

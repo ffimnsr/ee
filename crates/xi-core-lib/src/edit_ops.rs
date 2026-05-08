@@ -17,6 +17,7 @@
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 
+use regex::Regex;
 use unicode_width::UnicodeWidthChar;
 use xi_rope::{Cursor, DeltaBuilder, Interval, LinesMetric, Rope, RopeDelta};
 
@@ -622,6 +623,116 @@ pub fn align_selections(base: &Rope, regions: &[SelRegion], tab_size: usize) -> 
     builder.build()
 }
 
+pub fn align_it(
+    base: &Rope,
+    regions: &[SelRegion],
+    tab_size: usize,
+    pattern: &str,
+    regex: bool,
+    occurrence: i64,
+    all: bool,
+    format: &str,
+    line_range: Option<(usize, usize)>,
+) -> RopeDelta {
+    let Some(pattern) = compile_align_it_pattern(pattern, regex) else {
+        return identity_delta(base);
+    };
+    let Some(format_spec) = parse_align_it_format(format) else {
+        return identity_delta(base);
+    };
+    let occurrence = if all {
+        AlignOccurrence::All
+    } else {
+        let occurrence = occurrence.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as isize;
+        if occurrence == 0 {
+            return identity_delta(base);
+        }
+        AlignOccurrence::Index(occurrence)
+    };
+
+    let total_lines = base.measure::<LinesMetric>() + 1;
+    if total_lines == 0 {
+        return identity_delta(base);
+    }
+
+    let target_range = line_range
+        .map(|(start, end)| {
+            let last = total_lines.saturating_sub(1);
+            (start.min(last), end.min(last))
+        })
+        .or_else(|| selected_line_range(base, regions))
+        .or_else(|| contiguous_matching_block(base, regions, &pattern));
+
+    let Some((start_line, end_line)) = target_range else {
+        return identity_delta(base);
+    };
+
+    #[derive(Clone)]
+    struct MatchLine {
+        line_start: usize,
+        content_len: usize,
+        fields: Vec<String>,
+    }
+
+    let mut matched_lines = Vec::new();
+    let mut column_widths: Vec<usize> = Vec::new();
+
+    for line in start_line..=end_line {
+        let (line_start, content) = logical_line_contents(base, line);
+        let matches: Vec<_> =
+            pattern.find_iter(&content).filter(|found| found.start() != found.end()).collect();
+        let selected = select_align_it_matches(&matches, occurrence);
+        if selected.is_empty() {
+            continue;
+        }
+
+        let fields = build_align_it_fields(&content, &selected);
+        if fields.is_empty() {
+            continue;
+        }
+
+        for (index, field) in fields.iter().enumerate() {
+            let width = display_col_for_str(field, tab_size);
+            match column_widths.get_mut(index) {
+                Some(existing) => *existing = (*existing).max(width),
+                None => column_widths.push(width),
+            }
+        }
+
+        matched_lines.push(MatchLine { line_start, content_len: content.len(), fields });
+    }
+
+    if matched_lines.is_empty() {
+        return identity_delta(base);
+    }
+
+    let mut builder = DeltaBuilder::new(base.len());
+    for line in matched_lines {
+        let mut rebuilt = String::new();
+        for (index, field) in line.fields.iter().enumerate() {
+            let spec = format_spec[index % format_spec.len()];
+            let width = column_widths.get(index).copied().unwrap_or_default();
+            rebuilt.push_str(&align_it_field(
+                field,
+                width,
+                spec.align,
+                tab_size,
+                index + 1 == line.fields.len(),
+            ));
+            if index + 1 < line.fields.len() {
+                rebuilt.push_str(&" ".repeat(spec.padding));
+            }
+        }
+
+        builder.replace(
+            Interval::new(line.line_start, line.line_start + line.content_len),
+            Rope::from(rebuilt),
+        );
+    }
+
+    builder.build()
+}
+
 pub fn transform_text<F: Fn(&str) -> String>(
     base: &Rope,
     regions: &[SelRegion],
@@ -713,6 +824,199 @@ fn sel_region_to_interval_and_rope(base: &Rope, region: SelRegion) -> (Interval,
     (as_interval, interval_rope)
 }
 
+#[derive(Copy, Clone)]
+enum AlignOccurrence {
+    Index(isize),
+    All,
+}
+
+#[derive(Copy, Clone)]
+enum AlignItFieldAlign {
+    Left,
+    Right,
+    Center,
+}
+
+#[derive(Copy, Clone)]
+struct AlignItFormatSpec {
+    align: AlignItFieldAlign,
+    padding: usize,
+}
+
+fn parse_align_it_format(format: &str) -> Option<Vec<AlignItFormatSpec>> {
+    let format = format.trim();
+    if format.is_empty() {
+        return Some(vec![
+            AlignItFormatSpec { align: AlignItFieldAlign::Left, padding: 1 },
+            AlignItFormatSpec { align: AlignItFieldAlign::Right, padding: 1 },
+            AlignItFormatSpec { align: AlignItFieldAlign::Left, padding: 0 },
+        ]);
+    }
+
+    let mut specs = Vec::new();
+    let mut index = 0;
+    while index < format.len() {
+        let align = match format.as_bytes()[index] {
+            b'l' => AlignItFieldAlign::Left,
+            b'r' => AlignItFieldAlign::Right,
+            b'c' => AlignItFieldAlign::Center,
+            _ => return None,
+        };
+        index += 1;
+        let digit_start = index;
+        while index < format.len() && format.as_bytes()[index].is_ascii_digit() {
+            index += 1;
+        }
+        if digit_start == index {
+            return None;
+        }
+        let padding = format[digit_start..index].parse().ok()?;
+        specs.push(AlignItFormatSpec { align, padding });
+    }
+
+    (!specs.is_empty()).then_some(specs)
+}
+
+fn compile_align_it_pattern(pattern: &str, regex: bool) -> Option<Regex> {
+    if pattern.is_empty() {
+        return None;
+    }
+    let source = if regex { Cow::Borrowed(pattern) } else { Cow::Owned(regex::escape(pattern)) };
+    Regex::new(source.as_ref()).ok()
+}
+
+fn selected_line_range(base: &Rope, regions: &[SelRegion]) -> Option<(usize, usize)> {
+    if regions.is_empty() {
+        return None;
+    }
+    let use_selection_range = regions.len() > 1 || regions.iter().any(|region| !region.is_caret());
+    if !use_selection_range {
+        return None;
+    }
+
+    let mut start_line = usize::MAX;
+    let mut end_line = 0;
+    for region in regions {
+        let first_line = base.line_of_offset(region.min());
+        let last_offset =
+            if region.is_caret() { region.max() } else { region.max().saturating_sub(1) };
+        let last_line = base.line_of_offset(last_offset);
+        start_line = start_line.min(first_line);
+        end_line = end_line.max(last_line);
+    }
+
+    (start_line != usize::MAX).then_some((start_line, end_line))
+}
+
+fn contiguous_matching_block(
+    base: &Rope,
+    regions: &[SelRegion],
+    pattern: &Regex,
+) -> Option<(usize, usize)> {
+    let region = regions.first()?;
+    let line = base.line_of_offset(region.max());
+    if !line_matches(base, line, pattern) {
+        return None;
+    }
+
+    let total_lines = base.measure::<LinesMetric>() + 1;
+    let mut start = line;
+    while start > 0 && line_matches(base, start - 1, pattern) {
+        start -= 1;
+    }
+
+    let mut end = line;
+    while end + 1 < total_lines && line_matches(base, end + 1, pattern) {
+        end += 1;
+    }
+
+    Some((start, end))
+}
+
+fn line_matches(base: &Rope, line: usize, pattern: &Regex) -> bool {
+    let (_, content) = logical_line_contents(base, line);
+    pattern.find(&content).is_some_and(|found| found.start() != found.end())
+}
+
+fn select_align_it_matches<'a>(
+    matches: &'a [regex::Match<'a>],
+    occurrence: AlignOccurrence,
+) -> Vec<regex::Match<'a>> {
+    match occurrence {
+        AlignOccurrence::All => matches.to_vec(),
+        AlignOccurrence::Index(index) if index > 0 => {
+            matches.get(index.saturating_sub(1) as usize).copied().into_iter().collect()
+        }
+        AlignOccurrence::Index(index) => {
+            let offset = index.unsigned_abs();
+            matches
+                .len()
+                .checked_sub(offset)
+                .and_then(|selected| matches.get(selected))
+                .copied()
+                .into_iter()
+                .collect()
+        }
+    }
+}
+
+fn build_align_it_fields(content: &str, matches: &[regex::Match<'_>]) -> Vec<String> {
+    if matches.is_empty() {
+        return Vec::new();
+    }
+
+    let mut fields = Vec::with_capacity(matches.len() * 2 + 1);
+    let mut cursor = 0;
+    for (index, found) in matches.iter().enumerate() {
+        let text = &content[cursor..found.start()];
+        fields.push(if index == 0 {
+            normalize_align_it_leading_text(text)
+        } else {
+            text.trim().to_owned()
+        });
+        fields.push(found.as_str().to_owned());
+        cursor = found.end();
+    }
+    fields.push(content[cursor..].trim().to_owned());
+    fields
+}
+
+fn normalize_align_it_leading_text(text: &str) -> String {
+    let indent_end = text
+        .char_indices()
+        .find_map(|(idx, ch)| (!ch.is_whitespace()).then_some(idx))
+        .unwrap_or(text.len());
+    let indent = &text[..indent_end];
+    let body = text[indent_end..].trim_end_matches(char::is_whitespace);
+    format!("{indent}{body}")
+}
+
+fn align_it_field(
+    value: &str,
+    width: usize,
+    align: AlignItFieldAlign,
+    tab_size: usize,
+    is_last: bool,
+) -> String {
+    let display_width = display_col_for_str(value, tab_size);
+    let padding = width.saturating_sub(display_width);
+    match align {
+        AlignItFieldAlign::Left => {
+            if is_last {
+                value.to_owned()
+            } else {
+                format!("{value}{}", " ".repeat(padding))
+            }
+        }
+        AlignItFieldAlign::Right => format!("{}{value}", " ".repeat(padding)),
+        AlignItFieldAlign::Center => {
+            let left = padding / 2;
+            let right = if is_last { 0 } else { padding.saturating_sub(left) };
+            format!("{}{}{}", " ".repeat(left), value, " ".repeat(right))
+        }
+    }
+}
+
 fn display_col_for_offset(base: &Rope, offset: usize, tab_size: usize) -> usize {
     let line = base.line_of_offset(offset);
     let line_start = base.offset_of_line(line);
@@ -753,8 +1057,8 @@ fn n_spaces(n: usize) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        align_selections, delete_backward, reverse_selection_contents, rotate_selection_contents,
-        transpose,
+        align_it, align_selections, delete_backward, reverse_selection_contents,
+        rotate_selection_contents, transpose,
     };
     use crate::config::BufferItems;
     use crate::selection::SelRegion;
@@ -868,5 +1172,71 @@ mod tests {
         let delta = align_selections(&text, &regions, 4);
 
         assert_eq!(String::from(delta.apply(&text)), "a  b\na  b");
+    }
+
+    #[test]
+    fn align_it_expands_contiguous_matching_block_from_caret() {
+        let text: Rope = "a=1\nbbb=22\nskip\nz=3".into();
+        let regions = [SelRegion::new(0, 0)];
+
+        let delta = align_it(&text, &regions, 4, "=", false, 1, false, "", None);
+
+        assert_eq!(String::from(delta.apply(&text)), "a   = 1\nbbb = 22\nskip\nz=3");
+    }
+
+    #[test]
+    fn align_it_uses_selected_lines_and_skips_unmatched_lines() {
+        let text: Rope = "a=1\nskip\nbb=2".into();
+        let regions = [SelRegion::new(0, text.len())];
+
+        let delta = align_it(&text, &regions, 4, "=", false, 1, false, "", None);
+
+        assert_eq!(String::from(delta.apply(&text)), "a  = 1\nskip\nbb = 2");
+    }
+
+    #[test]
+    fn align_it_supports_regex_and_explicit_line_ranges() {
+        let text: Rope = "apple=1\nbanana += 22\npear ||= 3\nend".into();
+        let regions = [SelRegion::new(0, 0)];
+
+        let delta = align_it(&text, &regions, 4, r"\|\|=|\+=|=", true, 1, false, "", Some((0, 2)));
+
+        assert_eq!(
+            String::from(delta.apply(&text)),
+            "apple    = 1\nbanana  += 22\npear   ||= 3\nend"
+        );
+    }
+
+    #[test]
+    fn align_it_supports_nth_match_selection() {
+        let text: Rope = "a = 1 => foo\nlong_name = 22 => bar".into();
+        let regions = [SelRegion::new(0, 0)];
+
+        let delta = align_it(&text, &regions, 4, r"=>|=", true, 2, false, "", None);
+
+        assert_eq!(
+            String::from(delta.apply(&text)),
+            "a = 1          => foo\nlong_name = 22 => bar"
+        );
+    }
+
+    #[test]
+    fn align_it_supports_all_matches_with_tabular_format() {
+        let text: Rope = "abc,def,ghi\na,b\na,b,c".into();
+        let regions = [SelRegion::new(0, text.len())];
+
+        let delta = align_it(&text, &regions, 4, ",", false, 1, true, "r1c1l0", None);
+
+        assert_eq!(String::from(delta.apply(&text)), "abc , def, ghi\n  a , b\n  a , b  ,  c");
+    }
+
+    #[test]
+    fn align_it_supports_custom_spacing_format() {
+        let text: Rope = "a=1\nbbb=22".into();
+        let regions = [SelRegion::new(0, text.len())];
+
+        let delta = align_it(&text, &regions, 4, "=", false, 1, false, "l0r0l0", None);
+
+        assert_eq!(String::from(delta.apply(&text)), "a  =1\nbbb=22");
     }
 }

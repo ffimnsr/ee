@@ -69,7 +69,10 @@ pub(crate) enum ViewEvent {
 /// Events that modify the buffer
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) enum BufferEvent {
-    Delete { movement: Movement, kill: bool },
+    Delete {
+        movement: Movement,
+        kill: bool,
+    },
     Backspace,
     Transpose,
     Undo,
@@ -81,7 +84,10 @@ pub(crate) enum BufferEvent {
     Outdent,
     Insert(String),
     Paste(String),
-    PasteRegister { chars: String, before: bool },
+    PasteRegister {
+        chars: String,
+        before: bool,
+    },
     InsertNewline,
     InsertTab,
     Yank,
@@ -91,6 +97,14 @@ pub(crate) enum BufferEvent {
     IncreaseNumber,
     DecreaseNumber,
     AlignSelections,
+    AlignIt {
+        pattern: String,
+        regex: bool,
+        occurrence: i64,
+        all: bool,
+        format: String,
+        range: Option<LineRange>,
+    },
     RotateSelectionContentsBackward,
     RotateSelectionContentsForward,
     ReverseSelectionContents,
@@ -395,6 +409,9 @@ impl From<EditNotification> for EventDomain {
             }
             TrimSelections => ViewEvent::TrimSelections.into(),
             AlignSelections => BufferEvent::AlignSelections.into(),
+            AlignIt { pattern, regex, occurrence, all, format, range } => {
+                BufferEvent::AlignIt { pattern, regex, occurrence, all, format, range }.into()
+            }
             FlipSelections => ViewEvent::FlipSelections.into(),
             EnsureSelectionsForward => ViewEvent::EnsureSelectionsForward.into(),
             KeepPrimarySelection => ViewEvent::KeepPrimarySelection.into(),

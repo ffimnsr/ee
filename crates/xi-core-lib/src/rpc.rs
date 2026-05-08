@@ -524,6 +524,19 @@ pub enum EditNotification {
     MergeConsecutiveSelections,
     TrimSelections,
     AlignSelections,
+    AlignIt {
+        pattern: String,
+        #[serde(default)]
+        regex: bool,
+        #[serde(default = "default_align_it_occurrence")]
+        occurrence: i64,
+        #[serde(default)]
+        all: bool,
+        #[serde(default)]
+        format: String,
+        #[serde(default)]
+        range: Option<LineRange>,
+    },
     FlipSelections,
     EnsureSelectionsForward,
     KeepPrimarySelection,
@@ -771,6 +784,10 @@ impl<'de> Deserialize<'de> for LineRange {
         let tup = TwoTuple::deserialize(deserializer)?;
         Ok(LineRange { first: tup.0, last: tup.1 })
     }
+}
+
+fn default_align_it_occurrence() -> i64 {
+    1
 }
 
 #[cfg(test)]
