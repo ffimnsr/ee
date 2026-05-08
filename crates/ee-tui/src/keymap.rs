@@ -24,6 +24,7 @@ pub(crate) enum Action {
     CompleteCommandLine,
     FindNext,
     FindPrevious,
+    RequestCompletion,
     RequestHover,
     RequestDeclaration,
     RequestDefinition,
@@ -33,6 +34,8 @@ pub(crate) enum Action {
     RequestDocumentSymbols,
     RequestWorkspaceSymbols,
     RequestCodeActions,
+    GlobalSearch,
+    CommandPalette,
     FilePicker,
     FilePickerInCurrentDirectory,
     FileExplorer,
@@ -44,7 +47,25 @@ pub(crate) enum Action {
     DiagnosticsPicker,
     WorkspaceDiagnosticsPicker,
     LastPicker,
+    PickerClose,
+    PickerConfirm,
+    PickerMoveUp,
+    PickerMoveDown,
+    PickerBackspace,
+    QuickfixClose,
+    QuickfixConfirm,
+    QuickfixMoveUp,
+    QuickfixMoveDown,
+    LocationListClose,
+    LocationListConfirm,
+    LocationListMoveUp,
+    LocationListMoveDown,
+    SubstituteConfirmApply,
+    SubstituteConfirmSkip,
+    SubstituteConfirmApplyAll,
+    SubstituteConfirmCancel,
     RegisterPrefix,
+    InsertRegister,
     MarkSetPrefix,
     MarkJumpPrefix {
         line_start: bool,
@@ -263,7 +284,7 @@ pub(crate) fn parse_binding_spec(
     key: &str,
     prefix: Option<&str>,
 ) -> Result<BindingKey, String> {
-    let mode = parse_mode_spec(mode).ok_or_else(|| format!("unknown mode `{mode}`"))?;
+    let mode = parse_binding_mode_spec(mode).ok_or_else(|| format!("unknown mode `{mode}`"))?;
     let (key, modifiers) = parse_key_spec(key)?;
     let prefix = parse_prefix_spec(prefix)?;
     Ok(BindingKey { mode, key, modifiers, prefix })
@@ -390,6 +411,7 @@ pub(crate) fn parse_action_spec(spec: &str) -> Result<Action, String> {
         "reverse_search" | "rsearch" => Action::EnterSearchBackward,
         "search_next" => Action::FindNext,
         "search_prev" => Action::FindPrevious,
+        "global_search" => Action::GlobalSearch,
         "search_selection_detect_word_boundaries" => {
             Action::SearchSelection { detect_word_boundaries: true }
         }
@@ -411,7 +433,7 @@ pub(crate) fn parse_action_spec(spec: &str) -> Result<Action, String> {
         "goto_declaration" => Action::RequestDeclaration,
         "goto_definition" => Action::RequestDefinition,
         "goto_type_definition" => Action::RequestTypeDefinition,
-        "goto_reference" => Action::RequestReferences,
+        "goto_reference" | "select_references_to_symbol_under_cursor" => Action::RequestReferences,
         "goto_implementation" => Action::RequestImplementation,
         "file_picker" => Action::FilePicker,
         "file_picker_in_current_directory" => Action::FilePickerInCurrentDirectory,
@@ -426,6 +448,24 @@ pub(crate) fn parse_action_spec(spec: &str) -> Result<Action, String> {
         "diagnostics_picker" => Action::DiagnosticsPicker,
         "workspace_diagnostics_picker" => Action::WorkspaceDiagnosticsPicker,
         "last_picker" => Action::LastPicker,
+        "picker_close" => Action::PickerClose,
+        "picker_confirm" => Action::PickerConfirm,
+        "picker_move_up" => Action::PickerMoveUp,
+        "picker_move_down" => Action::PickerMoveDown,
+        "picker_backspace" => Action::PickerBackspace,
+        "quickfix_close" => Action::QuickfixClose,
+        "quickfix_confirm" => Action::QuickfixConfirm,
+        "quickfix_move_up" => Action::QuickfixMoveUp,
+        "quickfix_move_down" => Action::QuickfixMoveDown,
+        "location_list_close" => Action::LocationListClose,
+        "location_list_confirm" => Action::LocationListConfirm,
+        "location_list_move_up" => Action::LocationListMoveUp,
+        "location_list_move_down" => Action::LocationListMoveDown,
+        "substitute_confirm_apply" => Action::SubstituteConfirmApply,
+        "substitute_confirm_skip" => Action::SubstituteConfirmSkip,
+        "substitute_confirm_apply_all" => Action::SubstituteConfirmApplyAll,
+        "substitute_confirm_cancel" => Action::SubstituteConfirmCancel,
+        "command_palette" => Action::CommandPalette,
         "goto_next_function" => Action::Edit("goto_next_function"),
         "goto_prev_function" => Action::Edit("goto_prev_function"),
         "goto_next_class" => Action::Edit("goto_next_class"),
@@ -502,11 +542,14 @@ pub(crate) fn parse_action_spec(spec: &str) -> Result<Action, String> {
         "find_till_char" => Action::PendingCharFind { forward: true, inclusive: false },
         "find_prev_char" => Action::PendingCharFind { forward: false, inclusive: true },
         "till_prev_char" => Action::PendingCharFind { forward: false, inclusive: false },
-        "request_hover" => Action::RequestHover,
+        "completion" => Action::RequestCompletion,
+        "request_hover" | "hover" => Action::RequestHover,
         "request_document_symbols" => Action::RequestDocumentSymbols,
         "request_workspace_symbols" => Action::RequestWorkspaceSymbols,
         "code_action" => Action::RequestCodeActions,
+        "rename_symbol" => Action::PrefillCommandLine("rename "),
         "register_prefix" => Action::RegisterPrefix,
+        "insert_register" => Action::InsertRegister,
         "mark_set_prefix" => Action::MarkSetPrefix,
         "macro_record_toggle" => Action::MacroRecordToggle,
         "macro_replay_prefix" => Action::MacroReplayPrefix,
@@ -615,6 +658,15 @@ fn parse_mode_spec(spec: &str) -> Option<Mode> {
         "substitute_confirm" | "substitute" => Some(Mode::SubstituteConfirm),
         _ => None,
     }
+}
+
+fn parse_binding_mode_spec(spec: &str) -> Option<Mode> {
+    parse_mode_spec(spec).or_else(|| match spec.trim().to_ascii_lowercase().as_str() {
+        "picker" => Some(Mode::Picker),
+        "quickfix" => Some(Mode::Quickfix),
+        "location_list" | "locationlist" | "location" => Some(Mode::LocationList),
+        _ => None,
+    })
 }
 
 fn parse_operator_spec(spec: &str) -> Option<Operator> {
@@ -760,6 +812,7 @@ fn build_vim_bindings() -> HashMap<BindingKey, Action> {
 
     let none = KeyModifiers::NONE;
     let ctrl = KeyModifiers::CONTROL;
+    let ctrl_alt = KeyModifiers::CONTROL | KeyModifiers::ALT;
 
     let mut map = HashMap::new();
 
@@ -776,16 +829,59 @@ fn build_vim_bindings() -> HashMap<BindingKey, Action> {
         bind!(mode, KeyCode::Char('c'), ctrl, None, Quit);
     }
 
-    // Quit is available via `:q`, `:quit`, `:q!`, `:quit!`, or Ctrl-C.
+    bind!(Picker, KeyCode::Esc, none, None, PickerClose);
+    bind!(Picker, KeyCode::Enter, none, None, PickerConfirm);
+    bind!(Picker, KeyCode::Up, none, None, PickerMoveUp);
+    bind!(Picker, KeyCode::Down, none, None, PickerMoveDown);
+    bind!(Picker, KeyCode::Backspace, none, None, PickerBackspace);
+
+    bind!(Quickfix, KeyCode::Esc, none, None, QuickfixClose);
+    bind!(Quickfix, KeyCode::Char('q'), none, None, QuickfixClose);
+    bind!(Quickfix, KeyCode::Char('j'), none, None, QuickfixMoveDown);
+    bind!(Quickfix, KeyCode::Down, none, None, QuickfixMoveDown);
+    bind!(Quickfix, KeyCode::Char('k'), none, None, QuickfixMoveUp);
+    bind!(Quickfix, KeyCode::Up, none, None, QuickfixMoveUp);
+    bind!(Quickfix, KeyCode::Enter, none, None, QuickfixConfirm);
+
+    bind!(LocationList, KeyCode::Esc, none, None, LocationListClose);
+    bind!(LocationList, KeyCode::Char('q'), none, None, LocationListClose);
+    bind!(LocationList, KeyCode::Char('j'), none, None, LocationListMoveDown);
+    bind!(LocationList, KeyCode::Down, none, None, LocationListMoveDown);
+    bind!(LocationList, KeyCode::Char('k'), none, None, LocationListMoveUp);
+    bind!(LocationList, KeyCode::Up, none, None, LocationListMoveUp);
+    bind!(LocationList, KeyCode::Enter, none, None, LocationListConfirm);
+
+    bind!(SubstituteConfirm, KeyCode::Char('y'), none, None, SubstituteConfirmApply);
+    bind!(SubstituteConfirm, KeyCode::Char('Y'), none, None, SubstituteConfirmApply);
+    bind!(SubstituteConfirm, KeyCode::Char('n'), none, None, SubstituteConfirmSkip);
+    bind!(SubstituteConfirm, KeyCode::Char('N'), none, None, SubstituteConfirmSkip);
+    bind!(SubstituteConfirm, KeyCode::Char('a'), none, None, SubstituteConfirmApplyAll);
+    bind!(SubstituteConfirm, KeyCode::Char('A'), none, None, SubstituteConfirmApplyAll);
+    bind!(SubstituteConfirm, KeyCode::Char('q'), none, None, SubstituteConfirmCancel);
+    bind!(SubstituteConfirm, KeyCode::Char('Q'), none, None, SubstituteConfirmCancel);
+    bind!(SubstituteConfirm, KeyCode::Esc, none, None, SubstituteConfirmCancel);
+
+    bind!(Normal, KeyCode::Char('p'), ctrl, None, FilePickerInCurrentDirectory);
+    bind!(Normal, KeyCode::Char('p'), ctrl_alt, None, CommandPalette);
+
+    // Normal mode: unprefixed bindings.
+    // Quit is available via `:q`, `:quit`, `:q!`, `:quit!`.
     bind!(Normal, KeyCode::Char('i'), none, None, EnterMode(Insert));
     bind!(Normal, KeyCode::Char('v'), none, None, EnterMode(Visual));
+    bind!(Normal, KeyCode::Char('V'), none, None, EnterVisualLine);
     bind!(Normal, KeyCode::Char(':'), none, None, EnterCommandMode);
+    bind!(Normal, KeyCode::Char('/'), none, None, EnterSearch);
+    bind!(Normal, KeyCode::Char('?'), none, None, EnterSearchBackward);
     bind!(Normal, KeyCode::Char('"'), none, None, RegisterPrefix);
     bind!(Normal, KeyCode::Char('m'), none, None, MarkSetPrefix);
     bind!(Normal, KeyCode::Char('\''), none, None, MarkJumpPrefix { line_start: true });
     bind!(Normal, KeyCode::Char('`'), none, None, MarkJumpPrefix { line_start: false });
     bind!(Normal, KeyCode::Char('q'), none, None, MacroRecordToggle);
     bind!(Normal, KeyCode::Char('@'), none, None, MacroReplayPrefix);
+    bind!(Normal, KeyCode::Char('z'), none, None, SetPrefix('z'));
+    bind!(Normal, KeyCode::Char('g'), none, None, SetPrefix('g'));
+    bind!(Normal, KeyCode::Char('['), none, None, SetPrefix('['));
+    bind!(Normal, KeyCode::Char(']'), none, None, SetPrefix(']'));
     bind!(Normal, KeyCode::Left, none, None, Edit("move_left"));
     bind!(Normal, KeyCode::Char('h'), none, None, Edit("move_left"));
     bind!(Normal, KeyCode::Right, none, None, Edit("move_right"));
@@ -797,38 +893,15 @@ fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(Normal, KeyCode::Char('w'), none, None, Edit("move_word_right"));
     bind!(Normal, KeyCode::Char('e'), none, None, Edit("move_word_right"));
     bind!(Normal, KeyCode::Char('b'), none, None, Edit("move_word_left"));
-    bind!(Normal, KeyCode::Char('^'), none, None, Edit("move_to_beginning_of_paragraph"),);
+    bind!(Normal, KeyCode::Char('^'), none, None, GotoFirstNonWhitespace);
     bind!(Normal, KeyCode::Char('$'), none, None, Edit("move_to_right_end_of_line"));
     bind!(Normal, KeyCode::Char('G'), none, None, Edit("move_to_end_of_document"));
-    bind!(Normal, KeyCode::Char('g'), none, None, SetPrefix('g'));
-    // `]` / `[` prefix for list navigation (e.g. ]q / [q).
-    bind!(Normal, KeyCode::Char(']'), none, None, SetPrefix(']'));
-    bind!(Normal, KeyCode::Char('['), none, None, SetPrefix('['));
-    // ]q / [q — quickfix next / prev
-    bind!(Normal, KeyCode::Char('q'), none, Some(']'), QfNext);
-    bind!(Normal, KeyCode::Char('q'), none, Some('['), QfPrev);
-    // ]Q / [Q — location list next / prev
-    bind!(Normal, KeyCode::Char('Q'), none, Some(']'), LocNext);
-    bind!(Normal, KeyCode::Char('Q'), none, Some('['), LocPrev);
-    bind!(Normal, KeyCode::Char('g'), none, Some('g'), GotoFileStart);
-    bind!(Normal, KeyCode::Char('e'), none, Some('g'), GotoLastLine);
-    bind!(Normal, KeyCode::Char('f'), none, Some('g'), GotoFile);
-    bind!(Normal, KeyCode::Char('h'), none, Some('g'), Edit("move_to_left_end_of_line"));
-    bind!(Normal, KeyCode::Char('l'), none, Some('g'), Edit("move_to_right_end_of_line"));
-    // ]h / [h — git hunk next / prev
-    bind!(Normal, KeyCode::Char('h'), none, Some(']'), GitNextHunk);
-    bind!(Normal, KeyCode::Char('h'), none, Some('['), GitPrevHunk);
-    bind!(Normal, KeyCode::Char('d'), none, Some('g'), Edit("duplicate_line"));
-    bind!(Normal, KeyCode::Char('b'), none, Some('g'), GitBlame);
-    bind!(Normal, KeyCode::Char('D'), none, Some('g'), GitDiff);
-    // g+o — document symbols; g+O — workspace symbols
-    bind!(Normal, KeyCode::Char('o'), none, Some('g'), RequestDocumentSymbols);
-    bind!(Normal, KeyCode::Char('O'), none, Some('g'), RequestWorkspaceSymbols);
     bind!(Normal, KeyCode::Char('d'), ctrl, None, Edit("scroll_page_down"));
     bind!(Normal, KeyCode::Char('u'), ctrl, None, Edit("scroll_page_up"));
     bind!(Normal, KeyCode::Char('w'), ctrl, None, WindowCommandPrefix);
-    bind!(Normal, KeyCode::Char('/'), none, None, EnterSearch);
-    bind!(Normal, KeyCode::Char('?'), none, None, EnterSearchBackward);
+    bind!(Normal, KeyCode::Char('o'), ctrl, None, JumpListOlder);
+    bind!(Normal, KeyCode::Tab, none, None, JumpListNewer);
+    bind!(Normal, KeyCode::BackTab, none, None, JumpListNewer);
     bind!(Normal, KeyCode::Char('n'), none, None, FindNext);
     bind!(Normal, KeyCode::Char('N'), none, None, FindPrevious);
     bind!(Normal, KeyCode::Char('K'), none, None, RequestHover);
@@ -889,19 +962,49 @@ fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(Normal, KeyCode::Char('O'), none, None, OpenLineAbove);
     bind!(Normal, KeyCode::Char('s'), none, None, SubstituteChar);
     bind!(Normal, KeyCode::Char('S'), none, None, SubstituteLine);
-
-    // Insert mode editing controls (bound here for completeness; Ctrl keys
-    bind!(Normal, KeyCode::Char('K'), none, None, RequestHover);
     bind!(Normal, KeyCode::Char('a'), ctrl, None, Edit("increase_number"));
     bind!(Normal, KeyCode::Char('x'), ctrl, None, Edit("decrease_number"));
-    bind!(Insert, KeyCode::Char('w'), ctrl, None, DeleteWordBackward);
-    bind!(Insert, KeyCode::Char('u'), ctrl, None, DeleteToLineStart);
-    bind!(Insert, KeyCode::Char('t'), ctrl, None, IndentLine);
-    bind!(Insert, KeyCode::Char('d'), ctrl, None, OutdentLine);
 
+    // Normal mode: g-prefixed bindings.
+    bind!(Normal, KeyCode::Char('g'), none, Some('g'), GotoFileStart);
+    bind!(Normal, KeyCode::Char('e'), none, Some('g'), GotoLastLine);
+    bind!(Normal, KeyCode::Char('f'), none, Some('g'), GotoFile);
+    bind!(Normal, KeyCode::Char('h'), none, Some('g'), Edit("move_to_left_end_of_line"));
+    bind!(Normal, KeyCode::Char('l'), none, Some('g'), Edit("move_to_right_end_of_line"));
+    bind!(Normal, KeyCode::Char('d'), none, Some('g'), Edit("duplicate_line"));
+    bind!(Normal, KeyCode::Char('b'), none, Some('g'), GitBlame);
+    bind!(Normal, KeyCode::Char('D'), none, Some('g'), GitDiff);
+    bind!(Normal, KeyCode::Char('o'), none, Some('g'), RequestDocumentSymbols);
+    bind!(Normal, KeyCode::Char('O'), none, Some('g'), RequestWorkspaceSymbols);
+    bind!(Normal, KeyCode::Char('u'), none, Some('g'), SetOperator(Operator::Lowercase));
+    bind!(Normal, KeyCode::Char('U'), none, Some('g'), SetOperator(Operator::Uppercase));
+    bind!(Normal, KeyCode::Char('~'), none, Some('g'), SetOperator(Operator::CaseToggle));
+    bind!(Normal, KeyCode::Char('v'), none, Some('g'), RestoreLastVisual);
+    bind!(Normal, KeyCode::Char(';'), none, Some('g'), ChangeListOlder);
+    bind!(Normal, KeyCode::Char(','), none, Some('g'), ChangeListNewer);
+    bind!(Normal, KeyCode::Char('t'), none, Some('g'), TabNext);
+    bind!(Normal, KeyCode::Char('T'), none, Some('g'), TabPrev);
+
+    // Normal mode: list navigation prefixes.
+    bind!(Normal, KeyCode::Char('q'), none, Some(']'), QfNext);
+    bind!(Normal, KeyCode::Char('Q'), none, Some(']'), LocNext);
+    bind!(Normal, KeyCode::Char('h'), none, Some(']'), GitNextHunk);
+    bind!(Normal, KeyCode::Char('q'), none, Some('['), QfPrev);
+    bind!(Normal, KeyCode::Char('Q'), none, Some('['), LocPrev);
+    bind!(Normal, KeyCode::Char('h'), none, Some('['), GitPrevHunk);
+
+    // Normal mode: z-prefixed fold bindings.
+    bind!(Normal, KeyCode::Char('a'), none, Some('z'), FoldToggle);
+    bind!(Normal, KeyCode::Char('o'), none, Some('z'), FoldOpen);
+    bind!(Normal, KeyCode::Char('c'), none, Some('z'), FoldClose);
+    bind!(Normal, KeyCode::Char('R'), none, Some('z'), FoldOpenAll);
+    bind!(Normal, KeyCode::Char('M'), none, Some('z'), FoldCloseAll);
+
+    // Visual mode: unprefixed bindings.
     bind!(Visual, KeyCode::Esc, none, None, CollapseAndEnterNormal);
     bind!(Visual, KeyCode::Char('v'), none, None, CollapseAndEnterNormal);
     bind!(Visual, KeyCode::Char(':'), none, None, EnterCommandMode);
+    bind!(Visual, KeyCode::Char('o'), none, None, SwapVisualAnchor);
     bind!(Visual, KeyCode::Left, none, None, Edit("move_left_and_modify_selection"),);
     bind!(Visual, KeyCode::Char('h'), none, None, Edit("move_left_and_modify_selection"),);
     bind!(Visual, KeyCode::Right, none, None, Edit("move_right_and_modify_selection"),);
@@ -927,14 +1030,14 @@ fn build_vim_bindings() -> HashMap<BindingKey, Action> {
         None,
         Edit("move_to_beginning_of_paragraph_and_modify_selection"),
     );
-    // Anchor swap in visual char
-    bind!(Visual, KeyCode::Char('o'), none, None, SwapVisualAnchor);
+    bind!(Visual, KeyCode::Char('p'), none, None, PasteAfter);
 
-    // Visual Line mode (V)
-    bind!(Normal, KeyCode::Char('V'), none, None, EnterVisualLine);
+    // Visual line mode: unprefixed bindings.
     bind!(VisualLine, KeyCode::Esc, none, None, CollapseAndEnterNormal);
     bind!(VisualLine, KeyCode::Char('V'), none, None, CollapseAndEnterNormal);
     bind!(VisualLine, KeyCode::Char('v'), none, None, EnterMode(Visual));
+    bind!(VisualLine, KeyCode::Char('o'), none, None, SwapVisualAnchor);
+    bind!(VisualLine, KeyCode::Char(':'), none, None, EnterCommandMode);
     bind!(VisualLine, KeyCode::Up, none, None, Edit("move_up_and_modify_selection"),);
     bind!(VisualLine, KeyCode::Char('k'), none, None, Edit("move_up_and_modify_selection"),);
     bind!(VisualLine, KeyCode::Down, none, None, Edit("move_down_and_modify_selection"),);
@@ -946,13 +1049,15 @@ fn build_vim_bindings() -> HashMap<BindingKey, Action> {
         None,
         Edit("move_to_end_of_document_and_modify_selection"),
     );
-    bind!(VisualLine, KeyCode::Char('o'), none, None, SwapVisualAnchor);
-    bind!(VisualLine, KeyCode::Char(':'), none, None, EnterCommandMode);
 
-    // Visual Block mode (Ctrl-V)
+    // Visual block mode: unprefixed bindings.
     bind!(Normal, KeyCode::Char('v'), ctrl, None, EnterVisualBlock);
     bind!(VisualBlock, KeyCode::Esc, none, None, CollapseAndEnterNormal);
     bind!(VisualBlock, KeyCode::Char('v'), ctrl, None, CollapseAndEnterNormal);
+    bind!(VisualBlock, KeyCode::Char('o'), none, None, SwapVisualAnchor);
+    bind!(VisualBlock, KeyCode::Char('I'), none, None, VisualBlockInsert);
+    bind!(VisualBlock, KeyCode::Char('A'), none, None, VisualBlockAppend);
+    bind!(VisualBlock, KeyCode::Char(':'), none, None, EnterCommandMode);
     bind!(VisualBlock, KeyCode::Left, none, None, Edit("move_left"),);
     bind!(VisualBlock, KeyCode::Char('h'), none, None, Edit("move_left"),);
     bind!(VisualBlock, KeyCode::Right, none, None, Edit("move_right"),);
@@ -961,39 +1066,8 @@ fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(VisualBlock, KeyCode::Char('k'), none, None, Edit("move_up"),);
     bind!(VisualBlock, KeyCode::Down, none, None, Edit("move_down"),);
     bind!(VisualBlock, KeyCode::Char('j'), none, None, Edit("move_down"),);
-    bind!(VisualBlock, KeyCode::Char('o'), none, None, SwapVisualAnchor);
-    bind!(VisualBlock, KeyCode::Char('I'), none, None, VisualBlockInsert);
-    bind!(VisualBlock, KeyCode::Char('A'), none, None, VisualBlockAppend);
-    bind!(VisualBlock, KeyCode::Char(':'), none, None, EnterCommandMode);
 
-    // Undo / Redo (Normal mode)
-    bind!(Normal, KeyCode::Char('u'), none, None, Undo);
-    bind!(Normal, KeyCode::Char('r'), ctrl, None, Redo);
-
-    // Repeat last change
-    bind!(Normal, KeyCode::Char('.'), none, None, RepeatLastChange);
-
-    // Paste
-    bind!(Normal, KeyCode::Char('p'), none, None, PasteAfter);
-    bind!(Normal, KeyCode::Char('P'), none, None, PasteBefore);
-    bind!(Visual, KeyCode::Char('p'), none, None, PasteAfter);
-
-    // Restore last visual selection
-    bind!(Normal, KeyCode::Char('v'), none, Some('g'), RestoreLastVisual);
-
-    // Jump list navigation (Ctrl-O = older, Ctrl-I = newer)
-    bind!(Normal, KeyCode::Char('o'), ctrl, None, JumpListOlder);
-    bind!(Normal, KeyCode::BackTab, none, None, JumpListNewer);
-    bind!(Normal, KeyCode::Tab, none, None, JumpListNewer);
-
-    // Change list navigation (g; = older, g, = newer)
-    bind!(Normal, KeyCode::Char(';'), none, Some('g'), ChangeListOlder);
-    bind!(Normal, KeyCode::Char(','), none, Some('g'), ChangeListNewer);
-
-    // Tab navigation (gt = next tab, gT = prev tab)
-    bind!(Normal, KeyCode::Char('t'), none, Some('g'), TabNext);
-    bind!(Normal, KeyCode::Char('T'), none, Some('g'), TabPrev);
-
+    // Insert mode: unprefixed bindings.
     bind!(Insert, KeyCode::Esc, none, None, EnterMode(Normal));
     bind!(Insert, KeyCode::Left, none, None, Edit("move_left"));
     bind!(Insert, KeyCode::Right, none, None, Edit("move_right"));
@@ -1001,7 +1075,14 @@ fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(Insert, KeyCode::Down, none, None, Edit("move_down"));
     bind!(Insert, KeyCode::Enter, none, None, Edit("insert_newline"));
     bind!(Insert, KeyCode::Backspace, none, None, DeleteBackward);
+    bind!(Insert, KeyCode::Char('r'), ctrl, None, InsertRegister);
+    bind!(Insert, KeyCode::Char('w'), ctrl, None, DeleteWordBackward);
+    bind!(Insert, KeyCode::Char('x'), ctrl, None, RequestCompletion);
+    bind!(Insert, KeyCode::Char('u'), ctrl, None, DeleteToLineStart);
+    bind!(Insert, KeyCode::Char('t'), ctrl, None, IndentLine);
+    bind!(Insert, KeyCode::Char('d'), ctrl, None, OutdentLine);
 
+    // Command-line mode: unprefixed bindings.
     bind!(CommandLine, KeyCode::Esc, none, None, EnterMode(Normal));
     bind!(CommandLine, KeyCode::Enter, none, None, ExecuteCommand);
     bind!(CommandLine, KeyCode::Backspace, none, None, CommandBackspace);
@@ -1009,19 +1090,20 @@ fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(CommandLine, KeyCode::Up, none, None, CommandHistoryOlder);
     bind!(CommandLine, KeyCode::Down, none, None, CommandHistoryNewer);
 
+    // Search mode: unprefixed bindings.
     bind!(Search, KeyCode::Esc, none, None, EnterMode(Normal));
     bind!(Search, KeyCode::Enter, none, None, ExecuteSearch);
     bind!(Search, KeyCode::Backspace, none, None, SearchBackspace);
-    // Alt+Enter in search mode: select all occurrences (find_all) and return to Normal.
     bind!(Search, KeyCode::Enter, KeyModifiers::ALT, None, FindAll);
 
-    // z-prefix: fold commands
-    bind!(Normal, KeyCode::Char('z'), none, None, SetPrefix('z'));
-    bind!(Normal, KeyCode::Char('a'), none, Some('z'), FoldToggle);
-    bind!(Normal, KeyCode::Char('o'), none, Some('z'), FoldOpen);
-    bind!(Normal, KeyCode::Char('c'), none, Some('z'), FoldClose);
-    bind!(Normal, KeyCode::Char('R'), none, Some('z'), FoldOpenAll);
-    bind!(Normal, KeyCode::Char('M'), none, Some('z'), FoldCloseAll);
+    // Normal mode: edit history and repeat.
+    bind!(Normal, KeyCode::Char('u'), none, None, Undo);
+    bind!(Normal, KeyCode::Char('r'), ctrl, None, Redo);
+    bind!(Normal, KeyCode::Char('.'), none, None, RepeatLastChange);
+
+    // Normal and visual mode: paste.
+    bind!(Normal, KeyCode::Char('p'), none, None, PasteAfter);
+    bind!(Normal, KeyCode::Char('P'), none, None, PasteBefore);
 
     map
 }

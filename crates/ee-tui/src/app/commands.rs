@@ -1,5 +1,5 @@
 use super::*;
-use std::path::Path;
+use std::path::{Component, Path};
 
 use crate::buffer::BufferId;
 use crate::registers::RegisterName;
@@ -213,6 +213,18 @@ impl App {
         self.open_location_picker("Workspace Diagnostics", "no workspace diagnostics", items);
     }
 
+    pub(super) fn open_global_search(&mut self) {
+        let cwd = self.current_workspace_root();
+        let mut picker = PickerState::new_grep(String::new(), cwd);
+        picker.title = String::from("Global Search");
+        self.open_picker(picker);
+        self.enter_normal_mode();
+    }
+
+    pub(super) fn open_command_palette(&mut self) {
+        self.open_help_picker("Command Palette", Self::command_help_items());
+    }
+
     pub(crate) fn reopen_last_picker(&mut self) {
         let Some(picker) = self.last_picker.clone() else {
             self.backend.status_message = Some(String::from("no previous picker"));
@@ -408,7 +420,7 @@ impl App {
                     self.backend.status_message = Some(format!("format failed: {err}"));
                 }
             }
-            "complete" => {
+            "complete" | "completion" => {
                 if let Err(err) = self.backend.request_completion(None) {
                     self.backend.status_message = Some(format!("completion failed: {err}"));
                 }
@@ -438,7 +450,7 @@ impl App {
                     self.backend.status_message = Some(format!("references failed: {err}"));
                 }
             }
-            "goto_reference" => {
+            "goto_reference" | "select_references_to_symbol_under_cursor" => {
                 if let Err(err) = self.backend.request_references() {
                     self.backend.status_message = Some(format!("references failed: {err}"));
                 }
@@ -578,6 +590,12 @@ impl App {
                 if let Err(err) = self.backend.request_hover(position) {
                     self.backend.status_message = Some(format!("hover failed: {err}"));
                 }
+            }
+            "insert_register" => {
+                self.backend.status_message = Some(match self.insert_register_command(tail) {
+                    Ok(message) => message,
+                    Err(message) => message,
+                });
             }
             "gblame" => {
                 self.show_git_blame();
@@ -742,6 +760,16 @@ impl App {
                     self.backend.status_message = Some(message);
                 }
             }
+            "create_directory" => {
+                if tail.is_empty() {
+                    self.backend.status_message =
+                        Some(String::from("create_directory: usage: :create_directory <path>"));
+                } else {
+                    self.backend.status_message = Some(
+                        self.create_directory_in_workspace(tail).unwrap_or_else(|message| message),
+                    );
+                }
+            }
             "match_brackets" => {
                 let _ = self.backend.move_to_matching_bracket(false);
             }
@@ -810,6 +838,9 @@ impl App {
             }
             "rotate_selection_contents_forward" => {
                 let _ = self.backend.send_edit("rotate_selection_contents_forward", json!([]));
+            }
+            "reverse_selection_contents" => {
+                let _ = self.backend.send_edit("reverse_selection_contents", json!([]));
             }
             "select_all" => {
                 let _ = self.backend.send_edit("select_all", json!([]));
@@ -1341,7 +1372,7 @@ impl App {
                     self.backend.status_message = Some(message);
                 }
             }
-            "ls" | "buffers" | "Buffers" => {
+            "ls" | "buffers" => {
                 let list = self.backend.list_buffers_str();
                 self.backend.status_message = Some(list);
             }
@@ -1484,7 +1515,7 @@ impl App {
                     .join("  ");
                 self.backend.status_message = Some(info);
             }
-            "files" | "Files" => {
+            "files" => {
                 self.open_file_picker_in_current_directory();
                 self.enter_normal_mode();
                 return;
@@ -1539,7 +1570,15 @@ impl App {
                 self.enter_normal_mode();
                 return;
             }
-            "grep" | "Grep" => {
+            "global_search" => {
+                self.open_global_search();
+                return;
+            }
+            "command_palette" => {
+                self.open_command_palette();
+                return;
+            }
+            "grep" => {
                 let query = parts.collect::<Vec<_>>().join(" ");
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 self.open_picker(PickerState::new_grep(query, cwd));
@@ -1676,7 +1715,6 @@ impl App {
             "bprevious",
             "goto_previous_buffer",
             "buffers",
-            "Buffers",
             "cc",
             "ccl",
             "cclose",
@@ -1695,6 +1733,8 @@ impl App {
             "codeactions",
             "code_action",
             "complete",
+            "completion",
+            "command_palette",
             "d",
             "def",
             "definition",
@@ -1716,6 +1756,7 @@ impl App {
             "edit!",
             "g",
             "commands",
+            "create_directory",
             "decrement",
             "delete_char_backward",
             "delete_char_forward",
@@ -1728,10 +1769,9 @@ impl App {
             "file_explorer_in_current_directory",
             "file_picker",
             "file_picker_in_current_directory",
-            "Files",
             "format",
             "grep",
-            "Grep",
+            "global_search",
             "buffer_picker",
             "changed_file_picker",
             "gblame",
@@ -1769,6 +1809,7 @@ impl App {
             "hover",
             "increment",
             "insert_newline",
+            "insert_register",
             "insert_tab",
             "keymap",
             "kill_line",
@@ -1884,6 +1925,7 @@ impl App {
             "select_textobject_inner",
             "select_next_sibling",
             "select_prev_sibling",
+            "select_references_to_symbol_under_cursor",
             "shrink_selection",
             "shrink_to_line_bounds",
             "copy_selection_on_next_line",
@@ -1895,6 +1937,7 @@ impl App {
             "workspace_symbol_picker",
             "add_newline_above",
             "add_newline_below",
+            "reverse_selection_contents",
             "rotate_selection_contents_backward",
             "rotate_selection_contents_forward",
             "select_all",
@@ -2174,6 +2217,65 @@ impl App {
         Ok(String::from("config reloaded"))
     }
 
+    fn resolve_workspace_path(&self, target: &str) -> Result<PathBuf, String> {
+        let target = target.trim();
+        if target.is_empty() {
+            return Err(String::from("path cannot be empty"));
+        }
+
+        let workspace_root = self.current_workspace_root();
+        let relative = if Path::new(target).is_absolute() {
+            Path::new(target).strip_prefix(&workspace_root).map_err(|_| {
+                format!("path must stay under workspace {}", workspace_root.display())
+            })?
+        } else {
+            Path::new(target)
+        };
+
+        let mut resolved = workspace_root.clone();
+        for component in relative.components() {
+            match component {
+                Component::CurDir => {}
+                Component::Normal(part) => resolved.push(part),
+                Component::ParentDir => {
+                    if resolved == workspace_root {
+                        return Err(format!(
+                            "path must stay under workspace {}",
+                            workspace_root.display()
+                        ));
+                    }
+                    resolved.pop();
+                }
+                Component::RootDir | Component::Prefix(_) => {
+                    return Err(format!(
+                        "path must stay under workspace {}",
+                        workspace_root.display()
+                    ));
+                }
+            }
+        }
+
+        Ok(resolved)
+    }
+
+    fn create_directory_in_workspace(&mut self, target: &str) -> Result<String, String> {
+        let workspace_root = self.current_workspace_root();
+        let path = self
+            .resolve_workspace_path(target)
+            .map_err(|message| format!("create_directory: {message}"))?;
+
+        if path.exists() && !path.is_dir() {
+            return Err(format!(
+                "create_directory failed: {} exists and is not a directory",
+                path.display()
+            ));
+        }
+
+        std::fs::create_dir_all(&path).map_err(|err| format!("create_directory failed: {err}"))?;
+        let display = path.strip_prefix(&workspace_root).unwrap_or(&path);
+        Ok(format!("created {}", display.display()))
+    }
+
     fn read_file_into_buffer(&mut self, path: &str) -> Result<String, String> {
         let path = PathBuf::from(path);
         let content =
@@ -2233,6 +2335,27 @@ impl App {
             .ok_or_else(|| format!("clear_register: invalid register `{name}`"))?;
         self.registers.clear(Some(&register));
         Ok(format!("register {name} cleared"))
+    }
+
+    fn insert_register_command(&mut self, target: &str) -> Result<String, String> {
+        let target = target.trim();
+        let mut chars = target.chars();
+        let Some(name) = chars.next() else {
+            return Err(String::from("insert_register: usage: :insert_register <register>"));
+        };
+        if chars.next().is_some() {
+            return Err(String::from("insert_register: usage: :insert_register <register>"));
+        }
+        let register = RegisterName::from_char(name)
+            .ok_or_else(|| format!("insert_register: invalid register `{name}`"))?;
+        let text = self.registers.get(&register);
+        if text.is_empty() {
+            return Ok(format!("register {name} empty"));
+        }
+        self.backend
+            .send_edit("insert", json!({ "chars": text }))
+            .map_err(|err| format!("insert_register failed: {err}"))?;
+        Ok(format!("inserted register {name}"))
     }
 
     fn save_current_buffer(&mut self) -> Result<(), String> {
@@ -2358,6 +2481,7 @@ impl App {
             ":commands list ex commands and features".to_owned(),
             ":keymap list high-value normal-mode bindings".to_owned(),
             ":hover request LSP hover at cursor".to_owned(),
+            ":command_palette open searchable command reference picker".to_owned(),
             ":term cmd run shell command and open transcript buffer".to_owned(),
             ":!cmd shorthand shell command runner".to_owned(),
             ":run_shell_command / :sh aliases for :term shell-command".to_owned(),
@@ -2387,6 +2511,8 @@ impl App {
             ":lsp_restart / :lsp_stop restart or stop language-server plugin".to_owned(),
             ":change_current_directory / :cd switch current working directory | :show_directory / :pwd print cwd"
                 .to_owned(),
+            ":create_directory <path> create directory tree under current workspace root"
+                .to_owned(),
             ":rotate_view / :rotate_view_reverse / :transpose_view / :jump_view_* / :swap_view_* / :wclose / :wonly manage split focus and ordering"
                 .to_owned(),
             ":set_language / :lang set or show current syntax name".to_owned(),
@@ -2394,6 +2520,7 @@ impl App {
             ":move / :mv move current buffer to new path".to_owned(),
             ":encoding show or set current buffer encoding metadata".to_owned(),
             ":clear_register [name] clear one register or all registers".to_owned(),
+            ":insert_register <name> insert register contents at cursor".to_owned(),
             ":echo print arguments to status line | :redraw clear and repaint UI".to_owned(),
             ":pipe / :| / :pipe_to run shell commands on current selections".to_owned(),
             ":shell_insert_output / :shell_append_output insert shell output around selections"
@@ -2402,13 +2529,16 @@ impl App {
             ":gblame show git blame metadata for current line".to_owned(),
             ":gdiff open git diff for current buffer in scratch view".to_owned(),
             ":ghunkdiff open git diff for current hunk in scratch view".to_owned(),
+            ":global_search open workspace live-grep picker".to_owned(),
             ":goto_next_change / :goto_prev_change / :goto_first_change / :goto_last_change jump across git hunks"
                 .to_owned(),
             ":reset_diff_change / :diffget / :diffg restore current git hunk from HEAD"
                 .to_owned(),
-            ":complete open completion picker from backend suggestions".to_owned(),
+            ":complete / :completion open completion picker from backend suggestions".to_owned(),
             ":codeaction / :code_action open backend code-action picker".to_owned(),
             ":rename new_name request backend rename at cursor".to_owned(),
+            ":select_references_to_symbol_under_cursor request backend references at cursor"
+                .to_owned(),
             ":diagnostics open location list for active-buffer diagnostics".to_owned(),
             ":file_picker / :file_picker_in_current_directory open file pickers rooted at buffer dir or cwd".to_owned(),
             ":file_explorer / :file_explorer_in_current_buffer_directory / :file_explorer_in_current_directory open explorer-style pickers rooted at workspace, buffer dir, or cwd".to_owned(),
@@ -2473,6 +2603,7 @@ impl App {
                 .to_owned(),
             ":rotate_selection_contents_backward / :rotate_selection_contents_forward cycle selected text"
                 .to_owned(),
+            ":reverse_selection_contents reverse characters inside each selection".to_owned(),
             ":commit_undo_checkpoint split subsequent edits into a fresh undo step"
                 .to_owned(),
             ":select_all select entire buffer".to_owned(),

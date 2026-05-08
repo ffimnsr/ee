@@ -601,6 +601,13 @@ impl Editor {
             AlignSelections => self.do_align_selections(view, config),
             RotateSelectionContentsBackward => self.do_rotate_selection_contents(view, false),
             RotateSelectionContentsForward => self.do_rotate_selection_contents(view, true),
+            ReverseSelectionContents => {
+                let delta = edit_ops::reverse_selection_contents(&self.text, view.sel_regions());
+                if !delta.is_identity() {
+                    self.this_edit_type = EditType::Transpose;
+                    self.add_delta(delta);
+                }
+            }
         }
     }
 

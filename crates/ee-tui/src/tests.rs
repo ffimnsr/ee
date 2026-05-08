@@ -32,6 +32,8 @@ use crate::buffer::{BufState, BufferManager};
 use crate::git::{GitBufferCache, GitBufferStatus, GitHunk, GitSign};
 use crate::keymap::{Action, BindingKey, bindings, parse_action_spec};
 use crate::picker::PickerKind;
+use crate::picker::PickerState;
+use crate::quickfix::{QfEntry, QfList};
 use crate::registers::{ClipboardSelection, RegisterName, set_test_clipboard};
 use crate::text::{
     byte_col_to_display_col, display_col_to_byte, find_char_backward, find_char_forward,
@@ -1187,6 +1189,22 @@ fn complete_command_uses_backend_edit() {
 }
 
 #[test]
+fn completion_command_alias_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    run_ex(&mut app, "completion");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "request_completion");
+    assert!(value["params"]["params"]["index"].is_null());
+}
+
+#[test]
 fn increment_command_uses_backend_edit() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
@@ -1372,6 +1390,103 @@ fn file_explorer_command_opens_workspace_root_picker() {
             .iter()
             .any(|item| item.contains("root.txt"))
     );
+}
+
+#[test]
+fn resolve_startup_launch_for_dot_opens_picker_in_current_directory() {
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join("sample.rs"), "fn main() {}\n").unwrap();
+    env::set_current_dir(temp.path()).unwrap();
+
+    let launch = super::resolve_startup_launch(&[PathBuf::from(".")], None).unwrap();
+    let (app, additional) = super::build_startup_app(launch).unwrap();
+
+    assert!(additional.is_empty());
+    assert!(app.backend.active().path.is_none());
+    assert_eq!(env::current_dir().unwrap(), temp.path().canonicalize().unwrap());
+    let picker = app.picker.as_ref().expect("directory launch should open picker");
+    assert_eq!(picker.kind, PickerKind::Files);
+    assert_eq!(picker.title, "Files");
+    assert!(
+        picker
+            .visible_items_range(0, picker.visible_count())
+            .iter()
+            .any(|item| item == "sample.rs")
+    );
+}
+
+#[test]
+fn resolve_startup_launch_for_directory_path_opens_picker_from_that_directory() {
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    let temp = tempfile::tempdir().unwrap();
+    let nested = temp.path().join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("inside.rs"), "fn inside() {}\n").unwrap();
+    env::set_current_dir(temp.path()).unwrap();
+
+    let launch = super::resolve_startup_launch(std::slice::from_ref(&nested), None).unwrap();
+    let (app, additional) = super::build_startup_app(launch).unwrap();
+
+    assert!(additional.is_empty());
+    assert!(app.backend.active().path.is_none());
+    assert_eq!(env::current_dir().unwrap(), nested.canonicalize().unwrap());
+    let picker = app.picker.as_ref().expect("directory launch should open picker");
+    assert_eq!(picker.kind, PickerKind::Files);
+    assert!(
+        picker
+            .visible_items_range(0, picker.visible_count())
+            .iter()
+            .any(|item| item == "inside.rs")
+    );
+}
+
+#[test]
+fn lowercase_files_command_opens_picker() {
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    let temp = tempfile::tempdir().unwrap();
+    env::set_current_dir(temp.path()).unwrap();
+    fs::write(temp.path().join("sample.rs"), "fn main() {}\n").unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+    run_ex(&mut app, "files");
+
+    let picker = app.picker.as_ref().expect("files should open picker");
+    assert_eq!(picker.kind, PickerKind::Files);
+    assert_eq!(picker.title, "Files (cwd)");
+}
+
+#[test]
+fn lowercase_grep_command_opens_live_grep_picker() {
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    let temp = tempfile::tempdir().unwrap();
+    env::set_current_dir(temp.path()).unwrap();
+    fs::write(temp.path().join("sample.rs"), "fn main() {}\nlet value = 1;\n").unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+    run_ex(&mut app, "grep value");
+
+    let picker = app.picker.as_ref().expect("grep should open picker");
+    assert_eq!(picker.kind, PickerKind::LiveGrep);
+    assert_eq!(picker.visible_count(), 1);
+}
+
+#[test]
+fn capitalized_command_aliases_are_rejected() {
+    for (command, expected_unknown) in
+        [("Files", "Files"), ("Grep main", "Grep"), ("Buffers", "Buffers")]
+    {
+        let mut app = App::from_path(None).unwrap();
+        run_ex(&mut app, command);
+        let expected = format!("unknown command: {expected_unknown}");
+
+        assert!(app.picker.is_none(), "{command} should not open picker");
+        assert_eq!(app.backend.status_message.as_deref(), Some(expected.as_str()));
+    }
 }
 
 #[test]
@@ -1564,6 +1679,20 @@ fn align_selections_command_uses_backend_edit() {
     let message = rx.recv().expect("message should be sent");
     let value: Value = serde_json::from_str(&message).expect("message should be json");
     assert_eq!(value["params"]["method"], "align_selections");
+}
+
+#[test]
+fn reverse_selection_contents_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    run_ex(&mut app, "reverse_selection_contents");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["params"]["method"], "reverse_selection_contents");
 }
 
 #[test]
@@ -2466,6 +2595,63 @@ fn bindings_table_has_normal_hjkl() {
 }
 
 #[test]
+fn bindings_table_maps_caret_to_first_non_whitespace() {
+    let lookup = bindings()
+        .get(&BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('^'),
+            modifiers: KeyModifiers::NONE,
+            prefix: None,
+        })
+        .cloned();
+
+    assert_eq!(lookup, Some(Action::GotoFirstNonWhitespace));
+}
+
+#[test]
+fn overlay_binding_tables_have_defaults() {
+    let b = bindings();
+
+    let picker_close = b
+        .get(&BindingKey {
+            mode: Mode::Picker,
+            key: KeyCode::Esc,
+            modifiers: KeyModifiers::NONE,
+            prefix: None,
+        })
+        .cloned();
+    let quickfix_down = b
+        .get(&BindingKey {
+            mode: Mode::Quickfix,
+            key: KeyCode::Char('j'),
+            modifiers: KeyModifiers::NONE,
+            prefix: None,
+        })
+        .cloned();
+    let location_close = b
+        .get(&BindingKey {
+            mode: Mode::LocationList,
+            key: KeyCode::Char('q'),
+            modifiers: KeyModifiers::NONE,
+            prefix: None,
+        })
+        .cloned();
+    let substitute_apply = b
+        .get(&BindingKey {
+            mode: Mode::SubstituteConfirm,
+            key: KeyCode::Char('y'),
+            modifiers: KeyModifiers::NONE,
+            prefix: None,
+        })
+        .cloned();
+
+    assert_eq!(picker_close, Some(Action::PickerClose));
+    assert_eq!(quickfix_down, Some(Action::QuickfixMoveDown));
+    assert_eq!(location_close, Some(Action::LocationListClose));
+    assert_eq!(substitute_apply, Some(Action::SubstituteConfirmApply));
+}
+
+#[test]
 fn bindings_table_has_requested_goto_prefix_bindings() {
     let b = bindings();
     let lookup = |key| {
@@ -2497,6 +2683,30 @@ fn k_binding_requests_hover() {
         })
         .cloned();
     assert_eq!(lookup, Some(Action::RequestHover));
+}
+
+#[test]
+fn insert_ctrl_bindings_cover_register_and_completion() {
+    let b = bindings();
+    let insert_register = b
+        .get(&BindingKey {
+            mode: Mode::Insert,
+            key: KeyCode::Char('r'),
+            modifiers: KeyModifiers::CONTROL,
+            prefix: None,
+        })
+        .cloned();
+    let completion = b
+        .get(&BindingKey {
+            mode: Mode::Insert,
+            key: KeyCode::Char('x'),
+            modifiers: KeyModifiers::CONTROL,
+            prefix: None,
+        })
+        .cloned();
+
+    assert_eq!(insert_register, Some(Action::InsertRegister));
+    assert_eq!(completion, Some(Action::RequestCompletion));
 }
 
 #[test]
@@ -2569,6 +2779,7 @@ fn parse_action_spec_accepts_requested_command_aliases() {
     );
     assert_eq!(crate::keymap::parse_action_spec("search_next").unwrap(), Action::FindNext);
     assert_eq!(crate::keymap::parse_action_spec("search_prev").unwrap(), Action::FindPrevious);
+    assert_eq!(crate::keymap::parse_action_spec("global_search").unwrap(), Action::GlobalSearch);
     assert_eq!(
         crate::keymap::parse_action_spec("search_selection_detect_word_boundaries").unwrap(),
         Action::SearchSelection { detect_word_boundaries: true }
@@ -2668,6 +2879,28 @@ fn parse_action_spec_accepts_requested_command_aliases() {
         Action::WorkspaceDiagnosticsPicker
     );
     assert_eq!(crate::keymap::parse_action_spec("last_picker").unwrap(), Action::LastPicker);
+    assert_eq!(crate::keymap::parse_action_spec("picker_close").unwrap(), Action::PickerClose);
+    assert_eq!(crate::keymap::parse_action_spec("picker_confirm").unwrap(), Action::PickerConfirm);
+    assert_eq!(
+        crate::keymap::parse_action_spec("quickfix_move_down").unwrap(),
+        Action::QuickfixMoveDown
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("location_list_confirm").unwrap(),
+        Action::LocationListConfirm
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("substitute_confirm_apply").unwrap(),
+        Action::SubstituteConfirmApply
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("substitute_confirm_cancel").unwrap(),
+        Action::SubstituteConfirmCancel
+    );
+    assert_eq!(
+        crate::keymap::parse_action_spec("command_palette").unwrap(),
+        Action::CommandPalette
+    );
     assert_eq!(
         crate::keymap::parse_action_spec("repeat_last_motion").unwrap(),
         Action::RepeatLastMotion
@@ -2740,6 +2973,11 @@ fn parse_action_spec_accepts_requested_command_aliases() {
     assert_eq!(
         crate::keymap::parse_action_spec("code_action").unwrap(),
         Action::RequestCodeActions
+    );
+    assert_eq!(crate::keymap::parse_action_spec("completion").unwrap(), Action::RequestCompletion);
+    assert_eq!(
+        crate::keymap::parse_action_spec("insert_register").unwrap(),
+        Action::InsertRegister
     );
     assert_eq!(
         crate::keymap::parse_action_spec("delete_char_backward").unwrap(),
@@ -3834,6 +4072,48 @@ fn ctrl_a_and_x_bind_number_adjustments() {
 }
 
 #[test]
+fn ctrl_p_and_ctrl_alt_p_bind_normal_mode_picker_shortcuts() {
+    let b = bindings();
+    let file_picker = b
+        .get(&BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('p'),
+            modifiers: KeyModifiers::CONTROL,
+            prefix: None,
+        })
+        .cloned();
+    let command_palette = b
+        .get(&BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('p'),
+            modifiers: KeyModifiers::CONTROL | KeyModifiers::ALT,
+            prefix: None,
+        })
+        .cloned();
+    let insert_file_picker = b
+        .get(&BindingKey {
+            mode: Mode::Insert,
+            key: KeyCode::Char('p'),
+            modifiers: KeyModifiers::CONTROL,
+            prefix: None,
+        })
+        .cloned();
+    let insert_command_palette = b
+        .get(&BindingKey {
+            mode: Mode::Insert,
+            key: KeyCode::Char('p'),
+            modifiers: KeyModifiers::CONTROL | KeyModifiers::ALT,
+            prefix: None,
+        })
+        .cloned();
+
+    assert_eq!(file_picker, Some(Action::FilePickerInCurrentDirectory));
+    assert_eq!(command_palette, Some(Action::CommandPalette));
+    assert_eq!(insert_file_picker, None);
+    assert_eq!(insert_command_palette, None);
+}
+
+#[test]
 fn gd_binds_duplicate_line() {
     let b = bindings();
     let lookup = b
@@ -3886,6 +4166,142 @@ action = "request_hover"
     let value: Value = serde_json::from_str(&message).expect("message should be json");
     assert_eq!(value["method"], "edit");
     assert_eq!(value["params"]["method"], "request_hover");
+}
+
+#[test]
+fn configured_keymap_can_unbind_insert_ctrl_shortcuts() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(".ee.toml"),
+        r#"
+[keymap]
+inherit_defaults = true
+
+[[keymap.unbind]]
+mode = "insert"
+key = "ctrl+w"
+"#,
+    )
+    .unwrap();
+
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    env::set_current_dir(temp.path()).unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.mode = Mode::Insert;
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)));
+
+    assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[test]
+fn configured_keymap_can_bind_picker_navigation() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(".ee.toml"),
+        r#"
+[keymap]
+inherit_defaults = true
+
+[[keymap.bindings]]
+mode = "picker"
+key = "j"
+action = "picker_move_down"
+"#,
+    )
+    .unwrap();
+
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    env::set_current_dir(temp.path()).unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+    app.open_picker(PickerState::new_help("Picker", ["first", "second"]));
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+
+    assert_eq!(app.picker.as_ref().map(|picker| picker.selected), Some(1));
+}
+
+#[test]
+fn configured_keymap_can_bind_quickfix_navigation() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(".ee.toml"),
+        r#"
+[keymap]
+inherit_defaults = true
+
+[[keymap.bindings]]
+mode = "quickfix"
+key = "x"
+action = "quickfix_move_down"
+"#,
+    )
+    .unwrap();
+
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    env::set_current_dir(temp.path()).unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+    app.quickfix = Some(QfList::new(
+        "Quickfix",
+        vec![
+            QfEntry { path: None, line: 0, col: 0, message: String::from("first") },
+            QfEntry { path: None, line: 1, col: 0, message: String::from("second") },
+        ],
+    ));
+    app.quickfix_focused = true;
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+
+    assert_eq!(app.quickfix.as_ref().map(|list| list.selected), Some(1));
+}
+
+#[test]
+fn configured_keymap_can_bind_substitute_confirm_actions() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(".ee.toml"),
+        r#"
+[keymap]
+inherit_defaults = true
+
+[[keymap.bindings]]
+mode = "substitute_confirm"
+key = "x"
+action = "substitute_confirm_apply"
+"#,
+    )
+    .unwrap();
+
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    env::set_current_dir(temp.path()).unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    for ch in "alpha\nbeta\nalpha".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    app.backend.pump().unwrap();
+
+    app.execute_substitute(0, 2, "a", "A", "c");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+    app.backend.pump().unwrap();
+
+    assert_eq!(
+        app.backend.lines,
+        vec![String::from("Alpha"), String::from("beta"), String::from("alpha")]
+    );
 }
 
 #[test]
@@ -4540,6 +4956,41 @@ fn parse_action_spec_accepts_view_command_names() {
         parse_action_spec("shell_insert_output").unwrap(),
         Action::PrefillCommandLine("shell_insert_output ")
     );
+    assert_eq!(parse_action_spec("hover").unwrap(), Action::RequestHover);
+    assert_eq!(
+        parse_action_spec("select_references_to_symbol_under_cursor").unwrap(),
+        Action::RequestReferences
+    );
+    assert_eq!(parse_action_spec("rename_symbol").unwrap(), Action::PrefillCommandLine("rename "));
+}
+
+#[test]
+fn create_directory_command_creates_nested_path_in_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    env::set_current_dir(temp.path()).unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+    run_ex(&mut app, "create_directory alpha/beta");
+
+    assert!(temp.path().join("alpha/beta").is_dir());
+    assert_eq!(app.backend.status_message.as_deref(), Some("created alpha/beta"));
+}
+
+#[test]
+fn create_directory_command_rejects_workspace_escape() {
+    let temp = tempfile::tempdir().unwrap();
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    env::set_current_dir(temp.path()).unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+    run_ex(&mut app, "create_directory ../escape");
+
+    assert!(!temp.path().parent().unwrap().join("escape").exists());
+    let message = app.backend.status_message.as_deref().unwrap_or_default();
+    assert!(message.contains("path must stay under workspace"));
 }
 
 #[test]
@@ -4782,6 +5233,88 @@ fn language_encoding_echo_register_and_redraw_commands_update_state() {
     run_ex(&mut app, "redraw");
     assert!(app.redraw_requested);
     assert_eq!(app.backend.status_message.as_deref(), Some("redraw"));
+}
+
+#[test]
+fn global_search_and_command_palette_commands_open_expected_pickers() {
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    let temp = tempfile::tempdir().unwrap();
+    env::set_current_dir(temp.path()).unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+    run_ex(&mut app, "global_search");
+    let picker = app.picker.as_ref().expect("global search should open picker");
+    assert_eq!(picker.kind, PickerKind::LiveGrep);
+    assert_eq!(picker.title, "Global Search");
+
+    app.picker = None;
+    run_ex(&mut app, "command_palette");
+    let picker = app.picker.as_ref().expect("command palette should open picker");
+    assert_eq!(picker.kind, PickerKind::Help);
+    assert_eq!(picker.title, "Command Palette");
+}
+
+#[test]
+fn ctrl_p_opens_cwd_file_picker_from_normal_mode() {
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    let temp = tempfile::tempdir().unwrap();
+    env::set_current_dir(temp.path()).unwrap();
+    fs::write(temp.path().join("sample.rs"), "fn main() {}\n").unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)));
+
+    let picker = app.picker.as_ref().expect("ctrl+p should open picker");
+    assert_eq!(picker.kind, PickerKind::Files);
+    assert_eq!(picker.title, "Files (cwd)");
+}
+
+#[test]
+fn ctrl_alt_p_opens_command_palette_from_normal_mode() {
+    let mut app = App::from_path(None).unwrap();
+    app.handle_event(Event::Key(KeyEvent::new(
+        KeyCode::Char('p'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+    )));
+
+    let picker = app.picker.as_ref().expect("ctrl+alt+p should open picker");
+    assert_eq!(picker.kind, PickerKind::Help);
+    assert_eq!(picker.title, "Command Palette");
+}
+
+#[test]
+fn insert_mode_does_not_use_normal_mode_picker_shortcuts() {
+    let mut app = App::from_path(None).unwrap();
+    app.mode = Mode::Insert;
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)));
+    assert!(app.picker.is_none());
+
+    app.handle_event(Event::Key(KeyEvent::new(
+        KeyCode::Char('p'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+    )));
+    assert!(app.picker.is_none());
+}
+
+#[test]
+fn insert_register_action_inserts_named_register_contents_in_insert_mode() {
+    let mut app = App::from_path(None).unwrap();
+    app.registers.yank(&RegisterName::Named('a'), String::from("alpha"), false);
+    app.mode = Mode::Insert;
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
+    assert!(app.input_state.awaiting_register);
+    assert!(app.input_state.awaiting_register_insert);
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
+    app.backend.pump().unwrap();
+
+    assert_eq!(app.backend.lines, vec![String::from("alpha")]);
+    assert!(!app.input_state.awaiting_register);
+    assert!(!app.input_state.awaiting_register_insert);
 }
 
 #[test]

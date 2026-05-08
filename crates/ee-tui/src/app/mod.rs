@@ -84,9 +84,11 @@ impl App {
             return;
         }
 
-        // Picker overlay intercepts all keys while active.
         if self.picker.is_some() {
-            self.handle_picker_event(key);
+            if self.dispatch_context_key(key, Mode::Picker) {
+                return;
+            }
+            self.handle_picker_text_input(key);
             return;
         }
 
@@ -95,20 +97,17 @@ impl App {
             return;
         }
 
-        // Quickfix panel focus intercepts all keys while focused.
         if self.quickfix_focused {
-            self.handle_qf_focused_event(key, true);
+            self.dispatch_context_key(key, Mode::Quickfix);
             return;
         }
-        // Location-list panel focus intercepts all keys while focused.
         if self.location_list_focused {
-            self.handle_qf_focused_event(key, false);
+            self.dispatch_context_key(key, Mode::LocationList);
             return;
         }
 
-        // SubstituteConfirm mode: y/n/a/q consume all keys.
         if self.mode == Mode::SubstituteConfirm {
-            self.handle_substitute_confirm(key.code);
+            self.dispatch_context_key(key, Mode::SubstituteConfirm);
             return;
         }
 
@@ -119,29 +118,20 @@ impl App {
             self.macro_buffer.push(key);
         }
 
-        let binding_key = BindingKey {
-            mode: self.mode,
-            key: key.code,
-            modifiers: key.modifiers,
-            prefix: self.input_state.prefix,
-        };
-
-        let action = self
-            .key_bindings
-            .get(&binding_key)
-            .or_else(|| {
-                if key.modifiers != KeyModifiers::NONE {
-                    self.key_bindings
-                        .get(&BindingKey { modifiers: KeyModifiers::NONE, ..binding_key })
-                } else {
-                    None
-                }
-            })
-            .cloned();
+        let action = self.lookup_action(key, self.mode, self.input_state.prefix);
 
         // Two-char awaiting states consume the next key unconditionally.
         if self.input_state.awaiting_register {
             self.input_state.awaiting_register = false;
+            if self.input_state.awaiting_register_insert {
+                self.input_state.awaiting_register_insert = false;
+                if let KeyCode::Char(c) = key.code
+                    && let Some(register) = RegisterName::from_char(c)
+                {
+                    self.insert_register_for_current_mode(register);
+                }
+                return;
+            }
             if let KeyCode::Char(c) = key.code {
                 let append = RegisterName::is_append_char(c);
                 self.input_state.pending_register = RegisterName::from_char(c);
@@ -230,6 +220,40 @@ impl App {
             }
         } else {
             self.handle_default(key);
+        }
+    }
+
+    fn lookup_action(&self, key: KeyEvent, mode: Mode, prefix: Option<char>) -> Option<Action> {
+        let binding_key = BindingKey { mode, key: key.code, modifiers: key.modifiers, prefix };
+
+        self.key_bindings
+            .get(&binding_key)
+            .or_else(|| {
+                if key.modifiers != KeyModifiers::NONE {
+                    self.key_bindings
+                        .get(&BindingKey { modifiers: KeyModifiers::NONE, ..binding_key })
+                } else {
+                    None
+                }
+            })
+            .cloned()
+    }
+
+    fn dispatch_context_key(&mut self, key: KeyEvent, mode: Mode) -> bool {
+        let Some(action) = self.lookup_action(key, mode, None) else {
+            return false;
+        };
+        self.dispatch(action, key);
+        true
+    }
+
+    fn handle_picker_text_input(&mut self, key: KeyEvent) {
+        if let KeyCode::Char(c) = key.code
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+            && let Some(picker) = self.picker.as_mut()
+        {
+            picker.push_char(c);
         }
     }
 
@@ -360,6 +384,11 @@ impl App {
                     json!({ "wrap_around": true, "allow_same": false }),
                 );
             }
+            Action::RequestCompletion => {
+                if let Err(err) = self.backend.request_completion(None) {
+                    self.backend.status_message = Some(format!("completion failed: {err}"));
+                }
+            }
             Action::RequestHover => {
                 let position = Some((self.backend.cursor_line, self.backend.cursor_col));
                 if let Err(err) = self.backend.request_hover(position) {
@@ -421,9 +450,50 @@ impl App {
             Action::DiagnosticsPicker => self.open_diagnostics_picker(),
             Action::WorkspaceDiagnosticsPicker => self.open_workspace_diagnostics_picker(),
             Action::LastPicker => self.reopen_last_picker(),
+            Action::PickerClose => {
+                self.picker = None;
+            }
+            Action::PickerConfirm => self.handle_picker_confirm(),
+            Action::PickerMoveUp => {
+                if let Some(picker) = self.picker.as_mut() {
+                    picker.move_up();
+                }
+            }
+            Action::PickerMoveDown => {
+                if let Some(picker) = self.picker.as_mut() {
+                    picker.move_down();
+                }
+            }
+            Action::PickerBackspace => {
+                if let Some(picker) = self.picker.as_mut() {
+                    picker.pop_char();
+                }
+            }
+            Action::QuickfixClose => {
+                self.quickfix_focused = false;
+            }
+            Action::QuickfixConfirm => self.confirm_focused_list(true),
+            Action::QuickfixMoveUp => self.move_focused_list(true, false),
+            Action::QuickfixMoveDown => self.move_focused_list(true, true),
+            Action::LocationListClose => {
+                self.location_list_focused = false;
+            }
+            Action::LocationListConfirm => self.confirm_focused_list(false),
+            Action::LocationListMoveUp => self.move_focused_list(false, false),
+            Action::LocationListMoveDown => self.move_focused_list(false, true),
+            Action::SubstituteConfirmApply => self.apply_substitute_current(),
+            Action::SubstituteConfirmSkip => self.advance_substitute_confirm(),
+            Action::SubstituteConfirmApplyAll => self.apply_all_substitute_matches(),
+            Action::SubstituteConfirmCancel => self.cancel_substitute_confirm(),
             Action::RegisterPrefix => {
                 self.input_state.awaiting_register = true;
             }
+            Action::InsertRegister => {
+                self.input_state.awaiting_register = true;
+                self.input_state.awaiting_register_insert = true;
+            }
+            Action::GlobalSearch => self.open_global_search(),
+            Action::CommandPalette => self.open_command_palette(),
             Action::MarkSetPrefix => {
                 self.input_state.awaiting_mark_set = true;
             }
@@ -734,26 +804,7 @@ impl App {
             {
                 c
             }
-            KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                // Handle Ctrl+key in insert mode
-                if self.mode == Mode::Insert {
-                    match c {
-                        'w' => {
-                            let _ = self.backend.send_edit("delete_word_backward", json!([]));
-                        }
-                        'u' => {
-                            let _ =
-                                self.backend.send_edit("delete_to_beginning_of_line", json!([]));
-                        }
-                        't' => {
-                            let _ = self.backend.send_edit("indent", json!([]));
-                        }
-                        'd' => {
-                            let _ = self.backend.send_edit("outdent", json!([]));
-                        }
-                        _ => {}
-                    }
-                }
+            KeyCode::Char(_) if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return;
             }
             _ => return,
@@ -814,6 +865,8 @@ impl App {
             Mode::Visual | Mode::VisualLine | Mode::VisualBlock => {
                 self.handle_visual_char(ch);
             }
+            // Context-specific pseudo-modes are intercepted before `handle_default`.
+            Mode::Picker | Mode::Quickfix | Mode::LocationList => {}
             // SubstituteConfirm only accepts key codes (handled before we reach here);
             // any stray char is a no-op.
             Mode::SubstituteConfirm => {}
@@ -2494,52 +2547,37 @@ impl App {
 
     // ── Quickfix and location list ──────────────────────────────────────────
 
-    /// Handle key events when the quickfix or location-list panel is focused.
-    /// `is_quickfix=true` for the quickfix list, `false` for the location list.
-    fn handle_qf_focused_event(&mut self, key: KeyEvent, is_quickfix: bool) {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                if is_quickfix {
-                    self.quickfix_focused = false;
+    fn move_focused_list(&mut self, is_quickfix: bool, forward: bool) {
+        if is_quickfix {
+            if let Some(qf) = self.quickfix.as_mut() {
+                if forward {
+                    qf.move_down();
                 } else {
-                    self.location_list_focused = false;
+                    qf.move_up();
                 }
             }
-            KeyCode::Char('j') | KeyCode::Down => {
-                if is_quickfix {
-                    if let Some(qf) = self.quickfix.as_mut() {
-                        qf.move_down();
-                    }
-                } else if let Some(ll) = self.location_list.as_mut() {
-                    ll.move_down();
-                }
+        } else if let Some(ll) = self.location_list.as_mut() {
+            if forward {
+                ll.move_down();
+            } else {
+                ll.move_up();
             }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if is_quickfix {
-                    if let Some(qf) = self.quickfix.as_mut() {
-                        qf.move_up();
-                    }
-                } else if let Some(ll) = self.location_list.as_mut() {
-                    ll.move_up();
-                }
-            }
-            KeyCode::Enter => {
-                let entry = if is_quickfix {
-                    self.quickfix.as_ref().and_then(|q| q.current()).cloned()
-                } else {
-                    self.location_list.as_ref().and_then(|l| l.current()).cloned()
-                };
-                if let Some(e) = entry {
-                    self.navigate_to_qf_entry(e);
-                }
-                // Return focus to the editor after navigation.
-                if is_quickfix {
-                    self.quickfix_focused = false;
-                } else {
-                    self.location_list_focused = false;
-                }
-            }
-            _ => {}
+        }
+    }
+
+    fn confirm_focused_list(&mut self, is_quickfix: bool) {
+        let entry = if is_quickfix {
+            self.quickfix.as_ref().and_then(|q| q.current()).cloned()
+        } else {
+            self.location_list.as_ref().and_then(|l| l.current()).cloned()
+        };
+        if let Some(entry) = entry {
+            self.navigate_to_qf_entry(entry);
+        }
+        if is_quickfix {
+            self.quickfix_focused = false;
+        } else {
+            self.location_list_focused = false;
         }
     }
 
@@ -2795,42 +2833,6 @@ impl App {
     }
 
     // ── Picker overlay ──────────────────────────────────────────────────────
-
-    /// Route a key event to the active picker overlay.
-    fn handle_picker_event(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
-                self.picker = None;
-            }
-            KeyCode::Enter => {
-                self.handle_picker_confirm();
-            }
-            KeyCode::Up => {
-                if let Some(p) = self.picker.as_mut() {
-                    p.move_up();
-                }
-            }
-            KeyCode::Down => {
-                if let Some(p) = self.picker.as_mut() {
-                    p.move_down();
-                }
-            }
-            KeyCode::Backspace => {
-                if let Some(p) = self.picker.as_mut() {
-                    p.pop_char();
-                }
-            }
-            KeyCode::Char(c)
-                if !key.modifiers.contains(KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(KeyModifiers::ALT) =>
-            {
-                if let Some(p) = self.picker.as_mut() {
-                    p.push_char(c);
-                }
-            }
-            _ => {}
-        }
-    }
 
     /// Confirm the currently selected picker item and close the overlay.
     fn handle_picker_confirm(&mut self) {
@@ -3575,6 +3577,39 @@ impl App {
         self.input_state.pending_register.take().unwrap_or(RegisterName::Unnamed)
     }
 
+    fn insert_register_for_current_mode(&mut self, reg: RegisterName) {
+        let text = self.registers.get(&reg);
+        if text.is_empty() {
+            return;
+        }
+
+        match self.mode {
+            Mode::Insert => {
+                self.insert_buffer.push_str(&text);
+                let _ = self.backend.send_edit("insert", json!({ "chars": text }));
+            }
+            Mode::CommandLine => {
+                self.history_idx = None;
+                self.command_buffer.push_str(&text);
+            }
+            Mode::Search => {
+                self.command_buffer.push_str(&text);
+                let chars = self.command_buffer.clone();
+                let case_sensitive = smart_case_sensitive(&chars);
+                let _ = self.backend.send_edit(
+                    "find",
+                    json!({
+                        "chars": chars,
+                        "case_sensitive": case_sensitive,
+                        "regex": false,
+                        "whole_words": false
+                    }),
+                );
+            }
+            _ => {}
+        }
+    }
+
     fn selected_text_preview(&mut self, linewise: bool) -> String {
         if self.mode == Mode::VisualBlock {
             let (al, ac) =
@@ -3911,31 +3946,17 @@ impl App {
 
     // ── Substitute confirm mode ───────────────────────────────────────────
 
-    /// Handle a key event while in `SubstituteConfirm` mode.
-    pub(crate) fn handle_substitute_confirm(&mut self, key: crossterm::event::KeyCode) {
-        use crossterm::event::KeyCode;
-        match key {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                self.apply_substitute_current();
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') => {
-                self.advance_substitute_confirm();
-            }
-            KeyCode::Char('a') | KeyCode::Char('A') => {
-                // Apply all remaining.
-                while self.substitute_pending.as_ref().is_some_and(|s| s.current < s.matches.len())
-                {
-                    self.apply_substitute_current();
-                }
-            }
-            KeyCode::Char('q') | KeyCode::Esc => {
-                let applied = self.substitute_pending.as_ref().map(|s| s.applied).unwrap_or(0);
-                self.substitute_pending = None;
-                self.mode = Mode::Normal;
-                self.backend.status_message = Some(format!("{applied} substitution(s) applied"));
-            }
-            _ => {}
+    fn apply_all_substitute_matches(&mut self) {
+        while self.substitute_pending.as_ref().is_some_and(|s| s.current < s.matches.len()) {
+            self.apply_substitute_current();
         }
+    }
+
+    fn cancel_substitute_confirm(&mut self) {
+        let applied = self.substitute_pending.as_ref().map(|s| s.applied).unwrap_or(0);
+        self.substitute_pending = None;
+        self.mode = Mode::Normal;
+        self.backend.status_message = Some(format!("{applied} substitution(s) applied"));
     }
 
     /// Apply the current pending substitution match and advance.

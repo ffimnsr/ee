@@ -2,8 +2,9 @@
 
 ## New World
 
-- [ ] Remove commands that's capitalize like `Grep` should only retain `grep`
-- [ ] Use ripgrep crates for `grep` as its battle tested for grepping files
+- [x] Remove commands that's capitalize like `Grep` should only retain `grep`
+- [x] Analyze and use ripgrep crates like grep-searcher, grep-matcher, grep-regex or use grep as whole as its battle tested for grepping files
+- [x] When `ee` editor is open with `ee .` or a directory, it should opena a fuzzy search from that directory
 
 ### Tooling and CI
 
@@ -393,15 +394,15 @@ different name alias this. Description for the command can be found here: https:
 - [x] extend_line_above / select_line_below
 - [x] goto_file_end / extend_to_file_start / extend_to_file_end
 - [x] goto_declaration
-- [ ] create_directory - creates directory on current workspace, can create parent directory under workspace if missing
-- [ ] reverse_selection_contents
-- rename_symbol
-- select_references_to_symbol_under_cursor
-- hover (static command)
-- insert_register
-- global_search
-- command_palette
-- completion (static command)
+- [x] create_directory - creates directory on current workspace, can create parent directory under workspace if missing
+- [x] reverse_selection_contents
+- [x] rename_symbol
+- [x] select_references_to_symbol_under_cursor
+- [x] hover (static command)
+- [x] insert_register
+- [x] global_search
+- [x] command_palette
+- [x] completion (static command)
 
 ### Already Implemented But Missing From Tracker
 
@@ -427,11 +428,11 @@ different name alias this. Description for the command can be found here: https:
 - [x] selection_for_find / selection_for_replace
 - [x] multi_find
 - [x] insert_tab
-- [x] files / Files / grep / Grep / bpick
+- [x] files / grep / bpick
 - [x] recover / recoverdel
 - [x] set / noh / nohlsearch
 - [x] bn / bnext / bp / bprev / bprevious / b# / bd / bdelete
-- [x] ls / buffers / Buffers
+- [x] ls / buffers
 - [x] sp / split / vs / vsplit
 - [x] tabnew / tabe / tabedit / tabc / tabclose / tabn / tabnext / tabp / tabprev / tabprevious / tabs
 - [x] copen / cope / cclose / ccl / cn / cnext / cp / cprev / cprevious / cfirst / clast / cc / clist / cl

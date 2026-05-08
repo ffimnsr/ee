@@ -1314,6 +1314,9 @@ fn render_prompt(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             let prefix = if app.search_backward { "?" } else { "/" };
             Line::from(vec![Span::raw(prefix), Span::raw(app.command_buffer.as_str())])
         }
+        Mode::Picker => Line::from("picker | enter confirm | esc close | type filter"),
+        Mode::Quickfix => Line::from("quickfix | enter jump | q close | j/k move"),
+        Mode::LocationList => Line::from("location-list | enter jump | q close | j/k move"),
         Mode::SubstituteConfirm => Line::from(match app.backend.status_message.as_deref() {
             Some(msg) => msg.to_owned(),
             None => "substitute — replace? [y]es [n]o [a]ll [q]uit".to_owned(),

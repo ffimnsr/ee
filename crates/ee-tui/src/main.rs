@@ -44,6 +44,13 @@ use ui::ui;
 const INPUT_POLL_TIMEOUT: Duration = Duration::from_millis(16);
 const MAX_INPUT_EVENTS_PER_TICK: usize = 128;
 
+#[derive(Debug, Clone)]
+struct StartupLaunch {
+    initial_path: Option<PathBuf>,
+    additional_paths: Vec<PathBuf>,
+    picker_root: Option<PathBuf>,
+}
+
 // ── CLI definition ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Parser)]
@@ -180,6 +187,43 @@ fn cmd_completions(shell: Shell) {
     generate(shell, &mut cmd, "ee", &mut io::stdout());
 }
 
+fn resolve_startup_launch(
+    files: &[PathBuf],
+    saved_session: Option<&session::SessionState>,
+) -> io::Result<StartupLaunch> {
+    let Some(first) = files.first().cloned() else {
+        return Ok(StartupLaunch {
+            initial_path: saved_session.and_then(session::SessionState::initial_path),
+            additional_paths: Vec::new(),
+            picker_root: None,
+        });
+    };
+
+    if first.is_dir() {
+        let picker_root = std::fs::canonicalize(&first)?;
+        std::env::set_current_dir(&picker_root)?;
+        return Ok(StartupLaunch {
+            initial_path: None,
+            additional_paths: files.iter().skip(1).cloned().collect(),
+            picker_root: Some(picker_root),
+        });
+    }
+
+    Ok(StartupLaunch {
+        initial_path: Some(first),
+        additional_paths: files.iter().skip(1).cloned().collect(),
+        picker_root: None,
+    })
+}
+
+fn build_startup_app(launch: StartupLaunch) -> io::Result<(App, Vec<PathBuf>)> {
+    let mut app = App::from_path(launch.initial_path)?;
+    if let Some(picker_root) = launch.picker_root {
+        app.open_picker(picker::PickerState::new_files(picker_root));
+    }
+    Ok((app, launch.additional_paths))
+}
+
 // ── Editor entry point ────────────────────────────────────────────────────────
 
 fn main() -> io::Result<()> {
@@ -231,12 +275,8 @@ fn main() -> io::Result<()> {
     } else {
         None
     };
-    let first = cli
-        .files
-        .first()
-        .cloned()
-        .or_else(|| saved_session.as_ref().and_then(session::SessionState::initial_path));
-    let mut app = App::from_path(first)?;
+    let launch = resolve_startup_launch(&cli.files, saved_session.as_ref())?;
+    let (mut app, additional_paths) = build_startup_app(launch)?;
 
     if let Some(state) = saved_session.as_ref() {
         if let Err(err) = state.restore(&mut app) {
@@ -245,8 +285,8 @@ fn main() -> io::Result<()> {
     }
 
     // Open any additional files as extra buffers.
-    for path in cli.files.iter().skip(1) {
-        let _ = app.backend.open_buffer(Some(path.clone()));
+    for path in additional_paths {
+        let _ = app.backend.open_buffer(Some(path));
     }
 
     run(&mut app, shutdown)

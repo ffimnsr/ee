@@ -7,6 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
+use grep_regex::RegexMatcherBuilder;
+use grep_searcher::{BinaryDetection, SearcherBuilder, sinks::UTF8};
 use ignore::WalkBuilder;
 use xi_core_lib::plugin_rpc::{CodeActionDescriptor, SymbolItem};
 
@@ -365,36 +367,60 @@ fn collect_files(cwd: &Path) -> Vec<PickerItem> {
 const GREP_LIMIT: usize = 500;
 
 /// Search all files under `cwd` for lines containing `query` (case-insensitive).
+///
+/// Uses ripgrep crates so matching streams file content instead of loading whole
+/// files into memory.
 fn grep_files(query: &str, cwd: &Path) -> Vec<PickerItem> {
     if query.is_empty() {
         return Vec::new();
     }
-    let query_lower = query.to_lowercase();
+
+    let Ok(matcher) =
+        RegexMatcherBuilder::new().case_insensitive(true).build(&regex::escape(query))
+    else {
+        return Vec::new();
+    };
+
     let mut items = Vec::new();
+    let mut searcher = SearcherBuilder::new()
+        .binary_detection(BinaryDetection::quit(b'\x00'))
+        .line_number(true)
+        .build();
     let walker = WalkBuilder::new(cwd).hidden(false).git_ignore(true).max_depth(Some(10)).build();
-    'outer: for entry in walker.flatten() {
+    for entry in walker.flatten() {
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
         let path = entry.into_path();
-        // Skip unreadable / binary files.
-        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        if path.components().any(|component| component.as_os_str() == ".git") {
+            continue;
+        }
         let rel = path.strip_prefix(cwd).unwrap_or(&path).to_string_lossy().into_owned();
-        for (line_num, line_text) in content.lines().enumerate() {
-            if line_text.to_lowercase().contains(&query_lower) {
+
+        let path_for_match = path.clone();
+        let rel_for_match = rel.clone();
+        let search_result = searcher.search_path(
+            &matcher,
+            &path,
+            UTF8(|line_number, line| {
+                let line_text = line.trim_end_matches(['\r', '\n']);
                 items.push(PickerItem {
-                    label: format!("{}:{}: {}", rel, line_num + 1, line_text.trim()),
-                    detail: Some(rel.clone()),
-                    path: Some(path.clone()),
+                    label: format!("{}:{}: {}", rel_for_match, line_number, line_text.trim()),
+                    detail: Some(rel_for_match.clone()),
+                    path: Some(path_for_match.clone()),
                     buf_id: None,
-                    line: Some(line_num),
+                    line: Some(line_number.saturating_sub(1) as usize),
                     col: Some(0),
                     choice_index: None,
                 });
-                if items.len() >= GREP_LIMIT {
-                    break 'outer;
-                }
-            }
+                Ok(items.len() < GREP_LIMIT)
+            }),
+        );
+        if search_result.is_err() {
+            continue;
+        }
+        if items.len() >= GREP_LIMIT {
+            break;
         }
     }
     items
@@ -405,6 +431,9 @@ fn grep_files(query: &str, cwd: &Path) -> Vec<PickerItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    use tempfile::tempdir;
 
     #[test]
     fn buffer_picker_filters_by_query() {
@@ -444,5 +473,32 @@ mod tests {
         assert_eq!(picker.visible_count(), 1);
         picker.pop_char(); // back to all
         assert_eq!(picker.visible_count(), 2);
+    }
+
+    #[test]
+    fn grep_files_finds_case_insensitive_matches() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("sample.txt");
+        fs::write(&path, "alpha\nBeta match\ngamma\n").unwrap();
+
+        let items = grep_files("beta", temp.path());
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "sample.txt:2: Beta match");
+        assert_eq!(items[0].line, Some(1));
+    }
+
+    #[test]
+    fn grep_files_skips_binary_content() {
+        let temp = tempdir().unwrap();
+        let text_path = temp.path().join("sample.txt");
+        let binary_path = temp.path().join("sample.bin");
+        fs::write(&text_path, "needle\n").unwrap();
+        fs::write(&binary_path, b"needle\0hidden").unwrap();
+
+        let items = grep_files("needle", temp.path());
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].path.as_deref(), Some(text_path.as_path()));
     }
 }
