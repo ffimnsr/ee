@@ -6,29 +6,217 @@
 
 - [ ] Add property-based tests (`proptest`) in `crates/xi-rope` for delta application, merging, and CRDT invariants.
 
-### Large File Support (Terabytes see Emacs VLF)
+### Large File Support: VLF Mode (Very Large Files)
 
-- [ ] Define huge-file mode contract in `xi-core-lib`: read-only first, explicit feature gates for editing, search, syntax, git signs, LSP, diagnostics, undo, and save behavior.
-- [ ] Replace `crates/xi-core-lib/src/file.rs` full-file `read_to_end` + `Rope::from` open path with paged file access backed by `mmap` or bounded `pread` windows.
-- [ ] Remove whole-file open path from `crates/xi-core-lib/src/file.rs`; opening a huge file must not require reading entire contents into RAM before first render.
-- [ ] Add file-size thresholds and open policy: normal path for small files, huge-file backend for files above threshold, clear user-facing status when features are disabled.
-- [ ] Build lazy newline index for huge files: page-scanned line starts, cached chunks, background indexing, cancellation, and bounded memory cap.
-- [ ] Add paged text storage backend for huge files using mapped or windowed reads, with bounded cache eviction and viewport-first access patterns.
-- [ ] Change line addressing APIs to tolerate partial line index: viewport-first load, approximate total line count until scan completes, stable updates as index expands.
-- [ ] Keep `ee-tui` line cache sparse for huge files: no `Vec<String>` full-buffer clone, no placeholder strings for all lines, render only loaded viewport lines.
-- [ ] Add backend protocol for chunk/viewport text requests instead of whole-buffer line-cache invalidation ranges.
-- [ ] Limit whitespace and line-ending detection to bounded samples near file start plus later background verification; never scan full 10 GB during open.
-- [ ] Convert indentation and line-ending detection to sampled or incremental probes so huge-file open avoids full-buffer whitespace scans.
-- [ ] Disable or defer syntax parsing, tree-sitter, syntect fallback, and semantic text objects for huge files until visible-range parsing exists.
-- [ ] Disable automatic git hunk diff, blame, and source-control signs for huge files unless an explicit bounded range command is used.
-- [ ] Add huge-file search strategy: streaming search over pages, cancellation, progress reporting, bounded match storage, and viewport-local highlights.
-- [ ] Add huge-file feature gates so git, syntax, search, wrap, and similar full-buffer features are disabled or downgraded before they can trigger global scans.
-- [ ] Design edit strategy for huge files: append-only/read-only milestone first, then sparse overlay edits with piece-table/rope overlay and explicit save-as/rewrite semantics.
-- [ ] Rework save path for huge files: streaming copy with edit overlay application, fsync/rename durability, progress reporting, cancellation policy.
-- [ ] Add memory budget tests: opening 10 GB sparse fixture must keep RSS under configured cap and show first viewport without full scan.
-- [ ] Add performance benchmarks for 100 MB, 1 GB, and 10 GB fixtures covering open-to-first-render, page-down latency, goto-line behavior, and search cancellation.
-- [ ] Add regression tests for huge-file disabled features so frontend never accidentally triggers full-buffer clone, diff, syntax, or line-cache expansion.
-- [ ] Document huge-file mode limitations in `README.md` and command status messages.
+- [ ] Add hybrid paged-rope architecture seam.
+  - [x] Add `TextStore` trait as stable document API for normal, constrained, and VLF modes.
+    - [x] Place trait and shared position/result types in `crates/xi-core-lib/src/text_store.rs`.
+    - [x] Export module from `crates/xi-core-lib/src/lib.rs` or nearest existing core module root.
+    - [x] Define `DocumentMode::{Normal, ConstrainedNormal, Vlf}` near `TextStore`, not in TUI code.
+    - [x] Define typed positions: `ByteOffset(u64)`, `Utf16Offset(u64)`, `LogicalLine(u64)`, `VisualRow(u64)`, `ByteRange { start, end }`.
+    - [x] Define partial-result types: `KnownLineCount::{Exact(u64), Approximate(u64), Unknown}`, `LineLookup::{Exact(ByteOffset), Pending, OutOfRange}`, `TextChunkResult::{Ready(TextChunk), Pending, Cancelled, Unsupported}`.
+    - [x] Include core methods: `mode`, `len_bytes`, `known_line_count`, `read_byte_range`, `line_to_byte`, `byte_to_line`, `iter_chunks`, `snapshot_id`.
+    - [x] Make `TextStore` object-safe or document why enum dispatch is used instead.
+  - [x] Implement `TextStore` for existing `Rope` before changing storage internals.
+    - [x] Add `RopeTextStore` wrapper in `crates/xi-core-lib/src/text_store/rope_store.rs` or equivalent submodule.
+    - [x] Back `RopeTextStore` with current `xi_rope::Rope` and existing line/UTF-16 metrics.
+    - [x] Keep normal-mode behavior byte-for-byte compatible before introducing VLF.
+    - [x] Add unit tests comparing `RopeTextStore` line/byte/UTF-16 conversions against direct `Rope` calls.
+    - [x] Add regression test proving normal buffers can still expose full text only through normal-mode APIs.
+  - [x] Move view rendering, search, syntax, and save call sites toward `TextStore` instead of direct full-buffer `Rope` access.
+    - [x] Start with read-only/query paths: viewport line reads, search chunk iteration, and status reporting.
+    - [x] Leave edit mutation on existing `Editor`/`Rope` path until `RopeTextStore` tests pass.
+    - [x] Add adapter methods at editor boundary so call sites do not reach into `Editor.text` directly for read operations.
+    - [x] Track remaining direct `Rope` reads with comments or checklist items before enabling `VlfStore`.
+  - [x] Make all positions explicit by unit: byte offset, UTF-16 offset, logical line, visual row.
+    - [x] Use typed wrappers at API boundaries; do not pass raw `usize`/`u64` across storage/view boundaries.
+    - [x] Keep UI cursor coordinates separate from storage coordinates.
+    - [x] Add conversion methods only on `TextStore`; avoid local conversion helpers in TUI/rendering code.
+  - [x] Add guardrails so VLF documents cannot expose a "get full text" API.
+    - [x] Add `FullTextPolicy::{Allowed, Forbidden}` or equivalent mode check.
+    - [x] Make full-text extraction return `Unsupported` for `DocumentMode::Vlf`.
+    - [x] Add tests that VLF search/render paths use chunk APIs and never call full-text extraction.
+- [x] Add VLF storage primitives.
+  - [x] Add `FilePager` for file handle ownership, bounded `pread`/`mmap` windows, byte cache, and cancellation.
+    - [x] Place in `crates/xi-core-lib/src/vlf/pager.rs`.
+    - [x] Own `File`, canonical path, file size, modification metadata, and optional advisory lock handle.
+    - [x] Provide `read_at(ByteRange, CancelToken) -> io::Result<PageBytes>` with max read size enforcement.
+    - [x] Use bounded `pread` on Unix first; keep `mmap` optional behind feature/config because mmap failure modes differ by platform.
+    - [x] Add LRU page cache with configurable byte cap and metrics for cache hit/miss/eviction.
+    - [x] Add cancellation generation so stale viewport reads can be dropped without blocking UI.
+  - [x] Add `PageIndex` for page descriptors, newline summaries, UTF-8 seam validity, and scan progress.
+    - [x] Place in `crates/xi-core-lib/src/vlf/page_index.rs`.
+    - [x] Store descriptors by absolute byte range, not by line number.
+    - [x] Support lookup from byte to nearest scanned page in O(log n).
+    - [x] Support lookup from line to byte as `Exact`, `Approximate`, or `Pending`.
+    - [x] Run background scans viewport-first, then forward/backward expansion.
+    - [x] Store scan progress and cancellation state so reopening/jumping does not restart unnecessary work.
+  - [x] Add `PageDescriptor` metadata: file range, decoded range, byte length, UTF-16 length, newline count, line prefix/suffix lengths, boundary flags, and scan state.
+    - [x] Define descriptor in `page_index.rs` and keep raw page bytes out of descriptor.
+    - [x] Include `starts_at_utf8_boundary` and `ends_at_utf8_boundary` before exposing decoded text.
+    - [x] Include CRLF seam flags so line counting does not double-count split `\r\n`.
+    - [x] Include `first_line_prefix_len` and `last_line_suffix_len` for fast viewport stitching.
+  - [x] Add `VlfStore` implementing `TextStore` with `FilePager` + `PageIndex`.
+    - [x] Place in `crates/xi-core-lib/src/vlf/store.rs`.
+    - [x] Keep real file-open wiring deferred until open policy chooses VLF before `try_load_file`.
+    - [x] Implement `read_byte_range` with decode-safe seam expansion and bounded cache reads.
+    - [x] Implement `iter_chunks` as cancellable stream over decoded chunks with byte-range metadata.
+    - [x] Return `Pending` for line lookups that require unscanned index regions.
+  - [x] Copy VLF core invariant: file on disk remains source of truth; editor holds byte windows plus sparse metadata.
+    - [x] Document invariant in `vlf/mod.rs`.
+    - [x] Store only descriptors, cached pages, and future overlay edits in memory.
+    - [x] Prohibit conversion from `VlfStore` to full `Rope`.
+  - [x] Track absolute byte window start/end, decoded text range, original encoded length, dirty state, and batch size.
+    - [x] Keep this state in `VlfStore` or `VlfViewportState`, not in `ee-tui`.
+    - [x] Use absolute byte ranges for all save/search/edit planning.
+    - [x] Keep batch size configurable and later auto-tunable from read/decode timing.
+  - [x] Add decode-safe seam adjustment so window boundaries never split multibyte UTF-8 sequences.
+    - [x] Read up to 4 bytes of slack on both sides for UTF-8 boundary repair.
+    - [x] Preserve original requested range and adjusted decoded range separately.
+    - [x] Add fixtures where multibyte characters sit exactly across page boundaries.
+  - [x] Store file pages/chunks with bounded cache eviction and viewport-first access patterns.
+    - [x] Cache decoded text separately from raw bytes only when memory budget allows.
+    - [x] Prioritize current viewport, then overscan, then background index pages.
+    - [x] Evict cold pages before index metadata.
+  - [x] Keep memory under configurable cap for 100 MB, 1 GB, and 10 GB fixtures.
+    - [x] Add budget config in core settings with sane default.
+    - [x] Track peak raw-page bytes, decoded-page bytes, descriptor bytes, and overlay bytes separately.
+    - [x] Add test-only counters so budget tests do not depend only on RSS sampling.
+  - [x] Keep first `VlfStore` milestone read-only with stable byte/line addressing.
+    - [x] Disable edit commands at mode contract layer, not only in TUI key handling.
+    - [x] Return clear user-facing status for edit/save attempts.
+    - [x] Allow copy/search/navigation because they can operate over `TextStore` chunks.
+- [ ] Add VLF overlay model after read-only storage works.
+  - [x] Add `Piece` enum for `Original { file_range }` and `Inserted { buffer_id, range }`.
+    - [x] Place overlay types in `crates/xi-core-lib/src/vlf/overlay.rs`.
+    - [x] Use absolute byte ranges for `Original` pieces.
+    - [x] Use append-only inserted buffers for `Inserted` pieces.
+    - [x] Keep piece order in a balanced tree or interval structure once edits become arbitrary.
+  - [x] Store inserted text separately from original file pages.
+    - [x] Keep inserted text UTF-8 validated before it enters overlay.
+    - [x] Track inserted byte length, UTF-16 length, newline count, and CRLF seam flags.
+    - [x] Do not write inserted text into page cache.
+  - [x] Represent edits as sparse piece overlays without loading base file into rope.
+    - [x] Start with append-only or current-window edits only.
+    - [x] Split affected `Original` piece at edit boundaries.
+    - [x] Insert `Inserted` piece between unchanged original ranges.
+    - [x] Keep overlay metrics compatible with `TextStore` line/byte lookup APIs.
+  - [x] Preserve revision IDs and undo grouping above overlay layer.
+    - [x] Keep existing editor revision model as owner of edit intent.
+    - [x] Store overlay deltas as revision payloads or map them through an adapter.
+    - [x] Define GC rule for inserted buffers when undo history drops edits.
+  - [x] Delay arbitrary sparse edits until viewport reads, search, and save work against overlay pieces.
+    - [x] Require overlay-aware `read_byte_range` before enabling edit mode.
+    - [x] Require overlay-aware streaming search before enabling query replace.
+    - [x] Require temp-file streaming save before enabling persistent VLF edits.
+- [ ] Finish VLF mode contract wiring in `xi-core-lib`.
+  - [x] Add explicit document mode enum: normal file mode vs `Vlf` mode.
+  - [x] Make VLF read-only for first milestone; editing requires separate feature gate.
+  - [x] Define feature gate matrix for editing, search, syntax, git signs, LSP, diagnostics, undo, wrap, and save.
+  - [x] Expose user-facing VLF status: file size, mode name, disabled features, and indexing progress.
+- [x] Add VLF open policy and thresholds.
+  - [x] Use VS Code-inspired guardrails: normal full-feature target up to 20 MB and 300K LOC; constrained/VLF policy applies above either threshold.
+  - [x] Add separate hard-open confirmation thresholds: 1 GB local, 50 MB web/unknown, 10 MB remote.
+  - [x] Use normal rope path for small files.
+  - [x] Choose `ConstrainedNormal` or `Vlf` above normal thresholds based on configured size, line count, memory, and user override policy.
+  - [x] Add override command/config to force normal mode or force VLF mode when safe.
+  - [x] Fail closed when file metadata cannot be trusted; never fall back to whole-file load for huge files.
+- [ ] Keep normal mode fully featured up to 20 MB or 300K LOC without staggering.
+  - [ ] Add performance budget: open-to-first-render under 250 ms warm cache and under 750 ms cold cache for 20 MB fixtures.
+  - [ ] Add scroll budget: page-down and cursor movement stay under one frame at 60 Hz for 300K-line fixtures.
+  - [ ] Keep syntax, tree-sitter, search, diagnostics, git signs, wrap, undo, and save enabled below normal-mode threshold.
+  - [x] Convert expensive open-time probes to bounded or cached passes so full features do not block first render.
+  - [ ] Defer noncritical work after first render: full syntax tree, diagnostics refresh, git diff signs, and global search indexes.
+  - [x] Add fixture matrix: 20 MB long-line file, 20 MB many-line file, 300K LOC source file, and mixed CRLF/LF file.
+  - [x] Add regression tests for no full-buffer `Vec<String>` clone in `ee-tui` render path even in normal mode.
+  - [x] Add benchmark counters for allocations, peak RSS, bytes scanned before first render, and render invalidation count.
+- [ ] Add transition mode between normal and VLF.
+  - [ ] Introduce `LargeNormal` or `ConstrainedNormal` policy for files near thresholds that still fit in RAM.
+  - [ ] Keep editing enabled in transition mode, but downgrade background-heavy features before UI stalls.
+  - [ ] Disable worker/LSP sync above 50 MB unless server advertises bounded range sync.
+  - [ ] Disable heap-heavy whole-document operations above 256M chars.
+  - [ ] Show status when editor downgrades from full normal mode to constrained mode.
+- [ ] Wire VLF storage into `crates/xi-core-lib/src/file.rs` open path.
+  - [x] Add `VlfStore` and route its reads through `FilePager`.
+  - [ ] Select VLF path from open policy before `try_load_file` uses `read_to_end`.
+  - [ ] Remove `read_to_end` + `Rope::from` from VLF opens.
+  - [ ] Ensure VLF open never constructs a full-buffer `Rope`.
+  - [ ] Guarantee first render does not require reading entire contents into RAM.
+  - [ ] Add open telemetry/debug counters for bytes read before first viewport.
+- [ ] Finish lazy newline index integration for VLF.
+  - [x] Scan line starts by page, not whole file.
+  - [x] Cache scanned chunks with bounded memory.
+  - [x] Run viewport-first indexing with cancellation support.
+  - [ ] Run background indexing task from real VLF open path.
+  - [x] Report approximate total line count until scan completes.
+  - [ ] Keep line numbers stable as index expands.
+- [ ] Finish line addressing for partial indexes.
+  - [x] Add explicit partial-data status instead of pretending full buffer exists.
+  - [x] Avoid `TextStore` APIs that require `Vec<String>` or whole-buffer materialization.
+  - [ ] Allow viewport-first line lookup before full newline index exists.
+  - [ ] Add approximate goto-line behavior while indexing remains incomplete.
+- [ ] Keep `ee-tui` rendering sparse in VLF mode.
+  - [ ] Remove full-buffer `Vec<String>` clone path for VLF buffers.
+  - [ ] Avoid placeholder strings for all lines.
+  - [ ] Render only loaded viewport lines plus small overscan.
+  - [ ] Show loading/status rows for missing chunks without blocking UI.
+- [ ] Add backend protocol for VLF viewport requests.
+  - [ ] Request text by viewport/page range instead of whole-buffer invalidation.
+  - [ ] Return chunk text, byte ranges, line ranges, and partial-index metadata.
+  - [ ] Add cancellation token or generation id to drop stale viewport responses.
+  - [ ] Preserve normal-buffer protocol behavior for small files.
+- [ ] Bound file analysis on open.
+  - [ ] Limit whitespace detection to sampled bytes near file start.
+  - [ ] Limit line-ending detection to bounded samples plus background verification.
+  - [ ] Convert indentation detection to sampled or incremental probes.
+  - [ ] Never scan a full 10 GB file during open for formatting detection.
+- [ ] Gate syntax and semantic features in VLF.
+  - [ ] Disable tree-sitter for VLF until visible-range parsing exists.
+  - [ ] Disable syntect fallback for VLF unless bounded to visible range.
+  - [ ] Disable semantic text objects when they require full parse.
+  - [ ] Add visible-range parsing design before re-enabling syntax.
+- [ ] Gate source-control features in VLF.
+  - [ ] Disable automatic git hunk diff for VLF.
+  - [ ] Disable blame and source-control signs unless command is explicitly range-bounded.
+  - [ ] Ensure VLF open cannot trigger global diff scans.
+  - [ ] Show disabled reason in command/status UI.
+- [ ] Add VLF search strategy.
+  - [ ] Stream search over pages with cancellation.
+  - [ ] Search with seam overlap/slop so matches across chunk boundaries are not missed.
+  - [ ] Report progress by bytes scanned and matched ranges.
+  - [ ] Bound stored matches and page-local highlights.
+  - [ ] Prioritize viewport-local highlights before full-file search completes.
+  - [ ] Add search cancellation test for large fixture.
+- [ ] Design VLF editing path after read-only milestone.
+  - [ ] Graduate existing overlay model from read-only to append/current-window edits, then arbitrary sparse edits.
+  - [ ] Track encoded byte-length deltas per dirty window before save.
+  - [ ] Keep base file windowed; never convert whole file into rope.
+  - [ ] Define undo limits and memory cap behavior for overlay edits.
+  - [ ] Require explicit save-as/rewrite semantics for large rewritten files.
+- [ ] Rework VLF save path.
+  - [ ] Start with temp-file streaming rewrite for editable VLF; no in-place mutation in first editable milestone.
+  - [ ] Stream copy base file with edit overlay application.
+  - [ ] Add same-size in-place overwrite only as later optimization after crash-consistency tests pass.
+  - [ ] Add byte-length-changing tail-shift optimization only after temp-copy fallback is proven.
+  - [ ] Use fsync/rename durability policy compatible with existing save behavior.
+  - [ ] Report progress and support cancellation before commit point.
+  - [ ] Document cancellation behavior after commit point.
+- [ ] Add VLF regression and budget tests.
+  - [ ] Opening 10 GB sparse fixture keeps RSS under configured cap.
+  - [ ] First viewport renders without full scan.
+  - [ ] Frontend never triggers full-buffer clone, diff, syntax, or line-cache expansion in VLF.
+  - [ ] Disabled feature commands return clear VLF-specific status.
+- [ ] Add VLF performance benchmarks.
+  - [ ] Benchmark 100 MB, 1 GB, and 10 GB fixtures.
+  - [ ] Measure open-to-first-render latency.
+  - [ ] Measure page-down latency with cold and warm page cache.
+  - [ ] Measure approximate goto-line behavior before and after index completion.
+  - [ ] Measure streaming search throughput and cancellation latency.
+- [ ] Document VLF mode.
+  - [ ] Add `README.md` section for VLF thresholds, limits, and disabled features.
+  - [ ] Add command/status message examples.
+  - [ ] Document read-only milestone and future edit/save plan.
+  - [ ] Document memory budget expectations and benchmark fixture sizes.
 
 ### Optional Future Boundary Work
 

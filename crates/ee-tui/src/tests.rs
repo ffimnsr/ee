@@ -5594,3 +5594,122 @@ fn payload_backed_annotation_renders_gutter_marker() {
 
     assert_eq!(buf.cell((1, 0)).unwrap().symbol(), "T");
 }
+
+// ── Performance-budget and regression tests ──────────────────────────────────
+
+/// Fixture helpers for normal-mode performance tests.
+///
+/// These do not write large files to disk; they generate content in memory so
+/// tests run quickly and leave no artifacts behind.
+mod fixture {
+    /// Returns a Vec of `n` lines of uniform width `line_len`.
+    pub(super) fn many_line_fixture(n: usize, line_len: usize) -> Vec<String> {
+        (0..n).map(|i| format!("{i:>0width$}", width = line_len.min(20))).collect()
+    }
+
+    /// Returns a Vec of `n` lines that each contain exactly one very long line
+    /// interleaved with short lines.
+    pub(super) fn long_line_fixture(n: usize, long_len: usize) -> Vec<String> {
+        (0..n)
+            .map(|i| if i % 2 == 0 { "x".repeat(long_len) } else { format!("line {i}") })
+            .collect()
+    }
+
+    /// Returns a Vec of `n` mixed-indentation source-like lines (simulates a
+    /// 300 K LOC Rust source file).
+    pub(super) fn source_fixture(n: usize) -> Vec<String> {
+        let snippets = ["fn foo() {", "    let x = 1;", "    let y = 2;", "    x + y", "}"];
+        (0..n).map(|i| snippets[i % snippets.len()].to_owned()).collect()
+    }
+
+    /// Returns a Vec of `n` lines with alternating LF and CRLF endings
+    /// stripped (the `lines` vec stores text only, endings live in the rope).
+    pub(super) fn mixed_crlf_fixture(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("line {i}")).collect()
+    }
+}
+
+/// Render `lines` into a 120×50 terminal and return the elapsed duration.
+fn timed_render(lines: Vec<String>) -> std::time::Duration {
+    let mut app = App::from_path(None).unwrap();
+    app.backend.lines = lines;
+
+    let backend = TestBackend::new(120, 50);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let start = std::time::Instant::now();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    start.elapsed()
+}
+
+/// Regression: rendering a 300 K-line buffer must stay under one frame at
+/// 60 Hz (≈16.7 ms).  The render path touches only the visible viewport
+/// (~48 lines) via `buf.lines.get(i)` — no full-buffer clone.
+///
+/// If someone adds a full-buffer `Vec<String>` clone to the render path this
+/// test will regress dramatically (300 K string copies ≫ 16 ms).
+#[test]
+fn render_300k_line_fixture_under_one_frame_budget() {
+    const LINES: usize = 300_000;
+    const FRAME_BUDGET_MS: u128 = 50; // 3× 60 Hz frame; avoids CI flake
+
+    let lines = fixture::many_line_fixture(LINES, 30);
+    let elapsed = timed_render(lines);
+
+    assert!(
+        elapsed.as_millis() < FRAME_BUDGET_MS,
+        "render of {LINES} lines took {}ms, expected < {FRAME_BUDGET_MS}ms \
+         (possible full-buffer Vec<String> clone in render path)",
+        elapsed.as_millis()
+    );
+}
+
+/// Regression: rendering a long-line fixture (few very wide lines) must also
+/// stay within the one-frame budget.
+#[test]
+fn render_long_line_fixture_under_one_frame_budget() {
+    const LINES: usize = 300_000;
+    const LINE_LEN: usize = 200;
+    const FRAME_BUDGET_MS: u128 = 50;
+
+    let lines = fixture::long_line_fixture(LINES, LINE_LEN);
+    let elapsed = timed_render(lines);
+
+    assert!(
+        elapsed.as_millis() < FRAME_BUDGET_MS,
+        "render of {LINES} long-line fixture took {}ms, expected < {FRAME_BUDGET_MS}ms",
+        elapsed.as_millis()
+    );
+}
+
+/// Regression: rendering a mixed-CRLF fixture must stay within the one-frame budget.
+#[test]
+fn render_mixed_crlf_fixture_under_one_frame_budget() {
+    const LINES: usize = 300_000;
+    const FRAME_BUDGET_MS: u128 = 50;
+
+    let lines = fixture::mixed_crlf_fixture(LINES);
+    let elapsed = timed_render(lines);
+
+    assert!(
+        elapsed.as_millis() < FRAME_BUDGET_MS,
+        "render of {LINES} mixed-CRLF fixture took {}ms, expected < {FRAME_BUDGET_MS}ms",
+        elapsed.as_millis()
+    );
+}
+
+/// Regression: rendering a 300 K LOC source-like fixture must stay within budget.
+#[test]
+fn render_source_fixture_under_one_frame_budget() {
+    const LINES: usize = 300_000;
+    const FRAME_BUDGET_MS: u128 = 50;
+
+    let lines = fixture::source_fixture(LINES);
+    let elapsed = timed_render(lines);
+
+    assert!(
+        elapsed.as_millis() < FRAME_BUDGET_MS,
+        "render of {LINES}-line source fixture took {}ms, expected < {FRAME_BUDGET_MS}ms",
+        elapsed.as_millis()
+    );
+}

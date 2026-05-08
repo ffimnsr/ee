@@ -51,6 +51,7 @@ pub mod line_offset;
 pub mod linewrap;
 pub mod movement;
 pub mod object;
+pub mod open_policy;
 pub mod plugins;
 #[cfg(test)]
 pub mod recorder;
@@ -58,9 +59,11 @@ pub mod selection;
 pub mod styles;
 pub mod syntax;
 pub mod tabs;
+pub mod text_store;
 pub mod tracing_support;
 pub mod tree_sitter_support;
 pub mod view;
+pub mod vlf;
 #[cfg(feature = "notify")]
 pub mod watcher;
 pub mod whitespace;

@@ -109,7 +109,24 @@ impl Editor {
     }
 
     pub(crate) fn get_buffer(&self) -> &Rope {
+        // TODO(vlf): remaining direct `Rope` reads through `get_buffer` are tracked here.
+        // Once `RopeTextStore` tests pass, migrate read-only call sites to
+        // `text_store_snapshot()` and enable `VlfStore` without breaking changes.
         &self.text
+    }
+
+    /// Return a `RopeTextStore` snapshot of the current buffer.
+    ///
+    /// Use this for read-only and query operations (viewport line reads, search
+    /// chunk iteration, status reporting) instead of reaching into `self.text`
+    /// directly. Edit mutations continue to use `self.text` via the existing
+    /// `Editor`/`Rope` path.
+    #[expect(dead_code, reason = "will be used when VlfStore is wired into the open path")]
+    pub(crate) fn text_store_snapshot(&self) -> crate::text_store::rope_store::RopeTextStore {
+        crate::text_store::rope_store::RopeTextStore::new(
+            self.text.clone(),
+            self.engine.get_head_rev_id().token(),
+        )
     }
 
     pub(crate) fn get_layers_mut(&mut self) -> &mut Layers {

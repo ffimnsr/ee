@@ -28,14 +28,34 @@ pub enum Indentation {
 #[derive(Debug)]
 pub struct MixedIndentError;
 
+/// Maximum number of lines sampled by [`Indentation::parse_bounded`].
+/// Scanning beyond this count adds no statistical benefit for indentation
+/// detection and blocks the first render for large files.
+const MAX_INDENT_PROBE_LINES: usize = 1_000;
+
 impl Indentation {
     /// Parses a rope for indentation settings.
+    ///
+    /// Internally delegates to [`parse_bounded`] with [`MAX_INDENT_PROBE_LINES`].
+    /// Use [`parse_bounded`] directly when a custom cap is required.
+    ///
+    /// [`parse_bounded`]: Indentation::parse_bounded
     pub fn parse(rope: &Rope) -> Result<Option<Self>, MixedIndentError> {
-        let lines = rope.lines_raw(..);
+        Self::parse_bounded(rope, MAX_INDENT_PROBE_LINES)
+    }
+
+    /// Like [`parse`] but stops after `max_lines` lines.
+    ///
+    /// Limits the scan so that large files (≥ 20 MB / 300 K LOC) do not stall
+    /// the open path.  A sample of the first `max_lines` lines is statistically
+    /// sufficient for indentation detection.
+    ///
+    /// [`parse`]: Indentation::parse
+    pub fn parse_bounded(rope: &Rope, max_lines: usize) -> Result<Option<Self>, MixedIndentError> {
         let mut tabs = false;
         let mut spaces: BTreeMap<usize, usize> = BTreeMap::new();
 
-        for line in lines {
+        for line in rope.lines_raw(..).take(max_lines) {
             match Indentation::parse_line(&line) {
                 Ok(Some(Indentation::Spaces(size))) => {
                     let counter = spaces.entry(size).or_insert(0);
@@ -189,5 +209,50 @@ But the majority is still 0.
         ));
 
         assert_eq!(result.unwrap(), None);
+    }
+    #[test]
+    fn parse_bounded_caps_at_max_lines() {
+        // Build a rope with mixed indentation: first 10 lines use 2-space indent,
+        // remaining 10 use tab indent.  Bounded at 10 lines should see only spaces.
+        let head: String = (0..10).map(|_| "  item\n").collect();
+        let tail: String = (0..10).map(|_| "\titem\n").collect();
+        let rope = Rope::from(format!("{head}{tail}"));
+
+        let bounded = Indentation::parse_bounded(&rope, 10).unwrap();
+        assert_eq!(bounded, Some(Indentation::Spaces(2)));
+
+        // Full parse sees mixed and errors.
+        assert!(Indentation::parse_bounded(&rope, usize::MAX).is_err());
+    }
+
+    #[test]
+    fn parse_bounded_with_zero_max_lines_returns_none() {
+        let rope = Rope::from("  two space\n");
+        let result = Indentation::parse_bounded(&rope, 0).unwrap();
+        assert_eq!(result, None);
+    }
+
+    /// Performance budget: `Indentation::parse` on a 300 K-line rope must
+    /// complete within 100 ms because it is capped at `MAX_INDENT_PROBE_LINES`
+    /// (1 000 lines) regardless of file size.
+    #[test]
+    fn parse_bounded_large_rope_stays_within_budget() {
+        use std::time::Instant;
+        const LINES: usize = 300_000;
+        const BUDGET_MS: u128 = 100;
+
+        let content: String = (0..LINES).map(|_| "  item\n").collect();
+        let rope = Rope::from(content);
+
+        let start = Instant::now();
+        let _ = Indentation::parse(&rope);
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed.as_millis() < BUDGET_MS,
+            "Indentation::parse on {LINES}-line rope took {}ms, expected < {BUDGET_MS}ms \
+             (MAX_INDENT_PROBE_LINES cap may be missing)",
+            elapsed.as_millis()
+        );
     }
 }

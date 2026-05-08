@@ -28,6 +28,7 @@ mod keymap;
 mod picker;
 mod quickfix;
 mod registers;
+mod render_metrics;
 mod session;
 mod terminal;
 mod text;
@@ -317,6 +318,7 @@ fn run_app(
         app.backend.notify_scroll(app.viewport.top_line, app.viewport.top_line + editor_height)?;
 
         terminal.draw(|frame| ui(frame, app))?;
+        app.render_metrics.record_render();
 
         if event::poll(Duration::from_millis(16))? {
             match event::read()? {
