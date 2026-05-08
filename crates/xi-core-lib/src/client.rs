@@ -28,6 +28,7 @@ use crate::plugins::rpc::{
 };
 use crate::syntax::LanguageId;
 use crate::tabs::ViewId;
+use crate::vlf::search::VlfMatchRange;
 use crate::width_cache::{WidthReq, WidthResponse};
 
 /// An interface to the frontend.
@@ -312,6 +313,30 @@ impl Client {
                 "approximate_line_count": approximate_line_count,
                 "line_count_exact": line_count_exact,
                 "index_progress": index_progress,
+            }),
+        );
+    }
+
+    pub(crate) fn vlf_search_status(
+        &self,
+        view_id: ViewId,
+        query: &str,
+        scanned_bytes: u64,
+        total_bytes: u64,
+        complete: bool,
+        stored_match_count: usize,
+        ranges: &[VlfMatchRange],
+    ) {
+        self.0.send_rpc_notification(
+            "vlf_search_status",
+            &json!({
+                "view_id": view_id,
+                "query": query,
+                "scanned_bytes": scanned_bytes,
+                "total_bytes": total_bytes,
+                "complete": complete,
+                "stored_match_count": stored_match_count,
+                "ranges": ranges,
             }),
         );
     }

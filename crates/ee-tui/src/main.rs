@@ -287,7 +287,7 @@ fn run_app(
         app.handle_pending_locations();
         // Dispatch pending symbol results (document/workspace symbols) to picker.
         app.handle_pending_symbols();
-        if !app.startup_deferred_work_pending {
+        if !app.startup_deferred_work_pending && app.input_idle_for(Duration::from_millis(250)) {
             app.refresh_source_control();
         }
         // Periodically check for external file changes.

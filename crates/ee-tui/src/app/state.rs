@@ -154,6 +154,8 @@ pub(crate) struct App {
     pub(crate) input_state: InputState,
     /// Anchor position (line, col) when a visual mode was entered.
     pub(crate) visual_anchor: Option<(usize, usize)>,
+    /// Cursor restored when a VLF visual-line selection is cancelled.
+    pub(crate) visual_restore_cursor: Option<(usize, usize)>,
     /// Last visual selection for `gv` restore (mode, anchor_line, anchor_col).
     pub(crate) last_visual: Option<(Mode, usize, usize)>,
     /// Frontend register store.
@@ -243,6 +245,8 @@ pub(crate) struct App {
     pub(crate) source_control: HashMap<crate::buffer::BufferId, crate::git::GitBufferCache>,
     /// Noncritical startup work that should run only after first frame lands.
     pub(crate) startup_deferred_work_pending: bool,
+    /// Last time a user input event reached the app loop.
+    pub(crate) last_input_at: Instant,
     // ── Substitute confirm state ──────────────────────────────────────────────────
     /// Pending substitutions awaiting `y`/`n`/`a`/`q` confirmation.
     pub(crate) substitute_pending: Option<SubstitutePending>,
@@ -285,6 +289,7 @@ impl App {
             last_editor_height: 0,
             input_state: InputState::default(),
             visual_anchor: None,
+            visual_restore_cursor: None,
             last_visual: None,
             registers: RegisterStore::new(),
             last_change: None,
@@ -323,6 +328,7 @@ impl App {
             hover_popup: None,
             source_control: HashMap::new(),
             startup_deferred_work_pending: true,
+            last_input_at: Instant::now(),
             substitute_pending: None,
             redraw_requested: false,
             render_metrics: crate::render_metrics::RenderMetrics::new(),

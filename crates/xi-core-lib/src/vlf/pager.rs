@@ -259,6 +259,11 @@ impl FilePager {
         self.file_size
     }
 
+    /// Hard upper bound for a single positioned read.
+    pub fn max_read_size(&self) -> u64 {
+        self.max_read_size
+    }
+
     /// Modification time as recorded on open.
     pub fn modified(&self) -> Option<SystemTime> {
         self.modified

@@ -35,6 +35,7 @@ use crate::plugins::PluginId;
 use crate::rpc::{FindQuery, GestureType, MouseAction, SelectionGranularity, SelectionModifier};
 use crate::selection::{Affinity, InsertDrift, SelRegion, Selection};
 use crate::tabs::{BufferId, Counter, ViewId};
+use crate::vlf::search::{VlfMatchRange, VlfSearchState, VlfSearchStatus};
 use crate::width_cache::WidthCache;
 use crate::word_boundaries::WordCursor;
 use xi_rope::{Cursor, Interval, LinesMetric, Rope, RopeDelta};
@@ -97,6 +98,9 @@ pub struct View {
     /// Tracks whether find highlights should be rendered.
     /// Highlights are only rendered when search dialog is open.
     highlight_find: bool,
+
+    /// Streaming search state for Very Large File mode.
+    vlf_find: Option<VlfSearchState>,
 
     /// The state for replacing matches for this view.
     replace: Option<Replace>,
@@ -189,6 +193,7 @@ impl View {
             find_changed: FindStatusChange::None,
             find_progress: FindProgress::Ready,
             highlight_find: false,
+            vlf_find: None,
             replace: None,
             replace_changed: false,
             annotations: AnnotationStore::new(),
@@ -244,6 +249,41 @@ impl View {
 
     pub(crate) fn needs_more_wrap(&self) -> bool {
         !self.lines.is_converged()
+    }
+
+    pub(crate) fn start_vlf_find(
+        &mut self,
+        store: &crate::vlf::store::VlfStore,
+        chars: String,
+        case_sensitive: bool,
+        regex: bool,
+        whole_words: bool,
+    ) {
+        self.vlf_find = VlfSearchState::new(store, chars, case_sensitive, regex, whole_words);
+    }
+
+    pub(crate) fn clear_vlf_find(&mut self) {
+        self.vlf_find = None;
+    }
+
+    pub(crate) fn vlf_find_in_progress(&self) -> bool {
+        self.vlf_find.as_ref().is_some_and(|search| !search.is_complete())
+    }
+
+    pub(crate) fn scan_vlf_find(
+        &mut self,
+        store: &crate::vlf::store::VlfStore,
+    ) -> std::io::Result<Option<VlfSearchStatus>> {
+        let Some(search) = self.vlf_find.as_mut() else {
+            return Ok(None);
+        };
+
+        search.scan_batch(store)?;
+        Ok(Some(search.status()))
+    }
+
+    pub(crate) fn advance_vlf_match(&mut self, reverse: bool, wrap: bool) -> Option<VlfMatchRange> {
+        self.vlf_find.as_mut()?.next_match(reverse, wrap)
     }
 
     pub(crate) fn needs_wrap_in_visible_region(&self, text: &Rope) -> bool {
@@ -1901,6 +1941,27 @@ mod tests {
         assert_eq!(syntax[1]["start_byte"], 8);
         assert_eq!(syntax[1]["end_byte"], 9);
         assert_eq!(syntax[1]["scope"], "constant.numeric.decimal.rust");
+    }
+
+    #[test]
+    fn encode_line_keeps_line_relative_syntax_spans() {
+        let view = View::new(1.into(), BufferId::new(2));
+        let text = Rope::from("first\nsecond();\n");
+        let mut layers = Layers::default();
+        layers.add_scopes(PluginPid(1), vec![vec!["entity.name.function.c".into()]]);
+
+        let mut builder = SpansBuilder::new(text.len());
+        builder.add_span(Interval::new(6, 12), 0);
+        layers.update_layer(PluginPid(1), Interval::new(0, text.len()), builder.build());
+
+        let line = VisualLine { interval: Interval::new(6, 16), line_num: Some(2) };
+        let encoded = view.encode_line(line, Some(&text), &layers, text.len());
+        let syntax = encoded["syntax_spans"].as_array().expect("missing syntax spans");
+
+        assert_eq!(syntax.len(), 1);
+        assert_eq!(syntax[0]["start_byte"], 0);
+        assert_eq!(syntax[0]["end_byte"], 6);
+        assert_eq!(syntax[0]["scope"], "entity.name.function.c");
     }
 
     #[test]

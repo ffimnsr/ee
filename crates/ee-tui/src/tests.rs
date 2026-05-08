@@ -211,13 +211,14 @@ fn ui_render_shows_scrolled_gutter_after_many_enters() {
     let buffer = terminal.backend().buffer();
     let top_gutter = (0..6).map(|x| buffer.cell((x, 0)).unwrap().symbol()).collect::<String>();
     let status =
-        (0..40).map(|x| buffer.cell((x, height - 2)).unwrap().symbol()).collect::<String>();
+        (0..width).map(|x| buffer.cell((x, height - 2)).unwrap().symbol()).collect::<String>();
 
     // With the gap-fix, top_line is clamped so the last line fills the screen:
     // total_lines(51) - editor_height(47) = 4.
     assert_eq!(app.viewport.top_line, 4);
     assert!(top_gutter.contains("5"), "top gutter row was {top_gutter:?}");
     assert!(status.contains("Ln 51, Col 1"), "status row was {status:?}");
+    assert!(status.ends_with("  Ln 51, Col 1 "), "status row was {status:?}");
 }
 
 #[test]
@@ -436,6 +437,17 @@ fn source_control_skips_vlf_buffers_and_clears_stale_cache() {
     app.refresh_source_control();
 
     assert!(app.source_control.is_empty());
+}
+
+#[test]
+fn input_idle_gate_blocks_auto_source_control_during_key_bursts() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+    assert!(!app.input_idle_for(Duration::from_millis(250)));
+
+    app.last_input_at = Instant::now() - Duration::from_millis(300);
+    assert!(app.input_idle_for(Duration::from_millis(250)));
 }
 
 #[test]
@@ -2343,6 +2355,19 @@ fn byte_col_to_display_col_ascii() {
 }
 
 #[test]
+fn byte_col_to_display_col_expands_tabs() {
+    assert_eq!(byte_col_to_display_col("\tabc", 4), 7);
+    assert_eq!(byte_col_to_display_col("ab\tcd", 5), 6);
+}
+
+#[test]
+fn display_col_to_byte_respects_tab_stops() {
+    assert_eq!(display_col_to_byte("\tabc", 4), 1);
+    assert_eq!(display_col_to_byte("ab\tcd", 4), 3);
+    assert_eq!(display_col_to_byte("ab\tcd", 6), 5);
+}
+
+#[test]
 fn byte_col_to_display_col_wide_char() {
     let s = "日本";
     assert_eq!(byte_col_to_display_col(s, 3), 2);
@@ -3757,6 +3782,7 @@ fn ui_render_hides_git_signs_and_shows_vlf_disabled_marker() {
     let status = (0..40).map(|x| buffer.cell((x, 4)).unwrap().symbol()).collect::<String>();
 
     assert!(!gutter.contains("~"), "gutter row was {gutter:?}");
+    assert!(status.contains("VLF"), "status row was {status:?}");
     assert!(status.contains("git:off(vlf)"), "status row was {status:?}");
     assert!(!status.contains("main"), "status row was {status:?}");
 }
@@ -4315,6 +4341,9 @@ fn test_buf_state() -> BufState {
         is_vlf: false,
         vlf_generation: 0,
         vlf_approx_line_count: 0,
+        vlf_line_count_exact: false,
+        pending_vlf_tail_jump: false,
+        vlf_search_ranges: Vec::new(),
     }
 }
 
@@ -6167,6 +6196,361 @@ fn apply_vlf_chunks_grows_cache_to_approximate_count() {
 }
 
 #[test]
+fn apply_vlf_chunks_exact_count_truncates_stale_approximation() {
+    let mut buf = test_buf_state();
+    buf.is_vlf = true;
+    buf.vlf_generation = 1;
+    buf.line_cache = vec![LineSlot::Invalid; 1000];
+
+    buf.apply_vlf_chunks(1, 10, &[String::from("tail")], 25, true, 1.0);
+
+    assert_eq!(buf.line_count(), 25);
+    assert_eq!(buf.line_cache.len(), 25);
+    assert!(buf.vlf_line_count_exact);
+}
+
+#[test]
+fn apply_vlf_chunks_tail_jump_moves_cursor_to_returned_last_line() {
+    let mut buf = test_buf_state();
+    buf.is_vlf = true;
+    buf.vlf_generation = 1;
+    buf.pending_vlf_tail_jump = true;
+
+    buf.apply_vlf_chunks(
+        1,
+        995,
+        &[String::from("line 998"), String::from("line 999")],
+        1000,
+        false,
+        0.2,
+    );
+
+    assert_eq!((buf.cursor_line, buf.cursor_col), (996, 0));
+    assert!(!buf.pending_vlf_tail_jump);
+}
+
+#[test]
+fn vlf_document_mode_clears_stale_normal_cache_and_retries_viewport() {
+    let (tx, rx) = mpsc::channel();
+    let (backend_tx, backend_rx) = mpsc::channel();
+    let mut mgr = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    backend_tx
+        .send(BackendEvent::DocumentMode { view_id: String::from("view-id-1"), is_vlf: true })
+        .unwrap();
+    mgr.drain_events().unwrap();
+    assert!(mgr.active().is_vlf);
+    assert_eq!(mgr.active().line_cache.len(), 0);
+
+    mgr.notify_scroll(0, 4).unwrap();
+    let first: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
+        .expect("vlf viewport notification should be json");
+    assert_eq!(first["params"]["method"], "vlf_viewport");
+    assert_eq!(first["params"]["params"]["generation"], 1);
+
+    mgr.notify_scroll(0, 4).unwrap();
+    assert!(matches!(
+        rx.recv_timeout(Duration::from_millis(50)),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ));
+
+    backend_tx
+        .send(BackendEvent::VlfChunks {
+            view_id: String::from("view-id-1"),
+            generation: 1,
+            line_start: 0,
+            lines: Vec::new(),
+            approximate_line_count: 1000,
+            line_count_exact: false,
+            index_progress: 0.1,
+        })
+        .unwrap();
+    mgr.drain_events().unwrap();
+
+    mgr.notify_scroll(0, 4).unwrap();
+    let retry: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
+        .expect("vlf viewport retry after empty response should be json");
+    assert_eq!(retry["params"]["method"], "vlf_viewport");
+    assert_eq!(retry["params"]["params"]["generation"], 2);
+}
+
+#[test]
+fn vlf_invalid_cache_does_not_request_normal_lines() {
+    let (tx, rx) = mpsc::channel();
+    let (backend_tx, backend_rx) = mpsc::channel();
+    let mut mgr = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    backend_tx
+        .send(BackendEvent::DocumentMode { view_id: String::from("view-id-1"), is_vlf: true })
+        .unwrap();
+    backend_tx
+        .send(BackendEvent::VlfChunks {
+            view_id: String::from("view-id-1"),
+            generation: 0,
+            line_start: 0,
+            lines: Vec::new(),
+            approximate_line_count: 1000,
+            line_count_exact: false,
+            index_progress: 0.1,
+        })
+        .unwrap();
+    mgr.drain_events().unwrap();
+
+    mgr.pump().unwrap();
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
+fn vlf_ignores_normal_update_after_document_mode() {
+    let (tx, _rx) = mpsc::channel();
+    let (backend_tx, backend_rx) = mpsc::channel();
+    let mut mgr = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    backend_tx
+        .send(BackendEvent::DocumentMode { view_id: String::from("view-id-1"), is_vlf: true })
+        .unwrap();
+    backend_tx
+        .send(BackendEvent::Update {
+            view_id: String::from("view-id-1"),
+            update: CoreUpdate {
+                ops: vec![CoreUpdateOp {
+                    op: CoreUpdateKind::Insert,
+                    n: 1,
+                    lines: vec![CoreLine {
+                        text: Some(String::from("stale normal line")),
+                        cursor: Vec::new(),
+                        syntax_spans: Some(Vec::new()),
+                    }],
+                }],
+                pristine: true,
+                annotations: Vec::new(),
+            },
+        })
+        .unwrap();
+
+    mgr.drain_events().unwrap();
+    assert!(mgr.active().is_vlf);
+    assert!(mgr.active().line_cache.is_empty(), "VLF must ignore normal update payloads");
+}
+
+#[test]
+fn vlf_local_navigation_moves_cursor_without_core_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.is_vlf = true;
+    app.backend.line_cache = vec![
+        LineSlot::Known(CachedLine {
+            text: String::from("alpha"),
+            cursors: Vec::new(),
+            syntax_spans: Vec::new(),
+        }),
+        LineSlot::Known(CachedLine {
+            text: String::from("beta"),
+            cursors: Vec::new(),
+            syntax_spans: Vec::new(),
+        }),
+    ];
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+
+    assert_eq!(app.backend.cursor_line, 1);
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
+fn vlf_zero_moves_to_line_start_without_core_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.is_vlf = true;
+    app.backend.cursor_line = 9;
+    app.backend.cursor_col = 4;
+    app.backend.line_cache = vec![LineSlot::Invalid; 20];
+    app.backend.line_cache[9] = LineSlot::Known(CachedLine {
+        text: String::from("alpha"),
+        cursors: Vec::new(),
+        syntax_spans: Vec::new(),
+    });
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE)));
+
+    assert_eq!((app.backend.cursor_line, app.backend.cursor_col), (9, 0));
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
+fn vlf_goto_last_line_uses_sparse_line_count_without_core_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.is_vlf = true;
+    app.backend.line_cache = vec![LineSlot::Invalid; 500];
+    app.backend.vlf_line_count_exact = true;
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)));
+
+    assert_eq!((app.backend.cursor_line, app.backend.cursor_col), (499, 0));
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
+fn vlf_goto_last_line_uses_reported_line_count_without_core_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.is_vlf = true;
+    app.backend.line_cache = vec![LineSlot::Invalid; 500];
+    app.backend.vlf_approx_line_count = 10_000;
+    app.backend.vlf_line_count_exact = true;
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE)));
+
+    assert_eq!((app.backend.cursor_line, app.backend.cursor_col), (9_999, 0));
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
+fn vlf_goto_last_line_requests_tail_viewport_when_count_is_approximate() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.is_vlf = true;
+    app.backend.line_cache = vec![LineSlot::Invalid; 500];
+    app.backend.vlf_approx_line_count = 10_000;
+    app.backend.vlf_line_count_exact = false;
+    app.last_editor_height = 40;
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE)));
+
+    assert_eq!((app.backend.cursor_line, app.backend.cursor_col), (0, 0));
+    let message: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
+        .expect("tail viewport request should be json");
+    assert_eq!(message["params"]["method"], "vlf_viewport");
+    assert_eq!(message["params"]["params"]["line_start"], u64::MAX);
+    assert_eq!(message["params"]["params"]["line_end"], 39);
+    assert!(app.backend.pending_vlf_tail_jump);
+}
+
+#[test]
+fn vlf_pending_tail_jump_blocks_regular_viewport_scroll() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut mgr = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    mgr.is_vlf = true;
+    mgr.vlf_approx_line_count = 10_000;
+
+    mgr.request_vlf_tail_viewport(40).unwrap();
+    let first: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
+        .expect("tail viewport request should be json");
+    assert_eq!(first["params"]["params"]["line_start"], u64::MAX);
+
+    mgr.notify_scroll(9_950, 9_990).unwrap();
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    assert!(mgr.pending_vlf_tail_jump);
+}
+
+#[test]
+#[ignore = "manual real-fixture check; requires test_assets/vbig-100.txt"]
+fn vlf_goto_vbig_100_matches_wc_last_line() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_assets/vbig-100.txt");
+    if !path.exists() {
+        eprintln!("missing {}", path.display());
+        return;
+    }
+
+    let wc = Command::new("wc").arg("-l").arg(&path).output().expect("wc -l should run");
+    assert!(wc.status.success(), "wc -l failed: {wc:?}");
+    let stdout = String::from_utf8(wc.stdout).expect("wc output should be utf8");
+    let expected_last_line = stdout
+        .split_whitespace()
+        .next()
+        .expect("wc output should include count")
+        .parse::<usize>()
+        .expect("wc count should parse");
+    let expected_text = String::from_utf8(
+        Command::new("tail").arg("-n").arg("1").arg(&path).output().unwrap().stdout,
+    )
+    .unwrap()
+    .trim_end_matches('\n')
+    .to_owned();
+
+    let mut app = App::from_path(Some(path)).unwrap();
+    for _ in 0..20 {
+        app.backend.pump().unwrap();
+        if app.backend.is_vlf {
+            break;
+        }
+    }
+    assert!(app.backend.is_vlf, "fixture should open in VLF");
+
+    app.last_editor_height = 40;
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE)));
+
+    for _ in 0..40 {
+        app.backend.pump().unwrap();
+        if !app.backend.pending_vlf_tail_jump && app.backend.cursor_line == expected_last_line {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    assert_eq!(app.backend.cursor_line, expected_last_line);
+    assert_eq!(app.backend.get_line(app.backend.cursor_line), Some(expected_text.as_str()));
+}
+
+#[test]
+fn vlf_visual_line_escape_restores_cursor_without_core_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.is_vlf = true;
+    app.backend.cursor_line = 7;
+    app.backend.cursor_col = 3;
+    app.backend.line_cache = vec![LineSlot::Invalid; 10];
+    app.backend.line_cache[7] = LineSlot::Known(CachedLine {
+        text: String::from("abcdef"),
+        cursors: Vec::new(),
+        syntax_spans: Vec::new(),
+    });
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::NONE)));
+    assert_eq!((app.backend.cursor_line, app.backend.cursor_col), (7, 0));
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!((app.backend.cursor_line, app.backend.cursor_col), (7, 3));
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
+fn vlf_visual_line_does_not_send_core_motion() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.is_vlf = true;
+    app.backend.cursor_line = 7;
+    app.backend.cursor_col = 3;
+    app.backend.line_cache = vec![LineSlot::Invalid; 10];
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::NONE)));
+
+    assert_eq!(app.mode, Mode::VisualLine);
+    assert_eq!(app.visual_anchor, Some((7, 0)));
+    assert_eq!((app.backend.cursor_line, app.backend.cursor_col), (7, 0));
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
 fn vlf_chunks_backend_event_parsed() {
     let params = json!({
         "view_id": "view-1",
@@ -6197,5 +6581,46 @@ fn vlf_chunks_backend_event_parsed() {
             assert!((index_progress - 0.42).abs() < 1e-9);
         }
         other => panic!("expected VlfChunks, got {:?}", other),
+    }
+}
+
+#[test]
+fn vlf_search_status_backend_event_parsed() {
+    let params = json!({
+        "view_id": "view-1",
+        "query": "needle",
+        "scanned_bytes": 1024,
+        "total_bytes": 4096,
+        "complete": false,
+        "stored_match_count": 2,
+        "ranges": [
+            { "line": 3, "start_col": 2, "end_col": 8 },
+            { "line": 7, "start_col": 0, "end_col": 6 }
+        ]
+    });
+    let event =
+        parse_notification("vlf_search_status", params).expect("should parse vlf search status");
+    match event {
+        BackendEvent::VlfSearchStatus {
+            view_id,
+            query,
+            scanned_bytes,
+            total_bytes,
+            complete,
+            stored_match_count,
+            ranges,
+        } => {
+            assert_eq!(view_id, "view-1");
+            assert_eq!(query, "needle");
+            assert_eq!(scanned_bytes, 1024);
+            assert_eq!(total_bytes, 4096);
+            assert!(!complete);
+            assert_eq!(stored_match_count, 2);
+            assert_eq!(ranges.len(), 2);
+            assert_eq!(ranges[0].line, 3);
+            assert_eq!(ranges[0].start_col, 2);
+            assert_eq!(ranges[0].end_col, 8);
+        }
+        other => panic!("expected VlfSearchStatus, got {:?}", other),
     }
 }

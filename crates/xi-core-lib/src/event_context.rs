@@ -171,12 +171,56 @@ impl<'a> EventContext<'a> {
         use self::EventDomain as E;
         match event {
             E::View(cmd) => {
+                if self.editor.borrow().is_vlf() {
+                    match cmd {
+                        crate::edit_types::ViewEvent::Find {
+                            chars,
+                            case_sensitive,
+                            regex,
+                            whole_words,
+                        } => {
+                            self.do_vlf_find(chars, case_sensitive, regex, whole_words);
+                            return None;
+                        }
+                        crate::edit_types::ViewEvent::FindNext { wrap_around, .. } => {
+                            self.do_vlf_find_next(false, wrap_around);
+                            return None;
+                        }
+                        crate::edit_types::ViewEvent::FindPrevious { wrap_around, .. } => {
+                            self.do_vlf_find_next(true, wrap_around);
+                            return None;
+                        }
+                        crate::edit_types::ViewEvent::MultiFind { queries } => {
+                            if let Some(query) = queries.into_iter().next() {
+                                self.do_vlf_find(
+                                    query.chars,
+                                    query.case_sensitive,
+                                    query.regex,
+                                    query.whole_words,
+                                );
+                            }
+                            return None;
+                        }
+                        crate::edit_types::ViewEvent::FindAll => {
+                            self.client.alert("find_all: unsupported in VLF");
+                            return None;
+                        }
+                        crate::edit_types::ViewEvent::SelectionForFind { .. } => {
+                            self.client.alert("selection_for_find: unsupported in VLF");
+                            return None;
+                        }
+                        _ => {}
+                    }
+                }
+
                 self.with_view(|view, text| view.do_edit(text, cmd));
                 self.editor.borrow_mut().update_edit_type();
                 if self.with_view(|v, t| v.needs_wrap_in_visible_region(t)) {
                     self.rewrap();
                 }
-                if self.with_view(|v, _| v.find_in_progress()) {
+                if self.with_view(|v, _| v.find_in_progress())
+                    || self.view.borrow().vlf_find_in_progress()
+                {
                     self.do_incremental_find();
                 }
                 None
@@ -377,11 +421,14 @@ impl<'a> EventContext<'a> {
         // Gather all data while holding the editor borrow, then drop it before
         // calling `self.client` (a different field, but closures need clean lifetimes).
         // Returns `None` when the buffer is not in VLF mode.
-        let resp: Option<(Vec<String>, u64, bool, f64)> = (|| {
+        let resp: Option<(u64, Vec<String>, u64, bool, f64)> = (|| {
             let editor = self.editor.borrow();
-            let store: &dyn TextStore = editor.vlf_store.as_ref()?.as_ref();
+            let vlf_store = editor.vlf_store.as_ref()?;
+            let store: &dyn TextStore = vlf_store.as_ref();
 
-            let (approximate_line_count, line_count_exact) = match store.known_line_count() {
+            let line_count_unknown = matches!(store.known_line_count(), KnownLineCount::Unknown);
+            let (mut approximate_line_count, mut line_count_exact) = match store.known_line_count()
+            {
                 KnownLineCount::Exact(n) => (n, true),
                 KnownLineCount::Approximate(n) => (n.max(line_end + 1), false),
                 KnownLineCount::Unknown => (line_end.saturating_add(100), false),
@@ -389,20 +436,119 @@ impl<'a> EventContext<'a> {
 
             let index_progress = editor.vlf_store.as_ref()?.index().scan_progress().fraction();
 
-            let empty = || {
-                Some((
-                    Vec::<String>::new(),
+            if line_start == u64::MAX {
+                let requested_count = (line_end.saturating_add(1)).max(1) as usize;
+                if let Ok(newline_count) = vlf_store.count_lf_streaming() {
+                    approximate_line_count = newline_count.saturating_add(1);
+                    line_count_exact = true;
+                }
+                if store.len_bytes() == 0 {
+                    return Some((0, vec![String::new()], 1, true, index_progress));
+                }
+                let tail_len = (256 * 1024).min(store.len_bytes());
+                let tail_start = ByteOffset(store.len_bytes().saturating_sub(tail_len));
+                let tail_end = ByteOffset(store.len_bytes());
+                if let TextChunkResult::Ready(chunk) =
+                    store.read_byte_range(ByteRange { start: tail_start, end: tail_end })
+                {
+                    let mut lines = chunk.text.split('\n').map(str::to_owned).collect::<Vec<_>>();
+                    if chunk.byte_range.start.0 > 0
+                        && !chunk.text.starts_with('\n')
+                        && !lines.is_empty()
+                    {
+                        lines.remove(0);
+                    }
+                    if lines.len() > requested_count {
+                        let keep_from = lines.len() - requested_count;
+                        lines.drain(0..keep_from);
+                    }
+                    let response_line_start =
+                        approximate_line_count.saturating_sub(lines.len() as u64);
+                    return Some((
+                        response_line_start,
+                        lines,
+                        approximate_line_count,
+                        line_count_exact,
+                        index_progress,
+                    ));
+                }
+                return Some((
+                    approximate_line_count.saturating_sub(1),
+                    Vec::new(),
                     approximate_line_count,
                     line_count_exact,
                     index_progress,
-                ))
-            };
+                ));
+            }
+
+            let requested_count = (line_end - line_start + 1) as usize;
+
+            if line_count_unknown && store.len_bytes() > 0 {
+                let head_end = ByteOffset((256 * 1024).min(store.len_bytes()));
+                if let TextChunkResult::Ready(chunk) =
+                    store.read_byte_range(ByteRange { start: ByteOffset(0), end: head_end })
+                {
+                    let bytes_read =
+                        chunk.byte_range.end.0.saturating_sub(chunk.byte_range.start.0);
+                    let lines_read =
+                        chunk.text.as_bytes().iter().filter(|&&b| b == b'\n').count() as u64 + 1;
+                    if bytes_read > 0 && lines_read > 0 {
+                        let estimated = store
+                            .len_bytes()
+                            .saturating_mul(lines_read)
+                            .saturating_add(bytes_read.saturating_sub(1))
+                            / bytes_read;
+                        approximate_line_count = estimated.max(line_end + 1);
+                    }
+                }
+            }
+
+            if !line_count_exact
+                && line_end.saturating_add(1) >= approximate_line_count
+                && store.len_bytes() > 0
+            {
+                let tail_len = (256 * 1024).min(store.len_bytes());
+                let tail_start = ByteOffset(store.len_bytes().saturating_sub(tail_len));
+                let tail_end = ByteOffset(store.len_bytes());
+                if let TextChunkResult::Ready(chunk) =
+                    store.read_byte_range(ByteRange { start: tail_start, end: tail_end })
+                {
+                    let mut lines = chunk.text.split('\n').map(str::to_owned).collect::<Vec<_>>();
+                    if chunk.byte_range.start.0 > 0
+                        && !chunk.text.starts_with('\n')
+                        && !lines.is_empty()
+                    {
+                        lines.remove(0);
+                    }
+                    if lines.len() > requested_count {
+                        let keep_from = lines.len() - requested_count;
+                        lines.drain(0..keep_from);
+                    }
+                    let response_line_start =
+                        approximate_line_count.saturating_sub(lines.len() as u64);
+                    return Some((
+                        response_line_start,
+                        lines,
+                        approximate_line_count,
+                        line_count_exact,
+                        index_progress,
+                    ));
+                }
+            }
 
             // Resolve line_start → byte offset.
             let byte_start = match store.line_to_byte(LogicalLine(line_start)) {
                 LineLookup::Exact(b) | LineLookup::Approximate(b) => b,
                 // Index not ready; signal TUI to retry on next repaint.
-                LineLookup::Pending | LineLookup::OutOfRange => return empty(),
+                LineLookup::Pending | LineLookup::OutOfRange => {
+                    return Some((
+                        line_start,
+                        Vec::new(),
+                        approximate_line_count,
+                        line_count_exact,
+                        index_progress,
+                    ));
+                }
             };
 
             // Resolve the first byte past the last requested line.
@@ -414,21 +560,57 @@ impl<'a> EventContext<'a> {
                     ByteOffset(byte_start.0.saturating_add(64 * 1024).min(store.len_bytes()))
                 }
             };
-
-            let range = ByteRange { start: byte_start, end: byte_end };
-            let chunk_text = match store.read_byte_range(range) {
-                TextChunkResult::Ready(c) => c.text,
-                _ => return empty(),
+            let byte_end = if byte_end.0 <= byte_start.0 {
+                ByteOffset(byte_start.0.saturating_add(64 * 1024).min(store.len_bytes()))
+            } else {
+                byte_end
             };
 
-            let requested_count = (line_end - line_start + 1) as usize;
+            let range = ByteRange { start: byte_start, end: byte_end };
+            if let Some(store) = editor.vlf_store.as_ref() {
+                store.set_viewport(byte_start, byte_end);
+            }
+            let chunk = match store.read_byte_range(range) {
+                TextChunkResult::Ready(c) => c,
+                _ => {
+                    return Some((
+                        line_start,
+                        Vec::new(),
+                        approximate_line_count,
+                        line_count_exact,
+                        index_progress,
+                    ));
+                }
+            };
+            let chunk_text = chunk.text;
+            if line_count_unknown && !chunk_text.is_empty() {
+                let bytes_read = chunk.byte_range.end.0.saturating_sub(chunk.byte_range.start.0);
+                let lines_read =
+                    chunk_text.as_bytes().iter().filter(|&&b| b == b'\n').count() as u64 + 1;
+                if bytes_read > 0 && lines_read > 0 {
+                    let estimated = store
+                        .len_bytes()
+                        .saturating_mul(lines_read)
+                        .saturating_add(bytes_read.saturating_sub(1))
+                        / bytes_read;
+                    approximate_line_count = estimated.max(line_end + 1);
+                }
+            }
+
             let lines: Vec<String> =
                 chunk_text.split('\n').take(requested_count).map(str::to_owned).collect();
 
-            Some((lines, approximate_line_count, line_count_exact, index_progress))
+            Some((line_start, lines, approximate_line_count, line_count_exact, index_progress))
         })();
 
-        let Some((lines, approximate_line_count, line_count_exact, index_progress)) = resp else {
+        let Some((
+            response_line_start,
+            lines,
+            approximate_line_count,
+            line_count_exact,
+            index_progress,
+        )) = resp
+        else {
             // Non-VLF buffer; normal scroll/update protocol handles this view.
             return;
         };
@@ -436,7 +618,7 @@ impl<'a> EventContext<'a> {
         self.client.vlf_chunks(
             self.view_id,
             generation,
-            line_start,
+            response_line_start,
             &lines,
             approximate_line_count,
             line_count_exact,
@@ -971,6 +1153,12 @@ impl<'a> EventContext<'a> {
         let _t = tracing::trace_span!("EventContext::do_incremental_find", categories = "find")
             .entered();
 
+        if self.editor.borrow().is_vlf() {
+            self.do_incremental_vlf_find();
+            self.render_if_needed();
+            return;
+        }
+
         self.find();
         if self.view.borrow().find_in_progress() {
             let ed = self.editor.borrow();
@@ -981,6 +1169,86 @@ impl<'a> EventContext<'a> {
             self.schedule_find();
         }
         self.render_if_needed();
+    }
+
+    fn do_incremental_vlf_find(&mut self) {
+        let status = {
+            let editor = self.editor.borrow();
+            let Some(store) = editor.vlf_store.as_ref() else {
+                return;
+            };
+            let mut view = self.view.borrow_mut();
+            match view.scan_vlf_find(store) {
+                Ok(status) => status,
+                Err(err) => {
+                    self.client.alert(format!("vlf search failed: {err}"));
+                    None
+                }
+            }
+        };
+
+        if let Some(status) = status {
+            self.client.vlf_search_status(
+                self.view_id,
+                &status.query,
+                status.scanned_bytes,
+                status.total_bytes,
+                status.complete,
+                status.stored_match_count,
+                &status.ranges,
+            );
+        }
+
+        if self.view.borrow().vlf_find_in_progress() {
+            self.schedule_find();
+        }
+    }
+
+    fn do_vlf_find(&mut self, chars: String, case_sensitive: bool, regex: bool, whole_words: bool) {
+        let status = {
+            let editor = self.editor.borrow();
+            let Some(store) = editor.vlf_store.as_ref() else {
+                return;
+            };
+            let mut view = self.view.borrow_mut();
+            if chars.is_empty() {
+                view.clear_vlf_find();
+                return;
+            }
+            view.start_vlf_find(store, chars, case_sensitive, regex, whole_words);
+            match view.scan_vlf_find(store) {
+                Ok(status) => status,
+                Err(err) => {
+                    self.client.alert(format!("vlf search failed: {err}"));
+                    None
+                }
+            }
+        };
+
+        if let Some(status) = status {
+            self.client.vlf_search_status(
+                self.view_id,
+                &status.query,
+                status.scanned_bytes,
+                status.total_bytes,
+                status.complete,
+                status.stored_match_count,
+                &status.ranges,
+            );
+        }
+
+        if self.view.borrow().vlf_find_in_progress() {
+            self.schedule_find();
+        }
+    }
+
+    fn do_vlf_find_next(&mut self, reverse: bool, wrap: bool) {
+        let matched = self.view.borrow_mut().advance_vlf_match(reverse, wrap);
+        if let Some(matched) = matched {
+            self.client.scroll_to(self.view_id, matched.line as usize, matched.start_col);
+        } else if self.view.borrow().vlf_find_in_progress() {
+            self.client.alert("search still scanning VLF buffer");
+        }
     }
 
     fn schedule_find(&self) {
@@ -4114,6 +4382,7 @@ mod tests {
 
     use std::io::Write;
     use tempfile::NamedTempFile;
+    use crate::rpc::SelectionModifier;
     use crate::vlf::store::VlfStore;
 
     fn vlf_harness(content: &[u8]) -> (ContextHarness, NamedTempFile) {
@@ -4152,7 +4421,8 @@ mod tests {
     fn vlf_viewport_sends_empty_lines_for_pending_index() {
         // Build a store without scanning so line_to_byte(1) returns Pending.
         let mut f = NamedTempFile::new().unwrap();
-        f.write_all(b"alpha\nbeta\n").unwrap();
+        let content = (0..200).map(|i| format!("line {i}\n")).collect::<String>();
+        f.write_all(content.as_bytes()).unwrap();
         f.flush().unwrap();
         let store = VlfStore::open_with_config(f.path(), 64, 1024 * 1024).unwrap();
         // Deliberately skip scan_all() so the index is empty.
@@ -4174,6 +4444,95 @@ mod tests {
     }
 
     #[test]
+    fn vlf_viewport_estimates_unknown_line_count_from_decoded_chunk() {
+        let content = (0..200).map(|i| format!("line {i}\n")).collect::<String>();
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.flush().unwrap();
+        let store = VlfStore::open_with_config(f.path(), 4096, 1024 * 1024).unwrap();
+
+        let harness = ContextHarness::new("");
+        *harness.editor.borrow_mut() = Editor::with_vlf_store(store);
+        harness.take_notifications();
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::VlfViewport { line_start: 0, line_end: 2, generation: 7 });
+
+        let notifications = harness.take_notifications();
+        let (_, params) = notifications
+            .iter()
+            .find(|(m, _)| m == "vlf_chunks")
+            .expect("expected vlf_chunks notification");
+
+        let approximate = params["approximate_line_count"].as_u64().unwrap();
+        assert!(
+            approximate > 103,
+            "estimate should not crawl by line_end + 100, got {approximate}"
+        );
+        assert!(!params["line_count_exact"].as_bool().unwrap());
+    }
+
+    #[test]
+    fn vlf_viewport_near_approx_end_returns_tail_lines() {
+        let content = (0..200).map(|i| format!("line {i}\n")).collect::<String>();
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.flush().unwrap();
+        let store = VlfStore::open_with_config(f.path(), 4096, 1024 * 1024).unwrap();
+
+        let harness = ContextHarness::new("");
+        *harness.editor.borrow_mut() = Editor::with_vlf_store(store);
+        harness.take_notifications();
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::VlfViewport { line_start: 190, line_end: 210, generation: 8 });
+
+        let notifications = harness.take_notifications();
+        let (_, params) = notifications
+            .iter()
+            .find(|(m, _)| m == "vlf_chunks")
+            .expect("expected vlf_chunks notification");
+        let response_line_start = params["line_start"].as_u64().unwrap();
+        let lines = params["lines"].as_array().expect("lines must be array");
+
+        assert!(response_line_start <= 190);
+        assert!(lines.iter().any(|line| line.as_str() == Some("line 199")));
+    }
+
+    #[test]
+    fn vlf_viewport_tail_sentinel_returns_file_tail_without_index() {
+        let content = (0..200).map(|i| format!("line {i}\n")).collect::<String>();
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.flush().unwrap();
+        let store = VlfStore::open_with_config(f.path(), 4096, 1024 * 1024).unwrap();
+
+        let harness = ContextHarness::new("");
+        *harness.editor.borrow_mut() = Editor::with_vlf_store(store);
+        harness.take_notifications();
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::VlfViewport {
+            line_start: u64::MAX,
+            line_end: 4,
+            generation: 9,
+        });
+
+        let notifications = harness.take_notifications();
+        let (_, params) = notifications
+            .iter()
+            .find(|(m, _)| m == "vlf_chunks")
+            .expect("expected vlf_chunks notification");
+        let lines = params["lines"].as_array().expect("lines must be array");
+
+        assert_eq!(params["generation"], 9u64);
+        assert_eq!(params["approximate_line_count"], 201u64);
+        assert!(params["line_count_exact"].as_bool().unwrap());
+        assert_eq!(params["line_start"], 196u64);
+        assert!(lines.iter().any(|line| line.as_str() == Some("line 199")));
+    }
+
+    #[test]
     fn vlf_viewport_ignored_for_normal_buffer() {
         let harness = ContextHarness::new("hello\nworld\n");
         harness.take_notifications();
@@ -4186,6 +4545,61 @@ mod tests {
             !notifications.iter().any(|(m, _)| m == "vlf_chunks"),
             "vlf_chunks must not be sent for normal (non-VLF) buffers: {notifications:?}"
         );
+    }
+
+    #[test]
+    fn vlf_find_emits_search_status_with_ranges() {
+        let (harness, _f) = vlf_harness(b"alpha\nbeta needle\ngamma needle\n");
+        harness.take_notifications();
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::Find {
+            chars: String::from("needle"),
+            case_sensitive: true,
+            regex: false,
+            whole_words: false,
+        });
+
+        let notifications = harness.take_notifications();
+        let (_, params) = notifications.iter().find(|(method, _)| method == "vlf_search_status")
+            .expect("expected vlf_search_status notification");
+
+        assert_eq!(params["query"], "needle");
+        assert_eq!(params["stored_match_count"], 2u64);
+        assert_eq!(params["complete"], true);
+        let ranges = params["ranges"].as_array().expect("ranges array");
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0]["line"], 1u64);
+        assert_eq!(ranges[0]["start_col"], 5u64);
+        assert_eq!(ranges[0]["end_col"], 11u64);
+    }
+
+    #[test]
+    fn vlf_find_next_scrolls_to_first_known_match() {
+        let (harness, _f) = vlf_harness(b"alpha\nbeta needle\ngamma needle\n");
+        harness.take_notifications();
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::Find {
+            chars: String::from("needle"),
+            case_sensitive: true,
+            regex: false,
+            whole_words: false,
+        });
+        harness.take_notifications();
+
+        ctx.do_edit(EditNotification::FindNext {
+            wrap_around: true,
+            allow_same: false,
+            modify_selection: SelectionModifier::Set,
+        });
+
+        let notifications = harness.take_notifications();
+        let (_, params) = notifications.iter().find(|(method, _)| method == "scroll_to")
+            .expect("expected scroll_to notification");
+
+        assert_eq!(params["line"], 1u64);
+        assert_eq!(params["col"], 5u64);
     }
 
     #[test]

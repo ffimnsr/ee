@@ -54,6 +54,8 @@ impl App {
     }
 
     pub(crate) fn handle_event(&mut self, event: Event) {
+        self.last_input_at = Instant::now();
+
         match event {
             Event::Mouse(m) => {
                 self.handle_mouse_event(m);
@@ -308,12 +310,17 @@ impl App {
                     | "scroll_page_up" => self.push_jump(),
                     _ => {}
                 }
+                if self.handle_vlf_navigation(method, u64::from(count)) {
+                    return;
+                }
                 for _ in 0..count {
                     let _ = self.backend.send_edit(method, json!([]));
                 }
             }
             Action::CollapseAndEnterNormal => {
-                let _ = self.backend.send_edit("collapse_selections", json!([]));
+                if !self.backend.is_vlf {
+                    let _ = self.backend.send_edit("collapse_selections", json!([]));
+                }
                 self.enter_normal_mode();
             }
             Action::ExecuteCommand => self.execute_command(),
@@ -777,7 +784,9 @@ impl App {
                 }
                 if ch == '0' {
                     if self.input_state.count_digits.is_empty() {
-                        let _ = self.backend.send_edit("move_to_left_end_of_line", json!([]));
+                        if !self.handle_vlf_navigation("move_to_left_end_of_line", 1) {
+                            let _ = self.backend.send_edit("move_to_left_end_of_line", json!([]));
+                        }
                         self.input_state.reset();
                     } else {
                         self.input_state.count_digits.push(0);
@@ -938,8 +947,23 @@ impl App {
                 self.last_visual = Some((self.mode, al, ac));
             }
             self.visual_anchor = None;
-            // Collapse xi selection.
-            let _ = self.backend.send_edit("collapse_selections", json!([]));
+            if self.backend.is_vlf {
+                if let Some((line, col)) = self.visual_restore_cursor.take() {
+                    self.backend.cursor_line =
+                        line.min(self.backend.line_count().saturating_sub(1));
+                    let max_col = self
+                        .backend
+                        .get_line(self.backend.cursor_line)
+                        .map(str::len)
+                        .unwrap_or(col);
+                    self.backend.cursor_col = col.min(max_col);
+                }
+            } else {
+                self.visual_restore_cursor = None;
+            }
+            if !self.backend.is_vlf {
+                let _ = self.backend.send_edit("collapse_selections", json!([]));
+            }
         }
         self.mode = Mode::Normal;
         self.command_buffer.clear();
@@ -1698,7 +1722,7 @@ impl App {
     }
 
     fn goto_last_line(&mut self) {
-        let last_line = self.backend.lines.len().saturating_sub(1);
+        let last_line = self.backend.line_count().saturating_sub(1);
         self.jump_to_line(last_line);
     }
 
@@ -2455,8 +2479,13 @@ impl App {
 
     /// Jump the cursor to `line` (0-based), clamped to the buffer length.
     fn jump_to_line(&mut self, line: usize) {
-        let clamped = line.min(self.backend.lines.len().saturating_sub(1));
+        let clamped = line.min(self.backend.line_count().saturating_sub(1));
         self.push_jump();
+        if self.backend.is_vlf {
+            self.backend.cursor_line = clamped;
+            self.backend.cursor_col = 0;
+            return;
+        }
         let _ = self.backend.send_edit(
             "gesture",
             json!({ "line": clamped as u64, "col": 0u64, "ty": "point_select" }),
@@ -2906,12 +2935,12 @@ impl App {
         }
         // Clamp top_line so we never show blank rows at the bottom when there
         // are enough lines above to fill the editor area.
-        let total_lines = self.backend.lines.len().max(1);
+        let total_lines = self.backend.line_count().max(1);
         let max_top = total_lines.saturating_sub(editor_height);
         if self.viewport.top_line > max_top {
             self.viewport.top_line = max_top;
         }
-        let line = self.backend.lines.get(cursor_line).map(|s| s.as_str()).unwrap_or("");
+        let line = self.backend.get_line(cursor_line).unwrap_or("");
         let cursor_display_col = byte_col_to_display_col(line, self.backend.cursor_col);
         self.viewport.target_col = cursor_display_col;
 
@@ -2926,6 +2955,69 @@ impl App {
                 self.viewport.left_col = cursor_display_col + 1 - editor_width;
             }
         }
+    }
+
+    fn handle_vlf_navigation(&mut self, method: &str, count: u64) -> bool {
+        if !self.backend.is_vlf {
+            return false;
+        }
+
+        let count = usize::try_from(count).unwrap_or(usize::MAX);
+        let line_count = self.backend.line_count().max(1);
+        let line = self.backend.cursor_line;
+        let col = self.backend.cursor_col;
+        let move_to_end = matches!(
+            method,
+            "move_to_end_of_document" | "move_to_end_of_document_and_modify_selection"
+        );
+        let target = match method {
+            "move_up" | "move_up_and_modify_selection" => Some((line.saturating_sub(count), col)),
+            "move_down" | "move_down_and_modify_selection" => {
+                Some((line.saturating_add(count).min(line_count.saturating_sub(1)), col))
+            }
+            "move_left" | "move_left_and_modify_selection" => {
+                Some((line, col.saturating_sub(count)))
+            }
+            "move_right" | "move_right_and_modify_selection" => {
+                let max_col = self.backend.get_line(line).map(str::len).unwrap_or(col);
+                Some((line, col.saturating_add(count).min(max_col)))
+            }
+            "move_to_left_end_of_line" => Some((line, 0)),
+            "move_to_right_end_of_line" | "move_to_right_end_of_line_and_modify_selection" => {
+                Some((line, self.backend.get_line(line).map(str::len).unwrap_or(0)))
+            }
+            "scroll_page_down" => Some((
+                line.saturating_add(self.last_editor_height.max(1) * count)
+                    .min(line_count.saturating_sub(1)),
+                col,
+            )),
+            "scroll_page_up" => {
+                Some((line.saturating_sub(self.last_editor_height.max(1) * count), col))
+            }
+            "move_to_beginning_of_document"
+            | "move_to_beginning_of_document_and_modify_selection" => Some((0, 0)),
+            "move_to_end_of_document" | "move_to_end_of_document_and_modify_selection" => {
+                Some((line_count.saturating_sub(1), 0))
+            }
+            _ => None,
+        };
+
+        let Some((line, col)) = target else {
+            self.backend.status_message = Some(format!("{method}: disabled in VLF"));
+            return true;
+        };
+
+        if move_to_end && !self.backend.vlf_line_count_exact {
+            let viewport_lines = self.last_editor_height.max(1);
+            let _ = self.backend.request_vlf_tail_viewport(viewport_lines);
+            self.backend.status_message = Some(String::from("VLF: jumping to file end"));
+            return true;
+        }
+
+        self.backend.cursor_line = line.min(line_count.saturating_sub(1));
+        let max_col = self.backend.get_line(self.backend.cursor_line).map(str::len).unwrap_or(0);
+        self.backend.cursor_col = col.min(max_col);
+        true
     }
 
     pub(crate) fn refresh_source_control(&mut self) {
@@ -2946,6 +3038,11 @@ impl App {
             .all_bufs()
             .iter()
             .filter(|buf| !buf.is_vlf && buf.is_fully_cached())
+            .filter(|buf| {
+                self.source_control.get(&buf.id).is_none_or(|cached| {
+                    now.duration_since(cached.last_refresh) >= Duration::from_secs(2)
+                })
+            })
             .map(|buf| (buf.id, buf.path.clone(), buf.lines.clone()))
             .collect::<Vec<_>>();
 
@@ -2966,6 +3063,10 @@ impl App {
             self.source_control
                 .insert(buf_id, GitBufferCache { fingerprint, path, last_refresh: now, status });
         }
+    }
+
+    pub(crate) fn input_idle_for(&self, duration: Duration) -> bool {
+        Instant::now().duration_since(self.last_input_at) >= duration
     }
 
     pub(crate) fn git_status(&self, buf_id: crate::buffer::BufferId) -> Option<&GitBufferStatus> {
@@ -3531,9 +3632,18 @@ impl App {
     // ── Visual mode helpers ─────────────────────────────────────────────────
 
     fn enter_visual_line(&mut self) {
-        let anchor = (self.backend.cursor_line, self.backend.cursor_col);
+        if self.backend.is_vlf {
+            self.visual_restore_cursor = Some((self.backend.cursor_line, self.backend.cursor_col));
+        } else {
+            self.visual_restore_cursor = None;
+        }
+        let anchor = (self.backend.cursor_line, 0);
         self.visual_anchor = Some(anchor);
         self.mode = Mode::VisualLine;
+        if self.backend.is_vlf {
+            self.backend.cursor_col = 0;
+            return;
+        }
         // Immediately select the whole current line.
         let _ = self.backend.send_edit("move_to_left_end_of_line", json!([]));
         let _ = self.backend.send_edit("move_to_right_end_of_line_and_modify_selection", json!([]));

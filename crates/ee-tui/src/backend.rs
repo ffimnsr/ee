@@ -108,6 +108,15 @@ pub(crate) enum BackendEvent {
         line_count_exact: bool,
         index_progress: f64,
     },
+    VlfSearchStatus {
+        view_id: String,
+        query: String,
+        scanned_bytes: u64,
+        total_bytes: u64,
+        complete: bool,
+        stored_match_count: usize,
+        ranges: Vec<VlfSearchRange>,
+    },
 }
 
 impl BackendEvent {
@@ -118,8 +127,16 @@ impl BackendEvent {
                 | Self::ScrollTo { .. }
                 | Self::DocumentMode { .. }
                 | Self::VlfChunks { .. }
+                | Self::VlfSearchStatus { .. }
         )
     }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub(crate) struct VlfSearchRange {
+    pub(crate) line: u64,
+    pub(crate) start_col: usize,
+    pub(crate) end_col: usize,
 }
 
 pub(crate) fn startup_render_ready(line_cache: &[LineSlot]) -> bool {
@@ -253,6 +270,8 @@ pub(crate) struct XiClient {
     pub(crate) vlf_generation: u64,
     /// Last approximate total line count from a `vlf_chunks` response.
     pub(crate) vlf_approx_line_count: u64,
+    /// True when `vlf_approx_line_count` is backend-confirmed exact.
+    pub(crate) vlf_line_count_exact: bool,
 }
 
 #[allow(dead_code)]
@@ -317,6 +336,7 @@ impl XiClient {
             is_vlf: false,
             vlf_generation: 0,
             vlf_approx_line_count: 0,
+            vlf_line_count_exact: false,
         };
 
         for event in init_events {
@@ -708,6 +728,9 @@ impl XiClient {
             }
             BackendEvent::DocumentMode { is_vlf, .. } => {
                 self.is_vlf = is_vlf;
+                if is_vlf {
+                    self.vlf_line_count_exact = false;
+                }
             }
             BackendEvent::VlfChunks {
                 generation,
@@ -720,9 +743,17 @@ impl XiClient {
             } => {
                 if generation == self.vlf_generation {
                     self.vlf_approx_line_count = approximate_line_count;
+                    self.vlf_line_count_exact = line_count_exact;
                     let target_len = (approximate_line_count as usize).max(self.line_cache.len());
                     if target_len > self.line_cache.len() {
                         self.line_cache.resize(target_len, LineSlot::Invalid);
+                    }
+                    if line_count_exact {
+                        let exact_len =
+                            usize::try_from(approximate_line_count).unwrap_or(usize::MAX);
+                        if self.line_cache.len() > exact_len {
+                            self.line_cache.truncate(exact_len);
+                        }
                     }
                     let start = line_start as usize;
                     for (i, text) in lines.into_iter().enumerate() {
@@ -735,8 +766,48 @@ impl XiClient {
                             });
                         }
                     }
-                    let _ = (line_count_exact, index_progress);
+                    let _ = index_progress;
                 }
+            }
+            BackendEvent::VlfSearchStatus {
+                query,
+                scanned_bytes,
+                total_bytes,
+                complete,
+                stored_match_count,
+                ranges,
+                ..
+            } => {
+                let preview = ranges
+                    .iter()
+                    .take(3)
+                    .map(|range| {
+                        format!("L{}:{}-{}", range.line + 1, range.start_col + 1, range.end_col + 1)
+                    })
+                    .collect::<Vec<_>>();
+                let progress = if total_bytes == 0 {
+                    String::from("0/0 B")
+                } else {
+                    format!("{}/{} B", scanned_bytes, total_bytes)
+                };
+                self.status_message = Some(if preview.is_empty() {
+                    format!(
+                        "search {:?}: {} matches, {}{}",
+                        query,
+                        stored_match_count,
+                        progress,
+                        if complete { " complete" } else { " scanning" }
+                    )
+                } else {
+                    format!(
+                        "search {:?}: {} matches, {}, {}{}",
+                        query,
+                        stored_match_count,
+                        progress,
+                        preview.join(", "),
+                        if complete { " complete" } else { " scanning" }
+                    )
+                });
             }
         }
         Ok(())
@@ -1239,6 +1310,28 @@ pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendE
                 approximate_line_count,
                 line_count_exact,
                 index_progress,
+            })
+        }
+        "vlf_search_status" => {
+            let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
+            let query = params.get("query").and_then(Value::as_str)?.to_owned();
+            let scanned_bytes = params.get("scanned_bytes").and_then(Value::as_u64).unwrap_or(0);
+            let total_bytes = params.get("total_bytes").and_then(Value::as_u64).unwrap_or(0);
+            let complete = params.get("complete").and_then(Value::as_bool).unwrap_or(false);
+            let stored_match_count =
+                params.get("stored_match_count").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let ranges = serde_json::from_value::<Vec<VlfSearchRange>>(
+                params.get("ranges").cloned().unwrap_or_else(|| json!([])),
+            )
+            .ok()?;
+            Some(BackendEvent::VlfSearchStatus {
+                view_id,
+                query,
+                scanned_bytes,
+                total_bytes,
+                complete,
+                stored_match_count,
+                ranges,
             })
         }
         _ => None,

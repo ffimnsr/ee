@@ -56,7 +56,7 @@ use crate::text_store::{
 };
 
 use super::page_index::{PageDescriptor, PageIndex, ScanState};
-use super::pager::{DEFAULT_CACHE_BYTE_CAP, FilePager, pread_exact};
+use super::pager::{CancelGeneration, DEFAULT_CACHE_BYTE_CAP, FilePager, pread_exact};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -497,6 +497,37 @@ impl VlfStore {
         self.viewport.borrow().clone()
     }
 
+    pub(crate) fn viewport_window(&self) -> ByteRange {
+        let viewport = self.viewport.borrow();
+        ByteRange::new(viewport.window_start.0, viewport.window_end.0)
+    }
+
+    pub(crate) fn page_size(&self) -> u64 {
+        self.page_size
+    }
+
+    pub(crate) fn invalidate_pending_reads(&self) -> CancelGeneration {
+        self.pager.invalidate()
+    }
+
+    pub(crate) fn read_search_range(
+        &self,
+        range: ByteRange,
+        token: CancelGeneration,
+    ) -> io::Result<TextChunk> {
+        let raw = self.read_raw_range_token(range, token)?;
+        let trim_start = leading_continuation_bytes(&raw);
+        let trim_end = trailing_incomplete_bytes(&raw);
+        let decoded_end = raw.len().saturating_sub(trim_end);
+        let decoded_start = trim_start.min(decoded_end);
+        let decoded_range = ByteRange::new(
+            range.start.0 + decoded_start as u64,
+            range.start.0 + decoded_end as u64,
+        );
+        let text = String::from_utf8_lossy(&raw[decoded_start..decoded_end]).into_owned();
+        Ok(TextChunk { text, byte_range: decoded_range })
+    }
+
     /// Set the batch size for future viewport reads.
     ///
     /// The new value takes effect on the next [`set_viewport`](Self::set_viewport) call.
@@ -774,6 +805,26 @@ impl VlfStore {
             .ok(); // Ignore spawn failure; indexing simply won't happen.
     }
 
+    /// Count line-feed bytes by streaming the file from disk.
+    ///
+    /// This is intentionally equivalent to `wc -l`: it does not materialize
+    /// text and does not require the sparse page index to be complete.
+    pub fn count_lf_streaming(&self) -> io::Result<u64> {
+        let file = File::open(self.pager.canonical_path())?;
+        let file_size = self.pager.file_size();
+        let mut pos = 0u64;
+        let mut count = 0u64;
+
+        while pos < file_size {
+            let end = (pos + self.page_size).min(file_size);
+            let bytes = pread_exact(&file, pos, (end - pos) as usize)?;
+            count += bytes.iter().filter(|&&byte| byte == b'\n').count() as u64;
+            pos = end;
+        }
+
+        Ok(count)
+    }
+
     // ------------------------------------------------------------------
     // Internal read helpers
     // ------------------------------------------------------------------
@@ -788,6 +839,15 @@ impl VlfStore {
     /// Decoded text is also stored in the decoded-text cache keyed by
     /// `range.start.0`, with a priority determined by the active viewport.
     fn read_with_seam(&self, range: ByteRange) -> io::Result<SeamResult> {
+        let token = self.pager.current_generation();
+        self.read_with_seam_token(range, token)
+    }
+
+    fn read_with_seam_token(
+        &self,
+        range: ByteRange,
+        token: CancelGeneration,
+    ) -> io::Result<SeamResult> {
         // Check decoded cache first.
         if let Some((text, decoded_range)) = self.decoded_cache.borrow_mut().get(range.start.0) {
             return Ok(SeamResult { text, original_range: range, decoded_range });
@@ -797,7 +857,6 @@ impl VlfStore {
         let expanded_start = range.start.0.saturating_sub(UTF8_SEAM_SLACK);
         let expanded_end = (range.end.0 + UTF8_SEAM_SLACK).min(file_size);
 
-        let token = self.pager.current_generation();
         let page_bytes = self.pager.read_at(ByteRange::new(expanded_start, expanded_end), token)?;
         self.record_pager_read(expanded_end - expanded_start);
         let raw = page_bytes.as_bytes();
@@ -845,6 +904,45 @@ impl VlfStore {
         self.update_peak_stats();
 
         Ok(SeamResult { text, original_range: range, decoded_range })
+    }
+
+    fn read_raw_range_token(
+        &self,
+        range: ByteRange,
+        token: CancelGeneration,
+    ) -> io::Result<Vec<u8>> {
+        let file_size = self.pager.file_size();
+        if range.end.0 > file_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("read end {} exceeds file_size {}", range.end.0, file_size),
+            ));
+        }
+
+        let total_len = range.end.0.saturating_sub(range.start.0);
+        if total_len == 0 {
+            return Ok(Vec::new());
+        }
+
+        let chunk_cap = self.pager.max_read_size();
+        if chunk_cap == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "max_read_size must be greater than zero",
+            ));
+        }
+
+        let mut bytes = Vec::with_capacity(total_len as usize);
+        let mut pos = range.start.0;
+        while pos < range.end.0 {
+            let end = pos.saturating_add(chunk_cap).min(range.end.0);
+            let chunk = self.pager.read_at(ByteRange::new(pos, end), token)?;
+            self.record_pager_read(end - pos);
+            bytes.extend_from_slice(chunk.as_bytes());
+            pos = end;
+        }
+
+        Ok(bytes)
     }
 
     /// Walk the page index to count lines before `byte_offset`, loading the
