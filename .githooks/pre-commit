@@ -10,6 +10,79 @@ scope_args=()
 needs_rust_checks=0
 needs_workspace_checks=0
 
+sorted_scoped_packages() {
+    local packages=()
+    local package
+    for package in "${!package_scope[@]}"; do
+        packages+=("$package")
+    done
+
+    if [[ "${#packages[@]}" -eq 0 ]]; then
+        return
+    fi
+
+    printf '%s\n' "${packages[@]}" | sort
+}
+
+package_has_lib_target() {
+    local package="$1"
+    local manifest_path="crates/$package/Cargo.toml"
+
+    [[ -f "$manifest_path" ]] || return 1
+
+    if grep -Eq '^\[lib\]$' "$manifest_path"; then
+        return 0
+    fi
+
+    [[ -f "crates/$package/src/lib.rs" ]]
+}
+
+run_stable_clippy() {
+    local stable_targets_with_lib=(--lib --bins --tests --examples)
+    local stable_targets_without_lib=(--bins --tests --examples)
+
+    if [[ "${#scope_args[@]}" -eq 0 || "${scope_args[0]}" == "--workspace" ]]; then
+        echo "[pre-commit] lint stable (${scope_args[*]})"
+        cargo +stable clippy "${scope_args[@]}" "${stable_targets_with_lib[@]}" --all-features -- -D warnings
+        return
+    fi
+
+    local packages_with_lib=()
+    local packages_without_lib=()
+    local package
+    while IFS= read -r package; do
+        [[ -z "$package" ]] && continue
+        if package_has_lib_target "$package"; then
+            packages_with_lib+=("$package")
+        else
+            packages_without_lib+=("$package")
+        fi
+    done < <(sorted_scoped_packages)
+
+    local scoped_packages=()
+    local scoped_args=()
+
+    scoped_packages=("${packages_with_lib[@]}")
+    if [[ "${#scoped_packages[@]}" -gt 0 ]]; then
+        scoped_args=()
+        for package in "${scoped_packages[@]}"; do
+            scoped_args+=(-p "$package")
+        done
+        echo "[pre-commit] lint stable (${scoped_args[*]})"
+        cargo +stable clippy "${scoped_args[@]}" "${stable_targets_with_lib[@]}" --all-features -- -D warnings
+    fi
+
+    scoped_packages=("${packages_without_lib[@]}")
+    if [[ "${#scoped_packages[@]}" -gt 0 ]]; then
+        scoped_args=()
+        for package in "${scoped_packages[@]}"; do
+            scoped_args+=(-p "$package")
+        done
+        echo "[pre-commit] lint stable no-lib (${scoped_args[*]})"
+        cargo +stable clippy "${scoped_args[@]}" "${stable_targets_without_lib[@]}" --all-features -- -D warnings
+    fi
+}
+
 collect_check_scope() {
     local file
     while IFS= read -r file; do
@@ -52,52 +125,48 @@ build_scope_args() {
         return
     fi
 
-    local packages=()
     local package
-    for package in "${!package_scope[@]}"; do
-        packages+=("$package")
-    done
-    if [[ "${#packages[@]}" -eq 0 ]]; then
-        return
-    fi
-
-    IFS=$'\n' packages=($(printf '%s\n' "${packages[@]}" | sort))
-    unset IFS
-    for package in "${packages[@]}"; do
+    while IFS= read -r package; do
+        [[ -z "$package" ]] && continue
         scope_args+=(-p "$package")
-    done
+    done < <(sorted_scoped_packages)
 }
 
-collect_check_scope
-build_scope_args
+main() {
+    collect_check_scope
+    build_scope_args
 
-if [[ "$needs_rust_checks" -eq 1 || "${ATLAS_PRE_COMMIT_FULL:-0}" == "1" ]]; then
-    echo "[pre-commit] format check"
-    cargo fmt --all --check
+    if [[ "$needs_rust_checks" -eq 1 || "${ATLAS_PRE_COMMIT_FULL:-0}" == "1" ]]; then
+        echo "[pre-commit] format check"
+        cargo fmt --all --check
 
-    if [[ "${#scope_args[@]}" -eq 0 ]]; then
-        scope_args=(--workspace)
+        if [[ "${#scope_args[@]}" -eq 0 ]]; then
+            scope_args=(--workspace)
+        fi
+
+        echo "[pre-commit] lint (${scope_args[*]})"
+        cargo clippy "${scope_args[@]}" --all-targets --all-features -- -D warnings
+
+        run_stable_clippy
+
+        echo "[pre-commit] test stable (${scope_args[*]})"
+        "$test_summary_script" +stable "${scope_args[@]}" --all-features
+        echo "[pre-commit] test passed"
+    else
+        echo "[pre-commit] no Rust changes staged; skipping cargo fmt/clippy/test"
     fi
 
-    echo "[pre-commit] lint (${scope_args[*]})"
-    cargo clippy "${scope_args[@]}" --all-targets --all-features -- -D warnings
+    # atlas-hook start
 
-    echo "[pre-commit] lint stable (${scope_args[*]})"
-    cargo +stable clippy "${scope_args[@]}" --lib --bins --tests --examples --all-features -- -D warnings
+    # Installed by atlas. Remove these lines to disable atlas graph updates.
+    if command -v atlas >/dev/null 2>&1; then
+        atlas update || true
+        atlas detect-changes || true
+    fi
+    echo "[pre-commit] complete"
+    # atlas-hook end
+}
 
-    echo "[pre-commit] test stable (${scope_args[*]})"
-    "$test_summary_script" +stable "${scope_args[@]}" --all-features
-    echo "[pre-commit] test passed"
-else
-    echo "[pre-commit] no Rust changes staged; skipping cargo fmt/clippy/test"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
 fi
-
-# atlas-hook start
-
-# Installed by atlas. Remove these lines to disable atlas graph updates.
-if command -v atlas >/dev/null 2>&1; then
-    atlas update || true
-    atlas detect-changes || true
-fi
-echo "[pre-commit] complete"
-# atlas-hook end

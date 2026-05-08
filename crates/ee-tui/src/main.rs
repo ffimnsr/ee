@@ -41,6 +41,9 @@ mod tests;
 use app::App;
 use ui::ui;
 
+const INPUT_POLL_TIMEOUT: Duration = Duration::from_millis(16);
+const MAX_INPUT_EVENTS_PER_TICK: usize = 128;
+
 // ── CLI definition ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Parser)]
@@ -326,14 +329,26 @@ fn run_app(
             app.refresh_source_control();
         }
 
-        if event::poll(Duration::from_millis(16))? {
-            match event::read()? {
-                // SIGWINCH arrives as Event::Resize from crossterm; force a
-                // full redraw by clearing the terminal buffer.
-                Event::Resize(_, _) => {
-                    terminal.clear()?;
+        if event::poll(INPUT_POLL_TIMEOUT)? {
+            let mut handled = 0usize;
+            loop {
+                match event::read()? {
+                    // SIGWINCH arrives as Event::Resize from crossterm; force a
+                    // full redraw by clearing the terminal buffer.
+                    Event::Resize(_, _) => {
+                        terminal.clear()?;
+                    }
+                    ev => app.handle_event(ev),
                 }
-                ev => app.handle_event(ev),
+
+                handled += 1;
+                if app.should_quit
+                    || shutdown.load(Ordering::Relaxed)
+                    || handled >= MAX_INPUT_EVENTS_PER_TICK
+                    || !event::poll(Duration::ZERO)?
+                {
+                    break;
+                }
             }
         }
     }

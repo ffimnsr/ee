@@ -30,8 +30,13 @@ pub(crate) fn previous_char_boundary(line: &str, col: usize) -> usize {
 
 pub(crate) fn byte_col_to_display_col(line: &str, byte_col: usize) -> usize {
     let safe = previous_char_boundary(line, byte_col.min(line.len()));
+    let prefix = &line[..safe];
+    if prefix.is_ascii() && !prefix.as_bytes().contains(&b'\t') {
+        return safe;
+    }
+
     let mut col = 0usize;
-    for ch in line[..safe].chars() {
+    for ch in prefix.chars() {
         if ch == '\t' {
             let tab_width = 4 - (col % 4);
             col += tab_width;
@@ -43,6 +48,12 @@ pub(crate) fn byte_col_to_display_col(line: &str, byte_col: usize) -> usize {
 }
 
 pub(crate) fn display_col_to_byte(line: &str, display_col: usize) -> usize {
+    let prefix_len = display_col.min(line.len());
+    let prefix = &line.as_bytes()[..prefix_len];
+    if prefix.is_ascii() && !prefix.contains(&b'\t') {
+        return prefix_len;
+    }
+
     let mut col = 0usize;
     for (byte_idx, ch) in line.char_indices() {
         if col >= display_col {
