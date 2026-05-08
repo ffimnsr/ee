@@ -83,10 +83,10 @@ if [[ "$needs_rust_checks" -eq 1 || "${ATLAS_PRE_COMMIT_FULL:-0}" == "1" ]]; the
     cargo clippy "${scope_args[@]}" --all-targets --all-features -- -D warnings
 
     echo "[pre-commit] lint stable (${scope_args[*]})"
-    cargo +stable clippy "${scope_args[@]}" --lib --bins --tests --examples --all-features -- -D warnings
+    cargo +stable clippy "${scope_args[@]}" --all-targets --all-features -- -D warnings
 
     echo "[pre-commit] test stable (${scope_args[*]})"
-    "$test_summary_script" +stable "${scope_args[@]}" --lib --tests --examples --all-features
+    "$test_summary_script" +stable "${scope_args[@]}" --all-features
     echo "[pre-commit] test passed"
 else
     echo "[pre-commit] no Rust changes staged; skipping cargo fmt/clippy/test"
