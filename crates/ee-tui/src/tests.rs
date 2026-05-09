@@ -4534,6 +4534,147 @@ description = "buffer picker"
 }
 
 #[test]
+fn swift_motion_sequence_starts_and_jumps_to_labeled_visible_match() {
+    let mut app = App::from_path(None).unwrap();
+    app.last_editor_height = 10;
+    app.last_editor_width = 40;
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    for ch in "alpha\nbeta\nalpha".chars() {
+        let key = if ch == '\n' { KeyCode::Enter } else { KeyCode::Char(ch) };
+        app.handle_event(Event::Key(KeyEvent::new(key, KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    app.backend.pump().unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE)));
+    assert!(app.swift_motion.is_some());
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+
+    let state = app.swift_motion.as_ref().expect("swift motion should await label");
+    assert_eq!(state.query, "al");
+    assert_eq!(state.targets.len(), 2);
+    let second_label = state.targets[1].label;
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(second_label), KeyModifiers::NONE)));
+    app.backend.pump().unwrap();
+
+    assert!(app.swift_motion.is_none());
+    assert_eq!(app.backend.cursor_line, 2);
+    assert_eq!(app.backend.cursor_col, 0);
+}
+
+#[test]
+fn swift_motion_command_enters_prompt_state() {
+    let mut app = App::from_path(None).unwrap();
+
+    for key in [':', 's', 'w', 'i', 'f', 't', '_', 'm', 'o', 't', 'i', 'o', 'n'] {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.swift_motion.is_some());
+    assert_eq!(app.swift_motion.as_ref().unwrap().query, "");
+}
+
+#[test]
+fn swift_motion_prompt_renders_active_query() {
+    let mut app = App::from_path(None).unwrap();
+    app.last_editor_height = 8;
+    app.last_editor_width = 30;
+    app.swift_motion = Some(crate::app::SwiftMotionState {
+        query: String::from("al"),
+        label_prefix: None,
+        targets: vec![
+            crate::app::SwiftMotionTarget {
+                line: 0,
+                display_col: 0,
+                end_display_col: 2,
+                label: 'a',
+                next_label: None,
+            },
+            crate::app::SwiftMotionTarget {
+                line: 1,
+                display_col: 0,
+                end_display_col: 2,
+                label: 'b',
+                next_label: None,
+            },
+        ],
+    });
+
+    let backend = TestBackend::new(40, 8);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let mut screen = String::new();
+    for y in 0..8 {
+        for x in 0..40 {
+            screen.push_str(buffer.cell((x, y)).unwrap().symbol());
+        }
+        screen.push('\n');
+    }
+
+    assert!(
+        screen.contains("swift_motion al | choose label"),
+        "screen missing swift motion prompt: {screen}"
+    );
+}
+
+#[test]
+fn swift_motion_dense_matches_narrow_then_jump() {
+    let mut app = App::from_path(None).unwrap();
+    app.last_editor_height = 40;
+    app.last_editor_width = 20;
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    for index in 0..27 {
+        for ch in "ab".chars() {
+            app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+        }
+        if index != 26 {
+            app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        }
+        app.backend.pump().unwrap();
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    app.backend.pump().unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)));
+    for ch in "swift_motion".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)));
+
+    let state = app.swift_motion.as_ref().expect("swift motion should await dense labels");
+    assert_eq!(state.query, "ab");
+    assert_eq!(state.targets.len(), 27);
+    assert!(state.targets.iter().any(|target| target.next_label.is_some()));
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
+
+    let state = app.swift_motion.as_ref().expect("swift motion should narrow to second stage");
+    assert_eq!(state.label_prefix, Some('a'));
+    assert_eq!(state.targets.len(), 2);
+    assert_eq!(state.targets[0].label, 'a');
+    assert_eq!(state.targets[1].label, 'b');
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)));
+    app.backend.pump().unwrap();
+
+    assert!(app.swift_motion.is_none());
+    assert_eq!(app.backend.cursor_line, 26);
+    assert_eq!(app.backend.cursor_col, 0);
+}
+
+#[test]
 fn default_spc_tree_times_out_after_idle() {
     let mut app = App::from_path(None).unwrap();
 
@@ -5099,7 +5240,12 @@ fn timed_open_to_first_render_breakdown(
 }
 
 fn budget_many_line(i: usize) -> String {
-    format!("fn item_{i:06}() {{ let value = {}; }} // {:0>180}", i % 10, i % 100_000)
+    let thresholds = OpenThresholds::default();
+    let target_line_bytes =
+        (thresholds.normal_bytes as usize / (thresholds.normal_lines as usize - 2_000)).max(256);
+    let prefix = format!("fn item_{i:06}() {{ let value = {}; }} // ", i % 10);
+    let suffix_width = target_line_bytes.saturating_sub(prefix.len());
+    format!("{prefix}{:0>suffix_width$}", i % 100_000)
 }
 
 fn budget_long_line(i: usize) -> String {

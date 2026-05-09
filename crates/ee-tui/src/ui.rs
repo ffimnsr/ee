@@ -5,7 +5,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 use unicode_width::UnicodeWidthStr;
 use xi_core_lib::plugin_rpc::DiagnosticSeverity;
 
-use crate::app::{App, Mode, Viewport, smart_case_sensitive};
+use crate::app::{App, Mode, SwiftMotionTarget, Viewport, smart_case_sensitive};
 use crate::backend::{CoreAnnotation, LineSlot, VlfSearchRange};
 use crate::buffer::BufState;
 use crate::config::{NumberStyle, StatuslineFormat};
@@ -708,6 +708,85 @@ fn apply_annotation_overlay(
     out
 }
 
+fn replace_display_column(
+    spans: Vec<Span<'static>>,
+    display_col: usize,
+    replacement: char,
+    replacement_style: Style,
+) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut col = 0usize;
+    let mut replaced = false;
+
+    for sp in spans {
+        let content = sp.content.into_owned();
+        let style = sp.style;
+        let span_cols = UnicodeWidthStr::width(content.as_str());
+        let span_end = col + span_cols;
+
+        if replaced || display_col < col || display_col >= span_end {
+            out.push(Span::styled(content, style));
+            col = span_end;
+            continue;
+        }
+
+        let local_start = display_col - col;
+        let start_byte = display_col_to_byte(&content, local_start);
+        let end_byte = display_col_to_byte(&content, local_start + 1);
+
+        if start_byte > 0 {
+            out.push(Span::styled(content[..start_byte].to_owned(), style));
+        }
+        out.push(Span::styled(replacement.to_string(), replacement_style));
+        if end_byte < content.len() {
+            out.push(Span::styled(content[end_byte..].to_owned(), style));
+        }
+
+        replaced = true;
+        col = span_end;
+    }
+
+    out
+}
+
+fn apply_swift_motion_targets(
+    mut spans: Vec<Span<'static>>,
+    targets: &[SwiftMotionTarget],
+    left: usize,
+) -> Vec<Span<'static>> {
+    let visual = AnnotationVisual {
+        bg: Color::Rgb(137, 220, 235),
+        fg: Some(Color::Rgb(22, 24, 31)),
+        modifier: Modifier::BOLD,
+    };
+    let label_style = Style::default()
+        .fg(Color::Rgb(22, 24, 31))
+        .bg(Color::Rgb(245, 194, 231))
+        .add_modifier(Modifier::BOLD);
+
+    for target in targets {
+        if target.end_display_col <= left || target.display_col < left {
+            continue;
+        }
+        spans = apply_annotation_overlay(
+            spans,
+            target.display_col,
+            target.end_display_col,
+            left,
+            visual,
+        );
+    }
+
+    for target in targets {
+        if target.display_col < left {
+            continue;
+        }
+        spans = replace_display_column(spans, target.display_col - left, target.label, label_style);
+    }
+
+    spans
+}
+
 fn collect_line_annotation_segments(
     line: &str,
     log_idx: usize,
@@ -1159,6 +1238,18 @@ fn render_buffer(
                 }
             }
 
+            if let Some(swift_motion) = app.swift_motion.as_ref() {
+                let line_targets = swift_motion
+                    .targets
+                    .iter()
+                    .filter(|target| target.line == log_idx)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !line_targets.is_empty() {
+                    spans = apply_swift_motion_targets(spans, &line_targets, left);
+                }
+            }
+
             spans = pad_spans_to_width(spans, viewport_width, Style::default().bg(bg));
 
             let mut l = Line::from(spans);
@@ -1313,6 +1404,15 @@ fn git_status_span(app: &App) -> Option<Span<'static>> {
 }
 
 fn render_prompt(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
+    if let Some(swift_motion) = app.swift_motion.as_ref() {
+        frame.render_widget(
+            Paragraph::new(Line::from(swift_motion.prompt()))
+                .style(Style::default().fg(Color::Rgb(22, 24, 31)).bg(Color::Rgb(137, 220, 235))),
+            area,
+        );
+        return;
+    }
+
     if let Some(label) = app.active_key_sequence_label() {
         frame.render_widget(
             Paragraph::new(Line::from(format!("keys: {label}")))

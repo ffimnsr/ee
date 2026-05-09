@@ -34,6 +34,7 @@ pub(crate) enum Action {
     RequestDocumentSymbols,
     RequestWorkspaceSymbols,
     RequestCodeActions,
+    SwiftMotion,
     GlobalSearch,
     CommandPalette,
     FilePicker,
@@ -549,6 +550,7 @@ fn build_default_sequence_bindings() -> Vec<SequenceBinding> {
     bindings.extend(bind(&normal_modes, &["space", "b", "l"], LastPicker, "last picker"));
     bindings.extend(bind(&normal_modes, &["space", "s"], NoOp, "search"));
     bindings.extend(bind(&normal_modes, &["space", "s", "s"], GlobalSearch, "search workspace"));
+    bindings.extend(bind(&normal_modes, &["space", "s", "m"], SwiftMotion, "swift motion"));
     bindings.extend(bind(
         &normal_modes,
         &["space", "s", "d"],
@@ -728,6 +730,7 @@ pub(crate) fn parse_action_spec(spec: &str) -> Result<Action, String> {
         "search_next" => Action::FindNext,
         "search_prev" => Action::FindPrevious,
         "global_search" => Action::GlobalSearch,
+        "swift_motion" => Action::SwiftMotion,
         "search_selection_detect_word_boundaries" => {
             Action::SearchSelection { detect_word_boundaries: true }
         }
