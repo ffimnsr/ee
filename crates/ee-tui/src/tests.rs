@@ -4545,7 +4545,12 @@ fn swift_motion_sequence_starts_and_jumps_to_labeled_visible_match() {
         app.handle_event(Event::Key(KeyEvent::new(key, KeyModifiers::NONE)));
     }
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
-    app.backend.pump().unwrap();
+    // Wait until xi-core has fully processed all insert keystrokes.
+    // `line_count() >= 3` is not enough: it is satisfied the moment the second
+    // Enter is processed (line 2 = "") before the final "alpha" chars arrive.
+    // At that point swift motion finds only 1 "al" match and auto-jumps.
+    // Waiting until line 2 also contains "al" guarantees both matches exist.
+    app.backend.pump_until(|buf| buf.get_line(2).is_some_and(|l| l.contains("al"))).unwrap();
 
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)));

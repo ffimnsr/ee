@@ -1707,6 +1707,26 @@ impl BufferManager {
         self.sync_pending_events()
     }
 
+    /// Repeatedly drain pending events until `predicate` holds for the active
+    /// buffer, or the 2-second safety deadline expires.
+    ///
+    /// Use this instead of bare `pump()` when a test must wait for xi-core to
+    /// finish processing a batch of keystrokes before inspecting state.
+    #[cfg(test)]
+    pub(crate) fn pump_until<F>(&mut self, predicate: F) -> io::Result<()>
+    where
+        F: Fn(&BufState) -> bool,
+    {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            self.sync_pending_events()?;
+            if predicate(self.active()) || Instant::now() >= deadline {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// Test-only constructor that builds a minimal `BufferManager` around
     /// pre-existing channel ends and a known view_id.
     #[cfg(test)]
