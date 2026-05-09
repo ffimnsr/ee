@@ -510,6 +510,10 @@ impl App {
             "goto_word" => {
                 self.move_word_start(true, false);
             }
+            "swift_motion" | "swift" => {
+                self.start_swift_motion();
+                return;
+            }
             "goto_window_top" => {
                 self.goto_window_top();
             }
@@ -1941,6 +1945,8 @@ impl App {
             "select_all_children",
             "select_all_siblings",
             "symbol_picker",
+            "swift",
+            "swift_motion",
             "select_textobject_around",
             "select_textobject_inner",
             "select_next_sibling",
@@ -2525,6 +2531,7 @@ impl App {
             ":goto_next_diag / :goto_prev_diag / :goto_first_diag / :goto_last_diag jump active-buffer diagnostics"
                 .to_owned(),
             ":goto_word move to next word start using normal word semantics".to_owned(),
+            ":swift_motion / :swift start visible-window two-char jump with labels".to_owned(),
             ":write! :write_all :write_quit :write_quit_all add Vim-style aliases".to_owned(),
             ":buffer_close :buffer_close_others :buffer_close_all manage buffers".to_owned(),
             ":reload / :reload_all discard edits and reopen from disk".to_owned(),

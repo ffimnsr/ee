@@ -40,10 +40,11 @@ pub mod rope_store;
 /// rendering code never need to own or define it themselves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DocumentMode {
-    /// Standard full-featured mode for files up to ~20 MB / 300 K lines.
+    /// Standard full-featured mode for files below 8 MiB / 30 K lines when
+    /// line count is known, or below 8 MiB when line count is unknown.
     Normal,
     /// Editing-capable mode with some background features disabled; used for
-    /// files that still fit in RAM but are near the normal-mode threshold.
+    /// files in the 8-<30 MiB / 30-<50 K line transition band.
     ConstrainedNormal,
     /// Very Large File mode: read-only, paged, with a lazy newline index.
     /// Full-text extraction is explicitly forbidden in this mode.

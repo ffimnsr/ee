@@ -179,6 +179,36 @@ fn formatting_probe_str(bytes: &[u8], encoding: CharacterEncoding) -> Option<&st
     }
 }
 
+fn sampled_line_count_hint(path: &Path, file_size_bytes: u64) -> Option<u64> {
+    let sample_len =
+        usize::try_from(file_size_bytes.min(MAX_FORMATTING_PROBE_BYTES as u64)).ok()?;
+    let mut sample = vec![0; sample_len];
+    let mut file = File::open(path).ok()?;
+    let bytes_read = file.read(&mut sample).ok()?;
+    sample.truncate(bytes_read);
+    estimate_line_count_from_sample(&sample, file_size_bytes)
+}
+
+fn estimate_line_count_from_sample(sample: &[u8], file_size_bytes: u64) -> Option<u64> {
+    if sample.is_empty() {
+        return Some(0);
+    }
+
+    let newline_count = sample.iter().filter(|&&byte| byte == b'\n').count() as u64;
+    let sample_len = sample.len() as u64;
+
+    if newline_count == 0 {
+        return (sample_len == file_size_bytes).then_some(1);
+    }
+
+    let mut estimated = newline_count.saturating_mul(file_size_bytes).div_ceil(sample_len);
+    if sample_len == file_size_bytes && !sample.ends_with(b"\n") {
+        estimated = estimated.saturating_add(1);
+    }
+
+    Some(estimated.max(newline_count))
+}
+
 pub enum FileError {
     Io(io::Error, PathBuf),
     UnknownEncoding(PathBuf),
@@ -302,8 +332,9 @@ impl FileManager {
         // Fail-closed: if metadata is unavailable, refuse to proceed.
         // Note: we already returned early for non-existent paths above.
         let size_opt = fs::metadata(path).ok().map(|m| m.len());
+        let line_count_hint = size_opt.and_then(|size| sampled_line_count_hint(path, size));
 
-        match self.open_policy.decide(size_opt, None, None, location, mode_override) {
+        match self.open_policy.decide(size_opt, line_count_hint, None, location, mode_override) {
             OpenDecision::Open(DocumentMode::Normal)
             | OpenDecision::Open(DocumentMode::ConstrainedNormal) => {
                 // Normal rope load path — both Normal and ConstrainedNormal use
@@ -705,6 +736,7 @@ mod tests {
             normal_bytes: 1,
             normal_lines: 1,
             vlf_bytes: 2,
+            vlf_lines: 2,
             confirm_local_bytes: 3, // 3-byte file triggers confirmation
             confirm_remote_bytes: 3,
             confirm_web_bytes: 3,
@@ -723,6 +755,90 @@ mod tests {
             "expected ConfirmationRequired, got: {:?}",
             result.err().map(|e| e.to_string())
         );
+    }
+
+    #[cfg(all(target_family = "unix", not(feature = "notify")))]
+    #[test]
+    fn strict_byte_thresholds_choose_rope_then_vlf_in_file_manager_open_flow() {
+        use super::FileManager;
+        use crate::open_policy::{FileLocation, ModeOverride, OpenPolicy, OpenThresholds};
+        use std::fs::OpenOptions;
+
+        let thresholds = OpenThresholds {
+            normal_bytes: 8,
+            normal_lines: 30,
+            vlf_bytes: 30,
+            vlf_lines: 300,
+            confirm_local_bytes: 1_024,
+            confirm_remote_bytes: 1_024,
+            confirm_web_bytes: 1_024,
+        };
+
+        let exact_normal = tempfile::NamedTempFile::new().unwrap();
+        OpenOptions::new().write(true).open(exact_normal.path()).unwrap().set_len(8).unwrap();
+
+        let exact_vlf = tempfile::NamedTempFile::new().unwrap();
+        OpenOptions::new().write(true).open(exact_vlf.path()).unwrap().set_len(30).unwrap();
+
+        let mut mgr = FileManager::new();
+        mgr.set_open_policy(OpenPolicy::new(thresholds));
+
+        let constrained = mgr
+            .open_with_override(
+                exact_normal.path(),
+                crate::tabs::BufferId(3),
+                FileLocation::Local,
+                ModeOverride::Auto,
+            )
+            .unwrap();
+        assert!(matches!(constrained, OpenResult::Rope(_)));
+
+        let vlf = mgr
+            .open_with_override(
+                exact_vlf.path(),
+                crate::tabs::BufferId(4),
+                FileLocation::Local,
+                ModeOverride::Auto,
+            )
+            .unwrap();
+        assert!(matches!(vlf, OpenResult::Vlf(_)));
+    }
+
+    #[cfg(all(target_family = "unix", not(feature = "notify")))]
+    #[test]
+    fn sampled_line_count_hint_can_force_vlf_for_small_high_loc_file() {
+        use super::FileManager;
+        use crate::open_policy::{FileLocation, ModeOverride, OpenPolicy, OpenThresholds};
+        use std::io::Write;
+
+        let thresholds = OpenThresholds {
+            normal_bytes: 8 * 1024 * 1024,
+            normal_lines: 30_000,
+            vlf_bytes: 30 * 1024 * 1024,
+            vlf_lines: 50_000,
+            confirm_local_bytes: 1_024 * 1_024 * 1_024,
+            confirm_remote_bytes: 10 * 1024 * 1024,
+            confirm_web_bytes: 50 * 1024 * 1024,
+        };
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        for _ in 0..60_000 {
+            writeln!(tmp, "x").unwrap();
+        }
+
+        let mut mgr = FileManager::new();
+        mgr.set_open_policy(OpenPolicy::new(thresholds));
+
+        let result = mgr
+            .open_with_override(
+                tmp.path(),
+                crate::tabs::BufferId(5),
+                FileLocation::Local,
+                ModeOverride::Auto,
+            )
+            .unwrap();
+
+        assert!(matches!(result, OpenResult::Vlf(_)));
     }
 
     #[test]
@@ -746,5 +862,12 @@ mod tests {
         assert_eq!(analysis.indentation, SampledIndentation::Spaces(2));
         assert_eq!(analysis.line_ending, SampledLineEnding::Lf);
         assert!(analysis.needs_line_ending_verification());
+    }
+
+    #[test]
+    fn line_count_estimate_scales_head_sample_to_full_file() {
+        let sample = b"x\nx\nx\n";
+        let estimated = super::estimate_line_count_from_sample(sample, 12).unwrap();
+        assert_eq!(estimated, 6);
     }
 }

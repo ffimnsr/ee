@@ -97,6 +97,43 @@ pub(crate) enum RepeatableMotion {
     GitHunk { forward: bool },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SwiftMotionTarget {
+    pub(crate) line: usize,
+    pub(crate) display_col: usize,
+    pub(crate) end_display_col: usize,
+    pub(crate) label: char,
+    pub(crate) next_label: Option<char>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct SwiftMotionState {
+    pub(crate) query: String,
+    pub(crate) label_prefix: Option<char>,
+    pub(crate) targets: Vec<SwiftMotionTarget>,
+}
+
+impl SwiftMotionState {
+    pub(crate) fn prompt(&self) -> String {
+        match self.query.chars().count() {
+            0 => "swift_motion | type 2 ASCII chars | esc cancel".to_owned(),
+            1 => format!("swift_motion | target: {}_ | esc cancel", self.query),
+            _ if self.label_prefix.is_some() => format!(
+                "swift_motion {} {}_ | choose final label | esc cancel",
+                self.query,
+                self.label_prefix.unwrap_or_default()
+            ),
+            _ if self.targets.iter().any(|target| target.next_label.is_some()) => {
+                format!("swift_motion {} | choose label group | esc cancel", self.query)
+            }
+            _ if self.targets.is_empty() => {
+                format!("swift_motion {} | no visible labels", self.query)
+            }
+            _ => format!("swift_motion {} | choose label | esc cancel", self.query),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct InputState {
     pub(crate) count_digits: Vec<u8>,
@@ -168,6 +205,7 @@ pub(crate) struct App {
     pub(crate) should_quit: bool,
     pub(crate) viewport: Viewport,
     pub(crate) last_editor_height: usize,
+    pub(crate) last_editor_width: usize,
     pub(crate) input_state: InputState,
     /// Anchor position (line, col) when a visual mode was entered.
     pub(crate) visual_anchor: Option<(usize, usize)>,
@@ -264,6 +302,8 @@ pub(crate) struct App {
     pub(crate) startup_deferred_work_pending: bool,
     /// Last time a user input event reached the app loop.
     pub(crate) last_input_at: Instant,
+    /// Active swift-motion session over visible text.
+    pub(crate) swift_motion: Option<SwiftMotionState>,
     // ── Substitute confirm state ──────────────────────────────────────────────────
     /// Pending substitutions awaiting `y`/`n`/`a`/`q` confirmation.
     pub(crate) substitute_pending: Option<SubstitutePending>,
@@ -306,6 +346,7 @@ impl App {
             should_quit: false,
             viewport: Viewport::default(),
             last_editor_height: 0,
+            last_editor_width: 0,
             input_state: InputState::default(),
             visual_anchor: None,
             visual_restore_cursor: None,
@@ -348,6 +389,7 @@ impl App {
             source_control: HashMap::new(),
             startup_deferred_work_pending: true,
             last_input_at: Instant::now(),
+            swift_motion: None,
             substitute_pending: None,
             redraw_requested: false,
             render_metrics: crate::render_metrics::RenderMetrics::new(),

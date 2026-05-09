@@ -20,11 +20,11 @@
 //!
 //! # Thresholds (VS Code-inspired)
 //!
-//! | Zone               | Condition                                  |
-//! |--------------------|--------------------------------------------|
-//! | **Normal**         | size < 20 MB **and** line count < 300 K    |
-//! | **ConstrainedNormal** | above Normal, still fits in RAM         |
-//! | **Vlf**            | at/above `vlf_bytes` or too big for RAM    |
+//! | Zone                  | Condition                                            |
+//! |-----------------------|------------------------------------------------------|
+//! | **Normal**            | size < 8 MiB and line count < 30 K                  |
+//! | **ConstrainedNormal** | size in [8, 30) MiB and line count < 50 K           |
+//! | **Vlf**               | size >= 30 MiB, line count >= 50 K, or too big RAM  |
 //!
 //! Hard confirmation thresholds require explicit user acknowledgement before
 //! the file is opened at all:
@@ -100,23 +100,22 @@ pub enum ModeOverride {
 /// Size and line-count thresholds that drive the open policy.
 ///
 /// All byte values are inclusive upper bounds for the *lower* tier.  For
-/// example, `normal_bytes = 20 * 1024 * 1024` means files **strictly
-/// smaller** than 20 MiB are opened in Normal mode (when line count also
-/// qualifies).
+/// example, `normal_bytes = 8 * 1024 * 1024` means files **strictly
+/// smaller** than 8 MiB stay in the Normal byte band.
 #[derive(Debug, Clone)]
 pub struct OpenThresholds {
     /// Maximum file size (bytes) for full Normal mode.
     ///
-    /// Default: 20 MiB.
+    /// Default: 8 MiB.
     pub normal_bytes: u64,
 
     /// Maximum logical line count for full Normal mode.
     ///
     /// This hint is only used when the caller provides a known line count (e.g.
-    /// from a previously cached index).  When unknown, only `normal_bytes` is
+    /// from a previously cached index). When unknown, only byte thresholds are
     /// used.
     ///
-    /// Default: 300 000.
+    /// Default: 30 000.
     pub normal_lines: u64,
 
     /// File size threshold at which ConstrainedNormal switches to Vlf.
@@ -125,8 +124,17 @@ pub struct OpenThresholds {
     /// or above `vlf_bytes` use `Vlf`.  This value should be set to a size
     /// that the editor can comfortably keep in RAM.
     ///
-    /// Default: 20 MiB + 1 byte, so files greater than 20 MiB enter VLF.
+    /// Default: 30 MiB.
     pub vlf_bytes: u64,
+
+    /// Maximum logical line count for `ConstrainedNormal`.
+    ///
+    /// Files with a known line count below this threshold may still use
+    /// `ConstrainedNormal` when they are in the constrained byte band. Files
+    /// at or above this threshold use `Vlf`.
+    ///
+    /// Default: 50 000.
+    pub vlf_lines: u64,
 
     /// Hard-open confirmation threshold for **local** files.
     ///
@@ -150,9 +158,10 @@ pub struct OpenThresholds {
 impl Default for OpenThresholds {
     fn default() -> Self {
         OpenThresholds {
-            normal_bytes: 20 * 1024 * 1024,
-            normal_lines: 300_000,
-            vlf_bytes: (20 * 1024 * 1024) + 1,
+            normal_bytes: 8 * 1024 * 1024,
+            normal_lines: 30_000,
+            vlf_bytes: 30 * 1024 * 1024,
+            vlf_lines: 50_000,
             confirm_local_bytes: 1024 * 1024 * 1024,
             confirm_remote_bytes: 10 * 1024 * 1024,
             confirm_web_bytes: 50 * 1024 * 1024,
@@ -232,11 +241,11 @@ impl OpenPolicy {
     ///   trusted `stat(2)` call on the actual file path.  Pass `None` when the
     ///   metadata is unavailable; the policy fails-closed in that case.
     /// - `line_count_hint` — cached logical line count if known; `None` means
-    ///   unknown.  The policy uses this only to gate Normal mode; it is not
-    ///   used to select VLF.
+    ///   unknown. When known, `Normal` requires both small size and small line
+    ///   count; line counts at or above the constrained ceiling force `Vlf`.
     /// - `available_memory_bytes` — current process RSS headroom from the OS,
-    ///   or `None` if unavailable.  Used to choose between ConstrainedNormal
-    ///   and Vlf when the file is above the normal threshold.
+    ///   or `None` if unavailable. Used as an extra Vlf guardrail when the
+    ///   file would consume at least half the available headroom.
     /// - `location` — where the file lives (affects confirmation thresholds).
     /// - `mode_override` — user-supplied override; see [`ModeOverride`].
     pub fn decide(
@@ -299,30 +308,32 @@ impl OpenPolicy {
     ) -> DocumentMode {
         let t = &self.thresholds;
 
-        // Normal: below both the byte threshold AND the line threshold (if
-        // line count is known).
-        let below_normal_bytes = size < t.normal_bytes;
-        let below_normal_lines = line_count_hint.map(|lc| lc < t.normal_lines).unwrap_or(true);
-
-        if below_normal_bytes && below_normal_lines {
-            return DocumentMode::Normal;
-        }
-
-        // Above normal threshold: decide ConstrainedNormal vs Vlf.
-        //
-        // Use Vlf if:
-        //   a) file is at/above the explicit vlf_bytes threshold, OR
-        //   b) available_memory_bytes is known and the file would exceed half
-        //      the headroom (leaving room for the rest of the process).
         let file_exceeds_vlf_bytes = size >= t.vlf_bytes;
-        let file_exceeds_memory =
-            available_memory_bytes.map(|avail| size >= avail / 2).unwrap_or(false);
+        let line_exceeds_vlf =
+            line_count_hint.map(|line_count| line_count >= t.vlf_lines).unwrap_or(false);
 
-        if file_exceeds_vlf_bytes || file_exceeds_memory {
+        let mut mode = if file_exceeds_vlf_bytes || line_exceeds_vlf {
             DocumentMode::Vlf
         } else {
-            DocumentMode::ConstrainedNormal
+            match line_count_hint {
+                Some(line_count) if size < t.normal_bytes && line_count < t.normal_lines => {
+                    DocumentMode::Normal
+                }
+                Some(_) if size < t.vlf_bytes => DocumentMode::ConstrainedNormal,
+                Some(_) => DocumentMode::Vlf,
+                None if size < t.normal_bytes => DocumentMode::Normal,
+                None if size < t.vlf_bytes => DocumentMode::ConstrainedNormal,
+                None => DocumentMode::Vlf,
+            }
+        };
+
+        let file_exceeds_memory =
+            available_memory_bytes.map(|avail| size >= avail / 2).unwrap_or(false);
+        if file_exceeds_memory {
+            mode = DocumentMode::Vlf;
         }
+
+        mode
     }
 }
 
@@ -361,11 +372,60 @@ mod tests {
     }
 
     #[test]
-    fn line_count_above_threshold_forces_constrained_even_for_small_bytes() {
-        // 1 MiB but 500 K lines → ConstrainedNormal because lines > 300 K.
+    fn medium_file_with_mid_line_count_opens_constrained() {
+        // 10 MiB and 40 K lines -> ConstrainedNormal because file is in the
+        // constrained byte band and remains below the constrained line cap.
+        let d = policy().decide(
+            Some(10 * 1024 * 1024),
+            Some(40_000),
+            None,
+            FileLocation::Local,
+            ModeOverride::Auto,
+        );
+        assert_eq!(d, OpenDecision::Open(DocumentMode::ConstrainedNormal));
+    }
+
+    #[test]
+    fn line_count_at_vlf_threshold_forces_vlf_even_for_small_bytes() {
         let d = policy().decide(
             Some(1024 * 1024),
-            Some(500_000),
+            Some(OpenThresholds::default().vlf_lines),
+            None,
+            FileLocation::Local,
+            ModeOverride::Auto,
+        );
+        assert_eq!(d, OpenDecision::Open(DocumentMode::Vlf));
+    }
+
+    #[test]
+    fn small_line_count_does_not_keep_medium_file_normal() {
+        let d = policy().decide(
+            Some(10 * 1024 * 1024),
+            Some(20_000),
+            None,
+            FileLocation::Local,
+            ModeOverride::Auto,
+        );
+        assert_eq!(d, OpenDecision::Open(DocumentMode::ConstrainedNormal));
+    }
+
+    #[test]
+    fn high_line_count_with_small_bytes_enters_vlf() {
+        let d = policy().decide(
+            Some(1024 * 1024),
+            Some(OpenThresholds::default().vlf_lines),
+            None,
+            FileLocation::Local,
+            ModeOverride::Auto,
+        );
+        assert_eq!(d, OpenDecision::Open(DocumentMode::Vlf));
+    }
+
+    #[test]
+    fn file_with_exact_normal_line_threshold_is_constrained() {
+        let d = policy().decide(
+            Some(1024 * 1024),
+            Some(OpenThresholds::default().normal_lines),
             None,
             FileLocation::Local,
             ModeOverride::Auto,
@@ -396,10 +456,10 @@ mod tests {
     }
 
     #[test]
-    fn file_just_above_normal_threshold_opens_vlf_by_default() {
+    fn file_just_above_normal_threshold_opens_constrained_by_default() {
         let size = OpenThresholds::default().normal_bytes + 1;
         let d = policy().decide(Some(size), None, None, FileLocation::Local, ModeOverride::Auto);
-        assert_eq!(d, OpenDecision::Open(DocumentMode::Vlf));
+        assert_eq!(d, OpenDecision::Open(DocumentMode::ConstrainedNormal));
     }
 
     #[test]
@@ -407,6 +467,13 @@ mod tests {
         let size = 100 * 1024 * 1024u64;
         let d = policy().decide(Some(size), None, None, FileLocation::Local, ModeOverride::Auto);
         assert_eq!(d, OpenDecision::Open(DocumentMode::Vlf));
+    }
+
+    #[test]
+    fn file_just_below_vlf_threshold_stays_constrained() {
+        let size = OpenThresholds::default().vlf_bytes - 1;
+        let d = policy().decide(Some(size), None, None, FileLocation::Local, ModeOverride::Auto);
+        assert_eq!(d, OpenDecision::Open(DocumentMode::ConstrainedNormal));
     }
 
     #[test]
@@ -421,7 +488,7 @@ mod tests {
 
     #[test]
     fn file_using_less_than_half_memory_is_constrained_not_vlf() {
-        // Exact 20 MiB stays ConstrainedNormal; greater than 20 MiB enters VLF.
+        // Exact 8 MiB stays ConstrainedNormal when memory pressure is low.
         let size = OpenThresholds::default().normal_bytes;
         let avail = 512 * 1024 * 1024u64;
         let d =
@@ -456,7 +523,7 @@ mod tests {
     fn web_file_just_below_50mb_does_not_require_confirmation() {
         let size = OpenThresholds::default().confirm_web_bytes - 1;
         let d = policy().decide(Some(size), None, None, FileLocation::Web, ModeOverride::Auto);
-        // Above normal (20 MiB) but below confirmation (50 MiB) opens VLF.
+        // Above VLF threshold (30 MiB) but below confirmation (50 MiB) opens VLF.
         assert_eq!(d, OpenDecision::Open(DocumentMode::Vlf));
     }
 
@@ -501,6 +568,7 @@ mod tests {
             normal_bytes: 1024,
             normal_lines: 10,
             vlf_bytes: 4096,
+            vlf_lines: 20,
             confirm_local_bytes: 8192,
             confirm_remote_bytes: 2048,
             confirm_web_bytes: 2048,
@@ -511,9 +579,14 @@ mod tests {
             policy.decide(Some(500), None, None, FileLocation::Local, ModeOverride::Auto),
             OpenDecision::Open(DocumentMode::Normal)
         );
-        // 2048 bytes → ConstrainedNormal (above normal, below vlf).
+        // 2048 bytes + unknown lines → ConstrainedNormal (above normal, below vlf).
         assert_eq!(
             policy.decide(Some(2048), None, None, FileLocation::Local, ModeOverride::Auto),
+            OpenDecision::Open(DocumentMode::ConstrainedNormal)
+        );
+        // Small line count does not bypass the constrained byte band.
+        assert_eq!(
+            policy.decide(Some(2048), Some(5), None, FileLocation::Local, ModeOverride::Auto),
             OpenDecision::Open(DocumentMode::ConstrainedNormal)
         );
         // 4096 bytes → Vlf (at vlf_bytes).
