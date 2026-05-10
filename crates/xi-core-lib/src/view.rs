@@ -38,7 +38,7 @@ use crate::tabs::{BufferId, Counter, ViewId};
 use crate::vlf::search::{VlfMatchRange, VlfSearchState, VlfSearchStatus};
 use crate::width_cache::WidthCache;
 use crate::word_boundaries::WordCursor;
-use xi_rope::{Cursor, Interval, LinesMetric, Rope, RopeDelta};
+use xi_rope::{Cursor, Interval, LinesMetric, Rope, RopeDelta, RopeError};
 use xi_rpc::RequestId;
 
 /// A flag used to indicate when legacy actions should modify selections
@@ -1491,8 +1491,16 @@ impl View {
 }
 
 impl LineOffset for View {
+    fn try_offset_of_line(&self, text: &Rope, line: usize) -> Result<usize, RopeError> {
+        self.lines.try_offset_of_visual_line(text, line)
+    }
+
     fn offset_of_line(&self, text: &Rope, line: usize) -> usize {
         self.lines.offset_of_visual_line(text, line)
+    }
+
+    fn try_line_of_offset(&self, text: &Rope, offset: usize) -> Result<usize, RopeError> {
+        self.lines.try_visual_line_of_offset(text, offset)
     }
 
     fn line_of_offset(&self, text: &Rope, offset: usize) -> usize {
