@@ -33,6 +33,7 @@ use crate::line_ending::{LineEnding, LineEndingError};
 use crate::open_policy::{FileLocation, ModeOverride, OpenDecision, OpenPolicy};
 use crate::tabs::BufferId;
 use crate::text_store::DocumentMode;
+use crate::vlf::save::{SaveProgress, VlfSaveError};
 use crate::vlf::store::VlfStore;
 use crate::whitespace::{Indentation, MixedIndentError};
 
@@ -209,6 +210,7 @@ fn estimate_line_count_from_sample(sample: &[u8], file_size_bytes: u64) -> Optio
     Some(estimated.max(newline_count))
 }
 
+#[derive(Debug)]
 pub enum FileError {
     Io(io::Error, PathBuf),
     UnknownEncoding(PathBuf),
@@ -217,7 +219,7 @@ pub enum FileError {
     NonUtf8Path(PathBuf),
     /// File size could not be determined; refusing to load to avoid memory exhaustion.
     MetadataUntrusted(PathBuf),
-    /// File exceeds the hard-open confirmation threshold for its location.
+    /// File exceeds the full-memory confirmation threshold for its location.
     ///
     /// The caller must surface `reason` to the user.  If the user accepts, retry
     /// with [`FileManager::open_with_override`] passing the appropriate
@@ -461,6 +463,62 @@ impl FileManager {
         }
         Ok(())
     }
+
+    /// Save a VLF document by streaming the overlay piece sequence through a
+    /// temp file then atomically renaming over `path`.
+    ///
+    /// `on_progress` is called after each chunk is written.  Return `false`
+    /// from the callback to cancel the save before the rename commit point.
+    ///
+    /// Returns `Err(FileError::Io)` wrapping a [`VlfSaveError`] when the
+    /// overlay has not been enabled (editing was never activated) or when an
+    /// I/O failure occurs.  For successful saves, file metadata stored in
+    /// this [`FileManager`] is updated to reflect the new modification time.
+    pub fn save_vlf(
+        &mut self,
+        path: &Path,
+        store: &VlfStore,
+        id: BufferId,
+        on_progress: &mut dyn FnMut(SaveProgress) -> bool,
+    ) -> Result<(), FileError> {
+        if path.to_str().is_none() {
+            return Err(FileError::NonUtf8Path(path.to_owned()));
+        }
+
+        // Check for external modification before committing.
+        if let Some(info) = self.file_info.get(&id) {
+            if info.has_changed {
+                return Err(FileError::HasChanged(path.to_owned()));
+            }
+        }
+
+        let policy = store
+            .suggested_save_policy()
+            .unwrap_or(crate::vlf::overlay::VlfSavePolicy::TempFileRewrite { temp_dir: None });
+
+        store.stream_save(path, &policy, on_progress).map_err(|e| match e {
+            VlfSaveError::Io(io_err, err_path) => FileError::Io(io_err, err_path),
+            VlfSaveError::Cancelled => FileError::Io(
+                io::Error::new(io::ErrorKind::Interrupted, "VLF save cancelled"),
+                path.to_owned(),
+            ),
+            VlfSaveError::EditingNotEnabled => FileError::Io(
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "VLF editing not enabled; nothing to save",
+                ),
+                path.to_owned(),
+            ),
+        })?;
+
+        // Update stored file metadata to reflect the successful save.
+        if let Some(info) = self.file_info.get_mut(&id) {
+            info.mod_time = get_mod_time(path);
+            info.has_changed = false;
+        }
+
+        Ok(())
+    }
 }
 
 fn try_load_file<P>(path: P) -> Result<(Rope, FileInfo), FileError>
@@ -636,8 +694,8 @@ impl fmt::Display for FileError {
                 "File size could not be determined safely; refusing to load: {}",
                 p.display()
             ),
-            FileError::ConfirmationRequired { path, reason, .. } => {
-                write!(f, "{} ({})", reason, path.display())
+            FileError::ConfirmationRequired { path, reason, mode } => {
+                write!(f, "{}; selected mode: {:?}. File path: {}", reason, mode, path.display())
             }
         }
     }
@@ -649,14 +707,16 @@ mod tests {
 
     use xi_rpc::RemoteError;
 
+    #[cfg(all(target_family = "unix", not(feature = "notify")))]
+    use super::OpenResult;
     use super::{
         CharacterEncoding, FileError, FileOpenAnalysis, SampledIndentation, SampledLineEnding,
     };
+    use crate::text_store::DocumentMode;
 
     #[cfg(all(target_family = "unix", not(feature = "notify")))]
     #[test]
     fn open_rejects_non_utf8_path() {
-        use super::FileManager;
         use std::ffi::OsStr;
         use std::os::unix::ffi::OsStrExt;
 
@@ -698,15 +758,15 @@ mod tests {
 
     #[test]
     fn confirmation_required_has_correct_code() {
-        use crate::text_store::DocumentMode;
         use xi_rpc::RemoteErrorDetails;
         let err = FileError::ConfirmationRequired {
             path: PathBuf::from("/tmp/huge.bin"),
-            reason: "file exceeds 1 GiB",
-            mode: DocumentMode::Vlf,
+            reason: "file is too large for a full-memory open; use VLF mode or confirm normal open",
+            mode: DocumentMode::Normal,
         };
         assert_eq!(err.remote_error_code(), 10);
-        assert!(err.to_string().contains("file exceeds 1 GiB"));
+        assert!(err.to_string().contains("full-memory open"));
+        assert!(err.to_string().contains("selected mode: Normal"));
     }
 
     #[cfg(all(target_family = "unix", not(feature = "notify")))]
@@ -719,13 +779,13 @@ mod tests {
         writeln!(tmp, "hello world").unwrap();
         let path = tmp.path();
         let mut mgr = FileManager::new();
-        let rope = mgr.open(path, crate::tabs::BufferId(1)).unwrap();
-        assert!(rope.len() > 0);
+        let opened = mgr.open(path, crate::tabs::BufferId(1)).unwrap();
+        assert!(matches!(opened, OpenResult::Rope { .. }));
     }
 
     #[cfg(all(target_family = "unix", not(feature = "notify")))]
     #[test]
-    fn file_above_confirmation_threshold_requires_confirmation() {
+    fn force_normal_file_above_confirmation_threshold_requires_confirmation() {
         use super::FileManager;
         use crate::open_policy::{FileLocation, ModeOverride, OpenPolicy, OpenThresholds};
         use std::io::Write;
@@ -750,7 +810,7 @@ mod tests {
             tmp.path(),
             crate::tabs::BufferId(2),
             FileLocation::Local,
-            ModeOverride::Auto,
+            ModeOverride::ForceNormal,
         );
         assert!(
             matches!(result, Err(FileError::ConfirmationRequired { .. })),

@@ -26,8 +26,8 @@
 //! | **ConstrainedNormal** | size in [8, 30) MiB and line count < 50 K           |
 //! | **Vlf**               | size >= 30 MiB, line count >= 50 K, or too big RAM  |
 //!
-//! Hard confirmation thresholds require explicit user acknowledgement before
-//! the file is opened at all:
+//! Hard confirmation thresholds require explicit user acknowledgement before a
+//! full-memory Normal or ConstrainedNormal open:
 //!
 //! | Location | Default threshold |
 //! |----------|-------------------|
@@ -36,8 +36,9 @@
 //! | Web / unknown | 50 MB        |
 //!
 //! Files that exceed the confirmation threshold return
-//! [`OpenDecision::ConfirmationRequired`]; callers must surface this to the
-//! user and re-invoke with the appropriate [`ModeOverride`] after they accept.
+//! [`OpenDecision::ConfirmationRequired`] only when the selected mode would
+//! keep the whole document in memory. VLF opens are paged and do not use this
+//! confirmation gate.
 //!
 //! # Fail-closed rule
 //!
@@ -83,8 +84,8 @@ pub enum ModeOverride {
     /// Open in Normal mode even if the file is above the normal threshold.
     ///
     /// Only safe when the caller has already confirmed that the file fits in
-    /// RAM.  The policy still rejects files above the confirmation threshold
-    /// regardless of this override.
+    /// RAM. The policy still requires confirmation for files above the
+    /// full-memory confirmation threshold.
     ForceNormal,
     /// Open in VLF mode even if the file is below the normal threshold.
     ///
@@ -136,20 +137,21 @@ pub struct OpenThresholds {
     /// Default: 50 000.
     pub vlf_lines: u64,
 
-    /// Hard-open confirmation threshold for **local** files.
+    /// Full-memory confirmation threshold for **local** files.
     ///
-    /// Files at or above this size require explicit user confirmation before
-    /// any data is read.
+    /// Normal/ConstrainedNormal files at or above this size require explicit
+    /// user confirmation before any data is read. VLF files are paged and do
+    /// not use this threshold.
     ///
     /// Default: 1 GiB.
     pub confirm_local_bytes: u64,
 
-    /// Hard-open confirmation threshold for **remote** files.
+    /// Full-memory confirmation threshold for **remote** files.
     ///
     /// Default: 10 MiB.
     pub confirm_remote_bytes: u64,
 
-    /// Hard-open confirmation threshold for **web / unknown** files.
+    /// Full-memory confirmation threshold for **web / unknown** files.
     ///
     /// Default: 50 MiB.
     pub confirm_web_bytes: u64,
@@ -278,18 +280,20 @@ impl OpenPolicy {
             ModeOverride::ForceVlf => DocumentMode::Vlf,
         };
 
-        // Check hard confirmation threshold.
+        // Check hard confirmation threshold only for modes that load the whole
+        // file into memory. VLF opens use bounded paging, so blocking a 2 GiB
+        // local VLF file here is both misleading and unnecessary.
         let confirm_threshold = self.thresholds.confirm_bytes_for(location);
-        if size >= confirm_threshold {
+        if chosen_mode != DocumentMode::Vlf && size >= confirm_threshold {
             let reason = match location {
                 FileLocation::Local => {
-                    "file exceeds 1 GiB; open anyway? (this may exhaust available memory)"
+                    "file is too large for a full-memory open; use VLF mode or confirm normal open"
                 }
                 FileLocation::Remote => {
-                    "remote file exceeds 10 MiB; open anyway? (large remote reads may stall)"
+                    "remote file is too large for a full-memory open; use VLF mode or confirm normal open"
                 }
                 FileLocation::Web => {
-                    "web/unknown file exceeds 50 MiB; open anyway? (may exhaust memory)"
+                    "web/unknown file is too large for a full-memory open; use VLF mode or confirm normal open"
                 }
             };
             return OpenDecision::ConfirmationRequired { reason, mode: chosen_mode };
@@ -499,24 +503,27 @@ mod tests {
     // --- Confirmation thresholds ---
 
     #[test]
-    fn local_file_above_1gb_requires_confirmation() {
+    fn local_file_above_1gb_opens_vlf_without_confirmation() {
         let size = OpenThresholds::default().confirm_local_bytes;
         let d = policy().decide(Some(size), None, None, FileLocation::Local, ModeOverride::Auto);
-        assert!(matches!(d, OpenDecision::ConfirmationRequired { mode: DocumentMode::Vlf, .. }));
+        assert_eq!(d, OpenDecision::Open(DocumentMode::Vlf));
     }
 
     #[test]
-    fn remote_file_above_10mb_requires_confirmation() {
+    fn remote_constrained_file_above_10mb_requires_confirmation() {
         let size = OpenThresholds::default().confirm_remote_bytes;
         let d = policy().decide(Some(size), None, None, FileLocation::Remote, ModeOverride::Auto);
-        assert!(matches!(d, OpenDecision::ConfirmationRequired { .. }));
+        assert!(matches!(
+            d,
+            OpenDecision::ConfirmationRequired { mode: DocumentMode::ConstrainedNormal, .. }
+        ));
     }
 
     #[test]
-    fn web_file_above_50mb_requires_confirmation() {
+    fn web_vlf_file_above_50mb_opens_without_confirmation() {
         let size = OpenThresholds::default().confirm_web_bytes;
         let d = policy().decide(Some(size), None, None, FileLocation::Web, ModeOverride::Auto);
-        assert!(matches!(d, OpenDecision::ConfirmationRequired { .. }));
+        assert_eq!(d, OpenDecision::Open(DocumentMode::Vlf));
     }
 
     #[test]
@@ -555,7 +562,7 @@ mod tests {
 
     #[test]
     fn force_normal_still_requires_confirmation_above_hard_threshold() {
-        // ForceNormal does not bypass the confirmation gate.
+        // ForceNormal selects the full-memory path, so it still needs confirmation.
         let size = OpenThresholds::default().confirm_local_bytes;
         let d =
             policy().decide(Some(size), None, None, FileLocation::Local, ModeOverride::ForceNormal);
@@ -594,11 +601,11 @@ mod tests {
             policy.decide(Some(4096), None, None, FileLocation::Local, ModeOverride::Auto),
             OpenDecision::Open(DocumentMode::Vlf)
         );
-        // 8192 bytes local → ConfirmationRequired (at confirm_local_bytes).
-        assert!(matches!(
+        // 8192 bytes local → Vlf without confirmation because VLF is paged.
+        assert_eq!(
             policy.decide(Some(8192), None, None, FileLocation::Local, ModeOverride::Auto),
-            OpenDecision::ConfirmationRequired { .. }
-        ));
+            OpenDecision::Open(DocumentMode::Vlf)
+        );
     }
 
     #[test]

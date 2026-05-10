@@ -360,6 +360,30 @@ impl FilePager {
         self.cache.borrow().metrics()
     }
 
+    /// Read raw bytes for `range` bypassing the LRU cache and generation check.
+    ///
+    /// Use this **only** from the save path.  Render and viewport reads must
+    /// go through [`Self::read_at`] so they respect cancellation.
+    ///
+    /// Reads directly from the underlying file with positioned I/O so that a
+    /// concurrent viewport read (which may hold an older cancellation generation)
+    /// is not affected.
+    pub fn read_for_save(&self, range: ByteRange) -> io::Result<Vec<u8>> {
+        let start = range.start.0;
+        let end = range.end.0;
+        let len = end.saturating_sub(start);
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        if end > self.file_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("save read end {end} exceeds file_size {}", self.file_size),
+            ));
+        }
+        pread_exact(&self.file, start, len as usize)
+    }
+
     // ------------------------------------------------------------------
     // Internal helpers
     // ------------------------------------------------------------------

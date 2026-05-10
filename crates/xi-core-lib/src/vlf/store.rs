@@ -57,6 +57,9 @@ use crate::text_store::{
 
 use super::page_index::{PageDescriptor, PageIndex, ScanState};
 use super::pager::{CancelGeneration, DEFAULT_CACHE_BYTE_CAP, FilePager, pread_exact};
+use crate::vlf::overlay::{
+    OverlayEditContext, OverlayLimits, PieceOverlay, TextMetrics, VlfSavePolicy,
+};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -108,6 +111,40 @@ impl Default for VlfMemoryBudget {
 }
 
 // ---------------------------------------------------------------------------
+// VlfEditError
+// ---------------------------------------------------------------------------
+
+/// Errors returned by VLF edit operations ([`VlfStore::apply_insert`] /
+/// [`VlfStore::apply_delete`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VlfEditError {
+    /// [`VlfStore::enable_editing`] has not been called yet.
+    EditingNotEnabled,
+    /// The underlying overlay operation failed.
+    Overlay(crate::vlf::overlay::OverlayError),
+}
+
+impl std::fmt::Display for VlfEditError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VlfEditError::EditingNotEnabled => {
+                write!(f, "VLF editing not enabled; call enable_editing() first")
+            }
+            VlfEditError::Overlay(e) => write!(f, "overlay error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for VlfEditError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            VlfEditError::Overlay(e) => Some(e),
+            VlfEditError::EditingNotEnabled => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // VlfMemoryStats
 // ---------------------------------------------------------------------------
 
@@ -117,7 +154,7 @@ impl Default for VlfMemoryBudget {
 /// regression tests instead of relying on OS-level RSS sampling, which is
 /// unreliable in unit tests.
 ///
-/// In the read-only first milestone `peak_overlay_bytes` is always 0.
+/// Overlay bytes are tracked in `peak_overlay_bytes` after editing is enabled.
 #[derive(Debug, Clone, Default)]
 pub struct VlfMemoryStats {
     /// Peak raw-page bytes held in the [`FilePager`] LRU cache.
@@ -126,7 +163,8 @@ pub struct VlfMemoryStats {
     pub peak_decoded_bytes: u64,
     /// Approximate descriptor bytes: `size_of::<PageDescriptor>() × descriptor_count`.
     pub descriptor_bytes: u64,
-    /// Peak overlay bytes (always 0 in the read-only milestone).
+    /// Peak overlay bytes (insert buffers + piece metadata); 0 until editing
+    /// is enabled via [`VlfStore::enable_editing`].
     pub peak_overlay_bytes: u64,
     /// Cumulative raw bytes read from the pager before the first
     /// [`VlfStore::set_viewport`] call.  Useful for diagnosing how many bytes
@@ -305,8 +343,7 @@ pub struct VlfViewportState {
     /// Original encoded byte length of the window before seam expansion
     /// (`window_end.0 - window_start.0`).
     pub original_encoded_len: u64,
-    /// Whether the window has unsaved overlay changes (always `false` in the
-    /// read-only milestone).
+    /// Whether the window has unsaved overlay changes.
     pub dirty: bool,
     /// Number of bytes fetched per read batch.  Configurable and later
     /// auto-tunable from observed read/decode timing.
@@ -371,6 +408,15 @@ pub struct VlfStore {
     /// Ensures that `known_line_count` returns an `Approximate` value that
     /// never decreases as more pages are scanned, keeping the status bar stable.
     approx_line_floor: Cell<u64>,
+    /// Sparse piece-based edit overlay.
+    ///
+    /// `None` in the read-only first milestone.  Becomes `Some` when
+    /// [`VlfStore::enable_editing`] is called, which also changes
+    /// [`TextStore::edit_permission`] from `Forbidden` to `Allowed`.
+    ///
+    /// The base file is never converted to a `Rope`; the overlay keeps
+    /// only piece descriptors and append-only insert buffers in memory.
+    overlay: RefCell<Option<PieceOverlay>>,
 }
 
 impl VlfStore {
@@ -399,6 +445,7 @@ impl VlfStore {
             scan_rx: RefCell::new(None),
             bg_cancel: Arc::new(AtomicBool::new(false)),
             approx_line_floor: Cell::new(0),
+            overlay: RefCell::new(None),
         })
     }
 
@@ -422,12 +469,155 @@ impl VlfStore {
             scan_rx: RefCell::new(None),
             bg_cancel: Arc::new(AtomicBool::new(false)),
             approx_line_floor: Cell::new(0),
+            overlay: RefCell::new(None),
         })
     }
 
     // ------------------------------------------------------------------
-    // Viewport state
+    // Overlay edit API
     // ------------------------------------------------------------------
+
+    /// Enable editing mode for this VLF document.
+    ///
+    /// Initialises the [`PieceOverlay`] with the current file size and metrics.
+    /// After this call, [`TextStore::edit_permission`] returns `Allowed` and
+    /// [`Self::apply_insert`] / [`Self::apply_delete`] can be used to record
+    /// edits.
+    ///
+    /// The base file is **never** loaded into a `Rope`; the overlay holds only
+    /// piece descriptors and append-only insert buffers.
+    ///
+    /// Calling this more than once is a no-op (the existing overlay is kept).
+    pub fn enable_editing(&self) {
+        let mut ov = self.overlay.borrow_mut();
+        if ov.is_some() {
+            return;
+        }
+        let file_size = self.pager.file_size();
+        // Use byte_len from file size; newline_count is approximate (we don't
+        // scan the whole file here).  The overlay accumulates exact counts for
+        // inserted pieces; Original piece newline counts stay approximate until
+        // the page index fills in.
+        let metrics = TextMetrics { byte_len: file_size, ..TextMetrics::default() };
+        *ov = Some(PieceOverlay::with_limits(metrics, OverlayLimits::default()));
+    }
+
+    /// Enable editing mode with explicit resource limits.
+    ///
+    /// Use in tests or when the default [`OverlayLimits`] need to be tuned for
+    /// a specific deployment.
+    pub fn enable_editing_with_limits(&self, limits: OverlayLimits) {
+        let mut ov = self.overlay.borrow_mut();
+        if ov.is_some() {
+            return;
+        }
+        let file_size = self.pager.file_size();
+        let metrics = TextMetrics { byte_len: file_size, ..TextMetrics::default() };
+        *ov = Some(PieceOverlay::with_limits(metrics, limits));
+    }
+
+    /// Insert `text` at logical byte offset `at`, recording the edit in the
+    /// overlay under `ctx`'s undo group.
+    ///
+    /// Returns `Err` when editing is not enabled (call [`Self::enable_editing`]
+    /// first), when `at` is out of range, or when an overlay resource limit is
+    /// reached.
+    ///
+    /// # Invariant
+    ///
+    /// The base file is never converted to a `Rope`.  Inserted bytes live
+    /// exclusively in the overlay's append-only insert buffers.
+    pub fn apply_insert(
+        &self,
+        at: u64,
+        text: &str,
+        ctx: OverlayEditContext,
+    ) -> Result<(), VlfEditError> {
+        let mut ov = self.overlay.borrow_mut();
+        let overlay = ov.as_mut().ok_or(VlfEditError::EditingNotEnabled)?;
+        overlay.insert_in_group(at, text, ctx).map_err(VlfEditError::Overlay)?;
+        // Update peak overlay bytes tracking.
+        let overlay_bytes = overlay.overlay_bytes();
+        drop(ov);
+        let mut stats = self.stats.borrow_mut();
+        if overlay_bytes > stats.peak_overlay_bytes {
+            stats.peak_overlay_bytes = overlay_bytes;
+        }
+        Ok(())
+    }
+
+    /// Delete bytes `[range.start, range.end)` from the logical document,
+    /// recording the edit in the overlay under `ctx`'s undo group.
+    ///
+    /// Returns `Err` when editing is not enabled or when the range is out of
+    /// bounds.
+    pub fn apply_delete(
+        &self,
+        range: crate::text_store::ByteRange,
+        ctx: OverlayEditContext,
+    ) -> Result<(), VlfEditError> {
+        let mut ov = self.overlay.borrow_mut();
+        let overlay = ov.as_mut().ok_or(VlfEditError::EditingNotEnabled)?;
+        overlay.delete_in_group(range, ctx).map_err(VlfEditError::Overlay)?;
+        Ok(())
+    }
+
+    /// Suggested save policy given the current overlay state.
+    ///
+    /// Always returns a streaming strategy; never in-place mutation.  See
+    /// [`VlfSavePolicy`] for details.  Returns `None` when editing is not
+    /// enabled (no overlay changes to save).
+    pub fn suggested_save_policy(&self) -> Option<VlfSavePolicy> {
+        self.overlay.borrow().as_ref().map(|ov| ov.suggested_save_policy())
+    }
+
+    /// Signed byte delta of the current overlay relative to the original file.
+    ///
+    /// Returns `0` when editing has not been enabled.
+    pub fn signed_byte_delta(&self) -> i64 {
+        self.overlay.borrow().as_ref().map_or(0, |ov| ov.signed_byte_delta())
+    }
+
+    /// Stream the current overlay piece sequence to `dest` using the temp-file
+    /// then atomic-rename durability strategy.
+    ///
+    /// # Parameters
+    ///
+    /// - `dest`        — Final destination path (overwritten atomically).
+    /// - `policy`      — Determines temp-dir placement and save-as semantics.
+    ///   Use [`Self::suggested_save_policy`] to get a policy recommendation
+    ///   based on the current overlay.
+    /// - `on_progress` — Called after each chunk is written.  Return `false`
+    ///   to cancel **before** the rename commit point.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VlfSaveError::EditingNotEnabled`] when [`Self::enable_editing`]
+    /// has not been called (no overlay to save).  For an unmodified read-only
+    /// VLF file the original file on disk already reflects the correct content.
+    ///
+    /// # Cancellation after commit
+    ///
+    /// Once the rename succeeds the file is durably committed.  `on_progress`
+    /// is never called after the rename, so there is no way to cancel a
+    /// completed save.  Callers should treat `Ok(())` as unconditional success.
+    pub fn stream_save(
+        &self,
+        dest: &std::path::Path,
+        policy: &crate::vlf::overlay::VlfSavePolicy,
+        on_progress: &mut dyn FnMut(crate::vlf::save::SaveProgress) -> bool,
+    ) -> Result<(), crate::vlf::save::VlfSaveError> {
+        let ov = self.overlay.borrow();
+        let overlay = ov.as_ref().ok_or(crate::vlf::save::VlfSaveError::EditingNotEnabled)?;
+        crate::vlf::save::stream_save_pieces(
+            overlay.pieces(),
+            overlay,
+            &self.pager,
+            dest,
+            policy,
+            on_progress,
+        )
+    }
 
     /// Update the active viewport window.
     ///
@@ -1299,10 +1489,14 @@ impl TextStore for VlfStore {
     }
 
     fn edit_permission(&self) -> EditPermission {
-        // First VLF milestone is read-only.  Copy, search, and navigation
-        // remain available through TextStore chunk APIs.
-        EditPermission::Forbidden {
-            reason: "VLF mode is read-only; copy, search, and navigation remain available",
+        // When an overlay is active (editing enabled), edits are permitted.
+        // Before enable_editing() is called the store remains read-only.
+        if self.overlay.borrow().is_some() {
+            EditPermission::Allowed
+        } else {
+            EditPermission::Forbidden {
+                reason: "VLF mode is read-only; copy, search, and navigation remain available",
+            }
         }
     }
 
@@ -2001,6 +2195,7 @@ mod tests {
             scan_rx: RefCell::new(None),
             bg_cancel: Arc::new(AtomicBool::new(false)),
             approx_line_floor: Cell::new(0),
+            overlay: RefCell::new(None),
         };
 
         // Prime a background entry at [3,6) (before viewport is set).
@@ -2395,5 +2590,145 @@ mod tests {
             // Exact is authoritative; no floor assertion needed.
             KnownLineCount::Exact(_) | KnownLineCount::Unknown => {}
         }
+    }
+
+    // ---- Overlay edit API --------------------------------------------------
+
+    #[test]
+    fn edit_permission_forbidden_before_enable_editing() {
+        let content = b"hello world";
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content).unwrap();
+        f.flush().unwrap();
+
+        let store = VlfStore::open(f.path()).unwrap();
+        assert!(
+            matches!(store.edit_permission(), EditPermission::Forbidden { .. }),
+            "should be Forbidden before enable_editing"
+        );
+    }
+
+    #[test]
+    fn edit_permission_allowed_after_enable_editing() {
+        let content = b"hello world";
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content).unwrap();
+        f.flush().unwrap();
+
+        let store = VlfStore::open(f.path()).unwrap();
+        store.enable_editing();
+        assert!(
+            matches!(store.edit_permission(), EditPermission::Allowed),
+            "should be Allowed after enable_editing"
+        );
+    }
+
+    #[test]
+    fn apply_insert_without_enable_editing_returns_error() {
+        use crate::vlf::overlay::OverlayEditContext;
+        let content = b"hello";
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content).unwrap();
+        f.flush().unwrap();
+
+        let store = VlfStore::open(f.path()).unwrap();
+        let ctx = OverlayEditContext { revision_id: 1, undo_group: 1 };
+        let err = store.apply_insert(5, " world", ctx).unwrap_err();
+        assert!(
+            matches!(err, VlfEditError::EditingNotEnabled),
+            "expected EditingNotEnabled, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn apply_insert_after_enable_editing_succeeds() {
+        use crate::vlf::overlay::OverlayEditContext;
+        let content = b"hello";
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content).unwrap();
+        f.flush().unwrap();
+
+        let store = VlfStore::open(f.path()).unwrap();
+        store.enable_editing();
+        let ctx = OverlayEditContext { revision_id: 1, undo_group: 1 };
+        store.apply_insert(5, " world", ctx).unwrap();
+        // signed_byte_delta should reflect the 6 inserted bytes.
+        assert_eq!(store.signed_byte_delta(), 6);
+    }
+
+    #[test]
+    fn apply_delete_after_enable_editing_succeeds() {
+        use crate::vlf::overlay::OverlayEditContext;
+        let content = b"hello world";
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content).unwrap();
+        f.flush().unwrap();
+
+        let store = VlfStore::open(f.path()).unwrap();
+        store.enable_editing();
+        let ctx = OverlayEditContext { revision_id: 1, undo_group: 1 };
+        use crate::text_store::ByteRange;
+        store.apply_delete(ByteRange::new(5, 11), ctx).unwrap();
+        assert_eq!(store.signed_byte_delta(), -6);
+    }
+
+    #[test]
+    fn suggested_save_policy_none_before_enable_editing() {
+        let content = b"hello";
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content).unwrap();
+        f.flush().unwrap();
+
+        let store = VlfStore::open(f.path()).unwrap();
+        assert!(store.suggested_save_policy().is_none(), "no policy before editing");
+    }
+
+    #[test]
+    fn suggested_save_policy_temp_rewrite_after_small_insert() {
+        use crate::vlf::overlay::OverlayEditContext;
+        let content = b"hello";
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content).unwrap();
+        f.flush().unwrap();
+
+        let store = VlfStore::open(f.path()).unwrap();
+        store.enable_editing();
+        let ctx = OverlayEditContext { revision_id: 1, undo_group: 1 };
+        store.apply_insert(5, " world", ctx).unwrap();
+        assert!(
+            matches!(
+                store.suggested_save_policy(),
+                Some(crate::vlf::overlay::VlfSavePolicy::TempFileRewrite { .. })
+            ),
+            "small insert should suggest TempFileRewrite"
+        );
+    }
+
+    #[test]
+    fn enable_editing_called_twice_is_noop() {
+        let content = b"hello world";
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content).unwrap();
+        f.flush().unwrap();
+
+        let store = VlfStore::open(f.path()).unwrap();
+        store.enable_editing();
+        store.enable_editing(); // second call must not panic or reset overlay
+        assert!(matches!(store.edit_permission(), EditPermission::Allowed));
+    }
+
+    #[test]
+    fn peak_overlay_bytes_tracked_after_insert() {
+        use crate::vlf::overlay::OverlayEditContext;
+        let content = b"hello";
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content).unwrap();
+        f.flush().unwrap();
+
+        let store = VlfStore::open(f.path()).unwrap();
+        store.enable_editing();
+        let ctx = OverlayEditContext { revision_id: 1, undo_group: 1 };
+        store.apply_insert(5, " world", ctx).unwrap();
+        assert!(store.memory_stats().peak_overlay_bytes > 0, "overlay bytes should be > 0");
     }
 }
