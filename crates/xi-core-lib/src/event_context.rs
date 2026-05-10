@@ -76,6 +76,71 @@ struct VlfViewportResponse {
     index_progress: f64,
 }
 
+fn vlf_exact_line_byte(store: &dyn TextStore, line: u64) -> Result<ByteOffset, LineLookup> {
+    match store.line_to_byte(LogicalLine(line)) {
+        LineLookup::Exact(byte) => Ok(byte),
+        lookup => Err(lookup),
+    }
+}
+
+fn vlf_exact_logical_line_count(store: &crate::vlf::store::VlfStore) -> Option<u64> {
+    store.exact_logical_line_count_streaming().ok()
+}
+
+fn vlf_read_text_range(store: &dyn TextStore, range: ByteRange) -> Option<(String, ByteRange)> {
+    if let TextChunkResult::Ready(chunk) = store.read_byte_range(range) {
+        return Some((chunk.text, chunk.byte_range));
+    }
+
+    let mut text = String::new();
+    let mut decoded_start = None;
+    let mut decoded_end = range.start;
+    for result in store.iter_chunks(range) {
+        let TextChunkResult::Ready(chunk) = result else {
+            return None;
+        };
+        decoded_start.get_or_insert(chunk.byte_range.start);
+        decoded_end = chunk.byte_range.end;
+        text.push_str(&chunk.text);
+    }
+
+    Some((text, ByteRange { start: decoded_start.unwrap_or(range.start), end: decoded_end }))
+}
+
+fn vlf_tail_lines_for_range(
+    store: &dyn TextStore,
+    requested_line_start: u64,
+    requested_count: usize,
+    exact_line_count: u64,
+) -> Option<(u64, Vec<String>)> {
+    let tail_len = (256 * 1024).min(store.len_bytes());
+    let tail_start = ByteOffset(store.len_bytes().saturating_sub(tail_len));
+    let tail_end = ByteOffset(store.len_bytes());
+    let (tail_text, tail_byte_range) =
+        vlf_read_text_range(store, ByteRange { start: tail_start, end: tail_end })?;
+
+    let mut tail_lines = tail_text.split('\n').map(str::to_owned).collect::<Vec<_>>();
+    if tail_byte_range.start.0 > 0 && !tail_lines.is_empty() {
+        tail_lines.remove(0);
+    }
+
+    let tail_line_start = exact_line_count.saturating_sub(tail_lines.len() as u64);
+    let response_line_start = requested_line_start.max(tail_line_start);
+    let requested_line_end =
+        requested_line_start.saturating_add(requested_count as u64).min(exact_line_count);
+    if response_line_start >= requested_line_end {
+        return None;
+    }
+
+    let start_idx = usize::try_from(response_line_start.saturating_sub(tail_line_start)).ok()?;
+    let end_idx = usize::try_from(requested_line_end.saturating_sub(tail_line_start)).ok()?;
+    if start_idx >= tail_lines.len() || end_idx > tail_lines.len() || start_idx >= end_idx {
+        return None;
+    }
+
+    Some((response_line_start, tail_lines[start_idx..end_idx].to_vec()))
+}
+
 /// A collection of all the state relevant for handling a particular event.
 ///
 /// This is created dynamically for each event that arrives to the core,
@@ -507,32 +572,18 @@ impl<'a> EventContext<'a> {
                         index_progress,
                     });
                 }
-                let tail_len = (256 * 1024).min(store.len_bytes());
-                let tail_start = ByteOffset(store.len_bytes().saturating_sub(tail_len));
-                let tail_end = ByteOffset(store.len_bytes());
-                if let TextChunkResult::Ready(chunk) =
-                    store.read_byte_range(ByteRange { start: tail_start, end: tail_end })
-                {
-                    let mut lines = chunk.text.split('\n').map(str::to_owned).collect::<Vec<_>>();
-                    if chunk.byte_range.start.0 == 0 {
-                        approximate_line_count =
-                            chunk.text.as_bytes().iter().filter(|&&b| b == b'\n').count() as u64
-                                + 1;
-                        line_count_exact = true;
-                    }
-                    if chunk.byte_range.start.0 > 0
-                        && !chunk.text.starts_with('\n')
-                        && !lines.is_empty()
-                    {
-                        lines.remove(0);
-                    }
-                    if lines.len() > requested_count {
-                        let keep_from = lines.len() - requested_count;
-                        lines.drain(0..keep_from);
-                    }
-                    approximate_line_count = approximate_line_count.max(lines.len() as u64);
-                    let response_line_start =
-                        approximate_line_count.saturating_sub(lines.len() as u64);
+                if let Some(exact_count) = vlf_exact_logical_line_count(vlf_store) {
+                    approximate_line_count = exact_count;
+                    line_count_exact = true;
+                }
+                let requested_line_start =
+                    approximate_line_count.saturating_sub(requested_count as u64);
+                if let Some((response_line_start, lines)) = vlf_tail_lines_for_range(
+                    store,
+                    requested_line_start,
+                    requested_count,
+                    approximate_line_count,
+                ) {
                     let syntax_spans = self.vlf_visible_syntax_spans(&lines);
                     return Some(VlfViewportResponse {
                         line_start: response_line_start,
@@ -575,29 +626,40 @@ impl<'a> EventContext<'a> {
                 }
             }
 
+            if line_count_exact
+                && store.len_bytes() > 0
+                && let Some((response_line_start, lines)) = vlf_tail_lines_for_range(
+                    store,
+                    line_start,
+                    requested_count,
+                    approximate_line_count,
+                )
+            {
+                let syntax_spans = self.vlf_visible_syntax_spans(&lines);
+                return Some(VlfViewportResponse {
+                    line_start: response_line_start,
+                    lines,
+                    syntax_spans,
+                    approximate_line_count,
+                    line_count_exact,
+                    index_progress,
+                });
+            }
+
             if !line_count_exact
                 && line_end.saturating_add(1) >= approximate_line_count
                 && store.len_bytes() > 0
             {
-                let tail_len = (256 * 1024).min(store.len_bytes());
-                let tail_start = ByteOffset(store.len_bytes().saturating_sub(tail_len));
-                let tail_end = ByteOffset(store.len_bytes());
-                if let TextChunkResult::Ready(chunk) =
-                    store.read_byte_range(ByteRange { start: tail_start, end: tail_end })
-                {
-                    let mut lines = chunk.text.split('\n').map(str::to_owned).collect::<Vec<_>>();
-                    if chunk.byte_range.start.0 > 0
-                        && !chunk.text.starts_with('\n')
-                        && !lines.is_empty()
-                    {
-                        lines.remove(0);
-                    }
-                    if lines.len() > requested_count {
-                        let keep_from = lines.len() - requested_count;
-                        lines.drain(0..keep_from);
-                    }
-                    let response_line_start =
-                        approximate_line_count.saturating_sub(lines.len() as u64);
+                if let Some(exact_count) = vlf_exact_logical_line_count(vlf_store) {
+                    approximate_line_count = exact_count;
+                    line_count_exact = true;
+                }
+                if let Some((response_line_start, lines)) = vlf_tail_lines_for_range(
+                    store,
+                    line_start,
+                    requested_count,
+                    approximate_line_count,
+                ) {
                     let syntax_spans = self.vlf_visible_syntax_spans(&lines);
                     return Some(VlfViewportResponse {
                         line_start: response_line_start,
@@ -611,10 +673,10 @@ impl<'a> EventContext<'a> {
             }
 
             // Resolve line_start → byte offset.
-            let byte_start = match store.line_to_byte(LogicalLine(line_start)) {
-                LineLookup::Exact(b) | LineLookup::Approximate(b) => b,
+            let byte_start = match vlf_exact_line_byte(store, line_start) {
+                Ok(b) => b,
                 // Index not ready; signal TUI to retry on next repaint.
-                LineLookup::Pending | LineLookup::OutOfRange => {
+                Err(_) => {
                     return Some(VlfViewportResponse {
                         line_start,
                         lines: Vec::new(),
@@ -628,10 +690,10 @@ impl<'a> EventContext<'a> {
 
             // Resolve the first byte past the last requested line.
             let byte_end = match store.line_to_byte(LogicalLine(line_end + 1)) {
-                LineLookup::Exact(b) | LineLookup::Approximate(b) => b,
+                LineLookup::Exact(b) => b,
                 LineLookup::OutOfRange => ByteOffset(store.len_bytes()),
                 // Approximate: read up to 64 KiB past the start.
-                LineLookup::Pending => {
+                LineLookup::Approximate(_) | LineLookup::Pending => {
                     ByteOffset(byte_start.0.saturating_add(64 * 1024).min(store.len_bytes()))
                 }
             };
@@ -2788,8 +2850,10 @@ mod tests {
     use crate::tabs::BufferId;
     use crate::text_store::DocumentMode;
     use serde_json::Value;
+    use std::io::Write;
     use std::mem;
     use std::sync::{Arc, Mutex};
+    use tempfile::NamedTempFile;
     use xi_rope::Interval;
     use xi_rope::spans::SpansBuilder;
     use xi_rpc::{Callback, Error as RpcError, Peer, RequestId};
@@ -2939,6 +3003,32 @@ mod tests {
                 weak_core: &self.core_ref,
             }
         }
+    }
+
+    fn vlf_store_from(content: &[u8], page_size: u64) -> (crate::vlf::store::VlfStore, NamedTempFile) {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(content).unwrap();
+        file.flush().unwrap();
+        let store = crate::vlf::store::VlfStore::open_with_config(file.path(), page_size, 1024 * 1024).unwrap();
+        (store, file)
+    }
+
+    #[test]
+    fn vlf_viewport_refuses_approximate_line_anchor() {
+        let (store, _file) = vlf_store_from(b"a\nb\nc\nd\ne", 4);
+        store.scan_page_at(0).unwrap();
+
+        assert!(matches!(store.line_to_byte(LogicalLine(4)), LineLookup::Approximate(_)));
+        assert!(matches!(vlf_exact_line_byte(&store, 4), Err(LineLookup::Approximate(_))));
+    }
+
+    #[test]
+    fn vlf_tail_count_uses_exact_logical_line_count() {
+        let (store, _file) = vlf_store_from(b"alpha\nbeta\ngamma", 8);
+        assert_eq!(vlf_exact_logical_line_count(&store), Some(3));
+
+        let (store, _file) = vlf_store_from(b"alpha\nbeta\n", 8);
+        assert_eq!(vlf_exact_logical_line_count(&store), Some(3));
     }
 
     #[test]
@@ -4633,8 +4723,6 @@ mod tests {
 
     // ── VLF viewport tests ─────────────────────────────────────────────────
 
-    use std::io::Write;
-    use tempfile::NamedTempFile;
     use crate::rpc::SelectionModifier;
     use crate::vlf::store::VlfStore;
 
@@ -4796,7 +4884,7 @@ mod tests {
     }
 
     #[test]
-    fn vlf_viewport_tail_sentinel_does_not_count_whole_file() {
+    fn vlf_viewport_tail_sentinel_reports_exact_line_count() {
         let content = (0..40_000).map(|i| format!("line {i}\n")).collect::<String>();
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(content.as_bytes()).unwrap();
@@ -4821,8 +4909,44 @@ mod tests {
             .expect("expected vlf_chunks notification");
 
         assert_eq!(params["generation"], 10u64);
-        assert!(!params["line_count_exact"].as_bool().unwrap());
-        assert_eq!(params["approximate_line_count"], 104u64);
+        assert!(params["line_count_exact"].as_bool().unwrap());
+        assert_eq!(params["approximate_line_count"], 40_001u64);
+        assert_eq!(params["line_start"], 39_996u64);
+    }
+
+    #[test]
+    fn vlf_viewport_near_tail_scroll_up_uses_tail_bytes_without_index() {
+        let content = (0..40_000).map(|i| format!("line {i}\n")).collect::<String>();
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.flush().unwrap();
+        let store = VlfStore::open_with_config(f.path(), 4096, 1024 * 1024).unwrap();
+
+        let harness = ContextHarness::new("");
+        *harness.editor.borrow_mut() = Editor::with_vlf_store(store);
+        harness.take_notifications();
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::VlfViewport {
+            line_start: u64::MAX,
+            line_end: 4,
+            generation: 10,
+        });
+        harness.take_notifications();
+
+        ctx.do_edit(EditNotification::VlfViewport { line_start: 39_980, line_end: 40_000, generation: 11 });
+
+        let notifications = harness.take_notifications();
+        let (_, params) = notifications
+            .iter()
+            .find(|(m, _)| m == "vlf_chunks")
+            .expect("expected vlf_chunks notification");
+        let lines = params["lines"].as_array().expect("lines must be array");
+
+        assert_eq!(params["generation"], 11u64);
+        assert!(params["line_count_exact"].as_bool().unwrap());
+        assert_eq!(params["line_start"], 39_980u64);
+        assert!(lines.iter().any(|line| line.as_str() == Some("line 39980")));
     }
 
     #[test]

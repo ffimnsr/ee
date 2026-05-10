@@ -421,6 +421,8 @@ pub struct VlfStore {
     /// Ensures that `known_line_count` returns an `Approximate` value that
     /// never decreases as more pages are scanned, keeping the status bar stable.
     approx_line_floor: Cell<u64>,
+    /// Exact logical line count once a streaming count or full index has established it.
+    exact_line_count: Cell<Option<u64>>,
     /// Sparse piece-based edit overlay.
     ///
     /// `None` in the read-only first milestone.  Becomes `Some` when
@@ -458,6 +460,7 @@ impl VlfStore {
             scan_rx: RefCell::new(None),
             bg_cancel: Arc::new(AtomicBool::new(false)),
             approx_line_floor: Cell::new(0),
+            exact_line_count: Cell::new(None),
             overlay: RefCell::new(None),
         })
     }
@@ -482,6 +485,7 @@ impl VlfStore {
             scan_rx: RefCell::new(None),
             bg_cancel: Arc::new(AtomicBool::new(false)),
             approx_line_floor: Cell::new(0),
+            exact_line_count: Cell::new(None),
             overlay: RefCell::new(None),
         })
     }
@@ -1057,6 +1061,21 @@ impl VlfStore {
         Ok(count)
     }
 
+    /// Return exact logical line count, caching the streaming LF count result.
+    pub fn exact_logical_line_count_streaming(&self) -> io::Result<u64> {
+        if let Some(count) = self.exact_line_count.get() {
+            return Ok(count);
+        }
+
+        let count = if self.pager.file_size() == 0 {
+            1
+        } else {
+            self.count_lf_streaming()?.saturating_add(1)
+        };
+        self.exact_line_count.set(Some(count));
+        Ok(count)
+    }
+
     // ------------------------------------------------------------------
     // Internal read helpers
     // ------------------------------------------------------------------
@@ -1403,13 +1422,19 @@ impl TextStore for VlfStore {
     }
 
     fn known_line_count(&self) -> KnownLineCount {
+        if let Some(count) = self.exact_line_count.get() {
+            return KnownLineCount::Exact(count);
+        }
+
         self.drain_incoming();
         let index = self.index.borrow();
         let progress = index.scan_progress();
         if progress.is_complete() {
             // Sum all scanned newlines + 1 for the final partial line.
             let total_nl: u64 = index.descriptors.values().map(|d| d.newline_count).sum();
-            KnownLineCount::Exact(total_nl + 1)
+            let exact_count = total_nl + 1;
+            self.exact_line_count.set(Some(exact_count));
+            KnownLineCount::Exact(exact_count)
         } else if index.is_empty() {
             KnownLineCount::Unknown
         } else {
@@ -2317,6 +2342,7 @@ mod tests {
             scan_rx: RefCell::new(None),
             bg_cancel: Arc::new(AtomicBool::new(false)),
             approx_line_floor: Cell::new(0),
+            exact_line_count: Cell::new(None),
             overlay: RefCell::new(None),
         };
 
