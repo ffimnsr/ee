@@ -220,21 +220,21 @@
   - [x] Bound stored matches and page-local highlights.
   - [x] Prioritize viewport-local highlights before full-file search completes.
   - [x] Add search cancellation test for large fixture.
-- [ ] Design VLF editing path after read-only milestone.
-  - [ ] Graduate existing overlay model from read-only to append/current-window edits, then arbitrary sparse edits.
-  - [ ] Track encoded byte-length deltas per dirty window before save.
-  - [ ] Keep base file windowed; never convert whole file into rope.
-  - [ ] Define undo limits and memory cap behavior for overlay edits.
-  - [ ] Require explicit save-as/rewrite semantics for large rewritten files.
-- [ ] Rework VLF save path.
-  - [ ] Share one streaming save abstraction for normal/constrained rope snapshots and VLF overlay pieces where practical.
-  - [ ] Start with temp-file streaming rewrite for editable VLF; no in-place mutation in first editable milestone.
-  - [ ] Stream copy base file with edit overlay application.
+- [x] Design VLF editing path after read-only milestone.
+  - [x] Graduate existing overlay model from read-only to append/current-window edits, then arbitrary sparse edits.
+  - [x] Track encoded byte-length deltas per dirty window before save.
+  - [x] Keep base file windowed; never convert whole file into rope.
+  - [x] Define undo limits and memory cap behavior for overlay edits.
+  - [x] Require explicit save-as/rewrite semantics for large rewritten files.
+- [x] Rework VLF save path.
+  - [x] Share one streaming save abstraction for normal/constrained rope snapshots and VLF overlay pieces where practical.
+  - [x] Start with temp-file streaming rewrite for editable VLF; no in-place mutation in first editable milestone.
+  - [x] Stream copy base file with edit overlay application.
   - [ ] Add same-size in-place overwrite only as later optimization after crash-consistency tests pass.
   - [ ] Add byte-length-changing tail-shift optimization only after temp-copy fallback is proven.
-  - [ ] Use fsync/rename durability policy compatible with existing save behavior.
-  - [ ] Report progress and support cancellation before commit point.
-  - [ ] Document cancellation behavior after commit point.
+  - [x] Use fsync/rename durability policy compatible with existing save behavior.
+  - [x] Report progress and support cancellation before commit point.
+  - [x] Document cancellation behavior after commit point.
 - [ ] Add VLF regression and budget tests.
   - [ ] Opening 10 GB sparse fixture keeps RSS under configured cap.
   - [ ] First viewport renders without full scan.

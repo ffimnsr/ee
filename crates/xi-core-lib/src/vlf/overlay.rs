@@ -44,6 +44,7 @@
 //! double-counting `\r\n` that spans a piece boundary.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::str;
 
 use crate::text_store::{ByteRange, KnownLineCount, LineLookup, LogicalLine};
@@ -135,6 +136,81 @@ impl ArbitrarySparseEditGate {
         self.read_byte_range_ready && self.streaming_search_ready && self.streaming_save_ready
     }
 }
+
+// ---------------------------------------------------------------------------
+// OverlayLimits
+// ---------------------------------------------------------------------------
+
+/// Resource limits that [`PieceOverlay`] enforces to keep overlay memory
+/// bounded during an editing session.
+///
+/// When a limit is exceeded the overlay **automatically GCs the oldest undo
+/// group** before applying the new edit, rather than returning an error.  This
+/// ensures the editing session continues but the oldest undo step silently
+/// becomes unavailable.  The caller is notified via [`OverlayError::LimitReached`]
+/// only when GC cannot bring usage below the cap (e.g. a single edit alone
+/// exceeds the byte cap).
+///
+/// # Defaults
+///
+/// - `max_undo_groups`: 200 — sufficient for typical interactive sessions.
+/// - `overlay_byte_cap`: 64 MiB — matches the default raw-page LRU budget.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayLimits {
+    /// Maximum number of undo groups retained in [`PieceOverlay::undo_history`].
+    ///
+    /// When a new edit would push the count above this, the oldest recorded
+    /// undo group is GC'd first.
+    pub max_undo_groups: usize,
+    /// Maximum bytes consumed by all insert buffers combined.
+    ///
+    /// When inserting text would push `overlay_bytes()` above this cap, the
+    /// oldest undo group is GC'd first.  If the cap is still exceeded after GC
+    /// the edit is rejected with [`OverlayError::LimitReached`].
+    pub overlay_byte_cap: u64,
+}
+
+impl Default for OverlayLimits {
+    fn default() -> Self {
+        OverlayLimits {
+            max_undo_groups: 200,
+            overlay_byte_cap: 64 * 1024 * 1024, // 64 MiB
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VlfSavePolicy
+// ---------------------------------------------------------------------------
+
+/// Required save semantics for VLF documents.
+///
+/// In-place mutation is never permitted for the first editable milestone.
+/// All saves must use one of the two streaming strategies below so that a
+/// crash before the commit point leaves the original file intact.
+///
+/// The caller must choose a policy explicitly before triggering a save;
+/// there is no implicit fallback to in-place overwrite.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VlfSavePolicy {
+    /// Stream the piece sequence through a temp file in the same directory,
+    /// then atomically rename over the target on fsync+close success.
+    ///
+    /// `temp_dir` defaults to the target file's parent directory when `None`.
+    /// Use an explicit path when the parent directory is read-only or resides
+    /// on a different filesystem where rename-across-devices is unavailable.
+    TempFileRewrite { temp_dir: Option<PathBuf> },
+    /// Write the piece sequence to a new path instead of overwriting the
+    /// original.  Required when the caller explicitly chooses to preserve the
+    /// original file or when the target filesystem does not support atomic
+    /// rename.
+    SaveAs(PathBuf),
+}
+
+/// Threshold for `suggested_save_policy`: files larger than this where the
+/// signed byte delta exceeds 10 % of the file size must be confirmed by the
+/// caller as `SaveAs`.  Currently set to 512 MiB.
+const LARGE_REWRITE_THRESHOLD_BYTES: u64 = 512 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // BufferId
@@ -370,6 +446,9 @@ pub struct PieceOverlay {
     total_byte_len: u64,
     /// Total logical line count (newline_count sum, adjusted for CRLF seams).
     total_newlines: u64,
+    /// Original file byte length at open time.  Never changes after `new()`.
+    /// Used to compute [`Self::signed_byte_delta`].
+    original_file_byte_len: u64,
     /// Append-only insert buffers, keyed by [`BufferId`].
     buffers: HashMap<BufferId, InsertBuffer>,
     /// Counter for allocating the next [`BufferId`].
@@ -382,6 +461,11 @@ pub struct PieceOverlay {
     /// this map is purely a payload store so the editor can retrieve the
     /// overlay ops associated with each undo group for reversal or GC.
     undo_history: HashMap<usize, OverlayDelta>,
+    /// Insertion-order record of undo group IDs so the oldest group can be
+    /// found in O(1) when enforcing [`OverlayLimits::max_undo_groups`].
+    undo_group_order: Vec<usize>,
+    /// Resource limits for the overlay.
+    limits: OverlayLimits,
     /// Capability gate for arbitrary sparse edits.
     ///
     /// Append-only and current-window edits are always permitted.  Arbitrary
@@ -397,6 +481,14 @@ impl PieceOverlay {
     /// If `file_byte_len` is zero the overlay starts with no pieces (empty
     /// document).
     pub fn new(original_file_metrics: TextMetrics) -> Self {
+        Self::with_limits(original_file_metrics, OverlayLimits::default())
+    }
+
+    /// Create an overlay with explicit resource limits.
+    ///
+    /// Use this in tests or when tuning memory behaviour for a specific file
+    /// size.  For production use [`Self::new`] which applies the defaults.
+    pub fn with_limits(original_file_metrics: TextMetrics, limits: OverlayLimits) -> Self {
         let total_byte_len = original_file_metrics.byte_len;
         let total_newlines = original_file_metrics.newline_count;
 
@@ -415,10 +507,13 @@ impl PieceOverlay {
             cum_offsets,
             total_byte_len,
             total_newlines,
+            original_file_byte_len: total_byte_len,
             buffers: HashMap::new(),
             next_buffer_id: 0,
             active_buffer: None,
             undo_history: HashMap::new(),
+            undo_group_order: Vec::new(),
+            limits,
             edit_gate: ArbitrarySparseEditGate::default(),
         }
     }
@@ -745,6 +840,18 @@ impl PieceOverlay {
         &self.pieces
     }
 
+    /// Retrieve the bytes for an `Inserted` piece from the insert buffer.
+    ///
+    /// Returns `None` if the piece is `Original` (bytes live in the file, not
+    /// the overlay) or if the buffer/range is missing (should not happen for
+    /// well-formed overlays).
+    pub fn inserted_bytes_for_piece<'a>(&'a self, piece: &Piece) -> Option<&'a [u8]> {
+        match piece {
+            Piece::Inserted { buffer_id, range, .. } => self.buffers.get(buffer_id)?.slice(*range),
+            Piece::Original { .. } => None,
+        }
+    }
+
     /// Byte length of the named insert buffer.  Returns 0 if not found.
     pub fn buffer_len(&self, id: BufferId) -> u64 {
         self.buffers.get(&id).map_or(0, |b| b.len())
@@ -757,9 +864,135 @@ impl PieceOverlay {
         piece_bytes + buffer_bytes
     }
 
+    /// Signed byte-length delta relative to the original file.
+    ///
+    /// A positive value means the edited document is larger than the file on
+    /// disk; negative means it is smaller.  Zero means the byte count is
+    /// identical to the original (though content may still differ).
+    ///
+    /// Callers use this to decide whether a temp-file streaming rewrite or an
+    /// explicit save-as is required.  See [`VlfSavePolicy`] and
+    /// [`Self::suggested_save_policy`].
+    pub fn signed_byte_delta(&self) -> i64 {
+        self.total_byte_len as i64 - self.original_file_byte_len as i64
+    }
+
+    /// Net byte-length delta contributed by overlay edits that intersect
+    /// `range` (logical document bytes).
+    ///
+    /// Returns the sum of inserted bytes minus deleted original bytes within
+    /// the range.  Only `Inserted` pieces within `[range.start, range.end)` and
+    /// `Original` pieces that no longer exist (deleted) contribute to the delta.
+    ///
+    /// This is an approximation: deleted original bytes within `range` are
+    /// counted by subtracting the byte length of `Original` pieces that have
+    /// been split away or removed.  Inserted pieces that fully overlap `range`
+    /// are counted in full; partially overlapping pieces are clamped.
+    pub fn dirty_byte_delta_for_range(&self, range: ByteRange) -> i64 {
+        let range_start = range.start.0;
+        let range_end = range.end.0;
+
+        // Count inserted bytes within [range_start, range_end).
+        let mut inserted: i64 = 0;
+        let mut original_present: i64 = 0;
+
+        let mut doc_pos: u64 = 0;
+        for piece in &self.pieces {
+            let piece_end = doc_pos + piece.byte_len();
+            // Skip pieces that don't overlap the query range.
+            if piece_end <= range_start || doc_pos >= range_end {
+                doc_pos = piece_end;
+                continue;
+            }
+            let overlap_start = doc_pos.max(range_start);
+            let overlap_end = piece_end.min(range_end);
+            let overlap_len = overlap_end.saturating_sub(overlap_start) as i64;
+            match piece {
+                Piece::Inserted { .. } => inserted += overlap_len,
+                Piece::Original { .. } => original_present += overlap_len,
+            }
+            doc_pos = piece_end;
+        }
+
+        // Original bytes in [range_start, range_end) that are NOT present in
+        // any Original piece are deleted bytes.  We estimate original bytes that
+        // *should* be in range as `(range_end - range_start)` minus the
+        // original_present counted above.  This is an approximation because the
+        // range may include inserted bytes that displace original offsets.
+        let range_len = range_end.saturating_sub(range_start) as i64;
+        let deleted_original = (range_len - original_present).max(0);
+        inserted - deleted_original
+    }
+
+    /// Suggested save policy for the current overlay state.
+    ///
+    /// Always returns a streaming strategy (never in-place mutation).  Returns
+    /// [`VlfSavePolicy::SaveAs`] placeholder when the file is above
+    /// [`LARGE_REWRITE_THRESHOLD_BYTES`] **and** the signed byte delta exceeds
+    /// 10 % of the original file size, indicating the caller should confirm an
+    /// explicit save destination.  In all other cases returns
+    /// [`VlfSavePolicy::TempFileRewrite`].
+    ///
+    /// The returned `SaveAs` path is a placeholder (`<save-as-required>`); the
+    /// actual destination must be supplied by the caller after prompting the
+    /// user.
+    pub fn suggested_save_policy(&self) -> VlfSavePolicy {
+        let delta = self.signed_byte_delta().unsigned_abs();
+        let is_large = self.original_file_byte_len >= LARGE_REWRITE_THRESHOLD_BYTES;
+        let delta_fraction = if self.original_file_byte_len > 0 {
+            delta as f64 / self.original_file_byte_len as f64
+        } else {
+            0.0
+        };
+
+        if is_large && delta_fraction > 0.10 {
+            // Large file with >10 % byte change: require explicit save-as.
+            VlfSavePolicy::SaveAs(PathBuf::from("<save-as-required>"))
+        } else {
+            VlfSavePolicy::TempFileRewrite { temp_dir: None }
+        }
+    }
+
     // -----------------------------------------------------------------------
-    // Undo grouping and delta history
+    // Limit enforcement
     // -----------------------------------------------------------------------
+
+    /// Enforce [`OverlayLimits`] before applying an edit.
+    ///
+    /// GCs the oldest undo group until either the undo group count is within
+    /// `max_undo_groups` or the overlay byte usage is within `overlay_byte_cap`.
+    /// Returns `Err(LimitReached)` only when GC cannot bring byte usage below
+    /// the cap (i.e. the *current* overlay without any undo history already
+    /// exceeds the cap).
+    fn enforce_limits(&mut self, incoming_bytes: u64) -> Result<(), OverlayError> {
+        // GC oldest undo groups until count is within the limit.
+        while self.undo_history.len() >= self.limits.max_undo_groups {
+            if let Some(oldest) = self.undo_group_order.first().copied() {
+                self.undo_group_order.remove(0);
+                self.gc_undo_group(oldest);
+            } else {
+                break;
+            }
+        }
+
+        // GC oldest undo groups until byte usage would fit within the cap.
+        while self.overlay_bytes() + incoming_bytes > self.limits.overlay_byte_cap {
+            if let Some(oldest) = self.undo_group_order.first().copied() {
+                self.undo_group_order.remove(0);
+                self.gc_undo_group(oldest);
+            } else {
+                // No more undo groups to free; reject the edit.
+                return Err(OverlayError::LimitReached {
+                    kind: LimitKind::MemoryCap {
+                        cap: self.limits.overlay_byte_cap,
+                        used: self.overlay_bytes(),
+                    },
+                });
+            }
+        }
+
+        Ok(())
+    }
 
     /// Insert `text` at logical byte offset `at`, recording the operation in
     /// `ctx`'s undo group delta.
@@ -774,6 +1007,7 @@ impl PieceOverlay {
         text: &str,
         ctx: OverlayEditContext,
     ) -> Result<(), OverlayError> {
+        self.enforce_limits(text.len() as u64)?;
         self.insert(at, text)?;
 
         // Record the op in the delta for this undo group so the editor can
@@ -784,12 +1018,16 @@ impl PieceOverlay {
         let end = buf.len();
         let start = end - text.len() as u64;
         let op = OverlayOp::Insert { at, buffer_id: active_id, range: InsertRange { start, end } };
+        let is_new_group = !self.undo_history.contains_key(&ctx.undo_group);
         let delta = self.undo_history.entry(ctx.undo_group).or_insert_with(|| OverlayDelta {
             undo_group: ctx.undo_group,
             revision_id: ctx.revision_id,
             ops: Vec::new(),
         });
         delta.ops.push(op);
+        if is_new_group {
+            self.undo_group_order.push(ctx.undo_group);
+        }
         Ok(())
     }
 
@@ -800,15 +1038,21 @@ impl PieceOverlay {
         range: ByteRange,
         ctx: OverlayEditContext,
     ) -> Result<(), OverlayError> {
+        // Deletes don't add buffer bytes; enforce only the undo group count.
+        self.enforce_limits(0)?;
         self.delete(range)?;
 
         let op = OverlayOp::Delete { range };
+        let is_new_group = !self.undo_history.contains_key(&ctx.undo_group);
         let delta = self.undo_history.entry(ctx.undo_group).or_insert_with(|| OverlayDelta {
             undo_group: ctx.undo_group,
             revision_id: ctx.revision_id,
             ops: Vec::new(),
         });
         delta.ops.push(op);
+        if is_new_group {
+            self.undo_group_order.push(ctx.undo_group);
+        }
         Ok(())
     }
 
@@ -836,6 +1080,9 @@ impl PieceOverlay {
         let Some(delta) = self.undo_history.remove(&undo_group) else {
             return;
         };
+
+        // Remove from insertion-order record.
+        self.undo_group_order.retain(|&g| g != undo_group);
 
         // Collect buffer IDs referenced by the GC'd delta.
         let mut gc_buffer_ids: Vec<BufferId> = delta
@@ -913,8 +1160,20 @@ impl PieceOverlay {
 }
 
 // ---------------------------------------------------------------------------
-// OverlayError
+// LimitKind / OverlayError
 // ---------------------------------------------------------------------------
+
+/// Which resource limit was exceeded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LimitKind {
+    /// The undo group count exceeded [`OverlayLimits::max_undo_groups`] and
+    /// GC could not reduce it (should not happen in practice because GC removes
+    /// the oldest group unconditionally when the count is at the cap).
+    UndoGroupCap { cap: usize },
+    /// The insert-buffer byte usage exceeded [`OverlayLimits::overlay_byte_cap`]
+    /// and GC could not free enough memory (all undo history already freed).
+    MemoryCap { cap: u64, used: u64 },
+}
 
 /// Errors returned by [`PieceOverlay`] operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -931,6 +1190,11 @@ pub enum OverlayError {
     /// [`PieceOverlay::set_streaming_save_ready`] before enabling arbitrary
     /// edits.
     ArbitrarySparseEditsNotReady,
+    /// A resource limit was reached and the edit was rejected.
+    ///
+    /// Automatic GC of oldest undo groups was attempted but could not bring
+    /// usage within the configured [`OverlayLimits`].
+    LimitReached { kind: LimitKind },
 }
 
 impl std::fmt::Display for OverlayError {
@@ -950,6 +1214,18 @@ impl std::fmt::Display for OverlayError {
                      must all be overlay-aware before edit mode can be activated"
                 )
             }
+            OverlayError::LimitReached { kind } => match kind {
+                LimitKind::UndoGroupCap { cap } => {
+                    write!(f, "overlay undo group limit ({cap}) reached and GC failed")
+                }
+                LimitKind::MemoryCap { cap, used } => {
+                    write!(
+                        f,
+                        "overlay memory cap ({cap} bytes) reached; \
+                         current usage {used} bytes; save and reopen to continue editing"
+                    )
+                }
+            },
         }
     }
 }
@@ -1331,5 +1607,133 @@ mod tests {
         overlay.insert(5, " world").unwrap();
         let after = overlay.overlay_bytes();
         assert!(after > before, "overlay_bytes should grow after insert");
+    }
+
+    // --- OverlayLimits: undo group cap --------------------------------------
+
+    #[test]
+    fn undo_group_cap_auto_gcs_oldest_group() {
+        let m = ascii_metrics("hello");
+        let mut overlay = PieceOverlay::with_limits(
+            m,
+            OverlayLimits { max_undo_groups: 3, ..Default::default() },
+        );
+
+        for i in 0..4u64 {
+            let ctx = OverlayEditContext { revision_id: i, undo_group: i as usize };
+            // Append to avoid out-of-range errors as total_byte_len grows.
+            overlay.insert_in_group(overlay.total_byte_len(), "x", ctx).unwrap();
+        }
+
+        // After 4 inserts with cap=3, oldest group (0) should have been GC'd.
+        assert!(overlay.delta_for_group(0).is_none(), "group 0 should be GC'd");
+        assert!(overlay.delta_for_group(3).is_some(), "group 3 should exist");
+        // History count must not exceed cap.
+        assert!(overlay.undo_history.len() <= 3);
+    }
+
+    #[test]
+    fn undo_group_order_tracks_insertion_order() {
+        let m = ascii_metrics("hello");
+        let mut overlay = PieceOverlay::new(m);
+        for i in 0..3u64 {
+            let ctx = OverlayEditContext { revision_id: i, undo_group: i as usize };
+            overlay.insert_in_group(overlay.total_byte_len(), "a", ctx).unwrap();
+        }
+        // Order should be [0, 1, 2].
+        assert_eq!(overlay.undo_group_order, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn gc_removes_from_undo_group_order() {
+        let m = ascii_metrics("hello");
+        let mut overlay = PieceOverlay::new(m);
+        let ctx = OverlayEditContext { revision_id: 1, undo_group: 7 };
+        overlay.insert_in_group(5, "x", ctx).unwrap();
+        assert!(overlay.undo_group_order.contains(&7));
+        overlay.gc_undo_group(7);
+        assert!(!overlay.undo_group_order.contains(&7));
+    }
+
+    // --- OverlayLimits: memory cap ------------------------------------------
+
+    #[test]
+    fn memory_cap_rejects_edit_when_no_history_to_gc() {
+        let m = ascii_metrics("hello");
+        let mut overlay = PieceOverlay::with_limits(
+            m,
+            OverlayLimits { overlay_byte_cap: 5, ..Default::default() },
+        );
+        // A 10-byte insert should exceed the 5-byte cap with nothing to GC.
+        let ctx = OverlayEditContext { revision_id: 1, undo_group: 1 };
+        let result = overlay.insert_in_group(5, "0123456789", ctx);
+        assert!(
+            matches!(result, Err(OverlayError::LimitReached { .. })),
+            "should reject when cap cannot be satisfied"
+        );
+    }
+
+    // --- signed_byte_delta --------------------------------------------------
+
+    #[test]
+    fn signed_byte_delta_zero_before_any_edits() {
+        let m = ascii_metrics("hello");
+        let overlay = PieceOverlay::new(m);
+        assert_eq!(overlay.signed_byte_delta(), 0);
+    }
+
+    #[test]
+    fn signed_byte_delta_positive_after_insert() {
+        let m = ascii_metrics("hello");
+        let mut overlay = PieceOverlay::new(m);
+        overlay.insert(5, " world").unwrap();
+        assert_eq!(overlay.signed_byte_delta(), 6);
+    }
+
+    #[test]
+    fn signed_byte_delta_negative_after_delete() {
+        let m = ascii_metrics("hello world");
+        let mut overlay = PieceOverlay::new(m);
+        overlay.delete(ByteRange::new(5, 11)).unwrap(); // delete " world"
+        assert_eq!(overlay.signed_byte_delta(), -6);
+    }
+
+    // --- dirty_byte_delta_for_range -----------------------------------------
+
+    #[test]
+    fn dirty_byte_delta_for_range_zero_before_edits() {
+        let m = ascii_metrics("hello world");
+        let overlay = PieceOverlay::new(m);
+        let delta = overlay.dirty_byte_delta_for_range(ByteRange::new(0, 5));
+        assert_eq!(delta, 0);
+    }
+
+    // --- VlfSavePolicy ------------------------------------------------------
+
+    #[test]
+    fn suggested_save_policy_small_file_is_temp_rewrite() {
+        let m = ascii_metrics("hello");
+        let mut overlay = PieceOverlay::new(m);
+        overlay.insert(5, " world").unwrap();
+        assert!(matches!(overlay.suggested_save_policy(), VlfSavePolicy::TempFileRewrite { .. }));
+    }
+
+    #[test]
+    fn vlf_save_policy_display_variants_accessible() {
+        let policy_rewrite = VlfSavePolicy::TempFileRewrite { temp_dir: None };
+        let policy_saveas = VlfSavePolicy::SaveAs(std::path::PathBuf::from("/tmp/test.txt"));
+        // Just check they can be constructed and matched.
+        assert!(matches!(policy_rewrite, VlfSavePolicy::TempFileRewrite { .. }));
+        assert!(matches!(policy_saveas, VlfSavePolicy::SaveAs(_)));
+    }
+
+    // --- OverlayError::LimitReached display ---------------------------------
+
+    #[test]
+    fn limit_reached_memory_cap_display() {
+        let err =
+            OverlayError::LimitReached { kind: LimitKind::MemoryCap { cap: 1024, used: 2048 } };
+        let msg = format!("{err}");
+        assert!(msg.contains("memory cap"), "display: {msg}");
     }
 }
