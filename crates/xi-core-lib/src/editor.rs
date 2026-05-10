@@ -39,6 +39,7 @@ use crate::plugins::rpc::{
 };
 use crate::rpc::{LineRange, SelectionModifier};
 use crate::selection::{InsertDrift, SelRegion, Selection};
+use crate::text_store::DocumentMode;
 use crate::view::{Replace, View};
 
 // TODO This could go much higher without issue but while developing it is
@@ -48,6 +49,8 @@ const MAX_UNDOS: usize = 20;
 pub struct Editor {
     /// The contents of the buffer.
     text: Rope,
+    /// Normal or constrained-normal mode for rope-backed buffers.
+    rope_mode: DocumentMode,
     /// The CRDT engine, which tracks edit history and manages concurrent edits.
     engine: Engine,
 
@@ -90,12 +93,18 @@ impl Editor {
 
     /// Creates a new `Editor`, loading text into a new buffer.
     pub fn with_text<T: Into<Rope>>(text: T) -> Editor {
+        Self::with_text_mode(text, DocumentMode::Normal)
+    }
+
+    /// Creates a new rope-backed `Editor` with explicit document mode.
+    pub fn with_text_mode<T: Into<Rope>>(text: T, mode: DocumentMode) -> Editor {
         let engine = Engine::new(text.into());
         let buffer = engine.get_head().clone();
         let last_rev_id = engine.get_head_rev_id();
 
         Editor {
             text: buffer,
+            rope_mode: mode,
             engine,
             last_rev_id,
             pristine_rev_id: last_rev_id,
@@ -126,6 +135,7 @@ impl Editor {
         let last_rev_id = engine.get_head_rev_id();
         Editor {
             text: buffer,
+            rope_mode: DocumentMode::Vlf,
             engine,
             last_rev_id,
             pristine_rev_id: last_rev_id,
@@ -148,10 +158,19 @@ impl Editor {
         self.vlf_store.is_some()
     }
 
+    pub(crate) fn set_document_mode(&mut self, mode: DocumentMode) {
+        if !self.is_vlf() {
+            self.rope_mode = mode;
+        }
+    }
+
+    pub(crate) fn document_mode(&self) -> DocumentMode {
+        if self.is_vlf() { DocumentMode::Vlf } else { self.rope_mode }
+    }
+
     pub(crate) fn get_buffer(&self) -> &Rope {
-        // TODO(vlf): remaining direct `Rope` reads through `get_buffer` are tracked here.
-        // Once `RopeTextStore` tests pass, migrate read-only call sites to
-        // `text_store_snapshot()` and enable `VlfStore` without breaking changes.
+        // Mutation and rope-only algorithms may still use the backing rope.
+        // Read-only hot paths should prefer `text_store_snapshot()`.
         &self.text
     }
 
@@ -161,10 +180,10 @@ impl Editor {
     /// chunk iteration, status reporting) instead of reaching into `self.text`
     /// directly. Edit mutations continue to use `self.text` via the existing
     /// `Editor`/`Rope` path.
-    #[expect(dead_code, reason = "will be used when VlfStore is wired into the open path")]
     pub(crate) fn text_store_snapshot(&self) -> crate::text_store::rope_store::RopeTextStore {
-        crate::text_store::rope_store::RopeTextStore::new(
+        crate::text_store::rope_store::RopeTextStore::new_with_mode_and_snapshot(
             self.text.clone(),
+            self.rope_mode,
             self.engine.get_head_rev_id().token(),
         )
     }
@@ -833,6 +852,7 @@ fn count_lines(s: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::text_store::TextStore;
 
     fn insert_text(editor: &mut Editor, text: &str) {
         let mut builder = DeltaBuilder::new(editor.get_buffer().len());
@@ -856,6 +876,14 @@ mod tests {
 
         editor.do_undo();
         assert_eq!(editor.get_buffer().to_string(), "");
+    }
+
+    #[test]
+    fn text_store_snapshot_preserves_constrained_mode() {
+        let editor = Editor::with_text_mode("alpha\nbeta", DocumentMode::ConstrainedNormal);
+        let store = editor.text_store_snapshot();
+
+        assert_eq!(store.mode(), DocumentMode::ConstrainedNormal);
     }
 
     #[test]

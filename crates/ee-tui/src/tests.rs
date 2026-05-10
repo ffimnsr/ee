@@ -25,10 +25,10 @@ use xi_core_lib::rpc::LineReplacement;
 use crate::app::{App, Mode, Operator, PendingCharFind};
 use crate::backend::{
     BackendEvent, CachedLine, CompletionSuggestion, CoreAnnotation, CoreLine, CoreSyntaxSpan,
-    CoreUpdate, CoreUpdateKind, CoreUpdateOp, LineSlot, NavigationTarget, format_location_message,
-    invalid_line_ranges, parse_notification, startup_render_ready,
+    CoreUpdate, CoreUpdateKind, CoreUpdateOp, LineSlot, NavigationTarget, coalesce_backend_events,
+    format_location_message, invalid_line_ranges, parse_notification, startup_render_ready,
 };
-use crate::buffer::{BufState, BufferManager};
+use crate::buffer::{BufState, BufferManager, VlfChunkUpdate};
 use crate::git::{GitBufferCache, GitBufferStatus, GitHunk, GitSign};
 use crate::keymap::{Action, BindingKey, bindings, parse_action_spec};
 use crate::picker::PickerKind;
@@ -7408,7 +7408,14 @@ fn apply_vlf_chunks_populates_line_cache() {
     buf.line_cache = vec![LineSlot::Invalid; 3];
 
     let lines = vec![String::from("alpha"), String::from("beta")];
-    buf.apply_vlf_chunks(7, 0, &lines, 3, true, 1.0);
+    buf.apply_vlf_chunks(VlfChunkUpdate {
+        generation: 7,
+        line_start: 0,
+        lines: &lines,
+        syntax_spans: &[],
+        approximate_line_count: 3,
+        line_count_exact: true,
+    });
 
     assert_eq!(
         buf.line_cache[0],
@@ -7439,7 +7446,14 @@ fn apply_vlf_chunks_stale_generation_discarded() {
 
     let lines = vec![String::from("stale")];
     // Send with generation 3 (older than current 5) — must be ignored.
-    buf.apply_vlf_chunks(3, 0, &lines, 2, false, 0.5);
+    buf.apply_vlf_chunks(VlfChunkUpdate {
+        generation: 3,
+        line_start: 0,
+        lines: &lines,
+        syntax_spans: &[],
+        approximate_line_count: 2,
+        line_count_exact: false,
+    });
 
     assert_eq!(buf.line_cache[0], LineSlot::Invalid, "stale response must not update cache");
 }
@@ -7452,7 +7466,14 @@ fn apply_vlf_chunks_grows_cache_to_approximate_count() {
     buf.line_cache = Vec::new(); // start empty
 
     let lines: Vec<String> = Vec::new();
-    buf.apply_vlf_chunks(1, 0, &lines, 1000, false, 0.1);
+    buf.apply_vlf_chunks(VlfChunkUpdate {
+        generation: 1,
+        line_start: 0,
+        lines: &lines,
+        syntax_spans: &[],
+        approximate_line_count: 1000,
+        line_count_exact: false,
+    });
 
     assert_eq!(buf.line_cache.len(), 1000, "cache should grow to approximate_line_count");
     assert!(buf.line_cache.iter().all(|s| *s == LineSlot::Invalid));
@@ -7466,7 +7487,14 @@ fn apply_vlf_chunks_exact_count_truncates_stale_approximation() {
     buf.vlf_generation = 1;
     buf.line_cache = vec![LineSlot::Invalid; 1000];
 
-    buf.apply_vlf_chunks(1, 10, &[String::from("tail")], 25, true, 1.0);
+    buf.apply_vlf_chunks(VlfChunkUpdate {
+        generation: 1,
+        line_start: 10,
+        lines: &[String::from("tail")],
+        syntax_spans: &[],
+        approximate_line_count: 25,
+        line_count_exact: true,
+    });
 
     assert_eq!(buf.line_count(), 25);
     assert_eq!(buf.line_cache.len(), 25);
@@ -7480,14 +7508,14 @@ fn apply_vlf_chunks_tail_jump_moves_cursor_to_returned_last_line() {
     buf.vlf_generation = 1;
     buf.pending_vlf_tail_jump = true;
 
-    buf.apply_vlf_chunks(
-        1,
-        995,
-        &[String::from("line 998"), String::from("line 999")],
-        1000,
-        false,
-        0.2,
-    );
+    buf.apply_vlf_chunks(VlfChunkUpdate {
+        generation: 1,
+        line_start: 995,
+        lines: &[String::from("line 998"), String::from("line 999")],
+        syntax_spans: &[],
+        approximate_line_count: 1000,
+        line_count_exact: false,
+    });
 
     assert_eq!((buf.cursor_line, buf.cursor_col), (996, 0));
     assert!(!buf.pending_vlf_tail_jump);
@@ -7524,6 +7552,7 @@ fn vlf_document_mode_clears_stale_normal_cache_and_retries_viewport() {
             generation: 1,
             line_start: 0,
             lines: Vec::new(),
+            syntax_spans: Vec::new(),
             approximate_line_count: 1000,
             line_count_exact: false,
             index_progress: 0.1,
@@ -7553,6 +7582,7 @@ fn vlf_invalid_cache_does_not_request_normal_lines() {
             generation: 0,
             line_start: 0,
             lines: Vec::new(),
+            syntax_spans: Vec::new(),
             approximate_line_count: 1000,
             line_count_exact: false,
             index_progress: 0.1,
@@ -7821,6 +7851,7 @@ fn vlf_chunks_backend_event_parsed() {
         "generation": 42,
         "line_start": 10,
         "lines": ["hello", "world"],
+        "syntax_spans": [[{ "start_byte": 0, "end_byte": 5, "scope": "keyword.control" }], []],
         "approximate_line_count": 500,
         "line_count_exact": false,
         "index_progress": 0.42,
@@ -7832,6 +7863,7 @@ fn vlf_chunks_backend_event_parsed() {
             generation,
             line_start,
             lines,
+            syntax_spans,
             approximate_line_count,
             line_count_exact,
             index_progress,
@@ -7840,11 +7872,76 @@ fn vlf_chunks_backend_event_parsed() {
             assert_eq!(generation, 42);
             assert_eq!(line_start, 10);
             assert_eq!(lines, vec!["hello", "world"]);
+            assert_eq!(syntax_spans.len(), 2);
+            assert_eq!(syntax_spans[0][0].scope, "keyword.control");
             assert_eq!(approximate_line_count, 500);
             assert!(!line_count_exact);
             assert!((index_progress - 0.42).abs() < 1e-9);
         }
         other => panic!("expected VlfChunks, got {:?}", other),
+    }
+}
+
+#[test]
+fn coalesce_backend_events_keeps_latest_noisy_view_events() {
+    let events = vec![
+        BackendEvent::VlfSearchStatus {
+            view_id: String::from("view-1"),
+            query: String::from("needle"),
+            scanned_bytes: 10,
+            total_bytes: 100,
+            complete: false,
+            stored_match_count: 1,
+            ranges: Vec::new(),
+        },
+        BackendEvent::VlfChunks {
+            view_id: String::from("view-1"),
+            generation: 1,
+            line_start: 0,
+            lines: vec![String::from("old")],
+            syntax_spans: Vec::new(),
+            approximate_line_count: 10,
+            line_count_exact: false,
+            index_progress: 0.1,
+        },
+        BackendEvent::VlfSearchStatus {
+            view_id: String::from("view-1"),
+            query: String::from("needle"),
+            scanned_bytes: 100,
+            total_bytes: 100,
+            complete: true,
+            stored_match_count: 4,
+            ranges: Vec::new(),
+        },
+        BackendEvent::VlfChunks {
+            view_id: String::from("view-1"),
+            generation: 2,
+            line_start: 5,
+            lines: vec![String::from("new")],
+            syntax_spans: Vec::new(),
+            approximate_line_count: 10,
+            line_count_exact: false,
+            index_progress: 0.2,
+        },
+    ];
+
+    let coalesced = coalesce_backend_events(events);
+
+    assert_eq!(coalesced.len(), 2);
+    match &coalesced[0] {
+        BackendEvent::VlfSearchStatus { complete, scanned_bytes, .. } => {
+            assert!(*complete);
+            assert_eq!(*scanned_bytes, 100);
+        }
+        other => panic!("expected latest search status, got {other:?}"),
+    }
+    match &coalesced[1] {
+        BackendEvent::VlfChunks { generation, line_start, lines, .. } => {
+            assert_eq!(*generation, 2);
+            assert_eq!(*line_start, 5);
+            assert_eq!(lines, &vec![String::from("new")]);
+        }
+        other => panic!("expected latest vlf chunks, got {other:?}"),
     }
 }
 

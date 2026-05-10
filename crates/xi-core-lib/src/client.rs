@@ -28,6 +28,7 @@ use crate::plugins::rpc::{
 };
 use crate::syntax::LanguageId;
 use crate::tabs::ViewId;
+use crate::tree_sitter_support::VisibleSyntaxSpan;
 use crate::vlf::search::VlfMatchRange;
 use crate::width_cache::{WidthReq, WidthResponse};
 
@@ -299,6 +300,7 @@ impl Client {
         generation: u64,
         line_start: u64,
         lines: &[String],
+        syntax_spans: &[Vec<VisibleSyntaxSpan>],
         approximate_line_count: u64,
         line_count_exact: bool,
         index_progress: f64,
@@ -310,6 +312,7 @@ impl Client {
                 "generation": generation,
                 "line_start": line_start,
                 "lines": lines,
+                "syntax_spans": syntax_spans,
                 "approximate_line_count": approximate_line_count,
                 "line_count_exact": line_count_exact,
                 "index_progress": index_progress,

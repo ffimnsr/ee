@@ -17,11 +17,12 @@ use xi_core_lib::rpc::LineReplacement;
 use xi_rpc::RpcLoop;
 
 use crate::backend::{
-    BackendEvent, CachedLine, ChannelReader, ChannelWriter, CoreAnnotation, CoreUpdate,
-    CoreUpdateKind, LineSlot, NavigationTarget, PendingRequests, PendingUiAction, VlfSearchRange,
-    block_for_response, checked_advance, drain_sync_notifications, invalid_line_ranges,
-    normalize_line_text, parse_response, recv_with_timeout, send_rpc_notification,
-    send_rpc_request, startup_render_ready, xi_reader_thread,
+    BackendEvent, CachedLine, ChannelReader, ChannelWriter, CoreAnnotation, CoreSyntaxSpan,
+    CoreUpdate, CoreUpdateKind, LineSlot, NavigationTarget, PendingRequests, PendingUiAction,
+    VlfSearchRange, block_for_response, checked_advance, coalesce_backend_events,
+    drain_sync_notifications, invalid_line_ranges, normalize_line_text, parse_response,
+    recv_with_timeout, send_rpc_notification, send_rpc_request, startup_render_ready,
+    xi_reader_thread,
 };
 use crate::text::previous_char_boundary;
 
@@ -89,6 +90,15 @@ pub(crate) struct BufState {
     pub(crate) vlf_search_ranges: Vec<VlfSearchRange>,
 }
 
+pub(crate) struct VlfChunkUpdate<'a> {
+    pub(crate) generation: u64,
+    pub(crate) line_start: u64,
+    pub(crate) lines: &'a [String],
+    pub(crate) syntax_spans: &'a [Vec<CoreSyntaxSpan>],
+    pub(crate) approximate_line_count: u64,
+    pub(crate) line_count_exact: bool,
+}
+
 impl BufState {
     pub(crate) fn title(&self) -> String {
         if let Some(name) = &self.display_name {
@@ -105,7 +115,9 @@ impl BufState {
     pub(crate) fn apply_update(&mut self, update: CoreUpdate) -> io::Result<ApplyUpdateStats> {
         let CoreUpdate { ops, pristine, annotations } = update;
         let previous = std::mem::take(&mut self.line_cache);
+        let previous_lines = std::mem::take(&mut self.lines);
         let mut next_cache = Vec::new();
+        let mut next_lines = Vec::new();
         let mut source_index = 0;
 
         self.pristine = pristine;
@@ -124,20 +136,25 @@ impl BufState {
                             ),
                         ));
                     }
-                    next_cache.extend(op.lines.into_iter().map(LineSlot::from));
+                    for line in op.lines {
+                        let slot = LineSlot::from(line);
+                        next_lines.push(line_text_for_slot(&slot));
+                        next_cache.push(slot);
+                    }
                 }
                 CoreUpdateKind::Skip => {
                     source_index = checked_advance(source_index, op.n, previous.len(), "skip")?;
                 }
                 CoreUpdateKind::Invalidate => {
                     next_cache.extend(std::iter::repeat_n(LineSlot::Invalid, op.n));
+                    next_lines.extend(std::iter::repeat_n(String::new(), op.n));
                 }
                 CoreUpdateKind::Copy => {
                     let end = checked_advance(source_index, op.n, previous.len(), "copy")?;
                     // Clear cursor data from copied slots: Copy op means content is
                     // unchanged from xi-core's perspective, but cursor positions may
                     // have moved. Only Insert/Update ops carry authoritative cursor data.
-                    for slot in &previous[source_index..end] {
+                    for (offset, slot) in previous[source_index..end].iter().enumerate() {
                         match slot.clone() {
                             LineSlot::Known(mut line) => {
                                 line.cursors.clear();
@@ -145,6 +162,12 @@ impl BufState {
                             }
                             invalid => next_cache.push(invalid),
                         }
+                        next_lines.push(
+                            previous_lines
+                                .get(source_index + offset)
+                                .cloned()
+                                .unwrap_or_else(|| line_text_for_slot(slot)),
+                        );
                     }
                     source_index = end;
                 }
@@ -163,7 +186,9 @@ impl BufState {
                     for (slot, line) in
                         previous[source_index..end].iter().cloned().zip(op.lines.into_iter())
                     {
-                        next_cache.push(slot.merge(line)?);
+                        let slot = slot.merge(line)?;
+                        next_lines.push(line_text_for_slot(&slot));
+                        next_cache.push(slot);
                     }
                     source_index = end;
                 }
@@ -171,11 +196,15 @@ impl BufState {
         }
 
         self.line_cache = next_cache;
-        let rebuild_started = Instant::now();
-        self.rebuild_lines();
-        let rebuild_lines = rebuild_started.elapsed();
+        self.lines = next_lines;
+        if matches!(
+            self.line_cache.as_slice(),
+            [LineSlot::Known(CachedLine { text, .. })] if text.is_empty()
+        ) {
+            self.lines.clear();
+        }
         self.sync_cursor_from_cache();
-        Ok(ApplyUpdateStats { rebuild_lines })
+        Ok(ApplyUpdateStats { rebuild_lines: Duration::ZERO })
     }
 
     pub(crate) fn rebuild_lines(&mut self) {
@@ -270,15 +299,16 @@ impl BufState {
     /// Silently drops the response when `generation` does not match
     /// `vlf_generation`; this prevents an out-of-order reply from a superseded
     /// viewport scroll from overwriting data for the current position.
-    pub(crate) fn apply_vlf_chunks(
-        &mut self,
-        generation: u64,
-        line_start: u64,
-        lines: &[String],
-        approximate_line_count: u64,
-        line_count_exact: bool,
-        _index_progress: f64,
-    ) {
+    pub(crate) fn apply_vlf_chunks(&mut self, update: VlfChunkUpdate<'_>) {
+        let VlfChunkUpdate {
+            generation,
+            line_start,
+            lines,
+            syntax_spans,
+            approximate_line_count,
+            line_count_exact,
+        } = update;
+
         if generation != self.vlf_generation {
             return;
         }
@@ -306,10 +336,11 @@ impl BufState {
         for (i, text) in lines.iter().enumerate() {
             let idx = start + i;
             if idx < self.line_cache.len() {
+                let spans = syntax_spans.get(i).cloned().unwrap_or_default();
                 self.line_cache[idx] = LineSlot::Known(CachedLine {
                     text: text.clone(),
                     cursors: Vec::new(),
-                    syntax_spans: Vec::new(),
+                    syntax_spans: spans,
                 });
             }
         }
@@ -346,6 +377,13 @@ fn vlf_viewport_ready(buf: &BufState, first_line: usize, last_line: usize) -> bo
     }
 
     (first_line..last_line).all(|idx| matches!(buf.line_cache.get(idx), Some(LineSlot::Known(_))))
+}
+
+fn line_text_for_slot(slot: &LineSlot) -> String {
+    match slot {
+        LineSlot::Known(line) => line.text.clone(),
+        LineSlot::Invalid => String::new(),
+    }
 }
 
 // ── BufferManager ─────────────────────────────────────────────────────────────
@@ -1135,7 +1173,11 @@ impl BufferManager {
     }
 
     pub(crate) fn drain_events(&mut self) -> io::Result<()> {
+        let mut events = Vec::new();
         while let Ok(event) = self.backend_rx.try_recv() {
+            events.push(event);
+        }
+        for event in coalesce_backend_events(events) {
             self.apply_event_to_buffer(event)?;
         }
         Ok(())
@@ -1307,23 +1349,25 @@ impl BufferManager {
                 generation,
                 line_start,
                 lines,
+                syntax_spans,
                 approximate_line_count,
                 line_count_exact,
                 index_progress,
             } => {
+                let _ = index_progress;
                 let Some(idx) = self.buffer_index_for_view(&view_id) else {
                     return Ok(());
                 };
                 if generation == self.bufs[idx].vlf_generation {
                     self.bufs[idx].pending_line_request = false;
-                    self.bufs[idx].apply_vlf_chunks(
+                    self.bufs[idx].apply_vlf_chunks(VlfChunkUpdate {
                         generation,
                         line_start,
-                        &lines,
+                        lines: &lines,
+                        syntax_spans: &syntax_spans,
                         approximate_line_count,
                         line_count_exact,
-                        index_progress,
-                    );
+                    });
                 }
             }
             BackendEvent::VlfSearchStatus {

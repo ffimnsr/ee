@@ -45,7 +45,48 @@
 //! suppressed until each item is wired into the editor pipeline.
 #![allow(dead_code)]
 
-use tree_sitter::{InputEdit, Language, Node, Parser, Point, Tree};
+use std::ops::ControlFlow;
+use std::time::{Duration, Instant};
+
+use serde::Serialize;
+use tree_sitter::{InputEdit, Language, Node, ParseOptions, Parser, Point, Tree};
+
+/// Default byte budget for one visible VLF parse window.
+pub(crate) const DEFAULT_VISIBLE_SYNTAX_MAX_BYTES: usize = 128 * 1024;
+/// Default hard wall-clock budget for one visible VLF parse window.
+pub(crate) const DEFAULT_VISIBLE_SYNTAX_TIMEOUT: Duration = Duration::from_millis(4);
+/// Default maximum highlighted node matches for one visible VLF parse window.
+pub(crate) const DEFAULT_VISIBLE_SYNTAX_MAX_MATCHES: usize = 2_048;
+/// Default maximum emitted captures/spans for one visible VLF parse window.
+pub(crate) const DEFAULT_VISIBLE_SYNTAX_MAX_CAPTURES: usize = 4_096;
+
+/// Syntax span encoded relative to one rendered line.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct VisibleSyntaxSpan {
+    pub(crate) start_byte: usize,
+    pub(crate) end_byte: usize,
+    pub(crate) scope: &'static str,
+}
+
+/// Guardrails for visible-range VLF parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VisibleSyntaxLimits {
+    pub(crate) max_bytes: usize,
+    pub(crate) timeout: Duration,
+    pub(crate) max_matches: usize,
+    pub(crate) max_captures: usize,
+}
+
+impl Default for VisibleSyntaxLimits {
+    fn default() -> Self {
+        Self {
+            max_bytes: DEFAULT_VISIBLE_SYNTAX_MAX_BYTES,
+            timeout: DEFAULT_VISIBLE_SYNTAX_TIMEOUT,
+            max_matches: DEFAULT_VISIBLE_SYNTAX_MAX_MATCHES,
+            max_captures: DEFAULT_VISIBLE_SYNTAX_MAX_CAPTURES,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Language registry
@@ -113,6 +154,232 @@ impl TsParseState {
     pub(crate) fn tree(&self) -> Option<&Tree> {
         self.tree.as_ref()
     }
+}
+
+// ---------------------------------------------------------------------------
+// VLF visible-range highlighting
+// ---------------------------------------------------------------------------
+
+/// Parse only the supplied visible text and return line-relative syntax spans.
+///
+/// This is intentionally bounded by bytes, wall time, match count, and capture
+/// count so VLF highlighting cannot become whole-file work. The input must be a
+/// viewport chunk, optionally with small overscan; callers must not pass full
+/// VLF file contents.
+pub(crate) fn visible_syntax_spans(
+    language_name: &str,
+    visible_text: &str,
+    limits: VisibleSyntaxLimits,
+) -> Vec<Vec<VisibleSyntaxSpan>> {
+    let mut per_line = vec![Vec::new(); visible_text.split('\n').count().max(1)];
+    if visible_text.is_empty()
+        || visible_text.len() > limits.max_bytes
+        || limits.timeout.is_zero()
+        || limits.max_matches == 0
+        || limits.max_captures == 0
+    {
+        return per_line;
+    }
+
+    let Some(language) = ts_language_for_name(language_name) else {
+        return per_line;
+    };
+
+    let started = Instant::now();
+    let mut parser = Parser::new();
+    if parser.set_language(&language).is_err() {
+        return per_line;
+    }
+    let mut progress = |_: &tree_sitter::ParseState| {
+        if started.elapsed() >= limits.timeout {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    let bytes = visible_text.as_bytes();
+    let mut read = |offset: usize, _: Point| bytes.get(offset..).unwrap_or_default();
+    let options = ParseOptions { progress_callback: Some(&mut progress) };
+    let Some(tree) = parser.parse_with_options(&mut read, None, Some(options)) else {
+        return per_line;
+    };
+    if started.elapsed() >= limits.timeout {
+        return per_line;
+    }
+
+    let line_starts = line_start_offsets(visible_text);
+    let mut state = VisibleSyntaxWalk {
+        text: visible_text,
+        line_starts: &line_starts,
+        per_line: &mut per_line,
+        started,
+        limits,
+        matches: 0,
+        captures: 0,
+    };
+    state.walk(tree.root_node());
+    for spans in &mut per_line {
+        compact_visible_spans(spans);
+    }
+    per_line
+}
+
+struct VisibleSyntaxWalk<'a> {
+    text: &'a str,
+    line_starts: &'a [usize],
+    per_line: &'a mut [Vec<VisibleSyntaxSpan>],
+    started: Instant,
+    limits: VisibleSyntaxLimits,
+    matches: usize,
+    captures: usize,
+}
+
+impl VisibleSyntaxWalk<'_> {
+    fn exhausted(&self) -> bool {
+        self.matches >= self.limits.max_matches
+            || self.captures >= self.limits.max_captures
+            || self.started.elapsed() >= self.limits.timeout
+    }
+
+    fn walk(&mut self, node: Node<'_>) {
+        if self.exhausted() {
+            return;
+        }
+
+        if let Some(scope) = scope_for_node(node, self.text) {
+            self.matches += 1;
+            self.push_node_spans(node, scope);
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.walk(child);
+            if self.exhausted() {
+                break;
+            }
+        }
+    }
+
+    fn push_node_spans(&mut self, node: Node<'_>, scope: &'static str) {
+        let start = node.start_byte().min(self.text.len());
+        let end = node.end_byte().min(self.text.len());
+        if end <= start {
+            return;
+        }
+
+        let start_line = line_for_byte(self.line_starts, start);
+        let end_line = line_for_byte(self.line_starts, end.saturating_sub(1));
+        for line in start_line..=end_line {
+            if self.captures >= self.limits.max_captures {
+                break;
+            }
+            let line_start = self.line_starts[line];
+            let line_end = self
+                .line_starts
+                .get(line + 1)
+                .copied()
+                .unwrap_or(self.text.len())
+                .saturating_sub(usize::from(line + 1 < self.line_starts.len()));
+            let span_start = start.max(line_start).saturating_sub(line_start);
+            let span_end = end.min(line_end).saturating_sub(line_start);
+            if span_end > span_start {
+                self.per_line[line].push(VisibleSyntaxSpan {
+                    start_byte: span_start,
+                    end_byte: span_end,
+                    scope,
+                });
+                self.captures += 1;
+            }
+        }
+    }
+}
+
+fn line_start_offsets(text: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    starts.extend(text.match_indices('\n').map(|(idx, _)| idx + 1));
+    starts
+}
+
+fn line_for_byte(line_starts: &[usize], byte: usize) -> usize {
+    match line_starts.binary_search(&byte) {
+        Ok(line) => line,
+        Err(next) => next.saturating_sub(1),
+    }
+}
+
+fn scope_for_node(node: Node<'_>, text: &str) -> Option<&'static str> {
+    match node.kind() {
+        "line_comment" | "block_comment" | "comment" => Some("comment.line"),
+        "string_literal" | "raw_string_literal" | "interpreted_string_literal" | "string" => {
+            Some("string.quoted")
+        }
+        "integer_literal" | "float_literal" => Some("constant.numeric.decimal"),
+        "char_literal" | "boolean_literal" => Some("constant.language"),
+        "primitive_type" | "type_identifier" => Some("entity.name.type"),
+        kind if is_keyword_node(kind, node, text) => Some("keyword.control"),
+        _ => None,
+    }
+}
+
+fn compact_visible_spans(spans: &mut Vec<VisibleSyntaxSpan>) {
+    spans.sort_by_key(|span| (span.start_byte, span.end_byte));
+    let mut compacted: Vec<VisibleSyntaxSpan> = Vec::with_capacity(spans.len());
+    for span in spans.drain(..) {
+        if compacted.last().is_some_and(|last| span.start_byte < last.end_byte) {
+            continue;
+        }
+        compacted.push(span);
+    }
+    *spans = compacted;
+}
+
+fn is_keyword_node(kind: &str, node: Node<'_>, text: &str) -> bool {
+    if node.is_named() {
+        return false;
+    }
+    matches!(
+        kind,
+        "fn" | "let"
+            | "mut"
+            | "pub"
+            | "impl"
+            | "struct"
+            | "enum"
+            | "trait"
+            | "mod"
+            | "use"
+            | "match"
+            | "if"
+            | "else"
+            | "for"
+            | "while"
+            | "loop"
+            | "return"
+            | "async"
+            | "await"
+            | "move"
+            | "const"
+            | "static"
+            | "where"
+            | "in"
+            | "crate"
+            | "self"
+            | "super"
+            | "def"
+            | "class"
+            | "import"
+            | "from"
+            | "elif"
+            | "try"
+            | "except"
+            | "finally"
+            | "with"
+            | "as"
+            | "pass"
+            | "yield"
+    ) || node
+        .utf8_text(text.as_bytes())
+        .is_ok_and(|token| matches!(token, "True" | "False" | "None"))
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +622,33 @@ mod tests {
         let edit = make_input_edit(11, 11, 11 + " let x = 1;".len(), src_before, src_after);
         let tree = state.update(src_after, Some(&edit)).unwrap();
         assert!(!tree.root_node().has_error());
+    }
+
+    #[test]
+    fn visible_syntax_spans_highlights_only_supplied_lines() {
+        let src = "fn main() {\n    let answer = 42;\n}\n";
+        let spans = visible_syntax_spans("Rust", src, VisibleSyntaxLimits::default());
+
+        assert_eq!(spans.len(), 4);
+        assert!(spans[0].iter().any(|span| span.scope == "keyword.control"));
+        assert!(spans[1].iter().any(|span| span.scope == "constant.numeric.decimal"));
+        assert!(spans.iter().flatten().all(|span| span.end_byte > span.start_byte));
+    }
+
+    #[test]
+    fn visible_syntax_spans_obeys_byte_and_capture_limits() {
+        let src = "let a = 1;\nlet b = 2;\n";
+        let too_small = VisibleSyntaxLimits { max_bytes: 4, ..VisibleSyntaxLimits::default() };
+        assert!(visible_syntax_spans("Rust", src, too_small).iter().all(Vec::is_empty));
+
+        let limited = VisibleSyntaxLimits {
+            max_captures: 1,
+            max_matches: 1,
+            ..VisibleSyntaxLimits::default()
+        };
+        let capture_count =
+            visible_syntax_spans("Rust", src, limited).iter().map(Vec::len).sum::<usize>();
+        assert!(capture_count <= 1);
     }
 
     // --------------------------------------------------

@@ -310,7 +310,7 @@ impl DocumentMode {
                 save: false,
                 undo: false,
                 search: true,
-                syntax: false,
+                syntax: true,
                 git_signs: false,
                 lsp: false,
                 lsp_full_sync: false,
@@ -566,7 +566,7 @@ mod tests {
         assert!(!gates.save);
         assert!(!gates.undo);
         assert!(gates.search, "search must remain available in VLF");
-        assert!(!gates.syntax);
+        assert!(gates.syntax, "visible-range syntax must remain available in VLF");
         assert!(!gates.git_signs);
         assert!(!gates.lsp);
         assert!(!gates.diagnostics);
@@ -580,7 +580,7 @@ mod tests {
         assert!(disabled.contains(&"editing"), "editing disabled in VLF");
         assert!(disabled.contains(&"save"), "save disabled in VLF");
         assert!(disabled.contains(&"undo"), "undo disabled in VLF");
-        assert!(disabled.contains(&"syntax"), "syntax disabled in VLF");
+        assert!(!disabled.contains(&"syntax"), "visible-range syntax must NOT be disabled in VLF");
         assert!(disabled.contains(&"git-signs"), "git-signs disabled in VLF");
         assert!(disabled.contains(&"lsp"), "lsp disabled in VLF");
         assert!(disabled.contains(&"diagnostics"), "diagnostics disabled in VLF");
