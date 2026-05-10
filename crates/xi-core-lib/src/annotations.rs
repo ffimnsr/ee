@@ -216,7 +216,7 @@ impl AnnotationStore {
         text: &'c Rope,
         interval: Interval,
     ) -> impl Iterator<Item = AnnotationSlice> + 'c {
-        self.store.iter().flat_map(move |(_plugin, value)| {
+        self.store.values().flat_map(move |value| {
             value.iter().map(move |annotation| annotation.slice_for_interval(interval, view, text))
         })
     }
