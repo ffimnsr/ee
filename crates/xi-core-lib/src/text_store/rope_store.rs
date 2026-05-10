@@ -19,7 +19,6 @@
 //! normal-mode behaviour is byte-for-byte compatible with previous direct
 //! `Rope` access.
 
-use xi_rope::rope::Utf16CodeUnitsMetric;
 use xi_rope::{LinesMetric, Rope};
 
 use crate::text_store::{
@@ -72,6 +71,104 @@ impl RopeTextStore {
     pub fn rope(&self) -> &Rope {
         &self.rope
     }
+
+    fn validate_range(&self, range: ByteRange) -> Option<(usize, usize)> {
+        let start = range.start.0 as usize;
+        let end = range.end.0 as usize;
+        let len = self.rope.len();
+        if start > len || end > len || start > end { None } else { Some((start, end)) }
+    }
+
+    fn collect_text(&self, start: usize, end: usize) -> String {
+        let mut text = String::with_capacity(end.saturating_sub(start));
+        let mut current = start;
+        while current < end {
+            let (chunk, byte_start, _, _) = self
+                .rope
+                .chunk_at_offset(current)
+                .expect("validated range should resolve to a rope chunk");
+            let rel_start = current - byte_start;
+            let rel_end = chunk.len().min(end - byte_start);
+            text.push_str(&chunk[rel_start..rel_end]);
+            current = byte_start + rel_end;
+        }
+        text
+    }
+}
+
+fn count_newlines_in_prefix(chunk: &str, end: usize) -> usize {
+    chunk.as_bytes()[..end].iter().filter(|&&byte| byte == b'\n').count()
+}
+
+fn line_offset_in_chunk(chunk: &str, relative_line: usize) -> Option<usize> {
+    if relative_line == 0 {
+        return Some(0);
+    }
+    let mut remaining = relative_line;
+    for (idx, byte) in chunk.as_bytes().iter().enumerate() {
+        if *byte == b'\n' {
+            remaining -= 1;
+            if remaining == 0 {
+                return Some(idx + 1);
+            }
+        }
+    }
+    None
+}
+
+fn utf16_prefix_in_chunk(chunk: &str, end: usize) -> usize {
+    chunk[..end].encode_utf16().count()
+}
+
+fn byte_offset_for_utf16_in_chunk(chunk: &str, target_utf16: usize) -> Option<usize> {
+    if target_utf16 == 0 {
+        return Some(0);
+    }
+    let mut utf16_seen = 0;
+    let mut utf8_seen = 0;
+    for ch in chunk.chars() {
+        if utf16_seen >= target_utf16 {
+            break;
+        }
+        utf16_seen += ch.len_utf16();
+        utf8_seen += ch.len_utf8();
+        if utf16_seen == target_utf16 {
+            return Some(utf8_seen);
+        }
+        if utf16_seen > target_utf16 {
+            return None;
+        }
+    }
+    if utf16_seen == target_utf16 { Some(utf8_seen) } else { None }
+}
+
+struct RopeChunkIter<'a> {
+    rope: &'a Rope,
+    current: usize,
+    end: usize,
+}
+
+impl<'a> Iterator for RopeChunkIter<'a> {
+    type Item = TextChunkResult;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current >= self.end {
+            return None;
+        }
+        let (chunk, byte_start, _, _) = self
+            .rope
+            .chunk_at_offset(self.current)
+            .expect("validated range should resolve to a rope chunk");
+        let rel_start = self.current - byte_start;
+        let rel_end = chunk.len().min(self.end - byte_start);
+        let range = ByteRange {
+            start: ByteOffset(self.current as u64),
+            end: ByteOffset((byte_start + rel_end) as u64),
+        };
+        let text = chunk[rel_start..rel_end].to_owned();
+        self.current = byte_start + rel_end;
+        Some(TextChunkResult::Ready(TextChunk { text, byte_range: range }))
+    }
 }
 
 impl TextStore for RopeTextStore {
@@ -90,61 +187,44 @@ impl TextStore for RopeTextStore {
     }
 
     fn read_byte_range(&self, range: ByteRange) -> TextChunkResult {
-        let start = range.start.0 as usize;
-        let end = range.end.0 as usize;
-        let len = self.rope.len();
-        if start > len || end > len || start > end {
+        let Some((start, end)) = self.validate_range(range) else {
             return TextChunkResult::Unsupported;
-        }
-        let text = self.rope.slice_to_cow(start..end).into_owned();
+        };
+        let text = self.collect_text(start, end);
         TextChunkResult::Ready(TextChunk { text, byte_range: range })
     }
 
     fn line_to_byte(&self, line: LogicalLine) -> LineLookup {
-        // offset_of_line panics if line > newlines + 1; guard first.
+        let line = line.0 as usize;
         let max_line = self.rope.measure::<LinesMetric>() + 1;
-        if line.0 as usize > max_line {
+        if line > max_line {
             return LineLookup::OutOfRange;
         }
-        let offset = self.rope.offset_of_line(line.0 as usize);
-        LineLookup::Exact(ByteOffset(offset as u64))
+        if line == max_line {
+            return LineLookup::Exact(ByteOffset(self.rope.len() as u64));
+        }
+        let Some((chunk, byte_start, line_start, _)) = self.rope.chunk_at_line(line) else {
+            return LineLookup::OutOfRange;
+        };
+        let rel_line = line.saturating_sub(line_start);
+        let Some(within_chunk) = line_offset_in_chunk(chunk, rel_line) else {
+            return LineLookup::OutOfRange;
+        };
+        LineLookup::Exact(ByteOffset((byte_start + within_chunk) as u64))
     }
 
     fn byte_to_line(&self, offset: ByteOffset) -> Option<LogicalLine> {
         let off = offset.0 as usize;
-        if off > self.rope.len() {
-            return None;
-        }
-        let line = self.rope.line_of_offset(off);
-        Some(LogicalLine(line as u64))
+        let (chunk, byte_start, line_start, _) = self.rope.chunk_at_offset(off)?;
+        let within_chunk = off - byte_start;
+        Some(LogicalLine((line_start + count_newlines_in_prefix(chunk, within_chunk)) as u64))
     }
 
     fn iter_chunks(&self, range: ByteRange) -> Box<dyn Iterator<Item = TextChunkResult> + '_> {
-        let start = range.start.0 as usize;
-        let end = range.end.0 as usize;
-        let len = self.rope.len();
-        if start > len || end > len || start > end {
+        let Some((start, end)) = self.validate_range(range) else {
             return Box::new(std::iter::once(TextChunkResult::Unsupported));
-        }
-        // Yield one TextChunkResult per underlying rope leaf, tracking absolute
-        // byte positions via a running offset.
-        let chunks: Vec<TextChunkResult> = self
-            .rope
-            .iter_chunks(start..end)
-            .scan(start, |pos, chunk| {
-                let chunk_start = *pos;
-                let chunk_end = chunk_start + chunk.len();
-                *pos = chunk_end;
-                Some(TextChunkResult::Ready(TextChunk {
-                    text: chunk.to_owned(),
-                    byte_range: ByteRange {
-                        start: ByteOffset(chunk_start as u64),
-                        end: ByteOffset(chunk_end as u64),
-                    },
-                }))
-            })
-            .collect();
-        Box::new(chunks.into_iter())
+        };
+        Box::new(RopeChunkIter { rope: &self.rope, current: start, end })
     }
 
     fn snapshot_id(&self) -> u64 {
@@ -153,22 +233,21 @@ impl TextStore for RopeTextStore {
 
     fn byte_to_utf16(&self, offset: ByteOffset) -> Option<Utf16Offset> {
         let off = offset.0 as usize;
-        if off > self.rope.len() {
-            return None;
-        }
-        // count returns the accumulated measured units up to `off` base units.
-        let utf16 = self.rope.count::<Utf16CodeUnitsMetric>(off);
-        Some(Utf16Offset(utf16 as u64))
+        let (chunk, byte_start, _, utf16_start) = self.rope.chunk_at_offset(off)?;
+        let within_chunk = off - byte_start;
+        Some(Utf16Offset((utf16_start + utf16_prefix_in_chunk(chunk, within_chunk)) as u64))
     }
 
     fn utf16_to_byte(&self, offset: Utf16Offset) -> Utf16Lookup {
-        let total_utf16 = self.rope.measure::<Utf16CodeUnitsMetric>();
-        if offset.0 as usize > total_utf16 {
+        let target = offset.0 as usize;
+        let Some((chunk, byte_start, _, utf16_start)) = self.rope.chunk_at_utf16(target) else {
             return Utf16Lookup::OutOfRange;
-        }
-        // count_base_units converts from measured units back to base (byte) units.
-        let byte_off = self.rope.count_base_units::<Utf16CodeUnitsMetric>(offset.0 as usize);
-        Utf16Lookup::Exact(ByteOffset(byte_off as u64))
+        };
+        let rel_utf16 = target.saturating_sub(utf16_start);
+        let Some(within_chunk) = byte_offset_for_utf16_in_chunk(chunk, rel_utf16) else {
+            return Utf16Lookup::OutOfRange;
+        };
+        Utf16Lookup::Exact(ByteOffset((byte_start + within_chunk) as u64))
     }
 
     fn full_text_policy(&self) -> FullTextPolicy {
@@ -383,6 +462,36 @@ mod tests {
             })
             .collect();
         assert_eq!(text, s);
+    }
+
+    #[test]
+    fn iter_chunks_preserves_absolute_ranges_across_leaf_boundaries() {
+        let s = format!("{}{}", "a".repeat(1200), "b".repeat(1200));
+        let st = store(&s);
+        let mut offset = 0usize;
+        let mut boundary = None;
+        for chunk in st.rope().iter_chunks(..) {
+            offset += chunk.len();
+            if offset < s.len() {
+                boundary = Some(offset as u64);
+                break;
+            }
+        }
+        let boundary = boundary.expect("expected multi-leaf rope");
+        let chunks: Vec<_> =
+            st.iter_chunks(ByteRange::new(boundary.saturating_sub(50), boundary + 50)).collect();
+        assert!(chunks.len() >= 2);
+
+        let ranges: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| match chunk {
+                TextChunkResult::Ready(chunk) => (chunk.byte_range.start.0, chunk.byte_range.end.0),
+                other => panic!("expected Ready, got {:?}", other),
+            })
+            .collect();
+
+        assert_eq!(ranges.first().copied(), Some((boundary.saturating_sub(50), boundary)));
+        assert_eq!(ranges.last().copied(), Some((boundary, boundary + 50)));
     }
 
     #[test]

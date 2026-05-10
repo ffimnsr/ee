@@ -18,9 +18,7 @@ use std::cmp::min;
 
 use memchr::{memchr, memchr2, memchr3};
 
-use crate::rope::BaseMetric;
-use crate::rope::LinesRaw;
-use crate::rope::RopeInfo;
+use crate::rope::{BaseMetric, LinesRaw, RopeInfo, RopeSliceCursor};
 use crate::tree::Cursor;
 use regex::Regex;
 use std::borrow::Cow;
@@ -52,6 +50,76 @@ pub enum CaseMatching {
     CaseInsensitive,
 }
 
+trait FindCursor {
+    fn pos(&self) -> usize;
+    fn total_len(&self) -> usize;
+    fn get_leaf(&self) -> Option<(&str, usize)>;
+    fn set(&mut self, position: usize);
+    fn next_leaf(&mut self) -> Option<(&str, usize)>;
+    fn next_base(&mut self) -> Option<usize>;
+    fn next_codepoint(&mut self) -> Option<char>;
+}
+
+impl<'a> FindCursor for Cursor<'a, RopeInfo> {
+    fn pos(&self) -> usize {
+        Cursor::pos(self)
+    }
+
+    fn total_len(&self) -> usize {
+        Cursor::total_len(self)
+    }
+
+    fn get_leaf(&self) -> Option<(&str, usize)> {
+        Cursor::get_leaf(self).map(|(leaf, pos)| (leaf.as_str(), pos))
+    }
+
+    fn set(&mut self, position: usize) {
+        Cursor::set(self, position);
+    }
+
+    fn next_leaf(&mut self) -> Option<(&str, usize)> {
+        Cursor::next_leaf(self).map(|(leaf, pos)| (leaf.as_str(), pos))
+    }
+
+    fn next_base(&mut self) -> Option<usize> {
+        Cursor::next::<BaseMetric>(self)
+    }
+
+    fn next_codepoint(&mut self) -> Option<char> {
+        Cursor::next_codepoint(self)
+    }
+}
+
+impl<'a> FindCursor for RopeSliceCursor<'a> {
+    fn pos(&self) -> usize {
+        RopeSliceCursor::pos(self)
+    }
+
+    fn total_len(&self) -> usize {
+        RopeSliceCursor::total_len(self)
+    }
+
+    fn get_leaf(&self) -> Option<(&str, usize)> {
+        RopeSliceCursor::get_leaf(self)
+    }
+
+    fn set(&mut self, position: usize) {
+        RopeSliceCursor::set(self, position);
+    }
+
+    fn next_leaf(&mut self) -> Option<(&str, usize)> {
+        RopeSliceCursor::next_leaf(self)
+    }
+
+    fn next_base(&mut self) -> Option<usize> {
+        RopeSliceCursor::next_base(self)
+    }
+
+    fn next_codepoint(&mut self) -> Option<char> {
+        RopeSliceCursor::next_codepoint(self)
+    }
+}
+
 /// Finds a pattern string in the rope referenced by the cursor, starting at
 /// the current location of the cursor (and finding the first match). Both
 /// case sensitive and case insensitive matching is provided, controlled by
@@ -69,7 +137,22 @@ pub fn find(
     pat: &str,
     regex: Option<&Regex>,
 ) -> Option<usize> {
-    match find_progress(cursor, lines, cm, pat, usize::MAX, regex) {
+    match find_progress_impl(cursor, lines, cm, pat, usize::MAX, regex) {
+        FindResult::Found(start) => Some(start),
+        FindResult::NotFound => None,
+        FindResult::TryAgain => unreachable!("find_progress got stuck"),
+    }
+}
+
+/// Borrowed-view variant of [`find`].
+pub fn find_in_slice(
+    cursor: &mut RopeSliceCursor<'_>,
+    lines: &mut LinesRaw,
+    cm: CaseMatching,
+    pat: &str,
+    regex: Option<&Regex>,
+) -> Option<usize> {
+    match find_progress_impl(cursor, lines, cm, pat, usize::MAX, regex) {
         FindResult::Found(start) => Some(start),
         FindResult::NotFound => None,
         FindResult::TryAgain => unreachable!("find_progress got stuck"),
@@ -95,6 +178,17 @@ pub fn find_progress(
     num_steps: usize,
     regex: Option<&Regex>,
 ) -> FindResult {
+    find_progress_impl(cursor, lines, cm, pat, num_steps, regex)
+}
+
+fn find_progress_impl<C: FindCursor>(
+    cursor: &mut C,
+    lines: &mut LinesRaw,
+    cm: CaseMatching,
+    pat: &str,
+    num_steps: usize,
+    regex: Option<&Regex>,
+) -> FindResult {
     // empty search string
     if pat.is_empty() {
         return FindResult::NotFound;
@@ -106,7 +200,7 @@ pub fn find_progress(
             lines,
             pat,
             |_| Some(0),
-            |cursor, lines, pat| compare_cursor_regex(cursor, lines, pat, r),
+            |cursor, lines, pat| compare_cursor_regex_impl(cursor, lines, pat, r),
             num_steps,
         ),
         None => {
@@ -114,13 +208,13 @@ pub fn find_progress(
                 CaseMatching::Exact => {
                     let b = pat.as_bytes()[0];
                     let scanner = |s: &str| memchr(b, s.as_bytes());
-                    let matcher = compare_cursor_str;
+                    let matcher = compare_cursor_str_impl;
                     find_progress_iter(cursor, lines, pat, scanner, matcher, num_steps)
                 }
                 CaseMatching::CaseInsensitive => {
                     let pat_lower = pat.to_lowercase();
                     let b = pat_lower.as_bytes()[0];
-                    let matcher = compare_cursor_str_casei;
+                    let matcher = compare_cursor_str_casei_impl;
                     if b == b'i' {
                         // 0xC4 is first utf-8 byte of 'İ'
                         let scanner = |s: &str| memchr3(b'i', b'I', 0xC4, s.as_bytes());
@@ -147,12 +241,12 @@ pub fn find_progress(
 }
 
 // Run the core repeatedly until there is a result, up to a certain number of steps.
-fn find_progress_iter(
-    cursor: &mut Cursor<RopeInfo>,
+fn find_progress_iter<C: FindCursor>(
+    cursor: &mut C,
     lines: &mut LinesRaw,
     pat: &str,
     scanner: impl Fn(&str) -> Option<usize>,
-    matcher: impl Fn(&mut Cursor<RopeInfo>, &mut LinesRaw, &str) -> Option<usize>,
+    matcher: impl Fn(&mut C, &mut LinesRaw, &str) -> Option<usize>,
     num_steps: usize,
 ) -> FindResult {
     for _ in 0..num_steps {
@@ -168,12 +262,12 @@ fn find_progress_iter(
 // scans through a single leaf searching for some prefix of the pattern,
 // then a "matcher" which confirms that such a candidate actually matches
 // in the full rope.
-fn find_core(
-    cursor: &mut Cursor<RopeInfo>,
+fn find_core<C: FindCursor>(
+    cursor: &mut C,
     lines: &mut LinesRaw,
     pat: &str,
     scanner: impl Fn(&str) -> Option<usize>,
-    matcher: impl Fn(&mut Cursor<RopeInfo>, &mut LinesRaw, &str) -> Option<usize>,
+    matcher: impl Fn(&mut C, &mut LinesRaw, &str) -> Option<usize>,
 ) -> FindResult {
     let orig_pos = cursor.pos();
 
@@ -206,6 +300,14 @@ fn find_core(
 pub fn compare_cursor_str(
     cursor: &mut Cursor<RopeInfo>,
     _lines: &mut LinesRaw,
+    pat: &str,
+) -> Option<usize> {
+    compare_cursor_str_impl(cursor, _lines, pat)
+}
+
+fn compare_cursor_str_impl(
+    cursor: &mut impl FindCursor,
+    _lines: &mut LinesRaw,
     mut pat: &str,
 ) -> Option<usize> {
     let start_position = cursor.pos();
@@ -217,7 +319,7 @@ pub fn compare_cursor_str(
         let n = min(pat.len(), leaf.len() - pos_in_leaf);
         if leaf.as_bytes()[pos_in_leaf..pos_in_leaf + n] != pat.as_bytes()[..n] {
             cursor.set(start_position);
-            cursor.next::<BaseMetric>();
+            cursor.next_base();
             return None;
         }
         pat = &pat[n..];
@@ -228,7 +330,7 @@ pub fn compare_cursor_str(
         let _ = cursor.next_leaf();
     }
     cursor.set(start_position);
-    cursor.next::<BaseMetric>();
+    cursor.next_base();
     None
 }
 
@@ -240,6 +342,14 @@ pub fn compare_cursor_str_casei(
     _lines: &mut LinesRaw,
     pat: &str,
 ) -> Option<usize> {
+    compare_cursor_str_casei_impl(cursor, _lines, pat)
+}
+
+fn compare_cursor_str_casei_impl(
+    cursor: &mut impl FindCursor,
+    _lines: &mut LinesRaw,
+    pat: &str,
+) -> Option<usize> {
     let start_position = cursor.pos();
     let mut pat_iter = pat.chars();
     let mut c = pat_iter.next().unwrap();
@@ -248,7 +358,7 @@ pub fn compare_cursor_str_casei(
             for lc_c in rope_c.to_lowercase() {
                 if c != lc_c {
                     cursor.set(start_position);
-                    cursor.next::<BaseMetric>();
+                    cursor.next_base();
                     return None;
                 }
                 if let Some(next_c) = pat_iter.next() {
@@ -260,7 +370,7 @@ pub fn compare_cursor_str_casei(
         } else {
             // end of string before pattern is complete
             cursor.set(start_position);
-            cursor.next::<BaseMetric>();
+            cursor.next_base();
             return None;
         }
     }
@@ -274,6 +384,15 @@ pub fn compare_cursor_str_casei(
 /// the current line is matched. Returns the start position of the match.
 pub fn compare_cursor_regex(
     cursor: &mut Cursor<RopeInfo>,
+    lines: &mut LinesRaw,
+    pat: &str,
+    regex: &Regex,
+) -> Option<usize> {
+    compare_cursor_regex_impl(cursor, lines, pat, regex)
+}
+
+fn compare_cursor_regex_impl(
+    cursor: &mut impl FindCursor,
     lines: &mut LinesRaw,
     pat: &str,
     regex: &Regex,
@@ -766,5 +885,16 @@ mod tests {
         assert!(compare_cursor_str(&mut c, &mut raw_lines, &s).is_some());
         c.set(2000);
         assert!(compare_cursor_str(&mut c, &mut raw_lines, &s[2000..]).is_some());
+    }
+
+    #[test]
+    fn find_in_slice_respects_view_end() {
+        let text = Rope::from(format!("{}needle-after", "x".repeat(1024)));
+        let view = text.slice_view(1016..1022);
+        let mut cursor = view.cursor(0);
+        let mut raw_lines = view.lines_raw();
+
+        assert_eq!(find_in_slice(&mut cursor, &mut raw_lines, Exact, "needle", None), None);
+        assert_eq!(cursor.pos(), view.len());
     }
 }

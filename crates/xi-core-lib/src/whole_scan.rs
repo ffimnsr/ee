@@ -30,8 +30,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use xi_rope::engine::RevId;
 use xi_rope::{Rope, RopeDelta};
 
+use crate::file::{FileError, PreparedRopeSave, execute_prepared_rope_save};
 use crate::lang_features;
 
 // ---------------------------------------------------------------------------
@@ -43,6 +45,13 @@ pub(crate) enum WholeScanResult {
     /// Completed reindent: `Some(delta)` when changes were produced, `None`
     /// when the document was already correctly indented.
     Reindent(Option<RopeDelta>),
+}
+
+/// Result payload from a completed async save operation.
+pub(crate) struct SaveTaskResult {
+    pub(crate) request: PreparedRopeSave,
+    pub(crate) saved_rev_id: RevId,
+    pub(crate) result: Result<(), FileError>,
 }
 
 // ---------------------------------------------------------------------------
@@ -153,6 +162,79 @@ impl WholeScanTask {
     }
 }
 
+/// Tracks an in-flight async snapshot save operation.
+pub(crate) struct SaveTask {
+    generation: Arc<AtomicU64>,
+    result: Arc<Mutex<Option<(u64, SaveTaskResult)>>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SaveTask {
+    pub(crate) fn new() -> Self {
+        SaveTask {
+            generation: Arc::new(AtomicU64::new(0)),
+            result: Arc::new(Mutex::new(None)),
+            handle: None,
+        }
+    }
+
+    pub(crate) fn is_in_progress(&self) -> bool {
+        self.handle.as_ref().is_some_and(|h| !h.is_finished())
+    }
+
+    pub(crate) fn start_save(
+        &mut self,
+        request: PreparedRopeSave,
+        text: Rope,
+        saved_rev_id: RevId,
+    ) -> u64 {
+        let task_gen = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        drop(self.handle.take());
+
+        let gen_arc = Arc::clone(&self.generation);
+        let result_arc = Arc::clone(&self.result);
+
+        self.handle = Some(
+            std::thread::Builder::new()
+                .name("xi-async-save".into())
+                .spawn(move || {
+                    let mut should_continue = || gen_arc.load(Ordering::Acquire) == task_gen;
+                    if !should_continue() {
+                        return;
+                    }
+
+                    let result = execute_prepared_rope_save(&request, &text, &mut should_continue);
+
+                    let stale = gen_arc.load(Ordering::Acquire) != task_gen;
+                    if stale
+                        && matches!(
+                            result,
+                            Err(FileError::Io(ref err, _))
+                                if err.kind() == std::io::ErrorKind::Interrupted
+                        )
+                    {
+                        return;
+                    }
+
+                    *result_arc.lock().unwrap() =
+                        Some((task_gen, SaveTaskResult { request, saved_rev_id, result }));
+                })
+                .expect("failed to spawn async save thread"),
+        );
+
+        task_gen
+    }
+
+    pub(crate) fn poll(&mut self) -> Option<SaveTaskResult> {
+        let current_gen = self.generation.load(Ordering::Acquire);
+        let mut slot = self.result.lock().unwrap();
+        match slot.as_ref() {
+            Some((task_gen, _)) if *task_gen == current_gen => slot.take().map(|(_, r)| r),
+            _ => None,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -160,6 +242,7 @@ impl WholeScanTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn new_task_poll_returns_none() {
@@ -237,6 +320,38 @@ mod tests {
             }
             if std::time::Instant::now() > deadline {
                 panic!("task did not complete within 2 s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn save_task_writes_snapshot_and_returns_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("save-task.txt");
+        let text = Rope::from("alpha\n");
+        let saved_rev_id = xi_rope::engine::Engine::new(text.clone()).get_head_rev_id();
+        let request = PreparedRopeSave {
+            buffer_id: crate::tabs::BufferId(1),
+            path: path.clone(),
+            encoding: crate::file::CharacterEncoding::Utf8,
+            kind: crate::file::PreparedRopeSaveKind::New,
+            options: crate::file::SaveOptions::default(),
+        };
+        let mut task = SaveTask::new();
+
+        task.start_save(request.clone(), text, saved_rev_id);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            if let Some(result) = task.poll() {
+                assert!(result.result.is_ok());
+                assert_eq!(result.request.path, request.path);
+                assert_eq!(fs::read_to_string(&path).unwrap(), "alpha\n");
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("save task did not complete within 2 s");
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }

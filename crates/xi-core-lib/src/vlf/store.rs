@@ -562,6 +562,24 @@ impl VlfStore {
         Ok(())
     }
 
+    /// Return recorded overlay delta for `undo_group`, if present.
+    #[allow(dead_code)]
+    pub fn overlay_delta_for_undo_group(
+        &self,
+        undo_group: usize,
+    ) -> Option<crate::vlf::overlay::OverlayDelta> {
+        let ov = self.overlay.borrow();
+        ov.as_ref()?.delta_for_group(undo_group).cloned()
+    }
+
+    /// Release overlay history and insert buffers owned only by `undo_group`.
+    pub fn gc_undo_group(&self, undo_group: usize) {
+        let mut ov = self.overlay.borrow_mut();
+        if let Some(overlay) = ov.as_mut() {
+            overlay.gc_undo_group(undo_group);
+        }
+    }
+
     /// Suggested save policy given the current overlay state.
     ///
     /// Returns the narrowest available strategy: same-size overwrite,

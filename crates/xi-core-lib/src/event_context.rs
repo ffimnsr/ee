@@ -1025,13 +1025,19 @@ impl<'a> EventContext<'a> {
         self.render()
     }
 
-    /// Called after the buffer has been saved to `path`. Notifies plugins,
-    /// marks the buffer as pristine, and schedules a render.
-    pub(crate) fn after_save(&mut self, path: &Path) {
+    /// Called after a rope-backed buffer snapshot has been saved to `path`.
+    ///
+    /// Notifies plugins, marks the buffer as pristine only if the current head
+    /// is still equivalent to the saved revision, and schedules a render.
+    pub(crate) fn after_save_with_rev(
+        &mut self,
+        path: &Path,
+        saved_rev_id: xi_rope::engine::RevId,
+    ) {
         // notify plugins
         self.plugins.iter().for_each(|plugin| plugin.did_save(self.view_id, path));
 
-        self.editor.borrow_mut().set_pristine();
+        self.editor.borrow_mut().set_pristine_if_equivalent_revision(saved_rev_id);
         self.with_view(|view, text| view.set_dirty(text));
         self.render()
     }
@@ -1147,22 +1153,23 @@ impl<'a> EventContext<'a> {
         }
     }
 
-    /// Returns the text to be saved, appending a newline if necessary.
-    pub(crate) fn text_for_save(&mut self) -> Rope {
+    /// Returns a cheap rope snapshot for saving, appending a newline if needed.
+    pub(crate) fn rope_snapshot_for_save(&mut self) -> (Rope, xi_rope::engine::RevId) {
         let editor = self.editor.borrow();
+        let saved_rev_id = editor.get_head_rev_id();
         let mut rope = editor.get_buffer().clone();
         let rope_len = rope.len();
 
         if rope_len < 1 || !self.config.save_with_newline {
-            return rope;
+            return (rope, saved_rev_id);
         }
 
         let cursor = Cursor::new(&rope, rope.len());
         let has_newline_at_eof = match cursor.get_leaf() {
             Some((last_chunk, _)) => last_chunk.ends_with(&self.config.line_ending),
             None => {
-                warn!("text_for_save could not inspect final rope chunk at EOF");
-                return rope;
+                warn!("rope_snapshot_for_save could not inspect final rope chunk at EOF");
+                return (rope, saved_rev_id);
             }
         };
 
@@ -1170,7 +1177,7 @@ impl<'a> EventContext<'a> {
             let line_ending = &self.config.line_ending;
             rope.edit(rope_len.., line_ending);
         }
-        rope
+        (rope, saved_rev_id)
     }
 
     /// Called after anything changes that effects word wrap, such as the size of

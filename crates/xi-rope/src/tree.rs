@@ -770,6 +770,28 @@ impl<'a, N: NodeInfo> Cursor<'a, N> {
         self.leaf.map(|l| (l, self.position - self.offset_of_leaf))
     }
 
+    /// Returns the base-unit offset at the start of the current leaf.
+    pub fn leaf_start_offset(&self) -> Option<usize> {
+        self.leaf.map(|_| self.offset_of_leaf)
+    }
+
+    /// Returns the accumulated measure at the start of the current leaf.
+    pub fn leaf_start_measure<M: Metric<N>>(&self) -> Option<usize> {
+        self.leaf?;
+        let mut measure = 0;
+        for (node, child_idx) in self.cache.iter().flatten() {
+            let children = node.get_children();
+            if *child_idx > children.len() {
+                debug_assert!(false, "{}", TreeInvariantError::InternalNodeWithoutChildren);
+                return None;
+            }
+            for child in &children[..*child_idx] {
+                measure += child.measure::<M>();
+            }
+        }
+        Some(measure)
+    }
+
     /// Set the position of the cursor.
     ///
     /// The cursor is valid after this call.
@@ -793,6 +815,11 @@ impl<'a, N: NodeInfo> Cursor<'a, N> {
             }
         }
         self.descend();
+    }
+
+    /// Set the cursor to the leaf containing the given metric position.
+    pub fn set_measure<M: Metric<N>>(&mut self, measure: usize) {
+        self.descend_metric::<M>(measure);
     }
 
     /// Get the position of the cursor.

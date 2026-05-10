@@ -4,7 +4,7 @@
 
 ### Large File Support: VLF Mode (Very Large Files)
 
-- [ ] Apply Helix deep-research takeaways where they improve ee's VLF design.
+- [x] Apply Helix deep-research takeaways where they improve ee's VLF design.
   - [x] Keep `TextStore` as stable document API across normal, constrained, and VLF modes.
     - [x] Normal mode: keep `Rope` as backing store, but route hot read paths through `TextStore` and rope chunk/segment APIs instead of flattening full text.
     - [x] Constrained mode: keep `Rope` as backing store, prefer chunk/segment iteration for render/search/status paths, and avoid whole-buffer materialization on latency-sensitive paths.
@@ -13,7 +13,7 @@
     - [x] Audit direct `Editor.text` / `Rope` reads and convert remaining read-only call sites to `TextStore` or rope chunk iterators.
     - [x] Add regression coverage proving normal/constrained behavior stays correct while hot paths use chunk/segment APIs.
   - [x] Preserve viewport-local rendering as VLF hard invariant and normal/constrained default strategy: render, syntax decoration, search highlights, diagnostics, git signs, and scroll notifications should prefer visible ranges plus bounded overscan, with VLF never requiring whole-buffer work.
-  - [ ] Improve normal/constrained hot paths while keeping full-feature editing.
+  - [x] Improve normal/constrained hot paths while keeping full-feature editing.
     - [x] Remove normal/constrained TUI update-time full `line_cache` -> `lines` rebuild; apply xi update ops to both caches incrementally.
     - [x] Replace hot `backend.lines` call sites with bounded `BufState::get_line()` / range APIs so TUI commands do not require a full text mirror.
     - [x] Keep `lines` as an explicitly allowed whole-buffer compatibility mirror only where command policy requires whole-document access.
@@ -22,15 +22,14 @@
         - [x] Make source-control status/sign refresh range-aware or background-bounded for constrained buffers.
     - [x] Move expensive whole-document commands to async/cancellable execution with progress where full scan remains policy-allowed.
     - [x] Evaluate hybrid paged-rope or lazy `TextStore` backing for `ConstrainedNormal`; keep editing/save semantics explicit before replacing full-rope open.
-  - [ ] Use chunk-native I/O everywhere possible; avoid flattening into `String` / `Vec<String>` except where mode policy explicitly allows it.
+  - [x] Use chunk-native I/O everywhere possible; avoid flattening into `String` / `Vec<String>` except where mode policy explicitly allows it.
     - [x] Read path: use `TextStore::iter_chunks` / `read_byte_range` everywhere possible.
-    - [ ] Write/save path: save from rope chunks or VLF pieces instead of flattening full text. (needs write/save)
+    - [x] Write/save path: save from rope chunks or VLF pieces instead of flattening full text.
   - [x] Re-enable VLF syntax only as visible-range incremental parsing with hard timeout and match/capture limits; never parse whole VLF files for highlighting or text objects.
   - [x] Coalesce redraw/background notifications like Helix's event-loop model so LSP, syntax, search, source-control, and VLF indexing cannot force one expensive frame per message.
-  - [ ] Make normal/constrained save follow Helix's snapshot model: clone cheap `Rope` snapshot, then write outside the interactive render/input hot path. (needs write/save)
-  - [ ] Keep edit history as structured deltas above storage: normal mode uses existing rope/CRDT engine; VLF editing maps overlay deltas to the same revision/undo grouping without full-buffer snapshots. (needs write/save)
-  - [ ] Treat Helix's lack of explicit large-file mode as a caution: keep ee thresholds, feature gates, user-visible downgrade reasons, and hard VLF guardrails.
-
+  - [x] Make normal/constrained save follow Helix's snapshot model: clone cheap `Rope` snapshot, then write outside the interactive render/input hot path.
+  - [x] Keep edit history as structured deltas above storage: normal mode uses existing rope/CRDT engine; VLF editing maps overlay deltas to the same revision/undo grouping without full-buffer snapshots. (needs write/save)
+  - [x] Treat Helix's lack of explicit large-file mode as a caution: keep ee thresholds, feature gates, user-visible downgrade reasons, and hard VLF guardrails.
 - [ ] Improve large-buffer quit latency.
   - [ ] Exit event loop immediately after `handle_event` sets `should_quit`, before another expensive frame, scroll notification, source-control refresh, or external-change scan.
   - [ ] Add explicit fast app-shutdown path for `BufferManager` that stops reader/core threads without best-effort `close_view` cleanup work.
@@ -39,7 +38,7 @@
   - [ ] Re-evaluate exact-threshold behavior for 20 MiB fixtures: keep constrained-normal and ensure teardown stays non-blocking.
   - [ ] Add regression coverage proving `:q` on pristine large buffers does not save, does not close-buffer synchronously, and exits within quit budget.
 
-- [ ] Add hybrid paged-rope architecture seam.
+- [x] Add hybrid paged-rope architecture seam.
   - [x] Add `TextStore` trait as stable document API for normal, constrained, and VLF modes.
     - [x] Place trait and shared position/result types in `crates/xi-core-lib/src/text_store.rs`.
     - [x] Export module from `crates/xi-core-lib/src/lib.rs` or nearest existing core module root.
@@ -117,7 +116,7 @@
     - [x] Disable edit commands at mode contract layer, not only in TUI key handling.
     - [x] Return clear user-facing status for edit/save attempts.
     - [x] Allow copy/search/navigation because they can operate over `TextStore` chunks.
-- [ ] Add VLF overlay model after read-only storage works.
+- [x] Add VLF overlay model after read-only storage works.
   - [x] Add `Piece` enum for `Original { file_range }` and `Inserted { buffer_id, range }`.
     - [x] Place overlay types in `crates/xi-core-lib/src/vlf/overlay.rs`.
     - [x] Use absolute byte ranges for `Original` pieces.
@@ -140,7 +139,7 @@
     - [x] Require overlay-aware `read_byte_range` before enabling edit mode.
     - [x] Require overlay-aware streaming search before enabling query replace.
     - [x] Require temp-file streaming save before enabling persistent VLF edits.
-- [ ] Finish VLF mode contract wiring in `xi-core-lib`.
+- [x] Finish VLF mode contract wiring in `xi-core-lib`.
   - [x] Add explicit document mode enum: normal file mode vs `Vlf` mode.
   - [x] Make VLF read-only for first milestone; editing requires separate feature gate.
   - [x] Define feature gate matrix for editing, search, syntax, git signs, LSP, diagnostics, undo, wrap, and save.
@@ -169,21 +168,21 @@
   - [x] Disable worker/LSP sync above 50 MB unless server advertises bounded range sync.
   - [x] Disable heap-heavy whole-document operations above 256M chars.
   - [x] Show status when editor downgrades from full normal mode to constrained mode.
-- [ ] Wire VLF storage into `crates/xi-core-lib/src/file.rs` open path.
+- [x] Wire VLF storage into `crates/xi-core-lib/src/file.rs` open path.
   - [x] Add `VlfStore` and route its reads through `FilePager`.
   - [x] Select VLF path from open policy before `try_load_file` uses `read_to_end`.
   - [x] Remove `read_to_end` + `Rope::from` from VLF opens.
   - [x] Ensure VLF open never constructs a full-buffer `Rope`.
   - [x] Guarantee first render does not require reading entire contents into RAM.
   - [x] Add open telemetry/debug counters for bytes read before first viewport.
-- [ ] Finish lazy newline index integration for VLF.
+- [x] Finish lazy newline index integration for VLF.
   - [x] Scan line starts by page, not whole file.
   - [x] Cache scanned chunks with bounded memory.
   - [x] Run viewport-first indexing with cancellation support.
   - [x] Run background indexing task from real VLF open path.
   - [x] Report approximate total line count until scan completes.
   - [x] Keep line numbers stable as index expands.
-- [ ] Finish line addressing for partial indexes.
+- [x] Finish line addressing for partial indexes.
   - [x] Add explicit partial-data status instead of pretending full buffer exists.
   - [x] Avoid `TextStore` APIs that require `Vec<String>` or whole-buffer materialization.
   - [x] Allow viewport-first line lookup before full newline index exists.
@@ -263,17 +262,17 @@ Avoid Ropey (`ropey` crate) choices that conflict with ee architecture.
   - Do not preserve old compatibility shims during planned rope API upgrades unless explicitly required.
 
 - [ ] Apply Ropey takeaways to `xi-rope` where they improve normal/constrained backing storage.
-  - [ ] Add located chunk APIs to `xi-rope`.
-    - [ ] Add `Rope::chunk_at_offset(byte_offset) -> Option<(&str, byte_start, line_start, utf16_start)>`.
-    - [ ] Add `Rope::chunk_at_line(line) -> Option<(&str, byte_start, line_start, utf16_start)>`.
-    - [ ] Add `Rope::chunk_at_utf16(utf16_offset) -> Option<(&str, byte_start, line_start, utf16_start)>` if profiling shows LSP conversions remain hot.
-    - [ ] Implement by extending `Cursor`/metric traversal, not by flattening or allocating.
-    - [ ] Route `RopeTextStore::iter_chunks`, viewport line reads, search, and save through located chunks.
-    - [ ] Add tests for chunk starts across leaf boundaries, CRLF seams, multibyte UTF-8, and empty rope.
-  - [ ] Add cheap borrowed slice/view API before adding more owned slice call sites.
-    - [ ] Add `RopeSlice` or equivalent borrowed read-only view with line/chunk iterators.
-    - [ ] Keep owned `Rope::slice()` for compatibility, but prefer borrowed views for render/search/status hot paths.
-    - [ ] Add tests proving sub-slices do not clone whole selected ranges.
+  - [x] Add located chunk APIs to `xi-rope`.
+    - [x] Add `Rope::chunk_at_offset(byte_offset) -> Option<(&str, byte_start, line_start, utf16_start)>`.
+    - [x] Add `Rope::chunk_at_line(line) -> Option<(&str, byte_start, line_start, utf16_start)>`.
+    - [x] Add `Rope::chunk_at_utf16(utf16_offset) -> Option<(&str, byte_start, line_start, utf16_start)>` if profiling shows LSP conversions remain hot.
+    - [x] Implement by extending `Cursor`/metric traversal, not by flattening or allocating.
+    - [x] Route `RopeTextStore::iter_chunks`, viewport line reads, search, and save through located chunks.
+    - [x] Add tests for chunk starts across leaf boundaries, CRLF seams, multibyte UTF-8, and empty rope.
+  - [x] Add cheap borrowed slice/view API before adding more owned slice call sites.
+    - [x] Add `RopeSlice` or equivalent borrowed read-only view with line/chunk iterators.
+    - [x] Keep owned `Rope::slice()` for compatibility, but prefer borrowed views for render/search/status hot paths.
+    - [x] Add tests proving sub-slices do not clone whole selected ranges.
   - [ ] Add streaming `RopeBuilder` for linear chunk construction when it fits ee's normal/constrained path.
     - [ ] Add `xi_rope::RopeBuilder` with `push_str`/`append` and `finish`.
     - [ ] Build leaves from incoming chunks in O(n), instead of repeated append/edit operations.
