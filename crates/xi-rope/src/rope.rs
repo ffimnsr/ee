@@ -1562,6 +1562,25 @@ mod tests {
     }
 
     #[test]
+    fn clone_edit_preserves_snapshot_and_shares_unchanged_chunks() {
+        let text = format!("{}{}", "left-side-line\n".repeat(200), "right-side-line\n".repeat(200));
+        let mut rope = Rope::from(text.as_str());
+        let snapshot = rope.clone();
+        let snapshot_chunk_ptrs = snapshot.iter_chunks(..).map(str::as_ptr).collect::<Vec<_>>();
+
+        assert!(rope.ptr_eq(&snapshot));
+
+        rope.edit(0..4, "LEFT");
+
+        assert_eq!(String::from(&snapshot), text);
+        assert!(!rope.ptr_eq(&snapshot));
+        assert!(
+            rope.iter_chunks(..).skip(1).any(|chunk| snapshot_chunk_ptrs.contains(&chunk.as_ptr())),
+            "unchanged suffix chunks should remain shared after copy-on-write edit"
+        );
+    }
+
+    #[test]
     fn rope_builder_preserves_content_metrics_and_leaf_boundaries() {
         let text = format!(
             "{}\n{}🙂{}",

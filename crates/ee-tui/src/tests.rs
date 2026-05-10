@@ -9,6 +9,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use clap::Parser;
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -114,6 +115,70 @@ fn input_loop_does_not_coalesce_typed_repeat_chars() {
     let coalesced = crate::coalesce_input_events(vec![repeat.clone(), repeat.clone()]);
 
     assert_eq!(coalesced, vec![repeat.clone(), repeat]);
+}
+
+#[test]
+fn cli_utility_commands_live_under_do() {
+    let cli = crate::Cli::try_parse_from(["ee", "do", "doctor"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do { command: crate::DoCommands::Doctor })
+    ));
+
+    let cli =
+        crate::Cli::try_parse_from(["ee", "do", "validate", "--config", "custom.ee.toml"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do { command: crate::DoCommands::Validate { .. } })
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "completions", "bash"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do { command: crate::DoCommands::Completions { .. } })
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "file", "line-check", "sample.txt"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::File { command: crate::FileCommands::LineCheck { .. } }
+        })
+    ));
+}
+
+#[test]
+fn cli_allows_utility_names_as_file_paths() {
+    let cli = crate::Cli::try_parse_from(["ee", "doctor", "validate", "completions"]).unwrap();
+
+    assert!(cli.command.is_none());
+    assert_eq!(cli.files, ["doctor", "validate", "completions"].map(PathBuf::from));
+}
+
+#[test]
+fn file_line_check_reuses_streaming_vlf_counter() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sample.txt");
+    fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+
+    let count = crate::count_file_line_feeds(&path).unwrap();
+
+    assert_eq!(count, 3);
+}
+
+#[test]
+fn file_line_check_matches_wc_lf_semantics_without_trailing_newline() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sample.txt");
+    fs::write(&path, "alpha\nbeta\ngamma").unwrap();
+
+    let count = crate::count_file_line_feeds(&path).unwrap();
+
+    assert_eq!(count, 2);
 }
 
 #[test]
