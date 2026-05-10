@@ -199,9 +199,7 @@ impl BufState {
                         ));
                     }
                     let end = checked_advance(source_index, op.n, previous.len(), "update")?;
-                    for (slot, line) in
-                        previous[source_index..end].iter().cloned().zip(op.lines.into_iter())
-                    {
+                    for (slot, line) in previous[source_index..end].iter().cloned().zip(op.lines) {
                         let slot = slot.merge(line)?;
                         next_lines.push(line_text_for_slot(&slot));
                         next_cache.push(slot);

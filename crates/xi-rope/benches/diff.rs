@@ -11,11 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#![feature(test)]
-
-extern crate test;
-
-use test::Bencher;
+use criterion::{Criterion, criterion_group, criterion_main};
 use xi_rope::compare;
 use xi_rope::diff::{Diff, LineHashDiff};
 use xi_rope::rope::{Rope, RopeDelta};
@@ -42,156 +38,168 @@ fn make_test_data() -> (Vec<u8>, Vec<u8>) {
     (one, two)
 }
 
-#[bench]
-fn ne_idx_sw(b: &mut Bencher) {
+fn ne_idx_sw(c: &mut Criterion) {
     let (one, two) = make_test_data();
 
-    b.iter(|| {
-        compare::ne_idx_fallback(&one, &one);
-        compare::ne_idx_fallback(&one, &two);
-    })
+    c.bench_function("ne_idx_sw", |b| {
+        b.iter(|| {
+            compare::ne_idx_fallback(&one, &one);
+            compare::ne_idx_fallback(&one, &two);
+        })
+    });
 }
 
-#[bench]
 #[cfg(target_arch = "x86_64")]
-fn ne_idx_sse(b: &mut Bencher) {
+fn ne_idx_sse(c: &mut Criterion) {
     if !is_x86_feature_detected!("sse4.2") {
         return;
     }
     let (one, two) = make_test_data();
 
     let mut x = 0;
-    b.iter(|| {
-        x += unsafe { compare::ne_idx_sse(&one, &one).unwrap_or_default() };
-        x += unsafe { compare::ne_idx_sse(&one, &two).unwrap_or_default() };
-    })
+    c.bench_function("ne_idx_sse", |b| {
+        b.iter(|| {
+            x += unsafe { compare::ne_idx_sse(&one, &one).unwrap_or_default() };
+            x += unsafe { compare::ne_idx_sse(&one, &two).unwrap_or_default() };
+        })
+    });
 }
 
-#[bench]
 #[cfg(target_arch = "x86_64")]
-fn ne_idx_avx(b: &mut Bencher) {
+fn ne_idx_avx(c: &mut Criterion) {
     if !is_x86_feature_detected!("avx2") {
         return;
     }
     let (one, two) = make_test_data();
 
     let mut dont_opt_me = 0;
-    b.iter(|| {
-        dont_opt_me += unsafe { compare::ne_idx_avx(&one, &two).unwrap_or_default() };
-        dont_opt_me += unsafe { compare::ne_idx_avx(&one, &one).unwrap_or_default() };
-    })
+    c.bench_function("ne_idx_avx", |b| {
+        b.iter(|| {
+            dont_opt_me += unsafe { compare::ne_idx_avx(&one, &two).unwrap_or_default() };
+            dont_opt_me += unsafe { compare::ne_idx_avx(&one, &one).unwrap_or_default() };
+        })
+    });
 }
 
-#[bench]
-fn ne_idx_detect(b: &mut Bencher) {
+fn ne_idx_detect(c: &mut Criterion) {
     let (one, two) = make_test_data();
 
     let mut dont_opt_me = 0;
-    b.iter(|| {
-        dont_opt_me += compare::ne_idx(&one, &two).unwrap_or_default();
-        dont_opt_me += compare::ne_idx(&one, &one).unwrap_or_default();
-    })
+    c.bench_function("ne_idx_detect", |b| {
+        b.iter(|| {
+            dont_opt_me += compare::ne_idx(&one, &two).unwrap_or_default();
+            dont_opt_me += compare::ne_idx(&one, &one).unwrap_or_default();
+        })
+    });
 }
 
-#[bench]
-fn ne_idx_rev_sw(b: &mut Bencher) {
+fn ne_idx_rev_sw(c: &mut Criterion) {
     let (one, two) = make_test_data();
 
     let mut x = 0;
-    b.iter(|| {
-        x += compare::ne_idx_rev_fallback(&one, &one).unwrap_or_default();
-        x += compare::ne_idx_rev_fallback(&one, &two).unwrap_or_default();
-    })
+    c.bench_function("ne_idx_rev_sw", |b| {
+        b.iter(|| {
+            x += compare::ne_idx_rev_fallback(&one, &one).unwrap_or_default();
+            x += compare::ne_idx_rev_fallback(&one, &two).unwrap_or_default();
+        })
+    });
 }
 
-#[bench]
 #[cfg(target_arch = "x86_64")]
-fn ne_idx_rev_sse(b: &mut Bencher) {
+fn ne_idx_rev_sse(c: &mut Criterion) {
     if !is_x86_feature_detected!("sse4.2") {
         return;
     }
     let (one, two) = make_test_data();
 
-    b.iter(|| unsafe {
-        compare::ne_idx_rev_sse(&one, &one);
-        compare::ne_idx_rev_sse(&one, &two);
-    })
+    c.bench_function("ne_idx_rev_sse", |b| {
+        b.iter(|| unsafe {
+            compare::ne_idx_rev_sse(&one, &one);
+            compare::ne_idx_rev_sse(&one, &two);
+        })
+    });
 }
 
-#[bench]
-fn scanner(b: &mut Bencher) {
+fn scanner(c: &mut Criterion) {
     let (one, two) = make_test_data();
     let one = Rope::from(String::from_utf8(one).unwrap());
     let two = Rope::from(String::from_utf8(two).unwrap());
 
     let mut scanner = compare::RopeScanner::new(&one, &two);
-    b.iter(|| {
-        scanner.find_ne_char(0, 0, None);
-        scanner.find_ne_char_back(one.len(), two.len(), None);
-    })
+    c.bench_function("scanner", |b| {
+        b.iter(|| {
+            scanner.find_ne_char(0, 0, None);
+            scanner.find_ne_char_back(one.len(), two.len(), None);
+        })
+    });
 }
 
-#[bench]
-fn hash_diff(b: &mut Bencher) {
+fn hash_diff(c: &mut Criterion) {
     let one = BASE_STR.into();
     let two = TARG_STR.into();
     let mut delta: Option<RopeDelta> = None;
-    b.iter(|| {
-        delta = Some(LineHashDiff::compute_delta(&one, &two));
+    c.bench_function("hash_diff", |b| {
+        b.iter(|| {
+            delta = Some(LineHashDiff::compute_delta(&one, &two));
+        })
     });
 
     let _result = delta.unwrap().apply(&one);
     assert_eq!(String::from(_result), String::from(&two));
 }
 
-#[bench]
-fn hash_diff_med(b: &mut Bencher) {
+fn hash_diff_med(c: &mut Criterion) {
     let one = INTERVAL_STR.into();
     let two = BREAKS_STR.into();
     let mut delta: Option<RopeDelta> = None;
-    b.iter(|| {
-        delta = Some(LineHashDiff::compute_delta(&one, &two));
+    c.bench_function("hash_diff_med", |b| {
+        b.iter(|| {
+            delta = Some(LineHashDiff::compute_delta(&one, &two));
+        })
     });
 
     let _result = delta.unwrap().apply(&one);
     assert_eq!(String::from(_result), String::from(&two));
 }
 
-#[bench]
-fn hash_diff_big(b: &mut Bencher) {
+fn hash_diff_big(c: &mut Criterion) {
     let one = EDITOR_STR.into();
     let two = VIEW_STR.into();
     let mut delta: Option<RopeDelta> = None;
-    b.iter(|| {
-        delta = Some(LineHashDiff::compute_delta(&one, &two));
+    c.bench_function("hash_diff_big", |b| {
+        b.iter(|| {
+            delta = Some(LineHashDiff::compute_delta(&one, &two));
+        })
     });
 
     let _result = delta.unwrap().apply(&one);
     assert_eq!(String::from(_result), String::from(&two));
 }
 
-#[bench]
-fn simple_insertion(b: &mut Bencher) {
+fn simple_insertion(c: &mut Criterion) {
     let one: Rope =
         ["start", EDITOR_STR, VIEW_STR, INTERVAL_STR, BREAKS_STR, "end"].concat().into();
     let two = "startend".into();
     let mut delta: Option<RopeDelta> = None;
-    b.iter(|| {
-        delta = Some(LineHashDiff::compute_delta(&one, &two));
+    c.bench_function("simple_insertion", |b| {
+        b.iter(|| {
+            delta = Some(LineHashDiff::compute_delta(&one, &two));
+        })
     });
 
     let _result = delta.unwrap().apply(&one);
     assert_eq!(String::from(_result), String::from(&two));
 }
 
-#[bench]
-fn simple_deletion(b: &mut Bencher) {
+fn simple_deletion(c: &mut Criterion) {
     let one: Rope =
         ["start", EDITOR_STR, VIEW_STR, INTERVAL_STR, BREAKS_STR, "end"].concat().into();
     let two = "startend".into();
     let mut delta: Option<RopeDelta> = None;
-    b.iter(|| {
-        delta = Some(LineHashDiff::compute_delta(&two, &one));
+    c.bench_function("simple_deletion", |b| {
+        b.iter(|| {
+            delta = Some(LineHashDiff::compute_delta(&two, &one));
+        })
     });
 
     let _result = delta.unwrap().apply(&two);
@@ -203,18 +211,37 @@ fn simple_deletion(b: &mut Bencher) {
 ///
 /// Decision: rayon rejected (see comment in `diff.rs`).  This benchmark
 /// documents the baseline serial performance so the decision can be revisited.
-#[bench]
-fn hash_diff_xlarge(b: &mut Bencher) {
+fn hash_diff_xlarge(c: &mut Criterion) {
     // ~4x the size of `hash_diff_big`; representative of a large source file.
     let big_base: String = [EDITOR_STR, VIEW_STR, INTERVAL_STR, BREAKS_STR].concat();
     let big_target: String = [VIEW_STR, INTERVAL_STR, BREAKS_STR, EDITOR_STR].concat();
     let one: Rope = big_base.as_str().into();
     let two: Rope = big_target.as_str().into();
     let mut delta: Option<RopeDelta> = None;
-    b.iter(|| {
-        delta = Some(LineHashDiff::compute_delta(&one, &two));
+    c.bench_function("hash_diff_xlarge", |b| {
+        b.iter(|| {
+            delta = Some(LineHashDiff::compute_delta(&one, &two));
+        })
     });
 
     let _result = delta.unwrap().apply(&one);
     assert_eq!(String::from(_result), String::from(&two));
 }
+
+criterion_group!(
+    benches,
+    ne_idx_sw,
+    ne_idx_sse,
+    ne_idx_avx,
+    ne_idx_detect,
+    ne_idx_rev_sw,
+    ne_idx_rev_sse,
+    scanner,
+    hash_diff,
+    hash_diff_med,
+    hash_diff_big,
+    simple_insertion,
+    simple_deletion,
+    hash_diff_xlarge
+);
+criterion_main!(benches);
