@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -78,41 +78,6 @@ fn ctrl_c_quits() {
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
 
     assert!(app.should_quit);
-}
-
-#[test]
-fn input_loop_coalesces_stale_repeated_arrow_motion() {
-    let up_repeat =
-        Event::Key(KeyEvent::new_with_kind(KeyCode::Up, KeyModifiers::NONE, KeyEventKind::Repeat));
-    let down_press = Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-
-    let coalesced =
-        crate::coalesce_input_events(vec![up_repeat.clone(), up_repeat, down_press.clone()]);
-
-    assert_eq!(coalesced, vec![down_press]);
-}
-
-#[test]
-fn input_loop_preserves_non_repeated_input_batch() {
-    let first = Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
-    let second = Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-
-    let coalesced = crate::coalesce_input_events(vec![first.clone(), second.clone()]);
-
-    assert_eq!(coalesced, vec![first, second]);
-}
-
-#[test]
-fn input_loop_does_not_coalesce_typed_repeat_chars() {
-    let repeat = Event::Key(KeyEvent::new_with_kind(
-        KeyCode::Char('j'),
-        KeyModifiers::NONE,
-        KeyEventKind::Repeat,
-    ));
-
-    let coalesced = crate::coalesce_input_events(vec![repeat.clone(), repeat.clone()]);
-
-    assert_eq!(coalesced, vec![repeat.clone(), repeat]);
 }
 
 #[test]

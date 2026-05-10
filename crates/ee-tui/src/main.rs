@@ -8,7 +8,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -43,6 +43,38 @@ use ui::ui;
 
 const INPUT_POLL_TIMEOUT: Duration = Duration::from_millis(16);
 const MAX_INPUT_EVENTS_PER_TICK: usize = 128;
+
+fn is_repeated_arrow_motion(event: &Event) -> bool {
+    let Event::Key(key) = event else { return false };
+    key.kind == KeyEventKind::Repeat && is_arrow_motion_key(key)
+}
+
+fn is_arrow_motion_key(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right)
+        && !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+}
+
+fn coalesce_input_events(events: Vec<Event>) -> Vec<Event> {
+    if !events.iter().any(is_repeated_arrow_motion) {
+        return events;
+    }
+
+    let last_arrow_motion = events
+        .iter()
+        .rposition(|event| matches!(event, Event::Key(key) if is_arrow_motion_key(key)));
+
+    events
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, event)| {
+            let is_stale_arrow = matches!(&event, Event::Key(key) if is_arrow_motion_key(key))
+                && Some(idx) != last_arrow_motion;
+            (!is_stale_arrow).then_some(event)
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone)]
 struct StartupLaunch {
@@ -350,6 +382,38 @@ fn run_app(
         // Write crash-recovery artifacts every ~30 s for modified buffers.
         app.write_recovery_if_due();
 
+        if event::poll(INPUT_POLL_TIMEOUT)? {
+            let mut events = Vec::new();
+            loop {
+                events.push(event::read()?);
+                if app.should_quit
+                    || shutdown.load(Ordering::Relaxed)
+                    || events.len() >= MAX_INPUT_EVENTS_PER_TICK
+                    || !event::poll(Duration::ZERO)?
+                {
+                    break;
+                }
+            }
+
+            for event in coalesce_input_events(events) {
+                match event {
+                    // SIGWINCH arrives as Event::Resize from crossterm; force a
+                    // full redraw by clearing the terminal buffer.
+                    Event::Resize(_, _) => {
+                        terminal.clear()?;
+                    }
+                    ev => app.handle_event(ev),
+                }
+                if app.should_quit || shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+        }
+
+        // Apply backend responses from just-handled input before drawing, after
+        // dropping stale repeated arrow motion from the same input tick.
+        app.backend.drain_events()?;
+
         if app.redraw_requested {
             terminal.clear()?;
             app.redraw_requested = false;
@@ -368,29 +432,6 @@ fn run_app(
         if app.startup_deferred_work_pending {
             app.startup_deferred_work_pending = false;
             app.refresh_source_control();
-        }
-
-        if event::poll(INPUT_POLL_TIMEOUT)? {
-            let mut handled = 0usize;
-            loop {
-                match event::read()? {
-                    // SIGWINCH arrives as Event::Resize from crossterm; force a
-                    // full redraw by clearing the terminal buffer.
-                    Event::Resize(_, _) => {
-                        terminal.clear()?;
-                    }
-                    ev => app.handle_event(ev),
-                }
-
-                handled += 1;
-                if app.should_quit
-                    || shutdown.load(Ordering::Relaxed)
-                    || handled >= MAX_INPUT_EVENTS_PER_TICK
-                    || !event::poll(Duration::ZERO)?
-                {
-                    break;
-                }
-            }
         }
     }
     Ok(())
