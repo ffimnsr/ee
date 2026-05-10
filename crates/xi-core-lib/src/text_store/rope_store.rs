@@ -63,6 +63,11 @@ impl RopeTextStore {
         RopeTextStore { rope, snapshot_id: 0, mode }
     }
 
+    /// Create a `RopeTextStore` with an explicit document mode and revision.
+    pub fn new_with_mode_and_snapshot(rope: Rope, mode: DocumentMode, snapshot_id: u64) -> Self {
+        RopeTextStore { rope, snapshot_id, mode }
+    }
+
     /// Borrow the underlying `Rope`.
     pub fn rope(&self) -> &Rope {
         &self.rope

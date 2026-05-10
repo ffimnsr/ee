@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -104,6 +105,7 @@ pub(crate) enum BackendEvent {
         generation: u64,
         line_start: u64,
         lines: Vec<String>,
+        syntax_spans: Vec<Vec<CoreSyntaxSpan>>,
         approximate_line_count: u64,
         line_count_exact: bool,
         index_progress: f64,
@@ -130,6 +132,57 @@ impl BackendEvent {
                 | Self::VlfSearchStatus { .. }
         )
     }
+
+    fn coalesce_key(&self) -> Option<BackendEventCoalesceKey> {
+        match self {
+            Self::Hover { view_id, .. } => Some(BackendEventCoalesceKey::Hover(view_id.clone())),
+            Self::Completions { view_id, .. } => {
+                Some(BackendEventCoalesceKey::Completions(view_id.clone()))
+            }
+            Self::Diagnostics { view_id, .. } => {
+                Some(BackendEventCoalesceKey::Diagnostics(view_id.clone()))
+            }
+            Self::CodeActions { view_id, .. } => {
+                Some(BackendEventCoalesceKey::CodeActions(view_id.clone()))
+            }
+            Self::DocumentMode { view_id, .. } => {
+                Some(BackendEventCoalesceKey::DocumentMode(view_id.clone()))
+            }
+            Self::VlfChunks { view_id, .. } => {
+                Some(BackendEventCoalesceKey::VlfChunks(view_id.clone()))
+            }
+            Self::VlfSearchStatus { view_id, query, .. } => {
+                Some(BackendEventCoalesceKey::VlfSearchStatus(view_id.clone(), query.clone()))
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum BackendEventCoalesceKey {
+    Hover(String),
+    Completions(String),
+    Diagnostics(String),
+    CodeActions(String),
+    DocumentMode(String),
+    VlfChunks(String),
+    VlfSearchStatus(String, String),
+}
+
+pub(crate) fn coalesce_backend_events(events: Vec<BackendEvent>) -> Vec<BackendEvent> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(events.len());
+    for event in events.into_iter().rev() {
+        if let Some(key) = event.coalesce_key()
+            && !seen.insert(key)
+        {
+            continue;
+        }
+        out.push(event);
+    }
+    out.reverse();
+    out
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -736,6 +789,7 @@ impl XiClient {
                 generation,
                 line_start,
                 lines,
+                syntax_spans,
                 approximate_line_count,
                 line_count_exact,
                 index_progress,
@@ -759,10 +813,11 @@ impl XiClient {
                     for (i, text) in lines.into_iter().enumerate() {
                         let idx = start + i;
                         if idx < self.line_cache.len() {
+                            let spans = syntax_spans.get(i).cloned().unwrap_or_default();
                             self.line_cache[idx] = LineSlot::Known(CachedLine {
                                 text,
                                 cursors: Vec::new(),
-                                syntax_spans: Vec::new(),
+                                syntax_spans: spans,
                             });
                         }
                     }
@@ -1296,6 +1351,10 @@ pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendE
                 .iter()
                 .map(|v| v.as_str().unwrap_or("").to_owned())
                 .collect();
+            let syntax_spans = serde_json::from_value::<Vec<Vec<CoreSyntaxSpan>>>(
+                params.get("syntax_spans").cloned().unwrap_or_else(|| json!([])),
+            )
+            .ok()?;
             let approximate_line_count =
                 params.get("approximate_line_count").and_then(Value::as_u64).unwrap_or(0);
             let line_count_exact =
@@ -1307,6 +1366,7 @@ pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendE
                 generation,
                 line_start,
                 lines,
+                syntax_spans,
                 approximate_line_count,
                 line_count_exact,
                 index_progress,

@@ -238,7 +238,7 @@ pub enum FileError {
 ///   the [`VlfStore`] for all reads.  No `Rope` is ever constructed.
 pub enum OpenResult {
     /// Normal / ConstrainedNormal mode: full file content as a `Rope`.
-    Rope(Rope),
+    Rope { text: Rope, mode: DocumentMode },
     /// VLF mode: paged file reader with bounded cache.  No full buffer.
     Vlf(Box<VlfStore>),
 }
@@ -325,7 +325,7 @@ impl FileManager {
             return Err(FileError::NonUtf8Path(path.to_owned()));
         }
         if !path.exists() {
-            return Ok(OpenResult::Rope(Rope::from("")));
+            return Ok(OpenResult::Rope { text: Rope::from(""), mode: DocumentMode::Normal });
         }
 
         // Stat the file for size *before* reading any bytes.
@@ -334,11 +334,13 @@ impl FileManager {
         let size_opt = fs::metadata(path).ok().map(|m| m.len());
         let line_count_hint = size_opt.and_then(|size| sampled_line_count_hint(path, size));
 
-        match self.open_policy.decide(size_opt, line_count_hint, None, location, mode_override) {
-            OpenDecision::Open(DocumentMode::Normal)
-            | OpenDecision::Open(DocumentMode::ConstrainedNormal) => {
+        let decision =
+            self.open_policy.decide(size_opt, line_count_hint, None, location, mode_override);
+        let rope_mode = match decision {
+            OpenDecision::Open(mode @ (DocumentMode::Normal | DocumentMode::ConstrainedNormal)) => {
                 // Normal rope load path — both Normal and ConstrainedNormal use
                 // the existing read_to_end + Rope path for now.
+                mode
             }
             OpenDecision::Open(DocumentMode::Vlf) => {
                 // VLF files must never be loaded into a full Rope.
@@ -378,7 +380,7 @@ impl FileManager {
             OpenDecision::Reject { reason: _ } => {
                 return Err(FileError::MetadataUntrusted(path.to_owned()));
             }
-        }
+        };
 
         let (rope, info) = try_load_file(path)?;
 
@@ -387,7 +389,7 @@ impl FileManager {
             #[cfg(feature = "notify")]
             self.watcher.watch(path, false, OPEN_FILE_EVENT_TOKEN);
         }
-        Ok(OpenResult::Rope(rope))
+        Ok(OpenResult::Rope { text: rope, mode: rope_mode })
     }
 
     pub fn close(&mut self, id: BufferId) {
@@ -791,7 +793,10 @@ mod tests {
                 ModeOverride::Auto,
             )
             .unwrap();
-        assert!(matches!(constrained, OpenResult::Rope(_)));
+        assert!(matches!(
+            constrained,
+            OpenResult::Rope { mode: DocumentMode::ConstrainedNormal, .. }
+        ));
 
         let vlf = mgr
             .open_with_override(

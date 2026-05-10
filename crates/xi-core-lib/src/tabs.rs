@@ -54,6 +54,7 @@ use crate::rpc::{
     CoreNotification, CoreRequest, EditNotification, PluginNotification as CorePluginNotification,
 };
 use crate::syntax::LanguageId;
+use crate::text_store::DocumentMode;
 use crate::view::View;
 use crate::whitespace::Indentation;
 use crate::width_cache::WidthCache;
@@ -411,10 +412,10 @@ impl CoreState {
 
         let open_result = match path.as_ref() {
             Some(p) => self.file_manager.open(p, buffer_id)?,
-            None => OpenResult::Rope(Rope::from("")),
+            None => OpenResult::Rope { text: Rope::from(""), mode: DocumentMode::Normal },
         };
         let editor = match open_result {
-            OpenResult::Rope(rope) => RefCell::new(Editor::with_text(rope)),
+            OpenResult::Rope { text, mode } => RefCell::new(Editor::with_text_mode(text, mode)),
             OpenResult::Vlf(store) => RefCell::new(Editor::with_vlf_store(*store)),
         };
         let view = RefCell::new(View::new(view_id, buffer_id));
@@ -1024,7 +1025,7 @@ impl CoreState {
         if has_changes && is_pristine {
             if let Ok(open_result) = self.file_manager.open(path, buffer_id) {
                 match open_result {
-                    OpenResult::Rope(text) => {
+                    OpenResult::Rope { text, mode } => {
                         // this is ugly; we don't map buffer_id -> view_id anywhere
                         // but we know we must have a view.
                         let view_id = self
@@ -1034,6 +1035,9 @@ impl CoreState {
                             .map(|v| v.borrow().get_view_id())
                             .unwrap();
                         self.make_context(view_id).unwrap().reload(text);
+                        if let Some(editor) = self.editors.get(&buffer_id) {
+                            editor.borrow_mut().set_document_mode(mode);
+                        }
                     }
                     // VLF files are read-only and paged; reload is a no-op.
                     OpenResult::Vlf(_) => {}

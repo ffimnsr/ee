@@ -5,13 +5,30 @@
 ### Large File Support: VLF Mode (Very Large Files)
 
 - [ ] Apply Helix deep-research takeaways where they improve ee's VLF design.
-  - [ ] Keep `TextStore` as the stable document API; normal and constrained buffers may use full `Rope`, but VLF must stay paged/out-of-core and never degrade to Helix-style full in-memory storage.
-  - [ ] Preserve viewport-local rendering as a hard invariant: render, syntax decoration, search highlights, diagnostics, git signs, and scroll notifications must operate on visible ranges plus bounded overscan.
-  - [ ] Use chunk-native I/O everywhere possible: read from `TextStore::iter_chunks` / `read_byte_range`, save from rope chunks or VLF pieces, and avoid flattening into `String` / `Vec<String>` except where mode policy explicitly allows it.
-  - [ ] Make normal/constrained save follow Helix's snapshot model: clone cheap `Rope` snapshot, then write outside the interactive render/input hot path.
-  - [ ] Re-enable VLF syntax only as visible-range incremental parsing with hard timeout and match/capture limits; never parse whole VLF files for highlighting or text objects.
-  - [ ] Keep edit history as structured deltas above storage: normal mode uses existing rope/CRDT engine; VLF editing maps overlay deltas to the same revision/undo grouping without full-buffer snapshots.
-  - [ ] Coalesce redraw/background notifications like Helix's event-loop model so LSP, syntax, search, source-control, and VLF indexing cannot force one expensive frame per message.
+  - [x] Keep `TextStore` as stable document API across normal, constrained, and VLF modes.
+    - [x] Normal mode: keep `Rope` as backing store, but route hot read paths through `TextStore` and rope chunk/segment APIs instead of flattening full text.
+    - [x] Constrained mode: keep `Rope` as backing store, prefer chunk/segment iteration for render/search/status paths, and avoid whole-buffer materialization on latency-sensitive paths.
+    - [x] VLF mode: keep storage paged/out-of-core behind `TextStore`; never degrade to Helix-style full in-memory storage.
+    - [x] Define which operations may still use full-rope access in normal/constrained mode and which operations must stay chunk/segment-based.
+    - [x] Audit direct `Editor.text` / `Rope` reads and convert remaining read-only call sites to `TextStore` or rope chunk iterators.
+    - [x] Add regression coverage proving normal/constrained behavior stays correct while hot paths use chunk/segment APIs.
+  - [x] Preserve viewport-local rendering as VLF hard invariant and normal/constrained default strategy: render, syntax decoration, search highlights, diagnostics, git signs, and scroll notifications should prefer visible ranges plus bounded overscan, with VLF never requiring whole-buffer work.
+  - [ ] Improve normal/constrained hot paths while keeping full-feature editing.
+    - [x] Remove normal/constrained TUI update-time full `line_cache` -> `lines` rebuild; apply xi update ops to both caches incrementally.
+    - [ ] Replace hot `backend.lines` call sites with bounded `BufState::get_line()` / range APIs so TUI commands do not require a full text mirror.
+    - [ ] Keep `lines` as an explicitly allowed whole-buffer compatibility mirror only where command policy requires whole-document access.
+    - [ ] Bound normal/constrained `request_invalid_lines` to current viewport plus overscan by default; require explicit command reason for broader ranges.
+    - [ ] Add regression counters/tests proving normal/constrained update, render, syntax, diagnostics, git signs, and scroll paths do not clone or scan full line caches.
+    - [ ] Make source-control status/sign refresh range-aware or background-bounded for constrained buffers.
+    - [ ] Move expensive whole-document commands to async/cancellable execution with progress where full scan remains policy-allowed.
+    - [ ] Evaluate hybrid paged-rope or lazy `TextStore` backing for `ConstrainedNormal`; keep editing/save semantics explicit before replacing full-rope open.
+  - [ ] Use chunk-native I/O everywhere possible; avoid flattening into `String` / `Vec<String>` except where mode policy explicitly allows it.
+    - [x] Read path: use `TextStore::iter_chunks` / `read_byte_range` everywhere possible.
+    - [ ] Write/save path: save from rope chunks or VLF pieces instead of flattening full text. (needs write/save)
+  - [x] Re-enable VLF syntax only as visible-range incremental parsing with hard timeout and match/capture limits; never parse whole VLF files for highlighting or text objects.
+  - [x] Coalesce redraw/background notifications like Helix's event-loop model so LSP, syntax, search, source-control, and VLF indexing cannot force one expensive frame per message.
+  - [ ] Make normal/constrained save follow Helix's snapshot model: clone cheap `Rope` snapshot, then write outside the interactive render/input hot path. (needs write/save)
+  - [ ] Keep edit history as structured deltas above storage: normal mode uses existing rope/CRDT engine; VLF editing maps overlay deltas to the same revision/undo grouping without full-buffer snapshots. (needs write/save)
   - [ ] Treat Helix's lack of explicit large-file mode as a caution: keep ee thresholds, feature gates, user-visible downgrade reasons, and hard VLF guardrails.
 
 - [ ] Improve large-buffer quit latency.
