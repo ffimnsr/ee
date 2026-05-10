@@ -7,6 +7,7 @@ description = "Library module for xi-core"
 repository = "https://github.com/ffimnsr/ee"
 edition.workspace = true
 rust-version.workspace = true
+autobenches = false
 
 [dependencies]
 log.workspace = true
@@ -42,7 +43,12 @@ seccompiler = { workspace = true }
 windows-sys = { workspace = true }
 
 [dev-dependencies]
+criterion.workspace = true
 tempfile.workspace = true
 
 [features]
 default = ["notify"]
+
+[[bench]]
+name = "wrap"
+harness = false

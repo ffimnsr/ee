@@ -1,0 +1,44 @@
+name: Fuzz
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - xi_core_config
+          - xi_core_text
+          - xi_lsp_transport
+          - xi_plugin_wasm
+          - xi_rope_compare
+          - xi_rope_crdt
+          - xi_rpc_parse
+          - xi_unicode_text
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked
+      - name: Run fuzz target
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=60 -timeout=30

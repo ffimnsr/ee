@@ -273,15 +273,15 @@ Avoid Ropey (`ropey` crate) choices that conflict with ee architecture.
     - [x] Add `RopeSlice` or equivalent borrowed read-only view with line/chunk iterators.
     - [x] Keep owned `Rope::slice()` for compatibility, but prefer borrowed views for render/search/status hot paths.
     - [x] Add tests proving sub-slices do not clone whole selected ranges.
-  - [ ] Add streaming `RopeBuilder` for linear chunk construction when it fits ee's normal/constrained path.
-    - [ ] Add `xi_rope::RopeBuilder` with `push_str`/`append` and `finish`.
-    - [ ] Build leaves from incoming chunks in O(n), instead of repeated append/edit operations.
-    - [ ] Buffer partial leaves until `MAX_LEAF`, split on UTF-8 boundary and preferably newline boundary.
-    - [ ] Preserve existing `RopeInfo` metrics while building: bytes from leaf len, newline count, UTF-16 size.
-    - [ ] Use builder in normal/constrained file load only after VLF/open policy has rejected out-of-core mode.
-    - [ ] Keep `TextStore` chunk-native read path unchanged; builder improves in-memory rope creation only.
-    - [ ] Add benchmarks for 20 MiB many-line, 20 MiB long-line, and mixed UTF-8/CRLF fixtures.
-    - [ ] Add regression proving builder load does not allocate a full intermediate `String` beyond current file-read policy.
+  - [x] Add streaming `RopeBuilder` for linear chunk construction when it fits ee's normal/constrained path.
+    - [x] Add `xi_rope::RopeBuilder` with `push_str`/`append` and `finish`.
+    - [x] Build leaves from incoming chunks in O(n), instead of repeated append/edit operations.
+    - [x] Buffer partial leaves until `MAX_LEAF`, split on UTF-8 boundary and preferably newline boundary.
+    - [x] Preserve existing `RopeInfo` metrics while building: bytes from leaf len, newline count, UTF-16 size.
+    - [x] Use builder in normal/constrained file load only after VLF/open policy has rejected out-of-core mode.
+    - [x] Keep `TextStore` chunk-native read path unchanged; builder improves in-memory rope creation only.
+    - [x] Add benchmarks for 20 MiB many-line, 20 MiB long-line, and mixed UTF-8/CRLF fixtures.
+    - [x] Add regression proving builder load does not allocate a full intermediate `String` beyond current file-read policy.
   - [x] Add streaming write APIs.
     - [x] Add `Rope::write_to<W: io::Write>(&self, writer: W) -> io::Result<()>` using `iter_chunks(..)`.
     - [x] Use chunk streaming in normal/constrained save so save path avoids `String::from(&rope)`.
@@ -290,10 +290,10 @@ Avoid Ropey (`ropey` crate) choices that conflict with ee architecture.
     - [x] Add `try_offset_of_line`, `try_line_of_offset`, `try_slice`, and `try_edit` returning `Result`.
     - [x] Keep panicking APIs internal/test-friendly only where caller already validates bounds.
     - [x] Convert TUI/core boundary calls to checked APIs with user-facing error paths.
-  - [ ] Improve CRLF correctness without copying Ropey API wholesale.
-    - [ ] Evaluate enforcing "never split CRLF across leaves" in `find_leaf_split` and merge/split paths.
-    - [ ] Add line metric tests where `\r\n` lands exactly on leaf boundary and edit boundary.
-    - [ ] Keep byte offsets as source of truth; do not switch public edit APIs to char-index-first.
+  - [x] Improve CRLF correctness without copying Ropey (`ropey` crate) API wholesale.
+    - [x] Evaluate enforcing "never split CRLF across leaves" in `find_leaf_split` and merge/split paths.
+    - [x] Add line metric tests where `\r\n` lands exactly on leaf boundary and edit boundary.
+    - [x] Keep byte offsets as source of truth; do not switch public edit APIs to char-index-first.
   - [ ] Evaluate metadata/layout optimizations after API and I/O wins land.
     - [ ] Benchmark Ropey-style parent-side child metadata against current `Node` metadata before redesign.
     - [ ] Consider inline leaf storage only with measured memory/cache benefit and contained unsafe surface.
@@ -306,3 +306,8 @@ Avoid Ropey (`ropey` crate) choices that conflict with ee architecture.
 - [ ] Move text-object range resolution from `crates/ee-tui/src/app/mod.rs` into `xi-core-lib` if we want backend-owned semantic text objects across future frontends.
 - [ ] Move visual-block delete/change/yank execution from `crates/ee-tui/src/app/mod.rs` into `xi-core-lib` so rectangular selection mutations become backend-owned editor semantics.
 - [ ] Re-evaluate visual-block insert setup and replay split between `ee-tui` and `xi-core-lib`; keep frontend workflow glue only, move any remaining selection-truth or mutation semantics backend-side if reused by another frontend.
+
+
+### Others
+
+- [ ] Move 

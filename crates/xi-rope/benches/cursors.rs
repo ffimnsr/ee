@@ -11,11 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-#![feature(test)]
-
-extern crate test;
-
-use test::Bencher;
+use criterion::{Criterion, criterion_group, criterion_main};
 use xi_rope::rope::{LinesMetric, Rope};
 use xi_rope::tree::*;
 
@@ -58,20 +54,20 @@ fn build_few_big_lines(size: usize) -> String {
     s
 }
 
-#[bench]
-fn benchmark_triangle(b: &mut Bencher) {
+fn benchmark_triangle(c: &mut Criterion) {
     let text = Rope::from(build_triangle(50_000));
-    b.iter(|| run_down_rope(&text));
+    c.bench_function("benchmark_triangle", |b| b.iter(|| run_down_rope(&text)));
 }
 
-#[bench]
-fn benchmark_short_lines(b: &mut Bencher) {
+fn benchmark_short_lines(c: &mut Criterion) {
     let text = Rope::from(build_short_lines(1_000_000));
-    b.iter(|| run_down_rope(&text));
+    c.bench_function("benchmark_short_lines", |b| b.iter(|| run_down_rope(&text)));
 }
 
-#[bench]
-fn benchmark_few_big_lines(b: &mut Bencher) {
+fn benchmark_few_big_lines(c: &mut Criterion) {
     let text = Rope::from(build_few_big_lines(1_000_000));
-    b.iter(|| run_down_rope(&text));
+    c.bench_function("benchmark_few_big_lines", |b| b.iter(|| run_down_rope(&text)));
 }
+
+criterion_group!(benches, benchmark_triangle, benchmark_short_lines, benchmark_few_big_lines);
+criterion_main!(benches);

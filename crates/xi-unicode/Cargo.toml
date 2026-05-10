@@ -7,3 +7,11 @@ repository = "https://github.com/ffimnsr/ee"
 description = "Unicode utilities useful for text editing, including a line breaking iterator."
 edition.workspace = true
 rust-version.workspace = true
+autobenches = false
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "bench"
+harness = false

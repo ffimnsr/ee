@@ -139,6 +139,60 @@ pub type RopeDelta = Delta<RopeInfo>;
 /// An element in a `RopeDelta`.
 pub type RopeDeltaElement = DeltaElement<RopeInfo>;
 
+/// Streaming builder for linear rope construction.
+pub struct RopeBuilder {
+    tree: TreeBuilder<RopeInfo>,
+    pending: String,
+}
+
+impl Default for RopeBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RopeBuilder {
+    pub fn new() -> Self {
+        Self { tree: TreeBuilder::new(), pending: String::new() }
+    }
+
+    pub fn push_str(&mut self, mut text: &str) {
+        while !text.is_empty() {
+            let take = clamp_to_char_boundary(
+                text,
+                text.len().min(MAX_LEAF + MIN_LEAF - self.pending.len()),
+            );
+            debug_assert!(take > 0);
+            self.pending.push_str(&text[..take]);
+            text = &text[take..];
+
+            if self.pending.len() > MAX_LEAF {
+                self.flush_full_leaf();
+            }
+        }
+    }
+
+    pub fn append(&mut self, rope: &Rope) {
+        for chunk in rope.iter_chunks(..) {
+            self.push_str(chunk);
+        }
+    }
+
+    pub fn finish(mut self) -> Rope {
+        if !self.pending.is_empty() {
+            self.tree.push_leaf(std::mem::take(&mut self.pending));
+        }
+        self.tree.build()
+    }
+
+    fn flush_full_leaf(&mut self) {
+        let splitpoint = find_leaf_split_for_merge(&self.pending);
+        let remainder = self.pending.split_off(splitpoint);
+        let leaf = std::mem::replace(&mut self.pending, remainder);
+        self.tree.push_leaf(leaf);
+    }
+}
+
 /// Borrowed read-only view into a subrange of a [`Rope`].
 #[derive(Clone, Copy, Debug)]
 pub struct RopeSlice<'a> {
@@ -553,6 +607,39 @@ fn count_utf16_code_units(s: &str) -> usize {
     utf16_count
 }
 
+fn clamp_to_char_boundary(s: &str, splitpoint: usize) -> usize {
+    let mut splitpoint = splitpoint.min(s.len());
+    while splitpoint > 0 && !s.is_char_boundary(splitpoint) {
+        splitpoint -= 1;
+    }
+    splitpoint
+}
+
+fn is_crlf_split_point(s: &str, splitpoint: usize) -> bool {
+    splitpoint > 0
+        && splitpoint < s.len()
+        && s.as_bytes()[splitpoint - 1] == b'\r'
+        && s.as_bytes()[splitpoint] == b'\n'
+}
+
+fn adjust_splitpoint_for_crlf(
+    s: &str,
+    minsplit: usize,
+    maxsplit: usize,
+    splitpoint: usize,
+) -> usize {
+    if !is_crlf_split_point(s, splitpoint) {
+        return splitpoint;
+    }
+    if splitpoint < maxsplit {
+        splitpoint + 1
+    } else if splitpoint > minsplit {
+        splitpoint - 1
+    } else {
+        splitpoint
+    }
+}
+
 fn find_leaf_split_for_bulk(s: &str) -> usize {
     find_leaf_split(s, MIN_LEAF)
 }
@@ -563,16 +650,12 @@ fn find_leaf_split_for_merge(s: &str) -> usize {
 
 // Try to split at newline boundary (leaning left), if not, then split at codepoint
 fn find_leaf_split(s: &str, minsplit: usize) -> usize {
-    let mut splitpoint = min(MAX_LEAF, s.len() - MIN_LEAF);
-    match memrchr(b'\n', &s.as_bytes()[minsplit - 1..splitpoint]) {
+    let maxsplit = min(MAX_LEAF, s.len() - MIN_LEAF);
+    let splitpoint = match memrchr(b'\n', &s.as_bytes()[minsplit - 1..maxsplit]) {
         Some(pos) => minsplit + pos,
-        None => {
-            while !s.is_char_boundary(splitpoint) {
-                splitpoint -= 1;
-            }
-            splitpoint
-        }
-    }
+        None => clamp_to_char_boundary(s, maxsplit),
+    };
+    adjust_splitpoint_for_crlf(s, minsplit, maxsplit, splitpoint)
 }
 
 // Additional APIs custom to strings
@@ -580,9 +663,9 @@ fn find_leaf_split(s: &str, minsplit: usize) -> usize {
 impl FromStr for Rope {
     type Err = ParseError;
     fn from_str(s: &str) -> Result<Rope, Self::Err> {
-        let mut b = TreeBuilder::new();
+        let mut b = RopeBuilder::new();
         b.push_str(s);
-        Ok(b.build())
+        Ok(b.finish())
     }
 }
 
@@ -1479,6 +1562,72 @@ mod tests {
     }
 
     #[test]
+    fn rope_builder_preserves_content_metrics_and_leaf_boundaries() {
+        let text = format!(
+            "{}\n{}🙂{}",
+            "a".repeat(MAX_LEAF - 24),
+            "b".repeat(MAX_LEAF),
+            "é".repeat(MIN_LEAF + 17)
+        );
+        let expected = Rope::from(text.as_str());
+        let mut builder = RopeBuilder::new();
+        let mut start = 0;
+
+        while start < text.len() {
+            let mut end = (start + 137).min(text.len());
+            end = clamp_to_char_boundary(&text, end);
+            builder.push_str(&text[start..end]);
+            start = end;
+        }
+
+        let built = builder.finish();
+        let boundaries = chunk_boundaries(&built);
+
+        assert_eq!(String::from(&built), text);
+        assert_eq!(built.measure::<LinesMetric>(), expected.measure::<LinesMetric>());
+        assert_eq!(
+            built.measure::<Utf16CodeUnitsMetric>(),
+            expected.measure::<Utf16CodeUnitsMetric>()
+        );
+        assert!(boundaries.len() >= 2, "expected multi-leaf rope");
+    }
+
+    #[test]
+    fn rope_builder_append_streams_existing_rope() {
+        let suffix_text = format!("{}{}", "suffix-".repeat(120), "🙂tail");
+        let suffix = Rope::from(suffix_text.as_str());
+        let mut builder = RopeBuilder::new();
+
+        builder.push_str("prefix-");
+        builder.append(&suffix);
+
+        let built = builder.finish();
+
+        assert_eq!(String::from(&built), format!("prefix-{suffix_text}"));
+        assert_eq!(built.measure::<LinesMetric>(), suffix.measure::<LinesMetric>());
+    }
+
+    #[test]
+    fn find_leaf_split_for_merge_prefers_newline_boundary() {
+        let text = format!("{}\n{}", "a".repeat(MAX_LEAF - 8), "b".repeat(MIN_LEAF + 32));
+
+        let splitpoint = find_leaf_split_for_merge(&text);
+
+        assert!(text[..splitpoint].ends_with('\n'));
+    }
+
+    #[test]
+    fn find_leaf_split_for_merge_avoids_crlf_boundary() {
+        let text = format!("{}\r\n{}", "a".repeat(MAX_LEAF - 1), "b".repeat(MIN_LEAF + 32));
+
+        let splitpoint = find_leaf_split_for_merge(&text);
+
+        assert!(!is_crlf_split_point(&text, splitpoint));
+        assert!(splitpoint >= max(MIN_LEAF, text.len() - MAX_LEAF));
+        assert!(splitpoint <= min(MAX_LEAF, text.len() - MIN_LEAF));
+    }
+
+    #[test]
     fn utf16_code_units_metric() {
         let rope = Rope::from("hi\ni'm\nfour\nlines");
         let utf16_units = rope.measure::<Utf16CodeUnitsMetric>();
@@ -1528,6 +1677,27 @@ mod tests {
         Rope::from(left) + Rope::from(right)
     }
 
+    fn assert_no_crlf_chunk_split(rope: &Rope) {
+        let boundaries = chunk_boundaries(rope);
+        for window in boundaries.windows(2) {
+            assert!(
+                !(window[0].1.ends_with('\r') && window[1].1.starts_with('\n')),
+                "chunk boundary split CRLF at byte {}",
+                window[1].0
+            );
+        }
+    }
+
+    fn assert_crlf_line_metrics(rope: &Rope, expected: &str, line_break: usize) {
+        assert_eq!(String::from(rope), expected);
+        assert_eq!(rope.lines(..).collect::<Vec<_>>(), expected.lines().collect::<Vec<_>>());
+        assert_eq!(rope.measure::<LinesMetric>(), count_newlines(expected));
+        assert_eq!(rope.offset_of_line(1), line_break + 2);
+        assert_eq!(rope.line_of_offset(line_break), 0);
+        assert_eq!(rope.line_of_offset(line_break + 1), 0);
+        assert_eq!(rope.line_of_offset(line_break + 2), 1);
+    }
+
     #[test]
     fn chunk_at_offset_empty_rope() {
         let rope = Rope::from("");
@@ -1564,6 +1734,28 @@ mod tests {
         assert_eq!(located.2, 0);
         assert_eq!(rope.chunk_at_line(1).expect("line 1 chunk").1, left.len());
         assert_eq!(rope.chunk_at_line(1).expect("line 1 chunk").2, 0);
+    }
+
+    #[test]
+    fn rope_builder_preserves_crlf_line_metrics_near_leaf_boundary() {
+        let line_break = MAX_LEAF - 1;
+        let text = format!("{}\r\n{}", "a".repeat(line_break), "b".repeat(MIN_LEAF + 32));
+        let rope = Rope::from(text.as_str());
+
+        assert_no_crlf_chunk_split(&rope);
+        assert_crlf_line_metrics(&rope, &text, line_break);
+    }
+
+    #[test]
+    fn edit_preserves_crlf_line_metrics_at_edit_boundary() {
+        let line_break = MAX_LEAF - 1;
+        let suffix = "b".repeat(MIN_LEAF + 32);
+        let mut rope = Rope::from(format!("{}\n{}", "a".repeat(line_break), suffix));
+        rope.edit(line_break..line_break, "\r");
+        let expected = format!("{}\r\n{}", "a".repeat(line_break), suffix);
+
+        assert_no_crlf_chunk_split(&rope);
+        assert_crlf_line_metrics(&rope, &expected, line_break);
     }
 
     #[test]

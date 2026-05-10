@@ -26,7 +26,7 @@ use std::time::SystemTime;
 use fs2::FileExt;
 use log::warn;
 
-use xi_rope::Rope;
+use xi_rope::{Rope, RopeBuilder};
 use xi_rpc::RemoteErrorDetails;
 
 use crate::line_ending::{LineEnding, LineEndingError};
@@ -44,8 +44,74 @@ use crate::watcher::FileWatcher;
 #[cfg(target_family = "unix")]
 use std::{fs::Permissions, os::unix::fs::PermissionsExt};
 
+#[cfg(test)]
+use std::alloc::{GlobalAlloc, Layout, System};
+#[cfg(test)]
+use std::cell::Cell;
+
 const UTF8_BOM: &str = "\u{feff}";
 const MAX_FORMATTING_PROBE_BYTES: usize = 65_536;
+
+#[cfg(test)]
+struct TrackingAlloc;
+
+#[cfg(test)]
+thread_local! {
+    static TRACK_ALLOC_THRESHOLD: Cell<usize> = const { Cell::new(0) };
+    static TRACK_LARGE_ALLOC_COUNT: Cell<usize> = const { Cell::new(0) };
+    static TRACK_LARGEST_ALLOC: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: TrackingAlloc = TrackingAlloc;
+
+#[cfg(test)]
+#[inline]
+fn record_large_alloc(layout: Layout) {
+    TRACK_ALLOC_THRESHOLD.with(|threshold| {
+        let threshold = threshold.get();
+        if threshold == 0 || layout.size() < threshold {
+            return;
+        }
+        TRACK_LARGE_ALLOC_COUNT.with(|count| count.set(count.get() + 1));
+        TRACK_LARGEST_ALLOC.with(|largest| largest.set(largest.get().max(layout.size())));
+    });
+}
+
+#[cfg(test)]
+unsafe impl GlobalAlloc for TrackingAlloc {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        record_large_alloc(layout);
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        record_large_alloc(layout);
+        unsafe { System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        record_large_alloc(Layout::from_size_align(new_size, layout.align()).unwrap());
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[cfg(test)]
+fn with_large_alloc_tracking<T>(threshold: usize, f: impl FnOnce() -> T) -> (T, usize, usize) {
+    TRACK_ALLOC_THRESHOLD.with(|value| value.set(threshold));
+    TRACK_LARGE_ALLOC_COUNT.with(|value| value.set(0));
+    TRACK_LARGEST_ALLOC.with(|value| value.set(0));
+    let result = f();
+    let alloc_count = TRACK_LARGE_ALLOC_COUNT.with(|value| value.get());
+    let largest_alloc = TRACK_LARGEST_ALLOC.with(|value| value.get());
+    TRACK_ALLOC_THRESHOLD.with(|value| value.set(0));
+    (result, alloc_count, largest_alloc)
+}
 
 /// Tracks all state related to open files.
 pub struct FileManager {
@@ -735,16 +801,20 @@ impl<W: Write> Write for ChunkedSaveWriter<'_, W> {
 }
 
 fn try_decode(bytes: Vec<u8>, encoding: CharacterEncoding, path: &Path) -> Result<Rope, FileError> {
-    match encoding {
-        CharacterEncoding::Utf8 => Ok(Rope::from(
-            str::from_utf8(&bytes).map_err(|_e| FileError::UnknownEncoding(path.to_owned()))?,
-        )),
-        CharacterEncoding::Utf8WithBom => {
-            let s = String::from_utf8(bytes)
-                .map_err(|_e| FileError::UnknownEncoding(path.to_owned()))?;
-            Ok(Rope::from(&s[UTF8_BOM.len()..]))
+    let text = match encoding {
+        CharacterEncoding::Utf8 => {
+            str::from_utf8(&bytes).map_err(|_e| FileError::UnknownEncoding(path.to_owned()))?
         }
-    }
+        CharacterEncoding::Utf8WithBom => {
+            let s =
+                str::from_utf8(&bytes).map_err(|_e| FileError::UnknownEncoding(path.to_owned()))?;
+            &s[UTF8_BOM.len()..]
+        }
+    };
+
+    let mut builder = RopeBuilder::new();
+    builder.push_str(text);
+    Ok(builder.finish())
 }
 
 impl CharacterEncoding {
@@ -827,6 +897,7 @@ impl fmt::Display for FileError {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::path::PathBuf;
 
     use xi_rpc::RemoteError;
@@ -1051,6 +1122,55 @@ mod tests {
         assert_eq!(analysis.indentation, SampledIndentation::Spaces(2));
         assert_eq!(analysis.line_ending, SampledLineEnding::Lf);
         assert!(analysis.needs_line_ending_verification());
+    }
+
+    #[test]
+    fn try_decode_large_bom_text_builds_multi_leaf_rope() {
+        let text = format!("{}{}{}", "a".repeat(1500), "\r\n", "🙂é".repeat(400));
+        let bytes = format!("{}{text}", super::UTF8_BOM).into_bytes();
+
+        let rope = super::try_decode(bytes, CharacterEncoding::Utf8WithBom, Path::new("/tmp/demo"))
+            .unwrap();
+
+        assert_eq!(String::from(&rope), text);
+        assert!(rope.iter_chunks(..).count() >= 2);
+    }
+
+    #[test]
+    fn try_decode_does_not_allocate_full_intermediate_string() {
+        let text = format!("{}{}{}", "line\r\n".repeat(4096), "🙂é", "tail\n".repeat(1024));
+        let bytes = format!("{}{text}", super::UTF8_BOM).into_bytes();
+        let threshold = text.len();
+
+        let (rope, large_alloc_count, largest_alloc) =
+            super::with_large_alloc_tracking(threshold, || {
+                super::try_decode(bytes, CharacterEncoding::Utf8WithBom, Path::new("/tmp/demo"))
+                    .unwrap()
+            });
+
+        assert_eq!(String::from(&rope), text);
+        assert_eq!(large_alloc_count, 0, "unexpected >=full-buffer allocation: {largest_alloc}");
+        assert_eq!(largest_alloc, 0);
+    }
+
+    #[cfg(all(target_family = "unix", not(feature = "notify")))]
+    #[test]
+    fn open_large_normal_file_uses_multi_leaf_rope() {
+        use super::{FileManager, OpenResult};
+        use std::io::Write;
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "{}{}{}", "a".repeat(1500), "\n", "b".repeat(1300)).unwrap();
+
+        let mut mgr = FileManager::new();
+        let opened = mgr.open(tmp.path(), crate::tabs::BufferId(6)).unwrap();
+
+        match opened {
+            OpenResult::Rope { text, mode: DocumentMode::Normal } => {
+                assert!(text.iter_chunks(..).count() >= 2);
+            }
+            other => panic!("expected normal rope open, got {:?}", std::mem::discriminant(&other)),
+        }
     }
 
     #[test]

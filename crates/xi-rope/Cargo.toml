@@ -7,6 +7,7 @@ repository = "https://github.com/ffimnsr/ee"
 version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
+autobenches = false
 
 [dependencies]
 bytecount.workspace = true
@@ -17,6 +18,7 @@ regex.workspace = true
 im = "15.1.0"
 
 [dev-dependencies]
+criterion.workspace = true
 proptest = "1.6"
 serde_test = "^1.0"
 serde_json.workspace = true
@@ -24,3 +26,19 @@ serde_json.workspace = true
 [features]
 default = []
 serde = ["dep:serde", "im/serde"]
+
+[[bench]]
+name = "cursors"
+harness = false
+
+[[bench]]
+name = "diff"
+harness = false
+
+[[bench]]
+name = "edit"
+harness = false
+
+[[bench]]
+name = "rope_builder"
+harness = false
