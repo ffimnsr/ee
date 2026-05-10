@@ -85,12 +85,9 @@ pub struct Editor {
     layers: Layers,
 
     /// Tracks an in-flight async whole-document scan operation (e.g. reindent).
-    ///
-    /// Only populated when the buffer is in `Normal` mode; gated commands check
-    /// `VlfFeatureGates::whole_doc_ops` before scheduling any task.  VLF and
-    /// ConstrainedNormal buffers alert the user and return without touching this
-    /// field.
     pub(crate) whole_scan_task: crate::whole_scan::WholeScanTask,
+    /// Tracks an in-flight async save operation for rope-backed buffers.
+    pub(crate) save_task: crate::whole_scan::SaveTask,
 }
 
 impl Editor {
@@ -131,6 +128,7 @@ impl Editor {
             revs_in_flight: 0,
             vlf_store: None,
             whole_scan_task: crate::whole_scan::WholeScanTask::new(),
+            save_task: crate::whole_scan::SaveTask::new(),
         }
     }
 
@@ -160,6 +158,7 @@ impl Editor {
             revs_in_flight: 0,
             vlf_store: Some(Box::new(store)),
             whole_scan_task: crate::whole_scan::WholeScanTask::new(),
+            save_task: crate::whole_scan::SaveTask::new(),
         }
     }
 
@@ -210,12 +209,37 @@ impl Editor {
         self.engine.get_head_rev_id().token()
     }
 
+    pub(crate) fn get_head_rev_id(&self) -> RevId {
+        self.engine.get_head_rev_id()
+    }
+
     pub(crate) fn get_edit_type(&self) -> EditType {
         self.this_edit_type
     }
 
     pub(crate) fn get_active_undo_group(&self) -> usize {
         *self.live_undos.last().unwrap_or(&0)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn next_vlf_overlay_edit_context(
+        &mut self,
+        edit_type: EditType,
+    ) -> Option<crate::vlf::overlay::OverlayEditContext> {
+        self.vlf_store.as_ref()?;
+        self.this_edit_type = edit_type;
+        let revision_id = self.engine.get_head_rev_id().token();
+        let undo_group = self.calculate_undo_group();
+        self.last_edit_type = self.this_edit_type;
+        Some(crate::vlf::overlay::OverlayEditContext { revision_id, undo_group })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn vlf_overlay_delta_for_undo_group(
+        &self,
+        undo_group: usize,
+    ) -> Option<crate::vlf::overlay::OverlayDelta> {
+        self.vlf_store.as_ref()?.overlay_delta_for_undo_group(undo_group)
     }
 
     pub(crate) fn update_edit_type(&mut self) {
@@ -230,6 +254,16 @@ impl Editor {
 
     pub(crate) fn set_pristine(&mut self) {
         self.pristine_rev_id = self.engine.get_head_rev_id();
+    }
+
+    pub(crate) fn set_pristine_if_equivalent_revision(&mut self, saved_rev_id: RevId) -> bool {
+        let head_rev_id = self.engine.get_head_rev_id();
+        if self.engine.is_equivalent_revision(saved_rev_id, head_rev_id) {
+            self.pristine_rev_id = head_rev_id;
+            true
+        } else {
+            false
+        }
     }
 
     pub(crate) fn is_pristine(&self) -> bool {
@@ -368,7 +402,13 @@ impl Editor {
 
     fn gc_undos(&mut self) {
         if self.revs_in_flight == 0 && !self.gc_undos.is_empty() {
+            let gc_groups: Vec<usize> = self.gc_undos.iter().copied().collect();
             self.engine.gc(self.gc_undos.iter());
+            if let Some(store) = self.vlf_store.as_ref() {
+                for undo_group in &gc_groups {
+                    store.gc_undo_group(*undo_group);
+                }
+            }
             self.undos = &self.undos - &self.gc_undos;
             self.gc_undos.clear();
         }
@@ -863,6 +903,9 @@ fn count_lines(s: &str) -> usize {
 mod tests {
     use super::*;
     use crate::text_store::TextStore;
+    use crate::vlf::store::VlfStore;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
     fn insert_text(editor: &mut Editor, text: &str) {
         let mut builder = DeltaBuilder::new(editor.get_buffer().len());
@@ -871,6 +914,16 @@ mod tests {
         editor.add_delta(builder.build());
         let _ = editor.commit_delta();
         editor.update_edit_type();
+    }
+
+    fn vlf_editor(content: &str) -> (Editor, NamedTempFile) {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        file.flush().unwrap();
+
+        let store = VlfStore::open(file.path()).unwrap();
+        store.enable_editing();
+        (Editor::with_vlf_store(store), file)
     }
 
     #[test]
@@ -894,6 +947,63 @@ mod tests {
         let store = editor.text_store_snapshot();
 
         assert_eq!(store.mode(), DocumentMode::ConstrainedNormal);
+    }
+
+    #[test]
+    fn set_pristine_if_equivalent_revision_preserves_dirty_newer_head() {
+        let mut editor = Editor::with_text("alpha");
+        let saved_rev_id = editor.get_head_rev_id();
+
+        insert_text(&mut editor, "!");
+
+        assert!(!editor.set_pristine_if_equivalent_revision(saved_rev_id));
+        assert!(!editor.is_pristine());
+    }
+
+    #[test]
+    fn vlf_overlay_context_reuses_editor_undo_grouping() {
+        let (mut editor, _file) = vlf_editor("hello");
+
+        let first = editor.next_vlf_overlay_edit_context(EditType::InsertChars).unwrap();
+        editor.vlf_store.as_ref().unwrap().apply_insert(5, " world", first).unwrap();
+        editor.update_edit_type();
+
+        let second = editor.next_vlf_overlay_edit_context(EditType::InsertChars).unwrap();
+        editor.vlf_store.as_ref().unwrap().apply_insert(11, "!", second).unwrap();
+        editor.update_edit_type();
+
+        assert_eq!(first.undo_group, second.undo_group);
+        let delta = editor.vlf_overlay_delta_for_undo_group(first.undo_group).unwrap();
+        assert_eq!(delta.undo_group, first.undo_group);
+        assert_eq!(delta.revision_id, first.revision_id);
+        assert_eq!(delta.ops.len(), 2);
+
+        editor.commit_undo_checkpoint();
+        let third = editor.next_vlf_overlay_edit_context(EditType::InsertChars).unwrap();
+        assert_ne!(third.undo_group, first.undo_group);
+    }
+
+    #[test]
+    fn vlf_overlay_history_gcs_with_editor_undo_gc() {
+        let (mut editor, _file) = vlf_editor("hello");
+        let mut first_group = None;
+
+        for index in 0..=MAX_UNDOS {
+            editor.commit_undo_checkpoint();
+            let ctx = editor.next_vlf_overlay_edit_context(EditType::InsertChars).unwrap();
+            if first_group.is_none() {
+                first_group = Some(ctx.undo_group);
+            }
+            editor.vlf_store.as_ref().unwrap().apply_insert(5 + index as u64, "x", ctx).unwrap();
+            editor.update_edit_type();
+        }
+
+        let first_group = first_group.unwrap();
+        assert!(editor.vlf_overlay_delta_for_undo_group(first_group).is_some());
+
+        editor.gc_undos();
+
+        assert!(editor.vlf_overlay_delta_for_undo_group(first_group).is_none());
     }
 
     #[test]

@@ -251,6 +251,37 @@ pub enum CharacterEncoding {
     Utf8WithBom,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SaveOptions {
+    #[cfg(target_family = "unix")]
+    permissions: Option<u32>,
+}
+
+impl SaveOptions {
+    fn from_info(info: Option<&FileInfo>) -> Self {
+        Self {
+            #[cfg(target_family = "unix")]
+            permissions: info.and_then(|info| info.permissions),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum PreparedRopeSaveKind {
+    New,
+    ExistingSamePath,
+    ExistingMove { prev_path: PathBuf },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedRopeSave {
+    pub(crate) buffer_id: BufferId,
+    pub(crate) path: PathBuf,
+    pub(crate) encoding: CharacterEncoding,
+    pub(crate) kind: PreparedRopeSaveKind,
+    pub(crate) options: SaveOptions,
+}
+
 impl FileManager {
     #[cfg(feature = "notify")]
     pub fn new(watcher: FileWatcher) -> Self {
@@ -419,64 +450,79 @@ impl FileManager {
     }
 
     pub fn save(&mut self, path: &Path, text: &Rope, id: BufferId) -> Result<(), FileError> {
+        let request = self.prepare_rope_save(path, id)?;
+        let mut should_continue = || true;
+        execute_prepared_rope_save(&request, text, &mut should_continue)?;
+        self.finish_rope_save(&request)
+    }
+
+    pub(crate) fn prepare_rope_save(
+        &self,
+        path: &Path,
+        id: BufferId,
+    ) -> Result<PreparedRopeSave, FileError> {
         if path.to_str().is_none() {
             return Err(FileError::NonUtf8Path(path.to_owned()));
         }
-        let is_existing = self.file_info.contains_key(&id);
-        if is_existing { self.save_existing(path, text, id) } else { self.save_new(path, text, id) }
+
+        match self.file_info.get(&id) {
+            Some(info) if info.has_changed => Err(FileError::HasChanged(path.to_owned())),
+            Some(info) if info.path == path => Ok(PreparedRopeSave {
+                buffer_id: id,
+                path: path.to_owned(),
+                encoding: info.encoding,
+                kind: PreparedRopeSaveKind::ExistingSamePath,
+                options: SaveOptions::from_info(Some(info)),
+            }),
+            Some(info) => Ok(PreparedRopeSave {
+                buffer_id: id,
+                path: path.to_owned(),
+                encoding: CharacterEncoding::Utf8,
+                kind: PreparedRopeSaveKind::ExistingMove { prev_path: info.path.clone() },
+                options: SaveOptions::from_info(Some(info)),
+            }),
+            None => Ok(PreparedRopeSave {
+                buffer_id: id,
+                path: path.to_owned(),
+                encoding: CharacterEncoding::Utf8,
+                kind: PreparedRopeSaveKind::New,
+                options: SaveOptions::from_info(None),
+            }),
+        }
     }
 
-    fn save_new(&mut self, path: &Path, text: &Rope, id: BufferId) -> Result<(), FileError> {
-        try_save(path, text, CharacterEncoding::Utf8, self.get_info(id))?;
-        // Acquire advisory lock on the newly-saved file.
-        let lock = File::open(path).ok().and_then(|lf| match lf.try_lock_exclusive() {
-            Ok(()) => Some(lf),
-            Err(e) => {
-                warn!("Could not lock newly saved file {:?}: {}", path, e);
-                None
+    pub(crate) fn finish_rope_save(&mut self, request: &PreparedRopeSave) -> Result<(), FileError> {
+        match &request.kind {
+            PreparedRopeSaveKind::ExistingSamePath => {
+                if let Some(info) = self.file_info.get_mut(&request.buffer_id) {
+                    info.mod_time = get_mod_time(&request.path);
+                    info.has_changed = false;
+                }
             }
-        });
-        let info = FileInfo {
-            encoding: CharacterEncoding::Utf8,
-            path: path.to_owned(),
-            mod_time: get_mod_time(path),
-            has_changed: false,
-            open_analysis: FileOpenAnalysis::default(),
-            #[cfg(target_family = "unix")]
-            permissions: get_permissions(path),
-            _lock: lock,
-        };
-        self.open_files.insert(path.to_owned(), id);
-        self.file_info.insert(id, info);
-        #[cfg(feature = "notify")]
-        self.watcher.watch(path, false, OPEN_FILE_EVENT_TOKEN);
-        Ok(())
-    }
+            PreparedRopeSaveKind::New | PreparedRopeSaveKind::ExistingMove { .. } => {
+                let info = FileInfo {
+                    encoding: request.encoding,
+                    path: request.path.clone(),
+                    mod_time: get_mod_time(&request.path),
+                    has_changed: false,
+                    open_analysis: FileOpenAnalysis::default(),
+                    #[cfg(target_family = "unix")]
+                    permissions: get_permissions(&request.path),
+                    _lock: open_advisory_lock(&request.path),
+                };
+                self.open_files.insert(request.path.clone(), request.buffer_id);
+                self.file_info.insert(request.buffer_id, info);
+                #[cfg(feature = "notify")]
+                self.watcher.watch(&request.path, false, OPEN_FILE_EVENT_TOKEN);
 
-    fn save_existing(&mut self, path: &Path, text: &Rope, id: BufferId) -> Result<(), FileError> {
-        let prev_path = self.file_info[&id].path.clone();
-        if prev_path != path {
-            self.save_new(path, text, id)?;
-            self.open_files.remove(&prev_path);
-            #[cfg(feature = "notify")]
-            self.watcher.unwatch(&prev_path, OPEN_FILE_EVENT_TOKEN);
-        } else if self.file_info[&id].has_changed {
-            return Err(FileError::HasChanged(path.to_owned()));
-        } else {
-            let encoding = self.file_info[&id].encoding;
-            try_save(path, text, encoding, self.get_info(id))?;
-            if let Some(info) = self.file_info.get_mut(&id) {
-                info.mod_time = get_mod_time(path);
-            } else {
-                return Err(FileError::Io(
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("missing file metadata for buffer {:?}", id),
-                    ),
-                    path.to_owned(),
-                ));
+                if let PreparedRopeSaveKind::ExistingMove { prev_path } = &request.kind {
+                    self.open_files.remove(prev_path);
+                    #[cfg(feature = "notify")]
+                    self.watcher.unwatch(prev_path, OPEN_FILE_EVENT_TOKEN);
+                }
             }
         }
+
         Ok(())
     }
 
@@ -590,7 +636,8 @@ fn try_save(
     path: &Path,
     text: &Rope,
     encoding: CharacterEncoding,
-    file_info: Option<&FileInfo>,
+    save_options: SaveOptions,
+    should_continue: &mut dyn FnMut() -> bool,
 ) -> Result<(), FileError> {
     let tmp_extension = path.extension().map_or_else(
         || OsString::from("swp"),
@@ -610,14 +657,35 @@ fn try_save(
         CharacterEncoding::Utf8 => (),
     }
 
-    for chunk in text.iter_chunks(..text.len()) {
+    if !should_continue() {
+        drop(f);
+        let _ = fs::remove_file(tmp_path);
+        return Err(cancelled_save_error(tmp_path));
+    }
+
+    let mut offset = 0;
+    while offset < text.len() {
+        let (chunk, byte_start, _, _) = text
+            .chunk_at_offset(offset)
+            .expect("offset within rope length should resolve to a chunk");
         f.write_all(chunk.as_bytes()).map_err(|e| FileError::Io(e, tmp_path.to_owned()))?;
+        offset = byte_start + chunk.len();
+        if !should_continue() {
+            drop(f);
+            let _ = fs::remove_file(tmp_path);
+            return Err(cancelled_save_error(tmp_path));
+        }
     }
 
     // Flush OS buffers and sync to storage before rename so that a crash
     // after the rename cannot leave the destination file with stale data.
     f.sync_all().map_err(|e| FileError::Io(e, tmp_path.to_owned()))?;
     drop(f);
+
+    if !should_continue() {
+        let _ = fs::remove_file(tmp_path);
+        return Err(cancelled_save_error(tmp_path));
+    }
 
     fs::rename(tmp_path, path).map_err(|e| FileError::Io(e, path.to_owned()))?;
 
@@ -632,15 +700,24 @@ fn try_save(
 
     #[cfg(target_family = "unix")]
     {
-        if let Some(info) = file_info {
-            fs::set_permissions(path, Permissions::from_mode(info.permissions.unwrap_or(0o644)))
-                .unwrap_or_else(|e| {
-                    warn!("Couldn't set permissions on file {} due to error {}", path.display(), e)
-                });
-        }
+        fs::set_permissions(
+            path,
+            Permissions::from_mode(save_options.permissions.unwrap_or(0o644)),
+        )
+        .unwrap_or_else(|e| {
+            warn!("Couldn't set permissions on file {} due to error {}", path.display(), e)
+        });
     }
 
     Ok(())
+}
+
+pub(crate) fn execute_prepared_rope_save(
+    request: &PreparedRopeSave,
+    text: &Rope,
+    should_continue: &mut dyn FnMut() -> bool,
+) -> Result<(), FileError> {
+    try_save(&request.path, text, request.encoding, request.options, should_continue)
 }
 
 fn try_decode(bytes: Vec<u8>, encoding: CharacterEncoding, path: &Path) -> Result<Rope, FileError> {
@@ -670,6 +747,20 @@ impl CharacterEncoding {
 /// if present.
 fn get_mod_time<P: AsRef<Path>>(path: P) -> Option<SystemTime> {
     File::open(path).and_then(|f| f.metadata()).and_then(|meta| meta.modified()).ok()
+}
+
+fn cancelled_save_error(path: &Path) -> FileError {
+    FileError::Io(io::Error::new(io::ErrorKind::Interrupted, "save cancelled"), path.to_owned())
+}
+
+fn open_advisory_lock(path: &Path) -> Option<File> {
+    File::open(path).ok().and_then(|lf| match lf.try_lock_exclusive() {
+        Ok(()) => Some(lf),
+        Err(e) => {
+            warn!("Could not lock newly saved file {:?}: {}", path, e);
+            None
+        }
+    })
 }
 
 /// Returns the file permissions for the file at a given path on UNIXy systems,

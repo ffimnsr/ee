@@ -91,6 +91,162 @@ pub type RopeDelta = Delta<RopeInfo>;
 /// An element in a `RopeDelta`.
 pub type RopeDeltaElement = DeltaElement<RopeInfo>;
 
+/// Borrowed read-only view into a subrange of a [`Rope`].
+#[derive(Clone, Copy, Debug)]
+pub struct RopeSlice<'a> {
+    rope: &'a Rope,
+    interval: Interval,
+}
+
+impl<'a> RopeSlice<'a> {
+    /// Create a borrowed view for `interval` within `rope`.
+    pub fn new<T: IntervalBounds>(rope: &'a Rope, interval: T) -> Self {
+        RopeSlice { rope, interval: interval.into_interval(rope.len()) }
+    }
+
+    /// Borrow underlying rope.
+    pub fn rope(&self) -> &'a Rope {
+        self.rope
+    }
+
+    /// Absolute interval covered by this view.
+    pub fn interval(&self) -> Interval {
+        self.interval
+    }
+
+    /// Start offset of this view in underlying rope.
+    pub fn start(&self) -> usize {
+        self.interval.start()
+    }
+
+    /// End offset of this view in underlying rope.
+    pub fn end(&self) -> usize {
+        self.interval.end()
+    }
+
+    /// Length in bytes.
+    pub fn len(&self) -> usize {
+        self.interval.size()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.interval.is_empty()
+    }
+
+    /// Returns nested borrowed view relative to this view.
+    pub fn slice<T: IntervalBounds>(&self, interval: T) -> RopeSlice<'a> {
+        let rel = interval.into_interval(self.len());
+        RopeSlice { rope: self.rope, interval: rel.translate(self.interval.start()) }
+    }
+
+    /// Materialize this borrowed view as owned rope.
+    pub fn to_rope(&self) -> Rope {
+        self.rope.subseq(self.interval)
+    }
+
+    /// Iterate borrowed chunks in this view.
+    pub fn iter_chunks(&self) -> ChunkIter<'a> {
+        self.rope.iter_chunks(self.interval)
+    }
+
+    /// Iterate raw lines in this view.
+    pub fn lines_raw(&self) -> LinesRaw<'a> {
+        self.rope.lines_raw(self.interval)
+    }
+
+    /// Iterate logical lines in this view.
+    pub fn lines(&self) -> Lines<'a> {
+        self.rope.lines(self.interval)
+    }
+
+    /// Return borrowed-or-owned text for this view.
+    pub fn slice_to_cow(&self) -> Cow<'a, str> {
+        self.rope.slice_to_cow(self.interval)
+    }
+
+    /// Create cursor bounded to this view.
+    pub fn cursor(&self, position: usize) -> RopeSliceCursor<'a> {
+        RopeSliceCursor::new(*self, position)
+    }
+}
+
+/// Cursor bounded to a [`RopeSlice`].
+pub struct RopeSliceCursor<'a> {
+    cursor: Cursor<'a, RopeInfo>,
+    interval: Interval,
+}
+
+impl<'a> RopeSliceCursor<'a> {
+    pub fn new(slice: RopeSlice<'a>, position: usize) -> Self {
+        RopeSliceCursor {
+            cursor: Cursor::new(slice.rope, slice.interval.start() + position),
+            interval: slice.interval,
+        }
+    }
+
+    pub fn total_len(&self) -> usize {
+        self.interval.size()
+    }
+
+    pub fn pos(&self) -> usize {
+        self.cursor.pos().saturating_sub(self.interval.start())
+    }
+
+    pub fn set(&mut self, position: usize) {
+        self.cursor.set(self.interval.start() + position);
+    }
+
+    pub fn get_leaf(&self) -> Option<(&'a str, usize)> {
+        let (leaf, pos_in_leaf, _, _) = self.current_leaf_window()?;
+        Some((leaf, pos_in_leaf))
+    }
+
+    pub fn next_leaf(&mut self) -> Option<(&'a str, usize)> {
+        let (_, _, _, visible_end) = self.current_leaf_window()?;
+        if visible_end >= self.interval.end() {
+            self.cursor.set(self.interval.end());
+            return None;
+        }
+        self.cursor.set(visible_end);
+        self.get_leaf()
+    }
+
+    pub fn next_base(&mut self) -> Option<usize> {
+        let next = self.cursor.next::<BaseMetric>()?;
+        if next > self.interval.end() {
+            self.cursor.set(self.interval.end());
+            return None;
+        }
+        Some(self.pos())
+    }
+
+    pub fn next_codepoint(&mut self) -> Option<char> {
+        let ch = self.cursor.next_codepoint()?;
+        if self.cursor.pos() > self.interval.end() {
+            self.cursor.set(self.interval.end());
+            return None;
+        }
+        Some(ch)
+    }
+
+    fn current_leaf_window(&self) -> Option<(&'a str, usize, usize, usize)> {
+        if self.cursor.pos() >= self.interval.end() {
+            return None;
+        }
+        let (leaf, _) = self.cursor.get_leaf()?;
+        let leaf_start = self.cursor.leaf_start_offset()?;
+        let visible_start = leaf_start.max(self.interval.start());
+        let visible_end = (leaf_start + leaf.len()).min(self.interval.end());
+        if visible_start >= visible_end {
+            return None;
+        }
+        let start_in_leaf = visible_start - leaf_start;
+        let end_in_leaf = visible_end - leaf_start;
+        let pos_in_leaf = self.cursor.pos() - visible_start;
+        Some((&leaf[start_in_leaf..end_in_leaf], pos_in_leaf, visible_start, visible_end))
+    }
+}
+
 impl Leaf for String {
     fn len(&self) -> usize {
         self.len()
@@ -396,6 +552,11 @@ impl Rope {
         self.subseq(iv)
     }
 
+    /// Returns borrowed read-only view over provided range.
+    pub fn slice_view<T: IntervalBounds>(&self, iv: T) -> RopeSlice<'_> {
+        RopeSlice::new(self, iv)
+    }
+
     // encourage callers to use Cursor instead?
 
     /// Determine whether `offset` lies on a codepoint boundary.
@@ -485,6 +646,39 @@ impl Rope {
             }
             Ordering::Less => self.count_base_units::<LinesMetric>(line),
         }
+    }
+
+    /// Returns chunk containing `byte_offset` and chunk start metrics.
+    pub fn chunk_at_offset(&self, byte_offset: usize) -> Option<(&str, usize, usize, usize)> {
+        if byte_offset > self.len() {
+            return None;
+        }
+        let cursor = Cursor::new(self, byte_offset);
+        let (leaf, _) = cursor.get_leaf()?;
+        Some((
+            leaf.as_str(),
+            cursor.leaf_start_offset()?,
+            cursor.leaf_start_measure::<LinesMetric>()?,
+            cursor.leaf_start_measure::<Utf16CodeUnitsMetric>()?,
+        ))
+    }
+
+    /// Returns chunk containing line boundary `line` and chunk start metrics.
+    pub fn chunk_at_line(&self, line: usize) -> Option<(&str, usize, usize, usize)> {
+        let max_line = self.measure::<LinesMetric>() + 1;
+        if line > max_line {
+            return None;
+        }
+        self.chunk_at_offset(self.count_base_units::<LinesMetric>(line))
+    }
+
+    /// Returns chunk containing UTF-16 boundary `utf16_offset` and chunk start metrics.
+    pub fn chunk_at_utf16(&self, utf16_offset: usize) -> Option<(&str, usize, usize, usize)> {
+        let max_utf16 = self.measure::<Utf16CodeUnitsMetric>();
+        if utf16_offset > max_utf16 {
+            return None;
+        }
+        self.chunk_at_offset(self.count_base_units::<Utf16CodeUnitsMetric>(utf16_offset))
     }
 
     /// Returns an iterator over chunks of the rope.
@@ -1130,6 +1324,74 @@ mod tests {
         assert_eq!(utf8_offset, 19);
     }
 
+    fn chunk_boundaries(rope: &Rope) -> Vec<(usize, String)> {
+        let mut offset = 0;
+        let mut result = Vec::new();
+        for chunk in rope.iter_chunks(..) {
+            result.push((offset, chunk.to_owned()));
+            offset += chunk.len();
+        }
+        result
+    }
+
+    fn two_leaf_rope(left: &str, right: &str) -> Rope {
+        Rope::from(left) + Rope::from(right)
+    }
+
+    #[test]
+    fn chunk_at_offset_empty_rope() {
+        let rope = Rope::from("");
+        assert_eq!(rope.chunk_at_offset(0), Some(("", 0, 0, 0)));
+        assert_eq!(rope.chunk_at_line(0), Some(("", 0, 0, 0)));
+        assert_eq!(rope.chunk_at_utf16(0), Some(("", 0, 0, 0)));
+        assert_eq!(rope.chunk_at_offset(1), None);
+    }
+
+    #[test]
+    fn chunk_at_offset_reports_leaf_boundary_metrics() {
+        let left = "a".repeat(MAX_LEAF);
+        let right = format!("{}{}", "b".repeat(MAX_LEAF), "\nccc");
+        let rope = two_leaf_rope(&left, &right);
+        let boundaries = chunk_boundaries(&rope);
+        assert!(boundaries.len() >= 2, "expected multi-leaf rope");
+
+        let (boundary, expected_chunk) = &boundaries[1];
+        let located = rope.chunk_at_offset(*boundary).expect("chunk at boundary");
+        assert_eq!(located.0, expected_chunk);
+        assert_eq!(located.1, *boundary);
+        assert_eq!(located.2, rope.line_of_offset(*boundary));
+        assert_eq!(located.3, rope.count::<Utf16CodeUnitsMetric>(*boundary));
+    }
+
+    #[test]
+    fn chunk_at_line_handles_crlf_seam_across_leaves() {
+        let left = format!("{}\r", "a".repeat(MIN_LEAF + 32));
+        let right = format!("\n{}", "b".repeat(MIN_LEAF + 32));
+        let rope = two_leaf_rope(&left, &right);
+        let located = rope.chunk_at_offset(left.len()).expect("chunk at CRLF seam");
+        assert_eq!(located.0, right);
+        assert_eq!(located.1, left.len());
+        assert_eq!(located.2, 0);
+        assert_eq!(rope.chunk_at_line(1).expect("line 1 chunk").1, left.len());
+        assert_eq!(rope.chunk_at_line(1).expect("line 1 chunk").2, 0);
+    }
+
+    #[test]
+    fn chunk_at_utf16_tracks_multibyte_leaf_boundary() {
+        let left = "a".repeat(MIN_LEAF + 32);
+        let right = format!("{}{}", "é".repeat(MIN_LEAF + 16), "🙂");
+        let rope = two_leaf_rope(&left, &right);
+        let byte_start = left.len();
+        let utf16_start = rope.count::<Utf16CodeUnitsMetric>(byte_start);
+        let expected = rope.chunk_at_offset(byte_start).expect("chunk at byte boundary");
+
+        let located = rope.chunk_at_utf16(utf16_start).expect("chunk at utf16 boundary");
+        assert_eq!(located.0, expected.0);
+        assert_eq!(located.1, expected.1);
+        assert_eq!(located.2, rope.line_of_offset(byte_start));
+        assert_eq!(located.3, utf16_start);
+    }
+
     #[test]
     fn slice_to_cow_small_string() {
         let short_text = "hi, i'm a small piece of text.";
@@ -1168,6 +1430,52 @@ mod tests {
 
         assert!(long_text.len() > 1024);
         assert_eq!(cow, Cow::Borrowed(&long_text[..500]));
+    }
+
+    #[test]
+    fn slice_view_iterates_chunks_without_materializing() {
+        let text = format!("{}{}{}", "a".repeat(MAX_LEAF), "\n", "b".repeat(MAX_LEAF));
+        let rope = Rope::from(&text);
+        let view = rope.slice_view(MAX_LEAF - 8..MAX_LEAF + 9);
+
+        let collected: String = view.iter_chunks().collect();
+        assert_eq!(collected, text[MAX_LEAF - 8..MAX_LEAF + 9]);
+        assert_eq!(
+            view.lines_raw().collect::<Vec<_>>(),
+            vec![
+                Cow::from(&text[MAX_LEAF - 8..MAX_LEAF + 1]),
+                Cow::from(&text[MAX_LEAF + 1..MAX_LEAF + 9])
+            ]
+        );
+    }
+
+    #[test]
+    fn nested_slice_view_reuses_original_chunk_storage() {
+        let text = format!("{}{}{}", "a".repeat(MAX_LEAF), "0123456789", "b".repeat(MAX_LEAF));
+        let rope = Rope::from(&text);
+        let nested = rope.slice_view(MAX_LEAF - 4..MAX_LEAF + 14).slice(3..15);
+
+        let direct_chunks: Vec<_> = rope.iter_chunks(MAX_LEAF - 1..MAX_LEAF + 11).collect();
+        let nested_chunks: Vec<_> = nested.iter_chunks().collect();
+
+        assert_eq!(nested_chunks, direct_chunks);
+        assert!(
+            nested_chunks
+                .iter()
+                .zip(direct_chunks.iter())
+                .all(|(nested, direct)| nested.as_ptr() == direct.as_ptr())
+        );
+    }
+
+    #[test]
+    fn slice_view_cursor_stops_at_view_end() {
+        let rope = Rope::from(format!("{}needle-after", "x".repeat(MAX_LEAF + 32)));
+        let view = rope.slice_view(MAX_LEAF + 20..MAX_LEAF + 26);
+        let mut cursor = view.cursor(0);
+
+        assert_eq!(cursor.get_leaf().map(|(leaf, _)| leaf), Some("xxxxxx"));
+        assert_eq!(cursor.next_leaf(), None);
+        assert_eq!(cursor.pos(), view.len());
     }
 }
 

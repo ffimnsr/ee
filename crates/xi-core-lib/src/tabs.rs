@@ -83,6 +83,8 @@ pub(crate) const REWRAP_VIEW_IDLE_MASK: usize = 1 << 26;
 pub(crate) const FIND_VIEW_IDLE_MASK: usize = 1 << 27;
 /// Idle token mask for delivering async whole-document scan results.
 pub(crate) const WHOLE_SCAN_IDLE_MASK: usize = 1 << 28;
+/// Idle token mask for delivering async rope-save results.
+pub(crate) const SAVE_VIEW_IDLE_MASK: usize = 1 << 29;
 
 const NEW_VIEW_IDLE_TOKEN: usize = 1001;
 const VERIFY_LINE_ENDINGS_IDLE_TOKEN: usize = 1003;
@@ -502,25 +504,90 @@ impl CoreState {
             return;
         }
 
-        let mut save_ctx = self.make_context(view_id).unwrap();
-        let fin_text = save_ctx.text_for_save();
+        let request = match self.file_manager.prepare_rope_save(path, buffer_id) {
+            Ok(request) => request,
+            Err(e) => {
+                let error_message = e.to_string();
+                error!("File error: {:?}", error_message);
+                self.peer.alert(error_message);
+                return;
+            }
+        };
 
-        if let Err(e) = self.file_manager.save(path, &fin_text, buffer_id) {
-            let error_message = e.to_string();
+        let mut save_ctx = self.make_context(view_id).unwrap();
+        let (fin_text, saved_rev_id) = save_ctx.rope_snapshot_for_save();
+        drop(save_ctx);
+
+        if let Some(editor) = self.editors.get(&buffer_id) {
+            editor.borrow_mut().save_task.start_save(request, fin_text, saved_rev_id);
+            let view_id_usize: usize = view_id.into();
+            self.peer.schedule_idle(SAVE_VIEW_IDLE_MASK | view_id_usize);
+        } else {
+            let error_message = format!("missing editor for buffer {:?}", buffer_id);
             error!("File error: {:?}", error_message);
             self.peer.alert(error_message);
+        }
+    }
+
+    fn finish_async_save(&mut self, view_id: ViewId, result: crate::whole_scan::SaveTaskResult) {
+        let path = result.request.path.clone();
+        let buffer_id = result.request.buffer_id;
+
+        match result.result {
+            Ok(()) => {
+                if let Err(e) = self.file_manager.finish_rope_save(&result.request) {
+                    let error_message = e.to_string();
+                    error!("File error: {:?}", error_message);
+                    self.peer.alert(error_message);
+                    return;
+                }
+
+                let changes = self.config_manager.update_buffer_path(buffer_id, &path);
+                let language = self.config_manager.get_buffer_language(buffer_id);
+                let notify_view_id = self
+                    .views
+                    .iter()
+                    .find_map(|(candidate_id, view)| {
+                        (view.borrow().get_buffer_id() == buffer_id).then_some(*candidate_id)
+                    })
+                    .unwrap_or(view_id);
+
+                if let Some(mut ctx) = self.make_context(notify_view_id) {
+                    ctx.after_save_with_rev(&path, result.saved_rev_id);
+                    ctx.language_changed(&language);
+                    if let Some(changes) = changes {
+                        ctx.config_changed(&changes);
+                    }
+                }
+            }
+            Err(e) => {
+                let error_message = e.to_string();
+                error!("File error: {:?}", error_message);
+                self.peer.alert(error_message);
+            }
+        }
+    }
+
+    fn handle_save_callback(&mut self, token: usize) {
+        let id: ViewId = token.into();
+        let Some(buffer_id) = self.views.get(&id).map(|view| view.borrow().get_buffer_id()) else {
+            return;
+        };
+
+        let maybe_result =
+            self.editors.get(&buffer_id).and_then(|editor| editor.borrow_mut().save_task.poll());
+
+        if let Some(result) = maybe_result {
+            self.finish_async_save(id, result);
             return;
         }
 
-        let changes = self.config_manager.update_buffer_path(buffer_id, path);
-        let language = self.config_manager.get_buffer_language(buffer_id);
-
-        self.make_context(view_id).unwrap().after_save(path);
-        self.make_context(view_id).unwrap().language_changed(&language);
-
-        // update the config _after_ sending save related events
-        if let Some(changes) = changes {
-            self.make_context(view_id).unwrap().config_changed(&changes);
+        if self
+            .editors
+            .get(&buffer_id)
+            .is_some_and(|editor| editor.borrow().save_task.is_in_progress())
+        {
+            self.peer.schedule_idle(SAVE_VIEW_IDLE_MASK | token);
         }
     }
 
@@ -806,6 +873,9 @@ impl CoreState {
             }
             other if (other & FIND_VIEW_IDLE_MASK) != 0 => {
                 self.handle_find_callback(other ^ FIND_VIEW_IDLE_MASK)
+            }
+            other if (other & SAVE_VIEW_IDLE_MASK) != 0 => {
+                self.handle_save_callback(other ^ SAVE_VIEW_IDLE_MASK)
             }
             other if (other & WHOLE_SCAN_IDLE_MASK) != 0 => {
                 self.handle_whole_scan_callback(other ^ WHOLE_SCAN_IDLE_MASK)
@@ -1491,6 +1561,7 @@ impl BufferId {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::io::Write;
     use std::mem;
     use std::sync::{Arc, Mutex};
@@ -1502,7 +1573,7 @@ mod tests {
     use xi_rpc::{Callback, Error as RpcError, Handler, Peer, RequestId, RpcCtx};
 
     use super::{
-        CoreState, NEW_VIEW_IDLE_TOKEN, PLUGIN_RESTART_MAX_DELAY_MS,
+        CoreState, NEW_VIEW_IDLE_TOKEN, PLUGIN_RESTART_MAX_DELAY_MS, SAVE_VIEW_IDLE_MASK,
         VERIFY_LINE_ENDINGS_IDLE_TOKEN, ViewId, stderr_is_user_visible,
     };
 
@@ -1690,5 +1761,48 @@ mod tests {
                 "save disabled in VLF: VLF mode is read-only; copy, search, and navigation remain available"
             )
         );
+    }
+
+    #[test]
+    fn save_notification_completes_async_and_appends_newline() {
+        let peer = RecordingPeer::default();
+        let ctx = RpcCtx::new(Box::new(peer.clone()));
+        let mut core = crate::XiCore::new();
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::ClientStarted {
+                config_dir: None,
+                client_extras_dir: None,
+            },
+        );
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"alpha").unwrap();
+        tmp.flush().unwrap();
+
+        let view_id_value = core.inner().do_new_view(Some(tmp.path().to_path_buf())).unwrap();
+        let view_id: ViewId = serde_json::from_value(view_id_value).unwrap();
+        core.inner().handle_idle(NEW_VIEW_IDLE_TOKEN);
+
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::Save {
+                view_id,
+                file_path: tmp.path().display().to_string(),
+            },
+        );
+
+        let save_idle_token = SAVE_VIEW_IDLE_MASK | usize::from(view_id);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            core.inner().handle_idle(save_idle_token);
+            if fs::read_to_string(tmp.path()).unwrap() == "alpha\n" {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("async save did not complete within 2 s");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 }

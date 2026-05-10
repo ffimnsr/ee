@@ -26,7 +26,7 @@ use crate::view::View;
 use crate::word_boundaries::WordCursor;
 use regex::{Regex, RegexBuilder};
 use xi_rope::delta::DeltaRegion;
-use xi_rope::find::{CaseMatching, find, is_multiline_regex};
+use xi_rope::find::{CaseMatching, find_in_slice, is_multiline_regex};
 use xi_rope::{Cursor, Interval, LinesMetric, Metric, Rope, RopeDelta};
 
 const REGEX_SIZE_LIMIT: usize = 1000000;
@@ -272,12 +272,11 @@ impl Find {
         let mut to_cursor = Cursor::new(text, to);
         let _ = to_cursor.next_leaf();
 
-        let sub_text = text.subseq(Interval::new(0, to_cursor.pos()));
-        let mut find_cursor = Cursor::new(&sub_text, from);
+        let sub_text = text.slice_view(..to_cursor.pos());
+        let mut find_cursor = sub_text.cursor(from);
+        let mut raw_lines = sub_text.slice(from..).lines_raw();
 
-        let mut raw_lines = text.lines_raw(from..to);
-
-        while let Some(start) = find(
+        while let Some(start) = find_in_slice(
             &mut find_cursor,
             &mut raw_lines,
             self.case_matching,
@@ -287,7 +286,7 @@ impl Find {
             let end = find_cursor.pos();
 
             if self.whole_words && !self.is_matching_whole_words(text, start, end) {
-                raw_lines = text.lines_raw(find_cursor.pos()..to);
+                raw_lines = sub_text.slice(find_cursor.pos()..).lines_raw();
                 continue;
             }
 
@@ -300,7 +299,7 @@ impl Find {
                 // the beginning of the file. Re-align the cursor to the kept
                 // occurrence
                 find_cursor.set(e);
-                raw_lines = text.lines_raw(find_cursor.pos()..to);
+                raw_lines = sub_text.slice(find_cursor.pos()..).lines_raw();
                 continue;
             }
 
@@ -319,7 +318,7 @@ impl Find {
             }
 
             // update line iterator so that line starts at current cursor position
-            raw_lines = text.lines_raw(find_cursor.pos()..to);
+            raw_lines = sub_text.slice(find_cursor.pos()..).lines_raw();
         }
 
         self.hls_dirty = true;
