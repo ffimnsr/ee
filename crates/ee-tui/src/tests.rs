@@ -7589,6 +7589,27 @@ fn apply_vlf_chunks_exact_count_truncates_stale_approximation() {
 }
 
 #[test]
+fn vlf_line_count_uses_exact_report_over_stale_cache() {
+    let mut buf = test_buf_state();
+    buf.is_vlf = true;
+    buf.line_cache = vec![LineSlot::Invalid; 1000];
+    buf.vlf_approx_line_count = 25;
+    buf.vlf_line_count_exact = true;
+
+    assert_eq!(buf.line_count(), 25);
+}
+
+#[test]
+fn vlf_line_count_keeps_sparse_cache_when_exact_report_missing() {
+    let mut buf = test_buf_state();
+    buf.is_vlf = true;
+    buf.line_cache = vec![LineSlot::Invalid; 500];
+    buf.vlf_line_count_exact = true;
+
+    assert_eq!(buf.line_count(), 500);
+}
+
+#[test]
 fn apply_vlf_chunks_tail_jump_moves_cursor_to_returned_last_line() {
     let mut buf = test_buf_state();
     buf.is_vlf = true;

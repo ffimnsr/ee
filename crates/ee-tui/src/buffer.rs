@@ -287,7 +287,11 @@ impl BufState {
     pub(crate) fn line_count(&self) -> usize {
         if self.is_vlf {
             let reported = usize::try_from(self.vlf_approx_line_count).unwrap_or(usize::MAX);
-            reported.max(self.line_cache.len())
+            if self.vlf_line_count_exact && reported > 0 {
+                reported
+            } else {
+                reported.max(self.line_cache.len())
+            }
         } else {
             self.lines.len()
         }
