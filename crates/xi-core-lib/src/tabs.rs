@@ -54,7 +54,7 @@ use crate::rpc::{
     CoreNotification, CoreRequest, EditNotification, PluginNotification as CorePluginNotification,
 };
 use crate::syntax::LanguageId;
-use crate::text_store::DocumentMode;
+use crate::text_store::{DocumentMode, TextStore};
 use crate::view::View;
 use crate::whitespace::Indentation;
 use crate::width_cache::WidthCache;
@@ -81,6 +81,8 @@ pub type BufferIdentifier = BufferId;
 pub(crate) const RENDER_VIEW_IDLE_MASK: usize = 1 << 25;
 pub(crate) const REWRAP_VIEW_IDLE_MASK: usize = 1 << 26;
 pub(crate) const FIND_VIEW_IDLE_MASK: usize = 1 << 27;
+/// Idle token mask for delivering async whole-document scan results.
+pub(crate) const WHOLE_SCAN_IDLE_MASK: usize = 1 << 28;
 
 const NEW_VIEW_IDLE_TOKEN: usize = 1001;
 const VERIFY_LINE_ENDINGS_IDLE_TOKEN: usize = 1003;
@@ -486,6 +488,20 @@ impl CoreState {
             None => return,
         };
 
+        if let Some(message) = self.editors.get(&buffer_id).and_then(|editor| {
+            let editor = editor.borrow();
+            editor.vlf_store.as_ref().and_then(|store| {
+                let status = store.doc_status();
+                status.disabled_features.contains(&"save").then_some(
+                    "save disabled in VLF: VLF mode is read-only; copy, search, and navigation remain available"
+                        .to_string(),
+                )
+            })
+        }) {
+            self.peer.alert(message);
+            return;
+        }
+
         let mut save_ctx = self.make_context(view_id).unwrap();
         let fin_text = save_ctx.text_for_save();
 
@@ -791,6 +807,9 @@ impl CoreState {
             other if (other & FIND_VIEW_IDLE_MASK) != 0 => {
                 self.handle_find_callback(other ^ FIND_VIEW_IDLE_MASK)
             }
+            other if (other & WHOLE_SCAN_IDLE_MASK) != 0 => {
+                self.handle_whole_scan_callback(other ^ WHOLE_SCAN_IDLE_MASK)
+            }
             other => panic!("unexpected idle token {}", other),
         };
     }
@@ -977,6 +996,14 @@ impl CoreState {
         let id: ViewId = token.into();
         if let Some(mut ctx) = self.make_context(id) {
             ctx.do_incremental_find();
+        }
+    }
+
+    /// Callback for picking up a completed async whole-document scan result.
+    fn handle_whole_scan_callback(&mut self, token: usize) {
+        let id: ViewId = token.into();
+        if let Some(mut ctx) = self.make_context(id) {
+            ctx.apply_whole_scan_result();
         }
     }
 
@@ -1465,17 +1492,85 @@ impl BufferId {
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::mem;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use serde::Deserialize;
-    use serde_json::json;
+    use serde_json::{Value, json};
     use xi_rpc::test_utils::DummyPeer;
-    use xi_rpc::{Handler, Peer, RpcCtx};
+    use xi_rpc::{Callback, Error as RpcError, Handler, Peer, RequestId, RpcCtx};
 
     use super::{
         CoreState, NEW_VIEW_IDLE_TOKEN, PLUGIN_RESTART_MAX_DELAY_MS,
         VERIFY_LINE_ENDINGS_IDLE_TOKEN, ViewId, stderr_is_user_visible,
     };
+
+    #[derive(Clone, Default)]
+    struct RecordingPeer {
+        notifications: Arc<Mutex<Vec<(String, Value)>>>,
+    }
+
+    impl RecordingPeer {
+        fn take_notifications(&self) -> Vec<(String, Value)> {
+            let mut notifications = self.notifications.lock().expect("recording peer poisoned");
+            mem::take(&mut *notifications)
+        }
+    }
+
+    impl Peer for RecordingPeer {
+        fn box_clone(&self) -> Box<dyn Peer> {
+            Box::new(self.clone())
+        }
+
+        fn send_rpc_notification(&self, method: &str, params: &Value) {
+            self.notifications
+                .lock()
+                .expect("recording peer poisoned")
+                .push((method.to_owned(), params.clone()));
+        }
+
+        fn send_rpc_request_async(
+            &self,
+            _method: &str,
+            _params: &Value,
+            f: Box<dyn Callback>,
+        ) -> RequestId {
+            f.call(Ok(Value::Null));
+            RequestId::Number(0)
+        }
+
+        fn send_rpc_request(&self, _method: &str, _params: &Value) -> Result<Value, RpcError> {
+            Ok(Value::Null)
+        }
+
+        fn send_rpc_request_timeout(
+            &self,
+            _method: &str,
+            _params: &Value,
+            _timeout: std::time::Duration,
+        ) -> Result<Value, RpcError> {
+            Ok(Value::Null)
+        }
+
+        fn cancel_rpc_request(&self, _id: RequestId) -> bool {
+            false
+        }
+
+        fn request_is_pending(&self) -> bool {
+            false
+        }
+
+        fn schedule_idle(&self, _token: usize) {}
+
+        fn schedule_timer(&self, _time: std::time::Instant, _token: usize) {}
+
+        fn cancel_timer(&self, _token: usize) -> bool {
+            false
+        }
+
+        fn request_shutdown(&self) {}
+    }
 
     #[test]
     fn begin_plugin_launch_blocks_duplicate_starts() {
@@ -1550,5 +1645,50 @@ mod tests {
 
         let verified = core.inner().config_manager.get_buffer_config(buffer_id).items.clone();
         assert_eq!(verified.line_ending, "\r\n");
+    }
+
+    #[test]
+    fn save_notification_reports_clear_vlf_status() {
+        let peer = RecordingPeer::default();
+        let ctx = RpcCtx::new(Box::new(peer.clone()));
+        let mut core = crate::XiCore::new();
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::ClientStarted {
+                config_dir: None,
+                client_extras_dir: None,
+            },
+        );
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.as_file().set_len(35 * 1024 * 1024).unwrap();
+
+        let view_id_value = core.inner().do_new_view(Some(tmp.path().to_path_buf())).unwrap();
+        let view_id: ViewId = serde_json::from_value(view_id_value).unwrap();
+        core.inner().handle_idle(NEW_VIEW_IDLE_TOKEN);
+
+        let buffer_id = core.inner().views.get(&view_id).unwrap().borrow().get_buffer_id();
+        assert!(core.inner().editors.get(&buffer_id).unwrap().borrow().is_vlf());
+
+        peer.take_notifications();
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::Save {
+                view_id,
+                file_path: tmp.path().display().to_string(),
+            },
+        );
+
+        let notifications = peer.take_notifications();
+        let (_, params) = notifications
+            .iter()
+            .find(|(method, _)| method == "alert")
+            .expect("expected VLF save alert");
+        assert_eq!(
+            params["msg"].as_str(),
+            Some(
+                "save disabled in VLF: VLF mode is read-only; copy, search, and navigation remain available"
+            )
+        );
     }
 }

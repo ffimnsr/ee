@@ -67,6 +67,7 @@ pub mod vlf;
 #[cfg(feature = "notify")]
 pub mod watcher;
 pub mod whitespace;
+pub(crate) mod whole_scan;
 pub mod width_cache;
 pub mod word_boundaries;
 

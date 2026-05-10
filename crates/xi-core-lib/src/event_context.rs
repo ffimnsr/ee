@@ -49,6 +49,7 @@ use crate::selection::{InsertDrift, SelRegion, Selection};
 use crate::syntax::LanguageId;
 use crate::tabs::{
     BufferId, FIND_VIEW_IDLE_MASK, PluginId, RENDER_VIEW_IDLE_MASK, REWRAP_VIEW_IDLE_MASK, ViewId,
+    WHOLE_SCAN_IDLE_MASK,
 };
 use crate::text_store::{
     ByteOffset, ByteRange, LineLookup, LogicalLine, TextChunkResult, TextStore,
@@ -329,7 +330,18 @@ impl<'a> EventContext<'a> {
                 None
             }
             SpecialEvent::Reindent => {
-                self.do_reindent();
+                // Whole-document reindent is expensive (O(lines) syntect parse).
+                // Gate it behind `whole_doc_ops`; run async so the render loop
+                // is not blocked.
+                let mode = self.editor.borrow().document_mode();
+                if !mode.feature_gates().whole_doc_ops {
+                    self.client.alert(format!(
+                        "reindent: disabled in {mode:?} mode \
+                         (whole-document operations require Normal mode)"
+                    ));
+                    return None;
+                }
+                self.begin_async_reindent();
                 None
             }
             SpecialEvent::SyntaxSelection(action) => {
@@ -1416,23 +1428,70 @@ impl<'a> EventContext<'a> {
         }
     }
 
-    fn do_reindent(&mut self) {
+    /// Start an async reindent operation for `Normal`-mode buffers.
+    ///
+    /// For languages supported by the built-in syntect reindent, spawns a
+    /// background thread (via [`WholeScanTask`]) so the UI render loop is not
+    /// blocked.  For unknown languages, falls back to plugin dispatch
+    /// immediately (plugin RPC is already non-blocking).
+    ///
+    /// Alerts the user that work has started and schedules an idle callback to
+    /// pick up the result.
+    fn begin_async_reindent(&mut self) {
         let line_ranges = self.selected_line_ranges();
-        let lang_name = self.language.as_ref();
+        let lang_name = self.language.as_ref().to_string();
         let indent_str = if self.config.translate_tabs_to_spaces {
             " ".repeat(self.config.tab_size)
         } else {
             "\t".to_string()
         };
-        let maybe_delta = {
-            let ed = self.editor.borrow();
-            lang_features::reindent(ed.get_buffer(), &line_ranges, lang_name, &indent_str)
-        };
-        if let Some(delta) = maybe_delta {
-            self.editor.borrow_mut().apply_direct_delta(EditType::Other, delta);
-        } else {
-            // Fall back to plugin dispatch for unsupported or unknown languages.
+
+        // For unknown languages, fall back to plugin dispatch (already async).
+        if !lang_features::language_supports_reindent(&lang_name) {
             self.dispatch_command_to_plugins("reindent", &json!(line_ranges));
+            return;
+        }
+
+        // Clone the rope snapshot (cheap Arc clone) for the background thread.
+        let text = self.editor.borrow().get_buffer().clone();
+        let _ = self.editor.borrow_mut().whole_scan_task.start_reindent(
+            text,
+            line_ranges,
+            lang_name,
+            indent_str,
+        );
+
+        self.client.alert("Reindenting in background…");
+        let view_id_usize: usize = self.view_id.into();
+        self.client.schedule_idle(WHOLE_SCAN_IDLE_MASK | view_id_usize);
+    }
+
+    /// Apply the result of a completed async whole-document scan operation.
+    ///
+    /// Called from [`CoreState::handle_whole_scan_callback`] via the idle loop.
+    /// Polls the task slot and, if a completed reindent result is available,
+    /// applies the delta and triggers a render.  Stale or cancelled results are
+    /// silently discarded.
+    pub(crate) fn apply_whole_scan_result(&mut self) {
+        use crate::whole_scan::WholeScanResult;
+
+        let maybe_result = self.editor.borrow_mut().whole_scan_task.poll();
+        match maybe_result {
+            Some(WholeScanResult::Reindent(Some(delta))) => {
+                self.editor.borrow_mut().apply_direct_delta(EditType::Other, delta);
+                self.after_edit("core");
+                self.render_if_needed();
+                self.client.alert("Reindent complete.");
+            }
+            Some(WholeScanResult::Reindent(None)) => {
+                // No changes needed — nothing to apply.
+            }
+            None => {
+                // Result not ready yet or was cancelled; idle callback arrived
+                // early.  Re-schedule to check again shortly.
+                let view_id_usize: usize = self.view_id.into();
+                self.client.schedule_idle(WHOLE_SCAN_IDLE_MASK | view_id_usize);
+            }
         }
     }
 

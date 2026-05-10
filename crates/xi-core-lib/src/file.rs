@@ -340,8 +340,24 @@ impl FileManager {
             self.open_policy.decide(size_opt, line_count_hint, None, location, mode_override);
         let rope_mode = match decision {
             OpenDecision::Open(mode @ (DocumentMode::Normal | DocumentMode::ConstrainedNormal)) => {
-                // Normal rope load path — both Normal and ConstrainedNormal use
-                // the existing read_to_end + Rope path for now.
+                // Rope backing for both Normal and ConstrainedNormal.
+                //
+                // **Evaluation (ISSUES.md – Item 2)**: A hybrid paged-rope or
+                // lazy `TextStore` backing was considered for ConstrainedNormal
+                // to reduce peak RSS on mid-size files (8–30 MiB range).
+                //
+                // Decision: keep full-Rope until the following preconditions hold:
+                //   1. VlfStore-backed chunk-native save lands (saves currently
+                //      require a contiguous Rope snapshot for the encoder).
+                //   2. The CRDT edit engine (`xi-rope`) is decoupled enough that
+                //      deltas can be produced without materialising the whole rope.
+                //   3. Profiling shows ConstrainedNormal RAM is a real bottleneck
+                //      on representative workloads (not yet evidenced).
+                //
+                // The `TextStore` abstraction already routes chunk reads through
+                // the paged API for VLF; extending it to ConstrainedNormal only
+                // makes sense once save semantics are chunk-native.  Until then
+                // this path is identical to Normal.
                 mode
             }
             OpenDecision::Open(DocumentMode::Vlf) => {
@@ -509,6 +525,9 @@ impl FileManager {
                 ),
                 path.to_owned(),
             ),
+            VlfSaveError::InvalidPolicy(reason) => {
+                FileError::Io(io::Error::new(io::ErrorKind::InvalidInput, reason), path.to_owned())
+            }
         })?;
 
         // Update stored file metadata to reflect the successful save.
@@ -934,5 +953,62 @@ mod tests {
         let sample = b"x\nx\nx\n";
         let estimated = super::estimate_line_count_from_sample(sample, 12).unwrap();
         assert_eq!(estimated, 6);
+    }
+
+    /// Contract test: `ConstrainedNormal` files open with Rope backing.
+    ///
+    /// Documents the current evaluation decision from ISSUES.md Item 2:
+    /// ConstrainedNormal keeps full-Rope until chunk-native save lands.
+    /// `OpenResult::Rope` is the discriminant that proves this contract.
+    ///
+    /// Gated to `not(feature = "notify")` because `FileManager::new()` requires
+    /// a `FileWatcher` argument when the `notify` feature is enabled; this
+    /// mirrors the guard used by all other `file::tests` that create a manager.
+    #[cfg(all(target_family = "unix", not(feature = "notify")))]
+    #[test]
+    fn constrained_normal_uses_rope_backing() {
+        use super::{FileManager, OpenResult};
+        use crate::open_policy::{FileLocation, ModeOverride, OpenPolicy, OpenThresholds};
+        use crate::text_store::DocumentMode;
+
+        // Thresholds: ConstrainedNormal range is [normal_bytes, vlf_bytes).
+        let thresholds = OpenThresholds {
+            normal_bytes: 0,             // everything ≥ 0 bytes is at least Normal
+            normal_lines: 0,             // unused for this test
+            vlf_bytes: 64 * 1024 * 1024, // well above our temp file
+            vlf_lines: 1_000_000,
+            confirm_local_bytes: 1024 * 1024 * 1024,
+            confirm_remote_bytes: 64 * 1024 * 1024,
+            confirm_web_bytes: 64 * 1024 * 1024,
+        };
+
+        // Create a non-empty temp file so the policy has a real size to check.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"hello\nworld\n").unwrap();
+
+        let mut mgr = FileManager::new();
+        mgr.set_open_policy(OpenPolicy::new(thresholds));
+
+        let result = mgr
+            .open_with_override(
+                tmp.path(),
+                crate::tabs::BufferId(99),
+                FileLocation::Local,
+                ModeOverride::Auto,
+            )
+            .unwrap();
+
+        // Key assertion: ConstrainedNormal (or Normal) returns OpenResult::Rope,
+        // NOT OpenResult::Vlf.  This is the Rope-backing contract.
+        assert!(
+            matches!(
+                result,
+                OpenResult::Rope {
+                    mode: DocumentMode::Normal | DocumentMode::ConstrainedNormal,
+                    ..
+                }
+            ),
+            "expected Rope-backed result for ConstrainedNormal"
+        );
     }
 }

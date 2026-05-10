@@ -318,6 +318,14 @@ pub(crate) fn toggle_block_comment(
 // Reindent
 // ---------------------------------------------------------------------------
 
+/// Returns `true` when the built-in syntect reindent supports `language_name`.
+///
+/// Unknown languages return `false`; callers should fall back to plugin
+/// dispatch instead of starting an async whole-scan task.
+pub(crate) fn language_supports_reindent(language_name: &str) -> bool {
+    SYNTAX_SET.find_syntax_by_name(language_name).is_some()
+}
+
 /// Re-indent the selected line ranges using syntect for bracket-aware parsing.
 ///
 /// The algorithm:
@@ -329,6 +337,7 @@ pub(crate) fn toggle_block_comment(
 ///    match the computed indent level, using `indent_str` as one level unit.
 ///
 /// Returns `None` when:
+///
 /// - `language_name` is not found in the bundled syntect syntax set,
 /// - the buffer is empty, or
 /// - no lines would actually change.

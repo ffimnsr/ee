@@ -15,13 +15,13 @@
   - [x] Preserve viewport-local rendering as VLF hard invariant and normal/constrained default strategy: render, syntax decoration, search highlights, diagnostics, git signs, and scroll notifications should prefer visible ranges plus bounded overscan, with VLF never requiring whole-buffer work.
   - [ ] Improve normal/constrained hot paths while keeping full-feature editing.
     - [x] Remove normal/constrained TUI update-time full `line_cache` -> `lines` rebuild; apply xi update ops to both caches incrementally.
-    - [ ] Replace hot `backend.lines` call sites with bounded `BufState::get_line()` / range APIs so TUI commands do not require a full text mirror.
-    - [ ] Keep `lines` as an explicitly allowed whole-buffer compatibility mirror only where command policy requires whole-document access.
-    - [ ] Bound normal/constrained `request_invalid_lines` to current viewport plus overscan by default; require explicit command reason for broader ranges.
-    - [ ] Add regression counters/tests proving normal/constrained update, render, syntax, diagnostics, git signs, and scroll paths do not clone or scan full line caches.
-    - [ ] Make source-control status/sign refresh range-aware or background-bounded for constrained buffers.
-    - [ ] Move expensive whole-document commands to async/cancellable execution with progress where full scan remains policy-allowed.
-    - [ ] Evaluate hybrid paged-rope or lazy `TextStore` backing for `ConstrainedNormal`; keep editing/save semantics explicit before replacing full-rope open.
+    - [x] Replace hot `backend.lines` call sites with bounded `BufState::get_line()` / range APIs so TUI commands do not require a full text mirror.
+    - [x] Keep `lines` as an explicitly allowed whole-buffer compatibility mirror only where command policy requires whole-document access.
+    - [x] Bound normal/constrained `request_invalid_lines` to current viewport plus overscan by default; require explicit command reason for broader ranges.
+    - [x] Add regression counters/tests proving normal/constrained update, render, syntax, diagnostics, git signs, and scroll paths do not clone or scan full line caches.
+        - [x] Make source-control status/sign refresh range-aware or background-bounded for constrained buffers.
+    - [x] Move expensive whole-document commands to async/cancellable execution with progress where full scan remains policy-allowed.
+    - [x] Evaluate hybrid paged-rope or lazy `TextStore` backing for `ConstrainedNormal`; keep editing/save semantics explicit before replacing full-rope open.
   - [ ] Use chunk-native I/O everywhere possible; avoid flattening into `String` / `Vec<String>` except where mode policy explicitly allows it.
     - [x] Read path: use `TextStore::iter_chunks` / `read_byte_range` everywhere possible.
     - [ ] Write/save path: save from rope chunks or VLF pieces instead of flattening full text. (needs write/save)
@@ -67,6 +67,50 @@
     - [x] Add `FullTextPolicy::{Allowed, Forbidden}` or equivalent mode check.
     - [x] Make full-text extraction return `Unsupported` for `DocumentMode::Vlf`.
     - [x] Add tests that VLF search/render paths use chunk APIs and never call full-text extraction.
+- [ ] Apply Ropey takeaways to `xi-rope` where they improve normal/constrained backing storage.
+  - [ ] Add located chunk APIs to `xi-rope`.
+    - [ ] Add `Rope::chunk_at_offset(byte_offset) -> Option<(&str, byte_start, line_start, utf16_start)>`.
+    - [ ] Add `Rope::chunk_at_line(line) -> Option<(&str, byte_start, line_start, utf16_start)>`.
+    - [ ] Add `Rope::chunk_at_utf16(utf16_offset) -> Option<(&str, byte_start, line_start, utf16_start)>` if profiling shows LSP conversions remain hot.
+    - [ ] Implement by extending `Cursor`/metric traversal, not by flattening or allocating.
+    - [ ] Route `RopeTextStore::iter_chunks`, viewport line reads, search, and save through located chunks.
+    - [ ] Add tests for chunk starts across leaf boundaries, CRLF seams, multibyte UTF-8, and empty rope.
+  - [ ] Add cheap borrowed slice/view API before adding more owned slice call sites.
+    - [ ] Add `RopeSlice` or equivalent borrowed read-only view with line/chunk iterators.
+    - [ ] Keep owned `Rope::slice()` for compatibility, but prefer borrowed views for render/search/status hot paths.
+    - [ ] Add tests proving sub-slices do not clone whole selected ranges.
+  - [ ] Add streaming `RopeBuilder` for linear chunk construction when it fits ee's normal/constrained path.
+    - [ ] Add `xi_rope::RopeBuilder` with `push_str`/`append` and `finish`.
+    - [ ] Build leaves from incoming chunks in O(n), instead of repeated append/edit operations.
+    - [ ] Buffer partial leaves until `MAX_LEAF`, split on UTF-8 boundary and preferably newline boundary.
+    - [ ] Preserve existing `RopeInfo` metrics while building: bytes from leaf len, newline count, UTF-16 size.
+    - [ ] Use builder in normal/constrained file load only after VLF/open policy has rejected out-of-core mode.
+    - [ ] Keep `TextStore` chunk-native read path unchanged; builder improves in-memory rope creation only.
+    - [ ] Add benchmarks for 20 MiB many-line, 20 MiB long-line, and mixed UTF-8/CRLF fixtures.
+    - [ ] Add regression proving builder load does not allocate a full intermediate `String` beyond current file-read policy.
+  - [ ] Add streaming write APIs.
+    - [ ] Add `Rope::write_to<W: io::Write>(&self, writer: W) -> io::Result<()>` using `iter_chunks(..)`.
+    - [ ] Use chunk streaming in normal/constrained save so save path avoids `String::from(&rope)`.
+    - [ ] Add interrupted-writer test proving partial write errors propagate without retry loops hiding failure.
+  - [ ] Add checked non-panicking query/edit APIs at editor boundary.
+    - [ ] Add `try_offset_of_line`, `try_line_of_offset`, `try_slice`, and `try_edit` returning `Result`.
+    - [ ] Keep panicking APIs internal/test-friendly only where caller already validates bounds.
+    - [ ] Convert TUI/core boundary calls to checked APIs with user-facing error paths.
+  - [ ] Improve CRLF correctness without copying Ropey API wholesale.
+    - [ ] Evaluate enforcing "never split CRLF across leaves" in `find_leaf_split` and merge/split paths.
+    - [ ] Add line metric tests where `\r\n` lands exactly on leaf boundary and edit boundary.
+    - [ ] Keep byte offsets as source of truth; do not switch public edit APIs to char-index-first.
+  - [ ] Evaluate metadata/layout optimizations after API and I/O wins land.
+    - [ ] Benchmark Ropey-style parent-side child metadata against current `Node` metadata before redesign.
+    - [ ] Consider inline leaf storage only with measured memory/cache benefit and contained unsafe surface.
+    - [ ] Consider char-count metadata only if char-index or UTF-16 conversion hot paths justify extra update cost.
+    - [ ] Keep `Arc::make_mut` copy-on-write behavior and cheap snapshots for async save/history.
+  - [ ] Avoid Ropey choices that conflict with ee architecture.
+    - [ ] Do not replace VLF/paged storage with in-memory Ropey-style storage; VLF remains out-of-core.
+    - [ ] Do not make char indices primary across ee; keep byte offsets and typed UTF-16 offsets at boundaries.
+    - [ ] Do not add full Unicode-line semantics by default unless product policy requires it; measure cost first.
+    - [ ] Do not introduce broad unsafe layout rewrites without fuzz/property tests and performance gates.
+    - [ ] Do not preserve old compatibility shims during planned rope API upgrades unless explicitly required.
 - [x] Add VLF storage primitives.
   - [x] Add `FilePager` for file handle ownership, bounded `pread`/`mmap` windows, byte cache, and cancellation.
     - [x] Place in `crates/xi-core-lib/src/vlf/pager.rs`.
@@ -230,16 +274,16 @@
   - [x] Share one streaming save abstraction for normal/constrained rope snapshots and VLF overlay pieces where practical.
   - [x] Start with temp-file streaming rewrite for editable VLF; no in-place mutation in first editable milestone.
   - [x] Stream copy base file with edit overlay application.
-  - [ ] Add same-size in-place overwrite only as later optimization after crash-consistency tests pass.
-  - [ ] Add byte-length-changing tail-shift optimization only after temp-copy fallback is proven.
+  - [x] Add same-size in-place overwrite only as later optimization after crash-consistency tests pass.
+  - [x] Add byte-length-changing tail-shift optimization only after temp-copy fallback is proven.
   - [x] Use fsync/rename durability policy compatible with existing save behavior.
   - [x] Report progress and support cancellation before commit point.
   - [x] Document cancellation behavior after commit point.
-- [ ] Add VLF regression and budget tests.
-  - [ ] Opening 10 GB sparse fixture keeps RSS under configured cap.
-  - [ ] First viewport renders without full scan.
-  - [ ] Frontend never triggers full-buffer clone, diff, syntax, or line-cache expansion in VLF.
-  - [ ] Disabled feature commands return clear VLF-specific status.
+- [x] Add VLF regression and budget tests.
+  - [x] Opening 10 GB sparse fixture keeps RSS under configured cap.
+  - [x] First viewport renders without full scan.
+  - [x] Frontend never triggers full-buffer clone, diff, syntax, or line-cache expansion in VLF.
+  - [x] Disabled feature commands return clear VLF-specific status.
 - [ ] Add VLF performance benchmarks.
   - [ ] Benchmark 100 MB, 1 GB, and 10 GB fixtures.
   - [ ] Measure open-to-first-render latency.

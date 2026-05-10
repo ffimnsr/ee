@@ -83,6 +83,14 @@ pub struct Editor {
     revs_in_flight: usize,
 
     layers: Layers,
+
+    /// Tracks an in-flight async whole-document scan operation (e.g. reindent).
+    ///
+    /// Only populated when the buffer is in `Normal` mode; gated commands check
+    /// `VlfFeatureGates::whole_doc_ops` before scheduling any task.  VLF and
+    /// ConstrainedNormal buffers alert the user and return without touching this
+    /// field.
+    pub(crate) whole_scan_task: crate::whole_scan::WholeScanTask,
 }
 
 impl Editor {
@@ -122,6 +130,7 @@ impl Editor {
             layers: Layers::default(),
             revs_in_flight: 0,
             vlf_store: None,
+            whole_scan_task: crate::whole_scan::WholeScanTask::new(),
         }
     }
 
@@ -150,6 +159,7 @@ impl Editor {
             layers: Layers::default(),
             revs_in_flight: 0,
             vlf_store: Some(Box::new(store)),
+            whole_scan_task: crate::whole_scan::WholeScanTask::new(),
         }
     }
 
