@@ -564,9 +564,9 @@ impl VlfStore {
 
     /// Suggested save policy given the current overlay state.
     ///
-    /// Always returns a streaming strategy; never in-place mutation.  See
-    /// [`VlfSavePolicy`] for details.  Returns `None` when editing is not
-    /// enabled (no overlay changes to save).
+    /// Returns the narrowest available strategy: same-size overwrite,
+    /// tail-shift with temp fallback, temp rewrite, or save-as.  Returns
+    /// `None` when editing is not enabled (no overlay changes to save).
     pub fn suggested_save_policy(&self) -> Option<VlfSavePolicy> {
         self.overlay.borrow().as_ref().map(|ov| ov.suggested_save_policy())
     }
@@ -578,8 +578,8 @@ impl VlfStore {
         self.overlay.borrow().as_ref().map_or(0, |ov| ov.signed_byte_delta())
     }
 
-    /// Stream the current overlay piece sequence to `dest` using the temp-file
-    /// then atomic-rename durability strategy.
+    /// Save the current overlay piece sequence to `dest` using the requested
+    /// VLF save policy.
     ///
     /// # Parameters
     ///
@@ -2385,6 +2385,61 @@ mod tests {
     }
 
     #[test]
+    fn ten_gib_sparse_fixture_stays_within_configured_budget() {
+        let ten_gib = 10u64 * 1024 * 1024 * 1024;
+        let mut f = NamedTempFile::new().unwrap();
+        f.as_file().set_len(ten_gib).unwrap();
+        f.write_all(b"alpha\nbeta\n").unwrap();
+        f.flush().unwrap();
+
+        let budget = VlfMemoryBudget { raw_page_byte_cap: 64 * 1024, decoded_byte_cap: 16 * 1024 };
+        let store = VlfStore::open_with_budget(f.path(), budget.clone()).unwrap();
+
+        match store.read_byte_range(ByteRange::new(0, 8 * 1024)) {
+            TextChunkResult::Ready(chunk) => assert!(chunk.text.starts_with("alpha\nbeta\n")),
+            other => panic!("expected Ready, got {:?}", other),
+        }
+
+        let stats = store.memory_stats();
+        assert_eq!(store.len_bytes(), ten_gib);
+        assert!(
+            stats.peak_raw_bytes <= budget.raw_page_byte_cap,
+            "raw cache {} exceeded cap {}",
+            stats.peak_raw_bytes,
+            budget.raw_page_byte_cap
+        );
+        assert!(
+            stats.peak_decoded_bytes <= budget.decoded_byte_cap,
+            "decoded cache {} exceeded cap {}",
+            stats.peak_decoded_bytes,
+            budget.decoded_byte_cap
+        );
+    }
+
+    #[test]
+    fn first_viewport_read_does_not_require_full_scan() {
+        let content = (0..20_000).map(|i| format!("line {i}\n")).collect::<String>();
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.flush().unwrap();
+        let store = VlfStore::open_with_config(f.path(), 256, 64 * 1024).unwrap();
+
+        store.set_viewport(ByteOffset(0), ByteOffset(256));
+
+        match store.read_byte_range(ByteRange::new(0, 256)) {
+            TextChunkResult::Ready(chunk) => assert!(chunk.text.starts_with("line 0\nline 1\n")),
+            other => panic!("expected Ready, got {:?}", other),
+        }
+
+        assert_eq!(store.known_line_count(), KnownLineCount::Unknown);
+        assert_eq!(store.index().len(), 0, "first viewport read must not force page-index scan");
+        assert!(
+            matches!(store.line_to_byte(LogicalLine(10_000)), LineLookup::Pending),
+            "unscanned tail should stay unresolved after first viewport read"
+        );
+    }
+
+    #[test]
     fn decoded_cache_stays_within_budget_cap() {
         // Small decoded cap: 20 bytes.  Content is 50 bytes spanning 5 × 10-byte pages.
         // Reading all 50 bytes should not exceed the cap.
@@ -2684,7 +2739,7 @@ mod tests {
     }
 
     #[test]
-    fn suggested_save_policy_temp_rewrite_after_small_insert() {
+    fn suggested_save_policy_tail_shift_after_small_insert() {
         use crate::vlf::overlay::OverlayEditContext;
         let content = b"hello";
         let mut f = NamedTempFile::new().unwrap();
@@ -2698,9 +2753,9 @@ mod tests {
         assert!(
             matches!(
                 store.suggested_save_policy(),
-                Some(crate::vlf::overlay::VlfSavePolicy::TempFileRewrite { .. })
+                Some(crate::vlf::overlay::VlfSavePolicy::TailShift { .. })
             ),
-            "small insert should suggest TempFileRewrite"
+            "small insert should suggest TailShift"
         );
     }
 

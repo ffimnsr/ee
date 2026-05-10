@@ -67,50 +67,6 @@
     - [x] Add `FullTextPolicy::{Allowed, Forbidden}` or equivalent mode check.
     - [x] Make full-text extraction return `Unsupported` for `DocumentMode::Vlf`.
     - [x] Add tests that VLF search/render paths use chunk APIs and never call full-text extraction.
-- [ ] Apply Ropey takeaways to `xi-rope` where they improve normal/constrained backing storage.
-  - [ ] Add located chunk APIs to `xi-rope`.
-    - [ ] Add `Rope::chunk_at_offset(byte_offset) -> Option<(&str, byte_start, line_start, utf16_start)>`.
-    - [ ] Add `Rope::chunk_at_line(line) -> Option<(&str, byte_start, line_start, utf16_start)>`.
-    - [ ] Add `Rope::chunk_at_utf16(utf16_offset) -> Option<(&str, byte_start, line_start, utf16_start)>` if profiling shows LSP conversions remain hot.
-    - [ ] Implement by extending `Cursor`/metric traversal, not by flattening or allocating.
-    - [ ] Route `RopeTextStore::iter_chunks`, viewport line reads, search, and save through located chunks.
-    - [ ] Add tests for chunk starts across leaf boundaries, CRLF seams, multibyte UTF-8, and empty rope.
-  - [ ] Add cheap borrowed slice/view API before adding more owned slice call sites.
-    - [ ] Add `RopeSlice` or equivalent borrowed read-only view with line/chunk iterators.
-    - [ ] Keep owned `Rope::slice()` for compatibility, but prefer borrowed views for render/search/status hot paths.
-    - [ ] Add tests proving sub-slices do not clone whole selected ranges.
-  - [ ] Add streaming `RopeBuilder` for linear chunk construction when it fits ee's normal/constrained path.
-    - [ ] Add `xi_rope::RopeBuilder` with `push_str`/`append` and `finish`.
-    - [ ] Build leaves from incoming chunks in O(n), instead of repeated append/edit operations.
-    - [ ] Buffer partial leaves until `MAX_LEAF`, split on UTF-8 boundary and preferably newline boundary.
-    - [ ] Preserve existing `RopeInfo` metrics while building: bytes from leaf len, newline count, UTF-16 size.
-    - [ ] Use builder in normal/constrained file load only after VLF/open policy has rejected out-of-core mode.
-    - [ ] Keep `TextStore` chunk-native read path unchanged; builder improves in-memory rope creation only.
-    - [ ] Add benchmarks for 20 MiB many-line, 20 MiB long-line, and mixed UTF-8/CRLF fixtures.
-    - [ ] Add regression proving builder load does not allocate a full intermediate `String` beyond current file-read policy.
-  - [ ] Add streaming write APIs.
-    - [ ] Add `Rope::write_to<W: io::Write>(&self, writer: W) -> io::Result<()>` using `iter_chunks(..)`.
-    - [ ] Use chunk streaming in normal/constrained save so save path avoids `String::from(&rope)`.
-    - [ ] Add interrupted-writer test proving partial write errors propagate without retry loops hiding failure.
-  - [ ] Add checked non-panicking query/edit APIs at editor boundary.
-    - [ ] Add `try_offset_of_line`, `try_line_of_offset`, `try_slice`, and `try_edit` returning `Result`.
-    - [ ] Keep panicking APIs internal/test-friendly only where caller already validates bounds.
-    - [ ] Convert TUI/core boundary calls to checked APIs with user-facing error paths.
-  - [ ] Improve CRLF correctness without copying Ropey API wholesale.
-    - [ ] Evaluate enforcing "never split CRLF across leaves" in `find_leaf_split` and merge/split paths.
-    - [ ] Add line metric tests where `\r\n` lands exactly on leaf boundary and edit boundary.
-    - [ ] Keep byte offsets as source of truth; do not switch public edit APIs to char-index-first.
-  - [ ] Evaluate metadata/layout optimizations after API and I/O wins land.
-    - [ ] Benchmark Ropey-style parent-side child metadata against current `Node` metadata before redesign.
-    - [ ] Consider inline leaf storage only with measured memory/cache benefit and contained unsafe surface.
-    - [ ] Consider char-count metadata only if char-index or UTF-16 conversion hot paths justify extra update cost.
-    - [ ] Keep `Arc::make_mut` copy-on-write behavior and cheap snapshots for async save/history.
-  - [ ] Avoid Ropey choices that conflict with ee architecture.
-    - [ ] Do not replace VLF/paged storage with in-memory Ropey-style storage; VLF remains out-of-core.
-    - [ ] Do not make char indices primary across ee; keep byte offsets and typed UTF-16 offsets at boundaries.
-    - [ ] Do not add full Unicode-line semantics by default unless product policy requires it; measure cost first.
-    - [ ] Do not introduce broad unsafe layout rewrites without fuzz/property tests and performance gates.
-    - [ ] Do not preserve old compatibility shims during planned rope API upgrades unless explicitly required.
 - [x] Add VLF storage primitives.
   - [x] Add `FilePager` for file handle ownership, bounded `pread`/`mmap` windows, byte cache, and cancellation.
     - [x] Place in `crates/xi-core-lib/src/vlf/pager.rs`.
@@ -295,6 +251,56 @@
   - [ ] Add command/status message examples.
   - [ ] Document read-only milestone and future edit/save plan.
   - [ ] Document memory budget expectations and benchmark fixture sizes.
+
+#### Rope Upgrade
+
+HARD RULES:
+Avoid Ropey (`ropey` crate) choices that conflict with ee architecture.
+  - Do not replace VLF/paged storage with in-memory Ropey-style storage; VLF remains out-of-core.
+  - Do not make char indices primary across ee; keep byte offsets and typed UTF-16 offsets at boundaries.
+  - Do not add full Unicode-line semantics by default unless product policy requires it; measure cost first.
+  - Do not introduce broad unsafe layout rewrites without fuzz/property tests and performance gates.
+  - Do not preserve old compatibility shims during planned rope API upgrades unless explicitly required.
+
+- [ ] Apply Ropey takeaways to `xi-rope` where they improve normal/constrained backing storage.
+  - [ ] Add located chunk APIs to `xi-rope`.
+    - [ ] Add `Rope::chunk_at_offset(byte_offset) -> Option<(&str, byte_start, line_start, utf16_start)>`.
+    - [ ] Add `Rope::chunk_at_line(line) -> Option<(&str, byte_start, line_start, utf16_start)>`.
+    - [ ] Add `Rope::chunk_at_utf16(utf16_offset) -> Option<(&str, byte_start, line_start, utf16_start)>` if profiling shows LSP conversions remain hot.
+    - [ ] Implement by extending `Cursor`/metric traversal, not by flattening or allocating.
+    - [ ] Route `RopeTextStore::iter_chunks`, viewport line reads, search, and save through located chunks.
+    - [ ] Add tests for chunk starts across leaf boundaries, CRLF seams, multibyte UTF-8, and empty rope.
+  - [ ] Add cheap borrowed slice/view API before adding more owned slice call sites.
+    - [ ] Add `RopeSlice` or equivalent borrowed read-only view with line/chunk iterators.
+    - [ ] Keep owned `Rope::slice()` for compatibility, but prefer borrowed views for render/search/status hot paths.
+    - [ ] Add tests proving sub-slices do not clone whole selected ranges.
+  - [ ] Add streaming `RopeBuilder` for linear chunk construction when it fits ee's normal/constrained path.
+    - [ ] Add `xi_rope::RopeBuilder` with `push_str`/`append` and `finish`.
+    - [ ] Build leaves from incoming chunks in O(n), instead of repeated append/edit operations.
+    - [ ] Buffer partial leaves until `MAX_LEAF`, split on UTF-8 boundary and preferably newline boundary.
+    - [ ] Preserve existing `RopeInfo` metrics while building: bytes from leaf len, newline count, UTF-16 size.
+    - [ ] Use builder in normal/constrained file load only after VLF/open policy has rejected out-of-core mode.
+    - [ ] Keep `TextStore` chunk-native read path unchanged; builder improves in-memory rope creation only.
+    - [ ] Add benchmarks for 20 MiB many-line, 20 MiB long-line, and mixed UTF-8/CRLF fixtures.
+    - [ ] Add regression proving builder load does not allocate a full intermediate `String` beyond current file-read policy.
+  - [ ] Add streaming write APIs.
+    - [ ] Add `Rope::write_to<W: io::Write>(&self, writer: W) -> io::Result<()>` using `iter_chunks(..)`.
+    - [ ] Use chunk streaming in normal/constrained save so save path avoids `String::from(&rope)`.
+    - [ ] Add interrupted-writer test proving partial write errors propagate without retry loops hiding failure.
+  - [ ] Add checked non-panicking query/edit APIs at editor boundary.
+    - [ ] Add `try_offset_of_line`, `try_line_of_offset`, `try_slice`, and `try_edit` returning `Result`.
+    - [ ] Keep panicking APIs internal/test-friendly only where caller already validates bounds.
+    - [ ] Convert TUI/core boundary calls to checked APIs with user-facing error paths.
+  - [ ] Improve CRLF correctness without copying Ropey API wholesale.
+    - [ ] Evaluate enforcing "never split CRLF across leaves" in `find_leaf_split` and merge/split paths.
+    - [ ] Add line metric tests where `\r\n` lands exactly on leaf boundary and edit boundary.
+    - [ ] Keep byte offsets as source of truth; do not switch public edit APIs to char-index-first.
+  - [ ] Evaluate metadata/layout optimizations after API and I/O wins land.
+    - [ ] Benchmark Ropey-style parent-side child metadata against current `Node` metadata before redesign.
+    - [ ] Consider inline leaf storage only with measured memory/cache benefit and contained unsafe surface.
+    - [ ] Consider char-count metadata only if char-index or UTF-16 conversion hot paths justify extra update cost.
+    - [ ] Keep `Arc::make_mut` copy-on-write behavior and cheap snapshots for async save/history.
+
 
 ### Optional Future Boundary Work
 

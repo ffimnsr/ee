@@ -26,7 +26,8 @@ use crate::app::{App, Mode, Operator, PendingCharFind};
 use crate::backend::{
     BackendEvent, CachedLine, CompletionSuggestion, CoreAnnotation, CoreLine, CoreSyntaxSpan,
     CoreUpdate, CoreUpdateKind, CoreUpdateOp, LineSlot, NavigationTarget, coalesce_backend_events,
-    format_location_message, invalid_line_ranges, parse_notification, startup_render_ready,
+    format_location_message, invalid_line_ranges, invalid_line_ranges_bounded, parse_notification,
+    startup_render_ready,
 };
 use crate::buffer::{BufState, BufferManager, VlfChunkUpdate};
 use crate::git::{GitBufferCache, GitBufferStatus, GitHunk, GitSign};
@@ -522,6 +523,27 @@ fn core_update_keeps_invalid_lines_lazy() {
     assert_eq!(client.lines.first().map(String::as_str), Some("visible"));
     assert_eq!(client.lines.len(), 100_001);
     assert_eq!(invalid_line_ranges(&client.line_cache), vec![(1, 100_001)]);
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
+fn normal_invalid_line_requests_are_viewport_bounded() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    client.line_cache = vec![LineSlot::Invalid; 10_000];
+
+    client.notify_scroll(1_000, 1_020).unwrap();
+    let scroll: Value =
+        serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap()).unwrap();
+    assert_eq!(scroll["params"]["method"], "scroll");
+
+    client.sync_pending_events().unwrap();
+
+    let request: Value =
+        serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap()).unwrap();
+    assert_eq!(request["params"]["method"], "request_lines");
+    assert_eq!(request["params"]["params"], json!([936, 1084]));
     assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
 }
 
@@ -7527,11 +7549,14 @@ fn vlf_document_mode_clears_stale_normal_cache_and_retries_viewport() {
     let (backend_tx, backend_rx) = mpsc::channel();
     let mut mgr = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
 
+    mgr.lines = vec![String::from("stale normal line")];
+
     backend_tx
         .send(BackendEvent::DocumentMode { view_id: String::from("view-id-1"), is_vlf: true })
         .unwrap();
     mgr.drain_events().unwrap();
     assert!(mgr.active().is_vlf);
+    assert!(mgr.active().lines.is_empty());
     assert_eq!(mgr.active().line_cache.len(), 0);
 
     mgr.notify_scroll(0, 4).unwrap();
@@ -7592,6 +7617,19 @@ fn vlf_invalid_cache_does_not_request_normal_lines() {
 
     mgr.pump().unwrap();
     assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
+fn vlf_git_diff_command_reports_clear_status() {
+    let mut app = App::from_path(None).unwrap();
+    app.backend.is_vlf = true;
+
+    run_ex(&mut app, "gdiff");
+
+    assert_eq!(
+        app.backend.status_message.as_deref(),
+        Some("git diff disabled in VLF: requires whole-buffer diff/blame scans")
+    );
 }
 
 #[test]
@@ -7984,4 +8022,198 @@ fn vlf_search_status_backend_event_parsed() {
         }
         other => panic!("expected VlfSearchStatus, got {:?}", other),
     }
+}
+
+// ── Regression counters/tests: no full line-cache clone on hot paths ──────────
+
+#[test]
+fn source_control_skips_constrained_sized_buffers() {
+    // Buffers with more than CONSTRAINED_GIT_REFRESH_MAX_LINES (50_000) lines
+    // must be skipped by the periodic background refresh to avoid an expensive
+    // whole-buffer clone + diff on the UI thread.
+    let (tx, _rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    let buf_id = app.backend.active().id;
+
+    // Build a fully-cached line cache above the constrained threshold.
+    let line_count = 50_001;
+    app.backend.line_cache = (0..line_count)
+        .map(|i| {
+            LineSlot::Known(CachedLine {
+                text: format!("line {i}"),
+                cursors: Vec::new(),
+                syntax_spans: Vec::new(),
+            })
+        })
+        .collect();
+    app.backend.rebuild_lines();
+    assert_eq!(app.backend.lines.len(), line_count);
+    assert!(app.backend.is_fully_cached());
+
+    // No source-control entry yet — periodic refresh should still skip it.
+    app.refresh_source_control();
+
+    assert!(
+        !app.source_control.contains_key(&buf_id),
+        "background refresh must not clone or diff a constrained-sized buffer"
+    );
+}
+
+#[test]
+fn apply_update_large_cache_insert_does_not_clone_non_copy_range() {
+    // Prove that a Copy op over a large prefix followed by an Insert only
+    // allocates what is actually needed: the copy range and the new line.
+    // The whole line_cache length must match the op total exactly.
+    let large_line_count = 60_000usize;
+    let mut state = test_buf_state();
+    state.line_cache = (0..large_line_count)
+        .map(|i| {
+            LineSlot::Known(CachedLine {
+                text: format!("existing {i}"),
+                cursors: Vec::new(),
+                syntax_spans: Vec::new(),
+            })
+        })
+        .collect();
+    state.rebuild_lines();
+
+    state
+        .apply_update(CoreUpdate {
+            pristine: true,
+            annotations: Vec::new(),
+            ops: vec![
+                // Copy entire existing cache — must not scan non-copy lines.
+                CoreUpdateOp { op: CoreUpdateKind::Copy, n: large_line_count, lines: Vec::new() },
+                // Append one new line.
+                CoreUpdateOp {
+                    op: CoreUpdateKind::Insert,
+                    n: 1,
+                    lines: vec![CoreLine {
+                        text: Some(String::from("new-tail")),
+                        cursor: Vec::new(),
+                        syntax_spans: None,
+                    }],
+                },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(state.line_cache.len(), large_line_count + 1);
+    // Existing lines must be preserved through the copy.
+    match &state.line_cache[0] {
+        LineSlot::Known(l) => assert_eq!(l.text, "existing 0"),
+        other => panic!("expected known slot at 0, got {other:?}"),
+    }
+    // New line must appear at the tail.
+    match &state.line_cache[large_line_count] {
+        LineSlot::Known(l) => assert_eq!(l.text, "new-tail"),
+        other => panic!("expected known slot at tail, got {other:?}"),
+    }
+    assert_eq!(state.lines.len(), large_line_count + 1);
+    assert_eq!(state.lines[large_line_count], "new-tail");
+}
+
+#[test]
+fn invalidate_op_large_count_does_not_allocate_text() {
+    // Ensure that an Invalidate op for a huge line range produces Invalid
+    // slots with no text allocation — the `lines` mirror gets empty strings,
+    // but the slot type itself must be Invalid (no text cloned from previous).
+    let mut state = test_buf_state();
+
+    state
+        .apply_update(CoreUpdate {
+            pristine: true,
+            annotations: Vec::new(),
+            ops: vec![CoreUpdateOp {
+                op: CoreUpdateKind::Invalidate,
+                n: 100_000,
+                lines: Vec::new(),
+            }],
+        })
+        .unwrap();
+
+    assert_eq!(state.line_cache.len(), 100_000);
+    assert!(
+        state.line_cache.iter().all(|s| matches!(s, LineSlot::Invalid)),
+        "all slots from Invalidate op must be Invalid"
+    );
+    // The lines mirror has empty strings for invalid slots — no content.
+    assert!(state.lines.iter().all(|s| s.is_empty()));
+}
+
+#[test]
+fn bounded_invalid_range_scan_stops_at_window_boundary() {
+    // invalid_line_ranges_bounded must not iterate outside [start, end).
+    // This is the primitive that keeps scroll from scanning the full cache.
+    let cache_size = 10_000usize;
+    let viewport_start = 4_000usize;
+    let viewport_end = 4_050usize;
+
+    let mut cache = vec![LineSlot::Invalid; cache_size];
+    // Mark all lines outside the viewport as Known — they must never appear
+    // in the returned ranges.
+    for slot in &mut cache[..viewport_start] {
+        *slot = LineSlot::Known(CachedLine {
+            text: String::from("before"),
+            cursors: Vec::new(),
+            syntax_spans: Vec::new(),
+        });
+    }
+    for slot in &mut cache[viewport_end..] {
+        *slot = LineSlot::Known(CachedLine {
+            text: String::from("after"),
+            cursors: Vec::new(),
+            syntax_spans: Vec::new(),
+        });
+    }
+
+    let ranges = invalid_line_ranges_bounded(&cache, viewport_start, viewport_end);
+
+    // The entire viewport window is invalid, so exactly one range covers it.
+    assert_eq!(ranges, vec![(viewport_start, viewport_end)]);
+    // No range must extend outside the requested window.
+    for (start, end) in &ranges {
+        assert!(*start >= viewport_start, "range started before viewport");
+        assert!(*end <= viewport_end, "range extended past viewport");
+    }
+}
+
+#[test]
+fn normal_render_large_line_cache_only_displays_viewport_rows() {
+    // Prove that rendering a buffer with a large line cache only shows lines
+    // that fit in the terminal height — the render path must not expand all
+    // Invalid slots or panic on a huge cache.
+    let total_lines = 10_000usize;
+    let width: u16 = 80;
+    let height: u16 = 10;
+
+    let (tx, _rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    // First line is Known so the render path sees at least one valid row.
+    let mut cache: Vec<LineSlot> = vec![LineSlot::Known(CachedLine {
+        text: String::from("first line"),
+        cursors: vec![0],
+        syntax_spans: Vec::new(),
+    })];
+    cache.extend(std::iter::repeat_n(LineSlot::Invalid, total_lines - 1));
+    app.backend.line_cache = cache;
+    app.backend.rebuild_lines();
+
+    // Rendering must complete without panic even though most slots are Invalid.
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| crate::ui::ui(frame, &app)).unwrap();
+
+    let buf = terminal.backend().buffer();
+    // The first row must contain the known line text.
+    let first_row: String = (0..width).map(|x| buf.cell((x, 0)).unwrap().symbol()).collect();
+    assert!(
+        first_row.contains("first line"),
+        "first row should render the known line, got: {first_row:?}"
+    );
 }

@@ -20,9 +20,9 @@ use crate::backend::{
     BackendEvent, CachedLine, ChannelReader, ChannelWriter, CoreAnnotation, CoreSyntaxSpan,
     CoreUpdate, CoreUpdateKind, LineSlot, NavigationTarget, PendingRequests, PendingUiAction,
     VlfSearchRange, block_for_response, checked_advance, coalesce_backend_events,
-    drain_sync_notifications, invalid_line_ranges, normalize_line_text, parse_response,
-    recv_with_timeout, send_rpc_notification, send_rpc_request, startup_render_ready,
-    xi_reader_thread,
+    drain_sync_notifications, invalid_line_ranges, invalid_line_ranges_bounded,
+    normalize_line_text, parse_response, recv_with_timeout, send_rpc_notification,
+    send_rpc_request, startup_render_ready, xi_reader_thread,
 };
 use crate::text::previous_char_boundary;
 
@@ -44,6 +44,15 @@ pub(crate) struct ApplyUpdateStats {
     pub(crate) rebuild_lines: Duration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineRequestScope {
+    Viewport,
+    WholeDocument,
+}
+
+const NORMAL_INVALID_LINE_OVERSCAN: usize = 64;
+const NORMAL_INVALID_LINE_DEFAULT_WINDOW: usize = 256;
+
 // ── Per-view buffer state ─────────────────────────────────────────────────────
 
 /// All state associated with one open xi view (no connection fields).
@@ -56,6 +65,13 @@ pub(crate) struct BufState {
     pub(crate) editor_config_synced: bool,
     pub(crate) pending_line_request: bool,
     pub(crate) line_cache: Vec<LineSlot>,
+    /// Whole-buffer text mirror kept in sync with `line_cache` for normal/constrained mode.
+    ///
+    /// **Policy**: prefer `get_line()`, `line_len()`, and `line_start_offset()` for
+    /// single-line or bounded reads.  Access `lines` directly only where command policy
+    /// explicitly requires whole-document access (diagnostics offset lookup, crash
+    /// recovery, source-control diff, whole-document transforms, fold operations).
+    /// In VLF mode this field is always empty; never read it in VLF-aware paths.
     pub(crate) lines: Vec<String>,
     pub(crate) cursor_line: usize,
     pub(crate) cursor_col: usize,
@@ -292,6 +308,39 @@ impl BufState {
         } else {
             self.lines.get(idx).map(|s| s.as_str())
         }
+    }
+
+    pub(crate) fn line_len(&self, idx: usize) -> Option<usize> {
+        self.get_line(idx).map(str::len)
+    }
+
+    pub(crate) fn line_range_owned(&self, start: usize, end: usize) -> Option<Vec<String>> {
+        if start > end {
+            return Some(Vec::new());
+        }
+        (start..=end).map(|idx| self.get_line(idx).map(str::to_owned)).collect()
+    }
+
+    pub(crate) fn line_start_offset(&self, line: usize) -> Option<usize> {
+        let mut offset = 0usize;
+        for idx in 0..line {
+            offset = offset.checked_add(self.get_line(idx)?.len() + 1)?;
+        }
+        Some(offset)
+    }
+
+    pub(crate) fn whole_text(&self) -> Option<String> {
+        if self.line_count() == 0 {
+            return Some(String::new());
+        }
+        let mut text = String::new();
+        for idx in 0..self.line_count() {
+            if idx > 0 {
+                text.push('\n');
+            }
+            text.push_str(self.get_line(idx)?);
+        }
+        Some(text)
     }
 
     /// Apply a `vlf_chunks` response to the line cache.
@@ -1432,13 +1481,19 @@ impl BufferManager {
         buf.status_message = Some(String::from("reloaded"));
     }
 
-    fn request_invalid_lines(&mut self, idx: usize) -> io::Result<()> {
+    fn request_invalid_lines(&mut self, idx: usize, scope: LineRequestScope) -> io::Result<()> {
         let Some(buf) = self.bufs.get_mut(idx) else { return Ok(()) };
         if buf.is_vlf || buf.pending_line_request || buf.view_id.is_empty() {
             return Ok(());
         }
 
-        let invalid_ranges = invalid_line_ranges(&buf.line_cache);
+        let invalid_ranges = match scope {
+            LineRequestScope::WholeDocument => invalid_line_ranges(&buf.line_cache),
+            LineRequestScope::Viewport => {
+                let (start, end) = bounded_line_request_window(buf);
+                invalid_line_ranges_bounded(&buf.line_cache, start, end)
+            }
+        };
         if invalid_ranges.is_empty() {
             return Ok(());
         }
@@ -1459,16 +1514,24 @@ impl BufferManager {
         Ok(())
     }
 
-    fn has_pending_line_work(&self) -> bool {
+    fn has_pending_line_work(&self, scope: LineRequestScope) -> bool {
         self.bufs.iter().any(|buf| {
-            !buf.is_vlf
-                && (buf.pending_line_request || !invalid_line_ranges(&buf.line_cache).is_empty())
+            if buf.is_vlf || buf.pending_line_request {
+                return buf.pending_line_request;
+            }
+            match scope {
+                LineRequestScope::Viewport => {
+                    let (start, end) = bounded_line_request_window(buf);
+                    !invalid_line_ranges_bounded(&buf.line_cache, start, end).is_empty()
+                }
+                LineRequestScope::WholeDocument => !invalid_line_ranges(&buf.line_cache).is_empty(),
+            }
         })
     }
 
-    fn request_all_invalid_lines(&mut self) -> io::Result<()> {
+    fn request_all_invalid_lines(&mut self, scope: LineRequestScope) -> io::Result<()> {
         for idx in 0..self.bufs.len() {
-            self.request_invalid_lines(idx)?;
+            self.request_invalid_lines(idx, scope)?;
         }
         Ok(())
     }
@@ -1723,9 +1786,17 @@ impl BufferManager {
     }
 
     pub(crate) fn sync_pending_events(&mut self) -> io::Result<()> {
+        self.sync_pending_events_with_scope(LineRequestScope::Viewport)
+    }
+
+    pub(crate) fn sync_pending_events_for_whole_document(&mut self) -> io::Result<()> {
+        self.sync_pending_events_with_scope(LineRequestScope::WholeDocument)
+    }
+
+    fn sync_pending_events_with_scope(&mut self, scope: LineRequestScope) -> io::Result<()> {
         let mut idle_rounds = 0;
         for _ in 0..24 {
-            self.request_all_invalid_lines()?;
+            self.request_all_invalid_lines(scope)?;
             match recv_with_timeout(&mut self.backend_rx, Duration::from_millis(10)) {
                 Some(event) => {
                     idle_rounds = 0;
@@ -1734,7 +1805,7 @@ impl BufferManager {
                         self.apply_event_to_buffer(event)?;
                     }
                 }
-                None if self.has_pending_line_work() => continue,
+                None if self.has_pending_line_work(scope) => continue,
                 None => {
                     idle_rounds += 1;
                     if idle_rounds >= Self::SYNC_IDLE_LIMIT {
@@ -1941,6 +2012,16 @@ impl BufferManager {
         self.view_to_idx.insert(new_view_id, idx);
         Ok(())
     }
+}
+
+fn bounded_line_request_window(buf: &BufState) -> (usize, usize) {
+    if buf.line_cache.is_empty() {
+        return (0, 0);
+    }
+    let (start, end) = buf.last_scroll.unwrap_or((0, NORMAL_INVALID_LINE_DEFAULT_WINDOW));
+    let start = start.saturating_sub(NORMAL_INVALID_LINE_OVERSCAN);
+    let end = end.saturating_add(NORMAL_INVALID_LINE_OVERSCAN).min(buf.line_cache.len());
+    (start, end.max(start))
 }
 
 // ── Recovery helpers ──────────────────────────────────────────────────────────

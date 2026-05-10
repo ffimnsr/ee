@@ -29,6 +29,11 @@ mod state;
 
 const VLF_SOURCE_CONTROL_DISABLED_REASON: &str = "requires whole-buffer diff/blame scans";
 
+/// Background source-control refresh is skipped for non-VLF buffers larger than this
+/// line threshold. For constrained-sized buffers the full clone + diff would block the UI;
+/// use an explicit git command (`]c`, `[c`, or `:GitDiff`) to refresh on demand.
+const CONSTRAINED_GIT_REFRESH_MAX_LINES: usize = 50_000;
+
 pub(crate) use parsing::{
     line_col_for_offset, parse_ex_range, parse_substitute_cmd, smart_case_sensitive,
     text_obj_bracket, text_obj_quote, text_obj_tag, text_obj_word,
@@ -1490,7 +1495,7 @@ impl App {
         spec: char,
     ) -> Option<(usize, usize, usize, String)> {
         let line_idx = self.backend.cursor_line;
-        let line = self.backend.lines.get(line_idx)?.clone();
+        let line = self.backend.get_line(line_idx)?.to_owned();
         let cursor_byte = self.backend.cursor_col.min(line.len());
         let range = match spec {
             'w' | 'W' => {
@@ -1519,7 +1524,7 @@ impl App {
             }
             's' => {
                 let line_idx = self.backend.cursor_line;
-                let line_len = self.backend.lines.get(line_idx).map(|line| line.len()).unwrap_or(0);
+                let line_len = self.backend.line_len(line_idx).unwrap_or(0);
                 self.select_range_on_line(line_idx, 0, line_len);
                 Ok(())
             }
@@ -1544,7 +1549,7 @@ impl App {
 
     fn move_current_line_adjacent(&mut self, down: bool) -> Result<(), String> {
         let current_line = self.backend.cursor_line;
-        let Some(current_text) = self.backend.lines.get(current_line).cloned() else {
+        let Some(current_text) = self.backend.get_line(current_line).map(str::to_owned) else {
             return Err("move_line: cursor is outside buffer".to_owned());
         };
 
@@ -1558,7 +1563,7 @@ impl App {
             });
         };
 
-        let Some(target_text) = self.backend.lines.get(target_line).cloned() else {
+        let Some(target_text) = self.backend.get_line(target_line).map(str::to_owned) else {
             return Err(if down {
                 "move_line_down: already at last line".to_owned()
             } else {
@@ -1568,7 +1573,7 @@ impl App {
 
         let start_line = current_line.min(target_line);
         let end_line = current_line.max(target_line);
-        let end_col = self.backend.lines.get(end_line).map(|line| line.len()).unwrap_or(0);
+        let end_col = self.backend.line_len(end_line).unwrap_or(0);
         let replacement = if down {
             format!("{target_text}{}{current_text}", self.line_ending_str())
         } else {
@@ -1604,7 +1609,7 @@ impl App {
         }
 
         let line_idx = self.backend.cursor_line;
-        let line = self.backend.lines.get(line_idx)?.clone();
+        let line = self.backend.get_line(line_idx)?.to_owned();
         let cursor_byte = self.backend.cursor_col.min(line.len());
         let mut best = None;
 
@@ -1789,7 +1794,7 @@ impl App {
             }
         }
 
-        let line = self.backend.lines.get(self.backend.cursor_line)?;
+        let line = self.backend.get_line(self.backend.cursor_line)?;
         let col = self.backend.cursor_col;
         let ch = line.get(col..)?.chars().next()?;
         if !(ch.is_alphanumeric() || ch == '_') {
@@ -1822,7 +1827,7 @@ impl App {
             }
         }
 
-        let line = self.backend.lines.get(self.backend.cursor_line)?;
+        let line = self.backend.get_line(self.backend.cursor_line)?;
         if line.is_empty() {
             return None;
         }
@@ -1901,12 +1906,7 @@ impl App {
     }
 
     fn goto_first_nonwhitespace(&mut self) {
-        let line = self
-            .backend
-            .lines
-            .get(self.backend.cursor_line)
-            .map(String::as_str)
-            .unwrap_or_default();
+        let line = self.backend.get_line(self.backend.cursor_line).unwrap_or_default();
         let target_byte = line
             .char_indices()
             .find_map(|(idx, ch)| (!ch.is_whitespace()).then_some(idx))
@@ -1991,7 +1991,7 @@ impl App {
             .map(|(_, height)| height.saturating_sub(2) as usize)
             .unwrap_or(22);
         let delta = (editor_rows / 2).max(1);
-        let max_line = self.backend.lines.len().saturating_sub(1);
+        let max_line = self.backend.line_count().saturating_sub(1);
         let next_line = if down {
             self.backend.cursor_line.saturating_add(delta).min(max_line)
         } else {
@@ -1999,9 +1999,8 @@ impl App {
         };
         let next_col = self
             .backend
-            .lines
-            .get(next_line)
-            .map(|line| self.backend.cursor_col.min(line.len()))
+            .line_len(next_line)
+            .map(|len| self.backend.cursor_col.min(len))
             .unwrap_or(0);
         self.push_jump();
         let _ = self.backend.send_edit(
@@ -2385,11 +2384,11 @@ impl App {
     }
 
     fn current_buffer_text(&self) -> String {
-        self.backend.lines.join("\n")
+        self.backend.whole_text().unwrap_or_default()
     }
 
     fn line_start_offset(&self, line: usize) -> usize {
-        self.backend.lines.iter().take(line).map(|current| current.len() + 1).sum()
+        self.backend.line_start_offset(line).unwrap_or(0)
     }
 
     fn replace_line_block(
@@ -2443,10 +2442,15 @@ impl App {
                 true
             }
         } else {
-            if self.backend.lines.is_empty() {
+            if self.backend.line_count() == 0 {
                 return Ok(format!("{label}: no lines"));
             }
 
+            self.backend
+                .sync_pending_events_for_whole_document()
+                .map_err(|err| format!("{label}: line sync failed: {err}"))?;
+
+            // Whole-buffer policy-allowed: whole-document transform syncs full mirror first.
             let original = self.backend.lines.clone();
             let mut updated = original.clone();
             transform(&mut updated);
@@ -2476,14 +2480,17 @@ impl App {
     where
         F: FnMut(&mut Vec<String>),
     {
-        if self.backend.lines.is_empty() {
+        if self.backend.line_count() == 0 {
             return Ok(format!("{label}: no lines"));
         }
 
-        let last_line = self.backend.lines.len().saturating_sub(1);
+        let last_line = self.backend.line_count().saturating_sub(1);
         let start_line = start_line.min(last_line);
         let end_line = end_line.min(last_line).max(start_line);
-        let original = self.backend.lines[start_line..=end_line].to_vec();
+        let original = self
+            .backend
+            .line_range_owned(start_line, end_line)
+            .ok_or_else(|| format!("{label}: requested lines are not loaded"))?;
         let mut updated = original.clone();
         transform(&mut updated);
 
@@ -2610,12 +2617,13 @@ impl App {
             .cloned()
             .ok_or_else(|| String::from("git: cursor not inside changed hunk"))?;
 
-        let start_offset = self.line_start_offset(hunk.new_start.min(self.backend.lines.len()));
+        let line_count = self.backend.line_count();
+        let start_offset = self.line_start_offset(hunk.new_start.min(line_count));
         let end_offset = if hunk.new_count == 0 {
             start_offset
         } else {
-            let after_line = (hunk.new_start + hunk.new_count).min(self.backend.lines.len());
-            if after_line < self.backend.lines.len() {
+            let after_line = (hunk.new_start + hunk.new_count).min(line_count);
+            if after_line < line_count {
                 self.line_start_offset(after_line)
             } else {
                 self.current_buffer_text().len()
@@ -2627,12 +2635,8 @@ impl App {
             .filter(|line| matches!(line.kind, crate::git::DiffLineKind::Removed))
             .map(|line| line.text.as_str())
             .collect::<Vec<_>>();
-        let replacement = format_git_hunk_replacement(
-            &old_lines,
-            hunk.new_start,
-            hunk.new_count,
-            self.backend.lines.len(),
-        );
+        let replacement =
+            format_git_hunk_replacement(&old_lines, hunk.new_start, hunk.new_count, line_count);
 
         self.replace_range_with_text(
             SelectionRange { start: start_offset, end: end_offset },
@@ -2676,8 +2680,11 @@ impl App {
         let start = start.min(line_count.saturating_sub(1));
         let end = end.min(line_count.saturating_sub(1));
         let mut text = String::new();
-        for line in &self.backend.lines[start..=end] {
-            text.push_str(line);
+        let Some(lines) = self.backend.line_range_owned(start, end) else {
+            return;
+        };
+        for line in lines {
+            text.push_str(&line);
             text.push('\n');
         }
         self.registers.yank(&reg, text, false);
@@ -2925,6 +2932,7 @@ impl App {
     // ── Fold commands ─────────────────────────────────────────────────────────
 
     fn fold_extent_at_cursor(&self) -> Option<(usize, usize)> {
+        // Whole-buffer policy-allowed: indent fold detection scans surrounding lines.
         indent_fold_extent(&self.backend.lines, self.backend.cursor_line)
     }
 
@@ -2956,6 +2964,7 @@ impl App {
 
     fn fold_close_all(&mut self) {
         let buf_id = self.backend.active().id;
+        // Whole-buffer policy-allowed: closing all folds requires full line scan.
         let lines: Vec<String> = self.backend.lines.clone();
         self.folds.close_all(buf_id, &lines);
     }
@@ -2974,6 +2983,7 @@ impl App {
 
         for buf in self.backend.all_bufs() {
             // Skip clean buffers and scratch buffers.
+            // Whole-buffer policy-allowed: crash recovery serializes full buffer to disk.
             if buf.pristine || buf.path.is_none() || buf.lines.is_empty() {
                 continue;
             }
@@ -3198,11 +3208,18 @@ impl App {
             .all_bufs()
             .iter()
             .filter(|buf| !buf.is_vlf && buf.is_fully_cached())
+            // Skip periodic background refresh for constrained-sized buffers:
+            // cloning + diffing 50K+ lines in the UI thread would cause frame drops.
+            // Explicit git commands still work because refresh_active_git_status
+            // is called directly and is not subject to this throttle.
+            .filter(|buf| buf.lines.len() <= CONSTRAINED_GIT_REFRESH_MAX_LINES)
             .filter(|buf| {
                 self.source_control.get(&buf.id).is_none_or(|cached| {
                     now.duration_since(cached.last_refresh) >= Duration::from_secs(2)
                 })
             })
+            // Whole-buffer policy-allowed: source-control diff requires full text mirror;
+            // guarded by !buf.is_vlf && buf.is_fully_cached() and line-count bound above.
             .map(|buf| (buf.id, buf.path.clone(), buf.lines.clone()))
             .collect::<Vec<_>>();
 
@@ -3781,10 +3798,9 @@ impl App {
         self.push_jump();
         let (line, col) = pos;
         let col = if line_start {
-            // Find first non-whitespace byte offset on the target line.
+            // Bounded: reads only the target line, not full buffer.
             self.backend
-                .lines
-                .get(line)
+                .get_line(line)
                 .map(|l| l.find(|ch: char| !ch.is_whitespace()).unwrap_or(0))
                 .unwrap_or(0)
         } else {
@@ -4071,7 +4087,8 @@ impl App {
                 "ty": { "select": { "granularity": "point", "multi": false } }
             }),
         );
-        let bottom_len = self.backend.lines.get(bottom).map(|s| s.len()).unwrap_or(0);
+        // Bounded: reads only the bottom line length, not full buffer.
+        let bottom_len = self.backend.line_len(bottom).unwrap_or(0);
         let _ = self.backend.send_edit(
             "gesture",
             json!({

@@ -185,12 +185,11 @@ impl Default for OverlayLimits {
 
 /// Required save semantics for VLF documents.
 ///
-/// In-place mutation is never permitted for the first editable milestone.
-/// All saves must use one of the two streaming strategies below so that a
-/// crash before the commit point leaves the original file intact.
+/// Temp-file rewrite is the default crash-safe fallback.  Optimized in-place
+/// policies are explicit because their commit point is the first target-file
+/// write, not the final rename.
 ///
-/// The caller must choose a policy explicitly before triggering a save;
-/// there is no implicit fallback to in-place overwrite.
+/// The caller must choose a policy explicitly before triggering a save.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VlfSavePolicy {
     /// Stream the piece sequence through a temp file in the same directory,
@@ -200,6 +199,15 @@ pub enum VlfSavePolicy {
     /// Use an explicit path when the parent directory is read-only or resides
     /// on a different filesystem where rename-across-devices is unavailable.
     TempFileRewrite { temp_dir: Option<PathBuf> },
+    /// Overwrite changed bytes in the original file when logical byte length
+    /// is unchanged.  Falls back to temp-file rewrite only when the target path
+    /// is not the pager's original file.
+    SameSizeInPlaceOverwrite,
+    /// Shift unchanged tail bytes in-place, then overwrite the changed window.
+    /// Falls back to temp-file rewrite when the changed window is too large to
+    /// stage within the bounded optimization buffer or when the target path is
+    /// not the pager's original file.
+    TailShift { fallback_temp_dir: Option<PathBuf> },
     /// Write the piece sequence to a new path instead of overwriting the
     /// original.  Required when the caller explicitly chooses to preserve the
     /// original file or when the target filesystem does not support atomic
@@ -521,6 +529,11 @@ impl PieceOverlay {
     /// Total logical byte length of the document including overlay edits.
     pub fn total_byte_len(&self) -> u64 {
         self.total_byte_len
+    }
+
+    /// Byte length of the original file at overlay creation time.
+    pub fn original_file_byte_len(&self) -> u64 {
+        self.original_file_byte_len
     }
 
     /// Known line count for the overlay document.
@@ -870,8 +883,8 @@ impl PieceOverlay {
     /// disk; negative means it is smaller.  Zero means the byte count is
     /// identical to the original (though content may still differ).
     ///
-    /// Callers use this to decide whether a temp-file streaming rewrite or an
-    /// explicit save-as is required.  See [`VlfSavePolicy`] and
+    /// Callers use this to decide whether an optimized in-place save, a
+    /// temp-file streaming rewrite, or an explicit save-as is required.  See [`VlfSavePolicy`] and
     /// [`Self::suggested_save_policy`].
     pub fn signed_byte_delta(&self) -> i64 {
         self.total_byte_len as i64 - self.original_file_byte_len as i64
@@ -926,12 +939,13 @@ impl PieceOverlay {
 
     /// Suggested save policy for the current overlay state.
     ///
-    /// Always returns a streaming strategy (never in-place mutation).  Returns
+    /// Returns the narrowest save strategy that fits the current overlay.  Returns
     /// [`VlfSavePolicy::SaveAs`] placeholder when the file is above
     /// [`LARGE_REWRITE_THRESHOLD_BYTES`] **and** the signed byte delta exceeds
     /// 10 % of the original file size, indicating the caller should confirm an
-    /// explicit save destination.  In all other cases returns
-    /// [`VlfSavePolicy::TempFileRewrite`].
+    /// explicit save destination.  Same-size edits prefer
+    /// [`VlfSavePolicy::SameSizeInPlaceOverwrite`]; byte-length-changing edits
+    /// prefer [`VlfSavePolicy::TailShift`] with temp-file fallback.
     ///
     /// The returned `SaveAs` path is a placeholder (`<save-as-required>`); the
     /// actual destination must be supplied by the caller after prompting the
@@ -948,8 +962,10 @@ impl PieceOverlay {
         if is_large && delta_fraction > 0.10 {
             // Large file with >10 % byte change: require explicit save-as.
             VlfSavePolicy::SaveAs(PathBuf::from("<save-as-required>"))
+        } else if self.signed_byte_delta() == 0 {
+            VlfSavePolicy::SameSizeInPlaceOverwrite
         } else {
-            VlfSavePolicy::TempFileRewrite { temp_dir: None }
+            VlfSavePolicy::TailShift { fallback_temp_dir: None }
         }
     }
 
@@ -1715,15 +1731,29 @@ mod tests {
         let m = ascii_metrics("hello");
         let mut overlay = PieceOverlay::new(m);
         overlay.insert(5, " world").unwrap();
-        assert!(matches!(overlay.suggested_save_policy(), VlfSavePolicy::TempFileRewrite { .. }));
+        assert!(matches!(overlay.suggested_save_policy(), VlfSavePolicy::TailShift { .. }));
+    }
+
+    #[test]
+    fn suggested_save_policy_same_size_is_in_place() {
+        let m = ascii_metrics("hello");
+        let mut overlay = PieceOverlay::new(m);
+        let ctx = OverlayEditContext { revision_id: 1, undo_group: 1 };
+        overlay.delete_in_group(ByteRange::new(1, 3), ctx).unwrap();
+        overlay.insert_in_group(1, "XY", ctx).unwrap();
+        assert!(matches!(overlay.suggested_save_policy(), VlfSavePolicy::SameSizeInPlaceOverwrite));
     }
 
     #[test]
     fn vlf_save_policy_display_variants_accessible() {
         let policy_rewrite = VlfSavePolicy::TempFileRewrite { temp_dir: None };
+        let policy_in_place = VlfSavePolicy::SameSizeInPlaceOverwrite;
+        let policy_tail_shift = VlfSavePolicy::TailShift { fallback_temp_dir: None };
         let policy_saveas = VlfSavePolicy::SaveAs(std::path::PathBuf::from("/tmp/test.txt"));
         // Just check they can be constructed and matched.
         assert!(matches!(policy_rewrite, VlfSavePolicy::TempFileRewrite { .. }));
+        assert!(matches!(policy_in_place, VlfSavePolicy::SameSizeInPlaceOverwrite));
+        assert!(matches!(policy_tail_shift, VlfSavePolicy::TailShift { .. }));
         assert!(matches!(policy_saveas, VlfSavePolicy::SaveAs(_)));
     }
 

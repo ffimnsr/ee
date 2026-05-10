@@ -47,10 +47,11 @@
 //!
 //! ## In-place overwrite and tail-shift
 //!
-//! Same-size in-place overwrite is intentionally omitted from the first
-//! milestone.  It will be added only after crash-consistency tests for the
-//! temp-file path pass.  Byte-length-changing tail-shift optimisation is
-//! likewise deferred until the temp-copy fallback is proven correct.
+//! Same-size edits can overwrite only the changed byte window.  Byte-length
+//! changing edits can shift the unchanged file tail in-place, then overwrite
+//! the changed window.  Both optimizations stage the changed window in a
+//! bounded buffer first.  If the optimization cannot run safely, callers can
+//! use the temp-file rewrite fallback.
 //!
 //! ## Normal / constrained mode
 //!
@@ -80,6 +81,9 @@ use crate::vlf::overlay::VlfSavePolicy;
 /// progress callbacks fire at a reasonable granularity.
 const SAVE_CHUNK_BYTES: u64 = 1024 * 1024;
 
+/// Maximum changed-window bytes staged for in-place optimizations (64 MiB).
+const IN_PLACE_CHANGED_WINDOW_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // SaveProgress
 // ---------------------------------------------------------------------------
@@ -88,7 +92,7 @@ const SAVE_CHUNK_BYTES: u64 = 1024 * 1024;
 /// streaming VLF save.
 #[derive(Debug, Clone, Copy)]
 pub struct SaveProgress {
-    /// Bytes written to the temp file so far.
+    /// Bytes durably staged or written so far for the active save policy.
     pub bytes_written: u64,
     /// Total bytes to write (logical document length).
     pub total_bytes: u64,
@@ -112,6 +116,8 @@ pub enum VlfSaveError {
     /// [`VlfStore::enable_editing`] has not been called; there is no overlay
     /// to save from.
     EditingNotEnabled,
+    /// The requested optimized policy does not match the overlay byte delta.
+    InvalidPolicy(&'static str),
 }
 
 impl std::fmt::Display for VlfSaveError {
@@ -124,6 +130,7 @@ impl std::fmt::Display for VlfSaveError {
             VlfSaveError::EditingNotEnabled => {
                 write!(f, "VLF editing not enabled; nothing to save")
             }
+            VlfSaveError::InvalidPolicy(reason) => write!(f, "invalid VLF save policy: {reason}"),
         }
     }
 }
@@ -132,7 +139,9 @@ impl std::error::Error for VlfSaveError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             VlfSaveError::Io(e, _) => Some(e),
-            VlfSaveError::Cancelled | VlfSaveError::EditingNotEnabled => None,
+            VlfSaveError::Cancelled
+            | VlfSaveError::EditingNotEnabled
+            | VlfSaveError::InvalidPolicy(_) => None,
         }
     }
 }
@@ -167,19 +176,73 @@ pub fn stream_save_pieces(
     policy: &VlfSavePolicy,
     on_progress: &mut dyn FnMut(SaveProgress) -> bool,
 ) -> Result<(), VlfSaveError> {
+    match policy {
+        VlfSavePolicy::TempFileRewrite { temp_dir } => {
+            stream_save_pieces_temp_file(pieces, overlay, pager, dest, dest, temp_dir, on_progress)
+        }
+        VlfSavePolicy::SaveAs(save_as_path) => stream_save_pieces_temp_file(
+            pieces,
+            overlay,
+            pager,
+            dest,
+            save_as_path,
+            &None,
+            on_progress,
+        ),
+        VlfSavePolicy::SameSizeInPlaceOverwrite => {
+            if overlay.signed_byte_delta() != 0 {
+                return Err(VlfSaveError::InvalidPolicy(
+                    "same-size overwrite requires zero byte delta",
+                ));
+            }
+            if !same_canonical_path(dest, pager.canonical_path()) {
+                return stream_save_pieces_temp_file(
+                    pieces,
+                    overlay,
+                    pager,
+                    dest,
+                    dest,
+                    &None,
+                    on_progress,
+                );
+            }
+            save_same_size_in_place(pieces, overlay, pager, dest, on_progress)
+        }
+        VlfSavePolicy::TailShift { fallback_temp_dir } => {
+            if overlay.signed_byte_delta() == 0 {
+                return Err(VlfSaveError::InvalidPolicy("tail-shift requires non-zero byte delta"));
+            }
+            if !same_canonical_path(dest, pager.canonical_path()) {
+                return stream_save_pieces_temp_file(
+                    pieces,
+                    overlay,
+                    pager,
+                    dest,
+                    dest,
+                    fallback_temp_dir,
+                    on_progress,
+                );
+            }
+            save_with_tail_shift(pieces, overlay, pager, dest, fallback_temp_dir, on_progress)
+        }
+    }
+}
+
+fn stream_save_pieces_temp_file(
+    pieces: &[Piece],
+    overlay: &PieceOverlay,
+    pager: &FilePager,
+    dest: &Path,
+    final_dest: &Path,
+    requested_temp_dir: &Option<PathBuf>,
+    on_progress: &mut dyn FnMut(SaveProgress) -> bool,
+) -> Result<(), VlfSaveError> {
     let total_bytes = overlay.total_byte_len();
 
     // Determine final destination and temp-file directory.
-    let (final_dest, temp_dir) = match policy {
-        VlfSavePolicy::TempFileRewrite { temp_dir } => {
-            let dir = temp_dir.as_deref().or_else(|| dest.parent()).unwrap_or(dest);
-            (dest.to_owned(), dir.to_owned())
-        }
-        VlfSavePolicy::SaveAs(save_as_path) => {
-            let dir = save_as_path.parent().unwrap_or(save_as_path);
-            (save_as_path.clone(), dir.to_owned())
-        }
-    };
+    let temp_dir =
+        requested_temp_dir.as_deref().or_else(|| final_dest.parent()).unwrap_or(dest).to_owned();
+    let final_dest = final_dest.to_owned();
 
     let temp_path = build_temp_path(&final_dest, &temp_dir);
 
@@ -236,6 +299,281 @@ pub fn stream_save_pieces(
     }
 
     Ok(())
+}
+
+fn save_same_size_in_place(
+    pieces: &[Piece],
+    overlay: &PieceOverlay,
+    pager: &FilePager,
+    dest: &Path,
+    on_progress: &mut dyn FnMut(SaveProgress) -> bool,
+) -> Result<(), VlfSaveError> {
+    let plan = SaveOptimizationPlan::for_overlay(pieces, overlay);
+    if plan.new_changed_len() > IN_PLACE_CHANGED_WINDOW_MAX_BYTES {
+        return stream_save_pieces_temp_file(
+            pieces,
+            overlay,
+            pager,
+            dest,
+            dest,
+            &None,
+            on_progress,
+        );
+    }
+    if !on_progress(SaveProgress { bytes_written: 0, total_bytes: overlay.total_byte_len() }) {
+        return Err(VlfSaveError::Cancelled);
+    }
+
+    let changed = collect_logical_range_bytes(pieces, overlay, pager, plan.new_changed_range())?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dest)
+        .map_err(|e| VlfSaveError::Io(e, dest.to_owned()))?;
+    pwrite_all(&file, plan.prefix_len, &changed)
+        .map_err(|e| VlfSaveError::Io(e, dest.to_owned()))?;
+    file.sync_all().map_err(|e| VlfSaveError::Io(e, dest.to_owned()))?;
+    let _ = on_progress(SaveProgress {
+        bytes_written: overlay.total_byte_len(),
+        total_bytes: overlay.total_byte_len(),
+    });
+    Ok(())
+}
+
+fn save_with_tail_shift(
+    pieces: &[Piece],
+    overlay: &PieceOverlay,
+    pager: &FilePager,
+    dest: &Path,
+    fallback_temp_dir: &Option<PathBuf>,
+    on_progress: &mut dyn FnMut(SaveProgress) -> bool,
+) -> Result<(), VlfSaveError> {
+    let plan = SaveOptimizationPlan::for_overlay(pieces, overlay);
+    if plan.new_changed_len() > IN_PLACE_CHANGED_WINDOW_MAX_BYTES {
+        return stream_save_pieces_temp_file(
+            pieces,
+            overlay,
+            pager,
+            dest,
+            dest,
+            fallback_temp_dir,
+            on_progress,
+        );
+    }
+    if !on_progress(SaveProgress { bytes_written: 0, total_bytes: overlay.total_byte_len() }) {
+        return Err(VlfSaveError::Cancelled);
+    }
+
+    let changed = collect_logical_range_bytes(pieces, overlay, pager, plan.new_changed_range())?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dest)
+        .map_err(|e| VlfSaveError::Io(e, dest.to_owned()))?;
+    let delta = overlay.signed_byte_delta();
+
+    if delta > 0 {
+        file.set_len(overlay.total_byte_len()).map_err(|e| VlfSaveError::Io(e, dest.to_owned()))?;
+        shift_tail_right(&file, dest, plan.old_suffix_start, plan.old_len, delta as u64)?;
+        pwrite_all(&file, plan.prefix_len, &changed)
+            .map_err(|e| VlfSaveError::Io(e, dest.to_owned()))?;
+    } else {
+        pwrite_all(&file, plan.prefix_len, &changed)
+            .map_err(|e| VlfSaveError::Io(e, dest.to_owned()))?;
+        shift_tail_left(&file, dest, plan.old_suffix_start, plan.old_len, (-delta) as u64)?;
+        file.set_len(overlay.total_byte_len()).map_err(|e| VlfSaveError::Io(e, dest.to_owned()))?;
+    }
+
+    file.sync_all().map_err(|e| VlfSaveError::Io(e, dest.to_owned()))?;
+    let _ = on_progress(SaveProgress {
+        bytes_written: overlay.total_byte_len(),
+        total_bytes: overlay.total_byte_len(),
+    });
+    Ok(())
+}
+
+struct SaveOptimizationPlan {
+    prefix_len: u64,
+    old_suffix_start: u64,
+    new_suffix_start: u64,
+    old_len: u64,
+}
+
+impl SaveOptimizationPlan {
+    fn for_overlay(pieces: &[Piece], overlay: &PieceOverlay) -> Self {
+        let old_len = overlay.original_file_byte_len();
+        let new_len = overlay.total_byte_len();
+        let prefix_len = common_original_prefix_len(pieces);
+        let suffix_len = common_original_suffix_len(pieces, old_len, new_len)
+            .min(old_len.saturating_sub(prefix_len))
+            .min(new_len.saturating_sub(prefix_len));
+        SaveOptimizationPlan {
+            prefix_len,
+            old_suffix_start: old_len - suffix_len,
+            new_suffix_start: new_len - suffix_len,
+            old_len,
+        }
+    }
+
+    fn new_changed_range(&self) -> ByteRange {
+        ByteRange::new(self.prefix_len, self.new_suffix_start)
+    }
+
+    fn new_changed_len(&self) -> u64 {
+        self.new_suffix_start.saturating_sub(self.prefix_len)
+    }
+}
+
+fn common_original_prefix_len(pieces: &[Piece]) -> u64 {
+    let mut logical = 0;
+    for piece in pieces {
+        match piece {
+            Piece::Original { file_range, .. } if file_range.start.0 == logical => {
+                logical += file_range.len();
+            }
+            _ => break,
+        }
+    }
+    logical
+}
+
+fn common_original_suffix_len(pieces: &[Piece], old_len: u64, new_len: u64) -> u64 {
+    let mut original_end = old_len;
+    let mut logical_end = new_len;
+    let mut suffix_len = 0;
+    for piece in pieces.iter().rev() {
+        match piece {
+            Piece::Original { file_range, .. } if file_range.end.0 == original_end => {
+                let len = file_range.len();
+                if len > logical_end {
+                    break;
+                }
+                suffix_len += len;
+                original_end = file_range.start.0;
+                logical_end -= len;
+            }
+            _ => break,
+        }
+    }
+    suffix_len
+}
+
+fn collect_logical_range_bytes(
+    pieces: &[Piece],
+    overlay: &PieceOverlay,
+    pager: &FilePager,
+    range: ByteRange,
+) -> Result<Vec<u8>, VlfSaveError> {
+    let len = range.len();
+    if len > IN_PLACE_CHANGED_WINDOW_MAX_BYTES {
+        return Err(VlfSaveError::InvalidPolicy("changed window exceeds optimization buffer"));
+    }
+    let mut out = Vec::with_capacity(len as usize);
+    let mut logical_start = 0;
+    for piece in pieces {
+        let logical_end = logical_start + piece.byte_len();
+        if logical_end <= range.start.0 {
+            logical_start = logical_end;
+            continue;
+        }
+        if logical_start >= range.end.0 {
+            break;
+        }
+        let overlap_start = logical_start.max(range.start.0);
+        let overlap_end = logical_end.min(range.end.0);
+        let piece_offset = overlap_start - logical_start;
+        let overlap_len = overlap_end - overlap_start;
+        match piece {
+            Piece::Original { file_range, .. } => {
+                let start = file_range.start.0 + piece_offset;
+                let bytes = pager
+                    .read_for_save(ByteRange::new(start, start + overlap_len))
+                    .map_err(|e| VlfSaveError::Io(e, pager.canonical_path().to_owned()))?;
+                out.extend_from_slice(&bytes);
+            }
+            Piece::Inserted { range: insert_range, .. } => {
+                let bytes = overlay
+                    .inserted_bytes_for_piece(piece)
+                    .expect("Inserted piece must have valid buffer reference");
+                let start = piece_offset as usize;
+                let end = (piece_offset + overlap_len) as usize;
+                debug_assert_eq!(bytes.len() as u64, insert_range.len());
+                out.extend_from_slice(&bytes[start..end]);
+            }
+        }
+        logical_start = logical_end;
+    }
+    Ok(out)
+}
+
+fn shift_tail_right(
+    file: &fs::File,
+    path: &Path,
+    tail_start: u64,
+    old_len: u64,
+    delta: u64,
+) -> Result<(), VlfSaveError> {
+    let mut end = old_len;
+    while end > tail_start {
+        let start = end.saturating_sub(SAVE_CHUNK_BYTES).max(tail_start);
+        let bytes = super::pager::pread_exact(file, start, (end - start) as usize)
+            .map_err(|e| VlfSaveError::Io(e, path.to_owned()))?;
+        pwrite_all(file, start + delta, &bytes)
+            .map_err(|e| VlfSaveError::Io(e, path.to_owned()))?;
+        end = start;
+    }
+    Ok(())
+}
+
+fn shift_tail_left(
+    file: &fs::File,
+    path: &Path,
+    tail_start: u64,
+    old_len: u64,
+    delta: u64,
+) -> Result<(), VlfSaveError> {
+    let mut start = tail_start;
+    while start < old_len {
+        let end = (start + SAVE_CHUNK_BYTES).min(old_len);
+        let bytes = super::pager::pread_exact(file, start, (end - start) as usize)
+            .map_err(|e| VlfSaveError::Io(e, path.to_owned()))?;
+        pwrite_all(file, start - delta, &bytes)
+            .map_err(|e| VlfSaveError::Io(e, path.to_owned()))?;
+        start = end;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn pwrite_all(file: &fs::File, mut offset: u64, mut bytes: &[u8]) -> io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    while !bytes.is_empty() {
+        let written = file.write_at(bytes, offset)?;
+        if written == 0 {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "failed to write file chunk"));
+        }
+        offset += written as u64;
+        bytes = &bytes[written..];
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn pwrite_all(file: &fs::File, mut offset: u64, mut bytes: &[u8]) -> io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    while !bytes.is_empty() {
+        let written = file.seek_write(bytes, offset)?;
+        if written == 0 {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "failed to write file chunk"));
+        }
+        offset += written as u64;
+        bytes = &bytes[written..];
+    }
+    Ok(())
+}
+
+fn same_canonical_path(lhs: &Path, rhs: &Path) -> bool {
+    lhs.canonicalize().is_ok_and(|lhs| lhs == rhs)
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +787,99 @@ mod tests {
         )
         .unwrap();
         assert_eq!(read_file_bytes(save_as_target.path()), content);
+    }
+
+    #[test]
+    fn same_size_in_place_overwrites_changed_window() {
+        let content = b"abcdef\n";
+        let fixture = write_temp_fixture(content);
+        let pager = FilePager::open(fixture.path()).unwrap();
+        let metrics = TextMetrics { byte_len: content.len() as u64, ..TextMetrics::default() };
+        let mut overlay = PieceOverlay::new(metrics);
+        let ctx = OverlayEditContext { revision_id: 1, undo_group: 1 };
+        overlay.delete_in_group(ByteRange::new(2, 4), ctx).unwrap();
+        overlay.insert_in_group(2, "XY", ctx).unwrap();
+
+        let policy = VlfSavePolicy::SameSizeInPlaceOverwrite;
+        stream_save_pieces(
+            overlay.pieces(),
+            &overlay,
+            &pager,
+            fixture.path(),
+            &policy,
+            &mut |_| true,
+        )
+        .unwrap();
+        assert_eq!(read_file_bytes(fixture.path()), b"abXYef\n");
+    }
+
+    #[test]
+    fn tail_shift_grows_file_in_place() {
+        let content = b"abcdef\n";
+        let fixture = write_temp_fixture(content);
+        let pager = FilePager::open(fixture.path()).unwrap();
+        let metrics = TextMetrics { byte_len: content.len() as u64, ..TextMetrics::default() };
+        let mut overlay = PieceOverlay::new(metrics);
+        let ctx = OverlayEditContext { revision_id: 1, undo_group: 1 };
+        overlay.insert_in_group(3, "XY", ctx).unwrap();
+
+        let policy = VlfSavePolicy::TailShift { fallback_temp_dir: None };
+        stream_save_pieces(
+            overlay.pieces(),
+            &overlay,
+            &pager,
+            fixture.path(),
+            &policy,
+            &mut |_| true,
+        )
+        .unwrap();
+        assert_eq!(read_file_bytes(fixture.path()), b"abcXYdef\n");
+    }
+
+    #[test]
+    fn tail_shift_shrinks_file_in_place() {
+        let content = b"abcdef\n";
+        let fixture = write_temp_fixture(content);
+        let pager = FilePager::open(fixture.path()).unwrap();
+        let metrics = TextMetrics { byte_len: content.len() as u64, ..TextMetrics::default() };
+        let mut overlay = PieceOverlay::new(metrics);
+        let ctx = OverlayEditContext { revision_id: 1, undo_group: 1 };
+        overlay.delete_in_group(ByteRange::new(1, 4), ctx).unwrap();
+
+        let policy = VlfSavePolicy::TailShift { fallback_temp_dir: None };
+        stream_save_pieces(
+            overlay.pieces(),
+            &overlay,
+            &pager,
+            fixture.path(),
+            &policy,
+            &mut |_| true,
+        )
+        .unwrap();
+        assert_eq!(read_file_bytes(fixture.path()), b"aef\n");
+    }
+
+    #[test]
+    fn optimized_save_cancellation_before_commit_leaves_file_intact() {
+        let content = b"abcdef\n";
+        let fixture = write_temp_fixture(content);
+        let pager = FilePager::open(fixture.path()).unwrap();
+        let metrics = TextMetrics { byte_len: content.len() as u64, ..TextMetrics::default() };
+        let mut overlay = PieceOverlay::new(metrics);
+        let ctx = OverlayEditContext { revision_id: 1, undo_group: 1 };
+        overlay.insert_in_group(3, "XY", ctx).unwrap();
+
+        let policy = VlfSavePolicy::TailShift { fallback_temp_dir: None };
+        let result = stream_save_pieces(
+            overlay.pieces(),
+            &overlay,
+            &pager,
+            fixture.path(),
+            &policy,
+            &mut |_| false,
+        );
+        assert!(matches!(result, Err(VlfSaveError::Cancelled)));
+        assert_eq!(read_file_bytes(fixture.path()), content);
     }
 
     // -----------------------------------------------------------------------
