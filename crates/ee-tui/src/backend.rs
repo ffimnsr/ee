@@ -1193,6 +1193,38 @@ pub(crate) fn invalid_line_ranges(line_cache: &[LineSlot]) -> Vec<(usize, usize)
     ranges
 }
 
+pub(crate) fn invalid_line_ranges_bounded(
+    line_cache: &[LineSlot],
+    start: usize,
+    end: usize,
+) -> Vec<(usize, usize)> {
+    let end = end.min(line_cache.len());
+    if start >= end {
+        return Vec::new();
+    }
+
+    let mut ranges = Vec::new();
+    let mut range_start = None;
+
+    for (index, slot) in line_cache[start..end].iter().enumerate() {
+        let index = start + index;
+        match (slot, range_start) {
+            (LineSlot::Invalid, None) => range_start = Some(index),
+            (LineSlot::Known(_), Some(start)) => {
+                ranges.push((start, index));
+                range_start = None;
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(start) = range_start {
+        ranges.push((start, end));
+    }
+
+    ranges
+}
+
 pub(crate) fn xi_reader_thread(
     rx: std_mpsc::Receiver<String>,
     tx: mpsc::Sender<String>,

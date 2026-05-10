@@ -102,9 +102,9 @@ impl App {
                     line + 1,
                     col + 1,
                     self.backend
-                        .lines
-                        .get(*line)
-                        .map(|text| text.trim())
+                        .active()
+                        .get_line(*line)
+                        .map(str::trim)
                         .filter(|text| !text.is_empty())
                         .unwrap_or("<blank>")
                 ),
@@ -194,6 +194,7 @@ impl App {
                     .map(str::to_owned)
                     .unwrap_or_else(|| buffer.title());
                 buffer.diagnostics.iter().map(move |diagnostic| {
+                    // Whole-buffer policy-allowed: diagnostic offset→line/col requires full text mirror.
                     let (line, col) = line_col_for_offset(&buffer.lines, diagnostic.range.start);
                     crate::picker::PickerItem {
                         label: format!("{prefix}:{}: {}", line + 1, diagnostic.message),
@@ -2141,6 +2142,7 @@ impl App {
         buf.diagnostics
             .iter()
             .map(|diagnostic| {
+                // Whole-buffer policy-allowed: diagnostic offset→line/col requires full text mirror.
                 let (line, col) = line_col_for_offset(&buf.lines, diagnostic.range.start);
                 let severity = match diagnostic.severity {
                     xi_core_lib::plugin_rpc::DiagnosticSeverity::Error => "error",
@@ -2177,9 +2179,9 @@ impl App {
     pub(super) fn active_cursor_offset(&self) -> usize {
         let buf = self.backend.active();
         let line = self.backend.cursor_line.min(buf.line_count().saturating_sub(1));
-        let prefix = buf.lines.iter().take(line).map(|line| line.len() + 1).sum::<usize>();
-        let col =
-            buf.lines.get(line).map(|line| self.backend.cursor_col.min(line.len())).unwrap_or(0);
+        // Bounded: reads only up to cursor line, not full buffer.
+        let prefix = buf.line_start_offset(line).unwrap_or(0);
+        let col = buf.get_line(line).map(|l| self.backend.cursor_col.min(l.len())).unwrap_or(0);
         prefix + col
     }
 
