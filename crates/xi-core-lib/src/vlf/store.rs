@@ -43,12 +43,16 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
-use std::io;
+use std::io::{self, Read};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
+#[cfg(unix)]
+use std::{ptr, slice};
 
 use crate::text_store::{
     ByteOffset, ByteRange, DocumentMode, EditPermission, FullTextPolicy, KnownLineCount,
@@ -75,6 +79,15 @@ const UTF8_SEAM_SLACK: u64 = 4;
 
 /// Default batch size for viewport reads (256 KiB).
 pub const DEFAULT_BATCH_SIZE: u64 = 256 * 1024;
+
+/// Read buffer for streaming `wc -l`-style line counts.
+const LINE_COUNT_BUFFER_SIZE: usize = 256 * 1024;
+
+#[cfg(unix)]
+const LINE_COUNT_MMAP_PARALLEL_THRESHOLD: usize = 64 * 1024 * 1024;
+
+#[cfg(unix)]
+const LINE_COUNT_MMAP_MAX_THREADS: usize = 8;
 
 /// Default byte cap for the decoded-text cache (32 MiB).
 ///
@@ -1018,16 +1031,27 @@ impl VlfStore {
     /// This is intentionally equivalent to `wc -l`: it does not materialize
     /// text and does not require the sparse page index to be complete.
     pub fn count_lf_streaming(&self) -> io::Result<u64> {
-        let file = File::open(self.pager.canonical_path())?;
+        let mut file = File::open(self.pager.canonical_path())?;
         let file_size = self.pager.file_size();
-        let mut pos = 0u64;
+        #[cfg(unix)]
+        if let Some(count) = count_lf_mmap(&file, file_size)? {
+            return Ok(count);
+        }
+
+        advise_line_count_sequential(&file, file_size);
+
+        let mut buf = vec![0u8; LINE_COUNT_BUFFER_SIZE];
+        let mut bytes_seen = 0u64;
         let mut count = 0u64;
 
-        while pos < file_size {
-            let end = (pos + self.page_size).min(file_size);
-            let bytes = pread_exact(&file, pos, (end - pos) as usize)?;
-            count += bytes.iter().filter(|&&byte| byte == b'\n').count() as u64;
-            pos = end;
+        while bytes_seen < file_size {
+            let len = (file_size - bytes_seen).min(LINE_COUNT_BUFFER_SIZE as u64) as usize;
+            let bytes_read = file.read(&mut buf[..len])?;
+            if bytes_read == 0 {
+                break;
+            }
+            count += bytecount::count(&buf[..bytes_read], b'\n') as u64;
+            bytes_seen += bytes_read as u64;
         }
 
         Ok(count)
@@ -1665,6 +1689,77 @@ fn analyse_bytes(
     (newline_count, utf16_len, first_line_prefix_len, last_line_suffix_len)
 }
 
+#[cfg(unix)]
+fn count_lf_mmap(file: &File, file_size: u64) -> io::Result<Option<u64>> {
+    if file_size == 0 {
+        return Ok(Some(0));
+    }
+
+    let Ok(len) = usize::try_from(file_size) else {
+        return Ok(None);
+    };
+
+    let ptr = unsafe {
+        libc::mmap(ptr::null_mut(), len, libc::PROT_READ, libc::MAP_PRIVATE, file.as_raw_fd(), 0)
+    };
+
+    if ptr == libc::MAP_FAILED {
+        return Ok(None);
+    }
+
+    let bytes = unsafe { slice::from_raw_parts(ptr.cast::<u8>(), len) };
+    let count = count_lf_mmap_bytes(bytes)?;
+
+    if unsafe { libc::munmap(ptr, len) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(Some(count))
+}
+
+#[cfg(unix)]
+fn count_lf_mmap_bytes(bytes: &[u8]) -> io::Result<u64> {
+    let worker_count = thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(LINE_COUNT_MMAP_MAX_THREADS);
+
+    if worker_count <= 1 || bytes.len() < LINE_COUNT_MMAP_PARALLEL_THRESHOLD {
+        return Ok(bytecount::count(bytes, b'\n') as u64);
+    }
+
+    let chunk_size = bytes.len().div_ceil(worker_count);
+    thread::scope(|scope| {
+        let handles = bytes
+            .chunks(chunk_size)
+            .map(|chunk| scope.spawn(move || bytecount::count(chunk, b'\n') as u64))
+            .collect::<Vec<_>>();
+
+        let mut count = 0u64;
+        for handle in handles {
+            count += handle
+                .join()
+                .map_err(|_| io::Error::other("parallel line count worker panicked"))?;
+        }
+        Ok(count)
+    })
+}
+
+#[cfg(unix)]
+fn advise_line_count_sequential(file: &File, file_size: u64) {
+    let _ = unsafe {
+        libc::posix_fadvise(
+            file.as_raw_fd(),
+            0,
+            file_size.min(libc::off_t::MAX as u64) as libc::off_t,
+            libc::POSIX_FADV_SEQUENTIAL,
+        )
+    };
+}
+
+#[cfg(not(unix))]
+fn advise_line_count_sequential(_file: &File, _file_size: u64) {}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1704,6 +1799,15 @@ mod tests {
     fn read_full_text_returns_unsupported() {
         let (store, _f) = store_from(b"hello world");
         assert_eq!(store.read_full_text(), TextChunkResult::Unsupported);
+    }
+
+    #[test]
+    fn count_lf_streaming_matches_wc_l_semantics() {
+        let (store, _f) = store_from(b"alpha\nbeta\ngamma\n");
+        assert_eq!(store.count_lf_streaming().unwrap(), 3);
+
+        let (store, _f) = store_from(b"alpha\nbeta\ngamma");
+        assert_eq!(store.count_lf_streaming().unwrap(), 2);
     }
 
     #[test]

@@ -294,11 +294,12 @@ Avoid Ropey (`ropey` crate) choices that conflict with ee architecture.
     - [x] Evaluate enforcing "never split CRLF across leaves" in `find_leaf_split` and merge/split paths.
     - [x] Add line metric tests where `\r\n` lands exactly on leaf boundary and edit boundary.
     - [x] Keep byte offsets as source of truth; do not switch public edit APIs to char-index-first.
-  - [ ] Evaluate metadata/layout optimizations after API and I/O wins land.
-    - [ ] Benchmark Ropey-style parent-side child metadata against current `Node` metadata before redesign.
-    - [ ] Consider inline leaf storage only with measured memory/cache benefit and contained unsafe surface.
-    - [ ] Consider char-count metadata only if char-index or UTF-16 conversion hot paths justify extra update cost.
-    - [ ] Keep `Arc::make_mut` copy-on-write behavior and cheap snapshots for async save/history.
+  - [x] Evaluate metadata/layout optimizations after API and I/O wins land.
+    - [x] Benchmark Ropey-style parent-side child metadata against current `Node` metadata before redesign.
+    - [x] Consider inline leaf storage only with measured memory/cache benefit and contained unsafe surface.
+    - [x] Consider char-count metadata only if char-index or UTF-16 conversion hot paths justify extra update cost.
+    - [x] Keep `Arc::make_mut` copy-on-write behavior and cheap snapshots for async save/history.
+    - Note: `metadata_layout` benchmark compares current `Node` metadata to bench-only parent-side child metadata on line and UTF-16 lookups. May 2026 run: current layout was faster on absolute times for `offset_of_line` (609 ns vs 728 ns), `line_of_offset` (191 ns vs 237 ns), `offset_of_utf16` (1.566 us vs 2.346 us), and `utf16_of_offset` (915 ns vs 2.004 us). Production layout stays on `Arc` COW, owned `String` leaves, and existing line/UTF-16 metadata; no inline leaves or char-count metadata until a later benchmark shows a real win.
 
 
 ### Optional Future Boundary Work
@@ -306,8 +307,3 @@ Avoid Ropey (`ropey` crate) choices that conflict with ee architecture.
 - [ ] Move text-object range resolution from `crates/ee-tui/src/app/mod.rs` into `xi-core-lib` if we want backend-owned semantic text objects across future frontends.
 - [ ] Move visual-block delete/change/yank execution from `crates/ee-tui/src/app/mod.rs` into `xi-core-lib` so rectangular selection mutations become backend-owned editor semantics.
 - [ ] Re-evaluate visual-block insert setup and replay split between `ee-tui` and `xi-core-lib`; keep frontend workflow glue only, move any remaining selection-truth or mutation semantics backend-side if reused by another frontend.
-
-
-### Others
-
-- [ ] Move 

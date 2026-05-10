@@ -1,5 +1,5 @@
 use std::io::{self, Stdout};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -16,6 +16,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use xi_core_lib::vlf::store::VlfStore;
 
 mod app;
 mod backend;
@@ -111,8 +112,22 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Run editor utility commands
+    Do {
+        #[command(subcommand)]
+        command: DoCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DoCommands {
     /// Check for problems and locate loaded config files
     Doctor,
+    /// Run file utility commands
+    File {
+        #[command(subcommand)]
+        command: FileCommands,
+    },
     /// Validate config file syntax and values
     Validate {
         /// Config file to validate
@@ -124,6 +139,16 @@ enum Commands {
         /// Shell to generate completions for
         #[arg(value_enum)]
         shell: Shell,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum FileCommands {
+    /// Count line-feed bytes in a file like `wc -l`
+    LineCheck {
+        /// File to inspect
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
     },
 }
 
@@ -149,7 +174,7 @@ fn install_panic_hook() {
 // ── Subcommand handlers ───────────────────────────────────────────────────────
 
 fn cmd_doctor(config_path: Option<&PathBuf>) {
-    println!("ee doctor");
+    println!("ee do doctor");
     println!("─────────");
 
     // Config search path
@@ -219,6 +244,20 @@ fn cmd_completions(shell: Shell) {
     generate(shell, &mut cmd, "ee", &mut io::stdout());
 }
 
+fn count_file_line_feeds(path: &Path) -> io::Result<u64> {
+    VlfStore::open(path)?.count_lf_streaming()
+}
+
+fn cmd_file_line_check(path: &Path) {
+    match count_file_line_feeds(path) {
+        Ok(count) => println!("{count} {}", path.display()),
+        Err(err) => {
+            eprintln!("Cannot count lines in {}: {err}", path.display());
+            std::process::exit(1);
+        }
+    }
+}
+
 fn resolve_startup_launch(
     files: &[PathBuf],
     saved_session: Option<&session::SessionState>,
@@ -263,17 +302,18 @@ fn main() -> io::Result<()> {
 
     // Handle subcommands that don't launch the editor.
     match cli.command {
-        Some(Commands::Doctor) => {
-            cmd_doctor(cli.config.as_ref());
-            return Ok(());
-        }
-        Some(Commands::Validate { config }) => {
-            let config_path = config.as_ref().or(cli.config.as_ref());
-            cmd_validate(config_path);
-            return Ok(());
-        }
-        Some(Commands::Completions { shell }) => {
-            cmd_completions(shell);
+        Some(Commands::Do { command }) => {
+            match command {
+                DoCommands::Doctor => cmd_doctor(cli.config.as_ref()),
+                DoCommands::File { command } => match command {
+                    FileCommands::LineCheck { file } => cmd_file_line_check(&file),
+                },
+                DoCommands::Validate { config } => {
+                    let config_path = config.as_ref().or(cli.config.as_ref());
+                    cmd_validate(config_path);
+                }
+                DoCommands::Completions { shell } => cmd_completions(shell),
+            }
             return Ok(());
         }
         None => {}
