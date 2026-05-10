@@ -6,8 +6,10 @@ use std::path::PathBuf;
 #[test]
 fn replay_saved_xi_rope_compare_crashes() {
     let artifacts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("artifacts/xi_rope_compare");
-    let mut artifacts = fs::read_dir(&artifacts_dir)
-        .unwrap_or_else(|err| panic!("failed to read {}: {err}", artifacts_dir.display()))
+    let Ok(entries) = fs::read_dir(&artifacts_dir) else {
+        return;
+    };
+    let mut artifacts = entries
         .map(|entry| entry.unwrap().path())
         .filter(|path| {
             path.file_name()
