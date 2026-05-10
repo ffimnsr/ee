@@ -42,5 +42,7 @@ pub mod tree;
 
 pub use crate::delta::{Builder as DeltaBuilder, Delta, DeltaElement, Transformer};
 pub use crate::interval::Interval;
-pub use crate::rope::{LinesMetric, Rope, RopeDelta, RopeInfo, RopeSlice, RopeSliceCursor};
+pub use crate::rope::{
+    LinesMetric, Rope, RopeDelta, RopeError, RopeInfo, RopeSlice, RopeSliceCursor,
+};
 pub use crate::tree::{Cursor, Metric};

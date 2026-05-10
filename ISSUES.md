@@ -35,7 +35,7 @@
   - [ ] Add explicit fast app-shutdown path for `BufferManager` that stops reader/core threads without best-effort `close_view` cleanup work.
   - [ ] Keep interactive buffer-close commands (`:bc`, window close, tab close) on normal close semantics; use fast shutdown only for whole-app exit.
   - [ ] Avoid full-buffer close/render/plugin cleanup for large `ConstrainedNormal` buffers during app exit.
-  - [ ] Re-evaluate exact-threshold behavior for 20 MiB fixtures: keep constrained-normal and ensure teardown stays non-blocking.
+  - [ ] Re-evaluate exact-threshold behavior for 8 MiB fixtures: keep constrained-normal and ensure teardown stays non-blocking.
   - [ ] Add regression coverage proving `:q` on pristine large buffers does not save, does not close-buffer synchronously, and exits within quit budget.
 
 - [x] Add hybrid paged-rope architecture seam.
@@ -282,14 +282,14 @@ Avoid Ropey (`ropey` crate) choices that conflict with ee architecture.
     - [ ] Keep `TextStore` chunk-native read path unchanged; builder improves in-memory rope creation only.
     - [ ] Add benchmarks for 20 MiB many-line, 20 MiB long-line, and mixed UTF-8/CRLF fixtures.
     - [ ] Add regression proving builder load does not allocate a full intermediate `String` beyond current file-read policy.
-  - [ ] Add streaming write APIs.
-    - [ ] Add `Rope::write_to<W: io::Write>(&self, writer: W) -> io::Result<()>` using `iter_chunks(..)`.
-    - [ ] Use chunk streaming in normal/constrained save so save path avoids `String::from(&rope)`.
-    - [ ] Add interrupted-writer test proving partial write errors propagate without retry loops hiding failure.
-  - [ ] Add checked non-panicking query/edit APIs at editor boundary.
-    - [ ] Add `try_offset_of_line`, `try_line_of_offset`, `try_slice`, and `try_edit` returning `Result`.
-    - [ ] Keep panicking APIs internal/test-friendly only where caller already validates bounds.
-    - [ ] Convert TUI/core boundary calls to checked APIs with user-facing error paths.
+  - [x] Add streaming write APIs.
+    - [x] Add `Rope::write_to<W: io::Write>(&self, writer: W) -> io::Result<()>` using `iter_chunks(..)`.
+    - [x] Use chunk streaming in normal/constrained save so save path avoids `String::from(&rope)`.
+    - [x] Add interrupted-writer test proving partial write errors propagate without retry loops hiding failure.
+  - [x] Add checked non-panicking query/edit APIs at editor boundary.
+    - [x] Add `try_offset_of_line`, `try_line_of_offset`, `try_slice`, and `try_edit` returning `Result`.
+    - [x] Keep panicking APIs internal/test-friendly only where caller already validates bounds.
+    - [x] Convert TUI/core boundary calls to checked APIs with user-facing error paths.
   - [ ] Improve CRLF correctness without copying Ropey API wholesale.
     - [ ] Evaluate enforcing "never split CRLF across leaves" in `find_leaf_split` and merge/split paths.
     - [ ] Add line metric tests where `\r\n` lands exactly on leaf boundary and edit boundary.

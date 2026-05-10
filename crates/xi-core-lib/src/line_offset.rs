@@ -16,7 +16,7 @@
 
 use std::ops::Range;
 
-use xi_rope::Rope;
+use xi_rope::{Rope, RopeError};
 
 use crate::linewrap::Lines;
 use crate::selection::SelRegion;
@@ -26,14 +26,24 @@ use crate::selection::SelRegion;
 pub trait LineOffset {
     // use own breaks if present, or text if not (no line wrapping)
 
+    fn try_offset_of_line(&self, text: &Rope, line: usize) -> Result<usize, RopeError> {
+        text.try_offset_of_line(line)
+    }
+
     /// Returns the byte offset corresponding to the given line.
     fn offset_of_line(&self, text: &Rope, line: usize) -> usize {
-        text.offset_of_line(line)
+        self.try_offset_of_line(text, line)
+            .expect("LineOffset::offset_of_line callers must validate bounds")
+    }
+
+    fn try_line_of_offset(&self, text: &Rope, offset: usize) -> Result<usize, RopeError> {
+        text.try_line_of_offset(offset)
     }
 
     /// Returns the visible line number containing the given offset.
     fn line_of_offset(&self, text: &Rope, offset: usize) -> usize {
-        text.line_of_offset(offset)
+        self.try_line_of_offset(text, offset)
+            .expect("LineOffset::line_of_offset callers must validate bounds")
     }
 
     // How should we count "column"? Valid choices include:
@@ -46,17 +56,31 @@ pub trait LineOffset {
     // Of course, all these are identical for ASCII. For now we use UTF-8 code units
     // for simplicity.
 
-    fn offset_to_line_col(&self, text: &Rope, offset: usize) -> (usize, usize) {
-        let line = self.line_of_offset(text, offset);
-        (line, offset - self.offset_of_line(text, line))
+    fn try_offset_to_line_col(
+        &self,
+        text: &Rope,
+        offset: usize,
+    ) -> Result<(usize, usize), RopeError> {
+        let line = self.try_line_of_offset(text, offset)?;
+        Ok((line, offset - self.try_offset_of_line(text, line)?))
     }
 
-    fn line_col_to_offset(&self, text: &Rope, line: usize, col: usize) -> usize {
-        let mut offset = self.offset_of_line(text, line).saturating_add(col);
+    fn offset_to_line_col(&self, text: &Rope, offset: usize) -> (usize, usize) {
+        self.try_offset_to_line_col(text, offset)
+            .expect("LineOffset::offset_to_line_col callers must validate bounds")
+    }
+
+    fn try_line_col_to_offset(
+        &self,
+        text: &Rope,
+        line: usize,
+        col: usize,
+    ) -> Result<usize, RopeError> {
+        let mut offset = self.try_offset_of_line(text, line)?.saturating_add(col);
         if offset >= text.len() {
             offset = text.len();
-            if self.line_of_offset(text, offset) <= line {
-                return offset;
+            if self.try_line_of_offset(text, offset)? <= line {
+                return Ok(offset);
             }
         } else {
             // Snap to grapheme cluster boundary
@@ -64,13 +88,18 @@ pub trait LineOffset {
         }
 
         // clamp to end of line
-        let next_line_offset = self.offset_of_line(text, line + 1);
+        let next_line_offset = self.try_offset_of_line(text, line + 1)?;
         if offset >= next_line_offset {
             if let Some(prev) = text.prev_grapheme_offset(next_line_offset) {
                 offset = prev;
             }
         }
-        offset
+        Ok(offset)
+    }
+
+    fn line_col_to_offset(&self, text: &Rope, line: usize, col: usize) -> usize {
+        self.try_line_col_to_offset(text, line, col)
+            .expect("LineOffset::line_col_to_offset callers must validate bounds")
     }
 
     /// Get the line range of a selected region.
@@ -92,8 +121,21 @@ pub struct LogicalLines;
 impl LineOffset for LogicalLines {}
 
 impl LineOffset for xi_rope::breaks::Breaks {
+    fn try_offset_of_line(&self, _text: &Rope, line: usize) -> Result<usize, RopeError> {
+        let max_line = self.measure::<xi_rope::breaks::BreaksMetric>() + 1;
+        if line > max_line {
+            return Err(RopeError::LineOutOfBounds { line, max_line });
+        }
+        Ok(self.count_base_units::<xi_rope::breaks::BreaksMetric>(line))
+    }
+
     fn offset_of_line(&self, _text: &Rope, line: usize) -> usize {
         self.count_base_units::<xi_rope::breaks::BreaksMetric>(line)
+    }
+
+    fn try_line_of_offset(&self, text: &Rope, offset: usize) -> Result<usize, RopeError> {
+        text.try_line_of_offset(offset)?;
+        Ok(self.count::<xi_rope::breaks::BreaksMetric>(offset))
     }
 
     fn line_of_offset(&self, text: &Rope, offset: usize) -> usize {
@@ -103,8 +145,16 @@ impl LineOffset for xi_rope::breaks::Breaks {
 }
 
 impl LineOffset for Lines {
+    fn try_offset_of_line(&self, text: &Rope, line: usize) -> Result<usize, RopeError> {
+        self.try_offset_of_visual_line(text, line)
+    }
+
     fn offset_of_line(&self, text: &Rope, line: usize) -> usize {
         self.offset_of_visual_line(text, line)
+    }
+
+    fn try_line_of_offset(&self, text: &Rope, offset: usize) -> Result<usize, RopeError> {
+        self.try_visual_line_of_offset(text, offset)
     }
 
     fn line_of_offset(&self, text: &Rope, offset: usize) -> usize {

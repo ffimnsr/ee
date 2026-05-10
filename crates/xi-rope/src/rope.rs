@@ -20,6 +20,7 @@
 use std::borrow::Cow;
 use std::cmp::{Ordering, max, min};
 use std::fmt;
+use std::io;
 use std::ops::Add;
 use std::str::{self, FromStr};
 use std::string::ParseError;
@@ -33,6 +34,53 @@ use unicode_segmentation::{GraphemeCursor, GraphemeIncomplete};
 
 const MIN_LEAF: usize = 511;
 const MAX_LEAF: usize = 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RopeError {
+    OffsetOutOfBounds { offset: usize, len: usize },
+    LineOutOfBounds { line: usize, max_line: usize },
+    ReversedInterval { start: usize, end: usize },
+    IntervalOutOfBounds { start: usize, end: usize, len: usize },
+}
+
+impl RopeError {
+    fn offset_out_of_bounds(offset: usize, len: usize) -> Self {
+        Self::OffsetOutOfBounds { offset, len }
+    }
+
+    fn line_out_of_bounds(line: usize, max_line: usize) -> Self {
+        Self::LineOutOfBounds { line, max_line }
+    }
+
+    fn reversed_interval(iv: Interval) -> Self {
+        Self::ReversedInterval { start: iv.start(), end: iv.end() }
+    }
+
+    fn interval_out_of_bounds(iv: Interval, len: usize) -> Self {
+        Self::IntervalOutOfBounds { start: iv.start(), end: iv.end(), len }
+    }
+}
+
+impl fmt::Display for RopeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OffsetOutOfBounds { offset, len } => {
+                write!(f, "offset {offset} beyond rope length {len}")
+            }
+            Self::LineOutOfBounds { line, max_line } => {
+                write!(f, "line {line} beyond last line {max_line}")
+            }
+            Self::ReversedInterval { start, end } => {
+                write!(f, "invalid interval [{start}, {end}): start exceeds end")
+            }
+            Self::IntervalOutOfBounds { start, end, len } => {
+                write!(f, "interval [{start}, {end}) beyond rope length {len}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RopeError {}
 
 /// A rope data structure.
 ///
@@ -539,6 +587,34 @@ impl FromStr for Rope {
 }
 
 impl Rope {
+    fn validate_offset(&self, offset: usize) -> Result<(), RopeError> {
+        if offset > self.len() {
+            Err(RopeError::offset_out_of_bounds(offset, self.len()))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn max_line_index(&self) -> usize {
+        self.measure::<LinesMetric>() + 1
+    }
+
+    fn validate_line(&self, line: usize) -> Result<(), RopeError> {
+        let max_line = self.max_line_index();
+        if line > max_line { Err(RopeError::line_out_of_bounds(line, max_line)) } else { Ok(()) }
+    }
+
+    fn validate_interval<T: IntervalBounds>(&self, iv: T) -> Result<Interval, RopeError> {
+        let iv = iv.into_interval(self.len());
+        if iv.start() > iv.end() {
+            return Err(RopeError::reversed_interval(iv));
+        }
+        if iv.end() > self.len() {
+            return Err(RopeError::interval_out_of_bounds(iv, self.len()));
+        }
+        Ok(iv)
+    }
+
     /// Edit the string, replacing the byte range [`start`..`end`] with `new`.
     ///
     /// Time complexity: O(log n)
@@ -547,9 +623,23 @@ impl Rope {
         self.edit(iv, new)
     }
 
+    pub fn try_edit<T, IV>(&mut self, iv: IV, new: T) -> Result<(), RopeError>
+    where
+        T: Into<Rope>,
+        IV: IntervalBounds,
+    {
+        let iv = self.validate_interval(iv)?;
+        self.edit(iv, new);
+        Ok(())
+    }
+
     /// Returns a new Rope with the contents of the provided range.
     pub fn slice<T: IntervalBounds>(&self, iv: T) -> Rope {
-        self.subseq(iv)
+        self.try_slice(iv).expect("Rope::slice callers must validate bounds")
+    }
+
+    pub fn try_slice<T: IntervalBounds>(&self, iv: T) -> Result<Rope, RopeError> {
+        Ok(self.subseq(self.validate_interval(iv)?))
     }
 
     /// Returns borrowed read-only view over provided range.
@@ -619,7 +709,12 @@ impl Rope {
     /// This function will panic if `offset > self.len()`. Callers are expected to
     /// validate their input.
     pub fn line_of_offset(&self, offset: usize) -> usize {
-        self.count::<LinesMetric>(offset)
+        self.try_line_of_offset(offset).expect("Rope::line_of_offset callers must validate bounds")
+    }
+
+    pub fn try_line_of_offset(&self, offset: usize) -> Result<usize, RopeError> {
+        self.validate_offset(offset)?;
+        Ok(self.count::<LinesMetric>(offset))
     }
 
     /// Return the byte offset corresponding to the line number `line`.
@@ -636,16 +731,16 @@ impl Rope {
     /// This function will panic if `line > self.measure::<LinesMetric>() + 1`.
     /// Callers are expected to validate their input.
     pub fn offset_of_line(&self, line: usize) -> usize {
-        let max_line = self.measure::<LinesMetric>() + 1;
-        match line.cmp(&max_line) {
-            Ordering::Greater => {
-                panic!("line number {} beyond last line {}", line, max_line);
-            }
-            Ordering::Equal => {
-                return self.len();
-            }
+        self.try_offset_of_line(line).expect("Rope::offset_of_line callers must validate bounds")
+    }
+
+    pub fn try_offset_of_line(&self, line: usize) -> Result<usize, RopeError> {
+        self.validate_line(line)?;
+        Ok(match line.cmp(&self.max_line_index()) {
+            Ordering::Equal => self.len(),
             Ordering::Less => self.count_base_units::<LinesMetric>(line),
-        }
+            Ordering::Greater => unreachable!("validate_line rejects oversized indices"),
+        })
     }
 
     /// Returns chunk containing `byte_offset` and chunk start metrics.
@@ -745,6 +840,14 @@ impl Rope {
             }
             (None, Some(_)) => unreachable!(),
         }
+    }
+
+    /// Stream rope contents into a byte writer without flattening first.
+    pub fn write_to<W: io::Write>(&self, mut writer: W) -> io::Result<()> {
+        for chunk in self.iter_chunks(..) {
+            writer.write_all(chunk.as_bytes())?;
+        }
+        Ok(())
     }
 }
 
@@ -996,6 +1099,29 @@ impl<'a> Iterator for Lines<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct FailingWriter {
+        written: Vec<u8>,
+        remaining: usize,
+        fail_kind: io::ErrorKind,
+    }
+
+    impl io::Write for FailingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.remaining == 0 {
+                return Err(io::Error::new(self.fail_kind, "writer interrupted"));
+            }
+
+            let written = self.remaining.min(buf.len());
+            self.written.extend_from_slice(&buf[..written]);
+            self.remaining -= written;
+            Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn replace_small() {
@@ -1286,6 +1412,70 @@ mod tests {
     fn offset_of_line_panic() {
         let rope = Rope::from("hi\ni'm\nfour\nlines");
         rope.offset_of_line(5);
+    }
+
+    #[test]
+    fn try_line_of_offset_reports_bounds_error() {
+        let rope = Rope::from("hi\ni'm\nfour\nlines");
+        assert_eq!(
+            rope.try_line_of_offset(20),
+            Err(RopeError::OffsetOutOfBounds { offset: 20, len: rope.len() })
+        );
+    }
+
+    #[test]
+    fn try_offset_of_line_reports_bounds_error() {
+        let rope = Rope::from("hi\ni'm\nfour\nlines");
+        assert_eq!(
+            rope.try_offset_of_line(5),
+            Err(RopeError::LineOutOfBounds { line: 5, max_line: 4 })
+        );
+    }
+
+    #[test]
+    fn try_slice_reports_bounds_error() {
+        let rope = Rope::from("hello");
+        assert_eq!(
+            rope.try_slice(0..10),
+            Err(RopeError::IntervalOutOfBounds { start: 0, end: 10, len: 5 })
+        );
+    }
+
+    #[test]
+    fn try_edit_reports_bounds_error() {
+        let mut rope = Rope::from("hello");
+        assert_eq!(
+            rope.try_edit(4..8, "!"),
+            Err(RopeError::IntervalOutOfBounds { start: 4, end: 8, len: 5 })
+        );
+        assert_eq!(String::from(&rope), "hello");
+    }
+
+    #[test]
+    fn write_to_streams_full_rope() {
+        let text = format!("{}{}", "a".repeat(1200), "b".repeat(1200));
+        let rope = Rope::from(text.as_str());
+        let mut bytes = Vec::new();
+
+        rope.write_to(&mut bytes).unwrap();
+
+        assert_eq!(String::from_utf8(bytes).unwrap(), text);
+    }
+
+    #[test]
+    fn write_to_propagates_partial_write_errors() {
+        let text = format!("{}{}", "a".repeat(1200), "b".repeat(1200));
+        let rope = Rope::from(text.as_str());
+        let mut writer = FailingWriter {
+            written: Vec::new(),
+            remaining: 1300,
+            fail_kind: io::ErrorKind::BrokenPipe,
+        };
+
+        let err = rope.write_to(&mut writer).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(writer.written, text.as_bytes()[..1300]);
     }
 
     #[test]

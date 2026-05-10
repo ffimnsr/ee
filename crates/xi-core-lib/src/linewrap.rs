@@ -18,7 +18,7 @@ use std::cmp::Ordering;
 use std::ops::Range;
 
 use xi_rope::breaks::{BreakBuilder, Breaks, BreaksInfo, BreaksMetric};
-use xi_rope::{Cursor, Interval, LinesMetric, Rope, RopeDelta, RopeInfo};
+use xi_rope::{Cursor, Interval, LinesMetric, Rope, RopeDelta, RopeError, RopeInfo};
 use xi_unicode::LineBreakLeafIter;
 
 use crate::client::Client;
@@ -160,6 +160,15 @@ impl Lines {
         line
     }
 
+    pub(crate) fn try_visual_line_of_offset(
+        &self,
+        text: &Rope,
+        offset: usize,
+    ) -> Result<usize, RopeError> {
+        text.try_line_of_offset(offset)?;
+        Ok(self.visual_line_of_offset(text, offset))
+    }
+
     /// Returns the byte offset corresponding to the line `line`.
     pub(crate) fn offset_of_visual_line(&self, text: &Rope, line: usize) -> usize {
         match self.wrap {
@@ -173,6 +182,18 @@ impl Lines {
                 cursor.offset_of_line(line)
             }
         }
+    }
+
+    pub(crate) fn try_offset_of_visual_line(
+        &self,
+        text: &Rope,
+        line: usize,
+    ) -> Result<usize, RopeError> {
+        let max_line = text.measure::<LinesMetric>() + self.breaks.measure::<BreaksMetric>() + 1;
+        if line > max_line {
+            return Err(RopeError::LineOutOfBounds { line, max_line });
+        }
+        Ok(self.offset_of_visual_line(text, line))
     }
 
     /// Returns an iterator over [`VisualLine`]s, starting at (and including)

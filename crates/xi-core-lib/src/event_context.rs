@@ -185,6 +185,10 @@ impl<'a> EventContext<'a> {
         use self::EventDomain as E;
         match event {
             E::View(cmd) => {
+                if !self.validate_view_event_bounds(&cmd) {
+                    return None;
+                }
+
                 if self.editor.borrow().is_vlf() {
                     match cmd {
                         crate::edit_types::ViewEvent::Find {
@@ -361,6 +365,36 @@ impl<'a> EventContext<'a> {
                 None
             }
         }
+    }
+
+    fn validate_view_event_bounds(&mut self, cmd: &crate::edit_types::ViewEvent) -> bool {
+        use crate::edit_types::ViewEvent;
+
+        let validation = match cmd {
+            ViewEvent::GotoLine { line } => self.validate_view_line_col("goto_line", *line, 0),
+            ViewEvent::Gesture { line, col, .. } => {
+                self.validate_view_line_col("gesture", *line, *col)
+            }
+            ViewEvent::Click(mouse) => {
+                self.validate_view_line_col("click", mouse.line, mouse.column)
+            }
+            ViewEvent::Drag(mouse) => self.validate_view_line_col("drag", mouse.line, mouse.column),
+            _ => return true,
+        };
+
+        if let Err(err) = validation {
+            self.client.alert(err);
+            return false;
+        }
+        true
+    }
+
+    fn validate_view_line_col(&mut self, method: &str, line: u64, col: u64) -> Result<(), String> {
+        let line = usize::try_from(line).map_err(|_| format!("{method}: line index overflow"))?;
+        let col = usize::try_from(col).map_err(|_| format!("{method}: column index overflow"))?;
+        self.with_view(|view, text| view.try_line_col_to_offset(text, line, col))
+            .map(|_| ())
+            .map_err(|err| format!("{method}: {err}"))
     }
 
     fn do_syntax_selection(&mut self, action: SyntaxSelectionAction) {
@@ -1916,7 +1950,17 @@ impl<'a> EventContext<'a> {
     /// that instead
     fn get_resolved_position(&mut self, position: Option<ClientPosition>) -> Option<usize> {
         position
-            .map(|p| self.with_view(|view, text| view.line_col_to_offset(text, p.line, p.column)))
+            .and_then(|p| {
+                match self
+                    .with_view(|view, text| view.try_line_col_to_offset(text, p.line, p.column))
+                {
+                    Ok(offset) => Some(offset),
+                    Err(err) => {
+                        self.client.alert(format!("request_hover: {err}"));
+                        None
+                    }
+                }
+            })
             .or_else(|| self.view.borrow().get_caret_offset())
     }
 }
@@ -3157,6 +3201,42 @@ mod tests {
         this is a string\n\
         that h|as three\n\
         lines|." );
+    }
+
+    #[test]
+    fn goto_line_out_of_bounds_alerts_instead_of_panicking() {
+        let harness = ContextHarness::new("hello\nworld\n");
+        harness.take_notifications();
+
+        let mut ctx = harness.make_context();
+        ctx.do_edit(EditNotification::GotoLine { line: 99 });
+
+        let notifications = harness.take_notifications();
+        let alert = notifications
+            .iter()
+            .find(|(method, _)| method == "alert")
+            .expect("expected alert notification");
+        assert_eq!(alert.1["msg"], json!("goto_line: line 99 beyond last line 3"));
+        assert_eq!(harness.debug_render(), "|hello\nworld\n");
+    }
+
+    #[test]
+    fn gesture_out_of_bounds_alerts_instead_of_panicking() {
+        use crate::rpc::GestureType::PointSelect;
+
+        let harness = ContextHarness::new("hello\nworld\n");
+        harness.take_notifications();
+
+        let mut ctx = harness.make_context();
+        ctx.do_edit(EditNotification::Gesture { line: 99, col: 0, ty: PointSelect });
+
+        let notifications = harness.take_notifications();
+        let alert = notifications
+            .iter()
+            .find(|(method, _)| method == "alert")
+            .expect("expected alert notification");
+        assert_eq!(alert.1["msg"], json!("gesture: line 99 beyond last line 3"));
+        assert_eq!(harness.debug_render(), "|hello\nworld\n");
     }
 
     #[test]

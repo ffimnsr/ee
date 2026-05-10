@@ -663,19 +663,11 @@ fn try_save(
         return Err(cancelled_save_error(tmp_path));
     }
 
-    let mut offset = 0;
-    while offset < text.len() {
-        let (chunk, byte_start, _, _) = text
-            .chunk_at_offset(offset)
-            .expect("offset within rope length should resolve to a chunk");
-        f.write_all(chunk.as_bytes()).map_err(|e| FileError::Io(e, tmp_path.to_owned()))?;
-        offset = byte_start + chunk.len();
-        if !should_continue() {
-            drop(f);
-            let _ = fs::remove_file(tmp_path);
-            return Err(cancelled_save_error(tmp_path));
-        }
-    }
+    let mut writer = ChunkedSaveWriter { inner: &mut f, should_continue };
+    text.write_to(&mut writer).map_err(|e| match e.kind() {
+        io::ErrorKind::Interrupted => cancelled_save_error(tmp_path),
+        _ => FileError::Io(e, tmp_path.to_owned()),
+    })?;
 
     // Flush OS buffers and sync to storage before rename so that a crash
     // after the rename cannot leave the destination file with stale data.
@@ -718,6 +710,28 @@ pub(crate) fn execute_prepared_rope_save(
     should_continue: &mut dyn FnMut() -> bool,
 ) -> Result<(), FileError> {
     try_save(&request.path, text, request.encoding, request.options, should_continue)
+}
+
+struct ChunkedSaveWriter<'a, W> {
+    inner: &'a mut W,
+    should_continue: &'a mut dyn FnMut() -> bool,
+}
+
+impl<W: Write> Write for ChunkedSaveWriter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        if !(self.should_continue)() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "save cancelled"));
+        }
+        self.inner.write_all(buf)
+    }
 }
 
 fn try_decode(bytes: Vec<u8>, encoding: CharacterEncoding, path: &Path) -> Result<Rope, FileError> {
