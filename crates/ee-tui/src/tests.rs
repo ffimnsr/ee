@@ -5518,6 +5518,7 @@ fn test_buf_state() -> BufState {
         diagnostics: Vec::new(),
         annotations: Vec::new(),
         is_vlf: false,
+        vlf_cache_start_line: 0,
         vlf_generation: 0,
         vlf_approx_line_count: 0,
         vlf_line_count_exact: false,
@@ -7505,7 +7506,7 @@ fn apply_vlf_chunks_populates_line_cache() {
     });
 
     assert_eq!(
-        buf.line_cache[0],
+        buf.line_slot(0).cloned().unwrap(),
         LineSlot::Known(CachedLine {
             text: String::from("alpha"),
             cursors: vec![],
@@ -7513,15 +7514,15 @@ fn apply_vlf_chunks_populates_line_cache() {
         })
     );
     assert_eq!(
-        buf.line_cache[1],
+        buf.line_slot(1).cloned().unwrap(),
         LineSlot::Known(CachedLine {
             text: String::from("beta"),
             cursors: vec![],
             syntax_spans: vec![]
         })
     );
-    // Slot 2 untouched (not in the chunk).
-    assert_eq!(buf.line_cache[2], LineSlot::Invalid);
+    assert_eq!(buf.line_count(), 3);
+    assert!(buf.line_slot(2).is_none());
 }
 
 #[test]
@@ -7546,7 +7547,7 @@ fn apply_vlf_chunks_stale_generation_discarded() {
 }
 
 #[test]
-fn apply_vlf_chunks_grows_cache_to_approximate_count() {
+fn apply_vlf_chunks_does_not_grow_cache_to_approximate_count() {
     let mut buf = test_buf_state();
     buf.is_vlf = true;
     buf.vlf_generation = 1;
@@ -7562,13 +7563,13 @@ fn apply_vlf_chunks_grows_cache_to_approximate_count() {
         line_count_exact: false,
     });
 
-    assert_eq!(buf.line_cache.len(), 1000, "cache should grow to approximate_line_count");
-    assert!(buf.line_cache.iter().all(|s| *s == LineSlot::Invalid));
+    assert_eq!(buf.line_cache.len(), 0, "cache must stay viewport-local");
+    assert_eq!(buf.line_count(), 1000);
     assert_eq!(buf.vlf_approx_line_count, 1000);
 }
 
 #[test]
-fn apply_vlf_chunks_exact_count_truncates_stale_approximation() {
+fn apply_vlf_chunks_exact_count_replaces_stale_window() {
     let mut buf = test_buf_state();
     buf.is_vlf = true;
     buf.vlf_generation = 1;
@@ -7584,7 +7585,9 @@ fn apply_vlf_chunks_exact_count_truncates_stale_approximation() {
     });
 
     assert_eq!(buf.line_count(), 25);
-    assert_eq!(buf.line_cache.len(), 25);
+    assert_eq!(buf.line_cache.len(), 1);
+    assert_eq!(buf.vlf_cache_start_line, 10);
+    assert_eq!(buf.get_line(10), Some("tail"));
     assert!(buf.vlf_line_count_exact);
 }
 

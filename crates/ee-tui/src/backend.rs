@@ -318,6 +318,8 @@ pub(crate) struct XiClient {
     /// True when the backend opened this buffer in VLF mode.
     /// `lines` is never materialized; rendering reads `line_cache` directly.
     pub(crate) is_vlf: bool,
+    /// Logical line number represented by `line_cache[0]` in VLF mode.
+    pub(crate) vlf_cache_start_line: usize,
     /// Monotone counter incremented on every VLF viewport scroll; see
     /// [`BufState::vlf_generation`] for the full design note.
     pub(crate) vlf_generation: u64,
@@ -387,6 +389,7 @@ impl XiClient {
             annotations: Vec::new(),
             pending_symbols: Vec::new(),
             is_vlf: false,
+            vlf_cache_start_line: 0,
             vlf_generation: 0,
             vlf_approx_line_count: 0,
             vlf_line_count_exact: false,
@@ -782,6 +785,8 @@ impl XiClient {
             BackendEvent::DocumentMode { is_vlf, .. } => {
                 self.is_vlf = is_vlf;
                 if is_vlf {
+                    self.line_cache.clear();
+                    self.vlf_cache_start_line = 0;
                     self.vlf_line_count_exact = false;
                 }
             }
@@ -798,28 +803,26 @@ impl XiClient {
                 if generation == self.vlf_generation {
                     self.vlf_approx_line_count = approximate_line_count;
                     self.vlf_line_count_exact = line_count_exact;
-                    let target_len = (approximate_line_count as usize).max(self.line_cache.len());
-                    if target_len > self.line_cache.len() {
-                        self.line_cache.resize(target_len, LineSlot::Invalid);
-                    }
-                    if line_count_exact {
-                        let exact_len =
-                            usize::try_from(approximate_line_count).unwrap_or(usize::MAX);
-                        if self.line_cache.len() > exact_len {
-                            self.line_cache.truncate(exact_len);
-                        }
-                    }
-                    let start = line_start as usize;
-                    for (i, text) in lines.into_iter().enumerate() {
-                        let idx = start + i;
-                        if idx < self.line_cache.len() {
-                            let spans = syntax_spans.get(i).cloned().unwrap_or_default();
-                            self.line_cache[idx] = LineSlot::Known(CachedLine {
-                                text,
-                                cursors: Vec::new(),
-                                syntax_spans: spans,
-                            });
-                        }
+                    let Ok(start) = usize::try_from(line_start) else {
+                        self.line_cache.clear();
+                        return Ok(());
+                    };
+                    self.vlf_cache_start_line = start;
+                    if lines.is_empty() {
+                        self.line_cache.clear();
+                    } else {
+                        self.line_cache = lines
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, text)| {
+                                let spans = syntax_spans.get(i).cloned().unwrap_or_default();
+                                LineSlot::Known(CachedLine {
+                                    text,
+                                    cursors: Vec::new(),
+                                    syntax_spans: spans,
+                                })
+                            })
+                            .collect();
                     }
                     let _ = index_progress;
                 }
@@ -903,9 +906,15 @@ impl XiClient {
 
     fn clamp_cursor(&mut self) {
         if self.is_vlf {
-            // In VLF mode `lines` is empty; clamp against the cache length.
-            self.cursor_line = self.cursor_line.min(self.line_cache.len().saturating_sub(1));
-            if let Some(LineSlot::Known(line)) = self.line_cache.get(self.cursor_line) {
+            let reported = usize::try_from(self.vlf_approx_line_count).unwrap_or(usize::MAX);
+            let line_count = if self.vlf_line_count_exact && reported > 0 {
+                reported
+            } else {
+                reported.max(self.vlf_cache_start_line.saturating_add(self.line_cache.len()))
+            };
+            self.cursor_line = self.cursor_line.min(line_count.saturating_sub(1));
+            let local = self.cursor_line.checked_sub(self.vlf_cache_start_line);
+            if let Some(LineSlot::Known(line)) = local.and_then(|idx| self.line_cache.get(idx)) {
                 self.cursor_col = previous_char_boundary(&line.text, self.cursor_col);
             }
             return;
