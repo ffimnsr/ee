@@ -209,7 +209,7 @@ pub struct VlfFeatureGates {
     pub undo: bool,
     /// Text search (find, search-and-replace, grep) is permitted.
     pub search: bool,
-    /// Syntax highlighting (tree-sitter / syntect) is enabled.
+    /// Backend syntax highlighting is enabled.
     pub syntax: bool,
     /// Git diff signs in the gutter are shown.
     pub git_signs: bool,

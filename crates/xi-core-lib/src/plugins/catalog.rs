@@ -841,17 +841,17 @@ rpc_timeout_ms = "fast"
     #[test]
     fn load_from_paths_rejects_unsatisfied_plugin_requirement() {
         let temp_dir = TempDir::new().unwrap();
-        let plugin_dir = temp_dir.path().join("needs-syntect");
+        let plugin_dir = temp_dir.path().join("needs-syntax-runtime");
         let exec_path = plugin_dir.join("bin/run-plugin");
         fs::create_dir_all(exec_path.parent().unwrap()).unwrap();
         fs::write(&exec_path, b"#!/bin/sh\n").unwrap();
         fs::write(
             plugin_dir.join("manifest.toml"),
             r#"manifest_version = 1
-name = "needs-syntect"
+name = "needs-syntax-runtime"
 version = "0.1.0"
 exec_path = "bin/run-plugin"
-requires = ["syntect>=0.2.0"]
+requires = ["syntax-runtime>=0.2.0"]
 "#,
         )
         .unwrap();
@@ -861,8 +861,8 @@ requires = ["syntect>=0.2.0"]
 
         match errors.as_slice() {
             [PluginLoadError::UnsatisfiedRequirement { plugin, requirement, .. }] => {
-                assert_eq!(plugin, "needs-syntect");
-                assert_eq!(requirement, "syntect>=0.2.0");
+                assert_eq!(plugin, "needs-syntax-runtime");
+                assert_eq!(requirement, "syntax-runtime>=0.2.0");
             }
             other => panic!("unexpected errors: {other:?}"),
         }
@@ -907,16 +907,16 @@ requires = ["syntect>=0.2.0"]
     #[test]
     fn load_from_paths_accepts_satisfied_requirements() {
         let temp_dir = TempDir::new().unwrap();
-        let syntect_dir = temp_dir.path().join("syntect");
+        let provider_dir = temp_dir.path().join("syntax-runtime");
         let consumer_dir = temp_dir.path().join("consumer");
 
         for (dir, name, version, requires) in [
-            (&syntect_dir, "syntect", "0.2.1", None),
+            (&provider_dir, "syntax-runtime", "0.2.1", None),
             (
                 &consumer_dir,
                 "consumer",
                 "0.1.0",
-                Some(r#"requires = ["xi-core>=0.4.0", "syntect>=0.2.0"]"#),
+                Some(r#"requires = ["xi-core>=0.4.0", "syntax-runtime>=0.2.0"]"#),
             ),
         ] {
             let exec_path = dir.join("bin/run-plugin");
@@ -933,10 +933,10 @@ requires = ["syntect>=0.2.0"]
         }
 
         let mut catalog = PluginCatalog::default();
-        let errors = catalog.load_from_paths(&[syntect_dir, consumer_dir]);
+        let errors = catalog.load_from_paths(&[provider_dir, consumer_dir]);
 
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
-        assert!(catalog.get_named("syntect").is_some());
+        assert!(catalog.get_named("syntax-runtime").is_some());
         assert!(catalog.get_named("consumer").is_some());
     }
 }

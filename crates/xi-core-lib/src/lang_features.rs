@@ -12,166 +12,39 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Language-sensitive edit features backed by `syntect`.
+//! Temporary compatibility layer for language-sensitive edit features.
 //!
-//! Phase 2: reindent and toggle-comment are implemented in-core using syntect
-//! for language detection rather than dispatching to plugin processes.
+//! Runtime responsibilities that must survive full tree-sitter cutover:
+//! toggle line comment, toggle block comment, reindent dispatch, and language
+//! capability downgrade behavior. Comment toggles already read registry
+//! metadata; reindent now routes through shared tree-sitter helpers.
 
-use std::sync::LazyLock;
-
-use syntect::parsing::{ParseState, ScopeStack, SyntaxSet};
 use xi_rope::{DeltaBuilder, Interval, Rope, RopeDelta};
 
-/// Process-global `SyntaxSet` loaded from bundled defaults.
-/// Loaded lazily on first use; shared read-only across all callers.
-static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+#[cfg(test)]
+use crate::text_store::DocumentMode;
+#[cfg(test)]
+use crate::tree_sitter_support::syntax_feature_availability;
+use crate::tree_sitter_support::{
+    BlockCommentStyle, LineCommentStyle, indentation_levels_for_text, language_metadata_for_name,
+};
 
-// ---------------------------------------------------------------------------
-// Comment token lookup
-// ---------------------------------------------------------------------------
-
-/// Map a syntect scope root (e.g. `source.rust`) to its line-comment token.
-///
-/// Only scopes with a well-defined single-character line comment are covered.
-/// Block-only languages (HTML, CSS) return `None`.
-#[allow(dead_code)]
-fn scope_to_line_comment(scope_root: &str) -> Option<&'static str> {
-    // Match on the leading component so sub-scopes (e.g. `source.rust.embedded`)
-    // are covered by the same rule.
-    if scope_root.starts_with("source.rust") {
-        return Some("//");
-    }
-    if scope_root.starts_with("source.c")
-        || scope_root.starts_with("source.c++")
-        || scope_root.starts_with("source.objc")
-    {
-        return Some("//");
-    }
-    if scope_root.starts_with("source.java")
-        || scope_root.starts_with("source.groovy")
-        || scope_root.starts_with("source.kotlin")
-        || scope_root.starts_with("source.scala")
-        || scope_root.starts_with("source.swift")
-        || scope_root.starts_with("source.cs")
-        || scope_root.starts_with("source.dart")
-    {
-        return Some("//");
-    }
-    if scope_root.starts_with("source.js")
-        || scope_root.starts_with("source.ts")
-        || scope_root.starts_with("source.jsx")
-        || scope_root.starts_with("source.tsx")
-    {
-        return Some("//");
-    }
-    if scope_root.starts_with("source.go") {
-        return Some("//");
-    }
-    if scope_root.starts_with("source.php") {
-        return Some("//");
-    }
-    if scope_root.starts_with("source.python") {
-        return Some("#");
-    }
-    if scope_root.starts_with("source.ruby") {
-        return Some("#");
-    }
-    if scope_root.starts_with("source.sh")
-        || scope_root.starts_with("source.shell")
-        || scope_root.starts_with("source.bash")
-        || scope_root.starts_with("source.fish")
-        || scope_root.starts_with("source.zsh")
-    {
-        return Some("#");
-    }
-    if scope_root.starts_with("source.perl") {
-        return Some("#");
-    }
-    if scope_root.starts_with("source.r") {
-        return Some("#");
-    }
-    if scope_root.starts_with("source.yaml") {
-        return Some("#");
-    }
-    if scope_root.starts_with("source.toml") {
-        return Some("#");
-    }
-    if scope_root.starts_with("source.makefile") {
-        return Some("#");
-    }
-    if scope_root.starts_with("source.elixir") {
-        return Some("#");
-    }
-    if scope_root.starts_with("source.haskell")
-        || scope_root.starts_with("source.elm")
-        || scope_root.starts_with("source.lua")
-        || scope_root.starts_with("source.sql")
-    {
-        return Some("--");
-    }
-    if scope_root.starts_with("source.lisp")
-        || scope_root.starts_with("source.clojure")
-        || scope_root.starts_with("source.racket")
-    {
-        return Some(";");
-    }
-    if scope_root.starts_with("source.erlang") {
-        return Some("%");
-    }
-    if scope_root.starts_with("source.matlab") || scope_root.starts_with("source.octave") {
-        return Some("%");
-    }
-    None
-}
-
-/// Returns the line-comment token for `language_name` using the bundled
-/// syntect syntax definitions, or `None` if the language is unknown or has
-/// no single-line comment form.
+/// Returns the line-comment token for `language_name` from shared language
+/// metadata, or `None` if the language is unknown or has no single-line
+/// comment form.
 #[allow(dead_code)]
 pub(crate) fn line_comment_token(language_name: &str) -> Option<&'static str> {
-    let syntax = SYNTAX_SET.find_syntax_by_name(language_name)?;
-    let scope_root = syntax.scope.to_string();
-    scope_to_line_comment(&scope_root)
-}
-
-fn scope_to_block_comment(scope_root: &str) -> Option<(&'static str, &'static str)> {
-    if scope_root.starts_with("source.rust")
-        || scope_root.starts_with("source.c")
-        || scope_root.starts_with("source.c++")
-        || scope_root.starts_with("source.objc")
-        || scope_root.starts_with("source.java")
-        || scope_root.starts_with("source.groovy")
-        || scope_root.starts_with("source.kotlin")
-        || scope_root.starts_with("source.scala")
-        || scope_root.starts_with("source.swift")
-        || scope_root.starts_with("source.cs")
-        || scope_root.starts_with("source.dart")
-        || scope_root.starts_with("source.js")
-        || scope_root.starts_with("source.ts")
-        || scope_root.starts_with("source.jsx")
-        || scope_root.starts_with("source.tsx")
-        || scope_root.starts_with("source.go")
-        || scope_root.starts_with("source.php")
-        || scope_root.starts_with("source.css")
-        || scope_root.starts_with("source.scss")
-        || scope_root.starts_with("source.less")
-        || scope_root.starts_with("source.sql")
-    {
-        return Some(("/*", "*/"));
+    match language_metadata_for_name(language_name)?.line_comment {
+        LineCommentStyle::Unsupported => None,
+        LineCommentStyle::Token(token) => Some(token),
     }
-    if scope_root.starts_with("text.html")
-        || scope_root.starts_with("text.xml")
-        || scope_root.starts_with("text.sgml")
-    {
-        return Some(("<!--", "-->"));
-    }
-    None
 }
 
 pub(crate) fn block_comment_tokens(language_name: &str) -> Option<(&'static str, &'static str)> {
-    let syntax = SYNTAX_SET.find_syntax_by_name(language_name)?;
-    let scope_root = syntax.scope.to_string();
-    scope_to_block_comment(&scope_root)
+    match language_metadata_for_name(language_name)?.block_comment {
+        BlockCommentStyle::Unsupported => None,
+        BlockCommentStyle::Tokens { open, close } => Some((open, close)),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -318,27 +191,27 @@ pub(crate) fn toggle_block_comment(
 // Reindent
 // ---------------------------------------------------------------------------
 
-/// Returns `true` when the built-in syntect reindent supports `language_name`.
+/// Returns `true` when built-in tree-sitter reindent supports `language_name`.
 ///
 /// Unknown languages return `false`; callers should fall back to plugin
 /// dispatch instead of starting an async whole-scan task.
-pub(crate) fn language_supports_reindent(language_name: &str) -> bool {
-    SYNTAX_SET.find_syntax_by_name(language_name).is_some()
+#[cfg(test)]
+fn language_supports_reindent(language_name: &str) -> bool {
+    syntax_feature_availability(Some(language_name), None, DocumentMode::Normal).reindent
 }
 
-/// Re-indent the selected line ranges using syntect for bracket-aware parsing.
+/// Re-indent selected line ranges using shared tree-sitter indentation levels.
 ///
 /// The algorithm:
-/// 1. Parse the entire buffer from the start with syntect's `ParseState` to
-///    build per-line scope context.
-/// 2. At each line boundary, count opening (`{`, `[`, `(`) and closing
-///    (`}`, `]`, `)`) tokens that appear **outside** string and comment scopes.
+/// 1. Parse the buffer with the canonical tree-sitter language registry.
+/// 2. Compute per-line indent levels from syntax-tree block structure plus
+///    explicit dedent triggers for closers and Python clause lines.
 /// 3. Rewrite the leading whitespace of every line inside `line_ranges` to
 ///    match the computed indent level, using `indent_str` as one level unit.
 ///
 /// Returns `None` when:
 ///
-/// - `language_name` is not found in the bundled syntect syntax set,
+/// - `language_name` has no safe built-in tree-sitter indentation strategy,
 /// - the buffer is empty, or
 /// - no lines would actually change.
 pub(crate) fn reindent(
@@ -351,72 +224,11 @@ pub(crate) fn reindent(
         return None;
     }
 
-    let syntax = SYNTAX_SET.find_syntax_by_name(language_name)?;
-
     let total_lines = text.measure::<xi_rope::LinesMetric>() + 1;
     // Highest line index we need to visit.
     let max_line = line_ranges.iter().map(|&(_, e)| e).max().unwrap_or(0).min(total_lines - 1);
-
-    // Build per-line indent-delta using syntect parsing.
-    // `indent_level[i]` = the expected indent level at the *start* of line i.
-    let mut indent_level: Vec<i64> = vec![0i64; max_line + 2];
-
-    let mut parse_state = ParseState::new(syntax);
-    let mut scope_stack = ScopeStack::new();
-    let mut current_level: i64 = 0;
-
-    for (ln, level_slot) in indent_level.iter_mut().enumerate().take(max_line + 1) {
-        let line_str = line_content(text, ln);
-        let trimmed = line_str.trim_start();
-        let first_nonws = trimmed.chars().next();
-
-        // Lines starting with a closer belong at one level above the opener.
-        let target_level = match first_nonws {
-            Some('}' | ']' | ')') => (current_level - 1).max(0),
-            _ => current_level.max(0),
-        };
-        *level_slot = target_level;
-
-        // Parse the line to advance the scope state and count brackets.
-        let owned;
-        let line_for_parse: &str = if line_str.ends_with('\n') {
-            &line_str
-        } else {
-            owned = format!("{line_str}\n");
-            &owned
-        };
-
-        let ops = match parse_state.parse_line(line_for_parse, &SYNTAX_SET) {
-            Ok(ops) => ops,
-            Err(_) => continue,
-        };
-
-        let line_bytes = line_for_parse.as_bytes();
-        let limit = line_for_parse.len().saturating_sub(1);
-        let mut op_idx = 0;
-
-        // Walk every byte of the line (excluding the trailing newline).
-        for (byte_off, &ch_byte) in line_bytes.iter().enumerate().take(limit) {
-            // Apply all scope ops that fire at or before this byte position.
-            while op_idx < ops.len() && ops[op_idx].0 <= byte_off {
-                let _ = scope_stack.apply(&ops[op_idx].1);
-                op_idx += 1;
-            }
-            let ch = ch_byte as char;
-            if !in_string_or_comment(&scope_stack) {
-                match ch {
-                    '{' | '[' | '(' => current_level += 1,
-                    '}' | ']' | ')' => current_level -= 1,
-                    _ => {}
-                }
-            }
-        }
-        // Flush any remaining ops at end of line.
-        while op_idx < ops.len() {
-            let _ = scope_stack.apply(&ops[op_idx].1);
-            op_idx += 1;
-        }
-    }
+    let text_snapshot: String = text.slice_to_cow(0..text.len()).into_owned();
+    let indent_levels = indentation_levels_for_text(language_name, &text_snapshot, max_line)?;
 
     // Build the delta: replace leading whitespace of each targeted line.
     let target_lines = collect_lines(line_ranges);
@@ -427,7 +239,7 @@ pub(crate) fn reindent(
         if ln >= total_lines {
             continue;
         }
-        let expected_level = indent_level[ln].max(0) as usize;
+        let expected_level = indent_levels.get(ln).copied().unwrap_or_default();
         let expected_ws = indent_str.repeat(expected_level);
 
         let content = line_content(text, ln);
@@ -525,15 +337,6 @@ fn line_content(text: &Rope, ln: usize) -> String {
     raw.trim_end_matches('\n').trim_end_matches('\r').to_owned()
 }
 
-/// Returns `true` if the current scope stack indicates we are inside a string
-/// literal or a comment.
-fn in_string_or_comment(stack: &ScopeStack) -> bool {
-    stack.as_slice().iter().any(|scope| {
-        let s = scope.to_string();
-        s.starts_with("string") || s.starts_with("comment")
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -562,6 +365,12 @@ mod tests {
     }
 
     #[test]
+    fn test_line_comment_token_aliases_use_shared_registry() {
+        assert_eq!(line_comment_token("tsx"), Some("//"));
+        assert_eq!(line_comment_token("python3"), Some("#"));
+    }
+
+    #[test]
     fn test_line_comment_token_unknown() {
         assert_eq!(line_comment_token("NonExistentLang"), None);
     }
@@ -569,6 +378,63 @@ mod tests {
     #[test]
     fn test_block_comment_tokens_css() {
         assert_eq!(block_comment_tokens("CSS"), Some(("/*", "*/")));
+    }
+
+    #[test]
+    fn test_block_comment_tokens_html() {
+        assert_eq!(block_comment_tokens("HTML"), Some(("<!--", "-->")));
+    }
+
+    #[test]
+    fn test_language_supports_reindent_uses_registry_metadata() {
+        assert!(!language_supports_reindent("Bash"));
+        assert!(!language_supports_reindent("CSS"));
+        assert!(!language_supports_reindent("JSON"));
+        assert!(language_supports_reindent("TypeScript"));
+        assert!(language_supports_reindent("tsx"));
+        assert!(language_supports_reindent("Rust"));
+        assert!(language_supports_reindent("Python"));
+        assert!(!language_supports_reindent("HTML"));
+        assert!(!language_supports_reindent("Ruby"));
+        assert!(!language_supports_reindent("NonExistentLang"));
+    }
+
+    #[test]
+    fn test_reindent_rust_uses_tree_sitter_levels() {
+        let text = rope("fn main() {\nlet value = 1;\n}\n");
+        let delta = reindent(&text, &[(0usize, 2usize)], "Rust", "    ").unwrap();
+        let result = apply_delta(text, delta);
+        assert_eq!(result, "fn main() {\n    let value = 1;\n}\n");
+    }
+
+    #[test]
+    fn test_reindent_python_dedents_else_clause() {
+        let text = rope("if ready:\nprint('yes')\nelse:\nprint('no')\n");
+        let delta = reindent(&text, &[(0usize, 3usize)], "Python", "    ").unwrap();
+        let result = apply_delta(text, delta);
+        assert_eq!(result, "if ready:\n    print('yes')\nelse:\n    print('no')\n");
+    }
+
+    #[test]
+    fn test_reindent_typescript_uses_tree_sitter_levels() {
+        let text = rope("function demo() {\nconsole.log(1);\n}\n");
+        let delta = reindent(&text, &[(0usize, 2usize)], "TypeScript", "    ").unwrap();
+        let result = apply_delta(text, delta);
+        assert_eq!(result, "function demo() {\n    console.log(1);\n}\n");
+    }
+
+    #[test]
+    fn test_reindent_c_like_language_uses_tree_sitter_levels() {
+        let text = rope("int main() {\nreturn 0;\n}\n");
+        let delta = reindent(&text, &[(0usize, 2usize)], "C", "    ").unwrap();
+        let result = apply_delta(text, delta);
+        assert_eq!(result, "int main() {\n    return 0;\n}\n");
+    }
+
+    #[test]
+    fn test_reindent_returns_none_for_explicitly_unsupported_language() {
+        let text = rope("<div>\n<span>hi</span>\n</div>\n");
+        assert!(reindent(&text, &[(0usize, 2usize)], "HTML", "    ").is_none());
     }
 
     #[test]
@@ -620,6 +486,24 @@ mod tests {
     }
 
     #[test]
+    fn test_toggle_comment_preserves_blank_lines() {
+        let text = rope("alpha\n\ncharlie\n");
+        let line_ranges = vec![(0usize, 2usize)];
+        let delta = toggle_comment(&text, &line_ranges, "Python").unwrap();
+        let result = apply_delta(text, delta);
+        assert_eq!(result, "# alpha\n\n# charlie\n");
+    }
+
+    #[test]
+    fn test_toggle_comment_python_uses_metadata_token() {
+        let text = rope("print('hi')\n");
+        let line_ranges = vec![(0usize, 0usize)];
+        let delta = toggle_comment(&text, &line_ranges, "Python").unwrap();
+        let result = apply_delta(text, delta);
+        assert_eq!(result, "# print('hi')\n");
+    }
+
+    #[test]
     fn test_toggle_block_comment_add_current_line() {
         let text = rope("    color: red;\n");
         let selections = vec![(0usize, 0usize)];
@@ -647,6 +531,15 @@ mod tests {
     }
 
     #[test]
+    fn test_toggle_block_comment_html_current_line() {
+        let text = rope("<span>hi</span>\n");
+        let selections = vec![(0usize, 0usize)];
+        let delta = toggle_block_comment(&text, &selections, "HTML").unwrap();
+        let result = apply_delta(text, delta);
+        assert_eq!(result, "<!-- <span>hi</span> -->\n");
+    }
+
+    #[test]
     fn test_collect_lines_dedup() {
         let ranges = vec![(0usize, 2usize), (1usize, 3usize)];
         let lines = collect_lines(&ranges);
@@ -658,5 +551,13 @@ mod tests {
         let text = rope("hello\nworld\n");
         assert_eq!(line_content(&text, 0), "hello");
         assert_eq!(line_content(&text, 1), "world");
+    }
+
+    #[test]
+    fn test_unknown_language_degrades_without_delta() {
+        let text = rope("value\n");
+        assert!(toggle_comment(&text, &[(0, 0)], "NonExistentLang").is_none());
+        assert!(toggle_block_comment(&text, &[(0, 0)], "NonExistentLang").is_none());
+        assert!(reindent(&text, &[(0, 0)], "NonExistentLang", "    ").is_none());
     }
 }

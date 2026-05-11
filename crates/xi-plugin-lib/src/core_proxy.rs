@@ -24,7 +24,7 @@ use xi_core_lib::plugin_rpc::{
     CodeAction, CodeActionDescriptor, CodeActionRequest, CodeActionResponse, CompletionSuggestion,
     DataSpan, Diagnostic, FormatDocumentRequest, FormatDocumentResponse, GetDataResponse,
     GetDiagnosticsResponse, GetSelectionsResponse, Hover, NavigationTarget, PluginEdit,
-    PluginEditAck, ProtocolCapability, ScopeSpan, SelectionRange, SymbolItem, TextEdit, TextUnit,
+    PluginEditAck, ProtocolCapability, SelectionRange, SymbolItem, TextEdit, TextUnit,
 };
 use xi_core_lib::plugins::PluginId;
 use xi_rpc::{RemoteError, RpcCtx, RpcPeer};
@@ -73,17 +73,6 @@ impl CoreProxy {
     ) -> Result<T, Error> {
         let response = self.peer.send_rpc_request(method, &params).map_err(Error::RpcError)?;
         serde_json::from_value(response).map_err(|_| Error::WrongReturnType)
-    }
-
-    pub fn add_scopes(&self, view_id: ViewId, scopes: &[Vec<String>]) {
-        self.send_rpc_notification(
-            "add_scopes",
-            json!({
-                "plugin_id": self.plugin_id,
-                "view_id": view_id,
-                "scopes": scopes,
-            }),
-        );
     }
 
     pub fn apply_edit(&self, view_id: ViewId, edit: PluginEdit) -> Result<PluginEditAck, Error> {
@@ -187,27 +176,6 @@ impl CoreProxy {
             }),
         )?;
         Ok(response.actions)
-    }
-
-    pub fn update_spans(
-        &self,
-        view_id: ViewId,
-        start: usize,
-        len: usize,
-        rev: u64,
-        spans: &[ScopeSpan],
-    ) {
-        self.send_rpc_notification(
-            "update_spans",
-            json!({
-                "plugin_id": self.plugin_id,
-                "view_id": view_id,
-                "start": start,
-                "len": len,
-                "rev": rev,
-                "spans": spans,
-            }),
-        );
     }
 
     pub fn update_annotations(

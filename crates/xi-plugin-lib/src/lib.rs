@@ -42,10 +42,9 @@ pub use crate::state_cache::StateCache;
 pub use crate::view::View;
 pub use xi_core_lib::plugin_rpc::{
     CodeAction, CodeActionRequest, Diagnostic, DiagnosticSeverity, FormatDocumentRequest,
-    FormattingOptions, Hover, PluginEdit, PluginEditAck, Range, ScopeSpan, SelectionRange,
-    TextEdit,
+    FormattingOptions, Hover, PluginEdit, PluginEditAck, Range, SelectionRange, TextEdit,
 };
-pub use xi_plugin_derive::{SpanType, xi_plugin};
+pub use xi_plugin_derive::xi_plugin;
 
 pub extern crate self as xi_plugin;
 pub extern crate self as xi_plugin_lib;
@@ -236,141 +235,6 @@ pub trait SimplePlugin {
         _cancel: tokio_util::sync::CancellationToken,
     ) -> Result<Hover, RemoteError> {
         Err(RemoteError::custom(404, "hover not supported", None))
-    }
-}
-
-pub trait SyntaxDescriptor {
-    const LANGUAGE: &'static str;
-}
-
-pub trait SyntaxPlugin {
-    type State: Clone + Default;
-
-    fn initialize(&mut self, _core: CoreProxy) {}
-
-    fn update(
-        &mut self,
-        _view: &mut View<StateCache<Self::State>>,
-        _delta: Option<&RopeDelta>,
-        _edit_type: String,
-        _author: String,
-    ) {
-    }
-
-    fn did_save(&mut self, _view: &mut View<StateCache<Self::State>>, _old_path: Option<&Path>) {}
-
-    fn did_close(&mut self, _view: &View<StateCache<Self::State>>) {}
-
-    fn new_view(&mut self, _view: &mut View<StateCache<Self::State>>) {}
-
-    fn config_changed(
-        &mut self,
-        _view: &mut View<StateCache<Self::State>>,
-        _changes: &ConfigTable,
-    ) {
-    }
-
-    fn language_changed(
-        &mut self,
-        _view: &mut View<StateCache<Self::State>>,
-        _old_lang: LanguageId,
-    ) {
-    }
-
-    fn custom_command(
-        &mut self,
-        _view: &mut View<StateCache<Self::State>>,
-        _method: &str,
-        _params: Value,
-    ) {
-    }
-
-    fn idle(&mut self, _view: &mut View<StateCache<Self::State>>) {}
-
-    fn shutdown(&mut self) {}
-
-    fn get_hover(
-        &mut self,
-        _view: &mut View<StateCache<Self::State>>,
-        _position: usize,
-        _cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<Hover, RemoteError> {
-        Err(RemoteError::custom(404, "hover not supported", None))
-    }
-}
-
-pub trait SpanType {
-    fn scope_name(&self) -> &'static str;
-
-    fn scope_stack(&self) -> Vec<String> {
-        self.scope_name().split_whitespace().map(str::to_owned).collect()
-    }
-
-    fn span(self, start: usize, end: usize) -> ScopeSpanBuilder<Self>
-    where
-        Self: Sized,
-    {
-        ScopeSpanBuilder::new(start, end, self)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScopeSpanBuilder<T> {
-    pub start: usize,
-    pub end: usize,
-    pub scope: T,
-}
-
-impl<T> ScopeSpanBuilder<T> {
-    pub const fn new(start: usize, end: usize, scope: T) -> Self {
-        Self { start, end, scope }
-    }
-
-    pub fn map_scope<U>(self, f: impl FnOnce(T) -> U) -> ScopeSpanBuilder<U> {
-        ScopeSpanBuilder { start: self.start, end: self.end, scope: f(self.scope) }
-    }
-}
-
-impl<T: SpanType> ScopeSpanBuilder<T> {
-    pub fn scope_stack(&self) -> Vec<String> {
-        self.scope.scope_stack()
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ScopeRegistry {
-    scopes: Vec<Vec<String>>,
-}
-
-impl ScopeRegistry {
-    pub fn is_empty(&self) -> bool {
-        self.scopes.is_empty()
-    }
-
-    pub fn scopes(&self) -> &[Vec<String>] {
-        &self.scopes
-    }
-
-    pub fn build<T: SpanType>(&mut self, spans: &[ScopeSpanBuilder<T>]) -> Vec<ScopeSpan> {
-        spans
-            .iter()
-            .map(|span| ScopeSpan {
-                start: span.start,
-                end: span.end,
-                scope_id: self.intern(span.scope_stack()),
-            })
-            .collect()
-    }
-
-    fn intern(&mut self, scope_stack: Vec<String>) -> u32 {
-        if let Some((index, _)) =
-            self.scopes.iter().enumerate().find(|(_, existing)| **existing == scope_stack)
-        {
-            index as u32
-        } else {
-            self.scopes.push(scope_stack);
-            (self.scopes.len() - 1) as u32
-        }
     }
 }
 
@@ -689,25 +553,5 @@ mod tests {
                 .as_str()
                 .is_some_and(|backtrace| !backtrace.is_empty())
         );
-    }
-
-    #[derive(Clone, Debug, PartialEq, Eq, SpanType)]
-    enum TestScope {
-        #[span_type(name = "keyword.control")]
-        Keyword,
-        StringLiteral,
-    }
-
-    #[test]
-    fn scope_registry_builds_scope_spans_from_derived_span_types() {
-        let mut registry = ScopeRegistry::default();
-        let spans = [TestScope::Keyword.span(1, 3), TestScope::StringLiteral.span(3, 7)];
-
-        let resolved = registry.build(&spans);
-
-        assert_eq!(registry.scopes()[0], vec![String::from("keyword.control")]);
-        assert_eq!(registry.scopes()[1], vec![String::from("string_literal")]);
-        assert_eq!(resolved[0].scope_id, 0);
-        assert_eq!(resolved[1].scope_id, 1);
     }
 }

@@ -17,7 +17,7 @@ xi-core-lib.workspace = true
 xi-plugin-lib.workspace = true
 xi-rope.workspace = true
 xi-rpc.workspace = true
-xi-lsp-lib = { path = "../crates/xi-lsp-lib", version = "0.1.0" }
+xi-lsp-lib.workspace = true
 xi-unicode.workspace = true
 
 [[bin]]

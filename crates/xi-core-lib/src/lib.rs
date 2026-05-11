@@ -44,7 +44,6 @@ pub mod file;
 pub mod find;
 pub mod index_set;
 pub mod lang_features;
-pub mod layers;
 pub mod line_cache_shadow;
 pub mod line_ending;
 pub mod line_offset;

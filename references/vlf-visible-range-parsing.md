@@ -7,7 +7,6 @@ Re-enable syntax-driven features in VLF mode without requiring a whole-buffer pa
 Scope:
 
 - visible-range tree-sitter parsing
-- visible-range syntect fallback
 - semantic motions and text objects that currently depend on full parse
 
 Non-goals for first milestone:
@@ -21,7 +20,6 @@ Non-goals for first milestone:
 VLF keeps file contents in `VlfStore` and only loads bounded byte windows. Existing syntax features in normal mode assume whole-buffer text is available:
 
 - tree-sitter semantic selection and navigation parse `Rope::to_string()`
-- syntect fallback expects line slices with enough prior state to reconstruct parser context
 
 That is safe for normal buffers, but wrong for VLF because it defeats sparse loading and can scale to unbounded memory or CPU.
 
@@ -95,18 +93,11 @@ Return:
 - cancelled viewport generation must drop stale parse results
 - tests cover multi-line constructs crossing page and parse-window boundaries
 
-## Syntect Fallback Plan
+## Legacy Fallback Note
 
-Syntect remains fallback-only. In VLF it must never process from line `0..top+count` across full logical buffer.
+Visible-range parsing should stay tree-sitter-owned.
 
-Approach:
-
-- feed syntect only visible lines plus bounded lookback lines
-- maintain per-window checkpoint state in cache
-- refuse fallback when checkpoint is unavailable within configured budget
-- in that case render plain text for that viewport slice
-
-This keeps syntax rendering bounded and preserves responsiveness when grammar state reconstruction would be too expensive.
+Do not reintroduce local syntax fallback that reconstructs parser state from line `0..top+count` or from unbounded checkpoint history. If visible-range parsing cannot produce bounded results, render plain text for that viewport slice.
 
 ## Semantic Feature Plan
 
@@ -157,7 +148,6 @@ Required regression coverage before re-enable:
 - viewport parse over UTF-8 seam at page boundary
 - semantic motion inside fully covered window succeeds
 - semantic motion outside covered window returns bounded status, not full parse
-- syntect fallback in VLF never scans from file start
 - memory budget test proves no whole-buffer clone for VLF syntax path
 
 ## Re-enable Checklist
@@ -166,7 +156,6 @@ Required regression coverage before re-enable:
 - bounded lookback and cancellation implemented
 - syntax spans emitted only for visible lines
 - semantic commands consume visible-range parse output
-- syntect fallback uses bounded checkpoints only
 - tests prove no whole-buffer parse or clone in VLF
 
 Until all checklist items are complete, VLF should keep syntax and semantic parse-dependent features disabled.

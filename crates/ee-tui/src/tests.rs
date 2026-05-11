@@ -324,7 +324,7 @@ fn ui_render_shows_scrolled_gutter_after_many_enters() {
 }
 
 #[test]
-fn ui_render_prefers_backend_syntax_spans_over_syntect_fallback() {
+fn ui_render_uses_backend_syntax_spans_only() {
     fn render_numeric_fg(with_backend_syntax: bool, is_vlf: bool) -> ratatui::style::Color {
         let mut app = App::from_path(None).unwrap();
         let line = String::from("let answer = 42;");
@@ -357,13 +357,14 @@ fn ui_render_prefers_backend_syntax_spans_over_syntect_fallback() {
         buf.cell((four_x, 0)).unwrap().fg
     }
 
-    let syntect_fg = render_numeric_fg(false, false);
+    let plain_fg = render_numeric_fg(false, false);
     let backend_fg = render_numeric_fg(true, false);
     let vlf_fg = render_numeric_fg(false, true);
 
-    assert_ne!(backend_fg, syntect_fg);
+    assert_ne!(backend_fg, plain_fg);
     assert_eq!(backend_fg, ratatui::style::Color::Rgb(211, 120, 70));
-    assert_ne!(vlf_fg, syntect_fg);
+    assert_eq!(plain_fg, ratatui::style::Color::Rgb(213, 216, 224));
+    assert_eq!(vlf_fg, plain_fg);
     assert_eq!(vlf_fg, ratatui::style::Color::Rgb(213, 216, 224));
 }
 
@@ -2294,6 +2295,42 @@ fn block_text_preview_uses_backend_authoritative_text() {
         app.backend.block_text_preview(0, 2, 1, 3).expect("block text preview should succeed");
 
     assert_eq!(block, "bc\nfg\njk\n");
+}
+
+#[test]
+fn fold_close_uses_backend_authoritative_tree_sitter_range() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("fold-close.rs");
+    fs::write(&path, "").unwrap();
+    let mut app = App::from_path(Some(path)).unwrap();
+
+    insert_text(&mut app, "fn outer() {\n    if true {\n        work();\n    }\n}\n");
+    app.backend.pump().unwrap();
+
+    app.backend.cursor_line = 0;
+
+    app.fold_close();
+
+    let buf_id = app.backend.active().id;
+    assert_eq!(app.folds.fold_at(buf_id, 0), Some((0, 4)));
+    assert!(app.folds.is_hidden(buf_id, 1));
+}
+
+#[test]
+fn fold_close_all_uses_backend_authoritative_ranges() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("fold-close-all.rs");
+    fs::write(&path, "").unwrap();
+    let mut app = App::from_path(Some(path)).unwrap();
+
+    insert_text(&mut app, "fn outer() {\n    work();\n}\n\nfn second() {\n    more();\n}\n");
+    app.backend.pump().unwrap();
+
+    app.fold_close_all();
+
+    let buf_id = app.backend.active().id;
+    assert_eq!(app.folds.fold_at(buf_id, 0), Some((0, 2)));
+    assert_eq!(app.folds.fold_at(buf_id, 4), Some((4, 6)));
 }
 
 #[test]

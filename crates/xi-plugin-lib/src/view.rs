@@ -22,7 +22,7 @@ use xi_core_lib::plugin_rpc::DataSpan;
 use xi_core_lib::plugin_rpc::{
     CodeAction, CodeActionRequest, CodeActionResponse, Diagnostic, FormatDocumentRequest,
     FormatDocumentResponse, GetDataResponse, GetDiagnosticsResponse, GetSelectionsResponse,
-    PluginBufferInfo, PluginEdit, PluginEditAck, ScopeSpan, SelectionRange, TextEdit, TextUnit,
+    PluginBufferInfo, PluginEdit, PluginEditAck, SelectionRange, TextEdit, TextUnit,
 };
 use xi_core_lib::{BufferConfig, ConfigTable, LanguageId, PluginPid, ViewId};
 use xi_rope::RopeDelta;
@@ -42,7 +42,7 @@ pub struct View<C> {
     pub(crate) config: BufferConfig,
     pub(crate) config_table: ConfigTable,
     plugin_id: PluginPid,
-    // TODO: this is only public to avoid changing the syntect impl
+    // TODO: this is only public to avoid changing the legacy async edit path
     // this should go away with async edits
     pub rev: u64,
     pub undo_group: Option<usize>,
@@ -200,15 +200,6 @@ impl<C: Cache> View<C> {
         self.cache.line_of_offset(&ctx, offset)
     }
 
-    pub fn add_scopes(&self, scopes: &[Vec<String>]) {
-        let params = json!({
-            "plugin_id": self.plugin_id,
-            "view_id": self.active_view_id,
-            "scopes": scopes,
-        });
-        self.peer.send_rpc_notification("add_scopes", &params);
-    }
-
     pub fn edit(
         &self,
         delta: RopeDelta,
@@ -321,18 +312,6 @@ impl<C: Cache> View<C> {
         let response: CodeActionResponse =
             serde_json::from_value(response).map_err(|_| Error::WrongReturnType)?;
         Ok(response.actions)
-    }
-
-    pub fn update_spans(&self, start: usize, len: usize, spans: &[ScopeSpan]) {
-        let params = json!({
-            "plugin_id": self.plugin_id,
-            "view_id": self.active_view_id,
-            "start": start,
-            "len": len,
-            "rev": self.rev,
-            "spans": spans,
-        });
-        self.peer.send_rpc_notification("update_spans", &params);
     }
 
     pub fn update_annotations(

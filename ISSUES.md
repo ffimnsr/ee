@@ -13,130 +13,134 @@
   - Every phase must land with regression tests covering normal mode, constrained mode when relevant, and VLF when the phase touches shared syntax plumbing.
   - Remove compatibility shims once downstream call sites are migrated. Do not preserve mixed syntect/tree-sitter runtime paths longer than needed.
 
-- [ ] Phase 0: freeze target architecture and migration seam.
-  - [ ] Document final ownership boundaries in comments near existing syntax entry points.
-    - [ ] Mark `crates/ee-tui/src/highlight.rs` as render-only and planned for backend-span-only operation.
-    - [ ] Mark `crates/xi-core-lib/src/tree_sitter_support.rs` as canonical parse/query entry point for normal, constrained, and VLF syntax features.
-    - [ ] Mark `crates/xi-core-lib/src/lang_features.rs` as temporary compatibility layer scheduled to lose `syntect`.
-  - [ ] Enumerate exact runtime responsibilities that must survive cutover.
-    - [ ] Syntax highlighting spans for normal/constrained buffers.
-    - [ ] Visible-range syntax spans for VLF buffers.
-    - [ ] Semantic selection and navigation.
-    - [ ] Toggle line comment and block comment.
-    - [ ] Reindent.
-    - [ ] Language feature gating and downgrade behavior.
-  - [ ] Define completion criteria for full cutover.
-    - [ ] No runtime code in workspace imports `syntect`.
-    - [ ] No TUI path computes syntax colors without backend spans.
-    - [ ] No core syntax layer depends on `syntect::parsing::Scope`.
-    - [ ] Supported grammar matrix is wired through one shared tree-sitter language registry.
-    - [ ] Tests prove no syntect fallback remains in normal, constrained, or VLF paths.
+- [x] Phase 0: freeze target architecture and migration seam.
+  - [x] Document final ownership boundaries in comments near existing syntax entry points.
+    - [x] Mark `crates/ee-tui/src/highlight.rs` as render-only and planned for backend-span-only operation.
+    - [x] Mark `crates/xi-core-lib/src/tree_sitter_support.rs` as canonical parse/query entry point for normal, constrained, and VLF syntax features.
+    - [x] Mark `crates/xi-core-lib/src/lang_features.rs` as temporary compatibility layer scheduled to lose `syntect`.
+  - [x] Enumerate exact runtime responsibilities that must survive cutover.
+    - [x] Syntax highlighting spans for normal/constrained buffers.
+    - [x] Visible-range syntax spans for VLF buffers.
+    - [x] Semantic selection and navigation.
+    - [x] Toggle line comment and block comment.
+    - [x] Reindent.
+    - [x] Language feature gating and downgrade behavior.
+  - [x] Define completion criteria for full cutover.
+    - [x] No runtime code in workspace imports `syntect`.
+    - [x] No TUI path computes syntax colors without backend spans.
+    - [x] No core syntax layer depends on `syntect::parsing::Scope`.
+    - [x] Supported grammar matrix is wired through one shared tree-sitter language registry.
+    - [x] Tests prove no syntect fallback remains in normal, constrained, or VLF paths.
 
-- [ ] Phase 1: normalize language registry and language metadata.
-  - [ ] Expand tree-sitter language registry beyond Rust/Python so bundled grammars already listed in workspace `Cargo.toml` are reachable from core.
-    - [ ] Add explicit registry entries in `crates/xi-core-lib/src/tree_sitter_support.rs` for each bundled grammar crate.
-    - [ ] Cover at least: Bash, C, C#, C++, CSS, Elixir, Go, Haskell, HTML, Java, JavaScript, JSON, PHP, Ruby, Scala, TypeScript.
-    - [ ] Keep grammar registration names aligned with xi language names and file-extension mappings actually emitted by open/config paths.
-  - [ ] Unify language lookup across syntax features.
-    - [ ] Replace ad-hoc Rust/Python-only path matching in `crates/xi-core-lib/src/object.rs` with shared registry-backed resolution.
-    - [ ] Use same resolution for normal highlighting, VLF visible parsing, semantic motions, and language feature gating.
-    - [ ] Ensure explicit `:set_language` overrides map through same registry.
-  - [ ] Add explicit language metadata table for non-parse-derived behaviors.
-    - [ ] Store line-comment token, block-comment token pair, indentation strategy, and any known unsupported semantic targets per language.
-    - [ ] Keep metadata in core, not TUI.
-    - [ ] Make absence explicit with enums instead of silent fallback-to-plain heuristics.
-  - [ ] Add regression coverage for registry and metadata.
-    - [ ] Unit tests per language name and per extension/path alias.
-    - [ ] Tests proving unsupported languages degrade cleanly without panics or hidden syntect fallback.
+- [x] Phase 1: normalize language registry and language metadata.
+  - [x] Expand tree-sitter language registry beyond Rust/Python so bundled grammars already listed in workspace `Cargo.toml` are reachable from core.
+    - [x] Add explicit registry entries in `crates/xi-core-lib/src/tree_sitter_support.rs` for each bundled grammar crate.
+    - [x] Cover at least: Bash, C, C#, C++, CSS, Elixir, Go, Haskell, HTML, Java, JavaScript, JSON, PHP, Ruby, Scala, TypeScript.
+    - [x] Keep grammar registration names aligned with xi language names and file-extension mappings actually emitted by open/config paths.
+  - [x] Unify language lookup across syntax features.
+    - [x] Replace ad-hoc Rust/Python-only path matching in `crates/xi-core-lib/src/object.rs` with shared registry-backed resolution.
+    - [x] Use same resolution for normal highlighting, VLF visible parsing, semantic motions, and language feature gating.
+    - [x] Ensure explicit `:set_language` overrides map through same registry.
+  - [x] Add explicit language metadata table for non-parse-derived behaviors.
+    - [x] Store line-comment token, block-comment token pair, indentation strategy, and any known unsupported semantic targets per language.
+    - [x] Keep metadata in core, not TUI.
+    - [x] Make absence explicit with enums instead of silent fallback-to-plain heuristics.
+  - [x] Add regression coverage for registry and metadata.
+    - [x] Unit tests per language name and per extension/path alias.
+    - [x] Tests proving unsupported languages degrade cleanly without panics or hidden syntect fallback.
 
-- [ ] Phase 2: move normal/constrained syntax highlighting fully into backend tree-sitter.
-  - [ ] Define one backend-owned syntax span producer for non-VLF buffers.
-    - [ ] Reuse shared span shape used by VLF visible-range output so frontend consumes one conceptual format.
-    - [ ] Ensure spans remain line-relative byte ranges with stable scope strings.
-    - [ ] Keep parse/update work incremental or viewport-bounded according to buffer mode policy.
-  - [ ] Wire normal/constrained render/update path to emit backend syntax spans consistently.
-    - [ ] Identify current `view`/`layers`/plugin render path that emits syntax spans for normal buffers.
-    - [ ] Replace remaining plugin-only or syntect-only assumptions with backend tree-sitter span generation.
-    - [ ] Preserve existing omission semantics when no syntax spans are available for unsupported language.
-  - [ ] Remove local TUI parsing behavior after backend parity lands.
-    - [ ] Delete `ee-tui` logic that loads syntect syntax/theme assets.
-    - [ ] Delete `highlight_visible` fallback path and related bounded-lookback behavior.
-    - [ ] Keep only scope-to-style mapping and span slicing helpers needed for rendering backend spans.
-  - [ ] Add regression coverage for frontend/backend contract.
-    - [ ] Tests proving normal-mode numeric/string/comment spans come from backend data only.
-    - [ ] Tests proving constrained buffers do not trigger local syntax parsing in TUI.
-    - [ ] Tests proving unsupported languages render plain text without hidden syntax parser work.
+- [x] Phase 2: move normal/constrained syntax highlighting fully into backend tree-sitter.
+  - [x] Define one backend-owned syntax span producer for non-VLF buffers.
+    - [x] Reuse shared span shape used by VLF visible-range output so frontend consumes one conceptual format.
+    - [x] Ensure spans remain line-relative byte ranges with stable scope strings.
+    - [x] Keep parse/update work incremental or viewport-bounded according to buffer mode policy.
+  - [x] Wire normal/constrained render/update path to emit backend syntax spans consistently.
+    - [x] Identify current `view`/`layers`/plugin render path that emits syntax spans for normal buffers.
+    - [x] Replace remaining plugin-only or syntect-only assumptions with backend tree-sitter span generation.
+    - [x] Preserve existing omission semantics when no syntax spans are available for unsupported language.
+  - [x] Remove local TUI parsing behavior after backend parity lands.
+    - [x] Delete `ee-tui` logic that loads syntect syntax/theme assets.
+    - [x] Delete `highlight_visible` fallback path and related bounded-lookback behavior.
+    - [x] Keep only scope-to-style mapping and span slicing helpers needed for rendering backend spans.
+  - [x] Add regression coverage for frontend/backend contract.
+    - [x] Tests proving normal-mode numeric/string/comment spans come from backend data only.
+    - [x] Tests proving constrained buffers do not trigger local syntax parsing in TUI.
+    - [x] Tests proving unsupported languages render plain text without hidden syntax parser work.
 
-- [ ] Phase 3: replace `lang_features` syntect dependency with tree-sitter and metadata-backed logic.
-  - [ ] Remove `syntect`-based comment token discovery.
-    - [ ] Replace scope-derived line-comment detection with explicit metadata table lookups.
-    - [ ] Replace scope-derived block-comment detection with explicit metadata table lookups.
-    - [ ] Preserve exact current command semantics for blank lines, mixed selections, and already-commented regions.
-  - [ ] Replace `syntect`-based reindent implementation.
-    - [ ] Introduce tree-sitter-backed indentation entry point in `tree_sitter_support` or nearest shared syntax module.
-    - [ ] Compute indentation from syntax nodes or explicit indentation strategy per language, not from `syntect` parse state.
-    - [ ] Support incremental or bounded parsing strategy compatible with normal/constrained mode budgets.
-    - [ ] For languages without safe indentation support, return explicit unsupported status so caller can fall back to plugin dispatch instead of hidden syntect behavior.
-  - [ ] Simplify async whole-scan reindent orchestration.
-    - [ ] Keep background-thread execution if full-document reindent still needs async scheduling.
-    - [ ] Rename comments and alerts that still call it “syntect reindent”.
-    - [ ] Ensure cancellation/stale-result behavior remains unchanged.
-  - [ ] Add regression coverage for edit features.
-    - [ ] Toggle comment tests for representative single-line-comment languages.
-    - [ ] Block comment tests for CSS/HTML-like languages.
-    - [ ] Reindent tests for at least Rust, Python, JavaScript/TypeScript, and one C-like brace language.
-    - [ ] Tests proving unsupported-language reindent dispatches to plugin path without panic.
+- [x] Phase 3: replace `lang_features` syntect dependency with tree-sitter and metadata-backed logic.
+  - [x] Remove `syntect`-based comment token discovery.
+    - [x] Replace scope-derived line-comment detection with explicit metadata table lookups.
+    - [x] Replace scope-derived block-comment detection with explicit metadata table lookups.
+    - [x] Preserve exact current command semantics for blank lines, mixed selections, and already-commented regions.
+  - [x] Replace `syntect`-based reindent implementation.
+    - [x] Introduce tree-sitter-backed indentation entry point in `tree_sitter_support` or nearest shared syntax module.
+    - [x] Compute indentation from syntax nodes or explicit indentation strategy per language, not from `syntect` parse state.
+    - [x] Support incremental or bounded parsing strategy compatible with normal/constrained mode budgets.
+    - [x] For languages without safe indentation support, return explicit unsupported status so caller can fall back to plugin dispatch instead of hidden syntect behavior.
+  - [x] Simplify async whole-scan reindent orchestration.
+    - [x] Keep background-thread execution if full-document reindent still needs async scheduling.
+    - [x] Rename comments and alerts that still call it “syntect reindent”.
+    - [x] Ensure cancellation/stale-result behavior remains unchanged.
+  - [x] Add regression coverage for edit features.
+    - [x] Toggle comment tests for representative single-line-comment languages.
+    - [x] Block comment tests for CSS/HTML-like languages.
+    - [x] Reindent tests for at least Rust, Python, JavaScript/TypeScript, and one C-like brace language.
+    - [x] Tests proving unsupported-language reindent dispatches to plugin path without panic.
 
-- [ ] Phase 4: remove `syntect` runtime types from core syntax plumbing.
-  - [ ] Eliminate `syntect::parsing::Scope` from `crates/xi-core-lib/src/layers.rs`.
-    - [ ] Replace runtime scope parsing with direct storage of canonical scope strings or interned scope identifiers owned by core.
-    - [ ] Keep encoded output identical enough that existing frontend style mapping still works.
-    - [ ] Avoid repeated string allocations on hot render paths by interning or shared storage if needed.
-  - [ ] Clean up layer/update/view glue.
-    - [ ] Audit `editor`, `event_context`, `view`, and plugin update handling for APIs that still assume syntect scope stacks.
-    - [ ] Rename compatibility comments and tests so they describe generic syntax spans, not syntect-specific scope updates.
-    - [ ] Preserve plugin-provided scope span support only if still required by actual runtime features; otherwise remove dead adapter layers.
-  - [ ] Audit plugin/protocol/catalog references.
-    - [ ] Remove test fixtures that model `syntect` as required plugin unless that compatibility contract is intentionally kept.
-    - [ ] Remove documentation/examples that tell clients to start `syntect` plugin when syntax highlighting is now core-owned.
-    - [ ] Keep protocol backward compatibility only if current user-facing plugin loading still depends on it; otherwise delete compatibility code.
-  - [ ] Add regression coverage for plumbing changes.
-    - [ ] Tests proving encoded syntax spans still keep correct line-relative byte ranges.
-    - [ ] Tests proving generic scope strings survive update/apply/render pipeline unchanged.
+- [x] Phase 4: remove `syntect` runtime types from core syntax plumbing.
+  - [x] Eliminate `syntect` runtime scope plumbing.
+    - [x] Replace runtime scope parsing with direct storage of canonical scope strings or interned scope identifiers owned by core.
+    - [x] Keep encoded output identical enough that existing frontend style mapping still works.
+    - [x] Remove dead layer storage entirely when backend-owned syntax spans make hot-path interning unnecessary.
+  - [x] Clean up layer/update/view glue.
+    - [x] Audit `editor`, `event_context`, `view`, and plugin update handling for APIs that still assume syntect scope stacks.
+    - [x] Rename compatibility comments and tests so they describe generic syntax spans, not syntect-specific scope updates.
+    - [x] Preserve plugin-provided scope span support only if still required by actual runtime features; otherwise remove dead adapter layers.
+  - [x] Audit plugin/protocol/catalog references.
+    - [x] Remove test fixtures that model `syntect` as required plugin unless that compatibility contract is intentionally kept.
+    - [x] Remove documentation/examples that tell clients to start `syntect` plugin when syntax highlighting is now core-owned.
+    - [x] Keep protocol backward compatibility only if current user-facing plugin loading still depends on it; otherwise delete compatibility code.
+  - [x] Add regression coverage for plumbing changes.
+    - [x] Tests proving encoded syntax spans still keep correct line-relative byte ranges.
+    - [x] Tests proving generic scope strings survive update/apply/render pipeline unchanged.
 
-- [ ] Phase 5: unify semantic tree-sitter behavior across normal and VLF.
-  - [ ] Move semantic selection/navigation to shared language registry and parse entry points.
-    - [ ] Ensure `object.rs` no longer hardcodes only Rust/Python path aliases.
-    - [ ] Use same language resolution and unsupported-language behavior as highlighting/reindent.
-  - [ ] Finish visible-range semantic constraints for VLF.
-    - [ ] Keep semantics bounded to current parsed window.
-    - [ ] Return explicit “outside parsed range” result instead of escalating to whole-buffer parse.
-    - [ ] Ensure repeated commands can reuse cached visible parse state when safe.
-  - [ ] Align normal/constrained and VLF feature gating.
-    - [ ] One source of truth should decide whether syntax spans, semantic motions, comment features, and reindent are available for language plus document mode.
-    - [ ] TUI should only display capability result; it must not infer fallback policy itself.
-  - [ ] Add regression coverage for semantic features.
-    - [ ] Tests for next/prev function, class, parameter, comment, and test on newly wired languages.
-    - [ ] Tests proving VLF semantic commands stay bounded and do not materialize full text.
+- [x] Phase 5: unify semantic tree-sitter behavior across normal and VLF.
+  - [x] Move semantic selection/navigation to shared language registry and parse entry points.
+    - [x] Ensure `object.rs` no longer hardcodes only Rust/Python path aliases.
+    - [x] Use same language resolution and unsupported-language behavior as highlighting/reindent.
+  - [x] Finish visible-range semantic constraints for VLF.
+    - [x] Keep semantics bounded to current parsed window.
+    - [x] Return explicit “outside parsed range” result instead of escalating to whole-buffer parse.
+    - [x] Ensure repeated commands can reuse cached visible parse state when safe.
+  - [x] Align normal/constrained and VLF feature gating.
+    - [x] One source of truth should decide whether syntax spans, semantic motions, comment features, and reindent are available for language plus document mode.
+    - [x] TUI should only display capability result; it must not infer fallback policy itself.
+  - [x] Add regression coverage for semantic features.
+    - [x] Tests for next/prev function, class, parameter, comment, and test on newly wired languages.
+    - [x] Tests proving VLF semantic commands stay bounded and do not materialize full text.
 
-- [ ] Phase 6: remove dependency, fixtures, and stale compatibility branches.
-  - [ ] Remove `syntect` from workspace and crate manifests.
-    - [ ] Drop dependency from root `Cargo.toml`.
-    - [ ] Drop dependency from `crates/ee-tui/Cargo.toml`.
-    - [ ] Drop dependency from `crates/xi-core-lib/Cargo.toml`.
-    - [ ] Regenerate `Cargo.lock`.
-  - [ ] Delete dead code and tests that only existed for syntect fallback.
-    - [ ] Remove TUI shared asset loader and syntect-specific tests.
-    - [ ] Remove core compatibility helpers that only converted syntect scopes/tokens.
-    - [ ] Remove comments referencing phased syntect fallback once cutover is complete.
-  - [ ] Run final validation sweep.
-    - [ ] `cargo test --workspace`
-    - [ ] `cargo clippy --workspace --all-targets`
-    - [ ] Focused regression runs for VLF syntax, semantic selection/navigation, toggle comment, and reindent.
-    - [ ] Confirm no source file imports `syntect` and no manifest references remain.
-  - [ ] Close migration by updating docs and issue tracker.
-    - [ ] Mark cutover checklist done only after manifests, code, docs, and tests are all syntect-free.
-    - [ ] Add brief note describing final architecture: backend-owned tree-sitter for syntax features across all modes.
+- [x] Phase 6: remove dependency, fixtures, and stale compatibility branches.
+  - [x] Remove `syntect` from workspace and crate manifests.
+    - [x] Drop dependency from root `Cargo.toml`.
+    - [x] Drop dependency from `crates/ee-tui/Cargo.toml`.
+    - [x] Drop dependency from `crates/xi-core-lib/Cargo.toml`.
+    - [x] Regenerate `Cargo.lock`.
+  - [x] Delete dead code and tests that only existed for syntect fallback.
+    - [x] Remove TUI shared asset loader and syntect-specific tests.
+    - [x] Remove core compatibility helpers that only converted syntect scopes/tokens.
+    - [x] Remove comments referencing phased syntect fallback once cutover is complete.
+  - [x] Run final validation sweep.
+    - [x] `cargo test --workspace`
+    - [x] `cargo clippy --workspace --all-targets`
+    - [x] Focused regression runs for VLF syntax, semantic selection/navigation, toggle comment, and reindent.
+    - [x] Confirm no source file imports `syntect` and no manifest references remain.
+  - [x] Close migration by updating docs and issue tracker.
+    - [x] Mark cutover checklist done only after manifests, code, docs, and tests are all syntect-free.
+    - [x] Add brief note describing final architecture: backend-owned tree-sitter for syntax features across all modes.
+
+- Tree-sitter follow-up gaps found during Phase 6 audit:
+  - [x] Wire `TsParseState` into runtime buffer update flow or remove it if viewport-bounded parsing remains the chosen model.
+  - [x] Wire `fold_ranges` into viewport/manual fold commands or move fold detection to separate planned work.
 
 ### VLF Streaming Save Wiring
 

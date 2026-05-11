@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn reindent_task_completes_and_poll_returns_result() {
-        // "Rust" is known to syntect; reindent may or may not produce a delta
+        // "Rust" has built-in tree-sitter reindent; result may or may not produce a delta
         // depending on the content, but the result slot must be populated.
         let text = Rope::from("fn foo() {\n}\n");
         let mut task = WholeScanTask::new();
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn unknown_language_reindent_deposits_none_result() {
-        // "NoSuchLanguage_xyz" is not in syntect; reindent() returns None.
+        // Unsupported language returns no built-in reindent delta.
         let text = Rope::from("some text\n");
         let mut task = WholeScanTask::new();
         task.start_reindent(

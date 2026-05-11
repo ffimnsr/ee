@@ -1,10 +1,129 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Tree};
 use xi_rope::Rope;
 
 use crate::selection::{SelRegion, Selection};
-use crate::tree_sitter_support::ts_language_for_name;
+use crate::tree_sitter_support::{
+    SemanticTargetKind, language_name_for_path, language_supports_semantic_target,
+    resolve_ts_language,
+};
+
+#[derive(Debug, Clone, Copy)]
+struct SyntaxParseWindow<'a> {
+    source: &'a str,
+    base_offset: usize,
+    bounded: bool,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct SyntaxParseCache {
+    source: String,
+    base_offset: usize,
+    language_name: String,
+    file_path: Option<PathBuf>,
+    tree: Option<Tree>,
+    parse_count: usize,
+}
+
+impl SyntaxParseCache {
+    pub(crate) fn contains_window(
+        &self,
+        language_name: &str,
+        file_path: Option<&Path>,
+        base_offset: usize,
+        end_offset: usize,
+    ) -> bool {
+        self.tree.is_some()
+            && self.language_name == language_name
+            && self.file_path.as_deref() == file_path
+            && self.base_offset == base_offset
+            && self.base_offset.saturating_add(self.source.len()) == end_offset
+    }
+
+    pub(crate) fn source(&self) -> &str {
+        &self.source
+    }
+
+    pub(crate) fn update(
+        &mut self,
+        source: &str,
+        base_offset: usize,
+        language_name: &str,
+        file_path: Option<&Path>,
+    ) -> Result<(), SyntaxSelectionError> {
+        let file_path_key = file_path.map(Path::to_path_buf);
+        if self.tree.is_some()
+            && self.source == source
+            && self.base_offset == base_offset
+            && self.language_name == language_name
+            && self.file_path == file_path_key
+        {
+            return Ok(());
+        }
+
+        let Some(language) = resolve_ts_language(Some(language_name), file_path) else {
+            return Err(SyntaxSelectionError::SyntaxTreeUnavailable);
+        };
+        let mut parser = Parser::new();
+        parser.set_language(&language).map_err(|_| SyntaxSelectionError::SyntaxTreeUnavailable)?;
+        let tree = parser.parse(source, None).ok_or(SyntaxSelectionError::SyntaxTreeUnavailable)?;
+
+        self.source.clear();
+        self.source.push_str(source);
+        self.base_offset = base_offset;
+        self.language_name.clear();
+        self.language_name.push_str(language_name);
+        self.file_path = file_path_key;
+        self.tree = Some(tree);
+        self.parse_count += 1;
+        Ok(())
+    }
+
+    fn window(&self) -> Result<SyntaxParseWindow<'_>, SyntaxSelectionError> {
+        self.tree.as_ref().ok_or(SyntaxSelectionError::SyntaxTreeUnavailable)?;
+        Ok(SyntaxParseWindow::bounded(&self.source, self.base_offset))
+    }
+
+    fn root_node(&self) -> Result<Node<'_>, SyntaxSelectionError> {
+        self.tree.as_ref().map(Tree::root_node).ok_or(SyntaxSelectionError::SyntaxTreeUnavailable)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parse_count(&self) -> usize {
+        self.parse_count
+    }
+}
+
+impl<'a> SyntaxParseWindow<'a> {
+    fn full(source: &'a str) -> Self {
+        Self { source, base_offset: 0, bounded: false }
+    }
+
+    fn bounded(source: &'a str, base_offset: usize) -> Self {
+        Self { source, base_offset, bounded: true }
+    }
+
+    fn len(self) -> usize {
+        self.source.len()
+    }
+
+    fn contains_offset(self, offset: usize) -> bool {
+        offset >= self.base_offset && offset <= self.base_offset.saturating_add(self.len())
+    }
+
+    fn contains_region(self, region: SelRegion) -> bool {
+        self.contains_offset(region.min()) && self.contains_offset(region.max())
+    }
+
+    fn local_offset(self, offset: usize) -> Option<usize> {
+        self.contains_offset(offset).then_some(offset.saturating_sub(self.base_offset))
+    }
+
+    fn absolute_offset(self, offset: usize) -> usize {
+        self.base_offset.saturating_add(offset)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SyntaxSelectionAction {
@@ -72,6 +191,7 @@ impl SyntaxSelectionAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SyntaxSelectionError {
     SyntaxTreeUnavailable,
+    OutsideParsedRange,
     ParentAbsent,
     ChildAbsent,
     SiblingAbsent,
@@ -83,6 +203,7 @@ impl SyntaxSelectionError {
     pub(crate) fn message(self) -> &'static str {
         match self {
             SyntaxSelectionError::SyntaxTreeUnavailable => "no syntax tree available",
+            SyntaxSelectionError::OutsideParsedRange => "outside current parsed range",
             SyntaxSelectionError::ParentAbsent => "no parent syntax node",
             SyntaxSelectionError::ChildAbsent => "no child syntax node",
             SyntaxSelectionError::SiblingAbsent => "no sibling syntax node",
@@ -99,27 +220,88 @@ pub(crate) fn apply_syntax_navigation(
     file_path: Option<&Path>,
     action: SyntaxNavigationAction,
 ) -> Result<Selection, SyntaxSelectionError> {
-    let Some(language) =
-        ts_language_for_name(language_name).or_else(|| syntax_language_for_path(file_path))
-    else {
+    let source = text.to_string();
+    apply_syntax_navigation_with_window(
+        SyntaxParseWindow::full(&source),
+        current,
+        language_name,
+        file_path,
+        action,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn apply_syntax_navigation_in_window(
+    source: &str,
+    base_offset: usize,
+    current: &Selection,
+    language_name: &str,
+    file_path: Option<&Path>,
+    action: SyntaxNavigationAction,
+) -> Result<Selection, SyntaxSelectionError> {
+    apply_syntax_navigation_with_window(
+        SyntaxParseWindow::bounded(source, base_offset),
+        current,
+        language_name,
+        file_path,
+        action,
+    )
+}
+
+pub(crate) fn apply_syntax_navigation_in_cache(
+    cache: &SyntaxParseCache,
+    current: &Selection,
+    action: SyntaxNavigationAction,
+) -> Result<Selection, SyntaxSelectionError> {
+    if !supports_semantic_target(&cache.language_name, cache.file_path.as_deref(), action.target) {
+        return Err(SyntaxSelectionError::NavigationTargetAbsent);
+    }
+    let window = cache.window()?;
+    let root = cache.root_node()?;
+    apply_syntax_navigation_from_tree(window, root, current, action)
+}
+
+fn apply_syntax_navigation_with_window(
+    window: SyntaxParseWindow<'_>,
+    current: &Selection,
+    language_name: &str,
+    file_path: Option<&Path>,
+    action: SyntaxNavigationAction,
+) -> Result<Selection, SyntaxSelectionError> {
+    let Some(language) = resolve_ts_language(Some(language_name), file_path) else {
         return Err(SyntaxSelectionError::SyntaxTreeUnavailable);
     };
+    if !supports_semantic_target(language_name, file_path, action.target) {
+        return Err(SyntaxSelectionError::NavigationTargetAbsent);
+    }
+
     let mut parser = Parser::new();
     parser.set_language(&language).map_err(|_| SyntaxSelectionError::SyntaxTreeUnavailable)?;
 
-    let source = text.to_string();
-    let Some(tree) = parser.parse(&source, None) else {
+    let Some(tree) = parser.parse(window.source, None) else {
         return Err(SyntaxSelectionError::SyntaxTreeUnavailable);
     };
-    let root = tree.root_node();
-    let text_len = source.len();
+    apply_syntax_navigation_from_tree(window, tree.root_node(), current, action)
+}
+
+fn apply_syntax_navigation_from_tree(
+    window: SyntaxParseWindow<'_>,
+    root: Node<'_>,
+    current: &Selection,
+    action: SyntaxNavigationAction,
+) -> Result<Selection, SyntaxSelectionError> {
     let mut selection = Selection::new();
 
     for &region in current.iter() {
-        let cursor = region.end.min(text_len);
-        let target = find_navigation_target(root, &source, action, cursor)
-            .ok_or(SyntaxSelectionError::NavigationTargetAbsent)?;
-        selection.add_region(SelRegion::caret(target.start_byte()));
+        let cursor =
+            window.local_offset(region.end).ok_or(SyntaxSelectionError::OutsideParsedRange)?;
+        let target = find_navigation_target(root, window.source, action, cursor, window.bounded)
+            .ok_or(if window.bounded {
+                SyntaxSelectionError::OutsideParsedRange
+            } else {
+                SyntaxSelectionError::NavigationTargetAbsent
+            })?;
+        selection.add_region(SelRegion::caret(window.absolute_offset(target.start_byte())));
     }
 
     Ok(selection)
@@ -133,6 +315,73 @@ pub(crate) fn apply_syntax_selection(
     file_path: Option<&Path>,
     action: SyntaxSelectionAction,
 ) -> Result<Selection, SyntaxSelectionError> {
+    let source = text.to_string();
+    apply_syntax_selection_with_window(
+        SyntaxParseWindow::full(&source),
+        current,
+        history,
+        language_name,
+        file_path,
+        action,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn apply_syntax_selection_in_window(
+    source: &str,
+    base_offset: usize,
+    current: &Selection,
+    history: &mut Vec<Selection>,
+    language_name: &str,
+    file_path: Option<&Path>,
+    action: SyntaxSelectionAction,
+) -> Result<Selection, SyntaxSelectionError> {
+    apply_syntax_selection_with_window(
+        SyntaxParseWindow::bounded(source, base_offset),
+        current,
+        history,
+        language_name,
+        file_path,
+        action,
+    )
+}
+
+pub(crate) fn apply_syntax_selection_in_cache(
+    cache: &SyntaxParseCache,
+    current: &Selection,
+    history: &mut Vec<Selection>,
+    action: SyntaxSelectionAction,
+) -> Result<Selection, SyntaxSelectionError> {
+    apply_syntax_selection_from_tree(cache.window()?, cache.root_node()?, current, history, action)
+}
+
+fn apply_syntax_selection_with_window(
+    window: SyntaxParseWindow<'_>,
+    current: &Selection,
+    history: &mut Vec<Selection>,
+    language_name: &str,
+    file_path: Option<&Path>,
+    action: SyntaxSelectionAction,
+) -> Result<Selection, SyntaxSelectionError> {
+    let Some(language) = resolve_ts_language(Some(language_name), file_path) else {
+        return Err(SyntaxSelectionError::SyntaxTreeUnavailable);
+    };
+    let mut parser = Parser::new();
+    parser.set_language(&language).map_err(|_| SyntaxSelectionError::SyntaxTreeUnavailable)?;
+
+    let Some(tree) = parser.parse(window.source, None) else {
+        return Err(SyntaxSelectionError::SyntaxTreeUnavailable);
+    };
+    apply_syntax_selection_from_tree(window, tree.root_node(), current, history, action)
+}
+
+fn apply_syntax_selection_from_tree(
+    window: SyntaxParseWindow<'_>,
+    root: Node<'_>,
+    current: &Selection,
+    history: &mut Vec<Selection>,
+    action: SyntaxSelectionAction,
+) -> Result<Selection, SyntaxSelectionError> {
     if matches!(action, SyntaxSelectionAction::Shrink) {
         if let Some(previous) = history.pop() {
             if selection_contains(current, &previous) {
@@ -142,33 +391,18 @@ pub(crate) fn apply_syntax_selection(
         }
     }
 
-    let Some(language) =
-        ts_language_for_name(language_name).or_else(|| syntax_language_for_path(file_path))
-    else {
-        return Err(SyntaxSelectionError::SyntaxTreeUnavailable);
-    };
-    let mut parser = Parser::new();
-    parser.set_language(&language).map_err(|_| SyntaxSelectionError::SyntaxTreeUnavailable)?;
-
-    let source = text.to_string();
-    let Some(tree) = parser.parse(&source, None) else {
-        return Err(SyntaxSelectionError::SyntaxTreeUnavailable);
-    };
-    let root = tree.root_node();
-    let text_len = source.len();
-
     let next = match action {
-        SyntaxSelectionAction::Expand => expand_selection(current, root, text_len)?,
-        SyntaxSelectionAction::Shrink => shrink_selection(current, root, text_len)?,
-        SyntaxSelectionAction::SelectPrevSibling => select_sibling(current, root, text_len, true)?,
-        SyntaxSelectionAction::SelectNextSibling => select_sibling(current, root, text_len, false)?,
-        SyntaxSelectionAction::SelectAllSiblings => select_all_siblings(current, root, text_len)?,
-        SyntaxSelectionAction::SelectAllChildren => select_all_children(current, root, text_len)?,
+        SyntaxSelectionAction::Expand => expand_selection(current, root, window)?,
+        SyntaxSelectionAction::Shrink => shrink_selection(current, root, window)?,
+        SyntaxSelectionAction::SelectPrevSibling => select_sibling(current, root, window, true)?,
+        SyntaxSelectionAction::SelectNextSibling => select_sibling(current, root, window, false)?,
+        SyntaxSelectionAction::SelectAllSiblings => select_all_siblings(current, root, window)?,
+        SyntaxSelectionAction::SelectAllChildren => select_all_children(current, root, window)?,
         SyntaxSelectionAction::MoveParentNodeStart => {
-            move_parent_node_boundary(current, root, text_len, false)?
+            move_parent_node_boundary(current, root, window, false)?
         }
         SyntaxSelectionAction::MoveParentNodeEnd => {
-            move_parent_node_boundary(current, root, text_len, true)?
+            move_parent_node_boundary(current, root, window, true)?
         }
     };
 
@@ -179,29 +413,26 @@ pub(crate) fn apply_syntax_selection(
     Ok(next)
 }
 
-fn syntax_language_for_path(path: Option<&Path>) -> Option<tree_sitter::Language> {
-    let ext = path?.extension()?.to_str()?;
-    match ext {
-        "rs" => ts_language_for_name("Rust"),
-        "py" => ts_language_for_name("Python"),
-        _ => None,
-    }
-}
-
 fn expand_selection(
     current: &Selection,
     root: Node<'_>,
-    text_len: usize,
+    window: SyntaxParseWindow<'_>,
 ) -> Result<Selection, SyntaxSelectionError> {
     let mut selection = Selection::new();
     for &region in current.iter() {
-        let (from, to, node) =
-            node_for_region(root, region, text_len).ok_or(SyntaxSelectionError::ParentAbsent)?;
+        let (from, to, node) = node_for_region(root, region, window).ok_or(if window.bounded {
+            SyntaxSelectionError::OutsideParsedRange
+        } else {
+            SyntaxSelectionError::ParentAbsent
+        })?;
         let mut parent = node;
         while parent.start_byte() == from && parent.end_byte() == to {
             parent = parent.parent().ok_or(SyntaxSelectionError::ParentAbsent)?;
         }
-        selection.add_region(node_to_region(parent));
+        if window.bounded && parent.parent().is_none() {
+            return Err(SyntaxSelectionError::OutsideParsedRange);
+        }
+        selection.add_region(node_to_region(parent, window.base_offset));
     }
     Ok(selection)
 }
@@ -209,14 +440,17 @@ fn expand_selection(
 fn shrink_selection(
     current: &Selection,
     root: Node<'_>,
-    text_len: usize,
+    window: SyntaxParseWindow<'_>,
 ) -> Result<Selection, SyntaxSelectionError> {
     let mut selection = Selection::new();
     for &region in current.iter() {
-        let (_, _, node) =
-            node_for_region(root, region, text_len).ok_or(SyntaxSelectionError::ChildAbsent)?;
+        let (_, _, node) = node_for_region(root, region, window).ok_or(if window.bounded {
+            SyntaxSelectionError::OutsideParsedRange
+        } else {
+            SyntaxSelectionError::ChildAbsent
+        })?;
         let child = first_named_child(node).ok_or(SyntaxSelectionError::ChildAbsent)?;
-        selection.add_region(node_to_region(child));
+        selection.add_region(node_to_region(child, window.base_offset));
     }
     Ok(selection)
 }
@@ -224,21 +458,28 @@ fn shrink_selection(
 fn select_sibling(
     current: &Selection,
     root: Node<'_>,
-    text_len: usize,
+    window: SyntaxParseWindow<'_>,
     previous: bool,
 ) -> Result<Selection, SyntaxSelectionError> {
     let mut selection = Selection::new();
     for &region in current.iter() {
-        let (_, _, node) =
-            node_for_region(root, region, text_len).ok_or(SyntaxSelectionError::SiblingAbsent)?;
+        let (_, _, node) = node_for_region(root, region, window).ok_or(if window.bounded {
+            SyntaxSelectionError::OutsideParsedRange
+        } else {
+            SyntaxSelectionError::SiblingAbsent
+        })?;
         let sibling = if previous {
             node.prev_named_sibling().or_else(|| node.prev_sibling())
         } else {
             node.next_named_sibling().or_else(|| node.next_sibling())
         }
         .filter(|sibling| sibling.end_byte() > sibling.start_byte())
-        .ok_or(SyntaxSelectionError::SiblingAbsent)?;
-        selection.add_region(node_to_region(sibling));
+        .ok_or(if window.bounded {
+            SyntaxSelectionError::OutsideParsedRange
+        } else {
+            SyntaxSelectionError::SiblingAbsent
+        })?;
+        selection.add_region(node_to_region(sibling, window.base_offset));
     }
     Ok(selection)
 }
@@ -246,15 +487,21 @@ fn select_sibling(
 fn select_all_siblings(
     current: &Selection,
     root: Node<'_>,
-    text_len: usize,
+    window: SyntaxParseWindow<'_>,
 ) -> Result<Selection, SyntaxSelectionError> {
     let mut selection = Selection::new();
     let mut found_any = false;
 
     for &region in current.iter() {
-        let (_, _, node) =
-            node_for_region(root, region, text_len).ok_or(SyntaxSelectionError::SiblingAbsent)?;
+        let (_, _, node) = node_for_region(root, region, window).ok_or(if window.bounded {
+            SyntaxSelectionError::OutsideParsedRange
+        } else {
+            SyntaxSelectionError::SiblingAbsent
+        })?;
         let parent = node.parent().ok_or(SyntaxSelectionError::SiblingAbsent)?;
+        if window.bounded && parent.parent().is_none() {
+            return Err(SyntaxSelectionError::OutsideParsedRange);
+        }
         let mut cursor = parent.walk();
         let mut has_sibling = false;
         for child in parent.named_children(&mut cursor) {
@@ -262,7 +509,7 @@ fn select_all_siblings(
                 continue;
             }
             has_sibling = true;
-            selection.add_range_distinct(node_to_region(child));
+            selection.add_range_distinct(node_to_region(child, window.base_offset));
         }
         if !has_sibling {
             return Err(SyntaxSelectionError::SiblingAbsent);
@@ -280,14 +527,17 @@ fn select_all_siblings(
 fn select_all_children(
     current: &Selection,
     root: Node<'_>,
-    text_len: usize,
+    window: SyntaxParseWindow<'_>,
 ) -> Result<Selection, SyntaxSelectionError> {
     let mut selection = Selection::new();
     let mut found_any = false;
 
     for &region in current.iter() {
-        let (_, _, node) =
-            node_for_region(root, region, text_len).ok_or(SyntaxSelectionError::ChildrenAbsent)?;
+        let (_, _, node) = node_for_region(root, region, window).ok_or(if window.bounded {
+            SyntaxSelectionError::OutsideParsedRange
+        } else {
+            SyntaxSelectionError::ChildrenAbsent
+        })?;
         let mut cursor = node.walk();
         let mut has_child = false;
         for child in node.named_children(&mut cursor) {
@@ -295,7 +545,7 @@ fn select_all_children(
                 continue;
             }
             has_child = true;
-            selection.add_range_distinct(node_to_region(child));
+            selection.add_range_distinct(node_to_region(child, window.base_offset));
         }
         if !has_child {
             return Err(SyntaxSelectionError::ChildrenAbsent);
@@ -313,17 +563,23 @@ fn select_all_children(
 fn move_parent_node_boundary(
     current: &Selection,
     root: Node<'_>,
-    text_len: usize,
+    window: SyntaxParseWindow<'_>,
     end: bool,
 ) -> Result<Selection, SyntaxSelectionError> {
     let mut selection = Selection::new();
 
     for &region in current.iter() {
-        let (_, _, node) =
-            node_for_region(root, region, text_len).ok_or(SyntaxSelectionError::ParentAbsent)?;
+        let (_, _, node) = node_for_region(root, region, window).ok_or(if window.bounded {
+            SyntaxSelectionError::OutsideParsedRange
+        } else {
+            SyntaxSelectionError::ParentAbsent
+        })?;
         let parent = node.parent().ok_or(SyntaxSelectionError::ParentAbsent)?;
+        if window.bounded && parent.parent().is_none() {
+            return Err(SyntaxSelectionError::OutsideParsedRange);
+        }
         let offset = if end { parent.end_byte() } else { parent.start_byte() };
-        selection.add_region(SelRegion::caret(offset));
+        selection.add_region(SelRegion::caret(window.absolute_offset(offset)));
     }
 
     Ok(selection)
@@ -349,14 +605,19 @@ fn selection_eq(left: &Selection, right: &Selection) -> bool {
 fn node_for_region<'a>(
     root: Node<'a>,
     region: SelRegion,
-    text_len: usize,
+    window: SyntaxParseWindow<'_>,
 ) -> Option<(usize, usize, Node<'a>)> {
+    let text_len = window.len();
     if text_len == 0 {
         return None;
     }
 
-    let from = region.min().min(text_len);
-    let to = region.max().min(text_len);
+    if !window.contains_region(region) {
+        return None;
+    }
+
+    let from = window.local_offset(region.min())?.min(text_len);
+    let to = window.local_offset(region.max())?.min(text_len);
 
     let mut search_start = from.min(text_len.saturating_sub(1));
     let mut search_end = if region.is_caret() { from.saturating_add(1) } else { to }.min(text_len);
@@ -383,8 +644,11 @@ fn first_child(node: Node<'_>) -> Option<Node<'_>> {
     node.children(&mut cursor).find(|child| child.end_byte() > child.start_byte())
 }
 
-fn node_to_region(node: Node<'_>) -> SelRegion {
-    SelRegion::new(node.start_byte(), node.end_byte())
+fn node_to_region(node: Node<'_>, base_offset: usize) -> SelRegion {
+    SelRegion::new(
+        base_offset.saturating_add(node.start_byte()),
+        base_offset.saturating_add(node.end_byte()),
+    )
 }
 
 fn find_navigation_target<'a>(
@@ -392,6 +656,7 @@ fn find_navigation_target<'a>(
     source: &str,
     action: SyntaxNavigationAction,
     cursor: usize,
+    bounded: bool,
 ) -> Option<Node<'a>> {
     let mut matches = Vec::new();
     collect_navigation_nodes(root, source, action.target, &mut matches);
@@ -402,15 +667,37 @@ fn find_navigation_target<'a>(
             .iter()
             .copied()
             .find(|node| node.start_byte() > cursor)
-            .or_else(|| matches.first().copied())
+            .or_else(|| (!bounded).then(|| matches.first().copied()).flatten())
     } else {
         matches
             .iter()
             .rev()
             .copied()
             .find(|node| node.end_byte() <= cursor)
-            .or_else(|| matches.last().copied())
+            .or_else(|| (!bounded).then(|| matches.last().copied()).flatten())
     }
+}
+
+fn semantic_target_kind(target: SyntaxNavigationTarget) -> SemanticTargetKind {
+    match target {
+        SyntaxNavigationTarget::Function => SemanticTargetKind::Function,
+        SyntaxNavigationTarget::Class => SemanticTargetKind::Class,
+        SyntaxNavigationTarget::Parameter => SemanticTargetKind::Parameter,
+        SyntaxNavigationTarget::Comment => SemanticTargetKind::Comment,
+        SyntaxNavigationTarget::Test => SemanticTargetKind::Test,
+    }
+}
+
+fn supports_semantic_target(
+    language_name: &str,
+    file_path: Option<&Path>,
+    target: SyntaxNavigationTarget,
+) -> bool {
+    let target = semantic_target_kind(target);
+    language_supports_semantic_target(language_name, target)
+        || file_path
+            .and_then(language_name_for_path)
+            .is_some_and(|resolved| language_supports_semantic_target(resolved, target))
 }
 
 fn collect_navigation_nodes<'a>(
@@ -442,7 +729,11 @@ fn node_matches_target(node: Node<'_>, source: &str, target: SyntaxNavigationTar
 
 fn is_function_node(node: Node<'_>) -> bool {
     match node.kind() {
-        "function_item" | "function_definition" => true,
+        "function_item"
+        | "function_definition"
+        | "function_declaration"
+        | "generator_function_declaration"
+        | "method_definition" => true,
         "decorated_definition" => first_named_child(node)
             .map(|child| matches!(child.kind(), "function_definition"))
             .unwrap_or(false),
@@ -452,8 +743,8 @@ fn is_function_node(node: Node<'_>) -> bool {
 
 fn is_class_node(node: Node<'_>) -> bool {
     match node.kind() {
-        "class_definition" | "struct_item" | "enum_item" | "trait_item" | "impl_item"
-        | "union_item" | "type_item" => true,
+        "class_definition" | "class_declaration" | "struct_item" | "enum_item" | "trait_item"
+        | "impl_item" | "union_item" | "type_item" => true,
         "decorated_definition" => first_named_child(node)
             .map(|child| matches!(child.kind(), "class_definition"))
             .unwrap_or(false),
@@ -463,8 +754,12 @@ fn is_class_node(node: Node<'_>) -> bool {
 
 fn is_parameter_node(node: Node<'_>) -> bool {
     let kind = node.kind();
-    (kind.contains("parameter") && kind != "parameters")
+    (kind.contains("parameter") && !kind.ends_with("parameters"))
         || matches!(kind, "typed_parameter" | "self_parameter" | "default_parameter")
+        || (kind == "identifier"
+            && node
+                .parent()
+                .is_some_and(|parent| matches!(parent.kind(), "parameters" | "formal_parameters")))
 }
 
 fn is_test_node(node: Node<'_>, source: &str) -> bool {
@@ -472,6 +767,9 @@ fn is_test_node(node: Node<'_>, source: &str) -> bool {
         "function_item" => rust_function_has_test_attribute(node, source),
         "function_definition" => python_function_name(node, source)
             .map(|name| name.starts_with("test_"))
+            .unwrap_or(false),
+        "call_expression" => javascript_test_call_name(node, source)
+            .map(|name| matches!(name, "test" | "it"))
             .unwrap_or(false),
         "decorated_definition" => {
             if let Some(child) = first_named_child(node) {
@@ -484,6 +782,17 @@ fn is_test_node(node: Node<'_>, source: &str) -> bool {
             }
         }
         _ => false,
+    }
+}
+
+fn javascript_test_call_name<'a>(node: Node<'a>, source: &'a str) -> Option<&'a str> {
+    let function = node.child_by_field_name("function").or_else(|| first_named_child(node))?;
+    match function.kind() {
+        "identifier" => Some(node_text(function, source)),
+        "member_expression" => {
+            function.child_by_field_name("property").map(|property| node_text(property, source))
+        }
+        _ => None,
     }
 }
 
@@ -516,10 +825,12 @@ fn node_text<'a>(node: Node<'_>, source: &'a str) -> &'a str {
 mod tests {
     use super::{
         SyntaxNavigationAction, SyntaxNavigationTarget, SyntaxSelectionAction,
-        SyntaxSelectionError, apply_syntax_navigation, apply_syntax_selection, node_to_region,
+        SyntaxSelectionError, apply_syntax_navigation, apply_syntax_navigation_in_window,
+        apply_syntax_selection, apply_syntax_selection_in_window, node_to_region,
     };
     use crate::selection::{SelRegion, Selection};
     use crate::tree_sitter_support::ts_language_for_name;
+    use std::path::Path;
     use tree_sitter::Parser;
     use xi_rope::Rope;
 
@@ -539,7 +850,7 @@ mod tests {
         let start = source.find(needle).unwrap();
         let end = start + needle.len();
         let node = tree.root_node().descendant_for_byte_range(start, end).unwrap();
-        node_to_region(node)
+        node_to_region(node, 0)
     }
 
     #[test]
@@ -685,6 +996,27 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err, SyntaxSelectionError::SyntaxTreeUnavailable);
+    }
+
+    #[test]
+    fn registry_path_resolution_extends_beyond_rust_and_python() {
+        let source = "function alpha() { return value; }\n";
+        let text = Rope::from(source);
+        let mut history = Vec::new();
+        let current =
+            select_range(source.find("value").unwrap(), source.find("value").unwrap() + 5);
+
+        let expanded = apply_syntax_selection(
+            &text,
+            &current,
+            &mut history,
+            "Plain Text",
+            Some(Path::new("app.js")),
+            SyntaxSelectionAction::Expand,
+        )
+        .unwrap();
+
+        assert!(!super::selection_eq(&expanded, &current));
     }
 
     #[test]
@@ -851,5 +1183,146 @@ mod tests {
         )
         .unwrap();
         assert!(super::selection_eq(&prev, &caret(source.find("fn alpha").unwrap())));
+    }
+
+    #[test]
+    fn goto_next_function_uses_registry_for_javascript() {
+        let source = "function alpha() {}\nfunction beta() {}\n";
+        let text = Rope::from(source);
+
+        let next = apply_syntax_navigation(
+            &text,
+            &caret(source.find("alpha").unwrap()),
+            "Plain Text",
+            Some(Path::new("app.js")),
+            SyntaxNavigationAction::new(SyntaxNavigationTarget::Function, true),
+        )
+        .unwrap();
+
+        assert!(super::selection_eq(&next, &caret(source.find("function beta").unwrap())));
+    }
+
+    #[test]
+    fn javascript_semantic_navigation_covers_supported_targets() {
+        let source = "// alpha\nclass Alpha {}\nfunction beta(first, second) {}\ntest('beta', () => {});\n// omega\n";
+        let text = Rope::from(source);
+        let path = Some(Path::new("app.js"));
+
+        let next_function = apply_syntax_navigation(
+            &text,
+            &caret(0),
+            "Plain Text",
+            path,
+            SyntaxNavigationAction::new(SyntaxNavigationTarget::Function, true),
+        )
+        .unwrap();
+        assert!(super::selection_eq(&next_function, &caret(source.find("function beta").unwrap())));
+
+        let prev_class = apply_syntax_navigation(
+            &text,
+            &caret(source.find("function beta").unwrap()),
+            "Plain Text",
+            path,
+            SyntaxNavigationAction::new(SyntaxNavigationTarget::Class, false),
+        )
+        .unwrap();
+        assert!(super::selection_eq(&prev_class, &caret(source.find("class Alpha").unwrap())));
+
+        let next_parameter = apply_syntax_navigation(
+            &text,
+            &caret(source.find("first").unwrap()),
+            "Plain Text",
+            path,
+            SyntaxNavigationAction::new(SyntaxNavigationTarget::Parameter, true),
+        )
+        .unwrap();
+        assert!(super::selection_eq(&next_parameter, &caret(source.find("second").unwrap())));
+
+        let prev_comment = apply_syntax_navigation(
+            &text,
+            &caret(source.find("omega").unwrap()),
+            "Plain Text",
+            path,
+            SyntaxNavigationAction::new(SyntaxNavigationTarget::Comment, false),
+        )
+        .unwrap();
+        assert!(super::selection_eq(&prev_comment, &caret(source.find("// alpha").unwrap())));
+
+        let next_test = apply_syntax_navigation(
+            &text,
+            &caret(source.find("function beta").unwrap()),
+            "Plain Text",
+            path,
+            SyntaxNavigationAction::new(SyntaxNavigationTarget::Test, true),
+        )
+        .unwrap();
+        assert!(super::selection_eq(&next_test, &caret(source.find("test(").unwrap())));
+    }
+
+    #[test]
+    fn bounded_navigation_reports_outside_parsed_range_without_wrapping() {
+        let source = "fn alpha() {}\nfn beta() {}\n";
+        let current = caret(0);
+
+        let err = apply_syntax_navigation_in_window(
+            &source[..source.find("fn beta").unwrap()],
+            0,
+            &current,
+            "Rust",
+            None,
+            SyntaxNavigationAction::new(SyntaxNavigationTarget::Function, true),
+        )
+        .unwrap_err();
+
+        assert_eq!(err, SyntaxSelectionError::OutsideParsedRange);
+    }
+
+    #[test]
+    fn bounded_selection_uses_absolute_offsets() {
+        let source = "fn main() { [foo, bar, baz]; }\n";
+        let base = source.find('[').unwrap();
+        let end = source.find(']').unwrap() + 1;
+        let current = select_range(base, end);
+        let mut history = Vec::new();
+
+        let children = apply_syntax_selection_in_window(
+            &source[base..end],
+            base,
+            &current,
+            &mut history,
+            "Rust",
+            None,
+            SyntaxSelectionAction::SelectAllChildren,
+        )
+        .unwrap();
+
+        assert!(children.iter().any(|region| region.min() == source.find("foo").unwrap()));
+        assert!(children.iter().any(|region| region.min() == source.find("bar").unwrap()));
+        assert!(children.iter().any(|region| region.min() == source.find("baz").unwrap()));
+    }
+
+    #[test]
+    fn bounded_expand_selection_grows_region_for_visible_node() {
+        let source = "fn main() { foo(bar); }\n";
+        let start = source.find("bar").unwrap();
+        let end = start + 3;
+        let current = select_range(start, end);
+        let mut history = Vec::new();
+
+        let expanded = apply_syntax_selection_in_window(
+            source,
+            0,
+            &current,
+            &mut history,
+            "Rust",
+            None,
+            SyntaxSelectionAction::Expand,
+        )
+        .unwrap();
+
+        assert_eq!(expanded.len(), 1);
+        assert!(expanded[0].min() <= start);
+        assert!(expanded[0].max() >= end);
+        assert!(expanded[0].min() < start || expanded[0].max() > end);
     }
 }

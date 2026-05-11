@@ -1058,8 +1058,6 @@ fn render_buffer(
         return;
     }
 
-    let extension = buf.path.as_ref().and_then(|p| p.extension()).and_then(|e| e.to_str());
-
     // Collect visible logical lines (fold-aware).  Use line_count() so VLF
     // buffers iterate over `line_cache` size rather than the empty `lines` vec.
     let mut visible: Vec<usize> = Vec::with_capacity(height);
@@ -1072,20 +1070,6 @@ fn render_buffer(
             li += 1;
         }
     }
-
-    let hl_span = visible.last().copied().unwrap_or(top).saturating_sub(top) + 1;
-    let syntax_name = app.syntax_overrides.get(&buf.id).map(String::as_str);
-    let highlight_bytes: usize =
-        visible.iter().filter_map(|&idx| buf.get_line(idx)).map(str::len).sum();
-    const MAX_SYNC_HIGHLIGHT_BYTES: usize = 65_536;
-    // In VLF mode `lines` is empty; skip the server-side syntax pass (tree-sitter
-    // is disabled for VLF until visible-range parsing exists).
-    let hl_lines = if buf.is_vlf || highlight_bytes > MAX_SYNC_HIGHLIGHT_BYTES {
-        vec![]
-    } else {
-        app.highlighter.highlight_visible(&buf.lines, syntax_name, extension, top, hl_span)
-    };
-
     // Style for lines not yet loaded in VLF mode.
     let loading_style = Style::default().fg(Color::Rgb(90, 95, 115)).add_modifier(Modifier::ITALIC);
 
@@ -1149,34 +1133,10 @@ fn render_buffer(
                     })
                     .collect()
                 } else {
-                    let raw = hl_lines.get(log_idx.saturating_sub(top));
-                    if let Some(spans_ref) = raw {
-                        if spans_ref.is_empty() {
-                            vec![Span::styled(
-                                line[byte_start..byte_end].to_owned(),
-                                Style::default().bg(bg),
-                            )]
-                        } else {
-                            crate::highlight::Highlighter::spans_with_range(
-                                spans_ref, byte_start, byte_end,
-                            )
-                            .into_iter()
-                            .map(|s| {
-                                let style = if is_cursor && app.config.cursor_line {
-                                    s.style.bg(bg)
-                                } else {
-                                    s.style
-                                };
-                                Span::styled(s.content.into_owned(), style)
-                            })
-                            .collect()
-                        }
-                    } else {
-                        vec![Span::styled(
-                            line[byte_start..byte_end].to_owned(),
-                            Style::default().bg(bg),
-                        )]
-                    }
+                    vec![Span::styled(
+                        line[byte_start..byte_end].to_owned(),
+                        Style::default().bg(bg),
+                    )]
                 }
             };
 
