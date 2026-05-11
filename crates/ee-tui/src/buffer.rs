@@ -88,6 +88,11 @@ pub(crate) struct BufState {
     /// In VLF mode `lines` is never materialized; rendering reads `line_cache`
     /// directly for the visible viewport range only.
     pub(crate) is_vlf: bool,
+    /// Logical line number represented by `line_cache[0]` in VLF mode.
+    ///
+    /// VLF keeps only the loaded viewport window here; `vlf_approx_line_count`
+    /// carries document size so huge files do not allocate one slot per line.
+    pub(crate) vlf_cache_start_line: usize,
     /// Monotone counter incremented on every VLF viewport scroll.
     ///
     /// Each `vlf_viewport` request carries this counter; `vlf_chunks` responses
@@ -95,7 +100,7 @@ pub(crate) struct BufState {
     /// never overwrites a newer scroll position in the line cache.
     pub(crate) vlf_generation: u64,
     /// Last approximate total line count reported by a `vlf_chunks` response.
-    /// Used to pre-size the line cache while the background index is still
+    /// Used for reported document size while the background index is still
     /// scanning the file.
     pub(crate) vlf_approx_line_count: u64,
     /// True when `vlf_approx_line_count` is backend-confirmed exact.
@@ -249,7 +254,11 @@ impl BufState {
         for (line_index, slot) in self.line_cache.iter().enumerate() {
             let LineSlot::Known(line) = slot else { continue };
             if let Some(&cursor_col) = line.cursors.first() {
-                self.cursor_line = line_index;
+                self.cursor_line = if self.is_vlf {
+                    self.vlf_cache_start_line.saturating_add(line_index)
+                } else {
+                    line_index
+                };
                 self.cursor_col = previous_char_boundary(&line.text, cursor_col);
                 self.clamp_cursor();
                 return;
@@ -260,9 +269,8 @@ impl BufState {
 
     pub(crate) fn clamp_cursor(&mut self) {
         if self.is_vlf {
-            // In VLF mode `lines` is empty; clamp against the cache length.
-            self.cursor_line = self.cursor_line.min(self.line_cache.len().saturating_sub(1));
-            if let Some(LineSlot::Known(line)) = self.line_cache.get(self.cursor_line) {
+            self.cursor_line = self.cursor_line.min(self.line_count().saturating_sub(1));
+            if let Some(LineSlot::Known(line)) = self.line_slot(self.cursor_line) {
                 self.cursor_col = previous_char_boundary(&line.text, self.cursor_col);
             }
             return;
@@ -278,6 +286,12 @@ impl BufState {
     }
 
     pub(crate) fn is_fully_cached(&self) -> bool {
+        if self.is_vlf {
+            return self.vlf_line_count_exact
+                && self.vlf_cache_start_line == 0
+                && self.line_cache.len() == self.line_count()
+                && self.line_cache.iter().all(|slot| matches!(slot, LineSlot::Known(_)));
+        }
         self.line_cache.iter().all(|slot| matches!(slot, LineSlot::Known(_)))
     }
 
@@ -290,7 +304,7 @@ impl BufState {
             if self.vlf_line_count_exact && reported > 0 {
                 reported
             } else {
-                reported.max(self.line_cache.len())
+                reported.max(self.vlf_cache_start_line.saturating_add(self.line_cache.len()))
             }
         } else {
             self.lines.len()
@@ -303,12 +317,21 @@ impl BufState {
     /// and returns `None` for `LineSlot::Invalid` (show a loading indicator).
     pub(crate) fn get_line(&self, idx: usize) -> Option<&str> {
         if self.is_vlf {
-            match self.line_cache.get(idx)? {
+            match self.line_slot(idx)? {
                 LineSlot::Known(line) => Some(&line.text),
                 LineSlot::Invalid => None,
             }
         } else {
             self.lines.get(idx).map(|s| s.as_str())
+        }
+    }
+
+    pub(crate) fn line_slot(&self, idx: usize) -> Option<&LineSlot> {
+        if self.is_vlf {
+            let local = idx.checked_sub(self.vlf_cache_start_line)?;
+            self.line_cache.get(local)
+        } else {
+            self.line_cache.get(idx)
         }
     }
 
@@ -332,6 +355,9 @@ impl BufState {
     }
 
     pub(crate) fn whole_text(&self) -> Option<String> {
+        if self.is_vlf {
+            return None;
+        }
         if self.line_count() == 0 {
             return Some(String::new());
         }
@@ -368,32 +394,27 @@ impl BufState {
         self.vlf_line_count_exact = line_count_exact;
         let tail_jump = std::mem::take(&mut self.pending_vlf_tail_jump);
 
-        // Grow the line cache to fit the approximate document size.
-        let target_len = (approximate_line_count as usize)
-            .max(line_start as usize + lines.len())
-            .max(self.line_cache.len());
-        if target_len > self.line_cache.len() {
-            self.line_cache.resize(target_len, LineSlot::Invalid);
-        }
-        if line_count_exact {
-            let exact_len = usize::try_from(approximate_line_count).unwrap_or(usize::MAX);
-            if self.line_cache.len() > exact_len {
-                self.line_cache.truncate(exact_len);
-            }
-        }
+        let Ok(start) = usize::try_from(line_start) else {
+            self.line_cache.clear();
+            return;
+        };
+        self.vlf_cache_start_line = start;
 
-        // Write the received lines into the cache.
-        let start = line_start as usize;
-        for (i, text) in lines.iter().enumerate() {
-            let idx = start + i;
-            if idx < self.line_cache.len() {
-                let spans = syntax_spans.get(i).cloned().unwrap_or_default();
-                self.line_cache[idx] = LineSlot::Known(CachedLine {
-                    text: text.clone(),
-                    cursors: Vec::new(),
-                    syntax_spans: spans,
-                });
-            }
+        if lines.is_empty() {
+            self.line_cache.clear();
+        } else {
+            self.line_cache = lines
+                .iter()
+                .enumerate()
+                .map(|(i, text)| {
+                    let spans = syntax_spans.get(i).cloned().unwrap_or_default();
+                    LineSlot::Known(CachedLine {
+                        text: text.clone(),
+                        cursors: Vec::new(),
+                        syntax_spans: spans,
+                    })
+                })
+                .collect();
         }
         if tail_jump && !lines.is_empty() {
             self.cursor_line = start + lines.len() - 1;
@@ -416,6 +437,8 @@ impl PartialEq for BufState {
             && self.status_message == other.status_message
             && self.externally_modified == other.externally_modified
             && self.annotations == other.annotations
+            && self.is_vlf == other.is_vlf
+            && self.vlf_cache_start_line == other.vlf_cache_start_line
             && self.vlf_search_ranges == other.vlf_search_ranges
     }
 }
@@ -427,7 +450,7 @@ fn vlf_viewport_ready(buf: &BufState, first_line: usize, last_line: usize) -> bo
         return true;
     }
 
-    (first_line..last_line).all(|idx| matches!(buf.line_cache.get(idx), Some(LineSlot::Known(_))))
+    (first_line..last_line).all(|idx| matches!(buf.line_slot(idx), Some(LineSlot::Known(_))))
 }
 
 fn line_text_for_slot(slot: &LineSlot) -> String {
@@ -605,6 +628,7 @@ impl BufferManager {
             diagnostics: Vec::new(),
             annotations: Vec::new(),
             is_vlf: false,
+            vlf_cache_start_line: 0,
             vlf_generation: 0,
             vlf_approx_line_count: 0,
             vlf_line_count_exact: false,
@@ -1385,6 +1409,7 @@ impl BufferManager {
                 if is_vlf {
                     self.bufs[idx].lines.clear();
                     self.bufs[idx].line_cache.clear();
+                    self.bufs[idx].vlf_cache_start_line = 0;
                     self.bufs[idx].pending_line_request = false;
                     self.bufs[idx].last_scroll = None;
                     self.bufs[idx].vlf_approx_line_count = 0;
@@ -1597,6 +1622,7 @@ impl BufferManager {
             diagnostics: Vec::new(),
             annotations: Vec::new(),
             is_vlf: false,
+            vlf_cache_start_line: 0,
             vlf_generation: 0,
             vlf_approx_line_count: 0,
             vlf_line_count_exact: false,
@@ -1880,6 +1906,7 @@ impl BufferManager {
             diagnostics: Vec::new(),
             annotations: Vec::new(),
             is_vlf: false,
+            vlf_cache_start_line: 0,
             vlf_generation: 0,
             vlf_approx_line_count: 0,
             vlf_line_count_exact: false,
@@ -2002,6 +2029,7 @@ impl BufferManager {
         buf.pending_line_request = false;
         buf.last_scroll = None;
         buf.is_vlf = false;
+        buf.vlf_cache_start_line = 0;
         buf.vlf_generation = 0;
         buf.vlf_approx_line_count = 0;
         buf.vlf_line_count_exact = false;

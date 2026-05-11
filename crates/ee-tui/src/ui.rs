@@ -1124,7 +1124,7 @@ fn render_buffer(
                         .add_modifier(Modifier::ITALIC),
                 )]
             } else {
-                let backend_syntax = match buf.line_cache.get(log_idx) {
+                let backend_syntax = match buf.line_slot(log_idx) {
                     Some(LineSlot::Known(cached_line)) if !cached_line.syntax_spans.is_empty() => {
                         Some(cached_line.syntax_spans.as_slice())
                     }
@@ -1958,6 +1958,7 @@ mod tests {
                 payloads: Some(vec![serde_json::Value::String(String::from("todo"))]),
             }],
             is_vlf: false,
+            vlf_cache_start_line: 0,
             vlf_generation: 0,
             vlf_approx_line_count: 0,
             vlf_line_count_exact: false,
