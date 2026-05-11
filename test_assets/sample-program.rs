@@ -223,7 +223,7 @@ fn ui_render_shows_scrolled_gutter_after_many_enters() {
 }
 
 #[test]
-fn ui_render_prefers_backend_syntax_spans_over_syntect_fallback() {
+fn ui_render_uses_backend_syntax_spans_only() {
     fn render_numeric_fg(with_backend_syntax: bool, is_vlf: bool) -> ratatui::style::Color {
         let mut app = App::from_path(None).unwrap();
         let line = String::from("let answer = 42;");
@@ -256,13 +256,14 @@ fn ui_render_prefers_backend_syntax_spans_over_syntect_fallback() {
         buf.cell((four_x, 0)).unwrap().fg
     }
 
-    let syntect_fg = render_numeric_fg(false, false);
+    let plain_fg = render_numeric_fg(false, false);
     let backend_fg = render_numeric_fg(true, false);
     let vlf_fg = render_numeric_fg(false, true);
 
-    assert_ne!(backend_fg, syntect_fg);
+    assert_ne!(backend_fg, plain_fg);
     assert_eq!(backend_fg, ratatui::style::Color::Rgb(211, 120, 70));
-    assert_ne!(vlf_fg, syntect_fg);
+    assert_eq!(plain_fg, ratatui::style::Color::Rgb(213, 216, 224));
+    assert_eq!(vlf_fg, plain_fg);
     assert_eq!(vlf_fg, ratatui::style::Color::Rgb(213, 216, 224));
 }
 

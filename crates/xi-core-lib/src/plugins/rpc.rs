@@ -186,13 +186,6 @@ pub struct PluginEdit {
     pub author: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
-pub struct ScopeSpan {
-    pub start: usize,
-    pub end: usize,
-    pub scope_id: u32,
-}
-
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DataSpan {
     pub start: usize,
@@ -367,15 +360,6 @@ pub enum PluginRequest {
 #[serde(tag = "method", content = "params")]
 /// RPC commands sent from plugins.
 pub enum PluginNotification {
-    AddScopes {
-        scopes: Vec<Vec<String>>,
-    },
-    UpdateSpans {
-        start: usize,
-        len: usize,
-        spans: Vec<ScopeSpan>,
-        rev: u64,
-    },
     Edit {
         edit: PluginEdit,
     },

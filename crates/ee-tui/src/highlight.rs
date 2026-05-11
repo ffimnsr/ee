@@ -1,29 +1,17 @@
 //! Syntax highlighting for the `ee-tui` frontend.
 //!
-//! Backend semantic syntax spans are preferred when xi-core provides them.
-//! Local `syntect` parsing remains as whole-line fallback for lines without
-//! backend syntax data.
+//! Render-only layer. Backend syntax spans are authoritative; this module only
+//! maps scope strings to styles and slices spans for visible text.
 
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 use std::path::Path;
-use std::sync::OnceLock;
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{Theme, ThemeSet};
-use syntect::parsing::SyntaxSet;
+use xi_core_lib::tree_sitter_support::language_name_for_path;
 
 use crate::backend::CoreSyntaxSpan;
 
-const MAX_STATEFUL_HIGHLIGHT_LOOKBACK: usize = 256;
-
-/// A highlighted span: a foreground color and the text of that span.
-pub(crate) type HlSpan = (Color, String);
-
-/// Loaded once at startup; passed by reference into `render_buffer`.
-pub(crate) struct Highlighter {
-    syntax_set: &'static SyntaxSet,
-    theme: &'static Theme,
-}
+/// Loaded once at startup; used only for frontend syntax-span rendering.
+pub(crate) struct Highlighter;
 
 impl std::fmt::Debug for Highlighter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -32,162 +20,12 @@ impl std::fmt::Debug for Highlighter {
 }
 
 impl Highlighter {
-    /// Build a `Highlighter` using bundled grammars and the "base16-ocean.dark" theme.
-    pub(crate) fn new() -> Self {
-        let assets = shared_assets();
-        Self { syntax_set: &assets.syntax_set, theme: &assets.theme }
-    }
-
-    pub(crate) fn canonical_syntax_name(&self, requested: &str) -> Option<String> {
-        let requested = normalize_syntax_key(requested);
-        self.syntax_set
-            .syntaxes()
-            .iter()
-            .find(|syntax| normalize_syntax_key(&syntax.name) == requested)
-            .map(|syntax| syntax.name.clone())
+    pub(crate) const fn new() -> Self {
+        Self
     }
 
     pub(crate) fn syntax_name_for_path(&self, path: Option<&Path>) -> Option<String> {
-        let extension = path.and_then(|path| path.extension()).and_then(|ext| ext.to_str())?;
-        self.syntax_set.find_syntax_by_extension(extension).map(|syntax| syntax.name.clone())
-    }
-
-    /// Highlight the lines visible in the current viewport for syntect fallback.
-    ///
-    /// * `lines`     — all buffer lines (may be large; only visible range is returned)
-    /// * `extension` — file extension used to select the grammar (e.g. `"rs"`, `"py"`)
-    /// * `top`       — index of the first visible line
-    /// * `count`     — number of visible lines (height of the editor area)
-    ///
-    /// Returns one `Vec<HlSpan>` per visible line. The spans for each line
-    /// concatenate to the full line text. If a line has no highlights (e.g.
-    /// plain text fallback) its span vec holds a single entry with the default
-    /// foreground color. `ui.rs` only uses this output when backend
-    /// `syntax_spans` are absent for the line.
-    ///
-    /// To build correct incremental state, the function processes every line
-    /// from 0 up to `top + count`.  For most files (< ~10 k lines visible) this
-    /// is fast enough at 60 fps; a checkpoint cache can be added in Phase 2.
-    pub(crate) fn highlight_visible(
-        &self,
-        lines: &[String],
-        syntax_name: Option<&str>,
-        extension: Option<&str>,
-        top: usize,
-        count: usize,
-    ) -> Vec<Vec<HlSpan>> {
-        if lines.is_empty() || count == 0 {
-            return Vec::new();
-        }
-
-        let syntax = syntax_name
-            .and_then(|name| self.syntax_set.find_syntax_by_name(name))
-            .or_else(|| extension.and_then(|ext| self.syntax_set.find_syntax_by_extension(ext)))
-            .unwrap_or_else(|| self.syntax_set.find_syntax_plain_text());
-
-        let visible_end = (top + count).min(lines.len());
-        if top >= visible_end {
-            return Vec::new();
-        }
-
-        if syntax.name == self.syntax_set.find_syntax_plain_text().name
-            || is_slow_fallback_syntax(syntax.name.as_ref(), extension)
-        {
-            return self.plain_visible_lines(lines, top, visible_end);
-        }
-
-        let mut hl = HighlightLines::new(syntax, self.theme);
-        let parse_start = top.saturating_sub(MAX_STATEFUL_HIGHLIGHT_LOOKBACK);
-        let mut result = Vec::with_capacity(visible_end.saturating_sub(top));
-
-        for (i, line) in lines.iter().enumerate().take(visible_end).skip(parse_start) {
-            // syntect expects a trailing newline for accurate state transitions
-            // in some grammars (e.g. multi-line string detection).
-            let owned;
-            let line_str: &str = if line.ends_with('\n') {
-                line.as_str()
-            } else {
-                owned = format!("{line}\n");
-                &owned
-            };
-
-            match hl.highlight_line(line_str, self.syntax_set) {
-                Ok(ranges) if i >= top => {
-                    let spans: Vec<HlSpan> = ranges
-                        .iter()
-                        .filter(|(_, text)| !text.is_empty())
-                        .map(|(style, text)| {
-                            let c = style.foreground;
-                            (Color::Rgb(c.r, c.g, c.b), (*text).trim_end_matches('\n').to_owned())
-                        })
-                        .collect();
-                    result.push(spans);
-                }
-                Ok(_) => {
-                    // Pre-top line: advance state only, do not collect.
-                }
-                Err(_) if i >= top => {
-                    result.push(Vec::new());
-                }
-                Err(_) => {}
-            }
-        }
-
-        result
-    }
-
-    fn plain_visible_lines(
-        &self,
-        lines: &[String],
-        top: usize,
-        visible_end: usize,
-    ) -> Vec<Vec<HlSpan>> {
-        let fg = self
-            .theme
-            .settings
-            .foreground
-            .map(|color| Color::Rgb(color.r, color.g, color.b))
-            .unwrap_or(Color::Rgb(213, 216, 224));
-        lines[top..visible_end].iter().map(|line| vec![(fg, line.clone())]).collect()
-    }
-
-    /// Produce `ratatui` [`Span`]s from pre-computed `HlSpan`s, applying
-    /// a left-column byte offset for horizontal scrolling.
-    ///
-    /// `byte_start` is the byte index within the original line text at which
-    /// the visible viewport begins (as returned by `display_col_to_byte`).
-    /// Spans that fall entirely to the left of `byte_start` are discarded;
-    /// spans that straddle `byte_start` are sliced at the boundary.
-    pub(crate) fn spans_with_range(
-        hl_spans: &[HlSpan],
-        byte_start: usize,
-        byte_end: usize,
-    ) -> Vec<ratatui::text::Span<'static>> {
-        let mut out = Vec::new();
-        let mut offset = 0usize;
-
-        for (color, text) in hl_spans {
-            let end = offset + text.len();
-            if end <= byte_start {
-                offset = end;
-                continue;
-            }
-            if offset >= byte_end {
-                break;
-            }
-            let slice_start = byte_start.saturating_sub(offset);
-            let slice_end = byte_end.saturating_sub(offset).min(text.len());
-            // Safety: `byte_start` is a char boundary in the full line, and
-            // `offset` tracks exact byte positions of syntect span boundaries
-            // (which are also char boundaries), so `slice_start` is valid.
-            let visible = &text[slice_start..slice_end];
-            if !visible.is_empty() {
-                out.push(Span::styled(visible.to_owned(), Style::default().fg(*color)));
-            }
-            offset = end;
-        }
-
-        out
+        path.and_then(language_name_for_path).map(str::to_owned)
     }
 
     pub(crate) fn scope_spans_in_range(
@@ -349,188 +187,24 @@ impl Highlighter {
     }
 }
 
-struct HighlightAssets {
-    syntax_set: SyntaxSet,
-    theme: Theme,
-}
-
-fn shared_assets() -> &'static HighlightAssets {
-    static ASSETS: OnceLock<HighlightAssets> = OnceLock::new();
-    ASSETS.get_or_init(|| {
-        let syntax_set = SyntaxSet::load_defaults_newlines();
-        let theme_set = ThemeSet::load_defaults();
-        // "base16-ocean.dark" ships with syntect's default theme set and works
-        // well on a dark terminal background.
-        let theme = theme_set.themes.get("base16-ocean.dark").cloned().unwrap_or_else(|| {
-            theme_set.themes.values().next().cloned().expect("syntect default themes are empty")
-        });
-        HighlightAssets { syntax_set, theme }
-    })
-}
-
-fn normalize_syntax_key(value: &str) -> String {
-    value.chars().filter(|ch| !matches!(ch, '-' | '_' | ' ')).flat_map(char::to_lowercase).collect()
-}
-
-fn is_slow_fallback_syntax(syntax_name: &str, extension: Option<&str>) -> bool {
-    matches!(normalize_syntax_key(syntax_name).as_str(), "lisp")
-        || matches!(extension, Some("lisp" | "lsp" | "cl" | "el" | "scm" | "ss" | "rkt"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn make_highlighter() -> Highlighter {
         Highlighter::new()
     }
 
     #[test]
-    fn highlighter_reuses_shared_syntect_assets() {
-        let first = make_highlighter();
-        let second = make_highlighter();
-
-        assert!(std::ptr::eq(first.syntax_set, second.syntax_set));
-        assert!(std::ptr::eq(first.theme, second.theme));
-    }
-
-    #[test]
-    fn highlight_visible_rust_basic() {
+    fn syntax_name_for_path_uses_core_registry() {
         let hl = make_highlighter();
-        let lines = vec!["fn main() {".to_owned(), "    let x = 42;".to_owned(), "}".to_owned()];
-        let result = hl.highlight_visible(&lines, None, Some("rs"), 0, 3);
-        assert_eq!(result.len(), 3);
-        // Each visible line must produce at least one span.
-        for (i, spans) in result.iter().enumerate() {
-            assert!(!spans.is_empty(), "line {i} produced no spans");
-        }
-        // Concatenated span text should round-trip to the original line.
-        for (i, (spans, original)) in result.iter().zip(lines.iter()).enumerate() {
-            let joined: String = spans.iter().map(|(_, t)| t.as_str()).collect();
-            assert_eq!(joined, original.as_str(), "line {i} text mismatch");
-        }
-    }
-
-    #[test]
-    fn highlight_visible_respects_top_offset() {
-        let hl = make_highlighter();
-        let lines: Vec<String> = (0..10).map(|i| format!("// line {i}")).collect();
-        // Request only lines 3..6.
-        let result = hl.highlight_visible(&lines, None, Some("rs"), 3, 3);
-        assert_eq!(result.len(), 3);
-        for (i, (spans, original)) in result.iter().zip(lines[3..6].iter()).enumerate() {
-            let joined: String = spans.iter().map(|(_, t)| t.as_str()).collect();
-            assert_eq!(joined, original.as_str(), "line {i} text mismatch");
-        }
-    }
-
-    #[test]
-    fn highlight_visible_empty_lines() {
-        let hl = make_highlighter();
-        let result = hl.highlight_visible(&[], None, Some("rs"), 0, 10);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn highlight_visible_count_zero() {
-        let hl = make_highlighter();
-        let lines = vec!["fn main() {}".to_owned()];
-        let result = hl.highlight_visible(&lines, None, Some("rs"), 0, 0);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn highlight_visible_unknown_extension_fallback() {
-        let hl = make_highlighter();
-        let lines = vec!["hello world".to_owned()];
-        // Unknown extension falls back to plain text; should still produce spans.
-        let result = hl.highlight_visible(&lines, None, Some("zzz_unknown"), 0, 1);
-        assert_eq!(result.len(), 1);
-        let joined: String = result[0].iter().map(|(_, t)| t.as_str()).collect();
-        assert_eq!(joined, "hello world");
-    }
-
-    #[test]
-    fn highlight_visible_plain_text_skips_preceding_lines() {
-        let hl = make_highlighter();
-        let lines: Vec<String> = (0..30_000).map(|i| format!("line {i}")).collect();
-        let result = hl.highlight_visible(&lines, None, Some("txt"), 29_990, 3);
-
-        assert_eq!(result.len(), 3);
-        let joined = result
-            .iter()
-            .map(|spans| spans.iter().map(|(_, text)| text.as_str()).collect::<String>())
-            .collect::<Vec<_>>();
-        assert_eq!(joined, vec!["line 29990", "line 29991", "line 29992"]);
-    }
-
-    #[test]
-    fn highlight_visible_stateful_syntax_uses_bounded_lookback() {
-        let hl = make_highlighter();
-        let lines: Vec<String> = (0..30_000).map(|i| format!("int line_{i};")).collect();
-        let result = hl.highlight_visible(&lines, None, Some("c"), 29_990, 3);
-
-        assert_eq!(result.len(), 3);
-        let joined = result
-            .iter()
-            .map(|spans| spans.iter().map(|(_, text)| text.as_str()).collect::<String>())
-            .collect::<Vec<_>>();
-        assert_eq!(joined, vec!["int line_29990;", "int line_29991;", "int line_29992;"]);
-    }
-
-    #[test]
-    fn highlight_visible_lisp_uses_plain_fallback() {
-        let hl = make_highlighter();
-        let lines: Vec<String> = (0..30_000).map(|i| format!("(defun line-{i} ())")).collect();
-        let result = hl.highlight_visible(&lines, None, Some("lisp"), 29_990, 3);
-
-        assert_eq!(result.len(), 3);
-        assert!(result.iter().all(|spans| spans.len() == 1));
-        let joined = result
-            .iter()
-            .map(|spans| spans.iter().map(|(_, text)| text.as_str()).collect::<String>())
-            .collect::<Vec<_>>();
+        assert_eq!(hl.syntax_name_for_path(Some(&PathBuf::from("main.rs"))), Some("Rust".into()));
         assert_eq!(
-            joined,
-            vec!["(defun line-29990 ())", "(defun line-29991 ())", "(defun line-29992 ())"]
+            hl.syntax_name_for_path(Some(&PathBuf::from("component.tsx"))),
+            Some("TypeScript".into())
         );
-    }
-
-    #[test]
-    fn spans_with_range_trims_left() {
-        let spans = vec![
-            (Color::Rgb(255, 0, 0), "hello ".to_owned()),
-            (Color::Rgb(0, 255, 0), "world".to_owned()),
-        ];
-        // byte_start = 6 should skip "hello " entirely
-        let result = Highlighter::spans_with_range(&spans, 6, usize::MAX);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].content, "world");
-    }
-
-    #[test]
-    fn spans_with_range_splits_span() {
-        let spans = vec![(Color::Rgb(255, 0, 0), "hello world".to_owned())];
-        // byte_start = 6 should yield "world"
-        let result = Highlighter::spans_with_range(&spans, 6, usize::MAX);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].content, "world");
-    }
-
-    #[test]
-    fn spans_with_range_zero_noop() {
-        let spans = vec![(Color::Rgb(255, 0, 0), "hello".to_owned())];
-        let result = Highlighter::spans_with_range(&spans, 0, usize::MAX);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].content, "hello");
-    }
-
-    #[test]
-    fn spans_with_range_trims_right() {
-        let spans = vec![(Color::Rgb(255, 0, 0), "hello world".to_owned())];
-        let result = Highlighter::spans_with_range(&spans, 0, 5);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].content, "hello");
+        assert_eq!(hl.syntax_name_for_path(Some(&PathBuf::from("notes.txt"))), None);
     }
 
     #[test]

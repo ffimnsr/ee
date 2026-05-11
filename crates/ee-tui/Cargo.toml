@@ -28,7 +28,6 @@ serde.workspace = true
 serde_json.workspace = true
 signal-hook.workspace = true
 similar = "2.7.0"
-syntect.workspace = true
 tokio.workspace = true
 toml.workspace = true
 unicode-width = "0.2"

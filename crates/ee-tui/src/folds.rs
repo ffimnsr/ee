@@ -3,7 +3,6 @@
 //! Folds are stored per-buffer as sorted `(start, end)` line-index pairs
 //! (both 0-based, both inclusive).  When a fold is closed, lines
 //! `start+1..=end` are hidden from view and `start` shows a fold marker.
-//! Fold extents are detected by leading-indentation heuristics.
 
 use std::collections::HashMap;
 
@@ -60,19 +59,12 @@ impl FoldStore {
         self.folds.remove(&buf_id);
     }
 
-    /// Detect and close every indent-driven fold in `lines` for `buf_id`.
-    pub(crate) fn close_all(&mut self, buf_id: BufferId, lines: &[String]) {
+    /// Replace all closed folds for `buf_id` with backend-authoritative extents.
+    pub(crate) fn replace_all(&mut self, buf_id: BufferId, extents: Vec<(usize, usize)>) {
         let folds = self.folds.entry(buf_id).or_default();
         folds.clear();
-        let mut i = 0;
-        while i < lines.len() {
-            if let Some(extent) = indent_fold_extent(lines, i) {
-                folds.push(extent);
-                i = extent.1 + 1;
-            } else {
-                i += 1;
-            }
-        }
+        folds.extend(extents.into_iter().filter(|extent| extent.1 > extent.0));
+        folds.sort_unstable_by_key(|&(start, _)| start);
     }
 
     /// Closed folds for `buf_id`, sorted by start line.
@@ -92,86 +84,16 @@ impl FoldStore {
     }
 }
 
-// ── Fold extent detection ─────────────────────────────────────────────────────
-
-/// Compute the indent-driven fold extent starting at `start_line`.
-///
-/// Returns `Some((start_line, end_line))` covering all consecutive lines with
-/// strictly greater leading indentation.  Blank lines are included without
-/// breaking the extent.  Returns `None` when no deeper lines follow.
-pub(crate) fn indent_fold_extent(lines: &[String], start_line: usize) -> Option<(usize, usize)> {
-    let line_count = lines.len();
-    if start_line + 1 >= line_count {
-        return None;
-    }
-    let base_indent = leading_indent(&lines[start_line]);
-    let mut end = start_line;
-    for (i, line) in lines.iter().enumerate().take(line_count).skip(start_line + 1) {
-        if line.trim().is_empty() {
-            // Blank lines are part of the fold body but do not terminate it.
-            continue;
-        }
-        if leading_indent(line) > base_indent {
-            end = i;
-        } else {
-            break;
-        }
-    }
-    if end > start_line { Some((start_line, end)) } else { None }
-}
-
-fn leading_indent(line: &str) -> usize {
-    let mut n = 0usize;
-    for ch in line.chars() {
-        match ch {
-            ' ' => n += 1,
-            // Treat tab as 4 spaces for indent comparison purposes.
-            '\t' => n += 4,
-            _ => break,
-        }
-    }
-    n
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn s(v: &[&str]) -> Vec<String> {
-        v.iter().map(|s| s.to_string()).collect()
-    }
-
-    #[test]
-    fn indent_fold_extent_detects_deeper_block() {
-        let lines = s(&["fn foo() {", "    let x = 1;", "    let y = 2;", "}"]);
-        assert_eq!(indent_fold_extent(&lines, 0), Some((0, 2)));
-    }
-
-    #[test]
-    fn indent_fold_extent_single_line_returns_none() {
-        let lines = s(&["no_body"]);
-        assert_eq!(indent_fold_extent(&lines, 0), None);
-    }
-
-    #[test]
-    fn indent_fold_extent_last_line_returns_none() {
-        let lines = s(&["fn a() {", "    x;", "fn b() {"]);
-        assert_eq!(indent_fold_extent(&lines, 2), None);
-    }
-
-    #[test]
-    fn indent_fold_extent_blank_lines_included() {
-        let lines = s(&["fn foo() {", "    x;", "", "    y;", "}"]);
-        assert_eq!(indent_fold_extent(&lines, 0), Some((0, 3)));
-    }
-
     #[test]
     fn fold_store_toggle_closes_and_opens() {
         let mut store = FoldStore::new();
-        let lines = s(&["fn foo() {", "    let x = 1;", "}"]);
-        let extent = indent_fold_extent(&lines, 0).unwrap();
+        let extent = (0, 1);
         store.toggle(1, 0, extent);
         assert!(store.is_hidden(1, 1));
         assert!(!store.is_hidden(1, 0));
@@ -182,18 +104,16 @@ mod tests {
     #[test]
     fn fold_store_open_all_clears() {
         let mut store = FoldStore::new();
-        let lines = s(&["fn foo() {", "    x;", "}"]);
-        let extent = indent_fold_extent(&lines, 0).unwrap();
+        let extent = (0, 1);
         store.close(1, 0, extent);
         store.open_all(1);
         assert!(!store.is_hidden(1, 1));
     }
 
     #[test]
-    fn fold_store_close_all_detects_folds() {
+    fn fold_store_replace_all_uses_backend_extents() {
         let mut store = FoldStore::new();
-        let lines = s(&["fn foo() {", "    x;", "    y;", "}", "fn bar() {"]);
-        store.close_all(1, &lines);
+        store.replace_all(1, vec![(0, 2)]);
         assert!(store.is_hidden(1, 1));
         assert!(store.is_hidden(1, 2));
         assert!(!store.is_hidden(1, 4));
@@ -202,8 +122,7 @@ mod tests {
     #[test]
     fn fold_at_returns_header_fold() {
         let mut store = FoldStore::new();
-        let lines = s(&["fn a() {", "    x;", "}"]);
-        let extent = indent_fold_extent(&lines, 0).unwrap();
+        let extent = (0, 1);
         store.close(1, 0, extent);
         assert_eq!(store.fold_at(1, 0), Some(extent));
         assert_eq!(store.fold_at(1, 1), None);

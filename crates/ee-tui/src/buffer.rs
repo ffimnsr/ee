@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use xi_core_lib::XiCore;
 use xi_core_lib::config::Table;
 use xi_core_lib::plugin_rpc::{Diagnostic, SelectionRange, SymbolItem};
-use xi_core_lib::rpc::LineReplacement;
+use xi_core_lib::rpc::{FoldRangePreview, LineReplacement};
 use xi_rpc::RpcLoop;
 
 use crate::backend::{
@@ -1094,6 +1094,34 @@ impl BufferManager {
         )?;
         serde_json::from_value(response)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    }
+
+    pub(crate) fn fold_ranges_preview(
+        &mut self,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+    ) -> io::Result<Vec<(usize, usize)>> {
+        let view_id = self.bufs[self.current].view_id.clone();
+        let response = self.send_request(
+            "fold_ranges_preview",
+            json!({
+                "view_id": view_id,
+                "start_line": start_line,
+                "end_line": end_line,
+            }),
+        )?;
+        let ranges: Vec<FoldRangePreview> = serde_json::from_value(response)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        Ok(ranges
+            .into_iter()
+            .filter(|range| range.body_end >= range.header_line)
+            .map(|range| (range.header_line, range.body_end))
+            .collect())
+    }
+
+    pub(crate) fn fold_range_at_cursor(&mut self) -> io::Result<Option<(usize, usize)>> {
+        let line = self.active().cursor_line;
+        Ok(self.fold_ranges_preview(Some(line), Some(line))?.into_iter().next())
     }
 
     pub(crate) fn select_chars_preview(&mut self, count: usize) -> io::Result<Vec<SelectionRange>> {

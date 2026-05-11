@@ -32,6 +32,7 @@ use crate::plugins::rpc::{
     ClientPluginInfo, GetDiagnosticsResponse, GetSelectionsResponse, Hover, PluginBufferInfo,
     PluginNotification, PluginRequest, PluginUpdate, PluginUpdateAck, SelectionRange,
 };
+use crate::rpc::FoldRangePreview;
 use crate::rpc::{EditNotification, LineRange, LineReplacement, Position as ClientPosition};
 
 use crate::WeakXiCore;
@@ -54,7 +55,10 @@ use crate::tabs::{
 use crate::text_store::{
     ByteOffset, ByteRange, LineLookup, LogicalLine, TextChunkResult, TextStore,
 };
-use crate::tree_sitter_support::{VisibleSyntaxLimits, VisibleSyntaxSpan, visible_syntax_spans};
+use crate::tree_sitter_support::{
+    VisibleSyntaxLimits, VisibleSyntaxSpan, fold_ranges_for_text, syntax_feature_availability,
+    visible_syntax_spans,
+};
 use crate::view::View;
 use crate::width_cache::WidthCache;
 
@@ -107,6 +111,24 @@ fn vlf_read_text_range(store: &dyn TextStore, range: ByteRange) -> Option<(Strin
     Some((text, ByteRange { start: decoded_start.unwrap_or(range.start), end: decoded_end }))
 }
 
+fn vlf_read_exact_text_range(
+    store: &dyn TextStore,
+    range: ByteRange,
+) -> Option<(String, ByteRange)> {
+    let (text, decoded_range) = vlf_read_text_range(store, range)?;
+    if decoded_range == range {
+        return Some((text, range));
+    }
+
+    let start = usize::try_from(range.start.0.saturating_sub(decoded_range.start.0)).ok()?;
+    let end = usize::try_from(range.end.0.saturating_sub(decoded_range.start.0)).ok()?;
+    if end > text.len() || !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+        return None;
+    }
+
+    Some((text[start..end].to_owned(), range))
+}
+
 fn vlf_tail_lines_for_range(
     store: &dyn TextStore,
     requested_line_start: u64,
@@ -139,6 +161,33 @@ fn vlf_tail_lines_for_range(
     }
 
     Some((response_line_start, tail_lines[start_idx..end_idx].to_vec()))
+}
+
+fn vlf_update_viewport_for_lines(
+    vlf_store: &crate::vlf::store::VlfStore,
+    line_start: u64,
+    line_count: usize,
+) {
+    use crate::text_store::{ByteOffset, LineLookup, LogicalLine, TextStore};
+
+    if line_count == 0 {
+        return;
+    }
+
+    let store: &dyn TextStore = vlf_store;
+    let start = match store.line_to_byte(LogicalLine(line_start)) {
+        LineLookup::Exact(byte) => byte,
+        _ => return,
+    };
+    let end = match store.line_to_byte(LogicalLine(line_start.saturating_add(line_count as u64))) {
+        LineLookup::Exact(byte) => byte,
+        LineLookup::OutOfRange => ByteOffset(store.len_bytes()),
+        _ => return,
+    };
+
+    if end.0 > start.0 {
+        vlf_store.set_viewport(start, end);
+    }
 }
 
 /// A collection of all the state relevant for handling a particular event.
@@ -244,6 +293,37 @@ impl<'a> EventContext<'a> {
             self.with_view(|view, text| view.set_selection(text, selection));
         }
         self.render_if_needed();
+    }
+
+    pub(crate) fn preview_fold_ranges(
+        &self,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+    ) -> Vec<FoldRangePreview> {
+        let editor = self.editor.borrow();
+        if editor.is_vlf() {
+            return Vec::new();
+        }
+
+        let text = editor.get_buffer().slice_to_cow(0..editor.get_buffer().len()).into_owned();
+        let file_path = self.info.map(|info| info.path.as_path());
+        let folds = fold_ranges_for_text(
+            Some(self.language.as_ref()),
+            file_path,
+            &text,
+            Duration::from_millis(25),
+        );
+        let start_line = start_line.unwrap_or(0);
+        let end_line = end_line.unwrap_or(usize::MAX);
+        folds
+            .into_iter()
+            .filter(|fold| fold.header_line >= start_line && fold.header_line <= end_line)
+            .map(|fold| FoldRangePreview {
+                header_line: fold.header_line,
+                body_start: fold.body_start,
+                body_end: fold.body_end,
+            })
+            .collect()
     }
 
     fn dispatch_event(&mut self, event: EventDomain) -> Option<Selection> {
@@ -399,11 +479,14 @@ impl<'a> EventContext<'a> {
                 None
             }
             SpecialEvent::Reindent => {
-                // Whole-document reindent is expensive (O(lines) syntect parse).
+                // Whole-document reindent is expensive (full-buffer syntax walk).
                 // Gate it behind `whole_doc_ops`; run async so the render loop
                 // is not blocked.
                 let mode = self.editor.borrow().document_mode();
-                if !mode.feature_gates().whole_doc_ops {
+                let file_path = self.info.map(|info| info.path.as_path());
+                let capabilities =
+                    syntax_feature_availability(Some(self.language.as_ref()), file_path, mode);
+                if !capabilities.reindent && !mode.feature_gates().whole_doc_ops {
                     self.client.alert(format!(
                         "reindent: disabled in {mode:?} mode \
                          (whole-document operations require Normal mode)"
@@ -463,24 +546,35 @@ impl<'a> EventContext<'a> {
     }
 
     fn do_syntax_selection(&mut self, action: SyntaxSelectionAction) {
-        if self.alert_if_vlf_syntax_disabled(action.method_name()) {
-            return;
-        }
-
         let language = self.language.clone();
         let file_path = self.info.map(|info| info.path.clone());
-        let result = self.with_view(|view, text| {
-            let current = view.selection().clone();
-            object::apply_syntax_selection(
-                text,
-                &current,
-                view.syntax_selection_history_mut(),
-                language.as_ref(),
-                file_path.as_deref(),
-                action,
-            )
-            .map(|selection| view.set_selection(text, selection))
-        });
+        let mode = self.editor.borrow().document_mode();
+        let capabilities =
+            syntax_feature_availability(Some(language.as_ref()), file_path.as_deref(), mode);
+        if !capabilities.semantic_motions {
+            self.client.alert(format!(
+                "{}: {}",
+                action.method_name(),
+                object::SyntaxSelectionError::SyntaxTreeUnavailable.message()
+            ));
+            return;
+        }
+        let result = if self.editor.borrow().is_vlf() {
+            self.do_vlf_syntax_selection(language.as_ref(), file_path.as_deref(), action)
+        } else {
+            self.with_view(|view, text| {
+                let current = view.selection().clone();
+                object::apply_syntax_selection(
+                    text,
+                    &current,
+                    view.syntax_selection_history_mut(),
+                    language.as_ref(),
+                    file_path.as_deref(),
+                    action,
+                )
+                .map(|selection| view.set_selection(text, selection))
+            })
+        };
 
         if let Err(err) = result {
             self.client.alert(format!("{}: {}", action.method_name(), err.message()));
@@ -488,37 +582,115 @@ impl<'a> EventContext<'a> {
     }
 
     fn do_syntax_navigation(&mut self, action: SyntaxNavigationAction) {
-        if self.alert_if_vlf_syntax_disabled(action.method_name()) {
-            return;
-        }
-
         let language = self.language.clone();
         let file_path = self.info.map(|info| info.path.clone());
-        let result = self.with_view(|view, text| {
-            let current = view.selection().clone();
-            object::apply_syntax_navigation(
-                text,
-                &current,
-                language.as_ref(),
-                file_path.as_deref(),
-                action,
-            )
-            .map(|selection| view.set_selection(text, selection))
-        });
+        let mode = self.editor.borrow().document_mode();
+        let capabilities =
+            syntax_feature_availability(Some(language.as_ref()), file_path.as_deref(), mode);
+        if !capabilities.semantic_motions {
+            self.client.alert(format!(
+                "{}: {}",
+                action.method_name(),
+                object::SyntaxSelectionError::SyntaxTreeUnavailable.message()
+            ));
+            return;
+        }
+        let result = if self.editor.borrow().is_vlf() {
+            self.do_vlf_syntax_navigation(language.as_ref(), file_path.as_deref(), action)
+        } else {
+            self.with_view(|view, text| {
+                let current = view.selection().clone();
+                object::apply_syntax_navigation(
+                    text,
+                    &current,
+                    language.as_ref(),
+                    file_path.as_deref(),
+                    action,
+                )
+                .map(|selection| view.set_selection(text, selection))
+            })
+        };
 
         if let Err(err) = result {
             self.client.alert(format!("{}: {}", action.method_name(), err.message()));
         }
     }
 
-    fn alert_if_vlf_syntax_disabled(&self, method_name: &str) -> bool {
-        if !self.editor.borrow().is_vlf() {
-            return false;
-        }
+    fn do_vlf_syntax_selection(
+        &mut self,
+        language_name: &str,
+        file_path: Option<&Path>,
+        action: SyntaxSelectionAction,
+    ) -> Result<(), object::SyntaxSelectionError> {
+        let editor = self.editor.borrow();
+        let store =
+            editor.vlf_store.as_ref().ok_or(object::SyntaxSelectionError::SyntaxTreeUnavailable)?;
+        let window_range = self
+            .current_vlf_semantic_range(store)
+            .ok_or(object::SyntaxSelectionError::OutsideParsedRange)?;
+        let window_text = self
+            .current_vlf_semantic_window_text(store, window_range, language_name, file_path)
+            .ok_or(object::SyntaxSelectionError::OutsideParsedRange)?;
+        drop(editor);
+        let mut view = self.view.borrow_mut();
+        view.apply_vlf_syntax_selection(
+            &window_text,
+            window_range.start.0 as usize,
+            language_name,
+            file_path,
+            action,
+        )?;
+        Ok(())
+    }
 
-        self.client
-            .alert(format!("{method_name}: disabled in VLF until visible-range parsing exists"));
-        true
+    fn do_vlf_syntax_navigation(
+        &mut self,
+        language_name: &str,
+        file_path: Option<&Path>,
+        action: SyntaxNavigationAction,
+    ) -> Result<(), object::SyntaxSelectionError> {
+        let editor = self.editor.borrow();
+        let store =
+            editor.vlf_store.as_ref().ok_or(object::SyntaxSelectionError::SyntaxTreeUnavailable)?;
+        let window_range = self
+            .current_vlf_semantic_range(store)
+            .ok_or(object::SyntaxSelectionError::OutsideParsedRange)?;
+        let window_text = self
+            .current_vlf_semantic_window_text(store, window_range, language_name, file_path)
+            .ok_or(object::SyntaxSelectionError::OutsideParsedRange)?;
+        drop(editor);
+        let mut view = self.view.borrow_mut();
+        view.apply_vlf_syntax_navigation(
+            &window_text,
+            window_range.start.0 as usize,
+            language_name,
+            file_path,
+            action,
+        )?;
+        Ok(())
+    }
+
+    fn current_vlf_semantic_range(&self, store: &crate::vlf::store::VlfStore) -> Option<ByteRange> {
+        let viewport = store.viewport_state();
+        let requested = ByteRange { start: viewport.window_start, end: viewport.window_end };
+        (!requested.is_empty()).then_some(requested)
+    }
+
+    fn current_vlf_semantic_window_text(
+        &self,
+        store: &crate::vlf::store::VlfStore,
+        window_range: ByteRange,
+        language_name: &str,
+        file_path: Option<&Path>,
+    ) -> Option<String> {
+        let start = usize::try_from(window_range.start.0).ok()?;
+        let end = usize::try_from(window_range.end.0).ok()?;
+        if let Some(cached) =
+            self.view.borrow().cached_semantic_window_text(language_name, file_path, start, end)
+        {
+            return Some(cached);
+        }
+        vlf_read_exact_text_range(store, window_range).map(|(text, _)| text)
     }
 
     fn do_goto_paragraph(&mut self, forward: bool) {
@@ -584,6 +756,7 @@ impl<'a> EventContext<'a> {
                     requested_count,
                     approximate_line_count,
                 ) {
+                    vlf_update_viewport_for_lines(vlf_store, response_line_start, lines.len());
                     let syntax_spans = self.vlf_visible_syntax_spans(&lines);
                     return Some(VlfViewportResponse {
                         line_start: response_line_start,
@@ -635,6 +808,7 @@ impl<'a> EventContext<'a> {
                     approximate_line_count,
                 )
             {
+                vlf_update_viewport_for_lines(vlf_store, response_line_start, lines.len());
                 let syntax_spans = self.vlf_visible_syntax_spans(&lines);
                 return Some(VlfViewportResponse {
                     line_start: response_line_start,
@@ -660,6 +834,7 @@ impl<'a> EventContext<'a> {
                     requested_count,
                     approximate_line_count,
                 ) {
+                    vlf_update_viewport_for_lines(vlf_store, response_line_start, lines.len());
                     let syntax_spans = self.vlf_visible_syntax_spans(&lines);
                     return Some(VlfViewportResponse {
                         line_start: response_line_start,
@@ -767,7 +942,11 @@ impl<'a> EventContext<'a> {
     }
 
     fn vlf_visible_syntax_spans(&self, lines: &[String]) -> Vec<Vec<VisibleSyntaxSpan>> {
-        if lines.is_empty() || !self.editor.borrow().document_mode().feature_gates().syntax {
+        let mode = self.editor.borrow().document_mode();
+        let file_path = self.info.map(|info| info.path.as_path());
+        let capabilities =
+            syntax_feature_availability(Some(self.language.as_ref()), file_path, mode);
+        if lines.is_empty() || !capabilities.syntax_spans {
             return Vec::new();
         }
         let visible_text = lines.join("\n");
@@ -865,13 +1044,6 @@ impl<'a> EventContext<'a> {
     pub(crate) fn do_plugin_cmd(&mut self, plugin: PluginId, cmd: PluginNotification) {
         use self::PluginNotification::*;
         match cmd {
-            AddScopes { scopes } => {
-                let mut ed = self.editor.borrow_mut();
-                ed.get_layers_mut().add_scopes(plugin, scopes);
-            }
-            UpdateSpans { start, len, spans, rev } => self.with_editor(|ed, view, _, _| {
-                ed.update_spans(view, plugin, start, len, spans, rev)
-            }),
             Edit { edit } => {
                 let ack = self.with_editor(|ed, _, _, _| ed.apply_plugin_edit(edit));
                 if !ack.applied {
@@ -1047,11 +1219,19 @@ impl<'a> EventContext<'a> {
     fn render(&mut self) {
         let _t = tracing::trace_span!("EventContext::render", categories = "core").entered();
         let ed = self.editor.borrow();
+        let file_path = self.info.map(|info| info.path.as_path());
+        let capabilities = syntax_feature_availability(
+            Some(self.language.as_ref()),
+            file_path,
+            ed.document_mode(),
+        );
+        let syntax_enabled = capabilities.syntax_spans && !ed.is_vlf();
         self.view.borrow_mut().render_if_dirty(
             ed.get_buffer(),
             self.client,
-            ed.get_layers(),
             ed.is_pristine(),
+            self.language.as_ref(),
+            syntax_enabled,
         )
     }
 }
@@ -1213,13 +1393,9 @@ impl<'a> EventContext<'a> {
         self.client.plugin_started(self.view_id, &plugin.name)
     }
 
-    /// Notifies the client that `plugin` has stopped and removes its scope
-    /// layer bookkeeping.
+    /// Notifies the client that `plugin` has stopped.
     pub(crate) fn plugin_stopped(&mut self, plugin: &Plugin) {
         self.client.plugin_stopped(self.view_id, &plugin.name, 0);
-        self.with_editor(|ed, _, _, _| {
-            ed.get_layers_mut().remove_layer(plugin.id);
-        });
     }
 
     pub(crate) fn plugin_terminated(&self, plugin_name: &str, reason: &PluginTerminationReason) {
@@ -1437,13 +1613,21 @@ impl<'a> EventContext<'a> {
     fn do_request_lines(&mut self, first: usize, last: usize) {
         let mut view = self.view.borrow_mut();
         let ed = self.editor.borrow();
+        let file_path = self.info.map(|info| info.path.as_path());
+        let capabilities = syntax_feature_availability(
+            Some(self.language.as_ref()),
+            file_path,
+            ed.document_mode(),
+        );
+        let syntax_enabled = capabilities.syntax_spans && !ed.is_vlf();
         view.request_lines(
             ed.get_buffer(),
             self.client,
-            ed.get_layers(),
             first,
             last,
             ed.is_pristine(),
+            self.language.as_ref(),
+            syntax_enabled,
         )
     }
 
@@ -1451,7 +1635,7 @@ impl<'a> EventContext<'a> {
         let ed = self.editor.borrow();
         let mut prev_range: Option<Range<usize>> = None;
         let mut line_ranges = Vec::new();
-        // we send selection state to syntect in the form of a vec of line ranges,
+        // line-oriented edit features consume selection state as a vec of line ranges,
         // so we combine overlapping selections to get the minimum set of ranges.
         for region in self.view.borrow().sel_regions().iter() {
             let start = ed.get_buffer().line_of_offset(region.min());
@@ -1498,8 +1682,24 @@ impl<'a> EventContext<'a> {
         let lang_name = self.language.as_ref();
         let maybe_delta = {
             let ed = self.editor.borrow();
-            lang_features::toggle_comment(ed.get_buffer(), &line_ranges, lang_name).or_else(|| {
-                lang_features::toggle_block_comment(ed.get_buffer(), &selection_ranges, lang_name)
+            let file_path = self.info.map(|info| info.path.as_path());
+            let capabilities =
+                syntax_feature_availability(Some(lang_name), file_path, ed.document_mode());
+            let line_delta = capabilities
+                .line_comments
+                .then(|| lang_features::toggle_comment(ed.get_buffer(), &line_ranges, lang_name))
+                .flatten();
+            line_delta.or_else(|| {
+                capabilities
+                    .block_comments
+                    .then(|| {
+                        lang_features::toggle_block_comment(
+                            ed.get_buffer(),
+                            &selection_ranges,
+                            lang_name,
+                        )
+                    })
+                    .flatten()
             })
         };
         if let Some(delta) = maybe_delta {
@@ -1512,7 +1712,13 @@ impl<'a> EventContext<'a> {
         let lang_name = self.language.as_ref();
         let maybe_delta = {
             let ed = self.editor.borrow();
-            lang_features::toggle_comment(ed.get_buffer(), &line_ranges, lang_name)
+            let file_path = self.info.map(|info| info.path.as_path());
+            let capabilities =
+                syntax_feature_availability(Some(lang_name), file_path, ed.document_mode());
+            capabilities
+                .line_comments
+                .then(|| lang_features::toggle_comment(ed.get_buffer(), &line_ranges, lang_name))
+                .flatten()
         };
         if let Some(delta) = maybe_delta {
             self.editor.borrow_mut().apply_direct_delta(EditType::Other, delta);
@@ -1524,7 +1730,19 @@ impl<'a> EventContext<'a> {
         let lang_name = self.language.as_ref();
         let maybe_delta = {
             let ed = self.editor.borrow();
-            lang_features::toggle_block_comment(ed.get_buffer(), &selection_ranges, lang_name)
+            let file_path = self.info.map(|info| info.path.as_path());
+            let capabilities =
+                syntax_feature_availability(Some(lang_name), file_path, ed.document_mode());
+            capabilities
+                .block_comments
+                .then(|| {
+                    lang_features::toggle_block_comment(
+                        ed.get_buffer(),
+                        &selection_ranges,
+                        lang_name,
+                    )
+                })
+                .flatten()
         };
         if let Some(delta) = maybe_delta {
             self.editor.borrow_mut().apply_direct_delta(EditType::Other, delta);
@@ -1533,7 +1751,7 @@ impl<'a> EventContext<'a> {
 
     /// Start an async reindent operation for `Normal`-mode buffers.
     ///
-    /// For languages supported by the built-in syntect reindent, spawns a
+    /// For languages supported by the built-in tree-sitter reindent, spawns a
     /// background thread (via [`WholeScanTask`]) so the UI render loop is not
     /// blocked.  For unknown languages, falls back to plugin dispatch
     /// immediately (plugin RPC is already non-blocking).
@@ -1550,7 +1768,13 @@ impl<'a> EventContext<'a> {
         };
 
         // For unknown languages, fall back to plugin dispatch (already async).
-        if !lang_features::language_supports_reindent(&lang_name) {
+        let file_path = self.info.map(|info| info.path.as_path());
+        let capabilities = syntax_feature_availability(
+            Some(lang_name.as_str()),
+            file_path,
+            self.editor.borrow().document_mode(),
+        );
+        if !capabilities.reindent {
             self.dispatch_command_to_plugins("reindent", &json!(line_ranges));
             return;
         }
@@ -2842,7 +3066,6 @@ mod tests {
     use crate::config::ConfigManager;
     use crate::core::dummy_weak_core;
     use crate::object::SyntaxNavigationTarget;
-    use crate::plugins::PluginPid;
     use crate::plugins::rpc::{
         CodeActionRequest, Diagnostic, DiagnosticSeverity, FormatDocumentRequest,
         GetDiagnosticsResponse, GetSelectionsResponse, SelectionRange,
@@ -2855,7 +3078,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tempfile::NamedTempFile;
     use xi_rope::Interval;
-    use xi_rope::spans::SpansBuilder;
     use xi_rpc::{Callback, Error as RpcError, Peer, RequestId};
 
     #[derive(Clone, Default)]
@@ -3053,17 +3275,6 @@ mod tests {
     fn language_changed_invalidates_view_for_syntax_refresh() {
         let harness = ContextHarness::new("let x = 1;\n");
         harness.take_notifications();
-
-        {
-            let mut editor = harness.editor.borrow_mut();
-            let len = editor.get_buffer().len();
-            editor
-                .get_layers_mut()
-                .add_scopes(PluginPid(1), vec![vec!["constant.numeric.decimal.rust".into()]]);
-            let mut builder = SpansBuilder::new(len);
-            builder.add_span(Interval::new(8, 9), 0);
-            editor.get_layers_mut().update_layer(PluginPid(1), Interval::new(0, len), builder.build());
-        }
 
         let mut ctx = harness.make_context();
         ctx.language_changed(&LanguageId::from("Rust"));
@@ -3349,6 +3560,22 @@ mod tests {
         ctx.do_edit(EditNotification::ToggleBlockComment);
 
         assert_eq!(harness.debug_render(), "/* |div { color: red; } */\n");
+    }
+
+    #[test]
+    fn reindent_unsupported_language_avoids_background_task_and_panics() {
+        let harness = ContextHarness::new("<div>\n<span>hi</span>\n</div>\n");
+        harness.take_notifications();
+
+        let mut ctx = harness.make_context();
+        ctx.language = LanguageId::from("HTML");
+
+        ctx.do_edit(EditNotification::Reindent);
+
+        assert!(!harness.editor.borrow().whole_scan_task.is_in_progress());
+        let notifications = harness.take_notifications();
+        assert!(notifications.iter().all(|(method, _)| method != "alert"));
+        assert_eq!(harness.debug_render(), "|<div>\n<span>hi</span>\n</div>\n");
     }
 
     #[test]
@@ -5020,32 +5247,67 @@ mod tests {
     }
 
     #[test]
-    fn vlf_syntax_selection_alerts_until_visible_range_parsing_exists() {
-        let (harness, _f) = vlf_harness(b"fn alpha() {}\nfn beta() {}\n");
+    fn vlf_syntax_selection_uses_visible_range_parse() {
+        let source = b"fn main() { foo(bar); }\n";
+        let (harness, _f) = vlf_harness(source);
         harness.take_notifications();
-        let before = harness.debug_render();
         let mut ctx = harness.make_context();
+        ctx.language = LanguageId::from("Rust");
 
-        ctx.do_syntax_selection(SyntaxSelectionAction::SelectNextSibling);
+        ctx.do_edit(EditNotification::VlfViewport { line_start: 0, line_end: 0, generation: 1 });
+        harness.take_notifications();
+
+        let source = String::from_utf8(source.to_vec()).unwrap();
+        {
+            let editor = ctx.editor.borrow();
+            let store = editor.vlf_store.as_ref().expect("vlf store");
+            let window_range = ctx.current_vlf_semantic_range(store).expect("semantic window");
+            let window_text = ctx
+                .current_vlf_semantic_window_text(store, window_range, "Rust", None)
+                .expect("semantic window text");
+            assert_eq!(window_text, source);
+            assert_eq!(window_range.start.0 as usize, 0);
+            assert_eq!(window_range.end.0 as usize, source.len());
+        }
+        let start = source.find("bar").unwrap();
+        let end = start + 3;
+        harness.view.borrow_mut().set_vlf_selection(SelRegion::new(start, end));
+
+        ctx.do_syntax_selection(SyntaxSelectionAction::Expand);
 
         let notifications = harness.take_notifications();
-        let (_, params) = notifications
-            .iter()
-            .find(|(method, _)| method == "alert")
-            .expect("expected alert notification");
-        assert_eq!(
-            params["msg"].as_str(),
-            Some("select_next_sibling: disabled in VLF until visible-range parsing exists")
+        assert!(
+            notifications.iter().all(|(method, _)| method != "alert"),
+            "VLF semantic selection should not alert when current node is inside parsed window: {notifications:?}"
         );
-        assert_eq!(harness.debug_render(), before);
+
+        let selection = harness.view.borrow().sel_regions()[0];
+        assert!(selection.min() <= start);
+        assert!(selection.max() >= end);
+        assert!(selection.min() < start || selection.max() > end);
     }
 
     #[test]
-    fn vlf_syntax_navigation_alerts_until_visible_range_parsing_exists() {
+    fn vlf_syntax_navigation_stays_bounded_to_visible_range() {
         let (harness, _f) = vlf_harness(b"fn alpha() {}\nfn beta() {}\n");
         harness.take_notifications();
-        let before = harness.debug_render();
         let mut ctx = harness.make_context();
+        ctx.language = LanguageId::from("Rust");
+
+        ctx.do_edit(EditNotification::VlfViewport { line_start: 0, line_end: 0, generation: 1 });
+        harness.take_notifications();
+
+        {
+            let editor = ctx.editor.borrow();
+            let store = editor.vlf_store.as_ref().expect("vlf store");
+            let window_range = ctx.current_vlf_semantic_range(store).expect("semantic window");
+            let window_text = ctx
+                .current_vlf_semantic_window_text(store, window_range, "Rust", None)
+                .expect("semantic window text");
+            assert_eq!(window_text, "fn alpha() {}\n");
+            assert_eq!(window_range.start.0 as usize, 0);
+            assert_eq!(window_range.end.0 as usize, "fn alpha() {}\n".len());
+        }
 
         ctx.do_syntax_navigation(SyntaxNavigationAction::new(
             SyntaxNavigationTarget::Function,
@@ -5059,8 +5321,59 @@ mod tests {
             .expect("expected alert notification");
         assert_eq!(
             params["msg"].as_str(),
-            Some("goto_next_function: disabled in VLF until visible-range parsing exists")
+            Some("goto_next_function: outside current parsed range")
         );
-        assert_eq!(harness.debug_render(), before);
+    }
+
+    #[test]
+    fn vlf_syntax_navigation_uses_visible_range_parse() {
+        let (harness, _f) = vlf_harness(b"fn alpha() {}\nfn beta() {}\n");
+        harness.take_notifications();
+        let mut ctx = harness.make_context();
+        ctx.language = LanguageId::from("Rust");
+
+        ctx.do_edit(EditNotification::VlfViewport { line_start: 0, line_end: 2, generation: 1 });
+        harness.take_notifications();
+
+        ctx.do_syntax_navigation(SyntaxNavigationAction::new(
+            SyntaxNavigationTarget::Function,
+            true,
+        ));
+
+        let selection = harness.view.borrow().sel_regions()[0];
+        assert!(selection.is_caret());
+        assert_eq!(selection.min(), "fn alpha() {}\n".len());
+        assert!(
+            harness.take_notifications().iter().all(|(method, _)| method != "alert"),
+            "VLF semantic navigation should not alert when target is inside parsed window"
+        );
+    }
+
+    #[test]
+    fn vlf_syntax_commands_reuse_visible_parse_cache() {
+        let (harness, _f) = vlf_harness(b"fn alpha() { beta(gamma); }\nfn delta() {}\n");
+        harness.take_notifications();
+        let mut ctx = harness.make_context();
+        ctx.language = LanguageId::from("Rust");
+
+        ctx.do_edit(EditNotification::VlfViewport { line_start: 0, line_end: 1, generation: 1 });
+        harness.take_notifications();
+
+        let start = "fn alpha() { beta(".len();
+        let end = start + "gamma".len();
+        harness.view.borrow_mut().set_vlf_selection(SelRegion::new(start, end));
+
+        ctx.do_syntax_selection(SyntaxSelectionAction::Expand);
+        assert_eq!(harness.view.borrow().semantic_parse_cache_parse_count(), 1);
+
+        ctx.do_syntax_navigation(SyntaxNavigationAction::new(
+            SyntaxNavigationTarget::Function,
+            true,
+        ));
+        assert_eq!(harness.view.borrow().semantic_parse_cache_parse_count(), 1);
+        assert!(
+            harness.take_notifications().iter().all(|(method, _)| method != "alert"),
+            "reused VLF semantic parse should keep commands functional"
+        );
     }
 }

@@ -284,7 +284,7 @@ pub(crate) struct App {
     /// Timestamp of the last crash-recovery write.
     pub(super) recovery_last_check: Instant,
     // ── Syntax highlighting ─────────────────────────────────────────────────────
-    /// Syntect-backed in-process syntax highlighter (Phase 1).
+    /// Render-side syntax styling helper for backend-owned syntax spans.
     pub(crate) highlighter: crate::highlight::Highlighter,
     // ── Fold state ───────────────────────────────────────────────────────────────
     /// Manual fold state keyed by buffer ID.

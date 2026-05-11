@@ -14,7 +14,7 @@ use xi_core_lib::rpc::LineReplacement;
 
 use crate::backend::{CompletionSuggestion, PendingUiAction};
 use crate::buffer::BufferManager;
-use crate::folds::{FoldStore, indent_fold_extent};
+use crate::folds::FoldStore;
 use crate::git::{self, GitBufferCache, GitBufferStatus};
 use crate::keymap::{Action, BindingKey, SequenceNode};
 use crate::picker::PickerState;
@@ -2931,25 +2931,30 @@ impl App {
 
     // ── Fold commands ─────────────────────────────────────────────────────────
 
-    fn fold_extent_at_cursor(&self) -> Option<(usize, usize)> {
-        // Whole-buffer policy-allowed: indent fold detection scans surrounding lines.
-        indent_fold_extent(&self.backend.lines, self.backend.cursor_line)
+    fn fold_extent_at_cursor(&mut self) -> Option<(usize, usize)> {
+        match self.backend.fold_range_at_cursor() {
+            Ok(extent) => extent,
+            Err(err) => {
+                self.backend.status_message = Some(format!("fold query failed: {err}"));
+                None
+            }
+        }
     }
 
-    fn fold_toggle(&mut self) {
+    pub(crate) fn fold_toggle(&mut self) {
         let line = self.backend.cursor_line;
         let extent = self.fold_extent_at_cursor().unwrap_or((line, line));
         let buf_id = self.backend.active().id;
         self.folds.toggle(buf_id, line, extent);
     }
 
-    fn fold_open(&mut self) {
+    pub(crate) fn fold_open(&mut self) {
         let line = self.backend.cursor_line;
         let buf_id = self.backend.active().id;
         self.folds.open(buf_id, line);
     }
 
-    fn fold_close(&mut self) {
+    pub(crate) fn fold_close(&mut self) {
         let line = self.backend.cursor_line;
         let buf_id = self.backend.active().id;
         if let Some(extent) = self.fold_extent_at_cursor() {
@@ -2957,16 +2962,19 @@ impl App {
         }
     }
 
-    fn fold_open_all(&mut self) {
+    pub(crate) fn fold_open_all(&mut self) {
         let buf_id = self.backend.active().id;
         self.folds.open_all(buf_id);
     }
 
-    fn fold_close_all(&mut self) {
+    pub(crate) fn fold_close_all(&mut self) {
         let buf_id = self.backend.active().id;
-        // Whole-buffer policy-allowed: closing all folds requires full line scan.
-        let lines: Vec<String> = self.backend.lines.clone();
-        self.folds.close_all(buf_id, &lines);
+        match self.backend.fold_ranges_preview(None, None) {
+            Ok(ranges) => self.folds.replace_all(buf_id, ranges),
+            Err(err) => {
+                self.backend.status_message = Some(format!("fold query failed: {err}"));
+            }
+        }
     }
 
     // ── Crash recovery ──────────────────────────────────────────────────────

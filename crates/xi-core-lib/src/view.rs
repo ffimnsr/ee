@@ -16,6 +16,8 @@ use std::cmp::{max, min};
 use std::collections::HashMap;
 use std::iter;
 use std::ops::Range;
+use std::path::Path;
+use std::time::Duration;
 
 use log::warn;
 use regex::RegexBuilder;
@@ -26,15 +28,16 @@ use crate::annotations::{AnnotationStore, Annotations, ToAnnotation};
 use crate::client::{Client, Update, UpdateOp};
 use crate::edit_types::ViewEvent;
 use crate::find::{Find, FindStatus};
-use crate::layers::Layers;
 use crate::line_cache_shadow::{self, LineCacheShadow, RenderPlan, RenderTactic};
 use crate::line_offset::LineOffset;
 use crate::linewrap::{InvalLines, Lines, VisualLine, WrapWidth};
 use crate::movement::{Movement, region_movement, selection_movement};
+use crate::object::{self, SyntaxNavigationAction, SyntaxSelectionAction};
 use crate::plugins::PluginId;
 use crate::rpc::{FindQuery, GestureType, MouseAction, SelectionGranularity, SelectionModifier};
 use crate::selection::{Affinity, InsertDrift, SelRegion, Selection};
 use crate::tabs::{BufferId, Counter, ViewId};
+use crate::tree_sitter_support::{VisibleSyntaxLimits, VisibleSyntaxSpan, chunk_syntax_spans};
 use crate::vlf::search::{VlfMatchRange, VlfSearchState, VlfSearchStatus};
 use crate::width_cache::WidthCache;
 use crate::word_boundaries::WordCursor;
@@ -46,6 +49,11 @@ const FLAG_SELECT: u64 = 2;
 
 /// Size of batches as number of bytes used during incremental find.
 const FIND_BATCH_SIZE: usize = 500000;
+
+/// Bounded context for normal/constrained backend syntax rendering.
+const BACKEND_SYNTAX_CONTEXT_LINES: usize = 32;
+/// Normal/constrained buffers can spend more than VLF's tight visible-range budget.
+const BACKEND_SYNTAX_TIMEOUT: Duration = Duration::from_millis(25);
 
 /// A view to a buffer. It is the buffer plus additional information
 /// like line breaks and selection state.
@@ -65,6 +73,9 @@ pub struct View {
 
     /// Previous syntax-object selections used by `shrink_selection`.
     object_selection_history: Vec<Selection>,
+
+    /// Cached visible VLF semantic parse for repeated syntax-object commands.
+    semantic_parse_cache: object::SyntaxParseCache,
 
     drag_state: Option<DragState>,
 
@@ -181,6 +192,7 @@ impl View {
             selection: SelRegion::caret(0).into(),
             primary_selection_idx: 0,
             object_selection_history: Vec::new(),
+            semantic_parse_cache: object::SyntaxParseCache::default(),
             scroll_to: Some(0),
             size: Size::default(),
             drag_state: None,
@@ -456,6 +468,12 @@ impl View {
     pub fn set_selection<S: Into<Selection>>(&mut self, text: &Rope, sel: S) {
         self.set_selection_raw(text, sel.into());
         self.scroll_to_cursor(text);
+    }
+
+    pub(crate) fn set_vlf_selection<S: Into<Selection>>(&mut self, sel: S) {
+        self.selection = sel.into();
+        self.clamp_primary_selection();
+        self.scroll_to = self.primary_sel_region().map(|region| region.end);
     }
 
     /// Sets the selection to a new value, without invalidating.
@@ -876,6 +894,59 @@ impl View {
         &mut self.object_selection_history
     }
 
+    pub(crate) fn cached_semantic_window_text(
+        &self,
+        language_name: &str,
+        file_path: Option<&Path>,
+        base_offset: usize,
+        end_offset: usize,
+    ) -> Option<String> {
+        self.semantic_parse_cache
+            .contains_window(language_name, file_path, base_offset, end_offset)
+            .then(|| self.semantic_parse_cache.source().to_owned())
+    }
+
+    pub(crate) fn apply_vlf_syntax_selection(
+        &mut self,
+        source: &str,
+        base_offset: usize,
+        language_name: &str,
+        file_path: Option<&Path>,
+        action: SyntaxSelectionAction,
+    ) -> Result<(), object::SyntaxSelectionError> {
+        self.semantic_parse_cache.update(source, base_offset, language_name, file_path)?;
+        let current = self.selection.clone();
+        let selection = object::apply_syntax_selection_in_cache(
+            &self.semantic_parse_cache,
+            &current,
+            &mut self.object_selection_history,
+            action,
+        )?;
+        self.set_vlf_selection(selection);
+        Ok(())
+    }
+
+    pub(crate) fn apply_vlf_syntax_navigation(
+        &mut self,
+        source: &str,
+        base_offset: usize,
+        language_name: &str,
+        file_path: Option<&Path>,
+        action: SyntaxNavigationAction,
+    ) -> Result<(), object::SyntaxSelectionError> {
+        self.semantic_parse_cache.update(source, base_offset, language_name, file_path)?;
+        let current = self.selection.clone();
+        let selection =
+            object::apply_syntax_navigation_in_cache(&self.semantic_parse_cache, &current, action)?;
+        self.set_vlf_selection(selection);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn semantic_parse_cache_parse_count(&self) -> usize {
+        self.semantic_parse_cache.parse_count()
+    }
+
     /// Collapse all selections in this view into a single caret
     pub fn collapse_selections(&mut self, text: &Rope) {
         let mut sel = self.selection.clone();
@@ -895,7 +966,7 @@ impl View {
         &self,
         line: VisualLine,
         text: Option<&Rope>,
-        layers: &Layers,
+        syntax_spans: &[VisibleSyntaxSpan],
         last_pos: usize,
     ) -> Value {
         let start_pos = line.interval.start;
@@ -943,9 +1014,9 @@ impl View {
         if let Some(text) = text {
             result["text"] = json!(text.slice_to_cow(start_pos..pos));
         }
-        let syntax_spans = self.encode_syntax_spans(line.interval, layers);
-        if !syntax_spans.is_empty() {
-            result["syntax_spans"] = Value::Array(syntax_spans);
+        let encoded_syntax_spans = self.encode_syntax_spans(syntax_spans);
+        if !encoded_syntax_spans.is_empty() {
+            result["syntax_spans"] = Value::Array(encoded_syntax_spans);
         }
         if !cursors.is_empty() {
             result["cursor"] = json!(cursors);
@@ -956,28 +1027,85 @@ impl View {
         result
     }
 
-    fn encode_syntax_spans(&self, interval: Interval, layers: &Layers) -> Vec<Value> {
-        layers
-            .resolved_spans(interval)
-            .into_iter()
-            .filter(|span| span.end > span.start)
+    fn encode_syntax_spans(&self, syntax_spans: &[VisibleSyntaxSpan]) -> Vec<Value> {
+        syntax_spans
+            .iter()
+            .filter(|span| span.end_byte > span.start_byte)
             .map(|span| {
                 json!({
-                    "start_byte": span.start,
-                    "end_byte": span.end,
+                    "start_byte": span.start_byte,
+                    "end_byte": span.end_byte,
                     "scope": span.scope,
                 })
             })
             .collect()
     }
 
+    fn backend_syntax_spans_for_segment(
+        &self,
+        text: &Rope,
+        start_line: usize,
+        line_count: usize,
+        language_name: &str,
+        syntax_enabled: bool,
+    ) -> Vec<Vec<VisibleSyntaxSpan>> {
+        if !syntax_enabled || line_count == 0 {
+            return vec![Vec::new(); line_count];
+        }
+
+        let context_start_line = start_line.saturating_sub(BACKEND_SYNTAX_CONTEXT_LINES);
+        let context_line_count = line_count + start_line.saturating_sub(context_start_line);
+        let context_lines = self
+            .lines
+            .iter_lines(text, context_start_line)
+            .take(context_line_count)
+            .collect::<Vec<VisualLine>>();
+
+        if context_lines.is_empty() {
+            return vec![Vec::new(); line_count];
+        }
+
+        let chunk_start = context_lines.first().map(|line| line.interval.start()).unwrap_or(0);
+        let chunk_end = context_lines.last().map(|line| line.interval.end()).unwrap_or(chunk_start);
+        if chunk_end <= chunk_start {
+            return vec![Vec::new(); line_count];
+        }
+
+        let chunk_text = text.slice_to_cow(chunk_start..chunk_end).into_owned();
+        let segments = context_lines
+            .iter()
+            .map(|line| {
+                line.interval.start().saturating_sub(chunk_start)
+                    ..line.interval.end().saturating_sub(chunk_start)
+            })
+            .collect::<Vec<_>>();
+
+        let rendered_syntax = chunk_syntax_spans(
+            language_name,
+            &chunk_text,
+            &segments,
+            VisibleSyntaxLimits {
+                timeout: BACKEND_SYNTAX_TIMEOUT,
+                ..VisibleSyntaxLimits::default()
+            },
+        );
+        let skip = start_line.saturating_sub(context_start_line);
+        let mut segment_syntax =
+            rendered_syntax.into_iter().skip(skip).take(line_count).collect::<Vec<_>>();
+        while segment_syntax.len() < line_count {
+            segment_syntax.push(Vec::new());
+        }
+        segment_syntax
+    }
+
     fn send_update_for_plan(
         &mut self,
         text: &Rope,
         client: &Client,
-        layers: &Layers,
         plan: &RenderPlan,
         pristine: bool,
+        language_name: &str,
+        syntax_enabled: bool,
     ) {
         // every time current visible range changes, annotations are sent to frontend
         let start_off = self.offset_of_line(text, self.first_line);
@@ -1063,7 +1191,7 @@ impl View {
                                 .iter_lines(text, start_line)
                                 .take(seg.n)
                                 .map(|l| {
-                                    self.encode_line(l, /* text = */ None, layers, text.len())
+                                    self.encode_line(l, /* text = */ None, &[], text.len())
                                 })
                                 .collect::<Vec<_>>();
 
@@ -1078,11 +1206,21 @@ impl View {
                         b.add_span(seg.n, 0, 0);
                     } else if seg.tactic == RenderTactic::Render {
                         let start_line = seg.our_line_num;
+                        let syntax_spans = self.backend_syntax_spans_for_segment(
+                            text,
+                            start_line,
+                            seg.n,
+                            language_name,
+                            syntax_enabled,
+                        );
                         let encoded_lines = self
                             .lines
                             .iter_lines(text, start_line)
                             .take(seg.n)
-                            .map(|l| self.encode_line(l, Some(text), layers, text.len()))
+                            .zip(syntax_spans)
+                            .map(|(line, syntax)| {
+                                self.encode_line(line, Some(text), &syntax, text.len())
+                            })
                             .collect::<Vec<_>>();
                         debug_assert_eq!(encoded_lines.len(), seg.n);
                         ops.push(UpdateOp::insert(encoded_lines));
@@ -1117,12 +1255,13 @@ impl View {
         &mut self,
         text: &Rope,
         client: &Client,
-        layers: &Layers,
         pristine: bool,
+        language_name: &str,
+        syntax_enabled: bool,
     ) {
         let height = self.line_of_offset(text, text.len()) + 1;
         let plan = RenderPlan::create(height, self.first_line, self.height);
-        self.send_update_for_plan(text, client, layers, &plan, pristine);
+        self.send_update_for_plan(text, client, &plan, pristine, language_name, syntax_enabled);
         if let Some(new_scroll_pos) = self.scroll_to.take() {
             let (line, col) = self.offset_to_line_col(text, new_scroll_pos);
             client.scroll_to(self.view_id, line, col);
@@ -1134,15 +1273,16 @@ impl View {
         &mut self,
         text: &Rope,
         client: &Client,
-        layers: &Layers,
         first_line: usize,
         last_line: usize,
         pristine: bool,
+        language_name: &str,
+        syntax_enabled: bool,
     ) {
         let height = self.line_of_offset(text, text.len()) + 1;
         let mut plan = RenderPlan::create(height, self.first_line, self.height);
         plan.request_lines(first_line, last_line);
-        self.send_update_for_plan(text, client, layers, &plan, pristine);
+        self.send_update_for_plan(text, client, &plan, pristine, language_name, syntax_enabled);
     }
 
     /// Invalidates front-end's entire line cache, forcing a full render at the next
@@ -1522,15 +1662,11 @@ fn clamp(x: usize, min: usize, max: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layers::Layers;
-    use crate::plugins::PluginPid;
-    use crate::plugins::rpc::ScopeSpan;
     use crate::rpc::FindQuery;
     use serde_json::Value;
     use std::mem;
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
-    use xi_rope::spans::SpansBuilder;
     use xi_rpc::{Callback, Error as RpcError, Peer, RequestId};
 
     #[derive(Clone, Default)]
@@ -1924,22 +2060,20 @@ mod tests {
     }
 
     #[test]
-    fn encode_line_includes_plugin_syntax_spans_with_byte_ranges() {
+    fn encode_line_includes_backend_syntax_spans_with_byte_ranges() {
         let view = View::new(1.into(), BufferId::new(2));
         let text = Rope::from("let x = 1;\n");
-        let mut layers = Layers::default();
-        layers.add_scopes(
-            PluginPid(1),
-            vec![vec!["keyword.control.rust".into()], vec!["constant.numeric.decimal.rust".into()]],
-        );
-
-        let mut builder = SpansBuilder::new(text.len());
-        builder.add_span(Interval::new(0, 3), 0);
-        builder.add_span(Interval::new(8, 9), 1);
-        layers.update_layer(PluginPid(1), Interval::new(0, text.len()), builder.build());
+        let syntax_spans = vec![
+            VisibleSyntaxSpan { start_byte: 0, end_byte: 3, scope: "keyword.control.rust" },
+            VisibleSyntaxSpan {
+                start_byte: 8,
+                end_byte: 9,
+                scope: "constant.numeric.decimal.rust",
+            },
+        ];
 
         let line = VisualLine { interval: Interval::new(0, 10), line_num: Some(1) };
-        let encoded = view.encode_line(line, Some(&text), &layers, text.len());
+        let encoded = view.encode_line(line, Some(&text), &syntax_spans, text.len());
         let syntax = encoded["syntax_spans"].as_array().expect("missing syntax spans");
 
         assert_eq!(syntax.len(), 2);
@@ -1955,15 +2089,11 @@ mod tests {
     fn encode_line_keeps_line_relative_syntax_spans() {
         let view = View::new(1.into(), BufferId::new(2));
         let text = Rope::from("first\nsecond();\n");
-        let mut layers = Layers::default();
-        layers.add_scopes(PluginPid(1), vec![vec!["entity.name.function.c".into()]]);
-
-        let mut builder = SpansBuilder::new(text.len());
-        builder.add_span(Interval::new(6, 12), 0);
-        layers.update_layer(PluginPid(1), Interval::new(0, text.len()), builder.build());
+        let syntax_spans =
+            vec![VisibleSyntaxSpan { start_byte: 0, end_byte: 6, scope: "entity.name.function.c" }];
 
         let line = VisualLine { interval: Interval::new(6, 16), line_num: Some(2) };
-        let encoded = view.encode_line(line, Some(&text), &layers, text.len());
+        let encoded = view.encode_line(line, Some(&text), &syntax_spans, text.len());
         let syntax = encoded["syntax_spans"].as_array().expect("missing syntax spans");
 
         assert_eq!(syntax.len(), 1);
@@ -1973,41 +2103,24 @@ mod tests {
     }
 
     #[test]
-    fn encode_line_omits_syntax_spans_when_no_plugin_data_exists() {
+    fn encode_line_omits_syntax_spans_when_backend_has_no_data() {
         let view = View::new(1.into(), BufferId::new(2));
         let text = Rope::from("plain text\n");
-        let layers = Layers::default();
         let line = VisualLine { interval: Interval::new(0, 10), line_num: Some(1) };
 
-        let encoded = view.encode_line(line, Some(&text), &layers, text.len());
+        let encoded = view.encode_line(line, Some(&text), &[], text.len());
 
         assert!(encoded.get("syntax_spans").is_none());
     }
 
     #[test]
-    fn render_if_dirty_emits_syntax_spans_after_plugin_update() {
+    fn render_if_dirty_emits_backend_syntax_spans_without_plugin_update() {
         let mut view = View::new(1.into(), BufferId::new(2));
-        let mut editor = crate::editor::Editor::with_text("let x = 1;\n");
+        let editor = crate::editor::Editor::with_text("let x = 1;\n");
         let (client, peer) = recording_client();
         view.debug_force_rewrap_cols(editor.get_buffer(), 80);
 
-        view.render_if_dirty(editor.get_buffer(), &client, editor.get_layers(), true);
-        peer.take_notifications();
-
-        editor
-            .get_layers_mut()
-            .add_scopes(PluginPid(1), vec![vec!["constant.numeric.decimal.rust".into()]]);
-        let rev = editor.get_head_rev_token();
-        editor.update_spans(
-            &mut view,
-            PluginPid(1),
-            0,
-            editor.get_buffer().len(),
-            vec![ScopeSpan { start: 8, end: 9, scope_id: 0 }],
-            rev,
-        );
-
-        view.render_if_dirty(editor.get_buffer(), &client, editor.get_layers(), true);
+        view.render_if_dirty(editor.get_buffer(), &client, true, "Rust", true);
         let notifications = peer.take_notifications();
 
         let syntax_refresh = notifications.iter().any(|(method, params)| {
@@ -2021,7 +2134,31 @@ mod tests {
                 })
         });
 
-        assert!(syntax_refresh, "plugin span update should force syntax-bearing line updates");
+        assert!(syntax_refresh, "backend render should emit syntax-bearing line updates");
+    }
+
+    #[test]
+    fn render_if_dirty_omits_syntax_spans_for_unsupported_language() {
+        let mut view = View::new(1.into(), BufferId::new(2));
+        let editor = crate::editor::Editor::with_text("plain text\n");
+        let (client, peer) = recording_client();
+        view.debug_force_rewrap_cols(editor.get_buffer(), 80);
+
+        view.render_if_dirty(editor.get_buffer(), &client, true, "Plain Text", true);
+
+        let notifications = peer.take_notifications();
+        let syntax_refresh = notifications.iter().any(|(method, params)| {
+            method == "update"
+                && params["update"]["ops"].as_array().is_some_and(|ops| {
+                    ops.iter().any(|op| {
+                        op["lines"].as_array().is_some_and(|lines| {
+                            lines.iter().any(|line| line.get("syntax_spans").is_some())
+                        })
+                    })
+                })
+        });
+
+        assert!(!syntax_refresh, "unsupported languages should render without backend syntax");
     }
 
     #[test]
@@ -2032,27 +2169,13 @@ mod tests {
             (0..200).map(|index| format!("let value_{index} = 42;\n")).collect::<String>(),
         );
 
-        let mut layers = Layers::default();
-        layers.add_scopes(
-            PluginPid(1),
-            vec![vec!["keyword.control.rust".into()], vec!["constant.numeric.decimal.rust".into()]],
-        );
-
-        let mut builder = SpansBuilder::new(text.len());
-        for line_idx in 0..200 {
-            let start = text.offset_of_line(line_idx);
-            builder.add_span(Interval::new(start, start + 3), 0);
-            builder.add_span(Interval::new(start + 15, start + 17), 1);
-        }
-        layers.update_layer(PluginPid(1), Interval::new(0, text.len()), builder.build());
-
         let baseline_client = Client::new(Box::new(RecordingPeer::default()));
         let (syntax_client, syntax_peer) = recording_client();
 
-        view.request_lines(&text, &baseline_client, &Layers::default(), 0, 199, true);
+        view.request_lines(&text, &baseline_client, 0, 199, true, "Rust", false);
 
         let started = Instant::now();
-        view.request_lines(&text, &syntax_client, &layers, 0, 199, true);
+        view.request_lines(&text, &syntax_client, 0, 199, true, "Rust", true);
         let elapsed = started.elapsed();
 
         let syntax_bytes: usize = syntax_peer

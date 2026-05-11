@@ -2062,6 +2062,12 @@ impl App {
         self.syntax_overrides
             .get(&buf.id)
             .cloned()
+            .or_else(|| {
+                buf.path
+                    .as_deref()
+                    .and_then(xi_core_lib::tree_sitter_support::language_name_for_path)
+                    .map(str::to_owned)
+            })
             .or_else(|| self.highlighter.syntax_name_for_path(buf.path.as_deref()))
             .unwrap_or_else(|| String::from("Plain Text"))
     }
@@ -2227,9 +2233,8 @@ impl App {
     }
 
     fn set_current_buffer_language(&mut self, requested: &str) -> Result<String, String> {
-        let language = self
-            .highlighter
-            .canonical_syntax_name(requested)
+        let language = xi_core_lib::tree_sitter_support::canonical_language_name(requested)
+            .map(str::to_owned)
             .ok_or_else(|| format!("set_language: unknown language `{requested}`"))?;
         self.syntax_overrides.insert(self.backend.active().id, language.clone());
         Ok(language)

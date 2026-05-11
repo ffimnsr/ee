@@ -30,13 +30,10 @@ use crate::config::BufferItems;
 use crate::edit_ops::{self, IndentDirection};
 use crate::edit_types::BufferEvent;
 use crate::event_context::MAX_SIZE_LIMIT;
-use crate::layers::Layers;
 use crate::line_offset::{LineOffset, LogicalLines};
 use crate::movement::Movement;
 use crate::plugins::PluginId;
-use crate::plugins::rpc::{
-    DataSpan, GetDataResponse, PluginEdit, PluginEditAck, ScopeSpan, TextUnit,
-};
+use crate::plugins::rpc::{DataSpan, GetDataResponse, PluginEdit, PluginEditAck, TextUnit};
 use crate::rpc::{LineRange, SelectionModifier};
 use crate::selection::{InsertDrift, SelRegion, Selection};
 use crate::text_store::DocumentMode;
@@ -82,8 +79,6 @@ pub struct Editor {
 
     revs_in_flight: usize,
 
-    layers: Layers,
-
     /// Tracks an in-flight async whole-document scan operation (e.g. reindent).
     pub(crate) whole_scan_task: crate::whole_scan::WholeScanTask,
     /// Tracks an in-flight async save operation for rope-backed buffers.
@@ -124,7 +119,6 @@ impl Editor {
             force_undo_group: false,
             last_edit_type: EditType::Other,
             this_edit_type: EditType::Other,
-            layers: Layers::default(),
             revs_in_flight: 0,
             vlf_store: None,
             whole_scan_task: crate::whole_scan::WholeScanTask::new(),
@@ -154,7 +148,6 @@ impl Editor {
             force_undo_group: false,
             last_edit_type: EditType::Other,
             this_edit_type: EditType::Other,
-            layers: Layers::default(),
             revs_in_flight: 0,
             vlf_store: Some(Box::new(store)),
             whole_scan_task: crate::whole_scan::WholeScanTask::new(),
@@ -195,14 +188,6 @@ impl Editor {
             self.rope_mode,
             self.engine.get_head_rev_id().token(),
         )
-    }
-
-    pub(crate) fn get_layers_mut(&mut self) -> &mut Layers {
-        &mut self.layers
-    }
-
-    pub(crate) fn get_layers(&self) -> &Layers {
-        &self.layers
     }
 
     pub(crate) fn get_head_rev_token(&self) -> u64 {
@@ -394,8 +379,6 @@ impl Editor {
             EditType::Surround => InsertDrift::Outside,
             _ => InsertDrift::Default,
         };
-        self.layers.update_all(&delta);
-
         self.last_rev_id = self.engine.get_head_rev_id();
         Some((delta, last_text, drift))
     }
@@ -721,49 +704,6 @@ impl Editor {
     /// (always at least 1, even for an empty buffer).
     pub fn plugin_n_lines(&self) -> usize {
         self.text.measure::<LinesMetric>() + 1
-    }
-
-    /// Applies scope span updates from a plugin layer, transforming spans if
-    /// `rev` is stale.
-    ///
-    /// # Preconditions
-    ///
-    /// `start` and `len` must describe a valid byte range within the buffer at
-    /// the revision identified by `rev`.
-    pub fn update_spans(
-        &mut self,
-        view: &mut View,
-        plugin: PluginId,
-        start: usize,
-        len: usize,
-        spans: Vec<ScopeSpan>,
-        rev: RevToken,
-    ) {
-        let _t = tracing::trace_span!("Editor::update_spans", categories = "core").entered();
-        // TODO: more protection against invalid input
-        let mut start = start;
-        let mut end_offset = start + len;
-        let mut sb = SpansBuilder::new(len);
-        for span in spans {
-            sb.add_span(Interval::new(span.start, span.end), span.scope_id);
-        }
-        let mut spans = sb.build();
-        if rev != self.engine.get_head_rev_id().token() {
-            if let Ok(delta) = self.engine.try_delta_rev_head(rev) {
-                let mut transformer = Transformer::new(&delta);
-                let new_start = transformer.transform(start, false);
-                if !transformer.interval_untouched(Interval::new(start, end_offset)) {
-                    spans = spans.transform(start, end_offset, &mut transformer);
-                }
-                start = new_start;
-                end_offset = transformer.transform(end_offset, true);
-            } else {
-                error!("Revision {} not found", rev);
-            }
-        }
-        let iv = Interval::new(start, end_offset);
-        self.layers.update_layer(plugin, iv, spans);
-        view.set_dirty(self.get_buffer());
     }
 
     /// Applies annotation span updates from a plugin, transforming spans if

@@ -158,7 +158,7 @@ fn shell_command(command: &str, cwd: &Path) -> Command {
 
     #[cfg(not(windows))]
     let mut child = {
-        let shell = env::var("SHELL").unwrap_or_else(|_| String::from("sh"));
+        let shell = shell_program_from_env(env::var("SHELL").ok().as_deref());
         let mut command_builder = Command::new(shell);
         command_builder.arg("-lc").arg(command);
         command_builder
@@ -166,6 +166,18 @@ fn shell_command(command: &str, cwd: &Path) -> Command {
 
     child.current_dir(cwd);
     child
+}
+
+#[cfg(not(windows))]
+fn shell_program_from_env(shell: Option<&str>) -> String {
+    shell
+        .filter(|shell| !shell.is_empty())
+        .filter(|shell| {
+            let path = Path::new(shell);
+            !path.is_absolute() || path.is_file()
+        })
+        .unwrap_or("sh")
+        .to_owned()
 }
 
 fn format_duration(duration: Duration) -> String {
@@ -213,6 +225,14 @@ mod tests {
 
         assert!(result.success);
         assert_eq!(result.stdout, "alpha");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn shell_program_uses_sh_when_absolute_shell_is_missing() {
+        let shell = shell_program_from_env(Some("/definitely/missing/ee-shell"));
+
+        assert_eq!(shell, "sh");
     }
 
     #[test]

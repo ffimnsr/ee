@@ -46,6 +46,13 @@ pub struct LineReplacement {
     pub text: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
+pub struct FoldRangePreview {
+    pub header_line: usize,
+    pub body_start: usize,
+    pub body_end: usize,
+}
+
 /// The notifications which make up the base of the protocol.
 ///
 /// # Note
@@ -160,7 +167,7 @@ pub enum CoreNotification {
     /// let rpc = CoreNotification::Plugin(
     ///     PluginNotification::Start {
     ///         view_id: 1.into(),
-    ///         plugin_name: "syntect".into(),
+    ///         plugin_name: "sample-plugin".into(),
     ///     });
     ///
     /// let expected = json!({
@@ -168,7 +175,7 @@ pub enum CoreNotification {
     ///     "params": {
     ///         "command": "start",
     ///         "view_id": "view-id-1",
-    ///         "plugin_name": "syntect",
+    ///         "plugin_name": "sample-plugin",
     ///     }
     /// });
     /// assert_eq!(serde_json::to_value(&rpc).unwrap(), expected);
@@ -258,6 +265,13 @@ pub enum CoreRequest {
         end_line: usize,
         left_col: usize,
         right_col: usize,
+    },
+    FoldRangesPreview {
+        view_id: ViewId,
+        #[serde(default)]
+        start_line: Option<usize>,
+        #[serde(default)]
+        end_line: Option<usize>,
     },
     SelectCharsPreview {
         view_id: ViewId,

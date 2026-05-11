@@ -350,6 +350,9 @@ impl CoreState {
             BlockTextPreview { view_id, start_line, end_line, left_col, right_col } => {
                 self.do_block_text_preview(view_id, start_line, end_line, left_col, right_col)
             }
+            FoldRangesPreview { view_id, start_line, end_line } => {
+                self.do_fold_ranges_preview(view_id, start_line, end_line)
+            }
             SelectCharsPreview { view_id, count } => self.do_select_chars_preview(view_id, count),
         }
     }
@@ -401,6 +404,18 @@ impl CoreState {
             .make_context(view_id)
             .ok_or_else(|| RemoteError::custom(404, "missing view", None))?;
         Ok(json!(ctx.preview_block_text(start_line, end_line, left_col, right_col)))
+    }
+
+    fn do_fold_ranges_preview(
+        &mut self,
+        view_id: ViewId,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+    ) -> Result<Value, RemoteError> {
+        let ctx = self
+            .make_context(view_id)
+            .ok_or_else(|| RemoteError::custom(404, "missing view", None))?;
+        Ok(json!(ctx.preview_fold_ranges(start_line, end_line)))
     }
 
     fn do_set_config(&mut self, domain: ConfigDomainExternal, changes: Table) {
