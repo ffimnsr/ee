@@ -2,6 +2,269 @@
 
 ## New World
 
+### Full Tree-Sitter Cutover
+
+- Rules:
+  - Keep backend as only syntax authority. `ee-tui` may render spans and show degraded-status messages, but it must not parse languages or infer fallback syntax state locally.
+  - Do not remove `syntect` from manifests until last cutover phase. Earlier phases must preserve green builds and working user-facing behavior.
+  - Reuse existing `tree_sitter_support`, `object`, `event_context`, `view`, and VLF visible-range infrastructure before adding new modules.
+  - Keep VLF bounded-work invariants intact. No phase may reintroduce full-buffer parse, full-buffer clone, or unbounded syntax catch-up.
+  - Prefer explicit language metadata tables over heuristics when tree-sitter queries do not provide stable comment or indentation behavior.
+  - Every phase must land with regression tests covering normal mode, constrained mode when relevant, and VLF when the phase touches shared syntax plumbing.
+  - Remove compatibility shims once downstream call sites are migrated. Do not preserve mixed syntect/tree-sitter runtime paths longer than needed.
+
+- [ ] Phase 0: freeze target architecture and migration seam.
+  - [ ] Document final ownership boundaries in comments near existing syntax entry points.
+    - [ ] Mark `crates/ee-tui/src/highlight.rs` as render-only and planned for backend-span-only operation.
+    - [ ] Mark `crates/xi-core-lib/src/tree_sitter_support.rs` as canonical parse/query entry point for normal, constrained, and VLF syntax features.
+    - [ ] Mark `crates/xi-core-lib/src/lang_features.rs` as temporary compatibility layer scheduled to lose `syntect`.
+  - [ ] Enumerate exact runtime responsibilities that must survive cutover.
+    - [ ] Syntax highlighting spans for normal/constrained buffers.
+    - [ ] Visible-range syntax spans for VLF buffers.
+    - [ ] Semantic selection and navigation.
+    - [ ] Toggle line comment and block comment.
+    - [ ] Reindent.
+    - [ ] Language feature gating and downgrade behavior.
+  - [ ] Define completion criteria for full cutover.
+    - [ ] No runtime code in workspace imports `syntect`.
+    - [ ] No TUI path computes syntax colors without backend spans.
+    - [ ] No core syntax layer depends on `syntect::parsing::Scope`.
+    - [ ] Supported grammar matrix is wired through one shared tree-sitter language registry.
+    - [ ] Tests prove no syntect fallback remains in normal, constrained, or VLF paths.
+
+- [ ] Phase 1: normalize language registry and language metadata.
+  - [ ] Expand tree-sitter language registry beyond Rust/Python so bundled grammars already listed in workspace `Cargo.toml` are reachable from core.
+    - [ ] Add explicit registry entries in `crates/xi-core-lib/src/tree_sitter_support.rs` for each bundled grammar crate.
+    - [ ] Cover at least: Bash, C, C#, C++, CSS, Elixir, Go, Haskell, HTML, Java, JavaScript, JSON, PHP, Ruby, Scala, TypeScript.
+    - [ ] Keep grammar registration names aligned with xi language names and file-extension mappings actually emitted by open/config paths.
+  - [ ] Unify language lookup across syntax features.
+    - [ ] Replace ad-hoc Rust/Python-only path matching in `crates/xi-core-lib/src/object.rs` with shared registry-backed resolution.
+    - [ ] Use same resolution for normal highlighting, VLF visible parsing, semantic motions, and language feature gating.
+    - [ ] Ensure explicit `:set_language` overrides map through same registry.
+  - [ ] Add explicit language metadata table for non-parse-derived behaviors.
+    - [ ] Store line-comment token, block-comment token pair, indentation strategy, and any known unsupported semantic targets per language.
+    - [ ] Keep metadata in core, not TUI.
+    - [ ] Make absence explicit with enums instead of silent fallback-to-plain heuristics.
+  - [ ] Add regression coverage for registry and metadata.
+    - [ ] Unit tests per language name and per extension/path alias.
+    - [ ] Tests proving unsupported languages degrade cleanly without panics or hidden syntect fallback.
+
+- [ ] Phase 2: move normal/constrained syntax highlighting fully into backend tree-sitter.
+  - [ ] Define one backend-owned syntax span producer for non-VLF buffers.
+    - [ ] Reuse shared span shape used by VLF visible-range output so frontend consumes one conceptual format.
+    - [ ] Ensure spans remain line-relative byte ranges with stable scope strings.
+    - [ ] Keep parse/update work incremental or viewport-bounded according to buffer mode policy.
+  - [ ] Wire normal/constrained render/update path to emit backend syntax spans consistently.
+    - [ ] Identify current `view`/`layers`/plugin render path that emits syntax spans for normal buffers.
+    - [ ] Replace remaining plugin-only or syntect-only assumptions with backend tree-sitter span generation.
+    - [ ] Preserve existing omission semantics when no syntax spans are available for unsupported language.
+  - [ ] Remove local TUI parsing behavior after backend parity lands.
+    - [ ] Delete `ee-tui` logic that loads syntect syntax/theme assets.
+    - [ ] Delete `highlight_visible` fallback path and related bounded-lookback behavior.
+    - [ ] Keep only scope-to-style mapping and span slicing helpers needed for rendering backend spans.
+  - [ ] Add regression coverage for frontend/backend contract.
+    - [ ] Tests proving normal-mode numeric/string/comment spans come from backend data only.
+    - [ ] Tests proving constrained buffers do not trigger local syntax parsing in TUI.
+    - [ ] Tests proving unsupported languages render plain text without hidden syntax parser work.
+
+- [ ] Phase 3: replace `lang_features` syntect dependency with tree-sitter and metadata-backed logic.
+  - [ ] Remove `syntect`-based comment token discovery.
+    - [ ] Replace scope-derived line-comment detection with explicit metadata table lookups.
+    - [ ] Replace scope-derived block-comment detection with explicit metadata table lookups.
+    - [ ] Preserve exact current command semantics for blank lines, mixed selections, and already-commented regions.
+  - [ ] Replace `syntect`-based reindent implementation.
+    - [ ] Introduce tree-sitter-backed indentation entry point in `tree_sitter_support` or nearest shared syntax module.
+    - [ ] Compute indentation from syntax nodes or explicit indentation strategy per language, not from `syntect` parse state.
+    - [ ] Support incremental or bounded parsing strategy compatible with normal/constrained mode budgets.
+    - [ ] For languages without safe indentation support, return explicit unsupported status so caller can fall back to plugin dispatch instead of hidden syntect behavior.
+  - [ ] Simplify async whole-scan reindent orchestration.
+    - [ ] Keep background-thread execution if full-document reindent still needs async scheduling.
+    - [ ] Rename comments and alerts that still call it “syntect reindent”.
+    - [ ] Ensure cancellation/stale-result behavior remains unchanged.
+  - [ ] Add regression coverage for edit features.
+    - [ ] Toggle comment tests for representative single-line-comment languages.
+    - [ ] Block comment tests for CSS/HTML-like languages.
+    - [ ] Reindent tests for at least Rust, Python, JavaScript/TypeScript, and one C-like brace language.
+    - [ ] Tests proving unsupported-language reindent dispatches to plugin path without panic.
+
+- [ ] Phase 4: remove `syntect` runtime types from core syntax plumbing.
+  - [ ] Eliminate `syntect::parsing::Scope` from `crates/xi-core-lib/src/layers.rs`.
+    - [ ] Replace runtime scope parsing with direct storage of canonical scope strings or interned scope identifiers owned by core.
+    - [ ] Keep encoded output identical enough that existing frontend style mapping still works.
+    - [ ] Avoid repeated string allocations on hot render paths by interning or shared storage if needed.
+  - [ ] Clean up layer/update/view glue.
+    - [ ] Audit `editor`, `event_context`, `view`, and plugin update handling for APIs that still assume syntect scope stacks.
+    - [ ] Rename compatibility comments and tests so they describe generic syntax spans, not syntect-specific scope updates.
+    - [ ] Preserve plugin-provided scope span support only if still required by actual runtime features; otherwise remove dead adapter layers.
+  - [ ] Audit plugin/protocol/catalog references.
+    - [ ] Remove test fixtures that model `syntect` as required plugin unless that compatibility contract is intentionally kept.
+    - [ ] Remove documentation/examples that tell clients to start `syntect` plugin when syntax highlighting is now core-owned.
+    - [ ] Keep protocol backward compatibility only if current user-facing plugin loading still depends on it; otherwise delete compatibility code.
+  - [ ] Add regression coverage for plumbing changes.
+    - [ ] Tests proving encoded syntax spans still keep correct line-relative byte ranges.
+    - [ ] Tests proving generic scope strings survive update/apply/render pipeline unchanged.
+
+- [ ] Phase 5: unify semantic tree-sitter behavior across normal and VLF.
+  - [ ] Move semantic selection/navigation to shared language registry and parse entry points.
+    - [ ] Ensure `object.rs` no longer hardcodes only Rust/Python path aliases.
+    - [ ] Use same language resolution and unsupported-language behavior as highlighting/reindent.
+  - [ ] Finish visible-range semantic constraints for VLF.
+    - [ ] Keep semantics bounded to current parsed window.
+    - [ ] Return explicit “outside parsed range” result instead of escalating to whole-buffer parse.
+    - [ ] Ensure repeated commands can reuse cached visible parse state when safe.
+  - [ ] Align normal/constrained and VLF feature gating.
+    - [ ] One source of truth should decide whether syntax spans, semantic motions, comment features, and reindent are available for language plus document mode.
+    - [ ] TUI should only display capability result; it must not infer fallback policy itself.
+  - [ ] Add regression coverage for semantic features.
+    - [ ] Tests for next/prev function, class, parameter, comment, and test on newly wired languages.
+    - [ ] Tests proving VLF semantic commands stay bounded and do not materialize full text.
+
+- [ ] Phase 6: remove dependency, fixtures, and stale compatibility branches.
+  - [ ] Remove `syntect` from workspace and crate manifests.
+    - [ ] Drop dependency from root `Cargo.toml`.
+    - [ ] Drop dependency from `crates/ee-tui/Cargo.toml`.
+    - [ ] Drop dependency from `crates/xi-core-lib/Cargo.toml`.
+    - [ ] Regenerate `Cargo.lock`.
+  - [ ] Delete dead code and tests that only existed for syntect fallback.
+    - [ ] Remove TUI shared asset loader and syntect-specific tests.
+    - [ ] Remove core compatibility helpers that only converted syntect scopes/tokens.
+    - [ ] Remove comments referencing phased syntect fallback once cutover is complete.
+  - [ ] Run final validation sweep.
+    - [ ] `cargo test --workspace`
+    - [ ] `cargo clippy --workspace --all-targets`
+    - [ ] Focused regression runs for VLF syntax, semantic selection/navigation, toggle comment, and reindent.
+    - [ ] Confirm no source file imports `syntect` and no manifest references remain.
+  - [ ] Close migration by updating docs and issue tracker.
+    - [ ] Mark cutover checklist done only after manifests, code, docs, and tests are all syntect-free.
+    - [ ] Add brief note describing final architecture: backend-owned tree-sitter for syntax features across all modes.
+
+### VLF Streaming Save Wiring
+
+- Rules:
+  - Reuse existing `VlfStore::stream_save`, `vlf::save::stream_save_pieces`, `VlfSavePolicy`, and `FileManager::save_vlf` as core save primitives. Do not add second VLF save pipeline unless existing API proves structurally insufficient.
+  - Keep VLF write path chunk-native end-to-end. No phase may flatten VLF content into `String`, `Vec<String>`, or `Rope` just to save.
+  - Keep durability policy aligned with current rope save path: temp-file rewrite or bounded in-place optimization, `sync_all`, atomic rename, and best-effort parent-directory sync.
+  - Keep cancellation semantics explicit. Cancellation before commit deletes temp state and leaves original file intact; cancellation after commit is impossible and must never be reported as failure.
+  - Save wiring must preserve VLF mode invariants: bounded memory, overlay as source of unsaved edits, and no hidden whole-buffer reload after save.
+  - Prefer one shared async save orchestration model for rope and VLF where practical, but do not force premature abstraction if it obscures correctness.
+  - Every phase must land with regression tests for success path, cancellation path, and failure path.
+
+- [ ] Phase 0: freeze save architecture and decide ownership boundaries.
+  - [ ] Document target save ownership across existing modules.
+    - [ ] `crates/xi-core-lib/src/vlf/save.rs` owns piece streaming, durability policy, and optimization policy execution.
+    - [ ] `crates/xi-core-lib/src/file.rs` owns path validation, external-modification checks, metadata refresh, and file-manager integration.
+    - [ ] `crates/xi-core-lib/src/tabs.rs` owns command routing, async save kickoff, idle polling, alerts, and post-save UI/config updates.
+    - [ ] `crates/xi-core-lib/src/editor.rs` owns dirty/pristine revision state and access to `VlfStore` when buffer is VLF-backed.
+  - [ ] Define completion criteria for VLF save wiring.
+    - [ ] `CoreNotification::Save` succeeds for editable VLF buffers instead of always alerting read-only.
+    - [ ] VLF save and rope save both surface progress/cancellation through one coherent task/callback model.
+    - [ ] Successful VLF save updates file metadata, pristine state, watcher state, and buffer path/config state correctly.
+    - [ ] Save-as and policy-driven fallback paths are handled explicitly, not through placeholder `"<save-as-required>"` behavior leaking to UI.
+    - [ ] Tests prove no save path materializes full VLF text.
+
+- [ ] Phase 1: enable editable VLF save contract at editor and document-mode layer.
+  - [ ] Remove unconditional VLF save disable path from document status and save command routing when editing is enabled.
+    - [ ] Audit `VlfStore::edit_permission`, `doc_status`, and any disabled-feature lists that currently treat all VLF buffers as unsavable.
+    - [ ] Distinguish read-only VLF from editable VLF in capability reporting.
+      - [ ] Read-only VLF should still report save disabled with explicit reason.
+      - [ ] Editable VLF should report save allowed while still advertising any other bounded-feature restrictions.
+  - [ ] Wire `enable_editing()` and overlay save readiness to real editor lifecycle.
+    - [ ] Decide where VLF editing becomes active for buffers allowed to edit.
+    - [ ] Ensure enabling edit mode also marks overlay save gate ready only when streaming save path is fully wired and tested.
+    - [ ] Preserve current behavior for read-only VLF opens until editable VLF policy intentionally opts in.
+  - [ ] Align pristine/dirty state model for VLF edits.
+    - [ ] Define what revision/token marks VLF buffer pristine before first edit.
+    - [ ] Define what successful VLF save resets as pristine after commit.
+    - [ ] Ensure dirty state comes from overlay/content changes, not from line-cache/view churn.
+
+- [ ] Phase 2: route save commands through VLF-aware file-manager path.
+  - [ ] Refactor `tabs.rs::do_save` to branch by backing storage, not by hardcoded read-only VLF alert.
+    - [ ] Keep rope path using existing `prepare_rope_save` and `SaveTask` snapshot flow.
+    - [ ] Add VLF path using `FileManager::save_vlf` and `VlfStore::stream_save`.
+    - [ ] Surface clear alerts for unsupported cases: read-only VLF, save-as-required policy, external modification, invalid destination, or editing not enabled.
+  - [ ] Decide save request representation for async execution.
+    - [ ] Either extend existing save task enum/request types to carry rope and VLF save variants.
+    - [ ] Or introduce a thin shared save-task wrapper that can execute either `PreparedRopeSave` or VLF save request without duplicating polling/callback logic.
+    - [ ] Keep result payload rich enough to update metadata and pristine state after either save kind.
+  - [ ] Make VLF policy selection explicit at command boundary.
+    - [ ] Use `suggested_save_policy()` only as default policy selector.
+    - [ ] Do not silently pass placeholder `SaveAs` path through command flow.
+    - [ ] When policy requires explicit save-as target, route to save-as UX/protocol rather than attempting invalid write.
+
+- [ ] Phase 3: unify async save execution, progress, and cancellation.
+  - [ ] Extend current async save task model beyond rope snapshots.
+    - [ ] Preserve current generation/stale-result protection used by rope save tasks.
+    - [ ] Allow VLF save worker to report byte progress from `SaveProgress` without blocking render/input loop.
+    - [ ] Ensure cancel checks map cleanly to VLF pre-commit cancellation semantics.
+  - [ ] Decide worker-thread data ownership for VLF saves.
+    - [ ] Do not move `VlfStore` itself to worker thread if that breaks main-thread ownership assumptions.
+    - [ ] If needed, extract immutable save plan or cloneable save inputs from overlay/pager before spawning background work.
+    - [ ] Keep plan bounded: piece list, inserted buffers, pager/file references, selected policy, and destination path only.
+  - [ ] Surface progress to caller/UI.
+    - [ ] Reuse existing alert/progress channel if one exists for rope save.
+    - [ ] Otherwise add minimal generic save-progress callback path usable by both rope and VLF saves.
+    - [ ] Report bytes written and total bytes; avoid fake line-based progress for VLF.
+  - [ ] Add cancellation coverage.
+    - [ ] Cancel before first chunk writes.
+    - [ ] Cancel mid-stream during temp rewrite.
+    - [ ] Verify committed save cannot later report cancellation.
+
+- [ ] Phase 4: finish post-save state updates and file-system integration.
+  - [ ] Update file-manager metadata after successful VLF save just like rope save.
+    - [ ] Refresh modification time.
+    - [ ] Clear external-change marker.
+    - [ ] Reacquire or preserve advisory lock expectations for saved path.
+  - [ ] Update editor/buffer state after successful VLF save.
+    - [ ] Mark buffer pristine at saved overlay revision.
+    - [ ] Keep VLF buffer open in VLF mode; do not reopen as rope or force whole-file reload.
+    - [ ] Ensure overlay/source-of-truth state reflects that file on disk now matches current logical document.
+      - [ ] Either reset overlay against new base file contents.
+      - [ ] Or rebuild overlay/base metadata so subsequent edits and saves operate on new on-disk revision correctly.
+  - [ ] Update tabs/config/view side effects after successful VLF save.
+    - [ ] Apply save-as path changes to buffer config, language detection, and view notifications.
+    - [ ] Emit same post-save hooks expected by plugins/LSP/config watchers when appropriate.
+    - [ ] Ensure watcher-triggered reload path does not treat own successful VLF save as unexpected external change.
+  - [ ] Handle failure and interruption cleanly.
+    - [ ] Preserve dirty state after failed or cancelled save.
+    - [ ] Keep partial temp files cleaned up on failure paths.
+    - [ ] Avoid leaving save task stuck in progress after worker exits.
+
+- [ ] Phase 5: wire save-as, policy overrides, and optimization fallback behavior.
+  - [ ] Add explicit VLF save-as routing.
+    - [ ] When overlay policy returns save-as-required, surface path-prompt flow instead of opaque error.
+    - [ ] Ensure alternate destination keeps source file unchanged until successful commit.
+    - [ ] After successful save-as, decide whether buffer continues tracking original path or new path and make behavior explicit.
+  - [ ] Expose and validate optimization policies.
+    - [ ] Keep `SameSizeInPlaceOverwrite` and `TailShift` behind policy validation, not implicit assumptions.
+    - [ ] Fall back to temp-file rewrite automatically when optimization preconditions are not met.
+    - [ ] Record tests for canonical-path mismatch, oversized changed-window fallback, and non-zero/zero delta mismatches.
+  - [ ] Align user-facing messaging.
+    - [ ] Alerts should distinguish save complete, save cancelled, save failed, and save-as required.
+    - [ ] Do not reuse stale “VLF mode is read-only” alert once editable VLF save is wired.
+
+- [ ] Phase 6: validate with focused regression, budget, and failure tests.
+  - [ ] Add unit/integration coverage at save primitive level.
+    - [ ] Temp rewrite success.
+    - [ ] Same-size overwrite success.
+    - [ ] Tail-shift success and fallback.
+    - [ ] Cancellation before commit.
+    - [ ] I/O failure cleanup.
+  - [ ] Add core integration tests for save command routing.
+    - [ ] `CoreNotification::Save` on read-only VLF still alerts correctly.
+    - [ ] `CoreNotification::Save` on editable VLF schedules async save and finishes successfully.
+    - [ ] Save-as-required path yields explicit prompt/error contract instead of invalid placeholder path write.
+    - [ ] Successful VLF save updates pristine state and file metadata.
+  - [ ] Add watcher/reload regression tests.
+    - [ ] Saving VLF does not trigger self-reload loop.
+    - [ ] Real external modification after VLF save is still detected.
+  - [ ] Add budget and invariant tests.
+    - [ ] Saving large edited VLF fixture stays within bounded memory cap.
+    - [ ] Save path never calls full-text extraction or builds `Rope` from VLF contents.
+    - [ ] Progress and cancellation tests do not require whole-buffer staging.
+  - [ ] Close migration.
+    - [ ] Mark older high-level VLF save checklist items complete only after command routing, async execution, save-as handling, and post-save state are all wired.
+    - [ ] Add short note describing final architecture: `tabs` routes save, `file` validates and updates metadata, `vlf::save` streams pieces, and VLF buffers remain sparse before and after save.
+
 ### Large File Support: VLF Mode (Very Large Files)
 
 - [x] Apply Helix deep-research takeaways where they improve ee's VLF design.
