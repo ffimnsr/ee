@@ -8,6 +8,7 @@ categories = ["text-editors"]
 repository = "https://github.com/ffimnsr/ee"
 edition.workspace = true
 rust-version.workspace = true
+autobenches = false
 
 [[bin]]
 name = "ee"
@@ -37,4 +38,9 @@ xi-rpc.workspace = true
 workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 tempfile.workspace = true
+
+[[bench]]
+name = "vlf"
+harness = false

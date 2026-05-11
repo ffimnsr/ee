@@ -2,146 +2,6 @@
 
 ## New World
 
-### Full Tree-Sitter Cutover
-
-- Rules:
-  - Keep backend as only syntax authority. `ee-tui` may render spans and show degraded-status messages, but it must not parse languages or infer fallback syntax state locally.
-  - Do not remove `syntect` from manifests until last cutover phase. Earlier phases must preserve green builds and working user-facing behavior.
-  - Reuse existing `tree_sitter_support`, `object`, `event_context`, `view`, and VLF visible-range infrastructure before adding new modules.
-  - Keep VLF bounded-work invariants intact. No phase may reintroduce full-buffer parse, full-buffer clone, or unbounded syntax catch-up.
-  - Prefer explicit language metadata tables over heuristics when tree-sitter queries do not provide stable comment or indentation behavior.
-  - Every phase must land with regression tests covering normal mode, constrained mode when relevant, and VLF when the phase touches shared syntax plumbing.
-  - Remove compatibility shims once downstream call sites are migrated. Do not preserve mixed syntect/tree-sitter runtime paths longer than needed.
-
-- [x] Phase 0: freeze target architecture and migration seam.
-  - [x] Document final ownership boundaries in comments near existing syntax entry points.
-    - [x] Mark `crates/ee-tui/src/highlight.rs` as render-only and planned for backend-span-only operation.
-    - [x] Mark `crates/xi-core-lib/src/tree_sitter_support.rs` as canonical parse/query entry point for normal, constrained, and VLF syntax features.
-    - [x] Mark `crates/xi-core-lib/src/lang_features.rs` as temporary compatibility layer scheduled to lose `syntect`.
-  - [x] Enumerate exact runtime responsibilities that must survive cutover.
-    - [x] Syntax highlighting spans for normal/constrained buffers.
-    - [x] Visible-range syntax spans for VLF buffers.
-    - [x] Semantic selection and navigation.
-    - [x] Toggle line comment and block comment.
-    - [x] Reindent.
-    - [x] Language feature gating and downgrade behavior.
-  - [x] Define completion criteria for full cutover.
-    - [x] No runtime code in workspace imports `syntect`.
-    - [x] No TUI path computes syntax colors without backend spans.
-    - [x] No core syntax layer depends on `syntect::parsing::Scope`.
-    - [x] Supported grammar matrix is wired through one shared tree-sitter language registry.
-    - [x] Tests prove no syntect fallback remains in normal, constrained, or VLF paths.
-
-- [x] Phase 1: normalize language registry and language metadata.
-  - [x] Expand tree-sitter language registry beyond Rust/Python so bundled grammars already listed in workspace `Cargo.toml` are reachable from core.
-    - [x] Add explicit registry entries in `crates/xi-core-lib/src/tree_sitter_support.rs` for each bundled grammar crate.
-    - [x] Cover at least: Bash, C, C#, C++, CSS, Elixir, Go, Haskell, HTML, Java, JavaScript, JSON, PHP, Ruby, Scala, TypeScript.
-    - [x] Keep grammar registration names aligned with xi language names and file-extension mappings actually emitted by open/config paths.
-  - [x] Unify language lookup across syntax features.
-    - [x] Replace ad-hoc Rust/Python-only path matching in `crates/xi-core-lib/src/object.rs` with shared registry-backed resolution.
-    - [x] Use same resolution for normal highlighting, VLF visible parsing, semantic motions, and language feature gating.
-    - [x] Ensure explicit `:set_language` overrides map through same registry.
-  - [x] Add explicit language metadata table for non-parse-derived behaviors.
-    - [x] Store line-comment token, block-comment token pair, indentation strategy, and any known unsupported semantic targets per language.
-    - [x] Keep metadata in core, not TUI.
-    - [x] Make absence explicit with enums instead of silent fallback-to-plain heuristics.
-  - [x] Add regression coverage for registry and metadata.
-    - [x] Unit tests per language name and per extension/path alias.
-    - [x] Tests proving unsupported languages degrade cleanly without panics or hidden syntect fallback.
-
-- [x] Phase 2: move normal/constrained syntax highlighting fully into backend tree-sitter.
-  - [x] Define one backend-owned syntax span producer for non-VLF buffers.
-    - [x] Reuse shared span shape used by VLF visible-range output so frontend consumes one conceptual format.
-    - [x] Ensure spans remain line-relative byte ranges with stable scope strings.
-    - [x] Keep parse/update work incremental or viewport-bounded according to buffer mode policy.
-  - [x] Wire normal/constrained render/update path to emit backend syntax spans consistently.
-    - [x] Identify current `view`/`layers`/plugin render path that emits syntax spans for normal buffers.
-    - [x] Replace remaining plugin-only or syntect-only assumptions with backend tree-sitter span generation.
-    - [x] Preserve existing omission semantics when no syntax spans are available for unsupported language.
-  - [x] Remove local TUI parsing behavior after backend parity lands.
-    - [x] Delete `ee-tui` logic that loads syntect syntax/theme assets.
-    - [x] Delete `highlight_visible` fallback path and related bounded-lookback behavior.
-    - [x] Keep only scope-to-style mapping and span slicing helpers needed for rendering backend spans.
-  - [x] Add regression coverage for frontend/backend contract.
-    - [x] Tests proving normal-mode numeric/string/comment spans come from backend data only.
-    - [x] Tests proving constrained buffers do not trigger local syntax parsing in TUI.
-    - [x] Tests proving unsupported languages render plain text without hidden syntax parser work.
-
-- [x] Phase 3: replace `lang_features` syntect dependency with tree-sitter and metadata-backed logic.
-  - [x] Remove `syntect`-based comment token discovery.
-    - [x] Replace scope-derived line-comment detection with explicit metadata table lookups.
-    - [x] Replace scope-derived block-comment detection with explicit metadata table lookups.
-    - [x] Preserve exact current command semantics for blank lines, mixed selections, and already-commented regions.
-  - [x] Replace `syntect`-based reindent implementation.
-    - [x] Introduce tree-sitter-backed indentation entry point in `tree_sitter_support` or nearest shared syntax module.
-    - [x] Compute indentation from syntax nodes or explicit indentation strategy per language, not from `syntect` parse state.
-    - [x] Support incremental or bounded parsing strategy compatible with normal/constrained mode budgets.
-    - [x] For languages without safe indentation support, return explicit unsupported status so caller can fall back to plugin dispatch instead of hidden syntect behavior.
-  - [x] Simplify async whole-scan reindent orchestration.
-    - [x] Keep background-thread execution if full-document reindent still needs async scheduling.
-    - [x] Rename comments and alerts that still call it “syntect reindent”.
-    - [x] Ensure cancellation/stale-result behavior remains unchanged.
-  - [x] Add regression coverage for edit features.
-    - [x] Toggle comment tests for representative single-line-comment languages.
-    - [x] Block comment tests for CSS/HTML-like languages.
-    - [x] Reindent tests for at least Rust, Python, JavaScript/TypeScript, and one C-like brace language.
-    - [x] Tests proving unsupported-language reindent dispatches to plugin path without panic.
-
-- [x] Phase 4: remove `syntect` runtime types from core syntax plumbing.
-  - [x] Eliminate `syntect` runtime scope plumbing.
-    - [x] Replace runtime scope parsing with direct storage of canonical scope strings or interned scope identifiers owned by core.
-    - [x] Keep encoded output identical enough that existing frontend style mapping still works.
-    - [x] Remove dead layer storage entirely when backend-owned syntax spans make hot-path interning unnecessary.
-  - [x] Clean up layer/update/view glue.
-    - [x] Audit `editor`, `event_context`, `view`, and plugin update handling for APIs that still assume syntect scope stacks.
-    - [x] Rename compatibility comments and tests so they describe generic syntax spans, not syntect-specific scope updates.
-    - [x] Preserve plugin-provided scope span support only if still required by actual runtime features; otherwise remove dead adapter layers.
-  - [x] Audit plugin/protocol/catalog references.
-    - [x] Remove test fixtures that model `syntect` as required plugin unless that compatibility contract is intentionally kept.
-    - [x] Remove documentation/examples that tell clients to start `syntect` plugin when syntax highlighting is now core-owned.
-    - [x] Keep protocol backward compatibility only if current user-facing plugin loading still depends on it; otherwise delete compatibility code.
-  - [x] Add regression coverage for plumbing changes.
-    - [x] Tests proving encoded syntax spans still keep correct line-relative byte ranges.
-    - [x] Tests proving generic scope strings survive update/apply/render pipeline unchanged.
-
-- [x] Phase 5: unify semantic tree-sitter behavior across normal and VLF.
-  - [x] Move semantic selection/navigation to shared language registry and parse entry points.
-    - [x] Ensure `object.rs` no longer hardcodes only Rust/Python path aliases.
-    - [x] Use same language resolution and unsupported-language behavior as highlighting/reindent.
-  - [x] Finish visible-range semantic constraints for VLF.
-    - [x] Keep semantics bounded to current parsed window.
-    - [x] Return explicit “outside parsed range” result instead of escalating to whole-buffer parse.
-    - [x] Ensure repeated commands can reuse cached visible parse state when safe.
-  - [x] Align normal/constrained and VLF feature gating.
-    - [x] One source of truth should decide whether syntax spans, semantic motions, comment features, and reindent are available for language plus document mode.
-    - [x] TUI should only display capability result; it must not infer fallback policy itself.
-  - [x] Add regression coverage for semantic features.
-    - [x] Tests for next/prev function, class, parameter, comment, and test on newly wired languages.
-    - [x] Tests proving VLF semantic commands stay bounded and do not materialize full text.
-
-- [x] Phase 6: remove dependency, fixtures, and stale compatibility branches.
-  - [x] Remove `syntect` from workspace and crate manifests.
-    - [x] Drop dependency from root `Cargo.toml`.
-    - [x] Drop dependency from `crates/ee-tui/Cargo.toml`.
-    - [x] Drop dependency from `crates/xi-core-lib/Cargo.toml`.
-    - [x] Regenerate `Cargo.lock`.
-  - [x] Delete dead code and tests that only existed for syntect fallback.
-    - [x] Remove TUI shared asset loader and syntect-specific tests.
-    - [x] Remove core compatibility helpers that only converted syntect scopes/tokens.
-    - [x] Remove comments referencing phased syntect fallback once cutover is complete.
-  - [x] Run final validation sweep.
-    - [x] `cargo test --workspace`
-    - [x] `cargo clippy --workspace --all-targets`
-    - [x] Focused regression runs for VLF syntax, semantic selection/navigation, toggle comment, and reindent.
-    - [x] Confirm no source file imports `syntect` and no manifest references remain.
-  - [x] Close migration by updating docs and issue tracker.
-    - [x] Mark cutover checklist done only after manifests, code, docs, and tests are all syntect-free.
-    - [x] Add brief note describing final architecture: backend-owned tree-sitter for syntax features across all modes.
-
-- Tree-sitter follow-up gaps found during Phase 6 audit:
-  - [x] Wire `TsParseState` into runtime buffer update flow or remove it if viewport-bounded parsing remains the chosen model.
-  - [x] Wire `fold_ranges` into viewport/manual fold commands or move fold detection to separate planned work.
-
 ### VLF Streaming Save Wiring
 
 - Rules:
@@ -271,32 +131,6 @@
 
 ### Large File Support: VLF Mode (Very Large Files)
 
-- [x] Apply Helix deep-research takeaways where they improve ee's VLF design.
-  - [x] Keep `TextStore` as stable document API across normal, constrained, and VLF modes.
-    - [x] Normal mode: keep `Rope` as backing store, but route hot read paths through `TextStore` and rope chunk/segment APIs instead of flattening full text.
-    - [x] Constrained mode: keep `Rope` as backing store, prefer chunk/segment iteration for render/search/status paths, and avoid whole-buffer materialization on latency-sensitive paths.
-    - [x] VLF mode: keep storage paged/out-of-core behind `TextStore`; never degrade to Helix-style full in-memory storage.
-    - [x] Define which operations may still use full-rope access in normal/constrained mode and which operations must stay chunk/segment-based.
-    - [x] Audit direct `Editor.text` / `Rope` reads and convert remaining read-only call sites to `TextStore` or rope chunk iterators.
-    - [x] Add regression coverage proving normal/constrained behavior stays correct while hot paths use chunk/segment APIs.
-  - [x] Preserve viewport-local rendering as VLF hard invariant and normal/constrained default strategy: render, syntax decoration, search highlights, diagnostics, git signs, and scroll notifications should prefer visible ranges plus bounded overscan, with VLF never requiring whole-buffer work.
-  - [x] Improve normal/constrained hot paths while keeping full-feature editing.
-    - [x] Remove normal/constrained TUI update-time full `line_cache` -> `lines` rebuild; apply xi update ops to both caches incrementally.
-    - [x] Replace hot `backend.lines` call sites with bounded `BufState::get_line()` / range APIs so TUI commands do not require a full text mirror.
-    - [x] Keep `lines` as an explicitly allowed whole-buffer compatibility mirror only where command policy requires whole-document access.
-    - [x] Bound normal/constrained `request_invalid_lines` to current viewport plus overscan by default; require explicit command reason for broader ranges.
-    - [x] Add regression counters/tests proving normal/constrained update, render, syntax, diagnostics, git signs, and scroll paths do not clone or scan full line caches.
-        - [x] Make source-control status/sign refresh range-aware or background-bounded for constrained buffers.
-    - [x] Move expensive whole-document commands to async/cancellable execution with progress where full scan remains policy-allowed.
-    - [x] Evaluate hybrid paged-rope or lazy `TextStore` backing for `ConstrainedNormal`; keep editing/save semantics explicit before replacing full-rope open.
-  - [x] Use chunk-native I/O everywhere possible; avoid flattening into `String` / `Vec<String>` except where mode policy explicitly allows it.
-    - [x] Read path: use `TextStore::iter_chunks` / `read_byte_range` everywhere possible.
-    - [x] Write/save path: save from rope chunks or VLF pieces instead of flattening full text.
-  - [x] Re-enable VLF syntax only as visible-range incremental parsing with hard timeout and match/capture limits; never parse whole VLF files for highlighting or text objects.
-  - [x] Coalesce redraw/background notifications like Helix's event-loop model so LSP, syntax, search, source-control, and VLF indexing cannot force one expensive frame per message.
-  - [x] Make normal/constrained save follow Helix's snapshot model: clone cheap `Rope` snapshot, then write outside the interactive render/input hot path.
-  - [x] Keep edit history as structured deltas above storage: normal mode uses existing rope/CRDT engine; VLF editing maps overlay deltas to the same revision/undo grouping without full-buffer snapshots. (needs write/save)
-  - [x] Treat Helix's lack of explicit large-file mode as a caution: keep ee thresholds, feature gates, user-visible downgrade reasons, and hard VLF guardrails.
 - [ ] Improve large-buffer quit latency.
   - [ ] Exit event loop immediately after `handle_event` sets `should_quit`, before another expensive frame, scroll notification, source-control refresh, or external-change scan.
   - [ ] Add explicit fast app-shutdown path for `BufferManager` that stops reader/core threads without best-effort `close_view` cleanup work.
@@ -305,218 +139,145 @@
   - [ ] Re-evaluate exact-threshold behavior for 8 MiB fixtures: keep constrained-normal and ensure teardown stays non-blocking.
   - [ ] Add regression coverage proving `:q` on pristine large buffers does not save, does not close-buffer synchronously, and exits within quit budget.
 
-- [x] Add hybrid paged-rope architecture seam.
-  - [x] Add `TextStore` trait as stable document API for normal, constrained, and VLF modes.
-    - [x] Place trait and shared position/result types in `crates/xi-core-lib/src/text_store.rs`.
-    - [x] Export module from `crates/xi-core-lib/src/lib.rs` or nearest existing core module root.
-    - [x] Define `DocumentMode::{Normal, ConstrainedNormal, Vlf}` near `TextStore`, not in TUI code.
-    - [x] Define typed positions: `ByteOffset(u64)`, `Utf16Offset(u64)`, `LogicalLine(u64)`, `VisualRow(u64)`, `ByteRange { start, end }`.
-    - [x] Define partial-result types: `KnownLineCount::{Exact(u64), Approximate(u64), Unknown}`, `LineLookup::{Exact(ByteOffset), Pending, OutOfRange}`, `TextChunkResult::{Ready(TextChunk), Pending, Cancelled, Unsupported}`.
-    - [x] Include core methods: `mode`, `len_bytes`, `known_line_count`, `read_byte_range`, `line_to_byte`, `byte_to_line`, `iter_chunks`, `snapshot_id`.
-    - [x] Make `TextStore` object-safe or document why enum dispatch is used instead.
-  - [x] Implement `TextStore` for existing `Rope` before changing storage internals.
-    - [x] Add `RopeTextStore` wrapper in `crates/xi-core-lib/src/text_store/rope_store.rs` or equivalent submodule.
-    - [x] Back `RopeTextStore` with current `xi_rope::Rope` and existing line/UTF-16 metrics.
-    - [x] Keep normal-mode behavior byte-for-byte compatible before introducing VLF.
-    - [x] Add unit tests comparing `RopeTextStore` line/byte/UTF-16 conversions against direct `Rope` calls.
-    - [x] Add regression test proving normal buffers can still expose full text only through normal-mode APIs.
-  - [x] Move view rendering, search, syntax, and save call sites toward `TextStore` instead of direct full-buffer `Rope` access.
-    - [x] Start with read-only/query paths: viewport line reads, search chunk iteration, and status reporting.
-    - [x] Leave edit mutation on existing `Editor`/`Rope` path until `RopeTextStore` tests pass.
-    - [x] Add adapter methods at editor boundary so call sites do not reach into `Editor.text` directly for read operations.
-    - [x] Track remaining direct `Rope` reads with comments or checklist items before enabling `VlfStore`.
-  - [x] Make all positions explicit by unit: byte offset, UTF-16 offset, logical line, visual row.
-    - [x] Use typed wrappers at API boundaries; do not pass raw `usize`/`u64` across storage/view boundaries.
-    - [x] Keep UI cursor coordinates separate from storage coordinates.
-    - [x] Add conversion methods only on `TextStore`; avoid local conversion helpers in TUI/rendering code.
-  - [x] Add guardrails so VLF documents cannot expose a "get full text" API.
-    - [x] Add `FullTextPolicy::{Allowed, Forbidden}` or equivalent mode check.
-    - [x] Make full-text extraction return `Unsupported` for `DocumentMode::Vlf`.
-    - [x] Add tests that VLF search/render paths use chunk APIs and never call full-text extraction.
-- [x] Add VLF storage primitives.
-  - [x] Add `FilePager` for file handle ownership, bounded `pread`/`mmap` windows, byte cache, and cancellation.
-    - [x] Place in `crates/xi-core-lib/src/vlf/pager.rs`.
-    - [x] Own `File`, canonical path, file size, modification metadata, and optional advisory lock handle.
-    - [x] Provide `read_at(ByteRange, CancelToken) -> io::Result<PageBytes>` with max read size enforcement.
-    - [x] Use bounded `pread` on Unix first; keep `mmap` optional behind feature/config because mmap failure modes differ by platform.
-    - [x] Add LRU page cache with configurable byte cap and metrics for cache hit/miss/eviction.
-    - [x] Add cancellation generation so stale viewport reads can be dropped without blocking UI.
-  - [x] Add `PageIndex` for page descriptors, newline summaries, UTF-8 seam validity, and scan progress.
-    - [x] Place in `crates/xi-core-lib/src/vlf/page_index.rs`.
-    - [x] Store descriptors by absolute byte range, not by line number.
-    - [x] Support lookup from byte to nearest scanned page in O(log n).
-    - [x] Support lookup from line to byte as `Exact`, `Approximate`, or `Pending`.
-    - [x] Run background scans viewport-first, then forward/backward expansion.
-    - [x] Store scan progress and cancellation state so reopening/jumping does not restart unnecessary work.
-  - [x] Add `PageDescriptor` metadata: file range, decoded range, byte length, UTF-16 length, newline count, line prefix/suffix lengths, boundary flags, and scan state.
-    - [x] Define descriptor in `page_index.rs` and keep raw page bytes out of descriptor.
-    - [x] Include `starts_at_utf8_boundary` and `ends_at_utf8_boundary` before exposing decoded text.
-    - [x] Include CRLF seam flags so line counting does not double-count split `\r\n`.
-    - [x] Include `first_line_prefix_len` and `last_line_suffix_len` for fast viewport stitching.
-  - [x] Add `VlfStore` implementing `TextStore` with `FilePager` + `PageIndex`.
-    - [x] Place in `crates/xi-core-lib/src/vlf/store.rs`.
-    - [x] Keep real file-open wiring deferred until open policy chooses VLF before `try_load_file`.
-    - [x] Implement `read_byte_range` with decode-safe seam expansion and bounded cache reads.
-    - [x] Implement `iter_chunks` as cancellable stream over decoded chunks with byte-range metadata.
-    - [x] Return `Pending` for line lookups that require unscanned index regions.
-  - [x] Copy VLF core invariant: file on disk remains source of truth; editor holds byte windows plus sparse metadata.
-    - [x] Document invariant in `vlf/mod.rs`.
-    - [x] Store only descriptors, cached pages, and future overlay edits in memory.
-    - [x] Prohibit conversion from `VlfStore` to full `Rope`.
-  - [x] Track absolute byte window start/end, decoded text range, original encoded length, dirty state, and batch size.
-    - [x] Keep this state in `VlfStore` or `VlfViewportState`, not in `ee-tui`.
-    - [x] Use absolute byte ranges for all save/search/edit planning.
-    - [x] Keep batch size configurable and later auto-tunable from read/decode timing.
-  - [x] Add decode-safe seam adjustment so window boundaries never split multibyte UTF-8 sequences.
-    - [x] Read up to 4 bytes of slack on both sides for UTF-8 boundary repair.
-    - [x] Preserve original requested range and adjusted decoded range separately.
-    - [x] Add fixtures where multibyte characters sit exactly across page boundaries.
-  - [x] Store file pages/chunks with bounded cache eviction and viewport-first access patterns.
-    - [x] Cache decoded text separately from raw bytes only when memory budget allows.
-    - [x] Prioritize current viewport, then overscan, then background index pages.
-    - [x] Evict cold pages before index metadata.
-  - [x] Keep memory under configurable cap for 100 MB, 1 GB, and 10 GB fixtures.
-    - [x] Add budget config in core settings with sane default.
-    - [x] Track peak raw-page bytes, decoded-page bytes, descriptor bytes, and overlay bytes separately.
-    - [x] Add test-only counters so budget tests do not depend only on RSS sampling.
-  - [x] Keep first `VlfStore` milestone read-only with stable byte/line addressing.
-    - [x] Disable edit commands at mode contract layer, not only in TUI key handling.
-    - [x] Return clear user-facing status for edit/save attempts.
-    - [x] Allow copy/search/navigation because they can operate over `TextStore` chunks.
-- [x] Add VLF overlay model after read-only storage works.
-  - [x] Add `Piece` enum for `Original { file_range }` and `Inserted { buffer_id, range }`.
-    - [x] Place overlay types in `crates/xi-core-lib/src/vlf/overlay.rs`.
-    - [x] Use absolute byte ranges for `Original` pieces.
-    - [x] Use append-only inserted buffers for `Inserted` pieces.
-    - [x] Keep piece order in a balanced tree or interval structure once edits become arbitrary.
-  - [x] Store inserted text separately from original file pages.
-    - [x] Keep inserted text UTF-8 validated before it enters overlay.
-    - [x] Track inserted byte length, UTF-16 length, newline count, and CRLF seam flags.
-    - [x] Do not write inserted text into page cache.
-  - [x] Represent edits as sparse piece overlays without loading base file into rope.
-    - [x] Start with append-only or current-window edits only.
-    - [x] Split affected `Original` piece at edit boundaries.
-    - [x] Insert `Inserted` piece between unchanged original ranges.
-    - [x] Keep overlay metrics compatible with `TextStore` line/byte lookup APIs.
-  - [x] Preserve revision IDs and undo grouping above overlay layer.
-    - [x] Keep existing editor revision model as owner of edit intent.
-    - [x] Store overlay deltas as revision payloads or map them through an adapter.
-    - [x] Define GC rule for inserted buffers when undo history drops edits.
-  - [x] Delay arbitrary sparse edits until viewport reads, search, and save work against overlay pieces.
-    - [x] Require overlay-aware `read_byte_range` before enabling edit mode.
-    - [x] Require overlay-aware streaming search before enabling query replace.
-    - [x] Require temp-file streaming save before enabling persistent VLF edits.
-- [x] Finish VLF mode contract wiring in `xi-core-lib`.
-  - [x] Add explicit document mode enum: normal file mode vs `Vlf` mode.
-  - [x] Make VLF read-only for first milestone; editing requires separate feature gate.
-  - [x] Define feature gate matrix for editing, search, syntax, git signs, LSP, diagnostics, undo, wrap, and save.
-  - [x] Expose user-facing VLF status: file size, mode name, disabled features, and indexing progress.
-- [x] Add VLF open policy and thresholds.
-  - [x] Use VS Code-inspired guardrails: normal full-feature target below 8 MiB and below 30K LOC when line count is known; constrained mode covers 8-<30 MiB with line count below 50K LOC; VLF applies at/above 30 MiB or 50K LOC. When line count is unknown, fall back to byte thresholds only.
-  - [x] Add separate hard-open confirmation thresholds: 1 GB local, 50 MB web/unknown, 10 MB remote.
-  - [x] Use normal rope path for small files.
-  - [x] Choose `ConstrainedNormal` or `Vlf` above normal thresholds based on configured size, line count, memory, and user override policy.
-  - [x] Add override command/config to force normal mode or force VLF mode when safe.
-  - [x] Fail closed when file metadata cannot be trusted; never fall back to whole-file load for huge files.
-- [x] Keep normal mode fully featured up to 20 MB or 300K LOC without staggering.
-  - [x] Add performance budget: open-to-first-render under 250 ms warm cache and under 750 ms cold cache for 20 MB fixtures.
-    - Note: 20 MiB many-line and long-line budget probes now run as normal regression tests. Latest manual breakdown showed warm totals around 180 ms and 201 ms respectively.
-  - [x] Add scroll budget: page-down and cursor movement stay under one frame at 60 Hz for 300K-line fixtures.
-  - [x] Keep syntax, tree-sitter, search, diagnostics, git signs, wrap, undo, and save enabled below normal-mode threshold.
-  - [x] Convert expensive open-time probes to bounded or cached passes so full features do not block first render.
-  - [x] Defer noncritical work after first render: full syntax tree, diagnostics refresh, git diff signs, and global search indexes.
-    - Note: startup now stops once first visible line is render-ready, startup sync drain uses a short post-event quiet window, noncritical frontend notifications stay outside the render-critical path, and git refresh lands after frame one. Latest 20 MiB warm probes: `new_view` ~166-190 ms, `init_notification_drain` ~1.5 ms, `pump_init` ~0 ms, `rebuild_lines` ~1.4-1.9 ms.
-  - [x] Add fixture matrix: 20 MB long-line file, 20 MB many-line file, 300K LOC source file, and mixed CRLF/LF file.
-  - [x] Add regression tests for no full-buffer `Vec<String>` clone in `ee-tui` render path even in normal mode.
-  - [x] Add benchmark counters for allocations, peak RSS, bytes scanned before first render, and render invalidation count.
-- [x] Add transition mode between normal and VLF.
-  - [x] Introduce `LargeNormal` or `ConstrainedNormal` policy for files near thresholds that still fit in RAM.
-  - [x] Keep editing enabled in transition mode, but downgrade background-heavy features before UI stalls.
-  - [x] Disable worker/LSP sync above 50 MB unless server advertises bounded range sync.
-  - [x] Disable heap-heavy whole-document operations above 256M chars.
-  - [x] Show status when editor downgrades from full normal mode to constrained mode.
-- [x] Wire VLF storage into `crates/xi-core-lib/src/file.rs` open path.
-  - [x] Add `VlfStore` and route its reads through `FilePager`.
-  - [x] Select VLF path from open policy before `try_load_file` uses `read_to_end`.
-  - [x] Remove `read_to_end` + `Rope::from` from VLF opens.
-  - [x] Ensure VLF open never constructs a full-buffer `Rope`.
-  - [x] Guarantee first render does not require reading entire contents into RAM.
-  - [x] Add open telemetry/debug counters for bytes read before first viewport.
-- [x] Finish lazy newline index integration for VLF.
-  - [x] Scan line starts by page, not whole file.
-  - [x] Cache scanned chunks with bounded memory.
-  - [x] Run viewport-first indexing with cancellation support.
-  - [x] Run background indexing task from real VLF open path.
-  - [x] Report approximate total line count until scan completes.
-  - [x] Keep line numbers stable as index expands.
-- [x] Finish line addressing for partial indexes.
-  - [x] Add explicit partial-data status instead of pretending full buffer exists.
-  - [x] Avoid `TextStore` APIs that require `Vec<String>` or whole-buffer materialization.
-  - [x] Allow viewport-first line lookup before full newline index exists.
-  - [x] Add approximate goto-line behavior while indexing remains incomplete.
-- [x] Keep `ee-tui` rendering sparse in VLF mode.
-  - [x] Remove full-buffer `Vec<String>` clone path for VLF buffers.
-  - [x] Avoid placeholder strings for all lines.
-  - [x] Render only loaded viewport lines plus small overscan.
-  - [x] Show loading/status rows for missing chunks without blocking UI.
-- [x] Add backend protocol for VLF viewport requests.
-  - [x] Request text by viewport/page range instead of whole-buffer invalidation.
-  - [x] Return chunk text, byte ranges, line ranges, and partial-index metadata.
-  - [x] Add cancellation token or generation id to drop stale viewport responses.
-  - [x] Preserve normal-buffer protocol behavior for small files.
-- [x] Bound file analysis on open.
-  - [x] Limit whitespace detection to sampled bytes near file start.
-  - [x] Limit line-ending detection to bounded samples plus background verification.
-  - [x] Convert indentation detection to sampled or incremental probes.
-  - [x] Never scan a full GB (large file) file during open for formatting detection.
-- [x] Gate syntax and semantic features in VLF.
-  - [x] Disable tree-sitter for VLF until visible-range parsing exists.
-  - [x] Disable syntect fallback for VLF unless bounded to visible range.
-  - [x] Disable semantic text objects when they require full parse.
-  - [x] Add visible-range parsing design before re-enabling syntax.
-- [x] Gate source-control features in VLF.
-  - [x] Disable automatic git hunk diff for VLF.
-  - [x] Disable blame and source-control signs unless command is explicitly range-bounded.
-  - [x] Ensure VLF open cannot trigger global diff scans.
-  - [x] Show disabled reason in command/status UI.
-- [x] Add VLF search strategy.
-  - [x] Stream search over pages with cancellation.
-  - [x] Search with seam overlap/slop so matches across chunk boundaries are not missed.
-  - [x] Report progress by bytes scanned and matched ranges.
-  - [x] Bound stored matches and page-local highlights.
-  - [x] Prioritize viewport-local highlights before full-file search completes.
-  - [x] Add search cancellation test for large fixture.
-- [x] Design VLF editing path after read-only milestone.
-  - [x] Graduate existing overlay model from read-only to append/current-window edits, then arbitrary sparse edits.
-  - [x] Track encoded byte-length deltas per dirty window before save.
-  - [x] Keep base file windowed; never convert whole file into rope.
-  - [x] Define undo limits and memory cap behavior for overlay edits.
-  - [x] Require explicit save-as/rewrite semantics for large rewritten files.
-- [x] Rework VLF save path.
-  - [x] Share one streaming save abstraction for normal/constrained rope snapshots and VLF overlay pieces where practical.
-  - [x] Start with temp-file streaming rewrite for editable VLF; no in-place mutation in first editable milestone.
-  - [x] Stream copy base file with edit overlay application.
-  - [x] Add same-size in-place overwrite only as later optimization after crash-consistency tests pass.
-  - [x] Add byte-length-changing tail-shift optimization only after temp-copy fallback is proven.
-  - [x] Use fsync/rename durability policy compatible with existing save behavior.
-  - [x] Report progress and support cancellation before commit point.
-  - [x] Document cancellation behavior after commit point.
-- [x] Add VLF regression and budget tests.
-  - [x] Opening 10 GB sparse fixture keeps RSS under configured cap.
-  - [x] First viewport renders without full scan.
-  - [x] Frontend never triggers full-buffer clone, diff, syntax, or line-cache expansion in VLF.
-  - [x] Disabled feature commands return clear VLF-specific status.
-- [ ] Add VLF performance benchmarks.
-  - [ ] Benchmark 100 MB, 1 GB, and 10 GB fixtures.
-  - [ ] Measure open-to-first-render latency.
-  - [ ] Measure page-down latency with cold and warm page cache.
-  - [ ] Measure approximate goto-line behavior before and after index completion.
-  - [ ] Measure streaming search throughput and cancellation latency.
-- [ ] Document VLF mode.
-  - [ ] Add `README.md` section for VLF thresholds, limits, and disabled features.
-  - [ ] Add command/status message examples.
-  - [ ] Document read-only milestone and future edit/save plan.
-  - [ ] Document memory budget expectations and benchmark fixture sizes.
+### Runtime Tree-Sitter Grammar + Query Loading
+
+- Rules:
+  - Integrate external `tree-sitter-loader` crate for grammar discovery, grammar build/load orchestration, file-type/content-regex detection, and standard query-path parsing. Keep adapter surface backend-owned, but do not reimplement upstream loader mechanics already provided by crate.
+  - Keep editor-facing grammar selection config-driven. Runtime grammar loading must be rooted in ee language config merge rules, not direct parser-directory discovery bypassing editor config.
+  - Runtime tree-sitter must become canonical backend source for grammar resolution. Do not keep compile-time-only language registry as second source of truth once runtime loader lands.
+  - Query files must stay file-backed under runtime directories, not embedded into Rust source. Support `.scm` files per language under `queries/<language>/`.
+  - Query loading must support deterministic overlay order and explicit fallback rules in ee backend adapter. Missing optional query kinds disable only that feature; they must not crash syntax loading for unrelated features.
+  - Treat upstream loader query support as baseline only: standard `highlights`, `injections`, `locals`, and `tags` may come from loader metadata, but ee-owned support remains required for `indents`, `textobjects`, `rainbows`, `folds`, and `; inherits:` composition.
+  - Same runtime loader result must serve normal, constrained, and VLF syntax features so feature gating, query compilation, and language metadata stay consistent across modes.
+  - Dynamic library loading must stay explicit and bounded: canonical paths only, known runtime roots only, cache handles, and surface actionable errors for ABI mismatch, missing symbol, or unreadable query files.
+  - Every phase must land with regression tests and at least one failure-path test.
+
+- [ ] Phase 0: freeze runtime loader architecture, runtime layout, and ownership boundaries.
+  - [ ] Why: dynamic grammar loading cuts across config, runtime asset layout, backend syntax APIs, and distribution; lock architecture before code lands so later phases do not duplicate registries or query rules.
+  - [ ] Document target ownership.
+    - [ ] External `tree-sitter-loader` dependency owns parser-directory discovery, `tree-sitter.json` parsing, grammar compilation/loading, standard query-path parsing, and file-type/content-regex/injection-regex selection.
+    - [ ] `crates/xi-core-lib/` or small backend-only adapter crate owns ee-specific runtime root policy, merged language-config loading, bridge from ee config/runtime layout into loader inputs, shebang/glob matching that upstream loader does not cover, query inheritance resolution, extra query kinds, capability mapping, cache invalidation policy, and translation from loader results into backend syntax APIs.
+    - [ ] `crates/xi-core-lib/src/tree_sitter_support.rs` owns parser creation, query compilation, visible-range/VLF parse budgets, and language-feature gating on top of loader-provided runtime assets.
+    - [ ] `crates/xi-core-lib/src/lang_features.rs` owns edit-feature dispatch that consumes loader-backed indentation, textobject, comment-style, and semantic capability data.
+    - [ ] `crates/ee-tui/` owns runtime-health surfacing and user-facing diagnostics only; it must not parse grammar manifests or compile queries directly.
+  - [ ] Define runtime directory contract.
+    - [ ] `grammars/` stores compiled parser shared libraries (`.so`, `.dylib`, `.dll`).
+    - [ ] `queries/<language>/` stores `.scm` files such as `highlights.scm`, `injections.scm`, `locals.scm`, `textobjects.scm`, `indents.scm`, `tags.scm`, `folds.scm`, and `rainbows.scm`.
+    - [ ] Language metadata file declares canonical language id, file extensions/globs, optional aliases, optional shebang markers, grammar library name, and query-language mapping when grammar id differs from display name.
+  - [ ] Define completion criteria.
+    - [ ] Opening file with runtime-installed grammar uses shared library and query files without recompiling `ee`.
+    - [ ] Missing grammar disables syntax features with explicit diagnostic instead of silent fallback to stale built-in registry.
+    - [ ] Missing optional standard query file disables only affected standard feature set; missing ee-only query file disables only that ee-owned feature set.
+    - [ ] Query inheritance and overlay rules are documented and testable.
+
+- [ ] Phase 1: integrate `tree-sitter-loader` and define ee backend adapter model.
+  - [ ] Why: runtime grammar support needs one stable backend API for discovery, caches, and error reporting before cutover can happen safely, but upstream loader should stay source of truth for loader mechanics.
+  - [ ] Add dependency and backend adapter surface.
+    - [ ] Add `tree-sitter-loader` to backend dependency graph at `xi-core-lib` or a small backend-only support crate if separation improves testability.
+    - [ ] Define `RuntimeLoader` adapter that wraps upstream loader `Config`/`Loader`, runtime roots, and ee-specific policy.
+    - [ ] Define `RuntimeLanguage` view that exposes canonical id, aliases, file-type matchers, shebang markers, grammar library path, and supported query kinds to backend consumers.
+    - [ ] Define `GrammarHandle` wrapper or equivalent handle policy for loaded tree-sitter `Language` plus source path/mtime metadata needed for cache invalidation.
+  - [ ] Define editor config integration.
+    - [ ] Load built-in language config first, then merge user overrides, then merge workspace overrides, mirroring editor config precedence.
+    - [ ] Keep grammar source selection keyed by merged language entries instead of asking upstream loader to discover arbitrary parser repos from parser-directories alone.
+    - [ ] Preserve trusted-workspace boundary for workspace-local grammar config overrides.
+  - [ ] Define metadata schema and merge rules.
+    - [ ] Reuse upstream `tree-sitter.json` language-configuration shape where possible; add ee-only metadata layer only for capabilities not represented upstream such as shebangs, glob precedence, edit-feature gates, and extra query kinds.
+    - [ ] Support bundled runtime plus user/project overrides with deterministic precedence.
+    - [ ] Allow language aliasing without duplicate grammar load.
+    - [ ] Reject ambiguous file-type ownership unless precedence rule is explicit.
+  - [ ] Add cache behavior.
+    - [ ] Cache loaded libraries by canonical path plus modified time.
+    - [ ] Cache parsed loader language metadata separately from ee-compiled query objects.
+    - [ ] Expose invalidation hook for runtime reload or startup refresh.
+
+- [ ] Phase 2: load grammars from runtime shared libraries and remove compile-time grammar coupling.
+  - [ ] Why: runtime grammar adoption is not complete until parser selection stops depending on `tree-sitter-*` crate list baked into `xi-core-lib`.
+  - [ ] Replace static grammar registry path in backend.
+    - [ ] Audit `crates/xi-core-lib/src/tree_sitter_support.rs` for `LANGUAGE_REGISTRY`, per-language constructor functions, and direct `tree-sitter-*` crate references.
+    - [ ] Route grammar resolution through loader-backed metadata lookup and loaded `LanguageConfiguration` results.
+    - [ ] Keep comment-style and indentation capability metadata runtime-derived instead of hardcoded per built-in language.
+  - [ ] Add dynamic library loading safeguards.
+    - [ ] Validate runtime root and canonical library path before handing library path to loader/open path.
+    - [ ] Surface explicit error for missing export, incompatible ABI, unreadable library, or loader build failure.
+    - [ ] Keep loaded handle alive as long as any `Language` from that library can be queried.
+  - [ ] Remove compile-time grammar dependency list once runtime path covers current built-ins.
+    - [ ] Drop direct `tree-sitter-*` grammar crate dependencies from `xi-core-lib`.
+    - [ ] Keep only generic `tree-sitter` dependency plus loader crate API.
+    - [ ] Preserve non-tree-sitter builds or unsupported-platform behavior with explicit feature gate or runtime-disabled diagnostic.
+
+- [ ] Phase 3: add runtime `.scm` query support with inheritance and feature-scoped fallbacks.
+  - [ ] Why: runtime grammar loading alone is insufficient; upstream loader only covers standard query groups, while ee needs extra query kinds plus helix-style composition rules that can evolve without recompiling editor.
+  - [ ] Add query discovery API to loader.
+    - [ ] Reuse upstream query-path metadata for standard `highlights`, `injections`, `locals`, and `tags` when available.
+    - [ ] Resolve ee-owned query text for `textobjects`, `indents`, `folds`, and `rainbows` from runtime query directories keyed by canonical language id.
+    - [ ] Return empty/absent only for optional missing kind; malformed files must produce actionable compile error with source file attribution.
+  - [ ] Implement query inheritance semantics.
+    - [ ] Support `; inherits:` header parsing for one or more parent query sets.
+    - [ ] Merge inherited queries in deterministic order before local query text.
+    - [ ] Detect cycles and fail with precise language/kind chain instead of infinite recursion.
+  - [ ] Compile queries per feature boundary.
+    - [ ] Syntax/highlighting path compiles `highlights`, `injections`, and `locals` together, reusing upstream loader query ordering unless ee override paths are explicitly supplied.
+    - [ ] Semantic navigation path compiles `textobjects` and `tags` separately.
+    - [ ] Indentation path compiles `indents` separately so missing indent support does not disable highlighting.
+    - [ ] Future fold/rainbow consumers can compile their own query kinds without duplicating loader logic.
+
+- [ ] Phase 4: cut backend syntax, feature gating, and language detection over to loader-backed runtime data.
+  - [ ] Why: runtime assets only matter if all backend entry points consume same loader-backed resolution path; partial cutover would leave mismatched behavior between highlighting, reindent, and semantic motions.
+  - [ ] Wire loader through tree-sitter entry points.
+    - [ ] `visible_syntax_spans` and whole-buffer parse helpers must request grammar/query data from loader, not static tables.
+    - [ ] `language_feature_availability` must derive syntax, textobject, indent, and comment capabilities from runtime-loaded metadata/query presence.
+    - [ ] `lang_features.rs` must ask loader whether indentation/textobjects/comments are supported before dispatching feature paths.
+  - [ ] Preserve existing mode-specific safety budgets.
+    - [ ] Keep VLF visible-range parse limits independent from runtime loader.
+    - [ ] Do not let query inheritance or runtime reload turn visible-range work into whole-file work.
+    - [ ] Cache compiled query objects so repeated viewport renders do not reread `.scm` files on hot path.
+  - [ ] Unify language detection.
+    - [ ] Resolve language by explicit buffer setting first, then ee-owned shebang/glob rules, then loader-backed file-type/content-regex rules.
+    - [ ] Keep alias resolution canonical so query directory, upstream grammar id, and user-facing language name cannot drift apart.
+    - [ ] Decide behavior for unknown language with known extension conflict and document it.
+  - [ ] Keep editor config and grammar config aligned.
+    - [ ] Buffer language change commands must continue resolving against merged ee language config, not raw upstream grammar names.
+    - [ ] Language-server, formatter, root-marker, and edit-feature settings must remain attached to same merged language entry that selects grammar/query assets.
+    - [ ] Runtime grammar reload must not desynchronize active document language config from active parser/query set.
+
+- [ ] Phase 5: add runtime operations, diagnostics, and distribution contract.
+  - [ ] Why: runtime grammar system needs clear install/update/debug workflow or users cannot safely add grammars and queries outside source tree.
+  - [ ] Align operations with editor config workflow.
+    - [ ] Grammar fetch/build commands operate on grammars selected by merged ee language config.
+    - [ ] Health/diagnostic commands report both effective language config source and resolved runtime grammar/query assets.
+    - [ ] Runtime diagnostics must distinguish config-merge problem, grammar-source fetch/build problem, and runtime asset lookup problem.
+  - [ ] Define runtime root search order and overrides.
+    - [ ] Bundled runtime ships with default grammars and query files.
+    - [ ] User runtime can add or override grammars/query assets without editing install tree.
+    - [ ] Project-local runtime may override both when explicitly enabled.
+  - [ ] Add diagnostics surface.
+    - [ ] Expose command or status report listing resolved language id, grammar path, loaded query kinds, and missing query kinds.
+    - [ ] Distinguish load failure, compile failure, and unsupported-feature cases.
+    - [ ] Show effective runtime root used for current buffer.
+  - [ ] Decide packaging/update story.
+    - [ ] Document how bundled runtimes are produced for release artifacts.
+    - [ ] Decide whether runtime assets are fetched, vendored, or user-supplied for development builds.
+    - [ ] Ensure runtime additions do not require editing `Cargo.toml` for each new language.
+
+- [ ] Phase 6: validate runtime loading, query semantics, and migration off built-in registry.
+  - [ ] Why: runtime loading touches dynamic linking, parser correctness, feature gating, and startup behavior; regression coverage must prove both happy paths and failure containment.
+  - [ ] Add loader unit tests.
+    - [ ] Runtime root precedence.
+    - [ ] Canonical-path cache invalidation on modified library/query file.
+    - [ ] Alias, loader file-type/content-regex, ee glob, and ee shebang resolution.
+    - [ ] Query inheritance merge order and cycle detection.
+  - [ ] Add backend integration tests.
+    - [ ] Runtime-loaded grammar produces syntax spans for normal buffers.
+    - [ ] Runtime-loaded grammar works with visible-range VLF parsing without bypassing budgets.
+    - [ ] Missing `indents.scm` disables reindent only.
+    - [ ] Missing `textobjects.scm` disables semantic textobjects only.
+    - [ ] Missing standard `highlights`/`locals`/`injections`/`tags` query paths behave like upstream loader contract and report file-attributed query errors.
+    - [ ] Broken shared library reports explicit error and leaves editor usable.
+  - [ ] Add migration closeout.
+    - [ ] Remove now-obsolete compile-time grammar registry code and related checklist items only after runtime path covers current languages.
+    - [ ] Add short architecture note describing final flow: runtime root -> `tree-sitter-loader` -> grammar/query cache -> `xi-core-lib` parse/query consumers -> frontend diagnostics.
+
 
 ### Optional Future Boundary Work
 

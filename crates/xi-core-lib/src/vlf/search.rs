@@ -1,5 +1,6 @@
 use std::cmp::{max, min};
 use std::io;
+use std::time::{Duration, Instant};
 
 use regex::{Regex, RegexBuilder};
 use serde::Serialize;
@@ -29,6 +30,74 @@ pub(crate) struct VlfSearchStatus {
     pub(crate) complete: bool,
     pub(crate) stored_match_count: usize,
     pub(crate) ranges: Vec<VlfMatchRange>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct VlfSearchRunOptions {
+    pub case_sensitive: bool,
+    pub is_regex: bool,
+    pub whole_words: bool,
+    pub cancel_after_batches: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VlfSearchRunMetrics {
+    pub elapsed: Duration,
+    pub cancel_elapsed: Option<Duration>,
+    pub batches: usize,
+    pub scanned_bytes: u64,
+    pub total_bytes: u64,
+    pub stored_match_count: usize,
+    pub complete: bool,
+    pub cancelled: bool,
+}
+
+pub fn measure_streaming_search(
+    store: &VlfStore,
+    query: impl Into<String>,
+    options: VlfSearchRunOptions,
+) -> io::Result<VlfSearchRunMetrics> {
+    let query = query.into();
+    let Some(mut search) = VlfSearchState::new(
+        store,
+        query,
+        options.case_sensitive,
+        options.is_regex,
+        options.whole_words,
+    ) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "streaming search query must not be empty",
+        ));
+    };
+
+    let started = Instant::now();
+    let mut batches = 0usize;
+    let mut cancel_started = None;
+
+    while !search.is_complete() {
+        search.scan_batch(store)?;
+        batches = batches.saturating_add(1);
+
+        if cancel_started.is_none()
+            && options.cancel_after_batches.is_some_and(|limit| batches >= limit)
+        {
+            store.invalidate_pending_reads();
+            cancel_started = Some(Instant::now());
+        }
+    }
+
+    let status = search.status();
+    Ok(VlfSearchRunMetrics {
+        elapsed: started.elapsed(),
+        cancel_elapsed: cancel_started.map(|instant| instant.elapsed()),
+        batches,
+        scanned_bytes: status.scanned_bytes,
+        total_bytes: status.total_bytes,
+        stored_match_count: status.stored_match_count,
+        complete: status.complete,
+        cancelled: cancel_started.is_some(),
+    })
 }
 
 #[derive(Clone, Debug)]
