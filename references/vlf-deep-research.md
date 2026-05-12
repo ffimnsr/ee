@@ -413,7 +413,7 @@ Save should be piece-streaming. For read-only VLF, save is disabled. For editabl
 Migration plan for ee:
 
 1. Add `DocumentMode` and `TextStore` trait while current `Rope` remains normal-mode implementation.
-2. Change `ee-tui` viewport rendering to request sparse lines/chunks through `TextStore`-style APIs; remove render-time full-buffer clones.
+2. Change `ee-cli` viewport rendering to request sparse lines/chunks through `TextStore`-style APIs; remove render-time full-buffer clones.
 3. Add file-size policy: `Normal <= 20 MB && <= 300K LOC`, `ConstrainedNormal` above normal threshold but still in-memory, `Vlf` above configured VLF threshold or forced.
 4. Implement read-only `VlfStore` with `FilePager`, sampled encoding detection, decode-safe page reads, and lazy newline index.
 5. Add viewport protocol responses carrying byte ranges, line ranges, approximate line count, loaded/pending status, and generation id.

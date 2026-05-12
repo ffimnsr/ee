@@ -372,7 +372,7 @@ fn update_merge_normalizes_line_text() {
 
 #[test]
 fn pristine_external_reload_update_clears_changed_flag_for_trailing_blank_line_removal() {
-    let path = unique_temp_path("ee-tui-external-reload-state");
+    let path = unique_temp_path("ee-cli-external-reload-state");
     fs::write(&path, "alpha\n\n").unwrap();
 
     let (tx, _rx) = mpsc::channel();
@@ -591,7 +591,7 @@ fn parse_notification_decodes_syntax_spans_in_update_lines() {
 
 #[test]
 fn open_file_bootstraps_visible_lines_lazily() {
-    let path = unique_temp_path("ee-tui-open");
+    let path = unique_temp_path("ee-cli-open");
     let contents = (0..24).map(|i| format!("line-{i}")).collect::<Vec<_>>().join("\n");
     fs::write(&path, &contents).unwrap();
 
@@ -697,7 +697,7 @@ fn named_scratch_buffer_uses_display_name() {
 
 #[test]
 fn write_command_saves_file() {
-    let path = unique_temp_path("ee-tui-save");
+    let path = unique_temp_path("ee-cli-save");
     fs::write(&path, "seed").unwrap();
 
     let mut app = App::from_path(Some(path.clone())).unwrap();
@@ -1663,7 +1663,7 @@ fn plugin_terminated_notification_updates_status_message() {
 }
 
 #[test]
-fn ee_tui_sources_do_not_use_raw_lsp_or_plugin_routes() {
+fn ee_cli_sources_do_not_use_raw_lsp_or_plugin_routes() {
     let app_src = include_str!("app/mod.rs");
     let buffer_src = include_str!("buffer.rs");
     let backend_src = include_str!("backend.rs");
@@ -3991,7 +3991,7 @@ fn goto_last_line_action_jumps_to_final_line() {
 
 #[test]
 fn goto_file_action_opens_path_under_cursor() {
-    let target = unique_temp_path("ee-tui-goto-file-target");
+    let target = unique_temp_path("ee-cli-goto-file-target");
     fs::write(&target, "hello\n").unwrap();
 
     let mut app = App::from_path(None).unwrap();
@@ -5272,7 +5272,7 @@ fn assert_open_to_first_render_budget(label: &str, line_builder: fn(usize) -> St
 
     let thresholds = OpenThresholds::default();
     let target_bytes = thresholds.normal_bytes as usize - 4096;
-    let path = unique_temp_path(&format!("ee-tui-open-budget-{label}"));
+    let path = unique_temp_path(&format!("ee-cli-open-budget-{label}"));
     let line_count = write_exact_size_ascii_fixture(&path, target_bytes, line_builder);
 
     assert!(
@@ -5342,7 +5342,7 @@ fn assert_open_to_first_render_budget(label: &str, line_builder: fn(usize) -> St
 fn report_open_to_first_render_breakdown(label: &str, line_builder: fn(usize) -> String) {
     let thresholds = OpenThresholds::default();
     let target_bytes = thresholds.normal_bytes as usize - 4096;
-    let path = unique_temp_path(&format!("ee-tui-open-breakdown-{label}"));
+    let path = unique_temp_path(&format!("ee-cli-open-breakdown-{label}"));
     let line_count = write_exact_size_ascii_fixture(&path, target_bytes, line_builder);
 
     assert!(
@@ -5439,8 +5439,8 @@ fn capital_a_enters_insert_at_eol() {
 
 #[test]
 fn open_hsplit_and_new_aliases_work() {
-    let first = unique_temp_path("ee-tui-open-first");
-    let second = unique_temp_path("ee-tui-open-second");
+    let first = unique_temp_path("ee-cli-open-first");
+    let second = unique_temp_path("ee-cli-open-second");
     fs::write(&first, "one\ntwo\nthree\n").unwrap();
     fs::write(&second, "alpha\nbeta\ngamma\n").unwrap();
 
@@ -5463,9 +5463,9 @@ fn open_hsplit_and_new_aliases_work() {
 
 #[test]
 fn view_rotation_and_directional_jump_commands_follow_split_axis() {
-    let first = unique_temp_path("ee-tui-view-a");
-    let second = unique_temp_path("ee-tui-view-b");
-    let third = unique_temp_path("ee-tui-view-c");
+    let first = unique_temp_path("ee-cli-view-a");
+    let second = unique_temp_path("ee-cli-view-b");
+    let third = unique_temp_path("ee-cli-view-c");
     fs::write(&first, "one\n").unwrap();
     fs::write(&second, "two\n").unwrap();
     fs::write(&third, "three\n").unwrap();
@@ -5498,9 +5498,9 @@ fn view_rotation_and_directional_jump_commands_follow_split_axis() {
 
 #[test]
 fn reverse_transpose_and_window_close_commands_manage_views() {
-    let first = unique_temp_path("ee-tui-view-rev-a");
-    let second = unique_temp_path("ee-tui-view-rev-b");
-    let third = unique_temp_path("ee-tui-view-rev-c");
+    let first = unique_temp_path("ee-cli-view-rev-a");
+    let second = unique_temp_path("ee-cli-view-rev-b");
+    let third = unique_temp_path("ee-cli-view-rev-c");
     fs::write(&first, "one\n").unwrap();
     fs::write(&second, "two\n").unwrap();
     fs::write(&third, "three\n").unwrap();
@@ -5530,10 +5530,10 @@ fn reverse_transpose_and_window_close_commands_manage_views() {
 
 #[test]
 fn swap_view_commands_reorder_windows_on_matching_axis() {
-    let first = unique_temp_path("ee-tui-swap-a");
-    let second = unique_temp_path("ee-tui-swap-b");
-    let third = unique_temp_path("ee-tui-swap-c");
-    let fourth = unique_temp_path("ee-tui-swap-d");
+    let first = unique_temp_path("ee-cli-swap-a");
+    let second = unique_temp_path("ee-cli-swap-b");
+    let third = unique_temp_path("ee-cli-swap-c");
+    let fourth = unique_temp_path("ee-cli-swap-d");
     fs::write(&first, "one\n").unwrap();
     fs::write(&second, "two\n").unwrap();
     fs::write(&third, "three\n").unwrap();
@@ -5654,7 +5654,7 @@ fn goto_alias_emits_gesture_edit() {
 
 #[test]
 fn write_bang_update_and_x_bang_aliases_save() {
-    let first = unique_temp_path("ee-tui-write-bang");
+    let first = unique_temp_path("ee-cli-write-bang");
     fs::write(&first, "seed").unwrap();
 
     let mut app = App::from_path(Some(first.clone())).unwrap();
@@ -5669,7 +5669,7 @@ fn write_bang_update_and_x_bang_aliases_save() {
     }
     assert!(fs::read_to_string(&first).unwrap().starts_with('!'));
 
-    let second = unique_temp_path("ee-tui-update-bang");
+    let second = unique_temp_path("ee-cli-update-bang");
     fs::write(&second, "seed").unwrap();
     let mut update_app = App::from_path(Some(second.clone())).unwrap();
     insert_text(&mut update_app, "?");
@@ -5683,7 +5683,7 @@ fn write_bang_update_and_x_bang_aliases_save() {
     }
     assert!(fs::read_to_string(&second).unwrap().starts_with('?'));
 
-    let third = unique_temp_path("ee-tui-x-bang");
+    let third = unique_temp_path("ee-cli-x-bang");
     fs::write(&third, "seed").unwrap();
     let mut quit_app = App::from_path(Some(third.clone())).unwrap();
     insert_text(&mut quit_app, "#");
@@ -5705,8 +5705,8 @@ fn write_bang_update_and_x_bang_aliases_save() {
 
 #[test]
 fn write_all_and_write_quit_all_aliases_cover_hidden_buffers() {
-    let first = unique_temp_path("ee-tui-wa-first");
-    let second = unique_temp_path("ee-tui-wa-second");
+    let first = unique_temp_path("ee-cli-wa-first");
+    let second = unique_temp_path("ee-cli-wa-second");
     fs::write(&first, "seed").unwrap();
     fs::write(&second, "seed").unwrap();
 
@@ -5750,8 +5750,8 @@ fn write_all_and_write_quit_all_aliases_cover_hidden_buffers() {
 
 #[test]
 fn quit_all_alias_checks_hidden_dirty_buffers_and_force_variant() {
-    let first = unique_temp_path("ee-tui-qa-first");
-    let second = unique_temp_path("ee-tui-qa-second");
+    let first = unique_temp_path("ee-cli-qa-first");
+    let second = unique_temp_path("ee-cli-qa-second");
     fs::write(&first, "seed").unwrap();
     fs::write(&second, "seed").unwrap();
 
@@ -5775,7 +5775,7 @@ fn quit_all_alias_checks_hidden_dirty_buffers_and_force_variant() {
 
 #[test]
 fn read_command_inserts_file_contents() {
-    let source = unique_temp_path("ee-tui-read-source");
+    let source = unique_temp_path("ee-cli-read-source");
     fs::write(&source, "alpha\nbeta\n").unwrap();
 
     let (tx, rx) = mpsc::channel();
@@ -5798,8 +5798,8 @@ fn read_command_inserts_file_contents() {
 
 #[test]
 fn move_command_moves_dirty_buffer_to_new_path() {
-    let source = unique_temp_path("ee-tui-move-source");
-    let target = unique_temp_path("ee-tui-move-target");
+    let source = unique_temp_path("ee-cli-move-source");
+    let target = unique_temp_path("ee-cli-move-target");
     fs::write(&source, "seed").unwrap();
 
     let mut app = App::from_path(Some(source.clone())).unwrap();
@@ -6187,8 +6187,8 @@ fn vlf_source_control_commands_report_disabled_reason() {
 
 #[test]
 fn reload_and_reload_all_aliases_refresh_from_disk() {
-    let first = unique_temp_path("ee-tui-reload-first");
-    let second = unique_temp_path("ee-tui-reload-second");
+    let first = unique_temp_path("ee-cli-reload-first");
+    let second = unique_temp_path("ee-cli-reload-second");
     fs::write(&first, "old-one\n").unwrap();
     fs::write(&second, "old-two\n").unwrap();
 
@@ -6236,9 +6236,9 @@ fn reload_and_reload_all_aliases_refresh_from_disk() {
 
 #[test]
 fn buffer_close_aliases_and_force_variants_work() {
-    let first = unique_temp_path("ee-tui-bc-first");
-    let second = unique_temp_path("ee-tui-bc-second");
-    let third = unique_temp_path("ee-tui-bc-third");
+    let first = unique_temp_path("ee-cli-bc-first");
+    let second = unique_temp_path("ee-cli-bc-second");
+    let third = unique_temp_path("ee-cli-bc-third");
     fs::write(&first, "one\n").unwrap();
     fs::write(&second, "two\n").unwrap();
     fs::write(&third, "three\n").unwrap();
@@ -6278,9 +6278,9 @@ fn buffer_close_aliases_and_force_variants_work() {
 
 #[test]
 fn goto_buffer_commands_cycle_open_buffers() {
-    let first = unique_temp_path("ee-tui-goto-buffer-first");
-    let second = unique_temp_path("ee-tui-goto-buffer-second");
-    let third = unique_temp_path("ee-tui-goto-buffer-third");
+    let first = unique_temp_path("ee-cli-goto-buffer-first");
+    let second = unique_temp_path("ee-cli-goto-buffer-second");
+    let third = unique_temp_path("ee-cli-goto-buffer-third");
     fs::write(&first, "one\n").unwrap();
     fs::write(&second, "two\n").unwrap();
     fs::write(&third, "three\n").unwrap();
@@ -6302,8 +6302,8 @@ fn goto_buffer_commands_cycle_open_buffers() {
 
 #[test]
 fn goto_recent_file_commands_follow_access_and_modify_history() {
-    let first = unique_temp_path("ee-tui-goto-recent-first");
-    let second = unique_temp_path("ee-tui-goto-recent-second");
+    let first = unique_temp_path("ee-cli-goto-recent-first");
+    let second = unique_temp_path("ee-cli-goto-recent-second");
     fs::write(&first, "one\n").unwrap();
     fs::write(&second, "two\n").unwrap();
 

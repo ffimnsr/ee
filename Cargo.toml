@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
-  "crates/ee-tui",
+  "crates/ee-cli",
   "crates/xi-core-lib",
   "crates/xi-core",
   "crates/xi-lsp-lib",
@@ -12,7 +12,7 @@ members = [
   "crates/xi-unicode",
   "fuzz",
 ]
-default-members = ["crates/ee-tui"]
+default-members = ["crates/ee-cli"]
 
 [workspace.package]
 edition = "2024"

@@ -127,7 +127,7 @@ Planned core interfaces:
 - `VisibleSyntaxResult { spans, incomplete_start, incomplete_end, generation }`
 - `VisibleSemanticResult<T> { value, fully_covered, generation }`
 
-`ee-tui` stays consumer only. Window resolution, parsing, caching, and uncertainty rules remain backend-owned.
+`ee-cli` stays consumer only. Window resolution, parsing, caching, and uncertainty rules remain backend-owned.
 
 ## Budget and Cancellation
 

@@ -21,7 +21,7 @@ tasks:
     description: Run tests using the stable Rust toolchain.
   install:
     commands:
-      - cargo install --path crates/ee-tui
+      - cargo install --path crates/ee-cli
     description: Install the ee-editor using cargo.
   install-githooks:
     commands:

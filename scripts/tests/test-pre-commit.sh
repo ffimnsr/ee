@@ -32,12 +32,12 @@ capture_stable_clippy_calls() {
     )
 }
 
-ee_tui_output="$(capture_stable_clippy_calls ee-tui)"
-[[ "$ee_tui_output" == *"+stable clippy -p ee-tui --bins --tests --examples --all-features -- -D warnings"* ]]
-[[ "$ee_tui_output" != *"+stable clippy -p ee-tui --lib --bins --tests --examples --all-features -- -D warnings"* ]]
+ee_cli_output="$(capture_stable_clippy_calls ee-cli)"
+[[ "$ee_cli_output" == *"+stable clippy -p ee-cli --bins --tests --examples --all-features -- -D warnings"* ]]
+[[ "$ee_cli_output" != *"+stable clippy -p ee-cli --lib --bins --tests --examples --all-features -- -D warnings"* ]]
 
-mixed_output="$(capture_stable_clippy_calls ee-tui xi-core-lib)"
+mixed_output="$(capture_stable_clippy_calls ee-cli xi-core-lib)"
 [[ "$mixed_output" == *"+stable clippy -p xi-core-lib --lib --bins --tests --examples --all-features -- -D warnings"* ]]
-[[ "$mixed_output" == *"+stable clippy -p ee-tui --bins --tests --examples --all-features -- -D warnings"* ]]
+[[ "$mixed_output" == *"+stable clippy -p ee-cli --bins --tests --examples --all-features -- -D warnings"* ]]
 
 printf 'pre-commit hook test passed\n'
