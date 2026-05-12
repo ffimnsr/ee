@@ -196,8 +196,8 @@ mod tests {
         assert_eq!(shell.command, "printf 'ok'");
         assert_eq!(shell.title, "term: printf 'ok'");
 
-        let term = parse_command("term cargo test -p ee-tui").unwrap().unwrap();
-        assert_eq!(term.command, "cargo test -p ee-tui");
+        let term = parse_command("term cargo test -p ee-cli").unwrap().unwrap();
+        assert_eq!(term.command, "cargo test -p ee-cli");
 
         let sh = parse_command("sh printf 'ok'").unwrap().unwrap();
         assert_eq!(sh.command, "printf 'ok'");

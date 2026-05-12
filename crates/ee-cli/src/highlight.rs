@@ -1,4 +1,4 @@
-//! Syntax highlighting for the `ee-tui` frontend.
+//! Syntax highlighting for the `ee-cli` frontend.
 //!
 //! Render-only layer. Backend syntax spans are authoritative; this module only
 //! maps scope strings to styles and slices spans for visible text.

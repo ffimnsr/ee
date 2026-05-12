@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Keep `xi-core-lib` frontend agnostic. Keep `ee-tui` focused on terminal interaction and rendering.
+Keep `xi-core-lib` frontend agnostic. Keep `ee-cli` focused on terminal interaction and rendering.
 
 ## Core Rule
 
@@ -57,8 +57,8 @@ Editor config is frontend-owned. Backend is editor-config agnostic and must not 
 
 ## Current Protocol Decisions
 
-- Paste source remains frontend-owned because `ee-tui` owns registers, system clipboard, bracketed paste, and OSC 52 integration. Paste edit semantics should stay backend-owned.
-- `resize` remains frontend-originated because terminal layout and viewport size originate in `ee-tui`, but backend still owns resulting wrap and view-state updates.
+- Paste source remains frontend-owned because `ee-cli` owns registers, system clipboard, bracketed paste, and OSC 52 integration. Paste edit semantics should stay backend-owned.
+- `resize` remains frontend-originated because terminal layout and viewport size originate in `ee-cli`, but backend still owns resulting wrap and view-state updates.
 - Mouse clicks and drags originate in frontend, which translates terminal coordinates into canonical backend `gesture` edits.
 - `add_selection_above`, `add_selection_below`, `insert_tab`, `transpose`, `selection_for_find`, `selection_for_replace`, `selection_into_lines`, `duplicate_line`, `increase_number`, `decrease_number`, and `multi_find` are valid frontend-facing backend edits when they map cleanly to editor semantics.
 - `request_hover` is valid backend-facing protocol, but it is request or special-event surface, not ordinary edit surface.

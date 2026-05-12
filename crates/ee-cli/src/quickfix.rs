@@ -2,7 +2,7 @@
 //!
 //! The global quickfix list is populated from search results, diagnostics, and
 //! build errors.  The location list mirrors the same structure but is
-//! window-scoped; here we store it at the `App` level since ee-tui has one
+//! window-scoped; here we store it at the `App` level since ee-cli has one
 //! focused editing context at a time.
 
 use std::path::PathBuf;

@@ -3,8 +3,8 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use ee_tui::perf::{measure_open_to_first_render, measure_vlf_page_down};
-use ee_tui::vlf_bench_support::{
+use ee_cli::perf::{measure_open_to_first_render, measure_vlf_page_down};
+use ee_cli::vlf_bench_support::{
     FixtureMeta, FixtureSpec, ONE_MIB, PAGE_DOWN_TIMEOUT, build_fixture, default_fixture_dir,
     measure_goto, measure_search,
 };
@@ -110,7 +110,7 @@ fn parse_args() -> io::Result<Config> {
 
 fn print_help() {
     println!(
-        "vlf_bench\n\nUSAGE:\n  cargo run -p ee-tui --bin vlf_bench --release [-- --json] [--keep-fixtures] [--fixture-dir DIR]\n\nRuns one-shot VLF integration probes for 100 MB, 1 GB, and 10 GB fixtures. Focus: cold open-to-first-render, cold page-down, approximate/exact goto-line, and search cancellation latency. Warm steady-state benches live under `cargo bench -p ee-tui --bench vlf`."
+        "vlf_bench\n\nUSAGE:\n  cargo run -p ee-cli --bin vlf_bench --release [-- --json] [--keep-fixtures] [--fixture-dir DIR]\n\nRuns one-shot VLF integration probes for 100 MB, 1 GB, and 10 GB fixtures. Focus: cold open-to-first-render, cold page-down, approximate/exact goto-line, and search cancellation latency. Warm steady-state benches live under `cargo bench -p ee-cli --bench vlf`."
     );
 }
 

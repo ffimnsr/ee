@@ -4,8 +4,8 @@ use std::sync::OnceLock;
 
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
-use ee_tui::perf::{measure_open_to_first_render, measure_vlf_page_down};
-use ee_tui::vlf_bench_support::{
+use ee_cli::perf::{measure_open_to_first_render, measure_vlf_page_down};
+use ee_cli::vlf_bench_support::{
     FixtureMeta, FixtureSpec, ONE_MIB, PAGE_DOWN_TIMEOUT, build_fixture, default_fixture_dir,
     measure_search,
 };
