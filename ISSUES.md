@@ -2,133 +2,6 @@
 
 ## New World
 
-### VLF Streaming Save Wiring
-
-- Rules:
-  - Reuse existing `VlfStore::stream_save`, `vlf::save::stream_save_pieces`, `VlfSavePolicy`, and `FileManager::save_vlf` as core save primitives. Do not add second VLF save pipeline unless existing API proves structurally insufficient.
-  - Keep VLF write path chunk-native end-to-end. No phase may flatten VLF content into `String`, `Vec<String>`, or `Rope` just to save.
-  - Keep durability policy aligned with current rope save path: temp-file rewrite or bounded in-place optimization, `sync_all`, atomic rename, and best-effort parent-directory sync.
-  - Keep cancellation semantics explicit. Cancellation before commit deletes temp state and leaves original file intact; cancellation after commit is impossible and must never be reported as failure.
-  - Save wiring must preserve VLF mode invariants: bounded memory, overlay as source of unsaved edits, and no hidden whole-buffer reload after save.
-  - Prefer one shared async save orchestration model for rope and VLF where practical, but do not force premature abstraction if it obscures correctness.
-  - Every phase must land with regression tests for success path, cancellation path, and failure path.
-
-- [ ] Phase 0: freeze save architecture and decide ownership boundaries.
-  - [ ] Document target save ownership across existing modules.
-    - [ ] `crates/xi-core-lib/src/vlf/save.rs` owns piece streaming, durability policy, and optimization policy execution.
-    - [ ] `crates/xi-core-lib/src/file.rs` owns path validation, external-modification checks, metadata refresh, and file-manager integration.
-    - [ ] `crates/xi-core-lib/src/tabs.rs` owns command routing, async save kickoff, idle polling, alerts, and post-save UI/config updates.
-    - [ ] `crates/xi-core-lib/src/editor.rs` owns dirty/pristine revision state and access to `VlfStore` when buffer is VLF-backed.
-  - [ ] Define completion criteria for VLF save wiring.
-    - [ ] `CoreNotification::Save` succeeds for editable VLF buffers instead of always alerting read-only.
-    - [ ] VLF save and rope save both surface progress/cancellation through one coherent task/callback model.
-    - [ ] Successful VLF save updates file metadata, pristine state, watcher state, and buffer path/config state correctly.
-    - [ ] Save-as and policy-driven fallback paths are handled explicitly, not through placeholder `"<save-as-required>"` behavior leaking to UI.
-    - [ ] Tests prove no save path materializes full VLF text.
-
-- [ ] Phase 1: enable editable VLF save contract at editor and document-mode layer.
-  - [ ] Remove unconditional VLF save disable path from document status and save command routing when editing is enabled.
-    - [ ] Audit `VlfStore::edit_permission`, `doc_status`, and any disabled-feature lists that currently treat all VLF buffers as unsavable.
-    - [ ] Distinguish read-only VLF from editable VLF in capability reporting.
-      - [ ] Read-only VLF should still report save disabled with explicit reason.
-      - [ ] Editable VLF should report save allowed while still advertising any other bounded-feature restrictions.
-  - [ ] Wire `enable_editing()` and overlay save readiness to real editor lifecycle.
-    - [ ] Decide where VLF editing becomes active for buffers allowed to edit.
-    - [ ] Ensure enabling edit mode also marks overlay save gate ready only when streaming save path is fully wired and tested.
-    - [ ] Preserve current behavior for read-only VLF opens until editable VLF policy intentionally opts in.
-  - [ ] Align pristine/dirty state model for VLF edits.
-    - [ ] Define what revision/token marks VLF buffer pristine before first edit.
-    - [ ] Define what successful VLF save resets as pristine after commit.
-    - [ ] Ensure dirty state comes from overlay/content changes, not from line-cache/view churn.
-
-- [ ] Phase 2: route save commands through VLF-aware file-manager path.
-  - [ ] Refactor `tabs.rs::do_save` to branch by backing storage, not by hardcoded read-only VLF alert.
-    - [ ] Keep rope path using existing `prepare_rope_save` and `SaveTask` snapshot flow.
-    - [ ] Add VLF path using `FileManager::save_vlf` and `VlfStore::stream_save`.
-    - [ ] Surface clear alerts for unsupported cases: read-only VLF, save-as-required policy, external modification, invalid destination, or editing not enabled.
-  - [ ] Decide save request representation for async execution.
-    - [ ] Either extend existing save task enum/request types to carry rope and VLF save variants.
-    - [ ] Or introduce a thin shared save-task wrapper that can execute either `PreparedRopeSave` or VLF save request without duplicating polling/callback logic.
-    - [ ] Keep result payload rich enough to update metadata and pristine state after either save kind.
-  - [ ] Make VLF policy selection explicit at command boundary.
-    - [ ] Use `suggested_save_policy()` only as default policy selector.
-    - [ ] Do not silently pass placeholder `SaveAs` path through command flow.
-    - [ ] When policy requires explicit save-as target, route to save-as UX/protocol rather than attempting invalid write.
-
-- [ ] Phase 3: unify async save execution, progress, and cancellation.
-  - [ ] Extend current async save task model beyond rope snapshots.
-    - [ ] Preserve current generation/stale-result protection used by rope save tasks.
-    - [ ] Allow VLF save worker to report byte progress from `SaveProgress` without blocking render/input loop.
-    - [ ] Ensure cancel checks map cleanly to VLF pre-commit cancellation semantics.
-  - [ ] Decide worker-thread data ownership for VLF saves.
-    - [ ] Do not move `VlfStore` itself to worker thread if that breaks main-thread ownership assumptions.
-    - [ ] If needed, extract immutable save plan or cloneable save inputs from overlay/pager before spawning background work.
-    - [ ] Keep plan bounded: piece list, inserted buffers, pager/file references, selected policy, and destination path only.
-  - [ ] Surface progress to caller/UI.
-    - [ ] Reuse existing alert/progress channel if one exists for rope save.
-    - [ ] Otherwise add minimal generic save-progress callback path usable by both rope and VLF saves.
-    - [ ] Report bytes written and total bytes; avoid fake line-based progress for VLF.
-  - [ ] Add cancellation coverage.
-    - [ ] Cancel before first chunk writes.
-    - [ ] Cancel mid-stream during temp rewrite.
-    - [ ] Verify committed save cannot later report cancellation.
-
-- [ ] Phase 4: finish post-save state updates and file-system integration.
-  - [ ] Update file-manager metadata after successful VLF save just like rope save.
-    - [ ] Refresh modification time.
-    - [ ] Clear external-change marker.
-    - [ ] Reacquire or preserve advisory lock expectations for saved path.
-  - [ ] Update editor/buffer state after successful VLF save.
-    - [ ] Mark buffer pristine at saved overlay revision.
-    - [ ] Keep VLF buffer open in VLF mode; do not reopen as rope or force whole-file reload.
-    - [ ] Ensure overlay/source-of-truth state reflects that file on disk now matches current logical document.
-      - [ ] Either reset overlay against new base file contents.
-      - [ ] Or rebuild overlay/base metadata so subsequent edits and saves operate on new on-disk revision correctly.
-  - [ ] Update tabs/config/view side effects after successful VLF save.
-    - [ ] Apply save-as path changes to buffer config, language detection, and view notifications.
-    - [ ] Emit same post-save hooks expected by plugins/LSP/config watchers when appropriate.
-    - [ ] Ensure watcher-triggered reload path does not treat own successful VLF save as unexpected external change.
-  - [ ] Handle failure and interruption cleanly.
-    - [ ] Preserve dirty state after failed or cancelled save.
-    - [ ] Keep partial temp files cleaned up on failure paths.
-    - [ ] Avoid leaving save task stuck in progress after worker exits.
-
-- [ ] Phase 5: wire save-as, policy overrides, and optimization fallback behavior.
-  - [ ] Add explicit VLF save-as routing.
-    - [ ] When overlay policy returns save-as-required, surface path-prompt flow instead of opaque error.
-    - [ ] Ensure alternate destination keeps source file unchanged until successful commit.
-    - [ ] After successful save-as, decide whether buffer continues tracking original path or new path and make behavior explicit.
-  - [ ] Expose and validate optimization policies.
-    - [ ] Keep `SameSizeInPlaceOverwrite` and `TailShift` behind policy validation, not implicit assumptions.
-    - [ ] Fall back to temp-file rewrite automatically when optimization preconditions are not met.
-    - [ ] Record tests for canonical-path mismatch, oversized changed-window fallback, and non-zero/zero delta mismatches.
-  - [ ] Align user-facing messaging.
-    - [ ] Alerts should distinguish save complete, save cancelled, save failed, and save-as required.
-    - [ ] Do not reuse stale “VLF mode is read-only” alert once editable VLF save is wired.
-
-- [ ] Phase 6: validate with focused regression, budget, and failure tests.
-  - [ ] Add unit/integration coverage at save primitive level.
-    - [ ] Temp rewrite success.
-    - [ ] Same-size overwrite success.
-    - [ ] Tail-shift success and fallback.
-    - [ ] Cancellation before commit.
-    - [ ] I/O failure cleanup.
-  - [ ] Add core integration tests for save command routing.
-    - [ ] `CoreNotification::Save` on read-only VLF still alerts correctly.
-    - [ ] `CoreNotification::Save` on editable VLF schedules async save and finishes successfully.
-    - [ ] Save-as-required path yields explicit prompt/error contract instead of invalid placeholder path write.
-    - [ ] Successful VLF save updates pristine state and file metadata.
-  - [ ] Add watcher/reload regression tests.
-    - [ ] Saving VLF does not trigger self-reload loop.
-    - [ ] Real external modification after VLF save is still detected.
-  - [ ] Add budget and invariant tests.
-    - [ ] Saving large edited VLF fixture stays within bounded memory cap.
-    - [ ] Save path never calls full-text extraction or builds `Rope` from VLF contents.
-    - [ ] Progress and cancellation tests do not require whole-buffer staging.
-  - [ ] Close migration.
-    - [ ] Mark older high-level VLF save checklist items complete only after command routing, async execution, save-as handling, and post-save state are all wired.
-    - [ ] Add short note describing final architecture: `tabs` routes save, `file` validates and updates metadata, `vlf::save` streams pieces, and VLF buffers remain sparse before and after save.
-
 ### Large File Support: VLF Mode (Very Large Files)
 
 - [ ] Improve large-buffer quit latency.
@@ -284,3 +157,51 @@
 - [ ] Move text-object range resolution from `crates/ee-tui/src/app/mod.rs` into `xi-core-lib` if we want backend-owned semantic text objects across future frontends.
 - [ ] Move visual-block delete/change/yank execution from `crates/ee-tui/src/app/mod.rs` into `xi-core-lib` so rectangular selection mutations become backend-owned editor semantics.
 - [ ] Re-evaluate visual-block insert setup and replay split between `ee-tui` and `xi-core-lib`; keep frontend workflow glue only, move any remaining selection-truth or mutation semantics backend-side if reused by another frontend.
+
+### Other works
+
+- [ ] Add `do file head` and `do file tail`, it will be similar to `head` and `tail` command on linux
+would reuse existing functionality from vlf so it will be useful for getting head/tail of a file.
+- [ ] Time it using hyperfine against the original head and tail commands, and implement ways to be on par or much faster than the original command.
+- [ ] Implement a `jq` like command `do file query|q --type json`, to query document files in similar ways
+  - [ ] Implement for `json`
+  - [ ] Implement for `yaml`
+  - [ ] Implement for `toml`
+  - [ ] Implement for `kdl`
+- [ ] When trying to save and user doesn't have permission, ask if they want to re-execute with higher privilage with `sudo`, `su`, `run0`
+- [ ] Rework config search hierarchy and `.ee.toml` root semantics.
+  - Why: current loader only merges defaults + `~/.ee.toml` + git-root `.ee.toml` + cwd `.ee.toml`; path contract too narrow and root-stop behavior is undefined.
+  - Define config layers, lowest priority first:
+    - built-in defaults
+    - `/etc/ee/config.toml`
+    - `$XDG_CONFIG_HOME/ee/config.toml` or `~/.config/ee/config.toml`
+    - fallback user config `~/.ee.toml`, but only when XDG user config is missing
+    - every `.ee.toml` from project/file directory walk, applied from outermost to innermost so nearest directory wins
+    - `.editorconfig` remains final per-file override layer
+  - Define walk anchor clearly:
+    - when editing file, walk from file parent directory upward
+    - when no file path exists yet, walk from current working directory upward
+    - do not limit project config lookup to git root only; any ancestor may contribute until root-stop rule triggers
+  - Add `root: Option<bool>` to `.ee.toml` / config schema.
+    - `root = true`: apply that file, then stop searching more distant parent/system/user config layers above it
+    - missing `root` or `root = false`: merge normally and continue walking outward
+    - `/etc/ee/config.toml` is implicit terminal root even if field absent
+  - Merge behavior:
+    - partial config files override only keys they set
+    - nested tables such as keymaps still follow existing field-wise merge behavior unless issue explicitly changes that contract
+    - user XDG config and legacy `~/.ee.toml` are mutually exclusive sources; do not load both
+  - Acceptance examples:
+    - `/home/user/project/folder/.ee.toml (root = true)` -> load only that file for that subtree
+    - `/home/user/project/.ee.toml (root = true)` + `/home/user/project/folder/.ee.toml (root = false)` -> load project, then folder; stop before user/system layers
+    - folder + project with `root = false`, user XDG config with `root = true` -> load user, project, folder; stop before `/etc`
+    - folder + project + user with `root = false` -> merge all of them, then `/etc/ee/config.toml` as final fallback root
+  - Implementation scope:
+    - update loader in `crates/ee-cli/src/config.rs`
+    - update doctor/validate and any config-path reporting to show new precedence and fallback behavior
+    - update help/docs mentioning config locations
+  - Tests:
+    - XDG user config preferred over `~/.ee.toml`
+    - legacy `~/.ee.toml` used when XDG config missing
+    - ancestor `.ee.toml` chain merges outer -> inner
+    - `root = true` stops walk at folder, project, and user layers correctly
+    - `/etc/ee/config.toml` participates as lowest-priority external config and terminal root

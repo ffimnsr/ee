@@ -15,6 +15,7 @@
 use std::borrow::{Borrow, Cow};
 use std::cmp::{max, min};
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use log::error;
 use serde::{Deserialize, Serialize};
@@ -56,12 +57,17 @@ pub struct Editor {
     /// When `Some`, this editor was opened in VLF mode. `text` is an empty
     /// placeholder; all content reads go through `vlf_store`.
     /// `None` for Normal / ConstrainedNormal editors.
+    /// Editor owns dirty/pristine revision state for this VLF backing.
     pub(crate) vlf_store: Option<Box<crate::vlf::store::VlfStore>>,
 
     /// The most recent revision.
     last_rev_id: RevId,
     /// The revision of the last save.
     pristine_rev_id: RevId,
+    /// Monotonic VLF overlay revision counter.
+    vlf_head_revision: u64,
+    /// VLF overlay revision that matches on-disk state.
+    vlf_pristine_revision: u64,
     undo_group_id: usize,
     /// Undo groups that may still be toggled
     live_undos: Vec<usize>,
@@ -108,6 +114,8 @@ impl Editor {
             engine,
             last_rev_id,
             pristine_rev_id: last_rev_id,
+            vlf_head_revision: 0,
+            vlf_pristine_revision: 0,
             undo_group_id: 1,
             // GC only works on undone edits or prefixes of the visible edits,
             // but initial file loading can create an edit with undo group 0,
@@ -129,7 +137,8 @@ impl Editor {
     /// Creates a new `Editor` for a VLF file.
     ///
     /// The `text` buffer starts empty; all content reads must go through the
-    /// `VlfStore`.  The editor is read-only in VLF mode (first milestone).
+    /// `VlfStore`.  VLF editors start read-only; callers must explicitly opt
+    /// into overlay editing via [`Self::enable_vlf_editing`].
     pub fn with_vlf_store(store: crate::vlf::store::VlfStore) -> Editor {
         let engine = Engine::new(Rope::from(""));
         let buffer = engine.get_head().clone();
@@ -140,6 +149,8 @@ impl Editor {
             engine,
             last_rev_id,
             pristine_rev_id: last_rev_id,
+            vlf_head_revision: 0,
+            vlf_pristine_revision: 0,
             undo_group_id: 1,
             live_undos: vec![0],
             cur_undo: 1,
@@ -207,16 +218,43 @@ impl Editor {
     }
 
     #[allow(dead_code)]
+    pub(crate) fn enable_vlf_editing(&mut self) -> bool {
+        let Some(store) = self.vlf_store.as_ref() else {
+            return false;
+        };
+        store.enable_editing();
+        true
+    }
+
+    pub(crate) fn vlf_save_enabled(&self) -> bool {
+        self.vlf_store.as_ref().is_some_and(|store| store.is_save_enabled())
+    }
+
+    pub(crate) fn refresh_after_vlf_save(&mut self, path: &Path) -> std::io::Result<()> {
+        let Some(store) = self.vlf_store.as_mut() else {
+            return Ok(());
+        };
+        store.refresh_after_save(path)
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn next_vlf_overlay_edit_context(
         &mut self,
         edit_type: EditType,
     ) -> Option<crate::vlf::overlay::OverlayEditContext> {
         self.vlf_store.as_ref()?;
         self.this_edit_type = edit_type;
-        let revision_id = self.engine.get_head_rev_id().token();
+        let revision_id = self.vlf_head_revision.saturating_add(1);
         let undo_group = self.calculate_undo_group();
         self.last_edit_type = self.this_edit_type;
         Some(crate::vlf::overlay::OverlayEditContext { revision_id, undo_group })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn commit_vlf_overlay_revision(&mut self, revision_id: u64) {
+        if self.is_vlf() {
+            self.vlf_head_revision = self.vlf_head_revision.max(revision_id);
+        }
     }
 
     #[allow(dead_code)]
@@ -238,10 +276,18 @@ impl Editor {
     }
 
     pub(crate) fn set_pristine(&mut self) {
-        self.pristine_rev_id = self.engine.get_head_rev_id();
+        if self.is_vlf() {
+            self.vlf_pristine_revision = self.vlf_head_revision;
+        } else {
+            self.pristine_rev_id = self.engine.get_head_rev_id();
+        }
     }
 
     pub(crate) fn set_pristine_if_equivalent_revision(&mut self, saved_rev_id: RevId) -> bool {
+        if self.is_vlf() {
+            self.set_pristine();
+            return true;
+        }
         let head_rev_id = self.engine.get_head_rev_id();
         if self.engine.is_equivalent_revision(saved_rev_id, head_rev_id) {
             self.pristine_rev_id = head_rev_id;
@@ -252,7 +298,11 @@ impl Editor {
     }
 
     pub(crate) fn is_pristine(&self) -> bool {
-        self.engine.is_equivalent_revision(self.pristine_rev_id, self.engine.get_head_rev_id())
+        if self.is_vlf() {
+            self.vlf_pristine_revision == self.vlf_head_revision
+        } else {
+            self.engine.is_equivalent_revision(self.pristine_rev_id, self.engine.get_head_rev_id())
+        }
     }
 
     /// Applies `delta` directly with the given `edit_type`.
@@ -906,10 +956,12 @@ mod tests {
 
         let first = editor.next_vlf_overlay_edit_context(EditType::InsertChars).unwrap();
         editor.vlf_store.as_ref().unwrap().apply_insert(5, " world", first).unwrap();
+        editor.commit_vlf_overlay_revision(first.revision_id);
         editor.update_edit_type();
 
         let second = editor.next_vlf_overlay_edit_context(EditType::InsertChars).unwrap();
         editor.vlf_store.as_ref().unwrap().apply_insert(11, "!", second).unwrap();
+        editor.commit_vlf_overlay_revision(second.revision_id);
         editor.update_edit_type();
 
         assert_eq!(first.undo_group, second.undo_group);
@@ -935,6 +987,7 @@ mod tests {
                 first_group = Some(ctx.undo_group);
             }
             editor.vlf_store.as_ref().unwrap().apply_insert(5 + index as u64, "x", ctx).unwrap();
+            editor.commit_vlf_overlay_revision(ctx.revision_id);
             editor.update_edit_type();
         }
 
@@ -944,6 +997,20 @@ mod tests {
         editor.gc_undos();
 
         assert!(editor.vlf_overlay_delta_for_undo_group(first_group).is_none());
+    }
+
+    #[test]
+    fn editable_vlf_pristine_tracks_overlay_revisions() {
+        let (mut editor, _file) = vlf_editor("hello");
+        assert!(editor.is_pristine(), "fresh VLF editor should start pristine");
+
+        let ctx = editor.next_vlf_overlay_edit_context(EditType::InsertChars).unwrap();
+        editor.vlf_store.as_ref().unwrap().apply_insert(5, " world", ctx).unwrap();
+        editor.commit_vlf_overlay_revision(ctx.revision_id);
+        assert!(!editor.is_pristine(), "overlay edit should mark editor dirty");
+
+        editor.set_pristine();
+        assert!(editor.is_pristine(), "successful VLF save should reset pristine state");
     }
 
     #[test]

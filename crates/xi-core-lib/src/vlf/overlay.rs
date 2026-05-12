@@ -221,6 +221,52 @@ pub enum VlfSavePolicy {
 const LARGE_REWRITE_THRESHOLD_BYTES: u64 = 512 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
+// OverlaySaveSnapshot
+// ---------------------------------------------------------------------------
+
+/// Immutable snapshot of overlay state needed for background saves.
+///
+/// Keeps worker-thread ownership bounded to piece descriptors plus cloned
+/// inserted buffers; original-file bytes are still read from disk.
+#[derive(Debug, Clone)]
+pub struct OverlaySaveSnapshot {
+    pieces: Vec<Piece>,
+    inserted_buffers: HashMap<BufferId, Vec<u8>>,
+    total_bytes: u64,
+    original_file_byte_len: u64,
+}
+
+impl OverlaySaveSnapshot {
+    /// Ordered piece list for the logical document.
+    pub fn pieces(&self) -> &[Piece] {
+        &self.pieces
+    }
+
+    /// Total logical byte length represented by this snapshot.
+    pub fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+
+    /// Original file byte length at the time the overlay snapshot was taken.
+    pub fn original_file_byte_len(&self) -> u64 {
+        self.original_file_byte_len
+    }
+
+    /// Retrieve bytes for an inserted piece from the cloned buffer snapshot.
+    pub fn inserted_bytes_for_piece<'a>(&'a self, piece: &Piece) -> Option<&'a [u8]> {
+        match piece {
+            Piece::Inserted { buffer_id, range, .. } => {
+                let bytes = self.inserted_buffers.get(buffer_id)?;
+                let start = usize::try_from(range.start).ok()?;
+                let end = usize::try_from(range.end).ok()?;
+                bytes.get(start..end)
+            }
+            Piece::Original { .. } => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // BufferId
 // ---------------------------------------------------------------------------
 
@@ -865,6 +911,20 @@ impl PieceOverlay {
         }
     }
 
+    /// Clone bounded save inputs for background VLF save execution.
+    pub fn save_snapshot(&self) -> OverlaySaveSnapshot {
+        OverlaySaveSnapshot {
+            pieces: self.pieces.clone(),
+            inserted_buffers: self
+                .buffers
+                .iter()
+                .map(|(buffer_id, buffer)| (*buffer_id, buffer.bytes.clone()))
+                .collect(),
+            total_bytes: self.total_byte_len,
+            original_file_byte_len: self.original_file_byte_len,
+        }
+    }
+
     /// Byte length of the named insert buffer.  Returns 0 if not found.
     pub fn buffer_len(&self, id: BufferId) -> u64 {
         self.buffers.get(&id).map_or(0, |b| b.len())
@@ -875,6 +935,11 @@ impl PieceOverlay {
         let piece_bytes = (self.pieces.len() * std::mem::size_of::<Piece>()) as u64;
         let buffer_bytes: u64 = self.buffers.values().map(|b| b.len()).sum();
         piece_bytes + buffer_bytes
+    }
+
+    /// Borrow the resource limits that govern this overlay.
+    pub fn limits(&self) -> &OverlayLimits {
+        &self.limits
     }
 
     /// Signed byte-length delta relative to the original file.
