@@ -18,10 +18,14 @@
 //!
 //! This file is called 'tabs' for historical reasons, and should probably
 //! be renamed.
+//!
+//! Ownership boundary: this module owns save command routing, kickoff,
+//! alerts, and post-save UI/config updates.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+use std::io::ErrorKind;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -54,7 +58,7 @@ use crate::rpc::{
     CoreNotification, CoreRequest, EditNotification, PluginNotification as CorePluginNotification,
 };
 use crate::syntax::LanguageId;
-use crate::text_store::{DocumentMode, TextStore};
+use crate::text_store::{DocumentMode, EditPermission, TextStore};
 use crate::view::View;
 use crate::whitespace::Indentation;
 use crate::width_cache::WidthCache;
@@ -73,6 +77,27 @@ pub struct ViewId(pub(crate) usize);
 pub struct BufferId(pub(crate) usize);
 
 pub type PluginId = crate::plugins::PluginPid;
+
+fn save_complete_alert(path: &Path) -> String {
+    format!("save complete: {}", path.display())
+}
+
+fn save_cancelled_alert(path: &Path) -> String {
+    format!("save cancelled: {}", path.display())
+}
+
+fn save_failed_alert(error: &crate::file::FileError) -> String {
+    format!("save failed: {}", error)
+}
+
+fn save_error_alert(error: &crate::file::FileError, path: &Path) -> String {
+    match error {
+        crate::file::FileError::Io(io_error, _) if io_error.kind() == ErrorKind::Interrupted => {
+            save_cancelled_alert(path)
+        }
+        _ => save_failed_alert(error),
+    }
+}
 
 // old-style names; will be deprecated
 pub type BufferIdentifier = BufferId;
@@ -505,24 +530,82 @@ impl CoreState {
             None => return,
         };
 
-        if let Some(message) = self.editors.get(&buffer_id).and_then(|editor| {
-            let editor = editor.borrow();
-            editor.vlf_store.as_ref().and_then(|store| {
-                let status = store.doc_status();
-                status.disabled_features.contains(&"save").then_some(
-                    "save disabled in VLF: VLF mode is read-only; copy, search, and navigation remain available"
-                        .to_string(),
-                )
-            })
-        }) {
-            self.peer.alert(message);
-            return;
+        if let Some(editor) = self.editors.get(&buffer_id) {
+            let mut editor = editor.borrow_mut();
+            if let Some(store) = editor.vlf_store.as_ref() {
+                match store.edit_permission() {
+                    EditPermission::Forbidden { reason } => {
+                        self.peer.alert(format!("save disabled in VLF: {reason}"));
+                        return;
+                    }
+                    EditPermission::Allowed => {}
+                }
+
+                if !editor.vlf_save_enabled() {
+                    self.peer.alert("save disabled in VLF: streaming save path is not ready");
+                    return;
+                }
+
+                let Some(current_path) =
+                    self.file_manager.get_info(buffer_id).map(|info| info.path.clone())
+                else {
+                    self.peer.alert("VLF save missing file metadata");
+                    return;
+                };
+
+                let requested_path = path.to_owned();
+                let explicit_save_as = current_path != requested_path;
+                let suggested_policy = store.suggested_save_policy().unwrap_or(
+                    crate::vlf::overlay::VlfSavePolicy::TempFileRewrite { temp_dir: None },
+                );
+
+                if !explicit_save_as
+                    && matches!(suggested_policy, crate::vlf::overlay::VlfSavePolicy::SaveAs(_))
+                {
+                    self.peer.alert(
+                        "save-as required for VLF: explicit destination must be chosen before saving",
+                    );
+                    return;
+                }
+
+                let policy = if explicit_save_as {
+                    crate::vlf::overlay::VlfSavePolicy::SaveAs(requested_path.clone())
+                } else {
+                    suggested_policy
+                };
+
+                let request = match self.file_manager.prepare_vlf_save(path, buffer_id, policy) {
+                    Ok(request) => request,
+                    Err(e) => {
+                        let error_message = save_error_alert(&e, path);
+                        error!("File error: {:?}", error_message);
+                        self.peer.alert(error_message);
+                        return;
+                    }
+                };
+
+                let plan = match store.prepare_save_plan() {
+                    Ok(plan) => plan,
+                    Err(e) => {
+                        let error_message = format!("save failed: {}", e);
+                        error!("File error: {:?}", error_message);
+                        self.peer.alert(error_message);
+                        return;
+                    }
+                };
+
+                let saved_rev_id = editor.get_head_rev_id();
+                editor.save_task.start_vlf_save(request, plan, saved_rev_id);
+                let view_id_usize: usize = view_id.into();
+                self.peer.schedule_idle(SAVE_VIEW_IDLE_MASK | view_id_usize);
+                return;
+            }
         }
 
         let request = match self.file_manager.prepare_rope_save(path, buffer_id) {
             Ok(request) => request,
             Err(e) => {
-                let error_message = e.to_string();
+                let error_message = save_error_alert(&e, path);
                 error!("File error: {:?}", error_message);
                 self.peer.alert(error_message);
                 return;
@@ -534,7 +617,7 @@ impl CoreState {
         drop(save_ctx);
 
         if let Some(editor) = self.editors.get(&buffer_id) {
-            editor.borrow_mut().save_task.start_save(request, fin_text, saved_rev_id);
+            editor.borrow_mut().save_task.start_rope_save(request, fin_text, saved_rev_id);
             let view_id_usize: usize = view_id.into();
             self.peer.schedule_idle(SAVE_VIEW_IDLE_MASK | view_id_usize);
         } else {
@@ -545,17 +628,55 @@ impl CoreState {
     }
 
     fn finish_async_save(&mut self, view_id: ViewId, result: crate::whole_scan::SaveTaskResult) {
-        let path = result.request.path.clone();
-        let buffer_id = result.request.buffer_id;
+        let (path, buffer_id) = match &result.request {
+            crate::whole_scan::CompletedSaveRequest::Rope(request) => {
+                (request.path.clone(), request.buffer_id)
+            }
+            crate::whole_scan::CompletedSaveRequest::Vlf(request) => {
+                (request.path.clone(), request.buffer_id)
+            }
+        };
 
         match result.result {
             Ok(()) => {
-                if let Err(e) = self.file_manager.finish_rope_save(&result.request) {
-                    let error_message = e.to_string();
+                let finish_result = match &result.request {
+                    crate::whole_scan::CompletedSaveRequest::Rope(request) => {
+                        self.file_manager.finish_rope_save(request)
+                    }
+                    crate::whole_scan::CompletedSaveRequest::Vlf(request) => {
+                        self.file_manager.finish_vlf_save(request)
+                    }
+                };
+
+                if let Err(e) = finish_result {
+                    let error_message = save_error_alert(&e, &path);
                     error!("File error: {:?}", error_message);
                     self.peer.alert(error_message);
                     return;
                 }
+
+                if matches!(result.request, crate::whole_scan::CompletedSaveRequest::Vlf(_)) {
+                    let Some(editor_cell) = self.editors.get(&buffer_id) else {
+                        let error_message = format!(
+                            "save failed: missing editor for buffer {:?}. File path: {}",
+                            buffer_id,
+                            path.display()
+                        );
+                        error!("File error: {:?}", error_message);
+                        self.peer.alert(error_message);
+                        return;
+                    };
+
+                    if let Err(err) = editor_cell.borrow_mut().refresh_after_vlf_save(&path) {
+                        let error_message =
+                            format!("save failed: failed to refresh VLF save state: {err}");
+                        error!("File error: {:?}", error_message);
+                        self.peer.alert(error_message);
+                        return;
+                    }
+                }
+
+                self.peer.save_progress(view_id, 0, 0, true);
 
                 let changes = self.config_manager.update_buffer_path(buffer_id, &path);
                 let language = self.config_manager.get_buffer_language(buffer_id);
@@ -574,10 +695,18 @@ impl CoreState {
                         ctx.config_changed(&changes);
                     }
                 }
+
+                self.peer.alert(save_complete_alert(&path));
             }
             Err(e) => {
-                let error_message = e.to_string();
-                error!("File error: {:?}", error_message);
+                self.peer.save_progress(view_id, 0, 0, true);
+                let error_message = save_error_alert(&e, &path);
+                if matches!(&e, crate::file::FileError::Io(io_error, _) if io_error.kind() == ErrorKind::Interrupted)
+                {
+                    info!("Save cancelled: {}", path.display());
+                } else {
+                    error!("File error: {:?}", error_message);
+                }
                 self.peer.alert(error_message);
             }
         }
@@ -591,6 +720,14 @@ impl CoreState {
 
         let maybe_result =
             self.editors.get(&buffer_id).and_then(|editor| editor.borrow_mut().save_task.poll());
+
+        if let Some(progress) = self
+            .editors
+            .get(&buffer_id)
+            .and_then(|editor| editor.borrow_mut().save_task.poll_progress())
+        {
+            self.peer.save_progress(id, progress.bytes_written, progress.total_bytes, false);
+        }
 
         if let Some(result) = maybe_result {
             self.finish_async_save(id, result);
@@ -1130,11 +1267,14 @@ impl CoreState {
 
         let has_changes = self.file_manager.check_file(path, buffer_id);
         let is_pristine = self.editors.get(&buffer_id).map(|ed| ed.borrow().is_pristine()).unwrap();
-        //TODO: currently we only use the file's modification time when
-        // determining if a file has been changed by another process.
-        // A more robust solution would also hash the file's contents.
+        // External-change detection currently uses mtime, file length, and
+        // on Unix a device/inode/ctime change cookie. A content hash would be
+        // stronger still, but would cost an extra full-file read.
 
         if has_changes && is_pristine {
+            if self.editors.get(&buffer_id).is_some_and(|editor| editor.borrow().is_vlf()) {
+                return;
+            }
             if let Ok(open_result) = self.file_manager.open(path, buffer_id) {
                 match open_result {
                     OpenResult::Rope { text, mode } => {
@@ -1577,8 +1717,9 @@ impl BufferId {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::io::Write;
+    use std::io::{ErrorKind, Write};
     use std::mem;
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -1586,6 +1727,8 @@ mod tests {
     use serde_json::{Value, json};
     use xi_rpc::test_utils::DummyPeer;
     use xi_rpc::{Callback, Error as RpcError, Handler, Peer, RequestId, RpcCtx};
+
+    use crate::open_policy::{OpenPolicy, OpenThresholds};
 
     use super::{
         CoreState, NEW_VIEW_IDLE_TOKEN, PLUGIN_RESTART_MAX_DELAY_MS, SAVE_VIEW_IDLE_MASK,
@@ -1656,6 +1799,10 @@ mod tests {
         }
 
         fn request_shutdown(&self) {}
+    }
+
+    fn drive_save_idle(core: &mut crate::XiCore, view_id: ViewId) {
+        core.inner().handle_idle(SAVE_VIEW_IDLE_MASK | usize::from(view_id));
     }
 
     #[test]
@@ -1746,8 +1893,18 @@ mod tests {
             },
         );
 
+        core.inner().file_manager.set_open_policy(OpenPolicy::new(OpenThresholds {
+            normal_bytes: 1,
+            normal_lines: 1,
+            vlf_bytes: 2,
+            vlf_lines: 1,
+            confirm_local_bytes: u64::MAX,
+            confirm_remote_bytes: u64::MAX,
+            confirm_web_bytes: u64::MAX,
+        }));
+
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        tmp.as_file().set_len(35 * 1024 * 1024).unwrap();
+        tmp.as_file().set_len(8).unwrap();
 
         let view_id_value = core.inner().do_new_view(Some(tmp.path().to_path_buf())).unwrap();
         let view_id: ViewId = serde_json::from_value(view_id_value).unwrap();
@@ -1776,6 +1933,498 @@ mod tests {
                 "save disabled in VLF: VLF mode is read-only; copy, search, and navigation remain available"
             )
         );
+    }
+
+    #[test]
+    fn save_notification_saves_editable_vlf_buffer() {
+        let peer = RecordingPeer::default();
+        let ctx = RpcCtx::new(Box::new(peer.clone()));
+        let mut core = crate::XiCore::new();
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::ClientStarted {
+                config_dir: None,
+                client_extras_dir: None,
+            },
+        );
+
+        core.inner().file_manager.set_open_policy(OpenPolicy::new(OpenThresholds {
+            normal_bytes: 1,
+            normal_lines: 1,
+            vlf_bytes: 2,
+            vlf_lines: 1,
+            confirm_local_bytes: u64::MAX,
+            confirm_remote_bytes: u64::MAX,
+            confirm_web_bytes: u64::MAX,
+        }));
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"alpha").unwrap();
+        tmp.flush().unwrap();
+
+        let view_id_value = core.inner().do_new_view(Some(tmp.path().to_path_buf())).unwrap();
+        let view_id: ViewId = serde_json::from_value(view_id_value).unwrap();
+        core.inner().handle_idle(NEW_VIEW_IDLE_TOKEN);
+
+        let buffer_id = core.inner().views.get(&view_id).unwrap().borrow().get_buffer_id();
+        {
+            let inner = core.inner();
+            let editor_cell = inner.editors.get(&buffer_id).unwrap();
+            let mut editor = editor_cell.borrow_mut();
+            assert!(editor.is_vlf());
+            assert!(editor.enable_vlf_editing());
+            let overlay_ctx =
+                editor.next_vlf_overlay_edit_context(crate::editor::EditType::InsertChars).unwrap();
+            editor.vlf_store.as_ref().unwrap().apply_insert(5, "\n", overlay_ctx).unwrap();
+            editor.commit_vlf_overlay_revision(overlay_ctx.revision_id);
+            assert!(!editor.is_pristine());
+        }
+
+        peer.take_notifications();
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::Save {
+                view_id,
+                file_path: tmp.path().display().to_string(),
+            },
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            drive_save_idle(&mut core, view_id);
+            if std::fs::read_to_string(tmp.path()).unwrap() == "alpha\n" {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("editable VLF async save did not complete within 2 s");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(core.inner().editors.get(&buffer_id).unwrap().borrow().is_pristine());
+        let (saved_path, saved_mod_time, saved_has_changed) = {
+            let inner = core.inner();
+            let info = inner.file_manager.get_info(buffer_id).unwrap();
+            (info.path.clone(), info.mod_time, info.has_changed)
+        };
+        assert_eq!(saved_path, tmp.path().to_path_buf());
+        assert!(saved_mod_time.is_some());
+        assert!(!saved_has_changed);
+        let notifications = peer.take_notifications();
+        assert!(notifications.iter().any(|(method, _)| method == "save_progress"));
+        let expected = super::save_complete_alert(tmp.path());
+        let (_, params) = notifications
+            .iter()
+            .find(|(method, _)| method == "alert")
+            .expect("expected save-complete alert");
+        assert_eq!(params["msg"].as_str(), Some(expected.as_str()));
+    }
+
+    #[cfg(feature = "notify")]
+    #[test]
+    fn vlf_save_does_not_mark_own_watcher_event_as_external_change() {
+        let peer = RecordingPeer::default();
+        let ctx = RpcCtx::new(Box::new(peer.clone()));
+        let mut core = crate::XiCore::new();
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::ClientStarted {
+                config_dir: None,
+                client_extras_dir: None,
+            },
+        );
+
+        core.inner().file_manager.set_open_policy(OpenPolicy::new(OpenThresholds {
+            normal_bytes: 1,
+            normal_lines: 1,
+            vlf_bytes: 2,
+            vlf_lines: 1,
+            confirm_local_bytes: u64::MAX,
+            confirm_remote_bytes: u64::MAX,
+            confirm_web_bytes: u64::MAX,
+        }));
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"alpha").unwrap();
+        tmp.flush().unwrap();
+
+        let view_id_value = core.inner().do_new_view(Some(tmp.path().to_path_buf())).unwrap();
+        let view_id: ViewId = serde_json::from_value(view_id_value).unwrap();
+        core.inner().handle_idle(NEW_VIEW_IDLE_TOKEN);
+
+        let buffer_id = core.inner().views.get(&view_id).unwrap().borrow().get_buffer_id();
+        {
+            let inner = core.inner();
+            let editor_cell = inner.editors.get(&buffer_id).unwrap();
+            let mut editor = editor_cell.borrow_mut();
+            assert!(editor.enable_vlf_editing());
+            let overlay_ctx =
+                editor.next_vlf_overlay_edit_context(crate::editor::EditType::InsertChars).unwrap();
+            editor.vlf_store.as_ref().unwrap().apply_insert(5, "\n", overlay_ctx).unwrap();
+            editor.commit_vlf_overlay_revision(overlay_ctx.revision_id);
+        }
+
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::Save {
+                view_id,
+                file_path: tmp.path().display().to_string(),
+            },
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            drive_save_idle(&mut core, view_id);
+            if std::fs::read_to_string(tmp.path()).unwrap() == "alpha\n" {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("editable VLF async save did not complete within 2 s");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        core.inner().handle_open_file_fs_event(notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![tmp.path().to_path_buf()],
+            attrs: notify::event::EventAttributes::default(),
+        });
+
+        assert!(core.inner().editors.get(&buffer_id).unwrap().borrow().is_pristine());
+        assert!(!core.inner().file_manager.get_info(buffer_id).unwrap().has_changed);
+    }
+
+    #[cfg(feature = "notify")]
+    #[test]
+    fn external_modification_after_vlf_save_is_still_detected() {
+        let peer = RecordingPeer::default();
+        let ctx = RpcCtx::new(Box::new(peer.clone()));
+        let mut core = crate::XiCore::new();
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::ClientStarted {
+                config_dir: None,
+                client_extras_dir: None,
+            },
+        );
+
+        core.inner().file_manager.set_open_policy(OpenPolicy::new(OpenThresholds {
+            normal_bytes: 1,
+            normal_lines: 1,
+            vlf_bytes: 2,
+            vlf_lines: 1,
+            confirm_local_bytes: u64::MAX,
+            confirm_remote_bytes: u64::MAX,
+            confirm_web_bytes: u64::MAX,
+        }));
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"alpha").unwrap();
+        tmp.flush().unwrap();
+
+        let view_id_value = core.inner().do_new_view(Some(tmp.path().to_path_buf())).unwrap();
+        let view_id: ViewId = serde_json::from_value(view_id_value).unwrap();
+        core.inner().handle_idle(NEW_VIEW_IDLE_TOKEN);
+
+        let buffer_id = core.inner().views.get(&view_id).unwrap().borrow().get_buffer_id();
+        {
+            let inner = core.inner();
+            let editor_cell = inner.editors.get(&buffer_id).unwrap();
+            let mut editor = editor_cell.borrow_mut();
+            assert!(editor.enable_vlf_editing());
+            let overlay_ctx =
+                editor.next_vlf_overlay_edit_context(crate::editor::EditType::InsertChars).unwrap();
+            editor.vlf_store.as_ref().unwrap().apply_insert(5, "\n", overlay_ctx).unwrap();
+            editor.commit_vlf_overlay_revision(overlay_ctx.revision_id);
+        }
+
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::Save {
+                view_id,
+                file_path: tmp.path().display().to_string(),
+            },
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            drive_save_idle(&mut core, view_id);
+            if std::fs::read_to_string(tmp.path()).unwrap() == "alpha\n" {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("editable VLF async save did not complete within 2 s");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let saved_mod_time = core.inner().file_manager.get_info(buffer_id).unwrap().mod_time;
+        let rewrite_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            std::fs::write(tmp.path(), b"external\n").unwrap();
+            let current_mod_time = std::fs::metadata(tmp.path()).unwrap().modified().ok();
+            if current_mod_time != saved_mod_time {
+                break;
+            }
+            if std::time::Instant::now() > rewrite_deadline {
+                panic!("external rewrite did not change file metadata within 2 s");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        core.inner().handle_open_file_fs_event(notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![tmp.path().to_path_buf()],
+            attrs: notify::event::EventAttributes::default(),
+        });
+
+        assert!(core.inner().file_manager.get_info(buffer_id).unwrap().has_changed);
+    }
+
+    #[test]
+    fn save_notification_save_as_keeps_vlf_mode_and_updates_buffer_path() {
+        let peer = RecordingPeer::default();
+        let ctx = RpcCtx::new(Box::new(peer.clone()));
+        let mut core = crate::XiCore::new();
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::ClientStarted {
+                config_dir: None,
+                client_extras_dir: None,
+            },
+        );
+
+        core.inner().file_manager.set_open_policy(OpenPolicy::new(OpenThresholds {
+            normal_bytes: 1,
+            normal_lines: 1,
+            vlf_bytes: 2,
+            vlf_lines: 1,
+            confirm_local_bytes: u64::MAX,
+            confirm_remote_bytes: u64::MAX,
+            confirm_web_bytes: u64::MAX,
+        }));
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.as_file().set_len(8).unwrap();
+        let other = tempfile::NamedTempFile::new().unwrap();
+
+        let view_id_value = core.inner().do_new_view(Some(tmp.path().to_path_buf())).unwrap();
+        let view_id: ViewId = serde_json::from_value(view_id_value).unwrap();
+        core.inner().handle_idle(NEW_VIEW_IDLE_TOKEN);
+
+        let buffer_id = core.inner().views.get(&view_id).unwrap().borrow().get_buffer_id();
+        {
+            let inner = core.inner();
+            let editor_cell = inner.editors.get(&buffer_id).unwrap();
+            let mut editor = editor_cell.borrow_mut();
+            assert!(editor.enable_vlf_editing());
+            let overlay_ctx =
+                editor.next_vlf_overlay_edit_context(crate::editor::EditType::InsertChars).unwrap();
+            editor.vlf_store.as_ref().unwrap().apply_insert(8, "!", overlay_ctx).unwrap();
+            editor.commit_vlf_overlay_revision(overlay_ctx.revision_id);
+        }
+
+        peer.take_notifications();
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::Save {
+                view_id,
+                file_path: other.path().display().to_string(),
+            },
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            drive_save_idle(&mut core, view_id);
+            if std::fs::read_to_string(other.path()).unwrap() == "\0\0\0\0\0\0\0\0!" {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("VLF save-as did not complete within 2 s");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(std::fs::metadata(tmp.path()).unwrap().len(), 8);
+        let inner = core.inner();
+        let editor = inner.editors.get(&buffer_id).unwrap().borrow();
+        assert!(editor.is_vlf());
+        assert!(editor.is_pristine());
+        assert_eq!(
+            inner.file_manager.get_info(buffer_id).unwrap().path,
+            other.path().to_path_buf()
+        );
+        let notifications = peer.take_notifications();
+        assert!(notifications.iter().any(|(method, _)| method == "language_changed"));
+        let expected = super::save_complete_alert(other.path());
+        let (_, params) = notifications
+            .iter()
+            .find(|(method, _)| method == "alert")
+            .expect("expected save-complete alert");
+        assert_eq!(params["msg"].as_str(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn save_notification_requires_explicit_vlf_save_as_policy() {
+        let peer = RecordingPeer::default();
+        let ctx = RpcCtx::new(Box::new(peer.clone()));
+        let mut core = crate::XiCore::new();
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::ClientStarted {
+                config_dir: None,
+                client_extras_dir: None,
+            },
+        );
+
+        core.inner().file_manager.set_open_policy(OpenPolicy::new(OpenThresholds {
+            normal_bytes: 1,
+            normal_lines: 1,
+            vlf_bytes: 2,
+            vlf_lines: 1,
+            confirm_local_bytes: u64::MAX,
+            confirm_remote_bytes: u64::MAX,
+            confirm_web_bytes: u64::MAX,
+        }));
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.as_file().set_len(600 * 1024 * 1024).unwrap();
+
+        let view_id_value = core.inner().do_new_view(Some(tmp.path().to_path_buf())).unwrap();
+        let view_id: ViewId = serde_json::from_value(view_id_value).unwrap();
+        core.inner().handle_idle(NEW_VIEW_IDLE_TOKEN);
+
+        let buffer_id = core.inner().views.get(&view_id).unwrap().borrow().get_buffer_id();
+        {
+            let inner = core.inner();
+            let editor_cell = inner.editors.get(&buffer_id).unwrap();
+            let mut editor = editor_cell.borrow_mut();
+            assert!(editor.enable_vlf_editing());
+            let overlay_ctx =
+                editor.next_vlf_overlay_edit_context(crate::editor::EditType::Delete).unwrap();
+            editor
+                .vlf_store
+                .as_ref()
+                .unwrap()
+                .apply_delete(crate::text_store::ByteRange::new(0, 70 * 1024 * 1024), overlay_ctx)
+                .unwrap();
+            editor.commit_vlf_overlay_revision(overlay_ctx.revision_id);
+        }
+
+        peer.take_notifications();
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::Save {
+                view_id,
+                file_path: tmp.path().display().to_string(),
+            },
+        );
+
+        let notifications = peer.take_notifications();
+        let (_, params) = notifications
+            .iter()
+            .find(|(method, _)| method == "alert")
+            .expect("expected save-as-required alert");
+        assert_eq!(
+            params["msg"].as_str(),
+            Some("save-as required for VLF: explicit destination must be chosen before saving")
+        );
+    }
+
+    #[test]
+    fn vlf_second_save_after_rebase_uses_new_base_file() {
+        let peer = RecordingPeer::default();
+        let ctx = RpcCtx::new(Box::new(peer.clone()));
+        let mut core = crate::XiCore::new();
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::ClientStarted {
+                config_dir: None,
+                client_extras_dir: None,
+            },
+        );
+
+        core.inner().file_manager.set_open_policy(OpenPolicy::new(OpenThresholds {
+            normal_bytes: 1,
+            normal_lines: 1,
+            vlf_bytes: 2,
+            vlf_lines: 1,
+            confirm_local_bytes: u64::MAX,
+            confirm_remote_bytes: u64::MAX,
+            confirm_web_bytes: u64::MAX,
+        }));
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"alpha").unwrap();
+        tmp.flush().unwrap();
+
+        let view_id_value = core.inner().do_new_view(Some(tmp.path().to_path_buf())).unwrap();
+        let view_id: ViewId = serde_json::from_value(view_id_value).unwrap();
+        core.inner().handle_idle(NEW_VIEW_IDLE_TOKEN);
+
+        let buffer_id = core.inner().views.get(&view_id).unwrap().borrow().get_buffer_id();
+        {
+            let inner = core.inner();
+            let editor_cell = inner.editors.get(&buffer_id).unwrap();
+            let mut editor = editor_cell.borrow_mut();
+            assert!(editor.enable_vlf_editing());
+            let first =
+                editor.next_vlf_overlay_edit_context(crate::editor::EditType::InsertChars).unwrap();
+            editor.vlf_store.as_ref().unwrap().apply_insert(5, "\n", first).unwrap();
+            editor.commit_vlf_overlay_revision(first.revision_id);
+        }
+
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::Save {
+                view_id,
+                file_path: tmp.path().display().to_string(),
+            },
+        );
+
+        let first_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            drive_save_idle(&mut core, view_id);
+            if std::fs::read_to_string(tmp.path()).unwrap() == "alpha\n" {
+                break;
+            }
+            if std::time::Instant::now() > first_deadline {
+                panic!("first VLF save did not complete within 2 s");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        {
+            let inner = core.inner();
+            let editor_cell = inner.editors.get(&buffer_id).unwrap();
+            let mut editor = editor_cell.borrow_mut();
+            let second =
+                editor.next_vlf_overlay_edit_context(crate::editor::EditType::InsertChars).unwrap();
+            editor.vlf_store.as_ref().unwrap().apply_insert(6, "beta\n", second).unwrap();
+            editor.commit_vlf_overlay_revision(second.revision_id);
+        }
+
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::Save {
+                view_id,
+                file_path: tmp.path().display().to_string(),
+            },
+        );
+
+        let second_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            drive_save_idle(&mut core, view_id);
+            if std::fs::read_to_string(tmp.path()).unwrap() == "alpha\nbeta\n" {
+                break;
+            }
+            if std::time::Instant::now() > second_deadline {
+                panic!("second VLF save did not complete within 2 s");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(core.inner().editors.get(&buffer_id).unwrap().borrow().is_pristine());
     }
 
     #[test]
@@ -1819,5 +2468,104 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
+
+        let notifications = peer.take_notifications();
+        let expected = super::save_complete_alert(tmp.path());
+        let (_, params) = notifications
+            .iter()
+            .find(|(method, _)| method == "alert")
+            .expect("expected save-complete alert");
+        assert_eq!(params["msg"].as_str(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn finish_async_save_reports_cancelled_message() {
+        let peer = RecordingPeer::default();
+        let ctx = RpcCtx::new(Box::new(peer.clone()));
+        let mut core = crate::XiCore::new();
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::ClientStarted {
+                config_dir: None,
+                client_extras_dir: None,
+            },
+        );
+
+        let path = PathBuf::from("/tmp/cancelled.txt");
+        let request = crate::file::PreparedRopeSave {
+            buffer_id: crate::tabs::BufferId(1),
+            path: path.clone(),
+            encoding: crate::file::CharacterEncoding::Utf8,
+            kind: crate::file::PreparedRopeSaveKind::New,
+            options: crate::file::SaveOptions::default(),
+        };
+        let saved_rev_id = xi_rope::engine::Engine::new(xi_rope::Rope::from("")).get_head_rev_id();
+
+        core.inner().finish_async_save(
+            ViewId(1),
+            crate::whole_scan::SaveTaskResult {
+                request: crate::whole_scan::CompletedSaveRequest::Rope(request),
+                saved_rev_id,
+                result: Err(crate::file::FileError::Io(
+                    std::io::Error::new(ErrorKind::Interrupted, "save cancelled"),
+                    path.clone(),
+                )),
+            },
+        );
+
+        let notifications = peer.take_notifications();
+        let (_, params) = notifications
+            .iter()
+            .find(|(method, _)| method == "alert")
+            .expect("expected save-cancelled alert");
+        let expected = super::save_cancelled_alert(&path);
+        assert_eq!(params["msg"].as_str(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn finish_async_save_reports_failed_message() {
+        let peer = RecordingPeer::default();
+        let ctx = RpcCtx::new(Box::new(peer.clone()));
+        let mut core = crate::XiCore::new();
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::ClientStarted {
+                config_dir: None,
+                client_extras_dir: None,
+            },
+        );
+
+        let path = PathBuf::from("/tmp/failed.txt");
+        let request = crate::file::PreparedRopeSave {
+            buffer_id: crate::tabs::BufferId(1),
+            path: path.clone(),
+            encoding: crate::file::CharacterEncoding::Utf8,
+            kind: crate::file::PreparedRopeSaveKind::New,
+            options: crate::file::SaveOptions::default(),
+        };
+        let saved_rev_id = xi_rope::engine::Engine::new(xi_rope::Rope::from("")).get_head_rev_id();
+        let error = crate::file::FileError::Io(
+            std::io::Error::new(ErrorKind::PermissionDenied, "permission denied"),
+            path.clone(),
+        );
+
+        core.inner().finish_async_save(
+            ViewId(1),
+            crate::whole_scan::SaveTaskResult {
+                request: crate::whole_scan::CompletedSaveRequest::Rope(request),
+                saved_rev_id,
+                result: Err(error),
+            },
+        );
+
+        let notifications = peer.take_notifications();
+        let (_, params) = notifications
+            .iter()
+            .find(|(method, _)| method == "alert")
+            .expect("expected save-failed alert");
+        assert_eq!(
+            params["msg"].as_str(),
+            Some("save failed: permission denied. File path: /tmp/failed.txt")
+        );
     }
 }

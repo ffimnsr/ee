@@ -169,6 +169,24 @@ impl Client {
         self.0.send_rpc_notification("alert", &json!({ "msg": msg.as_ref() }));
     }
 
+    pub fn save_progress(
+        &self,
+        view_id: ViewId,
+        bytes_written: u64,
+        total_bytes: u64,
+        complete: bool,
+    ) {
+        self.0.send_rpc_notification(
+            "save_progress",
+            &json!({
+                "view_id": view_id,
+                "bytes_written": bytes_written,
+                "total_bytes": total_bytes,
+                "complete": complete,
+            }),
+        );
+    }
+
     pub fn add_status_item(
         &self,
         view_id: ViewId,

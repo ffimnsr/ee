@@ -95,6 +95,9 @@ const LINE_COUNT_MMAP_MAX_THREADS: usize = 8;
 /// only to the UTF-8 decoded strings stored alongside each raw page.
 pub const DEFAULT_DECODED_CACHE_BYTE_CAP: u64 = 32 * 1024 * 1024;
 
+const VLF_READ_ONLY_REASON: &str =
+    "VLF mode is read-only; copy, search, and navigation remain available";
+
 // ---------------------------------------------------------------------------
 // VlfMemoryBudget
 // ---------------------------------------------------------------------------
@@ -332,6 +335,10 @@ impl DecodedTextCache {
     fn used_bytes(&self) -> u64 {
         self.used_bytes
     }
+
+    fn byte_cap(&self) -> u64 {
+        self.byte_cap
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -516,7 +523,9 @@ impl VlfStore {
         // inserted pieces; Original piece newline counts stay approximate until
         // the page index fills in.
         let metrics = TextMetrics { byte_len: file_size, ..TextMetrics::default() };
-        *ov = Some(PieceOverlay::with_limits(metrics, OverlayLimits::default()));
+        let mut overlay = PieceOverlay::with_limits(metrics, OverlayLimits::default());
+        overlay.set_streaming_save_ready();
+        *ov = Some(overlay);
     }
 
     /// Enable editing mode with explicit resource limits.
@@ -530,7 +539,9 @@ impl VlfStore {
         }
         let file_size = self.pager.file_size();
         let metrics = TextMetrics { byte_len: file_size, ..TextMetrics::default() };
-        *ov = Some(PieceOverlay::with_limits(metrics, limits));
+        let mut overlay = PieceOverlay::with_limits(metrics, limits);
+        overlay.set_streaming_save_ready();
+        *ov = Some(overlay);
     }
 
     /// Insert `text` at logical byte offset `at`, recording the edit in the
@@ -606,6 +617,19 @@ impl VlfStore {
         self.overlay.borrow().as_ref().map(|ov| ov.suggested_save_policy())
     }
 
+    /// Returns `true` when an edit overlay is active for this VLF buffer.
+    pub fn is_editing_enabled(&self) -> bool {
+        self.overlay.borrow().is_some()
+    }
+
+    /// Returns `true` when the overlay has the streaming-save gate enabled.
+    pub fn is_save_enabled(&self) -> bool {
+        self.overlay
+            .borrow()
+            .as_ref()
+            .is_some_and(|overlay| overlay.edit_gate().streaming_save_ready)
+    }
+
     /// Signed byte delta of the current overlay relative to the original file.
     ///
     /// Returns `0` when editing has not been enabled.
@@ -652,6 +676,74 @@ impl VlfStore {
             policy,
             on_progress,
         )
+    }
+
+    /// Snapshot bounded save inputs for background VLF save execution.
+    pub fn prepare_save_plan(
+        &self,
+    ) -> Result<crate::vlf::save::PreparedVlfSavePlan, crate::vlf::save::VlfSaveError> {
+        let ov = self.overlay.borrow();
+        let overlay = ov.as_ref().ok_or(crate::vlf::save::VlfSaveError::EditingNotEnabled)?;
+        Ok(crate::vlf::save::PreparedVlfSavePlan {
+            source_path: self.pager.canonical_path().to_owned(),
+            snapshot: overlay.save_snapshot(),
+        })
+    }
+
+    /// Rebase the store onto the just-saved on-disk file without leaving VLF mode.
+    pub fn refresh_after_save(&mut self, path: &Path) -> io::Result<()> {
+        let raw_cache_byte_cap = self.pager.metrics().cache_byte_cap;
+        let decoded_cache_byte_cap = self.decoded_cache.get_mut().byte_cap();
+        let viewport = self.viewport.get_mut().clone();
+
+        let overlay_limits =
+            self.overlay.get_mut().as_ref().map(|overlay| overlay.limits().clone());
+
+        self.bg_cancel.store(true, Ordering::Release);
+        *self.scan_rx.get_mut() = None;
+        self.bg_cancel = Arc::new(AtomicBool::new(false));
+
+        self.pager = FilePager::open_with_config(path, raw_cache_byte_cap, self.page_size * 4)?;
+        let file_size = self.pager.file_size();
+        let exact_line_count = if overlay_limits.is_some() {
+            Some(if file_size == 0 { 1 } else { self.count_lf_streaming()?.saturating_add(1) })
+        } else {
+            None
+        };
+
+        *self.index.get_mut() = PageIndex::new(file_size);
+        *self.decoded_cache.get_mut() = DecodedTextCache::new(decoded_cache_byte_cap);
+
+        let window_start = viewport.window_start.0.min(file_size);
+        let window_end = viewport.window_end.0.min(file_size).max(window_start);
+        *self.viewport.get_mut() = VlfViewportState {
+            window_start: ByteOffset(window_start),
+            window_end: ByteOffset(window_end),
+            decoded_range: ByteRange::new(window_start, window_end),
+            original_encoded_len: window_end.saturating_sub(window_start),
+            dirty: false,
+            batch_size: viewport.batch_size,
+        };
+
+        self.first_viewport_set.set(window_end > window_start);
+        self.approx_line_floor.set(exact_line_count.unwrap_or(0));
+        self.exact_line_count.set(exact_line_count);
+
+        *self.overlay.get_mut() = overlay_limits.map(|limits| {
+            let mut overlay = PieceOverlay::with_limits(
+                TextMetrics {
+                    byte_len: file_size,
+                    newline_count: exact_line_count.unwrap_or(1).saturating_sub(1),
+                    ..TextMetrics::default()
+                },
+                limits,
+            );
+            overlay.set_streaming_save_ready();
+            overlay
+        });
+
+        self.start_background_indexing();
+        Ok(())
     }
 
     /// Update the active viewport window.
@@ -1561,19 +1653,25 @@ impl TextStore for VlfStore {
         if self.overlay.borrow().is_some() {
             EditPermission::Allowed
         } else {
-            EditPermission::Forbidden {
-                reason: "VLF mode is read-only; copy, search, and navigation remain available",
-            }
+            EditPermission::Forbidden { reason: VLF_READ_ONLY_REASON }
         }
     }
 
     fn doc_status(&self) -> crate::text_store::DocStatus {
         let gates = DocumentMode::Vlf.feature_gates();
         let progress = self.index.borrow().scan_progress();
+        let mut disabled_features: Vec<&'static str> = gates.disabled_features().collect();
+        let overlay = self.overlay.borrow();
+        if let Some(overlay) = overlay.as_ref() {
+            disabled_features.retain(|feature| *feature != "editing" && *feature != "undo");
+            if overlay.edit_gate().streaming_save_ready {
+                disabled_features.retain(|feature| *feature != "save");
+            }
+        }
         crate::text_store::DocStatus {
             file_size_bytes: self.pager.file_size(),
             mode_name: "vlf",
-            disabled_features: gates.disabled_features().collect(),
+            disabled_features,
             indexing_progress: progress.fraction(),
             downgrade_notice: None,
         }
@@ -2372,9 +2470,7 @@ mod tests {
         let (store, _f) = store_from(b"hello");
         assert_eq!(
             store.edit_permission(),
-            EditPermission::Forbidden {
-                reason: "VLF mode is read-only; copy, search, and navigation remain available",
-            }
+            EditPermission::Forbidden { reason: VLF_READ_ONLY_REASON }
         );
     }
 
@@ -2388,9 +2484,7 @@ mod tests {
 
         assert_eq!(
             store.edit_permission(),
-            EditPermission::Forbidden {
-                reason: "VLF mode is read-only; copy, search, and navigation remain available",
-            }
+            EditPermission::Forbidden { reason: VLF_READ_ONLY_REASON }
         );
         // Navigation/search still works.
         assert_eq!(store.line_to_byte(LogicalLine(0)), LineLookup::Exact(ByteOffset(0)));
@@ -2631,7 +2725,47 @@ mod tests {
         assert!(!status.disabled_features.contains(&"search"), "search should be available in VLF");
         assert!(status.disabled_features.contains(&"editing"), "editing must be disabled");
         assert!(status.disabled_features.contains(&"save"), "save must be disabled");
+        assert!(status.disabled_features.contains(&"undo"), "undo must be disabled");
         assert!(status.disabled_features.contains(&"lsp"), "lsp must be disabled");
+    }
+
+    #[test]
+    fn doc_status_editable_vlf_reports_edit_and_save_enabled() {
+        let (store, _f) = store_from(b"hi");
+        store.enable_editing();
+
+        let status = store.doc_status();
+        assert!(!status.disabled_features.contains(&"editing"), "editing should be enabled");
+        assert!(!status.disabled_features.contains(&"save"), "save should be enabled");
+        assert!(!status.disabled_features.contains(&"undo"), "undo should be enabled");
+        assert!(status.disabled_features.contains(&"lsp"), "other VLF restrictions remain");
+        assert!(store.is_editing_enabled());
+        assert!(store.is_save_enabled());
+    }
+
+    #[test]
+    fn refresh_after_save_rebases_overlay_without_leaving_vlf_mode() {
+        let (store, file) = store_from(b"alpha\n");
+        store.enable_editing();
+        let ctx = OverlayEditContext { revision_id: 1, undo_group: 1 };
+        store.apply_insert(6, "beta\n", ctx).unwrap();
+
+        std::fs::write(file.path(), b"alpha\nbeta\n").unwrap();
+
+        let mut store = store;
+        store.refresh_after_save(file.path()).unwrap();
+
+        assert!(store.is_editing_enabled());
+        assert!(store.is_save_enabled());
+        assert_eq!(store.signed_byte_delta(), 0);
+        assert!(matches!(
+            store.suggested_save_policy(),
+            Some(VlfSavePolicy::SameSizeInPlaceOverwrite)
+        ));
+        match store.known_line_count() {
+            KnownLineCount::Exact(count) => assert_eq!(count, 3),
+            other => panic!("expected exact saved line count, got {:?}", other),
+        }
     }
 
     #[test]

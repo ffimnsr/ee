@@ -13,6 +13,9 @@
 // limitations under the License.
 
 //! Interactions with the file system.
+//!
+//! Ownership boundary: this module owns save-path validation, external-change
+//! checks, metadata refresh, and file-manager integration.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -33,7 +36,8 @@ use crate::line_ending::{LineEnding, LineEndingError};
 use crate::open_policy::{FileLocation, ModeOverride, OpenDecision, OpenPolicy};
 use crate::tabs::BufferId;
 use crate::text_store::DocumentMode;
-use crate::vlf::save::{SaveProgress, VlfSaveError};
+use crate::vlf::overlay::VlfSavePolicy;
+use crate::vlf::save::{PreparedVlfSavePlan, SaveProgress, VlfSaveError, stream_save_snapshot};
 use crate::vlf::store::VlfStore;
 use crate::whitespace::{Indentation, MixedIndentError};
 
@@ -41,6 +45,8 @@ use crate::whitespace::{Indentation, MixedIndentError};
 use crate::tabs::OPEN_FILE_EVENT_TOKEN;
 #[cfg(feature = "notify")]
 use crate::watcher::FileWatcher;
+#[cfg(target_family = "unix")]
+use std::os::unix::fs::MetadataExt;
 #[cfg(target_family = "unix")]
 use std::{fs::Permissions, os::unix::fs::PermissionsExt};
 
@@ -102,7 +108,10 @@ unsafe impl GlobalAlloc for TrackingAlloc {
 }
 
 #[cfg(test)]
-fn with_large_alloc_tracking<T>(threshold: usize, f: impl FnOnce() -> T) -> (T, usize, usize) {
+pub(crate) fn with_large_alloc_tracking<T>(
+    threshold: usize,
+    f: impl FnOnce() -> T,
+) -> (T, usize, usize) {
     TRACK_ALLOC_THRESHOLD.with(|value| value.set(threshold));
     TRACK_LARGE_ALLOC_COUNT.with(|value| value.set(0));
     TRACK_LARGEST_ALLOC.with(|value| value.set(0));
@@ -128,24 +137,40 @@ pub struct FileInfo {
     pub encoding: CharacterEncoding,
     pub path: PathBuf,
     pub mod_time: Option<SystemTime>,
+    pub len: Option<u64>,
     pub has_changed: bool,
     pub open_analysis: FileOpenAnalysis,
     #[cfg(target_family = "unix")]
     pub permissions: Option<u32>,
+    #[cfg(target_family = "unix")]
+    change_cookie: Option<FileChangeCookie>,
     /// Advisory exclusive lock held for the lifetime of this open buffer.
     /// Prevents a second editor instance from silently corrupting the file.
     _lock: Option<File>,
 }
 
+#[cfg(target_family = "unix")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileChangeCookie {
+    device_id: u64,
+    inode: u64,
+    change_seconds: i64,
+    change_nanoseconds: i64,
+}
+
 impl fmt::Debug for FileInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FileInfo")
+        let mut debug = f.debug_struct("FileInfo");
+        debug
             .field("encoding", &self.encoding)
             .field("path", &self.path)
             .field("mod_time", &self.mod_time)
+            .field("len", &self.len)
             .field("has_changed", &self.has_changed)
-            .field("open_analysis", &self.open_analysis)
-            .finish_non_exhaustive()
+            .field("open_analysis", &self.open_analysis);
+        #[cfg(target_family = "unix")]
+        debug.field("change_cookie", &self.change_cookie);
+        debug.finish_non_exhaustive()
     }
 }
 
@@ -348,6 +373,20 @@ pub(crate) struct PreparedRopeSave {
     pub(crate) options: SaveOptions,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum PreparedVlfSaveKind {
+    ExistingSamePath,
+    ExistingMove { prev_path: PathBuf },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedVlfSave {
+    pub(crate) buffer_id: BufferId,
+    pub(crate) path: PathBuf,
+    pub(crate) policy: VlfSavePolicy,
+    pub(crate) kind: PreparedVlfSaveKind,
+}
+
 impl FileManager {
     #[cfg(feature = "notify")]
     pub fn new(watcher: FileWatcher) -> Self {
@@ -393,7 +432,19 @@ impl FileManager {
     pub fn check_file(&mut self, path: &Path, id: BufferId) -> bool {
         if let Some(info) = self.file_info.get_mut(&id) {
             let mod_t = get_mod_time(path);
-            if mod_t != info.mod_time {
+            let len = get_file_len(path);
+            #[cfg(target_family = "unix")]
+            let change_cookie = get_change_cookie(path);
+            if mod_t != info.mod_time || len != info.len || {
+                #[cfg(target_family = "unix")]
+                {
+                    change_cookie != info.change_cookie
+                }
+                #[cfg(not(target_family = "unix"))]
+                {
+                    false
+                }
+            } {
                 info.has_changed = true
             }
             return info.has_changed;
@@ -472,10 +523,13 @@ impl FileManager {
                     encoding: CharacterEncoding::Utf8,
                     path: path.to_owned(),
                     mod_time: get_mod_time(path),
+                    len: get_file_len(path),
                     has_changed: false,
                     open_analysis: FileOpenAnalysis::default(),
                     #[cfg(target_family = "unix")]
                     permissions: get_permissions(path),
+                    #[cfg(target_family = "unix")]
+                    change_cookie: get_change_cookie(path),
                     _lock: None, // VLF files are read-only; no write lock needed.
                 };
                 self.open_files.insert(path.to_owned(), id);
@@ -562,7 +616,12 @@ impl FileManager {
             PreparedRopeSaveKind::ExistingSamePath => {
                 if let Some(info) = self.file_info.get_mut(&request.buffer_id) {
                     info.mod_time = get_mod_time(&request.path);
+                    info.len = get_file_len(&request.path);
                     info.has_changed = false;
+                    #[cfg(target_family = "unix")]
+                    {
+                        info.change_cookie = get_change_cookie(&request.path);
+                    }
                 }
             }
             PreparedRopeSaveKind::New | PreparedRopeSaveKind::ExistingMove { .. } => {
@@ -570,10 +629,13 @@ impl FileManager {
                     encoding: request.encoding,
                     path: request.path.clone(),
                     mod_time: get_mod_time(&request.path),
+                    len: get_file_len(&request.path),
                     has_changed: false,
                     open_analysis: FileOpenAnalysis::default(),
                     #[cfg(target_family = "unix")]
                     permissions: get_permissions(&request.path),
+                    #[cfg(target_family = "unix")]
+                    change_cookie: get_change_cookie(&request.path),
                     _lock: open_advisory_lock(&request.path),
                 };
                 self.open_files.insert(request.path.clone(), request.buffer_id);
@@ -590,6 +652,95 @@ impl FileManager {
         }
 
         Ok(())
+    }
+
+    pub(crate) fn prepare_vlf_save(
+        &self,
+        path: &Path,
+        id: BufferId,
+        policy: VlfSavePolicy,
+    ) -> Result<PreparedVlfSave, FileError> {
+        if path.to_str().is_none() {
+            return Err(FileError::NonUtf8Path(path.to_owned()));
+        }
+
+        match self.file_info.get(&id) {
+            Some(info) if info.has_changed => Err(FileError::HasChanged(path.to_owned())),
+            Some(info) if info.path == path => Ok(PreparedVlfSave {
+                buffer_id: id,
+                path: path.to_owned(),
+                policy,
+                kind: PreparedVlfSaveKind::ExistingSamePath,
+            }),
+            Some(info) => Ok(PreparedVlfSave {
+                buffer_id: id,
+                path: path.to_owned(),
+                policy,
+                kind: PreparedVlfSaveKind::ExistingMove { prev_path: info.path.clone() },
+            }),
+            None => Err(FileError::Io(
+                io::Error::new(io::ErrorKind::NotFound, "VLF save missing file metadata"),
+                path.to_owned(),
+            )),
+        }
+    }
+
+    pub(crate) fn finish_vlf_save(&mut self, request: &PreparedVlfSave) -> Result<(), FileError> {
+        match &request.kind {
+            PreparedVlfSaveKind::ExistingSamePath => {
+                if let Some(info) = self.file_info.get_mut(&request.buffer_id) {
+                    info.mod_time = get_mod_time(&request.path);
+                    info.len = get_file_len(&request.path);
+                    info.has_changed = false;
+                    #[cfg(target_family = "unix")]
+                    {
+                        info.change_cookie = get_change_cookie(&request.path);
+                        if info._lock.is_none() {
+                            info._lock = open_advisory_lock(&request.path);
+                        }
+                        info.permissions = get_permissions(&request.path);
+                    }
+                    return Ok(());
+                }
+            }
+            PreparedVlfSaveKind::ExistingMove { prev_path } => {
+                let previous_info = self.file_info.get(&request.buffer_id).ok_or_else(|| {
+                    FileError::Io(
+                        io::Error::new(io::ErrorKind::NotFound, "VLF save missing file metadata"),
+                        request.path.clone(),
+                    )
+                })?;
+
+                let info = FileInfo {
+                    encoding: previous_info.encoding,
+                    path: request.path.clone(),
+                    mod_time: get_mod_time(&request.path),
+                    len: get_file_len(&request.path),
+                    has_changed: false,
+                    open_analysis: previous_info.open_analysis,
+                    #[cfg(target_family = "unix")]
+                    permissions: get_permissions(&request.path),
+                    #[cfg(target_family = "unix")]
+                    change_cookie: get_change_cookie(&request.path),
+                    _lock: open_advisory_lock(&request.path),
+                };
+
+                self.open_files.insert(request.path.clone(), request.buffer_id);
+                self.file_info.insert(request.buffer_id, info);
+                #[cfg(feature = "notify")]
+                self.watcher.watch(&request.path, false, OPEN_FILE_EVENT_TOKEN);
+
+                self.open_files.remove(prev_path);
+                #[cfg(feature = "notify")]
+                self.watcher.unwatch(prev_path, OPEN_FILE_EVENT_TOKEN);
+                return Ok(());
+            }
+        }
+
+        Err(FileError::Io(
+            io::Error::new(io::ErrorKind::NotFound, "VLF save missing file metadata"),
+            request.path.clone(),
+        ))
     }
 
     /// Save a VLF document by streaming the overlay piece sequence through a
@@ -623,8 +774,17 @@ impl FileManager {
         let policy = store
             .suggested_save_policy()
             .unwrap_or(crate::vlf::overlay::VlfSavePolicy::TempFileRewrite { temp_dir: None });
-
-        store.stream_save(path, &policy, on_progress).map_err(|e| match e {
+        if matches!(policy, VlfSavePolicy::SaveAs(_)) {
+            return Err(FileError::Io(
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "VLF save requires explicit save-as destination",
+                ),
+                path.to_owned(),
+            ));
+        }
+        let request = self.prepare_vlf_save(path, id, policy.clone())?;
+        let plan = store.prepare_save_plan().map_err(|e| match e {
             VlfSaveError::Io(io_err, err_path) => FileError::Io(io_err, err_path),
             VlfSaveError::Cancelled => FileError::Io(
                 io::Error::new(io::ErrorKind::Interrupted, "VLF save cancelled"),
@@ -642,13 +802,31 @@ impl FileManager {
             }
         })?;
 
-        // Update stored file metadata to reflect the successful save.
-        if let Some(info) = self.file_info.get_mut(&id) {
-            info.mod_time = get_mod_time(path);
-            info.has_changed = false;
-        }
+        stream_save_snapshot(
+            &PreparedVlfSavePlan { source_path: plan.source_path, snapshot: plan.snapshot },
+            path,
+            &policy,
+            on_progress,
+        )
+        .map_err(|e| match e {
+            VlfSaveError::Io(io_err, err_path) => FileError::Io(io_err, err_path),
+            VlfSaveError::Cancelled => FileError::Io(
+                io::Error::new(io::ErrorKind::Interrupted, "VLF save cancelled"),
+                path.to_owned(),
+            ),
+            VlfSaveError::EditingNotEnabled => FileError::Io(
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "VLF editing not enabled; nothing to save",
+                ),
+                path.to_owned(),
+            ),
+            VlfSaveError::InvalidPolicy(reason) => {
+                FileError::Io(io::Error::new(io::ErrorKind::InvalidInput, reason), path.to_owned())
+            }
+        })?;
 
-        Ok(())
+        self.finish_vlf_save(&request)
     }
 }
 
@@ -687,9 +865,12 @@ where
     let info = FileInfo {
         encoding,
         mod_time: get_mod_time(&path),
+        len: get_file_len(&path),
         open_analysis,
         #[cfg(target_family = "unix")]
         permissions: get_permissions(&path),
+        #[cfg(target_family = "unix")]
+        change_cookie: get_change_cookie(&path),
         path: path.as_ref().to_owned(),
         has_changed: false,
         _lock: lock,
@@ -704,6 +885,7 @@ fn try_save(
     encoding: CharacterEncoding,
     save_options: SaveOptions,
     should_continue: &mut dyn FnMut() -> bool,
+    on_progress: &mut dyn FnMut(SaveProgress),
 ) -> Result<(), FileError> {
     let tmp_extension = path.extension().map_or_else(
         || OsString::from("swp"),
@@ -716,9 +898,14 @@ fn try_save(
     let tmp_path = &path.with_extension(tmp_extension);
 
     let mut f = File::create(tmp_path).map_err(|e| FileError::Io(e, tmp_path.to_owned()))?;
+    let total_bytes = text.len() as u64
+        + u64::from(matches!(encoding, CharacterEncoding::Utf8WithBom)) * UTF8_BOM.len() as u64;
+    let mut bytes_written = 0u64;
     match encoding {
         CharacterEncoding::Utf8WithBom => {
-            f.write_all(UTF8_BOM.as_bytes()).map_err(|e| FileError::Io(e, tmp_path.to_owned()))?
+            f.write_all(UTF8_BOM.as_bytes()).map_err(|e| FileError::Io(e, tmp_path.to_owned()))?;
+            bytes_written += UTF8_BOM.len() as u64;
+            on_progress(SaveProgress { bytes_written, total_bytes });
         }
         CharacterEncoding::Utf8 => (),
     }
@@ -729,7 +916,13 @@ fn try_save(
         return Err(cancelled_save_error(tmp_path));
     }
 
-    let mut writer = ChunkedSaveWriter { inner: &mut f, should_continue };
+    let mut writer = ChunkedSaveWriter {
+        inner: &mut f,
+        should_continue,
+        on_progress,
+        bytes_written: &mut bytes_written,
+        total_bytes,
+    };
     text.write_to(&mut writer).map_err(|e| match e.kind() {
         io::ErrorKind::Interrupted => cancelled_save_error(tmp_path),
         _ => FileError::Io(e, tmp_path.to_owned()),
@@ -775,12 +968,46 @@ pub(crate) fn execute_prepared_rope_save(
     text: &Rope,
     should_continue: &mut dyn FnMut() -> bool,
 ) -> Result<(), FileError> {
-    try_save(&request.path, text, request.encoding, request.options, should_continue)
+    let mut ignore_progress = |_progress: SaveProgress| {};
+    execute_prepared_rope_save_with_progress(request, text, should_continue, &mut ignore_progress)
+}
+
+pub(crate) fn execute_prepared_rope_save_with_progress(
+    request: &PreparedRopeSave,
+    text: &Rope,
+    should_continue: &mut dyn FnMut() -> bool,
+    on_progress: &mut dyn FnMut(SaveProgress),
+) -> Result<(), FileError> {
+    try_save(&request.path, text, request.encoding, request.options, should_continue, on_progress)
+}
+
+pub(crate) fn execute_prepared_vlf_save(
+    request: &PreparedVlfSave,
+    plan: &PreparedVlfSavePlan,
+    on_progress: &mut dyn FnMut(SaveProgress) -> bool,
+) -> Result<(), FileError> {
+    stream_save_snapshot(plan, &request.path, &request.policy, on_progress).map_err(|e| match e {
+        VlfSaveError::Io(io_err, err_path) => FileError::Io(io_err, err_path),
+        VlfSaveError::Cancelled => FileError::Io(
+            io::Error::new(io::ErrorKind::Interrupted, "VLF save cancelled"),
+            request.path.clone(),
+        ),
+        VlfSaveError::EditingNotEnabled => FileError::Io(
+            io::Error::new(io::ErrorKind::InvalidInput, "VLF editing not enabled; nothing to save"),
+            request.path.clone(),
+        ),
+        VlfSaveError::InvalidPolicy(reason) => {
+            FileError::Io(io::Error::new(io::ErrorKind::InvalidInput, reason), request.path.clone())
+        }
+    })
 }
 
 struct ChunkedSaveWriter<'a, W> {
     inner: &'a mut W,
     should_continue: &'a mut dyn FnMut() -> bool,
+    on_progress: &'a mut dyn FnMut(SaveProgress),
+    bytes_written: &'a mut u64,
+    total_bytes: u64,
 }
 
 impl<W: Write> Write for ChunkedSaveWriter<'_, W> {
@@ -796,7 +1023,13 @@ impl<W: Write> Write for ChunkedSaveWriter<'_, W> {
         if !(self.should_continue)() {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "save cancelled"));
         }
-        self.inner.write_all(buf)
+        self.inner.write_all(buf)?;
+        *self.bytes_written += buf.len() as u64;
+        (self.on_progress)(SaveProgress {
+            bytes_written: *self.bytes_written,
+            total_bytes: self.total_bytes,
+        });
+        Ok(())
     }
 }
 
@@ -831,6 +1064,20 @@ impl CharacterEncoding {
 /// if present.
 fn get_mod_time<P: AsRef<Path>>(path: P) -> Option<SystemTime> {
     File::open(path).and_then(|f| f.metadata()).and_then(|meta| meta.modified()).ok()
+}
+
+fn get_file_len<P: AsRef<Path>>(path: P) -> Option<u64> {
+    File::open(path).and_then(|f| f.metadata()).map(|meta| meta.len()).ok()
+}
+
+#[cfg(target_family = "unix")]
+fn get_change_cookie<P: AsRef<Path>>(path: P) -> Option<FileChangeCookie> {
+    File::open(path).and_then(|f| f.metadata()).ok().map(|meta| FileChangeCookie {
+        device_id: meta.dev(),
+        inode: meta.ino(),
+        change_seconds: meta.ctime(),
+        change_nanoseconds: meta.ctime_nsec(),
+    })
 }
 
 fn cancelled_save_error(path: &Path) -> FileError {
@@ -1235,5 +1482,32 @@ mod tests {
             ),
             "expected Rope-backed result for ConstrainedNormal"
         );
+    }
+
+    #[cfg(all(target_family = "unix", not(feature = "notify")))]
+    #[test]
+    fn check_file_detects_same_size_rewrite_when_mtime_is_restored() {
+        use super::FileManager;
+        use std::fs::{File, FileTimes};
+        use std::io::Write;
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "alpha\n").unwrap();
+        tmp.flush().unwrap();
+
+        let path = tmp.path();
+        let buffer_id = crate::tabs::BufferId(123);
+        let mut mgr = FileManager::new();
+        let opened = mgr.open(path, buffer_id).unwrap();
+        assert!(matches!(opened, OpenResult::Rope { .. }));
+
+        let original_mod_time = mgr.get_info(buffer_id).unwrap().mod_time.unwrap();
+
+        std::fs::write(path, b"bravo\n").unwrap();
+        let file = File::options().write(true).open(path).unwrap();
+        file.set_times(FileTimes::new().set_modified(original_mod_time)).unwrap();
+
+        assert!(mgr.check_file(path, buffer_id));
+        assert!(mgr.get_info(buffer_id).unwrap().has_changed);
     }
 }
