@@ -255,7 +255,7 @@ impl CoreState {
     /// Sets (overwriting) the config for a given domain.
     fn set_config(&mut self, domain: ConfigDomain, table: Table) {
         match self.config_manager.set_user_config(domain, table) {
-            Err(e) => self.peer.alert(format!("{}", &e)),
+            Err(e) => self.peer.alert(format!("{}", e)),
             Ok(changes) => self.handle_config_changes(changes),
         }
     }
@@ -1992,7 +1992,9 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
             drive_save_idle(&mut core, view_id);
-            if std::fs::read_to_string(tmp.path()).unwrap() == "alpha\n" {
+            if std::fs::read_to_string(tmp.path()).unwrap() == "alpha\n"
+                && core.inner().editors.get(&buffer_id).unwrap().borrow().is_pristine()
+            {
                 break;
             }
             if std::time::Instant::now() > deadline {
@@ -2075,7 +2077,9 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
             drive_save_idle(&mut core, view_id);
-            if std::fs::read_to_string(tmp.path()).unwrap() == "alpha\n" {
+            if std::fs::read_to_string(tmp.path()).unwrap() == "alpha\n"
+                && core.inner().editors.get(&buffer_id).unwrap().borrow().is_pristine()
+            {
                 break;
             }
             if std::time::Instant::now() > deadline {
@@ -2236,7 +2240,9 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
             drive_save_idle(&mut core, view_id);
-            if std::fs::read_to_string(other.path()).unwrap() == "\0\0\0\0\0\0\0\0!" {
+            if std::fs::read_to_string(other.path()).unwrap() == "\0\0\0\0\0\0\0\0!"
+                && core.inner().editors.get(&buffer_id).unwrap().borrow().is_pristine()
+            {
                 break;
             }
             if std::time::Instant::now() > deadline {
@@ -2385,7 +2391,9 @@ mod tests {
         let first_deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
             drive_save_idle(&mut core, view_id);
-            if std::fs::read_to_string(tmp.path()).unwrap() == "alpha\n" {
+            if std::fs::read_to_string(tmp.path()).unwrap() == "alpha\n"
+                && core.inner().editors.get(&buffer_id).unwrap().borrow().is_pristine()
+            {
                 break;
             }
             if std::time::Instant::now() > first_deadline {
@@ -2415,7 +2423,9 @@ mod tests {
         let second_deadline = std::time::Instant::now() + Duration::from_secs(2);
         loop {
             drive_save_idle(&mut core, view_id);
-            if std::fs::read_to_string(tmp.path()).unwrap() == "alpha\nbeta\n" {
+            if std::fs::read_to_string(tmp.path()).unwrap() == "alpha\nbeta\n"
+                && core.inner().editors.get(&buffer_id).unwrap().borrow().is_pristine()
+            {
                 break;
             }
             if std::time::Instant::now() > second_deadline {
@@ -2458,9 +2468,16 @@ mod tests {
 
         let save_idle_token = SAVE_VIEW_IDLE_MASK | usize::from(view_id);
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut notifications = Vec::new();
         loop {
             core.inner().handle_idle(save_idle_token);
-            if fs::read_to_string(tmp.path()).unwrap() == "alpha\n" {
+            notifications.extend(peer.take_notifications());
+            let saw_save_complete_alert = notifications.iter().any(|(method, params)| {
+                method == "alert"
+                    && params["msg"].as_str()
+                        == Some(super::save_complete_alert(tmp.path()).as_str())
+            });
+            if fs::read_to_string(tmp.path()).unwrap() == "alpha\n" && saw_save_complete_alert {
                 break;
             }
             if std::time::Instant::now() > deadline {
@@ -2469,7 +2486,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
 
-        let notifications = peer.take_notifications();
         let expected = super::save_complete_alert(tmp.path());
         let (_, params) = notifications
             .iter()

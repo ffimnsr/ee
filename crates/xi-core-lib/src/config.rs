@@ -549,7 +549,7 @@ fn normalize_language_name(language_name: &str) -> &str {
 
 fn parse_fuzz_table_payload(format_case: u8, payload: &[u8]) -> Option<Table> {
     let text = std::str::from_utf8(payload).ok()?;
-    if format_case % 2 == 0 {
+    if format_case.is_multiple_of(2) {
         match serde_json::from_str::<Value>(text).ok()? {
             Value::Object(table) => Some(table),
             _ => None,

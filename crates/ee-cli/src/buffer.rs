@@ -1992,10 +1992,10 @@ impl BufferManager {
                 continue; // already notified
             }
             let current_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
-            if let (Some(stored), Some(current)) = (buf.mtime, current_mtime) {
-                if current > stored {
-                    buf.externally_modified = true;
-                }
+            if let (Some(stored), Some(current)) = (buf.mtime, current_mtime)
+                && current > stored
+            {
+                buf.externally_modified = true;
             }
         }
     }

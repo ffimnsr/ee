@@ -191,12 +191,12 @@ fn cmd_doctor(config_path: Option<&PathBuf>) {
             println!("  ~/.ee.toml              [{status}]");
         }
         // Git repo root
-        if let Some(root) = config::find_git_root(&cwd) {
-            if root != cwd {
-                let repo_cfg = root.join(".ee.toml");
-                let status = if repo_cfg.exists() { "found" } else { "not found" };
-                println!("  {repo_cfg:?}  [git root] [{status}]");
-            }
+        if let Some(root) = config::find_git_root(&cwd)
+            && root != cwd
+        {
+            let repo_cfg = root.join(".ee.toml");
+            let status = if repo_cfg.exists() { "found" } else { "not found" };
+            println!("  {repo_cfg:?}  [git root] [{status}]");
         }
         let status = if cwd_cfg.exists() { "found" } else { "not found" };
         println!("  {cwd_cfg:?}  [cwd] [{status}]");
@@ -350,10 +350,10 @@ fn main() -> io::Result<()> {
     let launch = resolve_startup_launch(&cli.files, saved_session.as_ref())?;
     let (mut app, additional_paths) = build_startup_app(launch)?;
 
-    if let Some(state) = saved_session.as_ref() {
-        if let Err(err) = state.restore(&mut app) {
-            eprintln!("ee: warning: failed to restore session: {err}");
-        }
+    if let Some(state) = saved_session.as_ref()
+        && let Err(err) = state.restore(&mut app)
+    {
+        eprintln!("ee: warning: failed to restore session: {err}");
     }
 
     // Open any additional files as extra buffers.

@@ -803,10 +803,7 @@ impl Editor {
         let text_cow = if rev == self.engine.get_head_rev_id().token() {
             Cow::Borrowed(&self.text)
         } else {
-            match self.engine.get_rev(rev) {
-                None => return None,
-                Some(text) => Cow::Owned(text),
-            }
+            Cow::Owned(self.engine.get_rev(rev)?)
         };
 
         Some(text_cow)

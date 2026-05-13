@@ -327,10 +327,10 @@ impl<S: Clone + Default> StateCache<S> {
             } else if need_push {
                 new_frontier.push(line_num);
                 need_push = false;
-                if let Some(entry) = self.state_cache.get(cache_idx) {
-                    if *old_ln >= entry.line_num {
-                        new_frontier.push(old_ln.wrapping_add(nl_count_delta as usize));
-                    }
+                if let Some(entry) = self.state_cache.get(cache_idx)
+                    && *old_ln >= entry.line_num
+                {
+                    new_frontier.push(old_ln.wrapping_add(nl_count_delta as usize));
                 }
             }
         }

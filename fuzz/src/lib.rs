@@ -71,6 +71,7 @@ fn trim_slice(bytes: &[u8], raw_offset: u16) -> &[u8] {
     &bytes[offset..]
 }
 
+#[cfg(target_arch = "x86_64")]
 fn expected_mask<const N: usize>(left: &[u8; N], right: &[u8; N]) -> i32 {
     let mut mask = 0i32;
     for index in 0..N {

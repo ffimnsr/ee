@@ -20,6 +20,7 @@ pub mod rpc;
 mod wasm;
 
 use std::fmt;
+#[cfg(target_os = "linux")]
 use std::fs;
 use std::io;
 use std::io::BufRead;
@@ -451,9 +452,9 @@ pub(crate) fn start_plugin_process(
     core: WeakXiCore,
 ) {
     let spawn_result = thread::Builder::new()
-        .name(format!("<{}> core host thread", &plugin_desc.name))
+        .name(format!("<{}> core host thread", plugin_desc.name))
         .spawn(move || {
-            info!("starting plugin {}", &plugin_desc.name);
+            info!("starting plugin {}", plugin_desc.name);
             let result = match plugin_desc.runtime {
                 PluginRuntime::Native => run_native_plugin(plugin_desc.clone(), id, core.clone()),
                 PluginRuntime::Wasm => run_wasm_plugin(plugin_desc.clone(), id, core.clone()),
@@ -592,6 +593,7 @@ fn configure_native_plugin_sandbox(
 
     #[cfg(target_os = "macos")]
     {
+        let _ = command;
         info!(
             "plugin {} runtime sandbox unavailable on macOS; stable syscall filtering not yet implemented",
             plugin_desc.name
@@ -667,11 +669,6 @@ fn linux_denied_syscalls() -> Vec<i64> {
     syscalls.sort_unstable();
     syscalls.dedup();
     syscalls
-}
-
-#[cfg(not(target_os = "linux"))]
-fn configure_linux_plugin_sandbox(_command: &mut ProcCommand) -> Result<(), PluginStartErrorKind> {
-    Ok(())
 }
 
 #[cfg(windows)]

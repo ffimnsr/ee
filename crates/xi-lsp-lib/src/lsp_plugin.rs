@@ -427,15 +427,14 @@ impl LspPlugin {
 
     fn request_completion(&mut self, view: &mut View<ChunkCache>, index: Option<usize>) {
         let view_id = view.get_id();
-        if let Some(index) = index {
-            if let Some(item) = self
+        if let Some(index) = index
+            && let Some(item) = self
                 .pending_completions
                 .get(&view_id)
                 .and_then(|items| index.checked_sub(1).and_then(|idx| items.get(idx)).cloned())
-            {
-                self.apply_completion(view, &item);
-                return;
-            }
+        {
+            self.apply_completion(view, &item);
+            return;
         }
 
         let position = match self.current_position(view) {
@@ -1016,13 +1015,12 @@ impl LspPlugin {
 
     fn request_or_apply_code_action(&mut self, view: &mut View<ChunkCache>, index: Option<usize>) {
         let view_id = view.get_id();
-        if let Some(index) = index {
-            if let Some(actions) = self.pending_code_actions.get(&view_id)
-                && let Some(action) = index.checked_sub(1).and_then(|idx| actions.get(idx)).cloned()
-            {
-                self.apply_code_action(view, &action);
-                return;
-            }
+        if let Some(index) = index
+            && let Some(actions) = self.pending_code_actions.get(&view_id)
+            && let Some(action) = index.checked_sub(1).and_then(|idx| actions.get(idx)).cloned()
+        {
+            self.apply_code_action(view, &action);
+            return;
         }
 
         let range = match self.current_range(view) {

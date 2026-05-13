@@ -156,10 +156,10 @@ impl App {
 
         if self.input_state.awaiting_mark_set {
             self.input_state.awaiting_mark_set = false;
-            if let KeyCode::Char(c) = key.code {
-                if c.is_ascii_lowercase() {
-                    self.set_mark(c);
-                }
+            if let KeyCode::Char(c) = key.code
+                && c.is_ascii_lowercase()
+            {
+                self.set_mark(c);
             }
             return;
         }
@@ -173,10 +173,10 @@ impl App {
 
         if self.input_state.awaiting_macro_record {
             self.input_state.awaiting_macro_record = false;
-            if let KeyCode::Char(c) = key.code {
-                if c.is_ascii_lowercase() {
-                    self.start_macro_record(c);
-                }
+            if let KeyCode::Char(c) = key.code
+                && c.is_ascii_lowercase()
+            {
+                self.start_macro_record(c);
             }
             return;
         }

@@ -76,10 +76,12 @@ function add_failed_crate(name) {
     failed_crate_order[++failed_crate_count] = name
 }
 
-function extract_count(line, label, matches, pattern) {
-    pattern = "([0-9]+) " label
-    if (match(line, pattern, matches)) {
-        return matches[1] + 0
+function extract_count(line, label, pattern, matched_text) {
+    pattern = "[0-9]+ " label
+    if (match(line, pattern)) {
+        matched_text = substr(line, RSTART, RLENGTH)
+        sub(/[[:space:]].*$/, "", matched_text)
+        return matched_text + 0
     }
     return 0
 }
@@ -150,17 +152,15 @@ END {
 
 run_tests() {
     local log_file cargo_pid heartbeat_pid start_ts cargo_status
-    local cargo_prefix=()
-    local cargo_args=()
     log_file="$(mktemp)"
     trap "rm -f '$log_file'; if [ -n \"\${heartbeat_pid-}\" ]; then kill \"\$heartbeat_pid\" 2>/dev/null || true; fi" EXIT
-    resolve_cargo_invocation cargo_prefix cargo_args "$@"
+    resolve_cargo_invocation "$@"
 
     start_ts="$(date +%s)"
     printf 'cargo test started...\n'
 
     set +e
-    cargo "${cargo_prefix[@]}" test "${cargo_args[@]}" >"$log_file" 2>&1 &
+    cargo "${resolved_cargo_prefix[@]}" test "${resolved_cargo_args[@]}" >"$log_file" 2>&1 &
     cargo_pid=$!
     print_heartbeat "$start_ts" "$cargo_pid" &
     heartbeat_pid=$!
@@ -180,17 +180,13 @@ run_tests() {
 }
 
 resolve_cargo_invocation() {
-    local -n out_prefix="$1"
-    local -n out_args="$2"
-    shift 2
-
-    out_prefix=()
-    out_args=()
+    resolved_cargo_prefix=()
+    resolved_cargo_args=()
 
     while [ "$#" -gt 0 ]; do
         case "$1" in
             +*)
-                out_prefix+=("$1")
+                resolved_cargo_prefix+=("$1")
                 shift
                 ;;
             --)
@@ -204,36 +200,22 @@ resolve_cargo_invocation() {
     done
 
     if [ "$#" -eq 0 ]; then
-        out_args=(--workspace)
+        resolved_cargo_args=(--workspace)
         return
     fi
 
-    out_args=("$@")
-}
-
-resolve_cargo_args() {
-    local -n out_args="$1"
-    shift
-
-    if [ "$#" -eq 0 ]; then
-        out_args=(--workspace)
-        return
-    fi
-
-    out_args=("$@")
+    resolved_cargo_args=("$@")
 }
 
 print_command() {
-    local cargo_prefix=()
-    local cargo_args=()
-    resolve_cargo_invocation cargo_prefix cargo_args "$@"
+    resolve_cargo_invocation "$@"
     printf 'cargo'
-    if [ "${#cargo_prefix[@]}" -gt 0 ]; then
-        printf ' %q' "${cargo_prefix[@]}"
+    if [ "${#resolved_cargo_prefix[@]}" -gt 0 ]; then
+        printf ' %q' "${resolved_cargo_prefix[@]}"
     fi
     printf ' test'
-    if [ "${#cargo_args[@]}" -gt 0 ]; then
-        printf ' %q' "${cargo_args[@]}"
+    if [ "${#resolved_cargo_args[@]}" -gt 0 ]; then
+        printf ' %q' "${resolved_cargo_args[@]}"
     fi
     printf '\n'
 }
