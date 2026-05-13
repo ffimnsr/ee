@@ -5413,7 +5413,7 @@ fn budget_many_line(i: usize) -> String {
 }
 
 fn budget_long_line(i: usize) -> String {
-    if i % 2 == 0 {
+    if i.is_multiple_of(2) {
         format!("const LINE_{i}: &str = \"{}\";", "x".repeat(512))
     } else {
         format!("let line_{i} = {i};")
@@ -6181,7 +6181,10 @@ fn cd_pwd_and_lsp_commands_update_status() {
 
     let mut app = App::from_path(None).unwrap();
     run_ex(&mut app, &format!("cd {}", temp.path().display()));
-    assert_eq!(std::env::current_dir().unwrap(), temp.path());
+    assert_eq!(
+        std::env::current_dir().unwrap().canonicalize().unwrap(),
+        temp.path().canonicalize().unwrap()
+    );
     assert!(
         app.backend.status_message.as_deref().unwrap().contains(&temp.path().display().to_string())
     );

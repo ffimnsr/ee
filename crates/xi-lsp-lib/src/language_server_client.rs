@@ -957,13 +957,10 @@ impl LanguageServerClient {
                                     value.push_str(&format!("{} ", s));
                                 }
 
-                                if let Some(Value::Number(n)) = &m.get("percentage") {
-                                    if let Some(percentage) = n.as_f64() {
-                                        value.push_str(&format!(
-                                            "{} %",
-                                            (percentage * 100.00).round()
-                                        ));
-                                    }
+                                if let Some(Value::Number(n)) = &m.get("percentage")
+                                    && let Some(percentage) = n.as_f64()
+                                {
+                                    value.push_str(&format!("{} %", (percentage * 100.00).round()));
                                 }
 
                                 if let Some(Value::String(s)) = &m.get("message") {

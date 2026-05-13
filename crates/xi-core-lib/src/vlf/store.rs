@@ -1868,7 +1868,10 @@ fn count_lf_mmap_bytes(bytes: &[u8]) -> io::Result<u64> {
     })
 }
 
-#[cfg(unix)]
+#[cfg(all(
+    unix,
+    not(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "watchos"))
+))]
 fn advise_line_count_sequential(file: &File, file_size: u64) {
     let _ = unsafe {
         libc::posix_fadvise(
@@ -1880,7 +1883,13 @@ fn advise_line_count_sequential(file: &File, file_size: u64) {
     };
 }
 
-#[cfg(not(unix))]
+#[cfg(any(
+    not(unix),
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "tvos",
+    target_os = "watchos"
+))]
 fn advise_line_count_sequential(_file: &File, _file_size: u64) {}
 
 // ---------------------------------------------------------------------------

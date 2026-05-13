@@ -344,10 +344,10 @@ pub(crate) fn extract_document_edits_for_uri(
 ) -> Result<Vec<TextEdit>, LanguageResponseError> {
     let mut edits = Vec::new();
 
-    if let Some(changes) = edit.changes {
-        if let Some(mut document_edits) = changes.get(document_uri).cloned() {
-            edits.append(&mut document_edits);
-        }
+    if let Some(changes) = edit.changes
+        && let Some(mut document_edits) = changes.get(document_uri).cloned()
+    {
+        edits.append(&mut document_edits);
     }
 
     if let Some(document_changes) = edit.document_changes {

@@ -376,7 +376,7 @@ impl fmt::Display for Selection {
         if self.regions.len() == 1 {
             self.regions[0].fmt(f)?;
         } else {
-            write!(f, "[ {}", &self.regions[0])?;
+            write!(f, "[ {}", self.regions[0])?;
             for region in &self.regions[1..] {
                 write!(f, ", {}", region)?;
             }

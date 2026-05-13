@@ -145,7 +145,7 @@ fn test_invalidate() {
                                 && op["op"].as_str().unwrap() != "skip"
                         }),
                     "bad update: {}",
-                    &ops.iter()
+                    ops.iter()
                         .map(|op| format!(
                             "{} {}",
                             op["op"].as_str().unwrap(),

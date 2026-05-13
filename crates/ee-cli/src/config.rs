@@ -503,10 +503,11 @@ fn is_editorconfig_root(path: &Path) -> bool {
             // Once we hit the first section, preamble is over.
             break;
         }
-        if let Some((k, v)) = parse_ec_kv(line) {
-            if k == "root" && v == "true" {
-                return true;
-            }
+        if let Some((k, v)) = parse_ec_kv(line)
+            && k == "root"
+            && v == "true"
+        {
+            return true;
         }
     }
     false
@@ -617,10 +618,10 @@ pub(crate) fn load_config(file_path: Option<&Path>) -> EditorSettings {
     let cwd = std::env::current_dir().unwrap_or_default();
 
     // 2. Git repo root config (skip if same as cwd to avoid double-loading).
-    if let Some(root) = find_git_root(&cwd) {
-        if root != cwd {
-            load_ee_toml(&mut settings, &root.join(".ee.toml"));
-        }
+    if let Some(root) = find_git_root(&cwd)
+        && root != cwd
+    {
+        load_ee_toml(&mut settings, &root.join(".ee.toml"));
     }
 
     // 3. Current working directory config.
@@ -665,7 +666,10 @@ impl TestCwdLock {
             return Ok(TestCwdGuard { _guard: None });
         }
 
-        let guard = self.inner.lock()?;
+        let guard = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         TEST_CWD_LOCK_DEPTH.with(|depth| depth.set(1));
         Ok(TestCwdGuard { _guard: Some(guard) })
     }

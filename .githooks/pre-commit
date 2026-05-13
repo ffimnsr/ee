@@ -5,23 +5,33 @@ repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 test_summary_script="./scripts/test-workspace-summary.sh"
 
-declare -A package_scope=()
+package_scope=()
 scope_args=()
 needs_rust_checks=0
 needs_workspace_checks=0
 
-sorted_scoped_packages() {
-    local packages=()
-    local package
-    for package in "${!package_scope[@]}"; do
-        packages+=("$package")
-    done
+add_scoped_package() {
+    local package="$1"
+    local existing
 
-    if [[ "${#packages[@]}" -eq 0 ]]; then
+    if [[ "${package_scope[0]+set}" != "set" ]]; then
+        package_scope=("$package")
         return
     fi
 
-    printf '%s\n' "${packages[@]}" | sort
+    for existing in "${package_scope[@]}"; do
+        [[ "$existing" == "$package" ]] && return
+    done
+
+    package_scope+=("$package")
+}
+
+sorted_scoped_packages() {
+    if [[ "${package_scope[0]+set}" != "set" ]]; then
+        return
+    fi
+
+    printf '%s\n' "${package_scope[@]}" | sort -u
 }
 
 package_has_lib_target() {
@@ -59,23 +69,20 @@ run_stable_clippy() {
         fi
     done < <(sorted_scoped_packages)
 
-    local scoped_packages=()
     local scoped_args=()
 
-    scoped_packages=("${packages_with_lib[@]}")
-    if [[ "${#scoped_packages[@]}" -gt 0 ]]; then
+    if [[ "${packages_with_lib[0]+set}" == "set" ]]; then
         scoped_args=()
-        for package in "${scoped_packages[@]}"; do
+        for package in "${packages_with_lib[@]}"; do
             scoped_args+=(-p "$package")
         done
         echo "[pre-commit] lint stable (${scoped_args[*]})"
         cargo +stable clippy "${scoped_args[@]}" "${stable_targets_with_lib[@]}" --all-features -- -D warnings
     fi
 
-    scoped_packages=("${packages_without_lib[@]}")
-    if [[ "${#scoped_packages[@]}" -gt 0 ]]; then
+    if [[ "${packages_without_lib[0]+set}" == "set" ]]; then
         scoped_args=()
-        for package in "${scoped_packages[@]}"; do
+        for package in "${packages_without_lib[@]}"; do
             scoped_args+=(-p "$package")
         done
         echo "[pre-commit] lint stable no-lib (${scoped_args[*]})"
@@ -105,7 +112,7 @@ collect_check_scope() {
                 package_dir="${file#crates/}"
                 package_dir="${package_dir%%/*}"
                 if [[ -n "$package_dir" ]]; then
-                    package_scope["$package_dir"]=1
+                    add_scoped_package "$package_dir"
                 else
                     needs_workspace_checks=1
                 fi

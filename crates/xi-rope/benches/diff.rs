@@ -228,6 +228,7 @@ fn hash_diff_xlarge(c: &mut Criterion) {
     assert_eq!(String::from(_result), String::from(&two));
 }
 
+#[cfg(target_arch = "x86_64")]
 criterion_group!(
     benches,
     ne_idx_sw,
@@ -236,6 +237,21 @@ criterion_group!(
     ne_idx_detect,
     ne_idx_rev_sw,
     ne_idx_rev_sse,
+    scanner,
+    hash_diff,
+    hash_diff_med,
+    hash_diff_big,
+    simple_insertion,
+    simple_deletion,
+    hash_diff_xlarge
+);
+
+#[cfg(not(target_arch = "x86_64"))]
+criterion_group!(
+    benches,
+    ne_idx_sw,
+    ne_idx_detect,
+    ne_idx_rev_sw,
     scanner,
     hash_diff,
     hash_diff_med,

@@ -187,12 +187,12 @@ pub(crate) fn parse_substitute_cmd(body: &str) -> Option<(String, String, String
     let mut chars = rest.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\\' {
-            if let Some(&nc) = chars.peek() {
-                if nc == delim {
-                    chars.next();
-                    current.push(nc);
-                    continue;
-                }
+            if let Some(&nc) = chars.peek()
+                && nc == delim
+            {
+                chars.next();
+                current.push(nc);
+                continue;
             }
             current.push(c);
         } else if c == delim {

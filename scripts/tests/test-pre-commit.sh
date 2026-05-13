@@ -20,7 +20,7 @@ capture_stable_clippy_calls() {
 
         local pair
         for pair in "${package_pairs[@]}"; do
-            package_scope["$pair"]=1
+            add_scoped_package "$pair"
             scope_args+=(-p "$pair")
         done
 

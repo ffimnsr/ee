@@ -189,10 +189,10 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
             if let Some(qf) = &app.quickfix {
                 render_qf_panel(frame, qf_rect, qf, app.quickfix_focused, false);
             }
-        } else if app.location_list_open {
-            if let Some(ll) = &app.location_list {
-                render_qf_panel(frame, qf_rect, ll, app.location_list_focused, true);
-            }
+        } else if app.location_list_open
+            && let Some(ll) = &app.location_list
+        {
+            render_qf_panel(frame, qf_rect, ll, app.location_list_focused, true);
         }
     }
 
@@ -819,14 +819,13 @@ fn collect_line_annotation_segments(
 
     let mut merged: Vec<LineAnnotationSegment> = Vec::new();
     for segment in segments {
-        if let Some(last) = merged.last_mut() {
-            if last.priority == segment.priority
-                && last.visual == segment.visual
-                && segment.start_display <= last.end_display
-            {
-                last.end_display = last.end_display.max(segment.end_display);
-                continue;
-            }
+        if let Some(last) = merged.last_mut()
+            && last.priority == segment.priority
+            && last.visual == segment.visual
+            && segment.start_display <= last.end_display
+        {
+            last.end_display = last.end_display.max(segment.end_display);
+            continue;
         }
         merged.push(segment);
     }
@@ -1155,18 +1154,19 @@ fn render_buffer(
             spans = expand_tabs_in_spans(spans, app.config.tab_width);
 
             // Apply search match highlighting over the rendered spans.
-            if let Some(ref pat) = app.search_pattern {
-                if !is_fold_header && !buf.is_vlf {
-                    spans = apply_search_highlights(spans, line, pat, byte_start, byte_end, bg);
-                }
+            if let Some(ref pat) = app.search_pattern
+                && !is_fold_header
+                && !buf.is_vlf
+            {
+                spans = apply_search_highlights(spans, line, pat, byte_start, byte_end, bg);
             }
 
             // Apply color column highlight.
-            if let Some(cc) = app.config.color_column {
-                if cc >= left {
-                    let screen_col = cc - left;
-                    spans = apply_color_column(spans, screen_col);
-                }
+            if let Some(cc) = app.config.color_column
+                && cc >= left
+            {
+                let screen_col = cc - left;
+                spans = apply_color_column(spans, screen_col);
             }
 
             // Apply visual-mode selection highlight (drawn last so it wins).

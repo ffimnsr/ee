@@ -152,7 +152,7 @@ fn build_chunk(chunk_idx: usize, start_line: u64, target_bytes: usize) -> (Vec<u
     let mut line_no = start_line;
 
     while chunk.len() + 96 < target_bytes {
-        let marker = if line_no % 97 == 0 { "needle" } else { "filler" };
+        let marker = if line_no.is_multiple_of(97) { "needle" } else { "filler" };
         let line = format!(
             "line_{line_no:012} chunk_{chunk_idx:04} {marker} abcdef0123456789 lorem ipsum dolor sit amet\n"
         );

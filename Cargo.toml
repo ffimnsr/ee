@@ -16,7 +16,7 @@ default-members = ["crates/ee-cli"]
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.95"
 
 [workspace.dependencies]
 bytecount = "0.6.9"

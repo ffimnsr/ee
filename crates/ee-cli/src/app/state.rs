@@ -326,13 +326,12 @@ impl App {
         // Notify user if a crash-recovery artifact exists for this file.
         if let Some(rp) =
             backend.active().path.as_ref().and_then(|p| crate::buffer::recovery_file_path(p))
+            && rp.exists()
         {
-            if rp.exists() {
-                backend.status_message = Some(format!(
-                    "Recovery file found: {} — use :recover to restore or :recoverdel to discard",
-                    rp.display()
-                ));
-            }
+            backend.status_message = Some(format!(
+                "Recovery file found: {} — use :recover to restore or :recoverdel to discard",
+                rp.display()
+            ));
         }
 
         Ok(Self {
