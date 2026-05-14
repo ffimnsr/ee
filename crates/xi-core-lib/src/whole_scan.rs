@@ -53,6 +53,7 @@ pub(crate) enum WholeScanResult {
 
 /// Result payload from a completed async save operation.
 pub(crate) struct SaveTaskResult {
+    pub(crate) generation: u64,
     pub(crate) request: CompletedSaveRequest,
     pub(crate) saved_rev_id: RevId,
     pub(crate) result: Result<(), FileError>,
@@ -66,6 +67,7 @@ pub(crate) enum CompletedSaveRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SaveTaskProgress {
+    pub(crate) generation: u64,
     pub(crate) bytes_written: u64,
     pub(crate) total_bytes: u64,
 }
@@ -250,6 +252,7 @@ impl SaveTask {
                                 *progress_arc.lock().unwrap() = Some((
                                     task_gen,
                                     SaveTaskProgress {
+                                        generation: task_gen,
                                         bytes_written: progress.bytes_written,
                                         total_bytes: progress.total_bytes,
                                     },
@@ -269,6 +272,7 @@ impl SaveTask {
                                 *progress_arc.lock().unwrap() = Some((
                                     task_gen,
                                     SaveTaskProgress {
+                                        generation: task_gen,
                                         bytes_written: progress.bytes_written,
                                         total_bytes: progress.total_bytes,
                                     },
@@ -294,7 +298,12 @@ impl SaveTask {
 
                     *result_arc.lock().unwrap() = Some((
                         task_gen,
-                        SaveTaskResult { request: completed_request, saved_rev_id, result },
+                        SaveTaskResult {
+                            generation: task_gen,
+                            request: completed_request,
+                            saved_rev_id,
+                            result,
+                        },
                     ));
                 })
                 .expect("failed to spawn async save thread"),
@@ -471,7 +480,8 @@ mod tests {
         let saved_rev_id = xi_rope::engine::Engine::new(Rope::from("")).get_head_rev_id();
         let mut task = SaveTask::new();
         let mut saw_progress = false;
-        let mut last_progress = SaveTaskProgress { bytes_written: 0, total_bytes: 0 };
+        let mut last_progress =
+            SaveTaskProgress { generation: 0, bytes_written: 0, total_bytes: 0 };
 
         task.start_vlf_save(request.clone(), plan, saved_rev_id);
 
