@@ -9,6 +9,7 @@ repository = "https://github.com/ffimnsr/ee"
 edition.workspace = true
 rust-version.workspace = true
 autobenches = false
+default-run = "ee"
 
 [[bin]]
 name = "ee"

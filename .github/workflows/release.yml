@@ -1,0 +1,268 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
+  CARGO_PROFILE_RELEASE_LTO: thin
+  CARGO_PROFILE_RELEASE_PANIC: abort
+  CARGO_PROFILE_RELEASE_STRIP: symbols
+  RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=/workspace
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify release inputs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ee-rust-${{ runner.os }}
+          cache-on-failure: "true"
+
+      - name: Resolve matching CI run
+        id: ci_status
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          runs_json="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&status=completed&per_page=20")"
+
+          if jq -e '.workflow_runs[] | select(.head_sha == env.GITHUB_SHA and .name == "CI" and .conclusion == "success")' <<<"${runs_json}" >/dev/null; then
+            echo "ci_green=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "ci_green=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Run quality gates
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+          RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+          cargo bench --workspace --no-run --locked
+
+      - name: Run test suite when CI result is unavailable
+        if: github.ref_type != 'tag' || steps.ci_status.outputs.ci_green != 'true'
+        run: |
+          cargo test --workspace --locked
+
+      - name: Skip duplicate tests after green CI
+        if: github.ref_type == 'tag' && steps.ci_status.outputs.ci_green == 'true'
+        run: echo "Skipping cargo test because commit already passed ci.yml."
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.0
+
+      - name: Prepare release inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          shasum -a 256 Cargo.lock | awk '{print $1 "  Cargo.lock"}' > Cargo.lock.sha256
+          shasum -a 256 install.sh | awk '{print $1 "  install.sh"}' > install.sh.sha256
+
+      - name: Sign Cargo.lock
+        run: cosign sign-blob --yes --bundle Cargo.lock.sigstore.json Cargo.lock
+
+      - name: Sign installer
+        run: cosign sign-blob --yes --bundle install.sh.sigstore.json install.sh
+
+      - name: Attest Cargo.lock
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: Cargo.lock
+
+      - name: Attest installer
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: install.sh
+
+      - name: Upload installer bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-installer
+          path: |
+            Cargo.lock
+            Cargo.lock.sha256
+            Cargo.lock.sigstore.json
+            install.sh
+            install.sh.sha256
+            install.sh.sigstore.json
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            archive_ext: tar.gz
+            binary_name: ee
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive_ext: tar.gz
+            binary_name: ee
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ee-rust-${{ runner.os }}
+          cache-on-failure: "true"
+
+      - name: Install Linux musl tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Derive reproducible build timestamp
+        shell: bash
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "${GITHUB_ENV}"
+
+      - name: Build release binary
+        run: cargo build --locked --release -p ee-cli --target ${{ matrix.target }}
+
+      - name: Prepare package metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(grep '^version = ' crates/ee-cli/Cargo.toml | head -n1 | cut -d '"' -f2)"
+          fi
+
+          BASENAME="ee-${VERSION}-${{ matrix.target }}"
+
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "basename=${BASENAME}" >> "${GITHUB_OUTPUT}"
+
+      - name: Package archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASENAME="${{ steps.meta.outputs.basename }}"
+
+          mkdir -p "${BASENAME}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "${BASENAME}/ee"
+          cp Cargo.lock "${BASENAME}/"
+          cp README.md LICENSE "${BASENAME}/"
+
+          tar -czf "${BASENAME}.tar.gz" "${BASENAME}"
+          shasum -a 256 "${BASENAME}.tar.gz" | awk -v name="${BASENAME}.tar.gz" '{print $1 "  " name}' > "${BASENAME}.tar.gz.sha256"
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: ./${{ steps.meta.outputs.basename }}
+          artifact-name: ${{ steps.meta.outputs.basename }}.spdx.json
+          output-file: ${{ steps.meta.outputs.basename }}.spdx.json
+          format: spdx-json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.0
+
+      - name: Sign archive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASENAME="${{ steps.meta.outputs.basename }}"
+          cosign sign-blob --yes --bundle "${BASENAME}.tar.gz.sigstore.json" "${BASENAME}.tar.gz"
+          cosign sign-blob --yes --bundle "${BASENAME}.spdx.json.sigstore.json" "${BASENAME}.spdx.json"
+
+      - name: Attest archive provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ steps.meta.outputs.basename }}.${{ matrix.archive_ext }}
+
+      - name: Upload release bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            ${{ steps.meta.outputs.basename }}.${{ matrix.archive_ext }}
+            ${{ steps.meta.outputs.basename }}.${{ matrix.archive_ext }}.sha256
+            ${{ steps.meta.outputs.basename }}.${{ matrix.archive_ext }}.sigstore.json
+            ${{ steps.meta.outputs.basename }}.spdx.json
+            ${{ steps.meta.outputs.basename }}.spdx.json.sigstore.json
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag'
+
+    steps:
+      - name: Download all release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.tar.gz
+            *.tar.gz.sha256
+            *.tar.gz.sigstore.json
+            *.spdx.json
+            *.spdx.json.sigstore.json
+            *.spdx.json.sigstore.json
+            Cargo.lock
+            Cargo.lock.sha256
+            Cargo.lock.sigstore.json
+            install.sh
+            install.sh.sha256
+            install.sh.sigstore.json
+          generate_release_notes: true
