@@ -102,6 +102,12 @@ struct WrapSummary {
 impl Lines {
     pub(crate) fn set_wrap_width(&mut self, text: &Rope, wrap: WrapWidth) {
         self.work.clear();
+        if wrap == WrapWidth::None {
+            self.breaks = Breaks::new_no_break(text.len());
+            self.wrap = wrap;
+            return;
+        }
+
         self.add_task(0..text.len());
         if self.breaks.is_empty() || self.wrap.differs_in_kind(wrap) {
             // we keep breaks while resizing, for more efficient invalidation
