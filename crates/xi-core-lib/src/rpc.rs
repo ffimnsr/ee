@@ -259,6 +259,12 @@ pub enum CoreRequest {
     SelectionsPreview {
         view_id: ViewId,
     },
+    BufferPristine {
+        view_id: ViewId,
+    },
+    SaveStatus {
+        view_id: ViewId,
+    },
     BlockTextPreview {
         view_id: ViewId,
         start_line: usize,
@@ -836,5 +842,20 @@ mod tests {
             serde_json::from_str(r#"{"view_id":"view-id-1","method":"toggle_block_comment"}"#)
                 .unwrap();
         assert!(matches!(block.cmd, EditNotification::ToggleBlockComment));
+    }
+
+    #[test]
+    fn deserialize_buffer_pristine_request() {
+        let request: CoreRequest =
+            serde_json::from_str(r#"{"method":"buffer_pristine","params":{"view_id":"1"}}"#)
+                .unwrap();
+        assert_eq!(request, CoreRequest::BufferPristine { view_id: ViewId(1) });
+    }
+
+    #[test]
+    fn deserialize_save_status_request() {
+        let request: CoreRequest =
+            serde_json::from_str(r#"{"method":"save_status","params":{"view_id":"1"}}"#).unwrap();
+        assert_eq!(request, CoreRequest::SaveStatus { view_id: ViewId(1) });
     }
 }

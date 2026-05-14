@@ -372,6 +372,8 @@ impl CoreState {
                 self.do_selected_text_preview(view_id, linewise)
             }
             SelectionsPreview { view_id } => self.do_selections_preview(view_id),
+            BufferPristine { view_id } => self.do_buffer_pristine(view_id),
+            SaveStatus { view_id } => self.do_save_status(view_id),
             BlockTextPreview { view_id, start_line, end_line, left_col, right_col } => {
                 self.do_block_text_preview(view_id, start_line, end_line, left_col, right_col)
             }
@@ -415,6 +417,42 @@ impl CoreState {
             .make_context(view_id)
             .ok_or_else(|| RemoteError::custom(404, "missing view", None))?;
         Ok(json!(ctx.preview_selections()))
+    }
+
+    fn do_buffer_pristine(&mut self, view_id: ViewId) -> Result<Value, RemoteError> {
+        let buffer_id = self
+            .views
+            .get(&view_id)
+            .map(|view| view.borrow().get_buffer_id())
+            .ok_or_else(|| RemoteError::custom(404, "missing view", None))?;
+        let pristine = self
+            .editors
+            .get(&buffer_id)
+            .map(|editor| editor.borrow().is_pristine())
+            .ok_or_else(|| RemoteError::custom(404, "missing editor", None))?;
+        Ok(json!(pristine))
+    }
+
+    fn do_save_status(&mut self, view_id: ViewId) -> Result<Value, RemoteError> {
+        let buffer_id = self
+            .views
+            .get(&view_id)
+            .map(|view| view.borrow().get_buffer_id())
+            .ok_or_else(|| RemoteError::custom(404, "missing view", None))?;
+
+        self.handle_save_callback(usize::from(view_id));
+
+        let editor = self
+            .editors
+            .get(&buffer_id)
+            .ok_or_else(|| RemoteError::custom(404, "missing editor", None))?
+            .borrow();
+        let generation = editor.save_task.generation();
+        let complete = generation > 0 && !editor.save_task.is_in_progress();
+        Ok(json!({
+            "generation": generation,
+            "complete": complete,
+        }))
     }
 
     fn do_block_text_preview(

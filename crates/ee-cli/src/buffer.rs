@@ -803,6 +803,36 @@ impl BufferManager {
         Ok(())
     }
 
+    pub(crate) fn buffer_pristine(&mut self, id: BufferId) -> io::Result<bool> {
+        let view_id = self
+            .bufs
+            .iter()
+            .find(|buf| buf.id == id)
+            .map(|buf| buf.view_id.clone())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "buffer not found"))?;
+        let response = self.send_request("buffer_pristine", json!({ "view_id": view_id }))?;
+        response.as_bool().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "buffer_pristine returned non-bool")
+        })
+    }
+
+    fn poll_buffer_save_status(&mut self, id: BufferId) -> io::Result<(u64, bool)> {
+        let view_id = self
+            .bufs
+            .iter()
+            .find(|buf| buf.id == id)
+            .map(|buf| buf.view_id.clone())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "buffer not found"))?;
+        let response = self.send_request("save_status", json!({ "view_id": view_id }))?;
+        let generation = response.get("generation").and_then(Value::as_u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "save_status missing generation")
+        })?;
+        let complete = response.get("complete").and_then(Value::as_bool).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "save_status missing complete")
+        })?;
+        Ok((generation, complete))
+    }
+
     fn wait_for_buffer_save(
         &mut self,
         id: BufferId,
@@ -823,6 +853,24 @@ impl BufferManager {
                 && self.bufs[idx].last_save_generation > baseline_generation
             {
                 target_generation = Some(self.bufs[idx].last_save_generation);
+            }
+            let (status_generation, status_complete) = self.poll_buffer_save_status(id)?;
+            if target_generation.is_none() && status_generation > baseline_generation {
+                target_generation = Some(status_generation);
+            }
+            if status_complete
+                && target_generation.is_some_and(|generation| status_generation >= generation)
+            {
+                let idx =
+                    self.bufs.iter().position(|buf| buf.id == id).ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::NotFound, "buffer not found")
+                    })?;
+                self.bufs[idx].last_save_generation =
+                    self.bufs[idx].last_save_generation.max(status_generation);
+                self.bufs[idx].completed_save_generation =
+                    self.bufs[idx].completed_save_generation.max(status_generation);
+                self.bufs[idx].save_complete = true;
+                return Ok(());
             }
             if target_generation
                 .is_some_and(|generation| self.bufs[idx].completed_save_generation >= generation)
