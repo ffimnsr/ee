@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt;
-use std::fs::{self, File};
+use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::str;
@@ -29,7 +29,7 @@ use std::time::SystemTime;
 use fs2::FileExt;
 use log::warn;
 
-use xi_rope::{Rope, RopeBuilder};
+use xi_rope::Rope;
 use xi_rpc::RemoteErrorDetails;
 
 use crate::line_ending::{LineEnding, LineEndingError};
@@ -838,16 +838,23 @@ where
     // it's arguable that the rope crate should have file loading functionality
     let mut f =
         File::open(path.as_ref()).map_err(|e| FileError::Io(e, path.as_ref().to_owned()))?;
-    let mut bytes = Vec::new();
-    f.read_to_end(&mut bytes).map_err(|e| FileError::Io(e, path.as_ref().to_owned()))?;
+    let metadata = f.metadata().ok();
+    let mut text = metadata
+        .as_ref()
+        .and_then(|meta| usize::try_from(meta.len()).ok())
+        .map(String::with_capacity)
+        .unwrap_or_default();
+    f.read_to_string(&mut text).map_err(|e| match e.kind() {
+        io::ErrorKind::InvalidData => FileError::UnknownEncoding(path.as_ref().to_owned()),
+        _ => FileError::Io(e, path.as_ref().to_owned()),
+    })?;
 
     // Acquire an advisory exclusive lock so that a second editor instance
     // cannot open the same file for writing without first detecting the lock.
     // `try_lock_exclusive` is non-blocking; if another process holds the lock
     // we warn and proceed without the lock rather than refusing to open the file.
-    let lock_file = File::open(path.as_ref()).ok();
-    let lock = lock_file.and_then(|lf| match lf.try_lock_exclusive() {
-        Ok(()) => Some(lf),
+    let lock = match f.try_lock_exclusive() {
+        Ok(()) => Some(f),
         Err(e) => {
             warn!(
                 "Could not acquire advisory lock on {:?}: {}. \
@@ -857,20 +864,24 @@ where
             );
             None
         }
-    });
+    };
 
-    let encoding = CharacterEncoding::guess(&bytes);
-    let open_analysis = FileOpenAnalysis::from_bytes(&bytes, encoding);
-    let rope = try_decode(bytes, encoding, path.as_ref())?;
+    let encoding = CharacterEncoding::guess(text.as_bytes());
+    let open_analysis = FileOpenAnalysis::from_bytes(text.as_bytes(), encoding);
+    let decoded = match encoding {
+        CharacterEncoding::Utf8 => text.as_str(),
+        CharacterEncoding::Utf8WithBom => &text[UTF8_BOM.len()..],
+    };
+    let rope = Rope::from(decoded);
     let info = FileInfo {
         encoding,
-        mod_time: get_mod_time(&path),
-        len: get_file_len(&path),
+        mod_time: metadata.as_ref().and_then(mod_time_from_metadata),
+        len: metadata.as_ref().map(Metadata::len),
         open_analysis,
         #[cfg(target_family = "unix")]
-        permissions: get_permissions(&path),
+        permissions: metadata.as_ref().map(permissions_from_metadata),
         #[cfg(target_family = "unix")]
-        change_cookie: get_change_cookie(&path),
+        change_cookie: metadata.as_ref().map(change_cookie_from_metadata),
         path: path.as_ref().to_owned(),
         has_changed: false,
         _lock: lock,
@@ -1033,6 +1044,7 @@ impl<W: Write> Write for ChunkedSaveWriter<'_, W> {
     }
 }
 
+#[cfg(test)]
 fn try_decode(bytes: Vec<u8>, encoding: CharacterEncoding, path: &Path) -> Result<Rope, FileError> {
     let text = match encoding {
         CharacterEncoding::Utf8 => {
@@ -1045,9 +1057,7 @@ fn try_decode(bytes: Vec<u8>, encoding: CharacterEncoding, path: &Path) -> Resul
         }
     };
 
-    let mut builder = RopeBuilder::new();
-    builder.push_str(text);
-    Ok(builder.finish())
+    Ok(Rope::from(text))
 }
 
 impl CharacterEncoding {
@@ -1063,7 +1073,11 @@ impl CharacterEncoding {
 /// Returns the modification timestamp for the file at a given path,
 /// if present.
 fn get_mod_time<P: AsRef<Path>>(path: P) -> Option<SystemTime> {
-    File::open(path).and_then(|f| f.metadata()).and_then(|meta| meta.modified()).ok()
+    File::open(path).and_then(|f| f.metadata()).ok().and_then(|meta| mod_time_from_metadata(&meta))
+}
+
+fn mod_time_from_metadata(meta: &Metadata) -> Option<SystemTime> {
+    meta.modified().ok()
 }
 
 fn get_file_len<P: AsRef<Path>>(path: P) -> Option<u64> {
@@ -1072,12 +1086,17 @@ fn get_file_len<P: AsRef<Path>>(path: P) -> Option<u64> {
 
 #[cfg(target_family = "unix")]
 fn get_change_cookie<P: AsRef<Path>>(path: P) -> Option<FileChangeCookie> {
-    File::open(path).and_then(|f| f.metadata()).ok().map(|meta| FileChangeCookie {
+    File::open(path).and_then(|f| f.metadata()).ok().map(|meta| change_cookie_from_metadata(&meta))
+}
+
+#[cfg(target_family = "unix")]
+fn change_cookie_from_metadata(meta: &Metadata) -> FileChangeCookie {
+    FileChangeCookie {
         device_id: meta.dev(),
         inode: meta.ino(),
         change_seconds: meta.ctime(),
         change_nanoseconds: meta.ctime_nsec(),
-    })
+    }
 }
 
 fn cancelled_save_error(path: &Path) -> FileError {
@@ -1098,7 +1117,12 @@ fn open_advisory_lock(path: &Path) -> Option<File> {
 /// if present.
 #[cfg(target_family = "unix")]
 fn get_permissions<P: AsRef<Path>>(path: P) -> Option<u32> {
-    File::open(path).and_then(|f| f.metadata()).map(|meta| meta.permissions().mode()).ok()
+    File::open(path).and_then(|f| f.metadata()).map(|meta| permissions_from_metadata(&meta)).ok()
+}
+
+#[cfg(target_family = "unix")]
+fn permissions_from_metadata(meta: &Metadata) -> u32 {
+    meta.permissions().mode()
 }
 
 impl RemoteErrorDetails for FileError {
@@ -1173,6 +1197,22 @@ mod tests {
             matches!(result, Err(FileError::NonUtf8Path(_))),
             "expected NonUtf8Path error, got {:?}",
             result.err().map(|e| e.to_string())
+        );
+    }
+
+    #[test]
+    fn try_load_file_rejects_non_utf8_contents() {
+        use std::io::Write;
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"ok\n\xff\n").unwrap();
+
+        let result = super::try_load_file(tmp.path());
+
+        assert!(
+            matches!(result, Err(FileError::UnknownEncoding(_))),
+            "expected UnknownEncoding error, got {:?}",
+            result.err().map(|err| err.to_string())
         );
     }
 
