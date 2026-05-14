@@ -179,7 +179,7 @@ would reuse existing functionality from vlf so it will be useful for getting hea
   - [ ] Implement for `toml`
   - [ ] Implement for `kdl`
 - [ ] When trying to save and user doesn't have permission, ask if they want to re-execute with higher privilage with `sudo`, `su`, `run0`
-- [ ] Rework config search hierarchy and `.ee.toml` root semantics.
+- [x] Rework config search hierarchy and `.ee.toml` root semantics.
   - Why: current loader only merges defaults + `~/.ee.toml` + git-root `.ee.toml` + cwd `.ee.toml`; path contract too narrow and root-stop behavior is undefined.
   - Define config layers, lowest priority first:
     - built-in defaults

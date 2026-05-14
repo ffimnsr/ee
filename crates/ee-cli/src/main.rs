@@ -98,7 +98,7 @@ struct Cli {
     #[arg(value_name = "FILE")]
     files: Vec<PathBuf>,
 
-    /// Load a specific config file instead of the default search path
+    /// Load a specific config file instead of layered defaults
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
 
@@ -121,7 +121,7 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum DoCommands {
-    /// Check for problems and locate loaded config files
+    /// Check for problems and show config search precedence
     Doctor,
     /// Run file utility commands
     File {
@@ -177,29 +177,33 @@ fn cmd_doctor(config_path: Option<&PathBuf>) {
     println!("ee do doctor");
     println!("─────────");
 
-    // Config search path
-    let home_cfg = dirs::home_dir().map(|h| h.join(".ee.toml"));
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let cwd_cfg = cwd.join(".ee.toml");
-
     if let Some(explicit) = config_path {
         let status = if explicit.exists() { "found" } else { "not found" };
         println!("  --config {explicit:?}  [{status}]");
     } else {
-        if let Some(ref hc) = home_cfg {
-            let status = if hc.exists() { "found" } else { "not found" };
-            println!("  ~/.ee.toml              [{status}]");
+        let report = config::config_search_report(None);
+        println!("  anchor {:?}", report.anchor);
+        println!("  layers (low -> high)");
+        for layer in report.layers {
+            let status = if layer.loaded {
+                "loaded"
+            } else if layer.exists {
+                "skipped"
+            } else {
+                "not found"
+            };
+            print!("  {:?}  [{}] [{}]", layer.path, layer.kind.label(), status);
+            if let Some(root) = layer.root {
+                print!(" [root={root}]");
+            }
+            if let Some(note) = layer.note {
+                print!(" {note}");
+            }
+            println!();
         }
-        // Git repo root
-        if let Some(root) = config::find_git_root(&cwd)
-            && root != cwd
-        {
-            let repo_cfg = root.join(".ee.toml");
-            let status = if repo_cfg.exists() { "found" } else { "not found" };
-            println!("  {repo_cfg:?}  [git root] [{status}]");
+        if !report.editorconfig_applies {
+            println!("  .editorconfig  [file-specific] [not evaluated without file path]");
         }
-        let status = if cwd_cfg.exists() { "found" } else { "not found" };
-        println!("  {cwd_cfg:?}  [cwd] [{status}]");
     }
 
     println!();
@@ -207,35 +211,27 @@ fn cmd_doctor(config_path: Option<&PathBuf>) {
 }
 
 fn cmd_validate(config_path: Option<&PathBuf>) {
-    let path_to_validate =
-        config_path.cloned().or_else(|| dirs::home_dir().map(|h| h.join(".ee.toml")));
+    let paths = if let Some(path) = config_path.cloned() {
+        vec![path]
+    } else {
+        config::default_config_layers(None).into_iter().map(|layer| layer.path).collect::<Vec<_>>()
+    };
 
-    match path_to_validate {
-        None => {
-            eprintln!("No config file found to validate.");
+    if paths.is_empty() {
+        eprintln!("No config files found in layered default search path.");
+        std::process::exit(1);
+    }
+
+    for path in paths {
+        if !path.exists() {
+            eprintln!("Config file not found: {path:?}");
             std::process::exit(1);
         }
-        Some(p) => {
-            if !p.exists() {
-                eprintln!("Config file not found: {p:?}");
-                std::process::exit(1);
-            }
-            match std::fs::read_to_string(&p) {
-                Err(e) => {
-                    eprintln!("Cannot read {p:?}: {e}");
-                    std::process::exit(1);
-                }
-                Ok(contents) => match toml::from_str::<toml::Value>(&contents) {
-                    Err(e) => {
-                        eprintln!("Config parse error in {p:?}: {e}");
-                        std::process::exit(1);
-                    }
-                    Ok(_) => {
-                        println!("Config {p:?} is valid.");
-                    }
-                },
-            }
+        if let Err(err) = config::validate_config_file(&path) {
+            eprintln!("{err}");
+            std::process::exit(1);
         }
+        println!("Config {path:?} is valid.");
     }
 }
 

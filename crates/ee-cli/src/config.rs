@@ -2,13 +2,15 @@
 //!
 //! Settings are resolved by merging layers in priority order (lowest first):
 //!   1. built-in defaults
-//!   2. `~/.ee.toml`
-//!   3. `<git-repo-root>/.ee.toml`
-//!   4. `<cwd>/.ee.toml`
-//!   5. `.editorconfig` (walked up from the open file, per spec)
+//!   2. `/etc/ee/config.toml`
+//!   3. `$XDG_CONFIG_HOME/ee/config.toml` or `~/.config/ee/config.toml`
+//!   4. fallback `~/.ee.toml` when XDG user config is missing
+//!   5. every ancestor `.ee.toml` from outermost to innermost
+//!   6. `.editorconfig` (walked up from the open file, per spec)
 //!
 //! Later layers override earlier ones for any key that is explicitly set.
 
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -23,6 +25,8 @@ use serde_json::Value;
 use xi_core_lib::config::Table as XiConfigTable;
 
 use crate::keymap::{self, KeymapOperation, KeymapSettings, SequenceBinding};
+
+const SYSTEM_CONFIG_PATH: &str = "/etc/ee/config.toml";
 
 // ── Public settings ───────────────────────────────────────────────────────────
 
@@ -188,6 +192,7 @@ fn diff_xi_config_tables(base: &XiConfigTable, updated: &XiConfigTable) -> XiCon
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct EeToml {
+    pub root: Option<bool>,
     /// `"spaces"` or `"tabs"` (aliases: `"space"`, `"tab"`).
     pub indent_style: Option<String>,
     /// Number of spaces per indent level.
@@ -214,6 +219,109 @@ pub(crate) struct EeToml {
     /// `"default"` or `"minimal"`.
     pub statusline_format: Option<String>,
     pub keymap: Option<KeymapToml>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigLayerKind {
+    System,
+    UserXdg,
+    UserLegacy,
+    Ancestor,
+}
+
+impl ConfigLayerKind {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::UserXdg => "user xdg",
+            Self::UserLegacy => "user legacy fallback",
+            Self::Ancestor => "ancestor",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConfigLayer {
+    pub kind: ConfigLayerKind,
+    pub path: PathBuf,
+    pub root: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConfigLayerReport {
+    pub kind: ConfigLayerKind,
+    pub path: PathBuf,
+    pub exists: bool,
+    pub loaded: bool,
+    pub root: Option<bool>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ConfigSearchReport {
+    pub anchor: PathBuf,
+    pub layers: Vec<ConfigLayerReport>,
+    pub editorconfig_applies: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ConfigEnvironment {
+    cwd: PathBuf,
+    home_dir: Option<PathBuf>,
+    config_dir: Option<PathBuf>,
+    system_config_path: PathBuf,
+}
+
+impl ConfigEnvironment {
+    fn from_process() -> Self {
+        Self {
+            cwd: std::env::current_dir().unwrap_or_default(),
+            home_dir: dirs::home_dir(),
+            config_dir: dirs::config_dir(),
+            system_config_path: PathBuf::from(SYSTEM_CONFIG_PATH),
+        }
+    }
+
+    fn anchor_dir(&self, file_path: Option<&Path>) -> PathBuf {
+        match file_path {
+            Some(path) if path.is_dir() => path.to_path_buf(),
+            Some(path) => path.parent().map(Path::to_path_buf).unwrap_or_else(|| self.cwd.clone()),
+            None => self.cwd.clone(),
+        }
+    }
+
+    fn xdg_user_config_path(&self) -> Option<PathBuf> {
+        self.config_dir.as_ref().map(|dir| dir.join("ee").join("config.toml"))
+    }
+
+    fn legacy_user_config_path(&self) -> Option<PathBuf> {
+        self.home_dir.as_ref().map(|home| home.join(".ee.toml"))
+    }
+
+    fn workspace_candidate_paths(&self, file_path: Option<&Path>) -> Vec<PathBuf> {
+        let mut candidates = Vec::new();
+        let mut dir = self.anchor_dir(file_path);
+        loop {
+            candidates.push(dir.join(".ee.toml"));
+            if !dir.pop() {
+                break;
+            }
+        }
+        candidates.reverse();
+        candidates
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ConfigProbe {
+    exists: bool,
+    root: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+struct ConfigDiscovery {
+    layers: Vec<ConfigLayer>,
+    root_stop_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -431,6 +539,220 @@ fn load_ee_toml(settings: &mut EditorSettings, path: &Path) {
     }
 }
 
+fn probe_config_file(path: &Path) -> ConfigProbe {
+    match std::fs::read_to_string(path) {
+        Ok(text) => match toml::from_str::<EeToml>(&text) {
+            Ok(config) => ConfigProbe { exists: true, root: config.root },
+            Err(_) => ConfigProbe { exists: true, root: None },
+        },
+        Err(err) if err.kind() == ErrorKind::NotFound => ConfigProbe { exists: false, root: None },
+        Err(_) => ConfigProbe { exists: true, root: None },
+    }
+}
+
+fn discover_config_layers_with_env(
+    env: &ConfigEnvironment,
+    file_path: Option<&Path>,
+) -> ConfigDiscovery {
+    let workspace_candidates = env.workspace_candidate_paths(file_path);
+    let mut high_to_low_layers = Vec::new();
+    let mut root_stop_path = None;
+
+    for path in workspace_candidates.iter().rev() {
+        let probe = probe_config_file(path);
+        if !probe.exists {
+            continue;
+        }
+        high_to_low_layers.push(ConfigLayer {
+            kind: ConfigLayerKind::Ancestor,
+            path: path.clone(),
+            root: probe.root,
+        });
+        if probe.root == Some(true) {
+            root_stop_path = Some(path.clone());
+            break;
+        }
+    }
+
+    if root_stop_path.is_none() {
+        let xdg_path = env.xdg_user_config_path();
+        let xdg_exists = xdg_path.as_ref().is_some_and(|path| probe_config_file(path).exists);
+
+        if let Some(path) = xdg_path
+            && xdg_exists
+        {
+            let probe = probe_config_file(&path);
+            high_to_low_layers.push(ConfigLayer {
+                kind: ConfigLayerKind::UserXdg,
+                path: path.clone(),
+                root: probe.root,
+            });
+            if probe.root == Some(true) {
+                root_stop_path = Some(path);
+            }
+        } else if let Some(legacy_path) = env.legacy_user_config_path() {
+            let legacy_probe = probe_config_file(&legacy_path);
+            if legacy_probe.exists {
+                high_to_low_layers.push(ConfigLayer {
+                    kind: ConfigLayerKind::UserLegacy,
+                    path: legacy_path.clone(),
+                    root: legacy_probe.root,
+                });
+                if legacy_probe.root == Some(true) {
+                    root_stop_path = Some(legacy_path);
+                }
+            }
+        }
+    }
+
+    if root_stop_path.is_none() && probe_config_file(&env.system_config_path).exists {
+        high_to_low_layers.push(ConfigLayer {
+            kind: ConfigLayerKind::System,
+            path: env.system_config_path.clone(),
+            root: Some(true),
+        });
+    }
+
+    high_to_low_layers.reverse();
+    ConfigDiscovery { layers: high_to_low_layers, root_stop_path }
+}
+
+fn load_config_with_env(file_path: Option<&Path>, env: &ConfigEnvironment) -> EditorSettings {
+    let mut settings = EditorSettings::default();
+
+    for layer in discover_config_layers_with_env(env, file_path).layers {
+        load_ee_toml(&mut settings, &layer.path);
+    }
+
+    if let Some(file_path) = file_path {
+        apply_editorconfig(&mut settings, file_path);
+    }
+
+    settings
+}
+
+pub(crate) fn default_config_layers(file_path: Option<&Path>) -> Vec<ConfigLayer> {
+    discover_config_layers_with_env(&ConfigEnvironment::from_process(), file_path).layers
+}
+
+pub(crate) fn config_search_report(file_path: Option<&Path>) -> ConfigSearchReport {
+    config_search_report_with_env(&ConfigEnvironment::from_process(), file_path)
+}
+
+fn config_search_report_with_env(
+    env: &ConfigEnvironment,
+    file_path: Option<&Path>,
+) -> ConfigSearchReport {
+    let discovery = discover_config_layers_with_env(env, file_path);
+    let workspace_candidates = env.workspace_candidate_paths(file_path);
+    let xdg_path = env.xdg_user_config_path();
+    let legacy_path = env.legacy_user_config_path();
+    let xdg_exists = xdg_path.as_ref().is_some_and(|path| probe_config_file(path).exists);
+
+    let mut layers = Vec::new();
+
+    let system_probe = probe_config_file(&env.system_config_path);
+    layers.push(ConfigLayerReport {
+        kind: ConfigLayerKind::System,
+        path: env.system_config_path.clone(),
+        exists: system_probe.exists,
+        loaded: discovery.layers.iter().any(|layer| layer.path == env.system_config_path),
+        root: Some(true),
+        note: if !system_probe.exists {
+            Some(String::from("not found"))
+        } else if discovery.layers.iter().any(|layer| layer.path == env.system_config_path) {
+            Some(String::from("terminal fallback"))
+        } else {
+            discovery
+                .root_stop_path
+                .as_ref()
+                .map(|path| format!("skipped: root=true at {}", path.display()))
+        },
+    });
+
+    if let Some(path) = xdg_path {
+        let probe = probe_config_file(&path);
+        let loaded = discovery.layers.iter().any(|layer| layer.path == path);
+        layers.push(ConfigLayerReport {
+            kind: ConfigLayerKind::UserXdg,
+            path,
+            exists: probe.exists,
+            loaded,
+            root: probe.root,
+            note: if !probe.exists {
+                Some(String::from("not found"))
+            } else if loaded {
+                None
+            } else {
+                discovery
+                    .root_stop_path
+                    .as_ref()
+                    .map(|stop| format!("skipped: root=true at {}", stop.display()))
+            },
+        });
+    }
+
+    if let Some(path) = legacy_path {
+        let probe = probe_config_file(&path);
+        let loaded = discovery.layers.iter().any(|layer| layer.path == path);
+        layers.push(ConfigLayerReport {
+            kind: ConfigLayerKind::UserLegacy,
+            path,
+            exists: probe.exists,
+            loaded,
+            root: probe.root,
+            note: if xdg_exists {
+                Some(String::from("skipped: XDG user config takes precedence"))
+            } else if !probe.exists {
+                Some(String::from("not found"))
+            } else if loaded {
+                Some(String::from("loaded because XDG user config is missing"))
+            } else {
+                discovery
+                    .root_stop_path
+                    .as_ref()
+                    .map(|stop| format!("skipped: root=true at {}", stop.display()))
+            },
+        });
+    }
+
+    for path in workspace_candidates {
+        let probe = probe_config_file(&path);
+        let loaded = discovery.layers.iter().any(|layer| layer.path == path);
+        layers.push(ConfigLayerReport {
+            kind: ConfigLayerKind::Ancestor,
+            path,
+            exists: probe.exists,
+            loaded,
+            root: probe.root,
+            note: if !probe.exists {
+                Some(String::from("not found"))
+            } else if loaded {
+                None
+            } else {
+                discovery
+                    .root_stop_path
+                    .as_ref()
+                    .map(|stop| format!("skipped: root=true at {}", stop.display()))
+            },
+        });
+    }
+
+    ConfigSearchReport {
+        anchor: env.anchor_dir(file_path),
+        layers,
+        editorconfig_applies: file_path.is_some(),
+    }
+}
+
+pub(crate) fn validate_config_file(path: &Path) -> Result<(), String> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|err| format!("Cannot read {}: {err}", path.display()))?;
+    toml::from_str::<EeToml>(&contents)
+        .map(|_| ())
+        .map_err(|err| format!("Config parse error in {}: {err}", path.display()))
+}
+
 /// Walk up directory tree from `start` looking for `.git` or `.git` file.
 /// Returns the directory that contains `.git`, or `None`.
 pub(crate) fn find_git_root(start: &Path) -> Option<PathBuf> {
@@ -608,31 +930,7 @@ pub(crate) fn load_config(file_path: Option<&Path>) -> EditorSettings {
     #[cfg(test)]
     let _cwd_lock = test_cwd_lock().lock().unwrap();
 
-    let mut settings = EditorSettings::default();
-
-    // 1. User home config.
-    if let Some(home) = dirs::home_dir() {
-        load_ee_toml(&mut settings, &home.join(".ee.toml"));
-    }
-
-    let cwd = std::env::current_dir().unwrap_or_default();
-
-    // 2. Git repo root config (skip if same as cwd to avoid double-loading).
-    if let Some(root) = find_git_root(&cwd)
-        && root != cwd
-    {
-        load_ee_toml(&mut settings, &root.join(".ee.toml"));
-    }
-
-    // 3. Current working directory config.
-    load_ee_toml(&mut settings, &cwd.join(".ee.toml"));
-
-    // 4. .editorconfig (highest priority, per-file aware).
-    if let Some(file_path) = file_path {
-        apply_editorconfig(&mut settings, file_path);
-    }
-
-    settings
+    load_config_with_env(file_path, &ConfigEnvironment::from_process())
 }
 
 #[cfg(test)]
@@ -789,6 +1087,202 @@ tab_width = 4
         assert_eq!(general.get("tab_size").and_then(Value::as_u64), Some(4));
         assert_eq!(overrides.get("tab_size").and_then(Value::as_u64), Some(2));
         assert_eq!(overrides.get("translate_tabs_to_spaces").and_then(Value::as_bool), Some(false));
+    }
+
+    fn test_env(root: &Path) -> ConfigEnvironment {
+        ConfigEnvironment {
+            cwd: root.join("workspace"),
+            home_dir: Some(root.join("home")),
+            config_dir: Some(root.join("xdg")),
+            system_config_path: root.join("etc").join("ee").join("config.toml"),
+        }
+    }
+
+    fn layer_paths(layers: &[ConfigLayer]) -> Vec<PathBuf> {
+        layers.iter().map(|layer| layer.path.clone()).collect()
+    }
+
+    #[test]
+    fn xdg_user_config_preferred_over_legacy() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+        std::fs::create_dir_all(env.home_dir.as_ref().unwrap()).unwrap();
+        std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+        std::fs::write(env.home_dir.as_ref().unwrap().join(".ee.toml"), "cursor_line = true\n")
+            .unwrap();
+        std::fs::write(
+            env.config_dir.as_ref().unwrap().join("ee").join("config.toml"),
+            "wrap_lines = true\n",
+        )
+        .unwrap();
+
+        let layers = discover_config_layers_with_env(&env, None).layers;
+
+        assert_eq!(
+            layer_paths(&layers),
+            vec![env.config_dir.as_ref().unwrap().join("ee").join("config.toml")]
+        );
+
+        let settings = load_config_with_env(None, &env);
+        assert!(settings.wrap_lines);
+        assert!(!settings.cursor_line);
+    }
+
+    #[test]
+    fn legacy_user_config_used_when_xdg_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+        std::fs::create_dir_all(env.home_dir.as_ref().unwrap()).unwrap();
+        std::fs::write(env.home_dir.as_ref().unwrap().join(".ee.toml"), "cursor_line = true\n")
+            .unwrap();
+
+        let layers = discover_config_layers_with_env(&env, None).layers;
+
+        assert_eq!(layer_paths(&layers), vec![env.home_dir.as_ref().unwrap().join(".ee.toml")]);
+
+        let settings = load_config_with_env(None, &env);
+        assert!(settings.cursor_line);
+    }
+
+    #[test]
+    fn ancestor_chain_merges_outer_to_inner() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        let folder = project.join("folder");
+        let file = folder.join("main.rs");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(project.join(".ee.toml"), "cursor_line = true\nindent_size = 2\n").unwrap();
+        std::fs::write(folder.join(".ee.toml"), "indent_size = 8\nwrap_lines = true\n").unwrap();
+
+        let settings = load_config_with_env(Some(&file), &env);
+
+        assert!(settings.cursor_line);
+        assert!(settings.wrap_lines);
+        assert_eq!(settings.indent_size, 8);
+    }
+
+    #[test]
+    fn root_true_in_folder_stops_user_and_system_layers() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        let folder = project.join("folder");
+        let file = folder.join("main.rs");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(env.home_dir.as_ref().unwrap()).unwrap();
+        std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+        std::fs::create_dir_all(env.system_config_path.parent().unwrap()).unwrap();
+        std::fs::write(env.system_config_path.as_path(), "trim_trailing_whitespace = true\n")
+            .unwrap();
+        std::fs::write(
+            env.config_dir.as_ref().unwrap().join("ee").join("config.toml"),
+            "insert_final_newline = true\n",
+        )
+        .unwrap();
+        std::fs::write(project.join(".ee.toml"), "cursor_line = true\n").unwrap();
+        std::fs::write(folder.join(".ee.toml"), "root = true\nwrap_lines = true\n").unwrap();
+
+        let settings = load_config_with_env(Some(&file), &env);
+
+        assert!(settings.wrap_lines);
+        assert!(!settings.cursor_line);
+        assert!(!settings.insert_final_newline);
+        assert!(!settings.trim_trailing_whitespace);
+    }
+
+    #[test]
+    fn root_true_in_project_stops_user_and_system_but_keeps_inner_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        let folder = project.join("folder");
+        let file = folder.join("main.rs");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+        std::fs::create_dir_all(env.system_config_path.parent().unwrap()).unwrap();
+        std::fs::write(env.system_config_path.as_path(), "trim_trailing_whitespace = true\n")
+            .unwrap();
+        std::fs::write(
+            env.config_dir.as_ref().unwrap().join("ee").join("config.toml"),
+            "insert_final_newline = true\n",
+        )
+        .unwrap();
+        std::fs::write(project.join(".ee.toml"), "root = true\ncursor_line = true\n").unwrap();
+        std::fs::write(folder.join(".ee.toml"), "wrap_lines = true\n").unwrap();
+
+        let settings = load_config_with_env(Some(&file), &env);
+
+        assert!(settings.cursor_line);
+        assert!(settings.wrap_lines);
+        assert!(!settings.insert_final_newline);
+        assert!(!settings.trim_trailing_whitespace);
+    }
+
+    #[test]
+    fn root_true_in_user_stops_system_but_keeps_workspace_layers() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        let folder = project.join("folder");
+        let file = folder.join("main.rs");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+        std::fs::create_dir_all(env.system_config_path.parent().unwrap()).unwrap();
+        std::fs::write(env.system_config_path.as_path(), "trim_trailing_whitespace = true\n")
+            .unwrap();
+        std::fs::write(
+            env.config_dir.as_ref().unwrap().join("ee").join("config.toml"),
+            "root = true\ninsert_final_newline = true\n",
+        )
+        .unwrap();
+        std::fs::write(project.join(".ee.toml"), "cursor_line = true\n").unwrap();
+        std::fs::write(folder.join(".ee.toml"), "wrap_lines = true\n").unwrap();
+
+        let settings = load_config_with_env(Some(&file), &env);
+
+        assert!(settings.insert_final_newline);
+        assert!(settings.cursor_line);
+        assert!(settings.wrap_lines);
+        assert!(!settings.trim_trailing_whitespace);
+    }
+
+    #[test]
+    fn system_config_is_lowest_priority_external_layer() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+        std::fs::create_dir_all(env.system_config_path.parent().unwrap()).unwrap();
+        std::fs::write(env.system_config_path.as_path(), "trim_trailing_whitespace = true\n")
+            .unwrap();
+
+        let layers = discover_config_layers_with_env(&env, None).layers;
+        let settings = load_config_with_env(None, &env);
+
+        assert_eq!(layer_paths(&layers), vec![env.system_config_path.clone()]);
+        assert!(settings.trim_trailing_whitespace);
+    }
+
+    #[test]
+    fn search_report_marks_legacy_as_fallback_when_xdg_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+        std::fs::create_dir_all(env.home_dir.as_ref().unwrap()).unwrap();
+        std::fs::write(env.home_dir.as_ref().unwrap().join(".ee.toml"), "cursor_line = true\n")
+            .unwrap();
+
+        let report = config_search_report_with_env(&env, None);
+        let legacy = report
+            .layers
+            .into_iter()
+            .find(|layer| layer.kind == ConfigLayerKind::UserLegacy)
+            .unwrap();
+
+        assert!(legacy.loaded);
+        assert_eq!(legacy.note.as_deref(), Some("loaded because XDG user config is missing"));
     }
 
     #[test]
