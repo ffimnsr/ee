@@ -207,6 +207,10 @@ impl SaveTask {
         self.handle.as_ref().is_some_and(|h| !h.is_finished())
     }
 
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
     pub(crate) fn start_rope_save(
         &mut self,
         request: PreparedRopeSave,

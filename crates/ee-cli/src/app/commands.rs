@@ -2338,7 +2338,8 @@ impl App {
         }
 
         let buffer_id = self.backend.active().id;
-        let pristine = self.backend.active().pristine;
+        let pristine =
+            self.backend.buffer_pristine(buffer_id).map_err(|err| format!("move failed: {err}"))?;
         if pristine {
             std::fs::rename(&source, &target).map_err(|err| format!("move failed: {err}"))?;
         }
@@ -2401,19 +2402,21 @@ impl App {
 
         self.backend.flush_all_pending_edits().map_err(|err| format!("save failed: {err}"))?;
         let mut seen_paths = HashSet::new();
-        let save_ids = self
+        let candidate_ids = self
             .backend
             .all_bufs()
             .iter()
             .rev()
-            .filter(|buf| !buf.pristine)
             .filter_map(|buf| {
                 let path = buf.path.as_ref()?;
                 let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
                 seen_paths.insert(key).then_some(buf.id)
             })
             .collect::<Vec<_>>();
-        for id in save_ids {
+        for id in candidate_ids {
+            if self.backend.buffer_pristine(id).map_err(|err| format!("save failed: {err}"))? {
+                continue;
+            }
             self.backend.save_buffer(id).map_err(|err| format!("save failed: {err}"))?;
         }
         Ok(())
