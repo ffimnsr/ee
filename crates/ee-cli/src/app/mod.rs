@@ -435,7 +435,7 @@ impl App {
             Action::EnterMode(mode) => {
                 if mode == Mode::Normal {
                     self.enter_normal_mode();
-                } else {
+                } else if mode != Mode::Insert || !self.block_vlf_editing("insert") {
                     if mode.is_visual() {
                         // Set anchor at current cursor position.
                         self.visual_anchor =
@@ -800,29 +800,47 @@ impl App {
             }
             // Insert-entry variants
             Action::AppendAfterCursor => {
+                if self.block_vlf_editing("append") {
+                    return;
+                }
                 let _ = self.backend.send_edit("move_right", json!([]));
                 self.mode = Mode::Insert;
             }
             Action::AppendAtEndOfLine => {
+                if self.block_vlf_editing("append") {
+                    return;
+                }
                 let _ = self.backend.send_edit("move_to_right_end_of_line", json!([]));
                 self.mode = Mode::Insert;
             }
             Action::InsertAtLineStart => {
+                if self.block_vlf_editing("insert") {
+                    return;
+                }
                 let _ = self.backend.send_edit("move_to_left_end_of_line", json!([]));
                 self.mode = Mode::Insert;
             }
             Action::OpenLineBelow => {
+                if self.block_vlf_editing("open line") {
+                    return;
+                }
                 let _ = self.backend.send_edit("move_to_right_end_of_line", json!([]));
                 let _ = self.backend.send_edit("insert_newline", json!([]));
                 self.mode = Mode::Insert;
             }
             Action::OpenLineAbove => {
+                if self.block_vlf_editing("open line") {
+                    return;
+                }
                 let _ = self.backend.send_edit("move_to_left_end_of_line", json!([]));
                 let _ = self.backend.send_edit("insert_newline", json!([]));
                 let _ = self.backend.send_edit("move_up", json!([]));
                 self.mode = Mode::Insert;
             }
             Action::SubstituteChar => {
+                if self.block_vlf_editing("substitute") {
+                    return;
+                }
                 let count = self.input_state.count();
                 for _ in 0..count {
                     let _ = self.backend.send_edit("delete_forward", json!([]));
@@ -830,6 +848,9 @@ impl App {
                 self.mode = Mode::Insert;
             }
             Action::SubstituteLine => {
+                if self.block_vlf_editing("substitute") {
+                    return;
+                }
                 let _ = self.backend.send_edit("move_to_left_end_of_line", json!([]));
                 let _ = self.backend.send_edit("delete_to_end_of_paragraph", json!([]));
                 self.mode = Mode::Insert;
@@ -976,6 +997,10 @@ impl App {
                 self.handle_operator_pending(ch);
             }
             Mode::Insert => {
+                if self.block_vlf_editing("insert") {
+                    self.mode = Mode::Normal;
+                    return;
+                }
                 let s = ch.to_string();
                 self.insert_buffer.push(ch);
                 let _ = self.backend.send_edit("insert", json!({ "chars": s }));
@@ -3663,6 +3688,16 @@ impl App {
 
         self.source_control.remove(&buf_id);
         self.backend.status_message = Some(Self::source_control_disabled_message(feature));
+        true
+    }
+
+    fn block_vlf_editing(&mut self, feature: &str) -> bool {
+        if !self.backend.is_vlf {
+            return false;
+        }
+
+        self.backend.status_message =
+            Some(format!("{feature} disabled in VLF: editing is not wired to sparse overlay yet"));
         true
     }
 

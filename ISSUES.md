@@ -22,6 +22,17 @@ Real next jump likely needs architectural change: first render from decoded pref
   - [ ] Add perf regression coverage for 20 MiB long-line fixture on macOS: target warm open-to-first-render <250ms, with separate noise ceiling only for CI variance.
   - [ ] Add correctness tests for invalid UTF-8, UTF-8 BOM, mixed line endings, long first line truncation/rendering, and edit/save attempted before hydration completes.
 
+- [ ] Connect editable VLF overlay end-to-end.
+  - [ ] Add backend edit-dispatch guard for VLF buffers before `Editor::do_edit`; never allow normal rope edit commands to mutate the empty VLF placeholder rope.
+  - [ ] Add explicit VLF edit RPC path for insert/delete/change operations: frontend cursor line/column -> backend VLF logical byte offset -> `VlfStore::apply_insert` / `apply_delete` -> overlay revision commit.
+  - [ ] Make VLF viewport reads overlay-aware so `read_byte_range`, `line_to_byte`, `byte_to_line`, and `iter_chunks` see inserted/deleted overlay pieces, not only the base file.
+  - [ ] Make VLF streaming search overlay-aware so search and replace can find matches across original and inserted pieces.
+  - [ ] Wire `edit_permission()` into all edit command dispatch paths, not only save, with clear user-facing status when VLF editing is disabled.
+  - [ ] Reconcile VLF feature gates with editable overlay state: read-only VLF keeps editing/save/undo disabled, overlay-enabled VLF exposes only features actually backed by overlay-aware read/search/save.
+  - [ ] Replace TUI insert stopgap with real overlay edit flow once backend read/search/save gates are ready; keep regression proving pressing `i` never jumps cursor to line 1.
+  - [ ] Add integration tests for VLF insert, delete, undo grouping, save, save-as, viewport refresh after edit, and search after edit without loading full file into memory.
+
+
 ### Runtime Tree-Sitter Grammar + Query Loading
 
 - Rules:

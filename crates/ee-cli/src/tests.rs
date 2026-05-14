@@ -7824,6 +7824,42 @@ fn vlf_local_navigation_moves_cursor_without_core_edit() {
 }
 
 #[test]
+fn vlf_insert_key_stays_normal_without_core_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.is_vlf = true;
+    app.backend.vlf_cache_start_line = 40;
+    app.backend.vlf_approx_line_count = 100;
+    app.backend.vlf_line_count_exact = true;
+    app.backend.cursor_line = 41;
+    app.backend.cursor_col = 2;
+    app.backend.line_cache = vec![
+        LineSlot::Known(CachedLine {
+            text: String::from("alpha"),
+            cursors: Vec::new(),
+            syntax_spans: Vec::new(),
+        }),
+        LineSlot::Known(CachedLine {
+            text: String::from("beta"),
+            cursors: Vec::new(),
+            syntax_spans: Vec::new(),
+        }),
+    ];
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+
+    assert_eq!(app.mode, Mode::Normal);
+    assert_eq!((app.backend.cursor_line, app.backend.cursor_col), (41, 2));
+    assert_eq!(
+        app.backend.status_message.as_deref(),
+        Some("insert disabled in VLF: editing is not wired to sparse overlay yet")
+    );
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
 fn vlf_zero_moves_to_line_start_without_core_edit() {
     let (tx, rx) = mpsc::channel();
     let (_backend_tx, backend_rx) = mpsc::channel();
