@@ -76,6 +76,9 @@ pub(crate) struct BufState {
     pub(crate) cursor_line: usize,
     pub(crate) cursor_col: usize,
     pub(crate) pristine: bool,
+    pub(crate) save_complete: bool,
+    pub(crate) last_save_generation: u64,
+    pub(crate) completed_save_generation: u64,
     pub(crate) status_message: Option<String>,
     pub(crate) last_scroll: Option<(usize, usize)>,
     /// Last-known mtime of the backing file; `None` for scratch buffers.
@@ -618,6 +621,9 @@ impl BufferManager {
             cursor_line: 0,
             cursor_col: 0,
             pristine: true,
+            save_complete: true,
+            last_save_generation: 0,
+            completed_save_generation: 0,
             status_message: None,
             last_scroll: None,
             mtime: path
@@ -759,6 +765,7 @@ impl BufferManager {
             .iter()
             .position(|buf| buf.id == id)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "buffer not found"))?;
+        self.flush_view_edits(idx)?;
         let buf = &self.bufs[idx];
         let Some(path) = buf.path.clone() else {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "scratch buffer has no path"));
@@ -772,6 +779,9 @@ impl BufferManager {
                 "file_path": path.to_string_lossy().to_string(),
             }),
         )?;
+        let baseline_generation = self.bufs[idx].last_save_generation;
+        self.bufs[idx].save_complete = false;
+        self.wait_for_buffer_save(id, &path, baseline_generation)?;
         let display = path.display().to_string();
         // Refresh mtime after the save so external-change detection stays accurate.
         let new_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
@@ -784,6 +794,59 @@ impl BufferManager {
             let _ = std::fs::remove_file(rp);
         }
         Ok(())
+    }
+
+    pub(crate) fn flush_all_pending_edits(&mut self) -> io::Result<()> {
+        for idx in 0..self.bufs.len() {
+            self.flush_view_edits(idx)?;
+        }
+        Ok(())
+    }
+
+    fn wait_for_buffer_save(
+        &mut self,
+        id: BufferId,
+        path: &std::path::Path,
+        baseline_generation: u64,
+    ) -> io::Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut target_generation = None;
+        loop {
+            self.sync_pending_events_for_whole_document()?;
+
+            let idx = self
+                .bufs
+                .iter()
+                .position(|buf| buf.id == id)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "buffer not found"))?;
+            if target_generation.is_none()
+                && self.bufs[idx].last_save_generation > baseline_generation
+            {
+                target_generation = Some(self.bufs[idx].last_save_generation);
+            }
+            if target_generation
+                .is_some_and(|generation| self.bufs[idx].completed_save_generation >= generation)
+            {
+                self.bufs[idx].save_complete = true;
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("save timed out: {}", path.display()),
+                ));
+            }
+
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn flush_view_edits(&mut self, idx: usize) -> io::Result<()> {
+        let Some(view_id) = self.bufs.get(idx).map(|buf| buf.view_id.clone()) else {
+            return Ok(());
+        };
+        let _ = self.send_request("selections_preview", json!({ "view_id": view_id }))?;
+        self.sync_pending_events_for_whole_document()
     }
 
     pub(crate) fn reload_editor_config(&mut self) -> io::Result<()> {
@@ -1514,6 +1577,18 @@ impl BufferManager {
                     )
                 });
             }
+            BackendEvent::SaveProgress { view_id, complete, generation } => {
+                let Some(idx) = self.buffer_index_for_view(&view_id) else {
+                    return Ok(());
+                };
+                self.bufs[idx].last_save_generation =
+                    self.bufs[idx].last_save_generation.max(generation);
+                if complete {
+                    self.bufs[idx].completed_save_generation =
+                        self.bufs[idx].completed_save_generation.max(generation);
+                    self.bufs[idx].save_complete = true;
+                }
+            }
         }
         Ok(())
     }
@@ -1643,6 +1718,9 @@ impl BufferManager {
             cursor_line: 0,
             cursor_col: 0,
             pristine: true,
+            save_complete: true,
+            last_save_generation: 0,
+            completed_save_generation: 0,
             status_message: None,
             last_scroll: None,
             mtime,
@@ -1927,6 +2005,9 @@ impl BufferManager {
             cursor_line: 0,
             cursor_col: 0,
             pristine: true,
+            save_complete: true,
+            last_save_generation: 0,
+            completed_save_generation: 0,
             status_message: None,
             last_scroll: None,
             mtime: None,

@@ -595,7 +595,8 @@ impl CoreState {
                 };
 
                 let saved_rev_id = editor.get_head_rev_id();
-                editor.save_task.start_vlf_save(request, plan, saved_rev_id);
+                let generation = editor.save_task.start_vlf_save(request, plan, saved_rev_id);
+                self.peer.save_progress(view_id, 0, 0, false, generation);
                 let view_id_usize: usize = view_id.into();
                 self.peer.schedule_idle(SAVE_VIEW_IDLE_MASK | view_id_usize);
                 return;
@@ -617,7 +618,9 @@ impl CoreState {
         drop(save_ctx);
 
         if let Some(editor) = self.editors.get(&buffer_id) {
-            editor.borrow_mut().save_task.start_rope_save(request, fin_text, saved_rev_id);
+            let generation =
+                editor.borrow_mut().save_task.start_rope_save(request, fin_text, saved_rev_id);
+            self.peer.save_progress(view_id, 0, 0, false, generation);
             let view_id_usize: usize = view_id.into();
             self.peer.schedule_idle(SAVE_VIEW_IDLE_MASK | view_id_usize);
         } else {
@@ -676,7 +679,7 @@ impl CoreState {
                     }
                 }
 
-                self.peer.save_progress(view_id, 0, 0, true);
+                self.peer.save_progress(view_id, 0, 0, true, result.generation);
 
                 let changes = self.config_manager.update_buffer_path(buffer_id, &path);
                 let language = self.config_manager.get_buffer_language(buffer_id);
@@ -699,7 +702,7 @@ impl CoreState {
                 self.peer.alert(save_complete_alert(&path));
             }
             Err(e) => {
-                self.peer.save_progress(view_id, 0, 0, true);
+                self.peer.save_progress(view_id, 0, 0, true, result.generation);
                 let error_message = save_error_alert(&e, &path);
                 if matches!(&e, crate::file::FileError::Io(io_error, _) if io_error.kind() == ErrorKind::Interrupted)
                 {
@@ -726,7 +729,13 @@ impl CoreState {
             .get(&buffer_id)
             .and_then(|editor| editor.borrow_mut().save_task.poll_progress())
         {
-            self.peer.save_progress(id, progress.bytes_written, progress.total_bytes, false);
+            self.peer.save_progress(
+                id,
+                progress.bytes_written,
+                progress.total_bytes,
+                false,
+                progress.generation,
+            );
         }
 
         if let Some(result) = maybe_result {
@@ -2520,6 +2529,7 @@ mod tests {
         core.inner().finish_async_save(
             ViewId(1),
             crate::whole_scan::SaveTaskResult {
+                generation: 1,
                 request: crate::whole_scan::CompletedSaveRequest::Rope(request),
                 saved_rev_id,
                 result: Err(crate::file::FileError::Io(
@@ -2568,6 +2578,7 @@ mod tests {
         core.inner().finish_async_save(
             ViewId(1),
             crate::whole_scan::SaveTaskResult {
+                generation: 1,
                 request: crate::whole_scan::CompletedSaveRequest::Rope(request),
                 saved_rev_id,
                 result: Err(error),

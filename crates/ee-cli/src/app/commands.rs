@@ -2397,14 +2397,23 @@ impl App {
     }
 
     fn save_all_dirty_buffers(&mut self) -> Result<(), String> {
-        let dirty_ids = self
+        use std::collections::HashSet;
+
+        self.backend.flush_all_pending_edits().map_err(|err| format!("save failed: {err}"))?;
+        let mut seen_paths = HashSet::new();
+        let save_ids = self
             .backend
             .all_bufs()
             .iter()
+            .rev()
             .filter(|buf| !buf.pristine)
-            .map(|buf| buf.id)
+            .filter_map(|buf| {
+                let path = buf.path.as_ref()?;
+                let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+                seen_paths.insert(key).then_some(buf.id)
+            })
             .collect::<Vec<_>>();
-        for id in dirty_ids {
+        for id in save_ids {
             self.backend.save_buffer(id).map_err(|err| format!("save failed: {err}"))?;
         }
         Ok(())

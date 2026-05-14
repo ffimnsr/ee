@@ -175,6 +175,7 @@ impl Client {
         bytes_written: u64,
         total_bytes: u64,
         complete: bool,
+        generation: u64,
     ) {
         self.0.send_rpc_notification(
             "save_progress",
@@ -183,6 +184,7 @@ impl Client {
                 "bytes_written": bytes_written,
                 "total_bytes": total_bytes,
                 "complete": complete,
+                "generation": generation,
             }),
         );
     }

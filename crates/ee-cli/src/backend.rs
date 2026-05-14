@@ -119,6 +119,11 @@ pub(crate) enum BackendEvent {
         stored_match_count: usize,
         ranges: Vec<VlfSearchRange>,
     },
+    SaveProgress {
+        view_id: String,
+        complete: bool,
+        generation: u64,
+    },
 }
 
 impl BackendEvent {
@@ -750,6 +755,11 @@ impl XiClient {
                 } else {
                     format!("completions: {}", preview.join(", "))
                 });
+            }
+            BackendEvent::SaveProgress { complete, .. } => {
+                if complete {
+                    self.status_message = Some(String::from("saved"));
+                }
             }
             BackendEvent::Locations { title, locations, .. } => {
                 let same_file = locations.len() == 1
@@ -1432,6 +1442,12 @@ pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendE
                 stored_match_count,
                 ranges,
             })
+        }
+        "save_progress" => {
+            let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
+            let complete = params.get("complete").and_then(Value::as_bool).unwrap_or(false);
+            let generation = params.get("generation").and_then(Value::as_u64).unwrap_or(0);
+            Some(BackendEvent::SaveProgress { view_id, complete, generation })
         }
         _ => None,
     }
