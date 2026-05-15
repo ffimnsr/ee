@@ -20,7 +20,7 @@ use crate::keymap::{Action, BindingKey, SequenceNode};
 use crate::picker::PickerState;
 use crate::quickfix::{QfEntry, QfList};
 use crate::registers::{BlockInsert, LastChange, RegisterName, RegisterStore};
-use crate::text::byte_col_to_display_col;
+use crate::text::{byte_col_to_display_col, previous_char_boundary};
 use crate::window::{SplitDir, TabManager, ViewDirection};
 
 mod commands;
@@ -435,7 +435,7 @@ impl App {
             Action::EnterMode(mode) => {
                 if mode == Mode::Normal {
                     self.enter_normal_mode();
-                } else if mode != Mode::Insert || !self.block_vlf_editing("insert") {
+                } else {
                     if mode.is_visual() {
                         // Set anchor at current cursor position.
                         self.visual_anchor =
@@ -494,6 +494,9 @@ impl App {
                     | "scroll_page_up" => self.push_jump(),
                     _ => {}
                 }
+                if self.handle_vlf_direct_edit_action(method, count as usize) {
+                    return;
+                }
                 if self.handle_vlf_navigation(method, u64::from(count)) {
                     return;
                 }
@@ -510,6 +513,9 @@ impl App {
             Action::ExecuteCommand => self.execute_command(),
             Action::DeleteBackward => {
                 let count = self.input_state.count();
+                if self.try_vlf_delete_backward(count as usize) {
+                    return;
+                }
                 for _ in 0..count {
                     let _ = self.backend.send_edit("delete_backward", json!([]));
                 }
@@ -800,28 +806,38 @@ impl App {
             }
             // Insert-entry variants
             Action::AppendAfterCursor => {
-                if self.block_vlf_editing("append") {
+                if self.backend.active().is_vlf {
+                    self.move_vlf_cursor_right();
+                    self.mode = Mode::Insert;
                     return;
                 }
                 let _ = self.backend.send_edit("move_right", json!([]));
                 self.mode = Mode::Insert;
             }
             Action::AppendAtEndOfLine => {
-                if self.block_vlf_editing("append") {
+                if self.backend.active().is_vlf {
+                    self.move_vlf_cursor_to_line_end();
+                    self.mode = Mode::Insert;
                     return;
                 }
                 let _ = self.backend.send_edit("move_to_right_end_of_line", json!([]));
                 self.mode = Mode::Insert;
             }
             Action::InsertAtLineStart => {
-                if self.block_vlf_editing("insert") {
+                if self.backend.active().is_vlf {
+                    self.backend.cursor_col = 0;
+                    self.backend.clamp_cursor();
+                    self.mode = Mode::Insert;
                     return;
                 }
                 let _ = self.backend.send_edit("move_to_left_end_of_line", json!([]));
                 self.mode = Mode::Insert;
             }
             Action::OpenLineBelow => {
-                if self.block_vlf_editing("open line") {
+                if self.backend.active().is_vlf {
+                    self.move_vlf_cursor_to_line_end();
+                    let _ = self.send_vlf_replace_range_at_cursor("\n");
+                    self.mode = Mode::Insert;
                     return;
                 }
                 let _ = self.backend.send_edit("move_to_right_end_of_line", json!([]));
@@ -829,7 +845,8 @@ impl App {
                 self.mode = Mode::Insert;
             }
             Action::OpenLineAbove => {
-                if self.block_vlf_editing("open line") {
+                if self.backend.active().is_vlf {
+                    let _ = self.block_vlf_editing("open line above");
                     return;
                 }
                 let _ = self.backend.send_edit("move_to_left_end_of_line", json!([]));
@@ -838,7 +855,10 @@ impl App {
                 self.mode = Mode::Insert;
             }
             Action::SubstituteChar => {
-                if self.block_vlf_editing("substitute") {
+                if self.backend.active().is_vlf {
+                    let count = self.input_state.count();
+                    let _ = self.try_vlf_delete_forward(count as usize);
+                    self.mode = Mode::Insert;
                     return;
                 }
                 let count = self.input_state.count();
@@ -848,7 +868,16 @@ impl App {
                 self.mode = Mode::Insert;
             }
             Action::SubstituteLine => {
-                if self.block_vlf_editing("substitute") {
+                if self.backend.active().is_vlf {
+                    let line = self.backend.cursor_line;
+                    if let Some(text) = self.backend.get_line(line) {
+                        let _ = self.backend.vlf_replace_range(line, 0, line, text.len(), "");
+                        self.backend.cursor_line = line;
+                        self.backend.cursor_col = 0;
+                        self.backend.clamp_cursor();
+                        self.refresh_vlf_viewport();
+                    }
+                    self.mode = Mode::Insert;
                     return;
                 }
                 let _ = self.backend.send_edit("move_to_left_end_of_line", json!([]));
@@ -997,12 +1026,11 @@ impl App {
                 self.handle_operator_pending(ch);
             }
             Mode::Insert => {
-                if self.block_vlf_editing("insert") {
-                    self.mode = Mode::Normal;
-                    return;
-                }
                 let s = ch.to_string();
                 self.insert_buffer.push(ch);
+                if self.try_vlf_insert_text(&s) {
+                    return;
+                }
                 let _ = self.backend.send_edit("insert", json!({ "chars": s }));
             }
             Mode::CommandLine => {
@@ -1136,8 +1164,10 @@ impl App {
     fn handle_paste(&mut self, text: String) {
         match self.mode {
             Mode::Insert => {
-                // Bracketed paste stays backend-owned for undo grouping and multicursor behavior.
                 self.insert_buffer.push_str(&text);
+                if self.try_vlf_insert_text(&text) {
+                    return;
+                }
                 let _ = self.backend.send_edit("paste", json!({ "chars": text }));
             }
             Mode::CommandLine | Mode::Search => {
@@ -1161,6 +1191,9 @@ impl App {
                 // In normal mode enter insert and paste the text, like pressing `i` then typing.
                 self.mode = Mode::Insert;
                 self.insert_buffer.push_str(&text);
+                if self.try_vlf_insert_text(&text) {
+                    return;
+                }
                 let _ = self.backend.send_edit("paste", json!({ "chars": text }));
             }
             _ => {}
@@ -3697,8 +3730,159 @@ impl App {
         }
 
         self.backend.status_message =
-            Some(format!("{feature} disabled in VLF: editing is not wired to sparse overlay yet"));
+            Some(format!("{feature} disabled in VLF: unsupported in sparse overlay mode"));
         true
+    }
+
+    fn handle_vlf_direct_edit_action(&mut self, method: &str, count: usize) -> bool {
+        if !self.backend.active().is_vlf {
+            return false;
+        }
+
+        match method {
+            "insert_newline" => {
+                for _ in 0..count.max(1) {
+                    let _ = self.send_vlf_replace_range_at_cursor("\n");
+                }
+                true
+            }
+            "delete_forward" => self.try_vlf_delete_forward(count.max(1)),
+            "delete_backward" => self.try_vlf_delete_backward(count.max(1)),
+            _ => false,
+        }
+    }
+
+    fn try_vlf_insert_text(&mut self, text: &str) -> bool {
+        if !self.backend.active().is_vlf {
+            return false;
+        }
+        let _ = self.send_vlf_replace_range_at_cursor(text);
+        true
+    }
+
+    fn apply_vlf_replace_range(
+        &mut self,
+        start_line: usize,
+        start_col: usize,
+        end_line: usize,
+        end_col: usize,
+        text: &str,
+    ) -> io::Result<()> {
+        self.backend.vlf_replace_range(start_line, start_col, end_line, end_col, text)?;
+        let _ = self
+            .backend
+            .apply_local_vlf_replace_range(start_line, start_col, end_line, end_col, text);
+        Ok(())
+    }
+
+    fn send_vlf_replace_range_at_cursor(&mut self, text: &str) -> io::Result<()> {
+        let line = self.backend.cursor_line;
+        let col = self.backend.cursor_col;
+        self.apply_vlf_replace_range(line, col, line, col, text)?;
+        self.advance_vlf_cursor_after_insert(text);
+        self.refresh_vlf_viewport();
+        Ok(())
+    }
+
+    fn try_vlf_delete_backward(&mut self, count: usize) -> bool {
+        if !self.backend.active().is_vlf {
+            return false;
+        }
+        for _ in 0..count {
+            let line = self.backend.cursor_line;
+            let col = self.backend.cursor_col;
+            if col > 0 {
+                let Some(line_text) = self.backend.get_line(line) else { break };
+                let start_col = previous_char_boundary(line_text, col.saturating_sub(1));
+                let _ = self.apply_vlf_replace_range(line, start_col, line, col, "");
+                self.backend.cursor_line = line;
+                self.backend.cursor_col = start_col;
+                self.backend.clamp_cursor();
+            } else if line > 0 {
+                let prev_line = line - 1;
+                let Some(prev_text) = self.backend.get_line(prev_line) else { break };
+                let prev_len = prev_text.len();
+                let _ = self.apply_vlf_replace_range(prev_line, prev_len, line, 0, "");
+                self.backend.cursor_line = prev_line;
+                self.backend.cursor_col = prev_len;
+                self.backend.clamp_cursor();
+            } else {
+                break;
+            }
+        }
+        self.refresh_vlf_viewport();
+        true
+    }
+
+    fn try_vlf_delete_forward(&mut self, count: usize) -> bool {
+        if !self.backend.active().is_vlf {
+            return false;
+        }
+        for _ in 0..count {
+            let line = self.backend.cursor_line;
+            let col = self.backend.cursor_col;
+            let Some(line_text) = self.backend.get_line(line) else { break };
+            if col < line_text.len() {
+                let start = previous_char_boundary(line_text, col);
+                let end = line_text[start..]
+                    .chars()
+                    .next()
+                    .map(|ch| start + ch.len_utf8())
+                    .unwrap_or(start);
+                let _ = self.apply_vlf_replace_range(line, start, line, end, "");
+            } else if line + 1 < self.backend.line_count() {
+                let _ = self.apply_vlf_replace_range(line, col, line + 1, 0, "");
+            } else {
+                break;
+            }
+        }
+        self.refresh_vlf_viewport();
+        true
+    }
+
+    fn advance_vlf_cursor_after_insert(&mut self, text: &str) {
+        let mut line = self.backend.cursor_line;
+        let mut col = self.backend.cursor_col;
+        let parts: Vec<&str> = text.split('\n').collect();
+        if parts.len() == 1 {
+            col = col.saturating_add(text.len());
+        } else {
+            line = line.saturating_add(parts.len().saturating_sub(1));
+            col = parts.last().map_or(0, |part| part.len());
+        }
+        self.backend.cursor_line = line;
+        self.backend.cursor_col = col;
+        self.backend.clamp_cursor();
+    }
+
+    fn refresh_vlf_viewport(&mut self) {
+        if !self.backend.active().is_vlf {
+            return;
+        }
+        let top = self.viewport.top_line;
+        let height = self.last_editor_height.max(1);
+        let _ = self.backend.force_vlf_viewport_refresh(top, top.saturating_add(height));
+    }
+
+    fn move_vlf_cursor_right(&mut self) {
+        let line = self.backend.cursor_line;
+        let col = self.backend.cursor_col;
+        if let Some(text) = self.backend.get_line(line)
+            && col < text.len()
+        {
+            let next = text[col..].chars().next().map(|ch| col + ch.len_utf8()).unwrap_or(col);
+            self.backend.cursor_line = line;
+            self.backend.cursor_col = next;
+            self.backend.clamp_cursor();
+        }
+    }
+
+    fn move_vlf_cursor_to_line_end(&mut self) {
+        let line = self.backend.cursor_line;
+        let col = self.backend.get_line(line).map_or(self.backend.cursor_col, str::len);
+        self.backend.cursor_line = line;
+        self.backend.cursor_col = col;
+        self.backend.clamp_cursor();
     }
 
     // ── Recording helpers ──────────────────────────────────────────────────

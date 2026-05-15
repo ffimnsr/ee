@@ -700,6 +700,10 @@ impl Editor {
         config: &BufferItems,
         cmd: BufferEvent,
     ) {
+        if self.is_vlf() {
+            error!("attempted rope-backed edit on VLF buffer");
+            return;
+        }
         use self::BufferEvent::*;
         match cmd {
             Delete { movement, kill } => {

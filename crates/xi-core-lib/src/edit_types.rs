@@ -203,6 +203,13 @@ pub(crate) enum SpecialEvent {
         line_end: u64,
         generation: u64,
     },
+    VlfReplaceRange {
+        start_line: u64,
+        start_col: u64,
+        end_line: u64,
+        end_col: u64,
+        text: String,
+    },
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -634,6 +641,14 @@ impl From<EditNotification> for EventDomain {
             CollapseSelections => ViewEvent::CollapseSelections.into(),
             VlfViewport { line_start, line_end, generation } =>
                 SpecialEvent::VlfViewport { line_start, line_end, generation }.into(),
+            VlfReplaceRange { start_line, start_col, end_line, end_col, text } =>
+                SpecialEvent::VlfReplaceRange {
+                    start_line,
+                    start_col,
+                    end_line,
+                    end_col,
+                    text,
+                }.into(),
         }
     }
 }

@@ -374,6 +374,79 @@ impl BufState {
         Some(text)
     }
 
+    pub(crate) fn apply_local_vlf_replace_range(
+        &mut self,
+        start_line: usize,
+        start_col: usize,
+        end_line: usize,
+        end_col: usize,
+        text: &str,
+    ) -> bool {
+        if !self.is_vlf || start_line > end_line {
+            return false;
+        }
+
+        let Some(start_local) = start_line.checked_sub(self.vlf_cache_start_line) else {
+            return false;
+        };
+        let Some(end_local) = end_line.checked_sub(self.vlf_cache_start_line) else {
+            return false;
+        };
+        if end_local >= self.line_cache.len() {
+            return false;
+        }
+
+        let (LineSlot::Known(first_line), LineSlot::Known(last_line)) =
+            (&self.line_cache[start_local], &self.line_cache[end_local])
+        else {
+            return false;
+        };
+
+        if start_col > first_line.text.len()
+            || end_col > last_line.text.len()
+            || !first_line.text.is_char_boundary(start_col)
+            || !last_line.text.is_char_boundary(end_col)
+        {
+            return false;
+        }
+
+        let mut combined = first_line.text[..start_col].to_owned();
+        combined.push_str(text);
+        combined.push_str(&last_line.text[end_col..]);
+
+        let replacement_lines: Vec<String> = combined.split('\n').map(str::to_owned).collect();
+        let replacement_spans = build_optimistic_vlf_spans(
+            first_line,
+            last_line,
+            start_col,
+            end_col,
+            &replacement_lines,
+        );
+        let replacement_count = replacement_lines.len();
+        let replacement =
+            replacement_lines.into_iter().zip(replacement_spans).map(|(line, syntax_spans)| {
+                LineSlot::Known(CachedLine { text: line, cursors: Vec::new(), syntax_spans })
+            });
+        let replaced_count = end_local - start_local + 1;
+        self.line_cache.splice(start_local..=end_local, replacement);
+
+        match replacement_count.cmp(&replaced_count) {
+            std::cmp::Ordering::Greater => {
+                self.vlf_approx_line_count = self
+                    .vlf_approx_line_count
+                    .saturating_add((replacement_count - replaced_count) as u64);
+            }
+            std::cmp::Ordering::Less => {
+                self.vlf_approx_line_count = self
+                    .vlf_approx_line_count
+                    .saturating_sub((replaced_count - replacement_count) as u64);
+            }
+            std::cmp::Ordering::Equal => {}
+        }
+
+        true
+    }
+
     /// Apply a `vlf_chunks` response to the line cache.
     ///
     /// Silently drops the response when `generation` does not match
@@ -418,12 +491,47 @@ impl BufState {
                     })
                 })
                 .collect();
+            self.last_scroll = Some((start, start.saturating_add(lines.len())));
         }
         if tail_jump && !lines.is_empty() {
             self.cursor_line = start + lines.len() - 1;
             self.cursor_col = 0;
         }
     }
+}
+
+fn build_optimistic_vlf_spans(
+    first_line: &CachedLine,
+    last_line: &CachedLine,
+    start_col: usize,
+    end_col: usize,
+    replacement_lines: &[String],
+) -> Vec<Vec<CoreSyntaxSpan>> {
+    let mut spans = vec![Vec::new(); replacement_lines.len()];
+    if replacement_lines.is_empty() {
+        return spans;
+    }
+
+    spans[0]
+        .extend(first_line.syntax_spans.iter().filter(|span| span.end_byte <= start_col).cloned());
+
+    let Some(last_result_line) = replacement_lines.last() else {
+        return spans;
+    };
+    let suffix_len = last_line.text.len().saturating_sub(end_col);
+    let suffix_start = last_result_line.len().saturating_sub(suffix_len);
+    let suffix_shift = suffix_start as isize - end_col as isize;
+    let last_index = spans.len() - 1;
+    spans[last_index].extend(last_line.syntax_spans.iter().filter_map(|span| {
+        if span.start_byte < end_col {
+            return None;
+        }
+        let start_byte = span.start_byte.checked_add_signed(suffix_shift)?;
+        let end_byte = span.end_byte.checked_add_signed(suffix_shift)?;
+        Some(CoreSyntaxSpan { start_byte, end_byte, scope: span.scope.clone() })
+    }));
+
+    spans
 }
 
 impl PartialEq for BufState {
@@ -433,15 +541,27 @@ impl PartialEq for BufState {
             && self.display_name == other.display_name
             && self.view_id == other.view_id
             && self.editor_config_synced == other.editor_config_synced
+            && self.pending_line_request == other.pending_line_request
+            && self.line_cache == other.line_cache
             && self.lines == other.lines
             && self.cursor_line == other.cursor_line
             && self.cursor_col == other.cursor_col
             && self.pristine == other.pristine
+            && self.save_complete == other.save_complete
+            && self.last_save_generation == other.last_save_generation
+            && self.completed_save_generation == other.completed_save_generation
             && self.status_message == other.status_message
+            && self.last_scroll == other.last_scroll
+            && self.mtime == other.mtime
             && self.externally_modified == other.externally_modified
+            && self.diagnostics == other.diagnostics
             && self.annotations == other.annotations
             && self.is_vlf == other.is_vlf
             && self.vlf_cache_start_line == other.vlf_cache_start_line
+            && self.vlf_generation == other.vlf_generation
+            && self.vlf_approx_line_count == other.vlf_approx_line_count
+            && self.vlf_line_count_exact == other.vlf_line_count_exact
+            && self.pending_vlf_tail_jump == other.pending_vlf_tail_jump
             && self.vlf_search_ranges == other.vlf_search_ranges
     }
 }
@@ -538,6 +658,8 @@ impl Drop for BufferManager {
 
 impl BufferManager {
     const SYNC_IDLE_LIMIT: usize = 6;
+    const STARTUP_VLF_VIEWPORT_LINES: usize = 200;
+    const TAIL_VLF_PREFETCH_LINES: usize = 4096;
 
     fn buffer_index_for_view(&self, view_id: &str) -> Option<usize> {
         self.view_to_idx.get(view_id).copied()
@@ -1275,6 +1397,26 @@ impl BufferManager {
         )
     }
 
+    pub(crate) fn vlf_replace_range(
+        &mut self,
+        start_line: usize,
+        start_col: usize,
+        end_line: usize,
+        end_col: usize,
+        text: &str,
+    ) -> io::Result<()> {
+        self.send_edit(
+            "vlf_replace_range",
+            json!({
+                "start_line": start_line,
+                "start_col": start_col,
+                "end_line": end_line,
+                "end_col": end_col,
+                "text": text,
+            }),
+        )
+    }
+
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn paste_register(&mut self, chars: &str, before: bool) -> io::Result<()> {
@@ -1317,8 +1459,8 @@ impl BufferManager {
             if buf.pending_vlf_tail_jump {
                 return Ok(());
             }
-            if buf.last_scroll == Some(range)
-                && (buf.pending_line_request || vlf_viewport_ready(buf, first_line, last_line))
+            if vlf_viewport_ready(buf, first_line, last_line)
+                || (buf.last_scroll == Some(range) && buf.pending_line_request)
             {
                 return Ok(());
             }
@@ -1360,12 +1502,44 @@ impl BufferManager {
         }
     }
 
+    pub(crate) fn force_vlf_viewport_refresh(
+        &mut self,
+        first_line: usize,
+        last_line: usize,
+    ) -> io::Result<()> {
+        let buf = &mut self.bufs[self.current];
+        if !buf.is_vlf {
+            return self.notify_scroll(first_line, last_line);
+        }
+
+        if buf.view_id.is_empty() {
+            return Ok(());
+        }
+        let generation = buf.vlf_generation.wrapping_add(1);
+        buf.vlf_generation = generation;
+        buf.pending_line_request = true;
+        buf.last_scroll = Some((first_line, last_line));
+        send_xi_notification(
+            &self.tx,
+            "edit",
+            json!({
+                "view_id": buf.view_id,
+                "method": "vlf_viewport",
+                "params": {
+                    "line_start": first_line as u64,
+                    "line_end": last_line as u64,
+                    "generation": generation,
+                },
+            }),
+        )
+    }
     pub(crate) fn request_vlf_tail_viewport(&mut self, line_count: usize) -> io::Result<()> {
         let buf = &mut self.bufs[self.current];
         if !buf.is_vlf || buf.view_id.is_empty() {
             return Ok(());
         }
 
+        let requested_lines = line_count.max(Self::TAIL_VLF_PREFETCH_LINES);
         let generation = buf.vlf_generation.wrapping_add(1);
         buf.vlf_generation = generation;
         buf.pending_line_request = true;
@@ -1379,13 +1553,24 @@ impl BufferManager {
                 "method": "vlf_viewport",
                 "params": {
                     "line_start": u64::MAX,
-                    "line_end": line_count.saturating_sub(1) as u64,
+                    "line_end": requested_lines.saturating_sub(1) as u64,
                     "generation": generation,
                 },
             }),
         )
     }
 
+    pub(crate) fn apply_local_vlf_replace_range(
+        &mut self,
+        start_line: usize,
+        start_col: usize,
+        end_line: usize,
+        end_col: usize,
+        text: &str,
+    ) -> bool {
+        self.bufs[self.current]
+            .apply_local_vlf_replace_range(start_line, start_col, end_line, end_col, text)
+    }
     pub(crate) fn drain_events(&mut self) -> io::Result<()> {
         let mut events = Vec::new();
         while let Ok(event) = self.backend_rx.try_recv() {
@@ -1397,13 +1582,21 @@ impl BufferManager {
         Ok(())
     }
 
-    fn pump_init(&mut self) -> io::Result<()> {
+    pub(crate) fn pump_init(&mut self) -> io::Result<()> {
         let mut idle_rounds = 0;
         loop {
             if startup_render_ready(&self.bufs[self.current].line_cache) {
                 break;
             }
-            if invalid_line_ranges(&self.bufs[self.current].line_cache).is_empty() {
+            if self.bufs[self.current].is_vlf
+                && self.bufs[self.current].last_scroll.is_none()
+                && !self.bufs[self.current].pending_line_request
+            {
+                self.notify_scroll(0, Self::STARTUP_VLF_VIEWPORT_LINES)?;
+            }
+            if invalid_line_ranges(&self.bufs[self.current].line_cache).is_empty()
+                && !self.current_buffer_may_receive_initial_content()
+            {
                 break;
             }
             match recv_with_timeout(&mut self.backend_rx, Duration::from_millis(20)) {
@@ -1433,6 +1626,16 @@ impl BufferManager {
             }
         }
         Ok(())
+    }
+
+    fn current_buffer_may_receive_initial_content(&self) -> bool {
+        let buf = &self.bufs[self.current];
+        buf.pending_line_request
+            || buf
+                .path
+                .as_ref()
+                .and_then(|path| std::fs::metadata(path).ok())
+                .is_some_and(|metadata| metadata.len() > 0)
     }
 
     fn apply_event_to_buffer(&mut self, event: BackendEvent) -> io::Result<()> {
@@ -1547,7 +1750,8 @@ impl BufferManager {
                 self.bufs[idx].is_vlf = is_vlf;
                 if is_vlf {
                     self.bufs[idx].lines.clear();
-                    self.bufs[idx].line_cache.clear();
+                    self.bufs[idx].line_cache =
+                        vec![LineSlot::Invalid; Self::STARTUP_VLF_VIEWPORT_LINES];
                     self.bufs[idx].vlf_cache_start_line = 0;
                     self.bufs[idx].pending_line_request = false;
                     self.bufs[idx].last_scroll = None;

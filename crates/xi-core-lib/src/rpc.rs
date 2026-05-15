@@ -698,6 +698,17 @@ pub enum EditNotification {
         line_end: u64,
         generation: u64,
     },
+    /// Replace a VLF logical range addressed by frontend line/column pairs.
+    ///
+    /// This bypasses rope-backed edit commands and applies mutations directly
+    /// to the sparse VLF overlay.
+    VlfReplaceRange {
+        start_line: u64,
+        start_col: u64,
+        end_line: u64,
+        end_col: u64,
+        text: String,
+    },
 }
 
 /// The plugin related notifications.

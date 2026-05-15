@@ -524,6 +524,8 @@ impl VlfStore {
         // the page index fills in.
         let metrics = TextMetrics { byte_len: file_size, ..TextMetrics::default() };
         let mut overlay = PieceOverlay::with_limits(metrics, OverlayLimits::default());
+        overlay.set_read_byte_range_ready();
+        overlay.set_streaming_search_ready();
         overlay.set_streaming_save_ready();
         *ov = Some(overlay);
     }
@@ -540,6 +542,8 @@ impl VlfStore {
         let file_size = self.pager.file_size();
         let metrics = TextMetrics { byte_len: file_size, ..TextMetrics::default() };
         let mut overlay = PieceOverlay::with_limits(metrics, limits);
+        overlay.set_read_byte_range_ready();
+        overlay.set_streaming_search_ready();
         overlay.set_streaming_save_ready();
         *ov = Some(overlay);
     }
@@ -705,11 +709,6 @@ impl VlfStore {
 
         self.pager = FilePager::open_with_config(path, raw_cache_byte_cap, self.page_size * 4)?;
         let file_size = self.pager.file_size();
-        let exact_line_count = if overlay_limits.is_some() {
-            Some(if file_size == 0 { 1 } else { self.count_lf_streaming()?.saturating_add(1) })
-        } else {
-            None
-        };
 
         *self.index.get_mut() = PageIndex::new(file_size);
         *self.decoded_cache.get_mut() = DecodedTextCache::new(decoded_cache_byte_cap);
@@ -726,18 +725,16 @@ impl VlfStore {
         };
 
         self.first_viewport_set.set(window_end > window_start);
-        self.approx_line_floor.set(exact_line_count.unwrap_or(0));
-        self.exact_line_count.set(exact_line_count);
+        self.approx_line_floor.set(0);
+        self.exact_line_count.set(None);
 
         *self.overlay.get_mut() = overlay_limits.map(|limits| {
             let mut overlay = PieceOverlay::with_limits(
-                TextMetrics {
-                    byte_len: file_size,
-                    newline_count: exact_line_count.unwrap_or(1).saturating_sub(1),
-                    ..TextMetrics::default()
-                },
+                TextMetrics { byte_len: file_size, ..TextMetrics::default() },
                 limits,
             );
+            overlay.set_read_byte_range_ready();
+            overlay.set_streaming_search_ready();
             overlay.set_streaming_save_ready();
             overlay
         });
@@ -832,6 +829,9 @@ impl VlfStore {
         range: ByteRange,
         token: CancelGeneration,
     ) -> io::Result<TextChunk> {
+        if self.overlay_read_enabled() {
+            return self.overlay_read_exact_range(range, token);
+        }
         let raw = self.read_raw_range_token(range, token)?;
         let trim_start = leading_continuation_bytes(&raw);
         let trim_end = trailing_incomplete_bytes(&raw);
@@ -843,6 +843,251 @@ impl VlfStore {
         );
         let text = String::from_utf8_lossy(&raw[decoded_start..decoded_end]).into_owned();
         Ok(TextChunk { text, byte_range: decoded_range })
+    }
+
+    fn overlay_read_enabled(&self) -> bool {
+        self.overlay
+            .borrow()
+            .as_ref()
+            .is_some_and(|overlay| overlay.edit_gate().read_byte_range_ready)
+    }
+
+    fn overlay_len_bytes(&self) -> Option<u64> {
+        let overlay = self.overlay.borrow();
+        overlay.as_ref().map(PieceOverlay::total_byte_len)
+    }
+
+    fn visit_overlay_range<F>(
+        &self,
+        range: ByteRange,
+        token: CancelGeneration,
+        mut visitor: F,
+    ) -> io::Result<()>
+    where
+        F: FnMut(u64, &[u8]) -> bool,
+    {
+        let overlay = self.overlay.borrow();
+        let Some(overlay) = overlay.as_ref() else {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "overlay not enabled"));
+        };
+        if range.end.0 > overlay.total_byte_len() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "overlay range out of bounds"));
+        }
+        let chunk_cap = self.pager.max_read_size().max(1);
+        let mut doc_pos = 0u64;
+        for piece in overlay.pieces() {
+            let piece_end = doc_pos.saturating_add(piece.byte_len());
+            if piece_end <= range.start.0 {
+                doc_pos = piece_end;
+                continue;
+            }
+            if doc_pos >= range.end.0 {
+                break;
+            }
+
+            let local_start = range.start.0.saturating_sub(doc_pos).min(piece.byte_len());
+            let local_end = range.end.0.saturating_sub(doc_pos).min(piece.byte_len());
+            if local_start >= local_end {
+                doc_pos = piece_end;
+                continue;
+            }
+
+            match piece {
+                crate::vlf::overlay::Piece::Original { file_range, .. } => {
+                    let mut file_pos = file_range.start.0.saturating_add(local_start);
+                    let file_end = file_range.start.0.saturating_add(local_end);
+                    let mut logical_pos = doc_pos.saturating_add(local_start);
+                    while file_pos < file_end {
+                        let next_file_end = file_pos.saturating_add(chunk_cap).min(file_end);
+                        let chunk =
+                            self.pager.read_at(ByteRange::new(file_pos, next_file_end), token)?;
+                        self.record_pager_read(next_file_end.saturating_sub(file_pos));
+                        if !visitor(logical_pos, chunk.as_bytes()) {
+                            return Ok(());
+                        }
+                        logical_pos =
+                            logical_pos.saturating_add(next_file_end.saturating_sub(file_pos));
+                        file_pos = next_file_end;
+                    }
+                }
+                crate::vlf::overlay::Piece::Inserted { .. } => {
+                    if let Some(bytes) = overlay.inserted_bytes_for_piece(piece) {
+                        let start =
+                            usize::try_from(local_start).unwrap_or(bytes.len()).min(bytes.len());
+                        let end =
+                            usize::try_from(local_end).unwrap_or(bytes.len()).min(bytes.len());
+                        if start < end
+                            && !visitor(doc_pos.saturating_add(local_start), &bytes[start..end])
+                        {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
+            doc_pos = piece_end;
+        }
+
+        Ok(())
+    }
+
+    fn overlay_read_exact_range(
+        &self,
+        range: ByteRange,
+        token: CancelGeneration,
+    ) -> io::Result<TextChunk> {
+        let Some(len_bytes) = self.overlay_len_bytes() else {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "overlay not enabled"));
+        };
+        if range.end.0 > len_bytes {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "overlay range out of bounds"));
+        }
+        let mut bytes = Vec::with_capacity(range.len() as usize);
+        self.visit_overlay_range(range, token, |_, chunk| {
+            bytes.extend_from_slice(chunk);
+            true
+        })?;
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        Ok(TextChunk { text, byte_range: range })
+    }
+
+    fn overlay_line_to_byte(&self, line: u64) -> LineLookup {
+        if line == 0 {
+            return LineLookup::Exact(ByteOffset(0));
+        }
+        let Some(total_len) = self.overlay_len_bytes() else {
+            return LineLookup::Pending;
+        };
+        let token = self.pager.current_generation();
+        let mut lines_seen = 0u64;
+        let mut pending_cr = false;
+        let mut found = None;
+        let _ = self.visit_overlay_range(
+            ByteRange::new(0, total_len),
+            token,
+            |logical_start, chunk| {
+                let mut index = 0usize;
+                if pending_cr {
+                    if chunk.first() == Some(&b'\n') {
+                        lines_seen = lines_seen.saturating_add(1);
+                        pending_cr = false;
+                        if lines_seen == line {
+                            found = Some(ByteOffset(logical_start.saturating_add(1)));
+                            return false;
+                        }
+                        index = 1;
+                    } else {
+                        lines_seen = lines_seen.saturating_add(1);
+                        pending_cr = false;
+                        if lines_seen == line {
+                            found = Some(ByteOffset(logical_start));
+                            return false;
+                        }
+                    }
+                }
+
+                while index < chunk.len() {
+                    let abs = logical_start.saturating_add(index as u64);
+                    match chunk[index] {
+                        b'\r' => pending_cr = true,
+                        b'\n' => {
+                            lines_seen = lines_seen.saturating_add(1);
+                            if lines_seen == line {
+                                found = Some(ByteOffset(abs.saturating_add(1)));
+                                return false;
+                            }
+                        }
+                        _ if pending_cr => {
+                            lines_seen = lines_seen.saturating_add(1);
+                            pending_cr = false;
+                            if lines_seen == line {
+                                found = Some(ByteOffset(abs));
+                                return false;
+                            }
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+                true
+            },
+        );
+
+        if let Some(found) = found {
+            return LineLookup::Exact(found);
+        }
+        if pending_cr {
+            lines_seen = lines_seen.saturating_add(1);
+            if lines_seen == line {
+                return LineLookup::Exact(ByteOffset(total_len));
+            }
+        }
+        LineLookup::OutOfRange
+    }
+
+    fn overlay_byte_to_line(&self, offset: u64) -> Option<LogicalLine> {
+        let total_len = self.overlay_len_bytes()?;
+        if offset > total_len {
+            return None;
+        }
+        let token = self.pager.current_generation();
+        let mut lines_seen = 0u64;
+        let mut pending_cr = false;
+        let mut reached_end = offset == 0;
+        let _ = self.visit_overlay_range(
+            ByteRange::new(0, total_len),
+            token,
+            |logical_start, chunk| {
+                if logical_start >= offset {
+                    reached_end = true;
+                    return false;
+                }
+                let available = usize::try_from(offset.saturating_sub(logical_start))
+                    .unwrap_or(chunk.len())
+                    .min(chunk.len());
+                let mut index = 0usize;
+                if pending_cr && available > 0 {
+                    if chunk[0] == b'\n' {
+                        if offset > logical_start.saturating_add(1) {
+                            lines_seen = lines_seen.saturating_add(1);
+                        }
+                        pending_cr = false;
+                        index = 1;
+                    } else {
+                        lines_seen = lines_seen.saturating_add(1);
+                        pending_cr = false;
+                    }
+                }
+
+                while index < available {
+                    match chunk[index] {
+                        b'\r' => pending_cr = true,
+                        b'\n' => {
+                            lines_seen = lines_seen.saturating_add(1);
+                            pending_cr = false;
+                        }
+                        _ if pending_cr => {
+                            lines_seen = lines_seen.saturating_add(1);
+                            pending_cr = false;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    index += 1;
+                }
+
+                if available < chunk.len() {
+                    reached_end = true;
+                    return false;
+                }
+                true
+            },
+        );
+        if reached_end && pending_cr && offset == total_len {
+            lines_seen = lines_seen.saturating_add(1);
+        }
+        Some(LogicalLine(lines_seen))
     }
 
     /// Set the batch size for future viewport reads.
@@ -1510,7 +1755,7 @@ impl TextStore for VlfStore {
     }
 
     fn len_bytes(&self) -> u64 {
-        self.pager.file_size()
+        self.overlay_len_bytes().unwrap_or_else(|| self.pager.file_size())
     }
 
     fn known_line_count(&self) -> KnownLineCount {
@@ -1552,6 +1797,24 @@ impl TextStore for VlfStore {
     }
 
     fn read_byte_range(&self, range: ByteRange) -> TextChunkResult {
+        if self.overlay_read_enabled() {
+            let len_bytes = self.len_bytes();
+            if range.start.0 > len_bytes || range.end.0 > len_bytes {
+                return TextChunkResult::Unsupported;
+            }
+            if range.is_empty() {
+                return TextChunkResult::Ready(TextChunk {
+                    text: String::new(),
+                    byte_range: range,
+                });
+            }
+            let token = self.pager.current_generation();
+            return match self.overlay_read_exact_range(range, token) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => TextChunkResult::Cancelled,
+                Err(_) => TextChunkResult::Pending,
+                Ok(chunk) => TextChunkResult::Ready(chunk),
+            };
+        }
         let file_size = self.pager.file_size();
         if range.start.0 > file_size || range.end.0 > file_size {
             return TextChunkResult::Unsupported;
@@ -1570,11 +1833,17 @@ impl TextStore for VlfStore {
     }
 
     fn line_to_byte(&self, line: LogicalLine) -> LineLookup {
+        if self.overlay_read_enabled() {
+            return self.overlay_line_to_byte(line.0);
+        }
         self.drain_incoming();
         self.line_to_byte_internal(line.0)
     }
 
     fn byte_to_line(&self, offset: ByteOffset) -> Option<LogicalLine> {
+        if self.overlay_read_enabled() {
+            return self.overlay_byte_to_line(offset.0);
+        }
         if offset.0 > self.pager.file_size() {
             return None;
         }
@@ -1583,6 +1852,25 @@ impl TextStore for VlfStore {
     }
 
     fn iter_chunks(&self, range: ByteRange) -> Box<dyn Iterator<Item = TextChunkResult> + '_> {
+        if self.overlay_read_enabled() {
+            let len_bytes = self.len_bytes();
+            if range.start.0 > len_bytes || range.end.0 > len_bytes {
+                return Box::new(std::iter::once(TextChunkResult::Unsupported));
+            }
+            if range.is_empty() {
+                return Box::new(std::iter::once(TextChunkResult::Ready(TextChunk {
+                    text: String::new(),
+                    byte_range: range,
+                })));
+            }
+            let token = self.pager.current_generation();
+            let result = match self.overlay_read_exact_range(range, token) {
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => TextChunkResult::Cancelled,
+                Err(_) => TextChunkResult::Pending,
+                Ok(chunk) => TextChunkResult::Ready(chunk),
+            };
+            return Box::new(std::iter::once(result));
+        }
         let file_size = self.pager.file_size();
         if range.start.0 > file_size || range.end.0 > file_size {
             return Box::new(std::iter::once(TextChunkResult::Unsupported));
@@ -1629,7 +1917,7 @@ impl TextStore for VlfStore {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        self.pager.file_size().wrapping_add(mtime_secs)
+        self.len_bytes().wrapping_add(mtime_secs)
     }
 
     fn byte_to_utf16(&self, _offset: ByteOffset) -> Option<Utf16Offset> {
@@ -1650,7 +1938,7 @@ impl TextStore for VlfStore {
     fn edit_permission(&self) -> EditPermission {
         // When an overlay is active (editing enabled), edits are permitted.
         // Before enable_editing() is called the store remains read-only.
-        if self.overlay.borrow().is_some() {
+        if self.overlay_read_enabled() {
             EditPermission::Allowed
         } else {
             EditPermission::Forbidden { reason: VLF_READ_ONLY_REASON }
@@ -1663,7 +1951,9 @@ impl TextStore for VlfStore {
         let mut disabled_features: Vec<&'static str> = gates.disabled_features().collect();
         let overlay = self.overlay.borrow();
         if let Some(overlay) = overlay.as_ref() {
-            disabled_features.retain(|feature| *feature != "editing" && *feature != "undo");
+            if overlay.edit_gate().read_byte_range_ready {
+                disabled_features.retain(|feature| *feature != "editing");
+            }
             if overlay.edit_gate().streaming_save_ready {
                 disabled_features.retain(|feature| *feature != "save");
             }
@@ -2505,6 +2795,45 @@ mod tests {
         assert!(!chunks.is_empty());
     }
 
+    #[test]
+    fn overlay_reads_and_line_lookups_include_inserted_text() {
+        let (store, _f) = store_from(b"alpha\nbeta\n");
+        store.enable_editing();
+        let ctx = OverlayEditContext { revision_id: 1, undo_group: 1 };
+        store.apply_insert(2, "XYZ", ctx).unwrap();
+
+        assert_eq!(store.len_bytes(), 14);
+
+        match store.read_byte_range(ByteRange::new(0, store.len_bytes())) {
+            TextChunkResult::Ready(chunk) => assert_eq!(chunk.text, "alXYZpha\nbeta\n"),
+            other => panic!("expected Ready, got {:?}", other),
+        }
+
+        assert_eq!(store.line_to_byte(LogicalLine(0)), LineLookup::Exact(ByteOffset(0)));
+        assert_eq!(store.line_to_byte(LogicalLine(1)), LineLookup::Exact(ByteOffset(9)));
+        assert_eq!(store.byte_to_line(ByteOffset(4)), Some(LogicalLine(0)));
+        assert_eq!(store.byte_to_line(ByteOffset(11)), Some(LogicalLine(1)));
+
+        let chunks: Vec<_> = store.iter_chunks(ByteRange::new(0, store.len_bytes())).collect();
+        assert_eq!(chunks.len(), 1);
+        match &chunks[0] {
+            TextChunkResult::Ready(chunk) => assert_eq!(chunk.text, "alXYZpha\nbeta\n"),
+            other => panic!("expected Ready, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn overlay_search_reads_include_inserted_text() {
+        let (store, _f) = store_from(b"alpha\nbeta\n");
+        store.enable_editing();
+        let ctx = OverlayEditContext { revision_id: 1, undo_group: 1 };
+        store.apply_insert(5, " plus", ctx).unwrap();
+
+        let token = store.pager.current_generation();
+        let chunk = store.read_search_range(ByteRange::new(0, store.len_bytes()), token).unwrap();
+        assert_eq!(chunk.text, "alpha plus\nbeta\n");
+    }
+
     // ---- scan_viewport_first ----------------------------------------
 
     #[test]
@@ -2746,7 +3075,7 @@ mod tests {
         let status = store.doc_status();
         assert!(!status.disabled_features.contains(&"editing"), "editing should be enabled");
         assert!(!status.disabled_features.contains(&"save"), "save should be enabled");
-        assert!(!status.disabled_features.contains(&"undo"), "undo should be enabled");
+        assert!(status.disabled_features.contains(&"undo"), "undo should stay disabled");
         assert!(status.disabled_features.contains(&"lsp"), "other VLF restrictions remain");
         assert!(store.is_editing_enabled());
         assert!(store.is_save_enabled());
@@ -2771,10 +3100,7 @@ mod tests {
             store.suggested_save_policy(),
             Some(VlfSavePolicy::SameSizeInPlaceOverwrite)
         ));
-        match store.known_line_count() {
-            KnownLineCount::Exact(count) => assert_eq!(count, 3),
-            other => panic!("expected exact saved line count, got {:?}", other),
-        }
+        assert_eq!(store.known_line_count(), KnownLineCount::Unknown);
     }
 
     #[test]
@@ -3016,6 +3342,96 @@ mod tests {
         use crate::text_store::ByteRange;
         store.apply_delete(ByteRange::new(5, 11), ctx).unwrap();
         assert_eq!(store.signed_byte_delta(), -6);
+    }
+
+    #[test]
+    fn apply_insert_mid_file_preserves_surrounding_content() {
+        use crate::vlf::overlay::OverlayEditContext;
+
+        let content = b"alpha\nbeta\ngamma\n";
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content).unwrap();
+        f.flush().unwrap();
+
+        let store = VlfStore::open(f.path()).unwrap();
+        store.enable_editing();
+        let ctx = OverlayEditContext { revision_id: 1, undo_group: 1 };
+        store.apply_insert(10, " needle", ctx).unwrap();
+
+        match store.read_byte_range(ByteRange::new(0, store.len_bytes())) {
+            TextChunkResult::Ready(chunk) => {
+                assert_eq!(chunk.text, "alpha\nbeta needle\ngamma\n");
+            }
+            other => panic!("expected Ready, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_insert_mid_file_with_small_page_size_preserves_surrounding_content() {
+        use crate::vlf::overlay::OverlayEditContext;
+
+        let content = b"alpha\nbeta\ngamma\n";
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content).unwrap();
+        f.flush().unwrap();
+
+        let store = VlfStore::open_with_config(f.path(), 64, 1024 * 1024).unwrap();
+        store.enable_editing();
+        let ctx = OverlayEditContext { revision_id: 1, undo_group: 1 };
+        store.apply_insert(10, " needle", ctx).unwrap();
+
+        match store.read_byte_range(ByteRange::new(0, store.len_bytes())) {
+            TextChunkResult::Ready(chunk) => {
+                assert_eq!(chunk.text, "alpha\nbeta needle\ngamma\n");
+            }
+            other => panic!("expected Ready, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_insert_mid_file_after_scan_all_preserves_surrounding_content() {
+        use crate::vlf::overlay::OverlayEditContext;
+
+        let content = b"alpha\nbeta\ngamma\n";
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content).unwrap();
+        f.flush().unwrap();
+
+        let store = VlfStore::open_with_config(f.path(), 64, 1024 * 1024).unwrap();
+        store.scan_all().unwrap();
+        store.enable_editing();
+        let ctx = OverlayEditContext { revision_id: 1, undo_group: 1 };
+        store.apply_insert(10, " needle", ctx).unwrap();
+
+        match store.read_byte_range(ByteRange::new(0, store.len_bytes())) {
+            TextChunkResult::Ready(chunk) => {
+                assert_eq!(chunk.text, "alpha\nbeta needle\ngamma\n");
+            }
+            other => panic!("expected Ready, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_delete_then_insert_replaces_mid_file_range() {
+        use crate::vlf::overlay::OverlayEditContext;
+
+        let content = b"alpha\nbeta\ngamma\n";
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content).unwrap();
+        f.flush().unwrap();
+
+        let store = VlfStore::open(f.path()).unwrap();
+        store.enable_editing();
+        let ctx = OverlayEditContext { revision_id: 1, undo_group: 1 };
+        store.apply_delete(ByteRange::new(6, 10), ctx).unwrap();
+        store.apply_insert(6, "BETA!", ctx).unwrap();
+
+        match store.read_byte_range(ByteRange::new(0, store.len_bytes())) {
+            TextChunkResult::Ready(chunk) => {
+                assert_eq!(chunk.text, "alpha\nBETA!\ngamma\n");
+            }
+            other => panic!("expected Ready, got {other:?}"),
+        }
     }
 
     #[test]
