@@ -201,7 +201,7 @@ pub struct SeamResult {
     /// The byte range originally requested by the caller.
     pub original_range: ByteRange,
     /// The byte range that was actually decoded after expanding by up to
-    /// [`UTF8_SEAM_SLACK`] bytes on each side and walking back to the nearest
+    /// `UTF8_SEAM_SLACK` bytes on each side and walking back to the nearest
     /// UTF-8 codepoint boundaries.
     pub decoded_range: ByteRange,
 }
@@ -655,7 +655,7 @@ impl VlfStore {
     ///
     /// # Errors
     ///
-    /// Returns [`VlfSaveError::EditingNotEnabled`] when [`Self::enable_editing`]
+    /// Returns [`crate::vlf::save::VlfSaveError::EditingNotEnabled`] when `Self::enable_editing`
     /// has not been called (no overlay to save).  For an unmodified read-only
     /// VLF file the original file on disk already reflects the correct content.
     ///
@@ -1342,7 +1342,7 @@ impl VlfStore {
 
     /// Start a background thread that scans the file sequentially from byte 0,
     /// sending [`PageDescriptor`]s through a channel that is drained by
-    /// [`drain_incoming`](Self::drain_incoming).
+    /// `drain_incoming`.
     ///
     /// The scan stops automatically when the file is fully covered or when
     /// `self` is dropped.  Calling this method more than once is a no-op.

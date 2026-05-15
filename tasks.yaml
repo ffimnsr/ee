@@ -19,6 +19,10 @@ tasks:
     commands:
       - cargo +stable test --workspace --all-features
     description: Run tests using the stable Rust toolchain.
+  docs-check:
+    commands:
+      - RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+    description: Check that documentation builds without errors.
   install:
     commands:
       - cargo install --path crates/ee-cli

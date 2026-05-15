@@ -446,7 +446,7 @@ impl Engine {
         self.try_edit_rev(priority, undo_group, base_rev, delta).unwrap();
     }
 
-    /// Attempts to apply a new edit based on the [`Revision`] specified by `base_rev`,
+    /// Attempts to apply a new edit based on the `Revision` specified by `base_rev`,
     /// Returning an [`Error`] if the `Revision` cannot be found.
     pub fn try_edit_rev(
         &mut self,

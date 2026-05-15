@@ -138,7 +138,7 @@ impl Editor {
     ///
     /// The `text` buffer starts empty; all content reads must go through the
     /// `VlfStore`.  VLF editors start read-only; callers must explicitly opt
-    /// into overlay editing via [`Self::enable_vlf_editing`].
+    /// into overlay editing via `Self::enable_vlf_editing`.
     pub fn with_vlf_store(store: crate::vlf::store::VlfStore) -> Editor {
         let engine = Engine::new(Rope::from(""));
         let buffer = engine.get_head().clone();

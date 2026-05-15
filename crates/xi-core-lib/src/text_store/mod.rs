@@ -198,7 +198,7 @@ pub const CONSTRAINED_WHOLE_DOC_MAX_CHARS: u64 = 256_000_000;
 /// matrix for a mode.
 ///
 /// Features disabled in VLF mode can be surfaced to the user through
-/// [`VlfStatus::disabled_features`].
+/// `VlfStatus::disabled_features`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VlfFeatureGates {
     /// Insert/delete/replace edits are permitted.

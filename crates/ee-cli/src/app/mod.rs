@@ -1506,7 +1506,7 @@ impl App {
         self.input_state.reset();
     }
 
-    /// Like [`jump_to_char`] but uses `select_extend` so the region from the
+    /// Like [`Self::jump_to_char`] but uses `select_extend` so the region from the
     /// current cursor position to the found char is selected (for operators).
     fn jump_to_char_selecting(&mut self, target: char, forward: bool, inclusive: bool) {
         let _ = self.backend.find_char(target, forward, inclusive, true);

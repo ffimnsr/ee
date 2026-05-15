@@ -21,7 +21,7 @@ use std::cmp::{max, min};
 use std::fmt;
 use std::ops::{Range, RangeFrom, RangeFull, RangeInclusive, RangeTo, RangeToInclusive};
 
-/// A fancy version of Range<usize>, representing a closed-open range;
+/// A fancy version of `Range<usize>`, representing a closed-open range;
 /// the interval [5, 7) is the set {5, 6}.
 ///
 /// It is an invariant that `start <= end`. An interval where `end < start` is
