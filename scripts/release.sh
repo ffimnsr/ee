@@ -15,11 +15,11 @@ usage() {
   cat <<'EOF'
 Usage: scripts/release.sh [options] [<version>]
 
-Bump ee-cli version, refresh Cargo.lock, run release quality gates,
+Bump all workspace crate versions, refresh Cargo.lock, run release quality gates,
 create release commit, create v-prefixed git tag, and optionally push commit/tag.
 
 Release version source of truth: crates/ee-cli/Cargo.toml
-Updated manifest: crates/ee-cli/Cargo.toml
+Updated manifests: all workspace package Cargo.toml files and workspace dependencies in Cargo.toml
 
 Options:
   --major      Increment major version and reset minor/patch to zero.
@@ -287,6 +287,77 @@ update_manifest_version() {
   mv "$tmp" "$manifest"
 }
 
+workspace_manifests() {
+  awk '
+    BEGIN { in_workspace = 0; in_members = 0 }
+    /^\[workspace\]$/ { in_workspace = 1; next }
+    in_workspace && /^\[/ && $0 != "[workspace]" { exit }
+    in_workspace {
+      if ($0 ~ /^[[:space:]]*members[[:space:]]*=/) {
+        line = $0
+        sub(/^[^=]*=[[:space:]]*/, "", line)
+        gsub(/[][]|"/, "", line)
+        n = split(line, parts, /,[[:space:]]*/)
+        for (i = 1; i <= n; i++) if (length(parts[i])) print parts[i]
+        in_members = 1
+      } else if (in_members) {
+        line = $0
+        gsub(/[][]|"/, "", line)
+        n = split(line, parts, /,[[:space:]]*/)
+        for (i = 1; i <= n; i++) if (length(parts[i])) print parts[i]
+        if ($0 ~ /\]/) in_members = 0
+      }
+    }
+  ' Cargo.toml
+}
+
+update_workspace_manifest_versions() {
+  local version="$1"
+  local member
+
+  for member in $(workspace_manifests); do
+    local manifest="${member%/}/Cargo.toml"
+    if [[ -f "$manifest" ]]; then
+      update_manifest_version "$manifest" "$version"
+    fi
+  done
+}
+
+update_root_workspace_dependency_versions() {
+  local version="$1"
+  local tmp
+
+  tmp="$(mktemp)"
+
+  awk -v version="$version" '
+    BEGIN { in_table = 0 }
+    /^\[workspace\.dependencies\]$/ { in_table = 1 }
+    /^\[/ && $0 != "[workspace.dependencies]" && in_table { in_table = 0 }
+    {
+      if (in_table && /path[[:space:]]*=.*"crates\// && /version[[:space:]]*=/) {
+        sub(/version[[:space:]]*=[[:space:]]*"[^"]*"/, "version = \"" version "\"")
+      }
+      print
+    }
+  ' Cargo.toml >"$tmp" || {
+    rm -f "$tmp"
+    die "failed to update workspace dependency versions in Cargo.toml"
+  }
+
+  mv "$tmp" Cargo.toml
+}
+
+stage_workspace_manifests() {
+  local member manifest
+
+  for member in $(workspace_manifests); do
+    manifest="${member%/}/Cargo.toml"
+    if [[ -f "$manifest" ]]; then
+      git add "$manifest"
+    fi
+  done
+}
+
 ensure_remote_exists() {
   git remote get-url "$REMOTE_NAME" >/dev/null 2>&1 || die "git remote '$REMOTE_NAME' is not configured"
 }
@@ -392,7 +463,8 @@ main() {
   previous_tag="$(previous_release_tag)"
   release_date="$(date +%Y-%m-%d)"
 
-  update_manifest_version "$RELEASE_MANIFEST" "$version"
+  update_workspace_manifest_versions "$version"
+  update_root_workspace_dependency_versions "$version"
   update_changelog "$version" "$release_date" "$previous_tag"
 
   cargo check --workspace --all-targets --quiet
@@ -400,7 +472,8 @@ main() {
   cargo clippy --workspace --all-targets --all-features -- -D warnings
   cargo test --workspace
 
-  git add Cargo.lock "$RELEASE_MANIFEST" "$CHANGELOG_FILE"
+  git add Cargo.lock Cargo.toml "$CHANGELOG_FILE"
+  stage_workspace_manifests
   git commit -m "release: $tag_name"
 
   git tag -a "$tag_name" -m "release: $tag_name"

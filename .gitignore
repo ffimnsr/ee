@@ -18,6 +18,8 @@ build
 *.md
 !/README.md
 !/RULE.md
+!/CHANGELOG.md
+!/CONTRIBUTING.md
 !/.github/copilot-instructions.md
 
 .atlas/
