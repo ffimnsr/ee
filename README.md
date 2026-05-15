@@ -1,88 +1,184 @@
-# ee-editor (forked of xi-editor)
+# ee-editor
 
-The ee-editor project is an attempt to build a high quality text editor,
-using modern software engineering techniques. It is initially built for
-macOS, using Cocoa for the user interface. There are also frontends for
-other operating systems available from third-party developers.
+`ee` is a modern editor built around a fast, backend-agnostic core and a terminal-first frontend.
+This repository is a fork and evolution of the original `xi-editor` architecture, with a focus on:
 
-Goals include:
+- high-performance editing for large files
+- safe and maintainable Rust implementation
+- terminal UI experience via `ee-cli`
+- language-aware tooling through tree-sitter and LSP support
+- plugin-friendly architecture and extensible backend services
 
-* ***Incredibly high performance***. All editing operations should commit and paint
-  in under 16ms. The editor should never make you wait for anything.
+This repo is primarily a Rust workspace with a CLI frontend in `crates/ee-cli` and shared editor-core libraries under `crates/xi-core-lib`.
 
-* ***Beauty***. The editor should fit well on a modern desktop, and not look like a
-  throwback from the ’80s or ’90s. Text drawing should be done with the best
-  technology available (Core Text on Mac, DirectWrite on Windows, etc.), and
-  support Unicode fully.
+## What makes ee special?
 
-* ***Reliability***. Crashing, hanging, or losing work should never happen.
+- **Fast and responsive**: backend edits, parsing, and rendering are designed to avoid stalls, even for large buffers.
+- **Large-file friendly**: persistent rope data structures and streaming workflows make very large files practical.
+- **Terminal-focused UI**: `ee` uses `ratatui` and `crossterm` for a polished terminal-based editing experience.
+- **Safe Rust core**: shared libraries are implemented in Rust and organized for frontend-agnostic reuse.
+- **Tree-sitter powered**: syntax parsing, highlighting, and language-feature support are built on tree-sitter grammars.
+- **Extensible backend**: plugin and RPC-driven design makes it easier to add code actions, completions, diagnostics, and external tooling.
 
-* ***Developer friendliness***. It should be easy to customize xi editor, whether
-  by adding plug-ins or hacking on the core.
+## Repository layout
 
-**Learn more** with the creator of Xi, Raph Levien, in this [Recurse Center Localhost talk](https://www.recurse.com/events/localhost-raph-levien
-).
+- `crates/ee-cli`: terminal frontend and user interface for `ee`
+- `crates/xi-core-lib`: shared editor core, language support, async runtime glue, and text model APIs
+- `crates/xi-core`: original xi backend adapter crate
+- `crates/xi-lsp-lib`: LSP integration and language service support
+- `crates/xi-plugin-lib`: plugin RPC helpers
+- `crates/xi-plugin-derive`: derive macros for plugin-related types
+- `crates/xi-rope`: rope text storage implementation
+- `crates/xi-rpc`: RPC layer for backend/frontend communication
+- `crates/xi-unicode`: unicode support utilities
+- `fuzz`: fuzzing targets and artifacts
 
+## Install
 
-## Design decisions
+### From source
 
-Here are some of the design decisions, and motivation why they should
-contribute to the above goals:
+The easiest way to install locally from this repository is:
 
-* ***Separation into front-end and back-end modules***. The front-end is responsible for presenting the user interface and
-  drawing a screen full of text. The back-end (also known as “core”) holds the file buffers and is
-  responsible for all potentially expensive editing operations.
+```sh
+cargo install --path crates/ee-cli
+```
 
-* ***Native UI***. Cross-platform UI toolkits never look and feel quite right. The
-  best technology for building a UI is the native framework of the platform.
-  On Mac, that’s Cocoa.
+Once installed, run the editor with:
 
-* ***Rust***. The back-end needs to be extremely performant. In particular, it
-  should use little more memory than the buffers being edited. That level of
-  performance is possible in C++, but Rust offers a much more reliable, and
-  in many ways, higher level programming platform.
+```sh
+ee <path/to/file>
+```
 
-* ***A persistent rope data structure***. Persistent ropes are efficient even for
-  very large files. In addition, they present a simple interface to their
-  clients - conceptually, they're a sequence of characters just like a string,
-  and the client need not be aware of any internal structure.
+### Official installer
 
-* ***Asynchronous operations***. The editor should never, ever block and prevent the
-  user from getting their work done. For example, autosave will spawn a
-  thread with a snapshot of the current editor buffer (the persistent rope
-  data structure is copy-on-write so this operation is nearly free), which can
-  then proceed to write out to disk at its leisure, while the buffer is still
-  fully editable.
+This repository includes a Unix installer at `install.sh` that downloads and installs a release binary from GitHub.
 
-* ***Plug-ins over scripting***. Most text editors have an associated scripting
-  language for extending functionality. However, these languages are usually
-  both more arcane and less powerful than “real” languages. The xi editor will
-  communicate with plugins through pipes, letting them be written in any
-  language, and making it easier to integrate with other systems such as
-  version control, deeper static analyzers of code, etc.
+#### Install with curl
 
-* ***JSON***. The protocol for front-end / back-end communication, as well as
-  between the back-end and plug-ins, is based on simple JSON messages. I
-  considered binary formats, but the actual improvement in performance would
-  be completely in the noise. Using JSON considerably lowers friction for
-  developing plug-ins, as it’s available out of the box for most modern
-  languages, and there are plenty of the libraries available for the other
-  ones.
+```sh
+curl -fsSL https://raw.githubusercontent.com/ffimnsr/ee/main/install.sh | sh
+```
 
+#### Install with wget
+
+```sh
+wget -qO- https://raw.githubusercontent.com/ffimnsr/ee/main/install.sh | sh
+```
+
+If you prefer to inspect the script first, download it explicitly and run it locally:
+
+```sh
+curl -fsSL -o install.sh https://raw.githubusercontent.com/ffimnsr/ee/main/install.sh
+sh install.sh
+```
+
+The installer supports `bash`, `zsh`, and `fish` completions and installs the binary into `~/.local/bin` by default.
+
+If `~/.local/bin` is not on your `PATH`, add it to your shell profile:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+### Requirements
+
+- Rust `1.95` or newer
+- Unix-like shell for `install.sh`
+- `cargo` toolchain for local development and builds
+
+## Build and run
+
+### Build the workspace
+
+```sh
+cargo build --workspace
+```
+
+### Build the release binary
+
+```sh
+cargo build --workspace --release
+```
+
+### Run `ee` directly from source
+
+```sh
+cargo run -p ee-cli -- <path/to/file>
+```
+
+### Run the terminal frontend only
+
+```sh
+cargo run -p ee-cli -- <path/to/file>
+```
+
+## Development
+
+### Formatting
+
+```sh
+cargo fmt --all
+```
+
+### Linting
+
+```sh
+cargo clippy --all -- -D warnings
+```
+
+For stable-toolchain checks:
+
+```sh
+cargo +stable clippy --workspace --all-targets --all-features -- -D warnings
+```
+
+### Tests
+
+```sh
+cargo test --workspace
+```
+
+For full workspace coverage with stable Rust:
+
+```sh
+cargo +stable test --workspace --all-features
+```
+
+### Useful tasks
+
+This repository provides `tasks.yaml` for common development flows:
+
+- `format`: format source with `cargo fmt`
+- `lint`: run `cargo clippy --all -D warnings`
+- `test-stable`: run stable Rust tests
+- `install`: install `ee` locally from `crates/ee-cli`
+
+## Design and architecture
+
+### Frontend / backend separation
+
+`ee` keeps the terminal UI separate from the editor core. The frontend handles input, layout, and rendering, while the backend owns buffer state, edit operations, parsing, and language-aware features.
+
+### Backend-agnostic core
+
+`xi-core-lib` is designed to be reusable without tying it to a specific UI. That makes it possible to build multiple frontends on the same editor runtime.
+
+### Language support
+
+The project uses `tree-sitter` for syntax parsing and language features. There is also first-class support for LSP and completion workflows through `xi-lsp-lib`.
+
+### Plugin and RPC model
+
+The editor core communicates through JSON/RPC messages. This keeps external integrations and plugin extensions language-agnostic and easier to evolve.
+
+## Contributing
+
+Contributions are welcome. Open issues and pull requests on GitHub and follow the repository's existing code style.
 
 ## Authors
 
-The xi-editor project was started by Raph Levien but has since received
-contributions from a number of other people. See the [AUTHORS](AUTHORS)
-file for details.
-
+This fork is maintained by the `ee` project contributors. See [AUTHORS](AUTHORS) for history and acknowledgements.
 
 ## License
 
-This project is licensed under the Apache 2 [license](LICENSE).
-
-
-## Contributions
-
-We gladly accept contributions via GitHub pull requests. Please see
-[CONTRIBUTING.md](CONTRIBUTING.md) for more details.
+This project is licensed under the Apache 2.0 [license](LICENSE).
