@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.1 - 2026-05-15
+
+### CI
+
+- fix ci and release workflow plus bugs (`1862d141`)
+
+
 ## 0.8.0 - 2026-05-15
 
 ### Features
@@ -105,5 +112,3 @@
 - complete quality improvements and feature implementations (`f94f10df`)
 - refactor and remove deprecated interval methods (`c5bf6073`)
 - move ee-tui to ee-cli (`c7d6427e`)
-
-
