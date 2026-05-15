@@ -1044,8 +1044,19 @@ fn render_buffer(
     };
 
     if buf.line_count() == 0 && top == 0 {
+        let label = if buf.pending_line_request
+            || buf
+                .path
+                .as_ref()
+                .and_then(|path| std::fs::metadata(path).ok())
+                .is_some_and(|metadata| metadata.len() > 0)
+        {
+            "Loading..."
+        } else {
+            "empty buffer"
+        };
         let text = vec![Line::from(Span::styled(
-            "empty buffer",
+            label,
             Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
         ))];
         frame.render_widget(

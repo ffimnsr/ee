@@ -888,6 +888,9 @@ impl App {
                 let _ = self.backend.send_edit("delete_backward", json!([]));
             }
             "delete_char_forward" => {
+                if self.try_vlf_delete_forward(1) {
+                    return;
+                }
                 let _ = self.backend.send_edit("delete_forward", json!([]));
             }
             "insert_newline" => {

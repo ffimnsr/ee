@@ -23,8 +23,8 @@
 //! locking.
 //!
 //! The LRU byte cache evicts the least-recently-used pages once the
-//! `cache_byte_cap` threshold is exceeded.  Cache entries are keyed by the
-//! **start byte offset** of the read.
+//! `cache_byte_cap` threshold is exceeded. Cache entries are keyed by the
+//! exact requested byte range so overlapping reads do not alias incorrectly.
 //!
 //! `mmap` is intentionally excluded from the first milestone: `mmap` failure
 //! modes (OOM-killer, SIGBUS on file truncation) differ significantly across
@@ -115,15 +115,15 @@ pub struct PagerMetrics {
 // PageCache (internal LRU)
 // ---------------------------------------------------------------------------
 
-/// LRU byte cache keyed by page-start byte offset.
+/// LRU byte cache keyed by exact byte range.
 ///
 /// Uses a `HashMap` for O(1) data access and a `BTreeMap<access_time,
 /// page_start>` for O(log n) LRU eviction without external crates.
 struct PageCache {
-    /// page_start → (data, last_access_time)
-    data: HashMap<u64, (PageBytes, u64)>,
-    /// last_access_time → page_start (for LRU eviction)
-    order: BTreeMap<u64, u64>,
+    /// (start, end) → (data, last_access_time)
+    data: HashMap<(u64, u64), (PageBytes, u64)>,
+    /// last_access_time → (start, end) (for LRU eviction)
+    order: BTreeMap<u64, (u64, u64)>,
     access_counter: u64,
     used_bytes: u64,
     byte_cap: u64,
@@ -146,21 +146,21 @@ impl PageCache {
         }
     }
 
-    fn get(&mut self, page_start: u64) -> Option<PageBytes> {
-        let (page, old_time) = self.data.get_mut(&page_start)?;
+    fn get(&mut self, range_key: (u64, u64)) -> Option<PageBytes> {
+        let (page, old_time) = self.data.get_mut(&range_key)?;
         // Update LRU order.
         self.order.remove(old_time);
         self.access_counter += 1;
         let new_time = self.access_counter;
         *old_time = new_time;
-        self.order.insert(new_time, page_start);
+        self.order.insert(new_time, range_key);
         self.hits += 1;
         Some(page.clone())
     }
 
-    fn put(&mut self, page_start: u64, bytes: PageBytes) {
+    fn put(&mut self, range_key: (u64, u64), bytes: PageBytes) {
         // Remove existing entry first to avoid double-counting bytes.
-        if let Some((old, old_time)) = self.data.remove(&page_start) {
+        if let Some((old, old_time)) = self.data.remove(&range_key) {
             self.used_bytes = self.used_bytes.saturating_sub(old.len() as u64);
             self.order.remove(&old_time);
         }
@@ -169,9 +169,9 @@ impl PageCache {
         while !self.data.is_empty() && self.used_bytes + needed > self.byte_cap {
             // BTreeMap::iter() yields keys in ascending order; the smallest
             // key is the least recently used.
-            if let Some((&oldest_time, &oldest_start)) = self.order.iter().next() {
+            if let Some((&oldest_time, &oldest_range)) = self.order.iter().next() {
                 self.order.remove(&oldest_time);
-                if let Some((evicted, _)) = self.data.remove(&oldest_start) {
+                if let Some((evicted, _)) = self.data.remove(&oldest_range) {
                     self.used_bytes = self.used_bytes.saturating_sub(evicted.len() as u64);
                     self.evictions += 1;
                 }
@@ -180,8 +180,8 @@ impl PageCache {
         self.access_counter += 1;
         let time = self.access_counter;
         self.used_bytes += needed;
-        self.data.insert(page_start, (bytes, time));
-        self.order.insert(time, page_start);
+        self.data.insert(range_key, (bytes, time));
+        self.order.insert(time, range_key);
         self.misses += 1; // counts a put as a cache miss (caller had to read)
     }
 
@@ -318,8 +318,10 @@ impl FilePager {
             ));
         }
 
+        let range_key = (start, end);
+
         // Cache hit?
-        if let Some(cached) = self.cache.borrow_mut().get(start) {
+        if let Some(cached) = self.cache.borrow_mut().get(range_key) {
             return Ok(cached);
         }
 
@@ -330,7 +332,7 @@ impl FilePager {
         self.check_generation(token)?;
 
         let page = PageBytes(Arc::from(raw.as_slice()));
-        self.cache.borrow_mut().put(start, page.clone());
+        self.cache.borrow_mut().put(range_key, page.clone());
         Ok(page)
     }
 
@@ -525,6 +527,19 @@ mod tests {
         pager.read_at(range, token).unwrap();
         let m = pager.metrics();
         assert!(m.cache_hits >= 1);
+    }
+
+    #[test]
+    fn overlapping_cached_reads_do_not_return_larger_prior_range() {
+        let content = b"alpha\nbeta\ngamma\n";
+        let (pager, _f) = make_pager(content);
+        let token = pager.current_generation();
+
+        let whole = pager.read_at(ByteRange::new(0, content.len() as u64), token).unwrap();
+        assert_eq!(whole.as_bytes(), content);
+
+        let prefix = pager.read_at(ByteRange::new(0, 10), token).unwrap();
+        assert_eq!(prefix.as_bytes(), b"alpha\nbeta");
     }
 
     #[test]

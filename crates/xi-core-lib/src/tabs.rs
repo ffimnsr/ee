@@ -498,7 +498,11 @@ impl CoreState {
         };
         let editor = match open_result {
             OpenResult::Rope { text, mode } => RefCell::new(Editor::with_text_mode(text, mode)),
-            OpenResult::Vlf(store) => RefCell::new(Editor::with_vlf_store(*store)),
+            OpenResult::Vlf(store) => {
+                let mut editor = Editor::with_vlf_store(*store);
+                editor.enable_vlf_editing();
+                RefCell::new(editor)
+            }
         };
         let view = RefCell::new(View::new(view_id, buffer_id));
 
@@ -1776,6 +1780,7 @@ mod tests {
     use xi_rpc::{Callback, Error as RpcError, Handler, Peer, RequestId, RpcCtx};
 
     use crate::open_policy::{OpenPolicy, OpenThresholds};
+    use crate::text_store::TextStore;
 
     use super::{
         CoreState, NEW_VIEW_IDLE_TOKEN, PLUGIN_RESTART_MAX_DELAY_MS, SAVE_VIEW_IDLE_MASK,
@@ -1850,6 +1855,16 @@ mod tests {
 
     fn drive_save_idle(core: &mut crate::XiCore, view_id: ViewId) {
         core.inner().handle_idle(SAVE_VIEW_IDLE_MASK | usize::from(view_id));
+    }
+
+    fn vlf_text(core: &crate::XiCore, buffer_id: super::BufferId) -> String {
+        let inner = core.inner();
+        let editor = inner.editors.get(&buffer_id).unwrap().borrow();
+        let store = editor.vlf_store.as_ref().expect("expected VLF store");
+        match store.read_byte_range(crate::text_store::ByteRange::new(0, store.len_bytes())) {
+            crate::text_store::TextChunkResult::Ready(chunk) => chunk.text,
+            other => panic!("expected Ready VLF text, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1959,6 +1974,9 @@ mod tests {
 
         let buffer_id = core.inner().views.get(&view_id).unwrap().borrow().get_buffer_id();
         assert!(core.inner().editors.get(&buffer_id).unwrap().borrow().is_vlf());
+        let read_only_store = crate::vlf::store::VlfStore::open(tmp.path()).unwrap();
+        *core.inner().editors.get(&buffer_id).unwrap().borrow_mut() =
+            crate::editor::Editor::with_vlf_store(read_only_store);
 
         peer.take_notifications();
         core.handle_notification(
@@ -2067,6 +2085,196 @@ mod tests {
             .find(|(method, _)| method == "alert")
             .expect("expected save-complete alert");
         assert_eq!(params["msg"].as_str(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn edit_notification_vlf_replace_range_updates_search_and_viewport() {
+        let peer = RecordingPeer::default();
+        let ctx = RpcCtx::new(Box::new(peer.clone()));
+        let mut core = crate::XiCore::new();
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::ClientStarted {
+                config_dir: None,
+                client_extras_dir: None,
+            },
+        );
+
+        core.inner().file_manager.set_open_policy(OpenPolicy::new(OpenThresholds {
+            normal_bytes: 1,
+            normal_lines: 1,
+            vlf_bytes: 2,
+            vlf_lines: 1,
+            confirm_local_bytes: u64::MAX,
+            confirm_remote_bytes: u64::MAX,
+            confirm_web_bytes: u64::MAX,
+        }));
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"alpha\nbeta\ngamma\n").unwrap();
+        tmp.flush().unwrap();
+
+        let view_id_value = core.inner().do_new_view(Some(tmp.path().to_path_buf())).unwrap();
+        let view_id: ViewId = serde_json::from_value(view_id_value).unwrap();
+        core.inner().handle_idle(NEW_VIEW_IDLE_TOKEN);
+
+        let buffer_id = core.inner().views.get(&view_id).unwrap().borrow().get_buffer_id();
+
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::Edit(crate::rpc::EditCommand {
+                view_id,
+                cmd: crate::rpc::EditNotification::VlfReplaceRange {
+                    start_line: 1,
+                    start_col: 4,
+                    end_line: 1,
+                    end_col: 4,
+                    text: String::from(" needle"),
+                },
+            }),
+        );
+
+        assert_eq!(vlf_text(&core, buffer_id), "alpha\nbeta needle\ngamma\n");
+
+        let notifications = peer.take_notifications();
+        let (_, scroll) = notifications
+            .iter()
+            .find(|(method, _)| method == "scroll_to")
+            .expect("expected scroll_to after VLF edit");
+        assert_eq!(scroll["line"], 1u64);
+        assert_eq!(scroll["col"], 11u64);
+
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::Edit(crate::rpc::EditCommand {
+                view_id,
+                cmd: crate::rpc::EditNotification::Find {
+                    chars: String::from("needle"),
+                    case_sensitive: true,
+                    regex: false,
+                    whole_words: false,
+                },
+            }),
+        );
+
+        let notifications = peer.take_notifications();
+        let (_, status) = notifications
+            .iter()
+            .find(|(method, _)| method == "vlf_search_status")
+            .expect("expected vlf_search_status after VLF edit");
+        assert_eq!(status["stored_match_count"], 1u64);
+        assert_eq!(status["ranges"][0]["line"], 1u64);
+        assert_eq!(status["ranges"][0]["start_col"], 5u64);
+        assert_eq!(status["ranges"][0]["end_col"], 11u64);
+
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::Edit(crate::rpc::EditCommand {
+                view_id,
+                cmd: crate::rpc::EditNotification::VlfViewport {
+                    line_start: 1,
+                    line_end: 1,
+                    generation: 17,
+                },
+            }),
+        );
+
+        let notifications = peer.take_notifications();
+        let (_, viewport) = notifications
+            .iter()
+            .find(|(method, _)| method == "vlf_chunks")
+            .expect("expected vlf_chunks after VLF edit");
+        assert_eq!(viewport["generation"], 17u64);
+        let lines = viewport["lines"].as_array().expect("lines array");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].as_str(), Some("beta needle"));
+    }
+
+    #[test]
+    fn edit_notification_vlf_replace_range_delete_and_insert_reuse_undo_group() {
+        let peer = RecordingPeer::default();
+        let ctx = RpcCtx::new(Box::new(peer.clone()));
+        let mut core = crate::XiCore::new();
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::ClientStarted {
+                config_dir: None,
+                client_extras_dir: None,
+            },
+        );
+
+        core.inner().file_manager.set_open_policy(OpenPolicy::new(OpenThresholds {
+            normal_bytes: 1,
+            normal_lines: 1,
+            vlf_bytes: 2,
+            vlf_lines: 1,
+            confirm_local_bytes: u64::MAX,
+            confirm_remote_bytes: u64::MAX,
+            confirm_web_bytes: u64::MAX,
+        }));
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"alpha\n").unwrap();
+        tmp.flush().unwrap();
+
+        let view_id_value = core.inner().do_new_view(Some(tmp.path().to_path_buf())).unwrap();
+        let view_id: ViewId = serde_json::from_value(view_id_value).unwrap();
+        core.inner().handle_idle(NEW_VIEW_IDLE_TOKEN);
+
+        let buffer_id = core.inner().views.get(&view_id).unwrap().borrow().get_buffer_id();
+
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::Edit(crate::rpc::EditCommand {
+                view_id,
+                cmd: crate::rpc::EditNotification::VlfReplaceRange {
+                    start_line: 0,
+                    start_col: 5,
+                    end_line: 0,
+                    end_col: 5,
+                    text: String::from("x"),
+                },
+            }),
+        );
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::Edit(crate::rpc::EditCommand {
+                view_id,
+                cmd: crate::rpc::EditNotification::VlfReplaceRange {
+                    start_line: 0,
+                    start_col: 6,
+                    end_line: 0,
+                    end_col: 6,
+                    text: String::from("y"),
+                },
+            }),
+        );
+
+        {
+            let inner = core.inner();
+            let editor = inner.editors.get(&buffer_id).unwrap().borrow();
+            let delta = editor
+                .vlf_overlay_delta_for_undo_group(1)
+                .expect("expected first VLF undo group delta");
+            assert_eq!(delta.ops.len(), 2);
+        }
+        assert_eq!(vlf_text(&core, buffer_id), "alphaxy\n");
+
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::Edit(crate::rpc::EditCommand {
+                view_id,
+                cmd: crate::rpc::EditNotification::VlfReplaceRange {
+                    start_line: 0,
+                    start_col: 5,
+                    end_line: 0,
+                    end_col: 7,
+                    text: String::new(),
+                },
+            }),
+        );
+
+        assert_eq!(vlf_text(&core, buffer_id), "alpha\n");
     }
 
     #[cfg(feature = "notify")]
