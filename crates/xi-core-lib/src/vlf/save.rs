@@ -166,7 +166,7 @@ pub enum VlfSaveError {
     ///
     /// The temp file has been removed.  The original file is intact.
     Cancelled,
-    /// [`VlfStore::enable_editing`] has not been called; there is no overlay
+    /// [`crate::vlf::store::VlfStore::enable_editing`] has not been called; there is no overlay
     /// to save from.
     EditingNotEnabled,
     /// The requested optimized policy does not match the overlay byte delta.

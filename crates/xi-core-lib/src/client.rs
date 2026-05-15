@@ -307,7 +307,7 @@ impl Client {
         );
     }
 
-    /// Respond to a [`vlf_viewport`] request with decoded line content.
+    /// Respond to a `vlf_viewport` request with decoded line content.
     ///
     /// `generation` echoes the request's generation id so the frontend can
     /// discard responses that have been superseded by a newer viewport scroll.

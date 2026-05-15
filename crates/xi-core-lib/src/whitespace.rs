@@ -36,7 +36,7 @@ const MAX_INDENT_PROBE_LINES: usize = 1_000;
 impl Indentation {
     /// Parses a rope for indentation settings.
     ///
-    /// Internally delegates to [`parse_bounded`] with [`MAX_INDENT_PROBE_LINES`].
+    /// Internally delegates to [`parse_bounded`] with `MAX_INDENT_PROBE_LINES`.
     /// Use [`parse_bounded`] directly when a custom cap is required.
     ///
     /// [`parse_bounded`]: Indentation::parse_bounded

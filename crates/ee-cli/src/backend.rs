@@ -326,7 +326,7 @@ pub(crate) struct XiClient {
     /// Logical line number represented by `line_cache[0]` in VLF mode.
     pub(crate) vlf_cache_start_line: usize,
     /// Monotone counter incremented on every VLF viewport scroll; see
-    /// [`BufState::vlf_generation`] for the full design note.
+    /// [`crate::buffer::BufState::vlf_generation`] for the full design note.
     pub(crate) vlf_generation: u64,
     /// Last approximate total line count from a `vlf_chunks` response.
     pub(crate) vlf_approx_line_count: u64,

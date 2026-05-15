@@ -46,7 +46,7 @@ const MAX_LINE_ENDING_PROBE_BYTES: usize = 65_536;
 impl LineEnding {
     /// Breaks a rope down into chunks, and checks each chunk for line endings.
     ///
-    /// Internally delegates to [`parse_bounded`] with [`MAX_LINE_ENDING_PROBE_BYTES`].
+    /// Internally delegates to [`parse_bounded`] with `MAX_LINE_ENDING_PROBE_BYTES`.
     ///
     /// [`parse_bounded`]: LineEnding::parse_bounded
     pub fn parse(rope: &Rope) -> Result<Option<Self>, LineEndingError> {

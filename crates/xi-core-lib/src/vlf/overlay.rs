@@ -17,14 +17,14 @@
 //! # Design
 //!
 //! The overlay sits on top of the read-only VLF storage layer.  Edits are
-//! represented as an ordered sequence of [`Piece`]s that together describe the
+//! represented as an ordered sequence of [`crate::vlf::overlay::Piece`]s that together describe the
 //! full logical document:
 //!
-//! - [`Piece::Original`] — a slice of the original file addressed by absolute
+//! - [`crate::vlf::overlay::Piece::Original`] — a slice of the original file addressed by absolute
 //!   byte offset (file stays on disk; the piece is just a range descriptor).
-//! - [`Piece::Inserted`] — a slice of an append-only [`InsertBuffer`].
+//! - [`crate::vlf::overlay::Piece::Inserted`] — a slice of an append-only [`crate::vlf::overlay::InsertBuffer`].
 //!
-//! Inserted text is **never** written into the [`super::pager::FilePager`]
+//! Inserted text is **never** written into the [`crate::vlf::pager::FilePager`]
 //! page cache; it lives exclusively in its `InsertBuffer`.
 //!
 //! # Current milestone scope
@@ -37,7 +37,7 @@
 //!
 //! # Piece metrics
 //!
-//! Every piece carries [`TextMetrics`] so the overlay can answer line/byte
+//! Every piece carries [`crate::vlf::overlay::TextMetrics`] so the overlay can answer line/byte
 //! queries without re-reading the original file or re-decoding insert buffers.
 //! Metrics are computed eagerly on insert and cached on original-piece split.
 //! CRLF seam flags (`ends_with_cr`, `starts_with_lf`) let the overlay avoid
@@ -157,7 +157,7 @@ impl ArbitrarySparseEditGate {
 /// - `overlay_byte_cap`: 64 MiB — matches the default raw-page LRU budget.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverlayLimits {
-    /// Maximum number of undo groups retained in [`PieceOverlay::undo_history`].
+    /// Maximum number of undo groups retained in `PieceOverlay::undo_history`.
     ///
     /// When a new edit would push the count above this, the oldest recorded
     /// undo group is GC'd first.
@@ -1006,7 +1006,7 @@ impl PieceOverlay {
     ///
     /// Returns the narrowest save strategy that fits the current overlay.  Returns
     /// [`VlfSavePolicy::SaveAs`] placeholder when the file is above
-    /// [`LARGE_REWRITE_THRESHOLD_BYTES`] **and** the signed byte delta exceeds
+    /// `LARGE_REWRITE_THRESHOLD_BYTES` **and** the signed byte delta exceeds
     /// 10 % of the original file size, indicating the caller should confirm an
     /// explicit save destination.  Same-size edits prefer
     /// [`VlfSavePolicy::SameSizeInPlaceOverwrite`]; byte-length-changing edits

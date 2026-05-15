@@ -470,7 +470,7 @@ impl Metric<RopeInfo> for BaseMetric {
 
 /// Given the inital byte of a UTF-8 codepoint, returns the number of
 /// bytes required to represent the codepoint.
-/// RFC reference : https://tools.ietf.org/html/rfc3629#section-4
+/// RFC reference: <https://tools.ietf.org/html/rfc3629#section-4>
 pub fn len_utf8_from_first_byte(b: u8) -> usize {
     match b {
         b if b < 0x80 => 1,
@@ -698,7 +698,7 @@ impl Rope {
         Ok(iv)
     }
 
-    /// Edit the string, replacing the byte range [`start`..`end`] with `new`.
+    /// Edit the string, replacing the byte range `start..end` with `new`.
     ///
     /// Time complexity: O(log n)
     #[deprecated(since = "0.3.0", note = "Use Rope::edit instead")]

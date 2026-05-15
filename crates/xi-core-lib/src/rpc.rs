@@ -405,7 +405,7 @@ pub struct FindQuery {
 
 /// The edit-related notifications.
 ///
-/// Alongside the [`EditRequest`] members, these commands constitute
+/// Alongside the edit request members, these commands constitute
 /// the API for interacting with a particular window and document.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
