@@ -771,7 +771,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ee-cli"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -798,7 +798,7 @@ dependencies = [
 
 [[package]]
 name = "ee-fuzz"
-version = "0.0.0"
+version = "0.8.0"
 dependencies = [
  "arbitrary",
  "libfuzzer-sys",
@@ -4082,7 +4082,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xi-core"
-version = "0.4.0"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "dirs",
@@ -4096,7 +4096,7 @@ dependencies = [
 
 [[package]]
 name = "xi-core-lib"
-version = "0.4.0"
+version = "0.8.0"
 dependencies = [
  "bytecount",
  "criterion",
@@ -4146,7 +4146,7 @@ dependencies = [
 
 [[package]]
 name = "xi-lsp-lib"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "fern",
@@ -4166,7 +4166,7 @@ dependencies = [
 
 [[package]]
 name = "xi-plugin-derive"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4175,7 +4175,7 @@ dependencies = [
 
 [[package]]
 name = "xi-plugin-lib"
-version = "0.1.0"
+version = "0.8.0"
 dependencies = [
  "bytecount",
  "log",
@@ -4194,7 +4194,7 @@ dependencies = [
 
 [[package]]
 name = "xi-rope"
-version = "0.3.0"
+version = "0.8.0"
 dependencies = [
  "bytecount",
  "criterion",
@@ -4210,7 +4210,7 @@ dependencies = [
 
 [[package]]
 name = "xi-rpc"
-version = "0.3.0"
+version = "0.8.0"
 dependencies = [
  "jsonrpc-lite",
  "log",
@@ -4223,7 +4223,7 @@ dependencies = [
 
 [[package]]
 name = "xi-unicode"
-version = "0.3.0"
+version = "0.8.0"
 dependencies = [
  "criterion",
 ]
