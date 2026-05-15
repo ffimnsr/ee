@@ -48,7 +48,7 @@ pub fn test_channel() -> (DummyWriter, DummyReader) {
 
 /// Returns a [`NewlineReader`] wrapping a [`Cursor`] over the given string.
 ///
-/// Suitable for passing directly to [`RpcLoop::mainloop`].
+/// Suitable for passing directly to [`crate::RpcLoop::mainloop`].
 pub fn make_reader<S: AsRef<str>>(s: S) -> NewlineReader<Cursor<Vec<u8>>> {
     NewlineReader::new(Cursor::new(s.as_ref().as_bytes().to_vec()))
 }
