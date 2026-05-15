@@ -1,6 +1,6 @@
 [package]
 name = "xi-unicode"
-version = "0.8.1"
+version = "0.8.2"
 license = "Apache-2.0"
 authors = ["Raph Levien <raph.levien@gmail.com>", "Edward Fitz Abucay <gh:ffimnsr>"]
 repository = "https://github.com/ffimnsr/ee"
