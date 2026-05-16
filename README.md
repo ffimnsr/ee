@@ -1,24 +1,32 @@
 # ee-editor
 
-`ee` is a modern editor built around a fast, backend-agnostic core and a terminal-first frontend.
-This repository is a fork and evolution of the original `xi-editor` architecture, with a focus on:
+[![CI](https://github.com/ffimnsr/ee/actions/workflows/ci.yml/badge.svg)](https://github.com/ffimnsr/ee/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-- high-performance editing for large files
-- safe and maintainable Rust implementation
-- terminal UI experience via `ee-cli`
-- language-aware tooling through tree-sitter and LSP support
-- plugin-friendly architecture and extensible backend services
+`ee` is a fast terminal-first editor written in Rust for editing large files, language-aware text, and plugin-driven workflows. It combines a reusable backend core with a polished `ee-cli` terminal UI, tree-sitter parsing, and RPC/plugin extensibility.
 
-This repo is primarily a Rust workspace with a CLI frontend in `crates/ee-cli` and shared editor-core libraries under `crates/xi-core-lib`.
+## Quick start
+
+Install locally:
+
+```sh
+cargo install --path crates/ee-cli
+```
+
+Open a file:
+
+```sh
+ee path/to/file
+```
 
 ## What makes ee special?
 
-- **Fast and responsive**: backend edits, parsing, and rendering are designed to avoid stalls, even for large buffers.
-- **Large-file friendly**: persistent rope data structures and streaming workflows make very large files practical.
-- **Terminal-focused UI**: `ee` uses `ratatui` and `crossterm` for a polished terminal-based editing experience.
-- **Safe Rust core**: shared libraries are implemented in Rust and organized for frontend-agnostic reuse.
-- **Tree-sitter powered**: syntax parsing, highlighting, and language-feature support are built on tree-sitter grammars.
-- **Extensible backend**: plugin and RPC-driven design makes it easier to add code actions, completions, diagnostics, and external tooling.
+- **Fast and responsive**: backend edits, parsing, and rendering are designed to avoid stalls, even for very large buffers.
+- **Large-file friendly**: persistent rope storage, streaming workflows, and efficient buffer operations make gigabyte-scale files practical.
+- **Terminal-first UI**: `ee` uses `ratatui` and `crossterm` to deliver a polished terminal editing experience.
+- **Reusable Rust core**: `xi-core-lib` is frontend-agnostic and can be reused by multiple UIs.
+- **Tree-sitter powered**: syntax parsing, highlighting, and language-aware features are based on tree-sitter grammars.
+- **LSP and plugin integration**: `xi-lsp-lib` and RPC-based plugin support enable diagnostics, completions, and external tooling.
+- **Extensible backend architecture**: the editor core communicates over JSON/RPC, making integrations language-agnostic and easier to evolve.
 
 ## Repository layout
 
@@ -106,7 +114,21 @@ cargo build --workspace --release
 cargo run -p ee-cli -- <path/to/file>
 ```
 
-### Run the terminal frontend only
+## Usage
+
+Open a file for editing:
+
+```sh
+ee samples/sample.txt
+```
+
+Create or open a new file:
+
+```sh
+ee new-file.rs
+```
+
+Run the bundled terminal frontend from source:
 
 ```sh
 cargo run -p ee-cli -- <path/to/file>
