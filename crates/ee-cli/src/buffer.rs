@@ -96,6 +96,7 @@ pub(crate) struct BufState {
     /// VLF keeps only the loaded viewport window here; `vlf_approx_line_count`
     /// carries document size so huge files do not allocate one slot per line.
     pub(crate) vlf_cache_start_line: usize,
+    pub(crate) vlf_previous_viewport: Option<(usize, Vec<LineSlot>)>,
     /// Monotone counter incremented on every VLF viewport scroll.
     ///
     /// Each `vlf_viewport` request carries this counter; `vlf_chunks` responses
@@ -124,6 +125,8 @@ pub(crate) struct VlfChunkUpdate<'a> {
 }
 
 impl BufState {
+    const VLF_PREVIOUS_VIEWPORT_MAX_BYTES: usize = 32 * 1024 * 1024;
+
     pub(crate) fn title(&self) -> String {
         if let Some(name) = &self.display_name {
             return name.clone();
@@ -447,6 +450,45 @@ impl BufState {
         true
     }
 
+    fn save_current_vlf_viewport(&mut self) {
+        if self.line_cache.is_empty()
+            || vlf_cache_text_bytes(&self.line_cache) > Self::VLF_PREVIOUS_VIEWPORT_MAX_BYTES
+        {
+            self.vlf_previous_viewport = None;
+            return;
+        }
+        self.vlf_previous_viewport = Some((self.vlf_cache_start_line, self.line_cache.clone()));
+    }
+
+    fn restore_previous_vlf_viewport_if_ready(
+        &mut self,
+        first_line: usize,
+        last_line: usize,
+    ) -> bool {
+        let Some((previous_start, previous_cache)) = self.vlf_previous_viewport.as_ref() else {
+            return false;
+        };
+        if !vlf_cache_ready(previous_start, previous_cache, first_line, last_line) {
+            return false;
+        }
+
+        let Some((previous_start, previous_cache)) = self.vlf_previous_viewport.take() else {
+            return false;
+        };
+        let current_start = self.vlf_cache_start_line;
+        let current_cache = std::mem::replace(&mut self.line_cache, previous_cache);
+        self.vlf_cache_start_line = previous_start;
+        self.last_scroll =
+            Some((previous_start, previous_start.saturating_add(self.line_cache.len())));
+
+        if !current_cache.is_empty()
+            && vlf_cache_text_bytes(&current_cache) <= Self::VLF_PREVIOUS_VIEWPORT_MAX_BYTES
+        {
+            self.vlf_previous_viewport = Some((current_start, current_cache));
+        }
+        true
+    }
+
     /// Apply a `vlf_chunks` response to the line cache.
     ///
     /// Silently drops the response when `generation` does not match
@@ -478,6 +520,9 @@ impl BufState {
             self.line_cache.clear();
             return;
         };
+        if start != self.vlf_cache_start_line {
+            self.save_current_vlf_viewport();
+        }
         self.vlf_cache_start_line = start;
 
         self.line_cache = lines
@@ -569,12 +614,39 @@ impl PartialEq for BufState {
 
 impl Eq for BufState {}
 
-fn vlf_viewport_ready(buf: &BufState, first_line: usize, last_line: usize) -> bool {
+fn vlf_cache_text_bytes(cache: &[LineSlot]) -> usize {
+    cache
+        .iter()
+        .map(|slot| match slot {
+            LineSlot::Known(line) => line.text.len(),
+            LineSlot::Invalid => 0,
+        })
+        .sum()
+}
+
+fn vlf_cache_ready(
+    cache_start_line: &usize,
+    cache: &[LineSlot],
+    first_line: usize,
+    last_line: usize,
+) -> bool {
     if first_line >= last_line {
         return true;
     }
+    let Some(start) = first_line.checked_sub(*cache_start_line) else {
+        return false;
+    };
+    let Some(end) = last_line.checked_sub(*cache_start_line) else {
+        return false;
+    };
+    if end > cache.len() {
+        return false;
+    }
+    cache[start..end].iter().all(|slot| matches!(slot, LineSlot::Known(_)))
+}
 
-    (first_line..last_line).all(|idx| matches!(buf.line_slot(idx), Some(LineSlot::Known(_))))
+fn vlf_viewport_ready(buf: &BufState, first_line: usize, last_line: usize) -> bool {
+    vlf_cache_ready(&buf.vlf_cache_start_line, &buf.line_cache, first_line, last_line)
 }
 
 fn line_text_for_slot(slot: &LineSlot) -> String {
@@ -660,6 +732,7 @@ impl Drop for BufferManager {
 impl BufferManager {
     const SYNC_IDLE_LIMIT: usize = 6;
     const STARTUP_VLF_VIEWPORT_LINES: usize = 200;
+    const VLF_VIEWPORT_OVERSCAN_LINES: usize = 200;
     const TAIL_VLF_PREFETCH_LINES: usize = 4096;
 
     fn buffer_index_for_view(&self, view_id: &str) -> Option<usize> {
@@ -758,6 +831,7 @@ impl BufferManager {
             annotations: Vec::new(),
             is_vlf: false,
             vlf_cache_start_line: 0,
+            vlf_previous_viewport: None,
             vlf_generation: 0,
             vlf_approx_line_count: 0,
             vlf_line_count_exact: false,
@@ -1460,12 +1534,26 @@ impl BufferManager {
             if buf.pending_vlf_tail_jump {
                 return Ok(());
             }
-            if vlf_viewport_ready(buf, first_line, last_line)
-                || (buf.last_scroll == Some(range) && buf.pending_line_request)
+            let visible_lines = last_line.saturating_sub(first_line);
+            let mut requested_last_line = if visible_lines >= Self::STARTUP_VLF_VIEWPORT_LINES {
+                last_line
+            } else {
+                last_line
+                    .saturating_add(Self::VLF_VIEWPORT_OVERSCAN_LINES)
+                    .max(first_line.saturating_add(Self::STARTUP_VLF_VIEWPORT_LINES))
+            };
+            let line_count = buf.line_count();
+            if line_count > first_line {
+                requested_last_line = requested_last_line.min(line_count);
+            }
+            let request_range = (first_line, requested_last_line);
+            buf.restore_previous_vlf_viewport_if_ready(first_line, requested_last_line);
+            if vlf_viewport_ready(buf, first_line, requested_last_line)
+                || (buf.last_scroll == Some(request_range) && buf.pending_line_request)
             {
                 return Ok(());
             }
-            buf.last_scroll = Some(range);
+            buf.last_scroll = Some(request_range);
             // VLF mode: use the dedicated viewport protocol so the backend
             // only decodes the visible line range from disk.  Increment the
             // generation counter so any in-flight response from the previous
@@ -1481,7 +1569,7 @@ impl BufferManager {
                     "method": "vlf_viewport",
                     "params": {
                         "line_start": first_line as u64,
-                        "line_end": last_line as u64,
+                        "line_end": requested_last_line as u64,
                         "generation": generation,
                     },
                 }),
@@ -1994,6 +2082,7 @@ impl BufferManager {
             annotations: Vec::new(),
             is_vlf: false,
             vlf_cache_start_line: 0,
+            vlf_previous_viewport: None,
             vlf_generation: 0,
             vlf_approx_line_count: 0,
             vlf_line_count_exact: false,
@@ -2281,6 +2370,7 @@ impl BufferManager {
             annotations: Vec::new(),
             is_vlf: false,
             vlf_cache_start_line: 0,
+            vlf_previous_viewport: None,
             vlf_generation: 0,
             vlf_approx_line_count: 0,
             vlf_line_count_exact: false,

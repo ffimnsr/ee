@@ -2151,6 +2151,7 @@ mod tests {
             }],
             is_vlf: false,
             vlf_cache_start_line: 0,
+            vlf_previous_viewport: None,
             vlf_generation: 0,
             vlf_approx_line_count: 0,
             vlf_line_count_exact: false,

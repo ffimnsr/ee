@@ -71,6 +71,7 @@ pub const MAX_SIZE_LIMIT: usize = 1024 * 1024;
 /// window will be sent to the view along with the edit.
 const RENDER_DELAY: Duration = Duration::from_millis(2);
 const VLF_TAIL_EXACT_LINE_COUNT_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const VLF_PREFIX_PENDING_INDEX_FALLBACK_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 struct VlfViewportResponse {
     line_start: u64,
@@ -219,6 +220,37 @@ fn vlf_estimate_line_count_from_head(store: &dyn TextStore, minimum: u64) -> u64
         store.len_bytes().saturating_mul(lines_read).saturating_add(bytes_read.saturating_sub(1))
             / bytes_read.max(1);
     estimated.max(minimum).max(lines_read)
+}
+
+fn vlf_prefix_lines_for_pending_index(
+    store: &dyn TextStore,
+    requested_line_start: u64,
+    requested_count: usize,
+) -> Option<(Vec<String>, ByteRange)> {
+    if store.len_bytes() == 0 {
+        return (requested_line_start == 0).then(|| {
+            (vec![String::new()], ByteRange { start: ByteOffset(0), end: ByteOffset(0) })
+        });
+    }
+
+    let read_end = ByteOffset(VLF_PREFIX_PENDING_INDEX_FALLBACK_MAX_BYTES.min(store.len_bytes()));
+    let (prefix_text, byte_range) =
+        vlf_read_text_range(store, ByteRange { start: ByteOffset(0), end: read_end })?;
+    let newline_count = prefix_text.as_bytes().iter().filter(|&&byte| byte == b'\n').count() as u64;
+    let required_lines = requested_line_start.saturating_add(requested_count as u64);
+    if byte_range.end.0 < store.len_bytes() && newline_count.saturating_add(1) < required_lines {
+        return None;
+    }
+
+    let start = usize::try_from(requested_line_start).ok()?;
+    let lines = prefix_text
+        .split('\n')
+        .skip(start)
+        .take(requested_count.max(1))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+
+    (!lines.is_empty()).then_some((lines, byte_range))
 }
 
 fn vlf_lines_near_approximate_byte(
@@ -1139,6 +1171,22 @@ impl<'a> EventContext<'a> {
                 }
                 // Index not ready; signal TUI to retry on next repaint.
                 Err(_) => {
+                    if let Some((lines, byte_range)) =
+                        vlf_prefix_lines_for_pending_index(store, line_start, requested_count)
+                    {
+                        approximate_line_count = approximate_line_count
+                            .max(line_start.saturating_add(lines.len() as u64));
+                        vlf_store.set_viewport(byte_range.start, byte_range.end);
+                        let syntax_spans = self.vlf_visible_syntax_spans(&lines);
+                        return Some(VlfViewportResponse {
+                            line_start,
+                            lines,
+                            syntax_spans,
+                            approximate_line_count,
+                            line_count_exact,
+                            index_progress,
+                        });
+                    }
                     return Some(VlfViewportResponse {
                         line_start,
                         lines: Vec::new(),
@@ -5367,10 +5415,12 @@ mod tests {
     }
 
     #[test]
-    fn vlf_viewport_sends_empty_lines_for_pending_index() {
-        // Build a store without scanning so line_to_byte(1) returns Pending.
+    fn vlf_viewport_uses_prefix_fallback_for_pending_index() {
+        // Build a store without scanning so line_to_byte(20) returns Pending.
         let mut f = NamedTempFile::new().unwrap();
-        let content = (0..200).map(|i| format!("line {i}\n")).collect::<String>();
+        let content = (0..200)
+            .map(|i| format!("line {i} {}\n", "x".repeat(128 * 1024)))
+            .collect::<String>();
         f.write_all(content.as_bytes()).unwrap();
         f.flush().unwrap();
         let store = VlfStore::open_with_config(f.path(), 64, 1024 * 1024).unwrap();
@@ -5381,15 +5431,22 @@ mod tests {
         harness.take_notifications();
         let mut ctx = harness.make_context();
 
-        // line_start=1 requires the index (line 0 is always byte 0 but line 1 is not).
-        ctx.do_edit(EditNotification::VlfViewport { line_start: 1, line_end: 2, generation: 42 });
+        // line_start=20 requires the index, but the prefix fallback can satisfy it cheaply.
+        ctx.do_edit(EditNotification::VlfViewport { line_start: 20, line_end: 25, generation: 42 });
 
         let notifications = harness.take_notifications();
         let (_, params) = notifications.iter().find(|(m, _)| m == "vlf_chunks")
             .expect("expected vlf_chunks notification even for pending index");
         assert_eq!(params["generation"], 42u64);
         let lines = params["lines"].as_array().unwrap();
-        assert!(lines.is_empty(), "empty lines signals pending index to frontend");
+        assert_eq!(params["line_start"], 20u64);
+        assert_eq!(lines.len(), 6, "prefix fallback should satisfy near-top viewport");
+        assert!(
+            lines.first().and_then(|line| line.as_str()).is_some_and(|line| line.starts_with("line 20 "))
+        );
+        assert!(
+            lines.last().and_then(|line| line.as_str()).is_some_and(|line| line.starts_with("line 25 "))
+        );
     }
 
     #[test]

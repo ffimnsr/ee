@@ -5768,6 +5768,7 @@ fn test_buf_state() -> BufState {
         annotations: Vec::new(),
         is_vlf: false,
         vlf_cache_start_line: 0,
+        vlf_previous_viewport: None,
         vlf_generation: 0,
         vlf_approx_line_count: 0,
         vlf_line_count_exact: false,
@@ -7979,6 +7980,8 @@ fn vlf_document_mode_clears_stale_normal_cache_and_retries_viewport() {
     let first: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
         .expect("vlf viewport notification should be json");
     assert_eq!(first["params"]["method"], "vlf_viewport");
+    assert_eq!(first["params"]["params"]["line_start"], 0);
+    assert_eq!(first["params"]["params"]["line_end"], 200);
     assert_eq!(first["params"]["params"]["generation"], 1);
 
     mgr.notify_scroll(0, 4).unwrap();
@@ -8005,7 +8008,37 @@ fn vlf_document_mode_clears_stale_normal_cache_and_retries_viewport() {
     let retry: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
         .expect("vlf viewport retry after empty response should be json");
     assert_eq!(retry["params"]["method"], "vlf_viewport");
+    assert_eq!(retry["params"]["params"]["line_start"], 0);
+    assert_eq!(retry["params"]["params"]["line_end"], 204);
     assert_eq!(retry["params"]["params"]["generation"], 2);
+}
+
+#[test]
+fn vlf_notify_scroll_prefetches_beyond_ready_visible_rows() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut mgr = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    mgr.is_vlf = true;
+    mgr.vlf_cache_start_line = 0;
+    mgr.vlf_approx_line_count = 10_000;
+    mgr.line_cache = (0..4)
+        .map(|line| {
+            LineSlot::Known(CachedLine {
+                text: format!("line {line}"),
+                cursors: Vec::new(),
+                syntax_spans: Vec::new(),
+            })
+        })
+        .collect();
+
+    mgr.notify_scroll(0, 4).unwrap();
+    let scroll: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
+        .expect("vlf viewport notification should be json");
+
+    assert_eq!(scroll["params"]["method"], "vlf_viewport");
+    assert_eq!(scroll["params"]["params"]["line_start"], 0);
+    assert_eq!(scroll["params"]["params"]["line_end"], 204);
 }
 
 #[test]
@@ -8531,7 +8564,7 @@ fn vlf_navigation_away_from_pending_tail_jump_cancels_tail_request() {
             .expect("top viewport request should be json");
     assert_eq!(top_request["params"]["method"], "vlf_viewport");
     assert_eq!(top_request["params"]["params"]["line_start"], 0);
-    assert_eq!(top_request["params"]["params"]["line_end"], 40);
+    assert_eq!(top_request["params"]["params"]["line_end"], 240);
 }
 
 #[test]
@@ -8569,6 +8602,54 @@ fn vlf_pending_tail_jump_blocks_regular_viewport_scroll() {
     assert!(!mgr.pending_vlf_tail_jump);
     assert_eq!(mgr.cursor_line, 9_999);
     mgr.notify_scroll(9_960, 10_000).unwrap();
+    assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+}
+
+#[test]
+fn vlf_completed_tail_jump_then_top_restores_cached_top_viewport() {
+    let (tx, rx) = mpsc::channel();
+    let (backend_tx, backend_rx) = mpsc::channel();
+    let mut mgr = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    mgr.is_vlf = true;
+    mgr.vlf_approx_line_count = 10_000;
+    mgr.line_cache = (0..240)
+        .map(|line| {
+            LineSlot::Known(CachedLine {
+                text: format!("top {line}"),
+                cursors: Vec::new(),
+                syntax_spans: Vec::new(),
+            })
+        })
+        .collect();
+
+    mgr.request_vlf_tail_viewport(40).unwrap();
+    let first: Value = serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
+        .expect("tail viewport request should be json");
+    assert_eq!(first["params"]["params"]["line_start"], u64::MAX);
+
+    let tail_lines = (0..40).map(|idx| format!("tail {idx}")).collect::<Vec<_>>();
+    backend_tx
+        .send(BackendEvent::VlfChunks {
+            view_id: String::from("view-id-1"),
+            generation: 1,
+            line_start: 9_960,
+            lines: tail_lines,
+            syntax_spans: Vec::new(),
+            approximate_line_count: 10_000,
+            line_count_exact: false,
+            index_progress: 0.1,
+        })
+        .unwrap();
+    mgr.drain_events().unwrap();
+
+    assert_eq!(mgr.vlf_cache_start_line, 9_960);
+    assert_eq!(mgr.get_line(9_960), Some("tail 0"));
+
+    mgr.cursor_line = 0;
+    mgr.notify_scroll(0, 40).unwrap();
+
+    assert_eq!(mgr.vlf_cache_start_line, 0);
+    assert_eq!(mgr.get_line(0), Some("top 0"));
     assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
 }
 
