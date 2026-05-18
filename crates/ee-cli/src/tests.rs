@@ -2951,7 +2951,7 @@ fn mouse_click_accounts_for_gutter_and_viewport_offsets() {
     app.handle_mouse_event_in_area(
         MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: 6,
+            column: 7,
             row: 5,
             modifiers: KeyModifiers::NONE,
         },
@@ -2962,6 +2962,25 @@ fn mouse_click_accounts_for_gutter_and_viewport_offsets() {
     let value: Value = serde_json::from_str(&message).expect("message should be json");
     assert_eq!(value["params"]["params"]["line"], 55);
     assert_eq!(value["params"]["params"]["col"], 7);
+}
+
+#[test]
+fn ui_render_inserts_blank_column_between_gutter_and_text() {
+    let mut app = App::from_path(None).unwrap();
+    app.backend.lines = vec![String::from("alpha")];
+
+    let width: u16 = 20;
+    let height: u16 = 6;
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let buf = terminal.backend().buffer();
+
+    let spacer_x: u16 = 6;
+    let text_x: u16 = 7;
+    assert_eq!(buf.cell((spacer_x, 0)).unwrap().symbol(), " ");
+    assert_eq!(buf.cell((spacer_x, 0)).unwrap().bg, ratatui::style::Color::Rgb(22, 24, 31));
+    assert_eq!(buf.cell((text_x, 0)).unwrap().symbol(), "a");
 }
 
 #[test]
@@ -7518,11 +7537,11 @@ fn visual_char_mode_highlights_single_line_selection() {
     let buf = terminal.backend().buffer();
 
     let vis_bg = ratatui::style::Color::Rgb(68, 71, 90);
-    // Gutter occupies ~4 cols; text starts at col 4.
-    // Columns 4..8 (display cols 0..3) should be highlighted.
+    // Gutter occupies ~4 cols; buffer adds one black padding col before text.
+    // Columns 5..9 (display cols 0..3) should be highlighted.
     let gutter_width: u16 = 4;
     let row_has_vis =
-        (gutter_width..gutter_width + 4).any(|x| buf.cell((x, 0)).unwrap().bg == vis_bg);
+        (gutter_width + 1..gutter_width + 5).any(|x| buf.cell((x, 0)).unwrap().bg == vis_bg);
     assert!(row_has_vis, "selected chars should carry visual-selection background");
 }
 
@@ -7546,11 +7565,11 @@ fn multi_line_core_annotation_highlights_rendered_rows() {
     let annotation_bg = ratatui::style::Color::Rgb(43, 82, 74);
     let gutter_width: u16 = 5;
     let row0_has_annotation =
-        (gutter_width + 1..gutter_width + 5).any(|x| buf.cell((x, 0)).unwrap().bg == annotation_bg);
+        (gutter_width + 2..gutter_width + 6).any(|x| buf.cell((x, 0)).unwrap().bg == annotation_bg);
     let row1_has_annotation =
-        (gutter_width..gutter_width + 2).any(|x| buf.cell((x, 1)).unwrap().bg == annotation_bg);
+        (gutter_width + 1..gutter_width + 3).any(|x| buf.cell((x, 1)).unwrap().bg == annotation_bg);
     let row2_has_annotation =
-        (gutter_width..gutter_width + 5).any(|x| buf.cell((x, 2)).unwrap().bg == annotation_bg);
+        (gutter_width + 1..gutter_width + 6).any(|x| buf.cell((x, 2)).unwrap().bg == annotation_bg);
 
     assert!(row0_has_annotation, "row 0 should show annotation highlight");
     assert!(row1_has_annotation, "row 1 should show annotation highlight");

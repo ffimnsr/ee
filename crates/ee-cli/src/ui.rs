@@ -106,6 +106,8 @@ pub(crate) fn compute_editor_height(terminal_size: ratatui::layout::Rect, app: &
     split_root_areas(terminal_size, app).editor_area.height as usize
 }
 
+const BUFFER_LEFT_PADDING_COLS: u16 = 1;
+
 fn window_chunks(app: &App, win_rect: Rect, line_count: usize) -> [Rect; 2] {
     let gw = gutter_width(app, line_count);
     let editor = Layout::default()
@@ -117,6 +119,15 @@ fn window_chunks(app: &App, win_rect: Rect, line_count: usize) -> [Rect; 2] {
 
 fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
     column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
+}
+
+fn buffer_content_area(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(BUFFER_LEFT_PADDING_COLS),
+        y: area.y,
+        width: area.width.saturating_sub(BUFFER_LEFT_PADDING_COLS),
+        height: area.height,
+    }
 }
 
 pub(crate) fn hit_test_buffer_cell(
@@ -140,9 +151,15 @@ pub(crate) fn hit_test_buffer_cell(
     let buf = app.backend.all_bufs().iter().find(|b| b.id == buf_id)?;
     let vp = app.tabs.focused_windows().viewport_for_window(win_id, app.viewport);
     let [_, buffer_area] = window_chunks(app, win_rect, buf.line_count());
-    let line = vp.top_line + usize::from(row.saturating_sub(buffer_area.y));
-    let display_col =
-        if column < buffer_area.x { 0 } else { vp.left_col + usize::from(column - buffer_area.x) };
+    let content_area = buffer_content_area(buffer_area);
+    let line = vp.top_line + usize::from(row.saturating_sub(content_area.y));
+    let display_col = if column < buffer_area.x {
+        0
+    } else if column < content_area.x {
+        vp.left_col
+    } else {
+        vp.left_col + usize::from(column - content_area.x)
+    };
     Some((line, display_col))
 }
 
@@ -166,12 +183,13 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
         };
         let vp = app.tabs.focused_windows().viewport_for_window(win_id, app.viewport);
         let editor = window_chunks(app, win_rect, buf.line_count());
+        let buffer_area = buffer_content_area(editor[1]);
 
         render_gutter(frame, editor[0], buf, vp, app);
         render_buffer(frame, editor[1], buf, vp, app);
 
         if is_focused {
-            let cursor = cursor_position_for(buf, vp, app, editor[1], root.prompt_area);
+            let cursor = cursor_position_for(buf, vp, app, buffer_area, root.prompt_area);
             frame.set_cursor_position(cursor);
         }
     }
@@ -223,7 +241,7 @@ pub(crate) fn compute_editor_width(terminal_size: ratatui::layout::Rect, app: &A
     let area = split_root_areas(terminal_size, app).editor_area;
     let line_count = app.backend.line_count().max(1);
     let gw = gutter_width(app, line_count);
-    area.width.saturating_sub(gw) as usize
+    area.width.saturating_sub(gw + BUFFER_LEFT_PADDING_COLS) as usize
 }
 
 // ── Visible-whitespace substitution ──────────────────────────────────────────
@@ -1025,13 +1043,16 @@ fn render_buffer(
     vp: Viewport,
     app: &App,
 ) {
+    let content_area = buffer_content_area(area);
     let height = area.height as usize;
     let top = vp.top_line;
     let left = vp.left_col;
-    let viewport_width = area.width as usize;
+    let viewport_width = content_area.width as usize;
     let cursor_line = buf.cursor_line;
     let cursor_line_bg = Color::Rgb(35, 38, 50);
     let buf_bg = Color::Rgb(22, 24, 31);
+
+    frame.render_widget(Block::default().style(Style::default().bg(buf_bg)), area);
 
     // Pre-compute visual selection bounds for this buffer.
     // Returns (anchor_line, anchor_col, cursor_line, cursor_col) in natural order.
@@ -1063,7 +1084,7 @@ fn render_buffer(
             Paragraph::new(text)
                 .block(Block::default().borders(Borders::NONE))
                 .style(Style::default().fg(Color::Rgb(213, 216, 224)).bg(buf_bg)),
-            area,
+            content_area,
         );
         return;
     }
@@ -1239,7 +1260,7 @@ fn render_buffer(
         widget = widget.wrap(Wrap { trim: false });
     }
 
-    frame.render_widget(widget, area);
+    frame.render_widget(widget, content_area);
 }
 
 fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
@@ -2183,11 +2204,11 @@ mod tests {
             app.backend.active(),
             app.viewport,
             &app,
-            Rect { x: 5, y: 2, width: 20, height: 4 },
+            buffer_content_area(Rect { x: 5, y: 2, width: 20, height: 4 }),
             Rect { x: 0, y: 7, width: 20, height: 1 },
         );
 
-        assert_eq!(pos, Position::new(8, 2));
+        assert_eq!(pos, Position::new(9, 2));
     }
 
     #[test]
