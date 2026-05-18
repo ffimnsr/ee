@@ -83,10 +83,10 @@ url = "2.5.8"
 wasmtime = { version = "44.0.0", default-features = false, features = ["cranelift", "runtime", "std", "wat"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
-xi-core-lib = { package = "ee-xi-core-lib", path = "crates/xi-core-lib", version = "0.8.5" }
-xi-plugin-derive = { package = "ee-xi-plugin-derive", path = "crates/xi-plugin-derive", version = "0.8.5" }
-xi-plugin-lib = { package = "ee-xi-plugin-lib", path = "crates/xi-plugin-lib", version = "0.8.5" }
-xi-rope = { package = "ee-xi-rope", path = "crates/xi-rope", version = "0.8.5" }
-xi-rpc = { package = "ee-xi-rpc", path = "crates/xi-rpc", version = "0.8.5" }
-xi-unicode = { package = "ee-xi-unicode", path = "crates/xi-unicode", version = "0.8.5" }
-xi-lsp-lib = { package = "ee-xi-lsp-lib", path = "crates/xi-lsp-lib", version = "0.8.5" }
+xi-core-lib = { package = "ee-xi-core-lib", path = "crates/xi-core-lib", version = "0.8.6" }
+xi-plugin-derive = { package = "ee-xi-plugin-derive", path = "crates/xi-plugin-derive", version = "0.8.6" }
+xi-plugin-lib = { package = "ee-xi-plugin-lib", path = "crates/xi-plugin-lib", version = "0.8.6" }
+xi-rope = { package = "ee-xi-rope", path = "crates/xi-rope", version = "0.8.6" }
+xi-rpc = { package = "ee-xi-rpc", path = "crates/xi-rpc", version = "0.8.6" }
+xi-unicode = { package = "ee-xi-unicode", path = "crates/xi-unicode", version = "0.8.6" }
+xi-lsp-lib = { package = "ee-xi-lsp-lib", path = "crates/xi-lsp-lib", version = "0.8.6" }

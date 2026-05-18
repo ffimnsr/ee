@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.6 - 2026-05-19
+
+### CI
+
+- update macos bash bug as its old and can't process bash v4 args (`e9eba0c6`)
+
+
+### Maintenance
+
+- remove fuzz from quality gates (`bdf4aa25`)
+
+
 ## 0.8.5 - 2026-05-19
 
 ### Features
