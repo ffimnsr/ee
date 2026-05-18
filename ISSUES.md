@@ -22,17 +22,6 @@ Real next jump likely needs architectural change: first render from decoded pref
   - [ ] Add perf regression coverage for 20 MiB long-line fixture on macOS: target warm open-to-first-render <250ms, with separate noise ceiling only for CI variance.
   - [ ] Add correctness tests for invalid UTF-8, UTF-8 BOM, mixed line endings, long first line truncation/rendering, and edit/save attempted before hydration completes.
 
-- [x] Connect editable VLF overlay end-to-end.
-  - [x] Add backend edit-dispatch guard for VLF buffers before `Editor::do_edit`; never allow normal rope edit commands to mutate the empty VLF placeholder rope.
-  - [x] Add explicit VLF edit RPC path for insert/delete/change operations: frontend cursor line/column -> backend VLF logical byte offset -> `VlfStore::apply_insert` / `apply_delete` -> overlay revision commit.
-  - [x] Make VLF viewport reads overlay-aware so `read_byte_range`, `line_to_byte`, `byte_to_line`, and `iter_chunks` see inserted/deleted overlay pieces, not only the base file.
-  - [x] Make VLF streaming search overlay-aware so search and replace can find matches across original and inserted pieces.
-  - [x] Wire `edit_permission()` into all edit command dispatch paths, not only save, with clear user-facing status when VLF editing is disabled.
-  - [x] Reconcile VLF feature gates with editable overlay state: read-only VLF keeps editing/save/undo disabled, overlay-enabled VLF exposes only features actually backed by overlay-aware read/search/save.
-  - [x] Replace TUI insert stopgap with real overlay edit flow once backend read/search/save gates are ready; keep regression proving pressing `i` never jumps cursor to line 1.
-  - [x] Add integration tests for VLF insert, delete, undo grouping, save, save-as, viewport refresh after edit, and search after edit without loading full file into memory.
-
-
 ### Runtime Tree-Sitter Grammar + Query Loading
 
 - Rules:
@@ -181,7 +170,7 @@ Real next jump likely needs architectural change: first render from decoded pref
 
 ### Other works
 
-- [ ] Add `do file head` and `do file tail`, it will be similar to `head` and `tail` command on linux
+- [x] Add `do file head` and `do file tail`, it will be similar to `head` and `tail` command on linux
 would reuse existing functionality from vlf so it will be useful for getting head/tail of a file.
 - [ ] Time it using hyperfine against the original head and tail commands, and implement ways to be on par or much faster than the original command.
 - [ ] Implement a `jq` like command `do file query|q --type json`, to query document files in similar ways

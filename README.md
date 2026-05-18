@@ -48,7 +48,7 @@ ee path/to/file
 The easiest way to install locally from this repository is:
 
 ```sh
-cargo install --path crates/ee-cli
+cargo install --path crates/ee-cli --locked
 ```
 
 Once installed, run the editor with:
@@ -60,6 +60,12 @@ ee <path/to/file>
 ### Official installer
 
 This repository includes a Unix installer at `install.sh` that downloads and installs a release binary from GitHub.
+
+#### Install with scpr
+
+```sh
+scpr install ee
+```
 
 #### Install with curl
 

@@ -149,6 +149,29 @@ fn cli_utility_commands_live_under_do() {
             command: crate::DoCommands::File { command: crate::FileCommands::LineCheck { .. } }
         })
     ));
+
+    let cli =
+        crate::Cli::try_parse_from(["ee", "do", "file", "head", "-n", "3", "sample.txt"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::File {
+                command: crate::FileCommands::Head { lines: 3, .. }
+            }
+        })
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "file", "tail", "sample.txt"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::File {
+                command: crate::FileCommands::Tail { lines: 10, .. }
+            }
+        })
+    ));
 }
 
 #[test]
@@ -179,6 +202,50 @@ fn file_line_check_matches_wc_lf_semantics_without_trailing_newline() {
     let count = crate::count_file_line_feeds(&path).unwrap();
 
     assert_eq!(count, 2);
+}
+
+#[test]
+fn file_head_reads_first_requested_lines() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sample.txt");
+    fs::write(&path, "alpha\nbeta\ngamma\ndelta\n").unwrap();
+
+    let head = crate::read_file_head(&path, 2).unwrap();
+
+    assert_eq!(head, "alpha\nbeta\n");
+}
+
+#[test]
+fn file_head_keeps_partial_last_line_without_trailing_newline() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sample.txt");
+    fs::write(&path, "alpha\nbeta\ngamma").unwrap();
+
+    let head = crate::read_file_head(&path, 3).unwrap();
+
+    assert_eq!(head, "alpha\nbeta\ngamma");
+}
+
+#[test]
+fn file_tail_reads_last_requested_lines() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sample.txt");
+    fs::write(&path, "alpha\nbeta\ngamma\ndelta\n").unwrap();
+
+    let tail = crate::read_file_tail(&path, 2).unwrap();
+
+    assert_eq!(tail, "gamma\ndelta\n");
+}
+
+#[test]
+fn file_tail_keeps_partial_last_line_without_trailing_newline() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sample.txt");
+    fs::write(&path, "alpha\nbeta\ngamma").unwrap();
+
+    let tail = crate::read_file_tail(&path, 1).unwrap();
+
+    assert_eq!(tail, "gamma");
 }
 
 #[test]
