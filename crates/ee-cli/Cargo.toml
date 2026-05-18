@@ -1,6 +1,6 @@
 [package]
 name = "ee-cli"
-version = "0.8.3"
+version = "0.8.4"
 license = "Apache-2.0"
 authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
 description = "Large file viewer and editor for the terminal, built on top of xi-core backend."

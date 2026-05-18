@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.8.4 - 2026-05-18
+
+### Features
+
+- rename crates to be able to publish to crates.io (`5c88a9a7`)
+- add head and tail commands under `do file` (`d68b2087`)
+- update the picker UI (`ec14b8bc`)
+- update tree-sitter runtime grammar loading (`ff3354d2`)
+- update working area padding to gutter (`8a5b0513`)
+- bump version and release script (`68527a22`)
+- update docs and cargo lock (`4da124a0`)
+
+
+### Fixes
+
+- update crlf and utf-8 bom reads on vlf mode (`e337db09`)
+- update the text loading problems on large file buffers (`3becc307`)
+
+
+### Documentation
+
+- update README and add quick start (`7286f695`)
+- add metadata docs to cargo for publish (`9cd1bc6e`)
+
+
+### Maintenance
+
+- update cargo lock file (`dee7d370`)
+
+
 ## 0.8.3 - 2026-05-18
 
 ### Features
