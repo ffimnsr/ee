@@ -57,6 +57,7 @@ use crate::plugins::{
 use crate::rpc::{
     CoreNotification, CoreRequest, EditNotification, PluginNotification as CorePluginNotification,
 };
+use crate::runtime_loader::{merged_runtime_languages, reload_default_runtime_loader_languages};
 use crate::syntax::LanguageId;
 use crate::text_store::{DocumentMode, EditPermission, TextStore};
 use crate::view::View;
@@ -243,10 +244,15 @@ impl CoreState {
         self.plugins.reload_from_paths(&plugin_paths).into_iter().for_each(|err| {
             warn!("error loading plugin {:?}", err);
         });
-        let languages = self.plugins.make_languages_map();
+        let plugin_languages = self.plugins.make_languages_map();
+        let languages = merged_runtime_languages(&plugin_languages);
         let languages_ids = languages.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
         self.peer.available_languages(languages_ids);
         let lang_config_changes = self.config_manager.set_languages(languages);
+        if let Err(error) = reload_default_runtime_loader_languages(self.config_manager.languages())
+        {
+            warn!("failed reloading runtime loader language config: {error}");
+        }
         self.handle_config_changes(lang_config_changes);
 
         self.ensure_manifest_plugins_started();

@@ -22,6 +22,10 @@ use xi_core_lib::plugin_rpc::{
     CodeActionDescriptor, Diagnostic, DiagnosticSeverity, Range, SelectionRange, SymbolItem,
 };
 use xi_core_lib::rpc::LineReplacement;
+use xi_core_lib::runtime_loader::{
+    RuntimeGrammarHealth, RuntimeHealthReport, RuntimeLanguageDetectionSource, RuntimeQueryHealth,
+    RuntimeQueryHealthReport, RuntimeQueryKind, RuntimeRoots,
+};
 
 use crate::app::{App, Mode, Operator, PendingCharFind};
 use crate::backend::{
@@ -126,6 +130,53 @@ fn cli_utility_commands_live_under_do() {
         Some(crate::Commands::Do { command: crate::DoCommands::Doctor })
     ));
 
+    let cli = crate::Cli::try_parse_from([
+        "ee",
+        "do",
+        "runtime",
+        "--file",
+        "sample.rs",
+        "--language",
+        "Rust",
+    ])
+    .unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do { command: crate::DoCommands::Runtime { .. } })
+    ));
+
+    let cli = crate::Cli::try_parse_from([
+        "ee",
+        "do",
+        "runtime-fetch",
+        "--all",
+        "--source-root",
+        "target/runtime-sources",
+    ])
+    .unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do { command: crate::DoCommands::RuntimeFetch { all: true, .. } })
+    ));
+
+    let cli = crate::Cli::try_parse_from([
+        "ee",
+        "do",
+        "runtime-build",
+        "--language",
+        "Rust",
+        "--output-root",
+        "target/runtime",
+    ])
+    .unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do { command: crate::DoCommands::RuntimeBuild { .. } })
+    ));
+
     let cli =
         crate::Cli::try_parse_from(["ee", "do", "validate", "--config", "custom.ee.toml"]).unwrap();
 
@@ -224,6 +275,78 @@ fn file_head_keeps_partial_last_line_without_trailing_newline() {
     let head = crate::read_file_head(&path, 3).unwrap();
 
     assert_eq!(head, "alpha\nbeta\ngamma");
+}
+
+#[test]
+fn runtime_report_renders_resolution_and_query_health() {
+    let report = RuntimeHealthReport {
+        requested_language: Some(String::from("Rust")),
+        file_path: Some(PathBuf::from("sample.rs")),
+        detection_source: Some(RuntimeLanguageDetectionSource::Explicit),
+        language_id: Some(String::from("Rust")),
+        display_name: Some(String::from("Rust")),
+        asset_source: None,
+        effective_runtime_root: Some(PathBuf::from("/runtime")),
+        grammar_path: Some(PathBuf::from("/runtime/grammars/libtree-sitter-rust.so")),
+        grammar_status: RuntimeGrammarHealth::Loaded,
+        query_reports: vec![
+            RuntimeQueryHealthReport {
+                kind: RuntimeQueryKind::Highlights,
+                status: RuntimeQueryHealth::Loaded,
+                source_paths: vec![PathBuf::from("/runtime/queries/Rust/highlights.scm")],
+            },
+            RuntimeQueryHealthReport {
+                kind: RuntimeQueryKind::Indents,
+                status: RuntimeQueryHealth::Missing,
+                source_paths: Vec::new(),
+            },
+        ],
+        runtime_roots: RuntimeRoots::new(
+            "/bundle",
+            "/user/ee",
+            Some(PathBuf::from("/workspace/.ee")),
+        ),
+    };
+
+    let rendered = crate::render_runtime_report(&report);
+    assert!(rendered.contains("resolved language: Rust [Rust] via explicit"));
+    assert!(rendered.contains("grammar: loaded"));
+    assert!(rendered.contains("highlights  loaded"));
+    assert!(rendered.contains("indents     missing"));
+    assert!(rendered.contains("effective runtime root: /runtime"));
+}
+
+#[test]
+fn runtime_report_exit_code_classifies_runtime_failures() {
+    let mut healthy = RuntimeHealthReport {
+        requested_language: Some(String::from("Rust")),
+        file_path: None,
+        detection_source: Some(RuntimeLanguageDetectionSource::Explicit),
+        language_id: Some(String::from("Rust")),
+        display_name: Some(String::from("Rust")),
+        asset_source: None,
+        effective_runtime_root: None,
+        grammar_path: None,
+        grammar_status: RuntimeGrammarHealth::Loaded,
+        query_reports: Vec::new(),
+        runtime_roots: RuntimeRoots::new("/bundle", "/user/ee", None),
+    };
+    assert_eq!(crate::runtime_report_exit_code(&healthy), 0);
+
+    healthy.language_id = None;
+    assert_eq!(crate::runtime_report_exit_code(&healthy), crate::EXIT_RUNTIME_CONFIG_MERGE);
+
+    healthy.language_id = Some(String::from("Rust"));
+    healthy.grammar_status = RuntimeGrammarHealth::Missing;
+    assert_eq!(crate::runtime_report_exit_code(&healthy), crate::EXIT_RUNTIME_ASSET);
+
+    healthy.grammar_status = RuntimeGrammarHealth::Loaded;
+    healthy.query_reports = vec![RuntimeQueryHealthReport {
+        kind: RuntimeQueryKind::Highlights,
+        status: RuntimeQueryHealth::Missing,
+        source_paths: Vec::new(),
+    }];
+    assert_eq!(crate::runtime_report_exit_code(&healthy), crate::EXIT_RUNTIME_ASSET);
 }
 
 #[test]

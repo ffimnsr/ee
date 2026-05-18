@@ -6,7 +6,13 @@
 
 ## Quick start
 
-Install locally:
+Install release build with bundled runtime:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ffimnsr/ee/main/install.sh | sh
+```
+
+Install development build from source:
 
 ```sh
 cargo install --path crates/ee-cli
@@ -51,6 +57,8 @@ The easiest way to install locally from this repository is:
 cargo install --path crates/ee-cli --locked
 ```
 
+`cargo install` is development-oriented. It installs the `ee` binary, but it does not stage a bundled runtime next to the executable. For tree-sitter grammars and queries, build runtime assets separately and point `EE_RUNTIME_DIR` at them.
+
 Once installed, run the editor with:
 
 ```sh
@@ -88,11 +96,62 @@ sh install.sh
 
 The installer supports `bash`, `zsh`, and `fish` completions and installs the binary into `~/.local/bin` by default.
 
+On Linux and macOS the installer also places bundled runtime assets under `~/.local/share/ee`, which matches the release runtime layout resolved relative to `~/.local/bin/ee`.
+
 If `~/.local/bin` is not on your `PATH`, add it to your shell profile:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
 ```
+
+## Runtime assets
+
+Runtime grammar lookup uses this precedence:
+
+- `EE_RUNTIME_DIR` for explicit bundled-runtime override
+- bundled release layout relative to the executable: `<prefix>/share/ee/` on Linux/macOS, `<install_dir>/runtime/` on Windows
+- user overlay at `dirs::data_dir()/ee/`
+- optional workspace overlay at `<workspace>/.ee/` when caller explicitly enables trusted workspace runtime roots
+
+Bundled runtime is treated as read-only. Bundled and user/workspace overlays all use the same on-disk contract:
+
+- `grammars/` for compiled parser libraries
+- `queries/<language>/` for `.scm` query files
+
+Query overlays merge deterministically in bundled, then user, then workspace order for each language and query kind.
+
+### Development runtime flow
+
+Development builds use fetched runtime assets, not vendored parser sources in this repository. Build the runtime package with:
+
+```sh
+scripts/build-runtime.sh --output-root target/runtime-package
+```
+
+Then point the editor at that runtime:
+
+```sh
+EE_RUNTIME_DIR="$PWD/target/runtime-package" cargo run -p ee-cli -- path/to/file.rs
+```
+
+`scripts/build-runtime.sh` drives `ee do runtime-fetch` and `ee do runtime-build` against the merged ee language configuration, fetches grammar crate sources into a staging directory, then writes a runtime tree containing `grammars/` and `queries/`.
+
+New runtime languages should be described in runtime language metadata with a grammar crate name and exact crate version. Runtime fetch now resolves those crates through a temporary cargo manifest, so adding a language no longer requires editing workspace `Cargo.toml` just to stage grammar sources.
+
+### Release runtime packaging
+
+Release artifacts should build runtime assets first:
+
+```sh
+scripts/build-runtime.sh --output-root target/runtime-package
+```
+
+Archive that runtime tree next to the release binary as:
+
+- `share/ee/` on Linux and macOS
+- `runtime/` on Windows
+
+The official installer copies that bundled runtime tree into the resolved bundled runtime root instead of downloading grammars on first launch.
 
 ### Requirements
 

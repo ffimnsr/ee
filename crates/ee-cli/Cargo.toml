@@ -43,6 +43,7 @@ xi-core-lib.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 tempfile.workspace = true
+xi-core-lib = { workspace = true, features = ["test-grammars"] }
 
 [[bench]]
 name = "vlf"

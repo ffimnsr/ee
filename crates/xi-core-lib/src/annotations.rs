@@ -259,8 +259,13 @@ mod tests {
         };
 
         assert_eq!(
-            slice.to_json().to_string(),
-            "{\"n\":1,\"payloads\":null,\"ranges\":[[1,3,4,1]],\"type\":\"find\"}"
+            slice.to_json(),
+            json!({
+                "n": 1,
+                "payloads": null,
+                "ranges": [[1, 3, 4, 1]],
+                "type": "find",
+            })
         )
     }
 

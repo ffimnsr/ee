@@ -1,0 +1,31 @@
+[package]
+name = "ee-ts-test-grammars"
+version = "0.8.2"
+license = "Apache-2.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+name = "ee_ts_test_grammars"
+
+[dependencies]
+tree-sitter.workspace = true
+tree-sitter-bash.workspace = true
+tree-sitter-c.workspace = true
+tree-sitter-c-sharp.workspace = true
+tree-sitter-cpp.workspace = true
+tree-sitter-css.workspace = true
+tree-sitter-elixir.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-haskell.workspace = true
+tree-sitter-html.workspace = true
+tree-sitter-java.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-json.workspace = true
+tree-sitter-php.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-ruby.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-scala.workspace = true
+tree-sitter-typescript.workspace = true

@@ -166,6 +166,20 @@ jobs:
       - name: Build release binary
         run: cargo build --locked --release -p ee-cli --target ${{ matrix.target }}
 
+      - name: Build bundled runtime assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            export CC=musl-gcc
+          fi
+
+          bash scripts/build-runtime.sh \
+            --force \
+            --source-root target/runtime-sources \
+            --output-root target/runtime-package
+
       - name: Prepare package metadata
         id: meta
         shell: bash
@@ -194,6 +208,8 @@ jobs:
           cp "target/${{ matrix.target }}/release/${{ matrix.binary_name }}" "${BASENAME}/ee"
           cp Cargo.lock "${BASENAME}/"
           cp README.md LICENSE "${BASENAME}/"
+          mkdir -p "${BASENAME}/share/ee"
+          cp -R target/runtime-package/. "${BASENAME}/share/ee/"
 
           tar -czf "${BASENAME}.tar.gz" "${BASENAME}"
           shasum -a 256 "${BASENAME}.tar.gz" | awk -v name="${BASENAME}.tar.gz" '{print $1 "  " name}' > "${BASENAME}.tar.gz.sha256"

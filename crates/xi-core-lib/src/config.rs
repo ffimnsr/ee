@@ -245,7 +245,7 @@ impl ConfigManager {
             configs: defaults,
             buffer_tags: HashMap::new(),
             buffer_configs: HashMap::new(),
-            languages: Languages::default(),
+            languages: crate::runtime_loader::builtin_runtime_languages(),
             config_dir,
             extras_dir,
         }
@@ -426,6 +426,10 @@ impl ConfigManager {
 
     pub fn language_for_path(&self, path: &Path) -> Option<LanguageId> {
         self.languages.language_for_path(path).map(|lang| lang.name.clone())
+    }
+
+    pub(crate) fn languages(&self) -> &Languages {
+        &self.languages
     }
 
     /// Sets the config for the given domain, removing any existing config.

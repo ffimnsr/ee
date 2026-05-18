@@ -25,7 +25,7 @@ impl Highlighter {
     }
 
     pub(crate) fn syntax_name_for_path(&self, path: Option<&Path>) -> Option<String> {
-        path.and_then(language_name_for_path).map(str::to_owned)
+        path.and_then(language_name_for_path)
     }
 
     pub(crate) fn scope_spans_in_range(

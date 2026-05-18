@@ -54,6 +54,7 @@ pub mod open_policy;
 pub mod plugins;
 #[cfg(test)]
 pub mod recorder;
+pub mod runtime_loader;
 pub mod selection;
 pub mod styles;
 pub mod syntax;

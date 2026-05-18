@@ -697,6 +697,7 @@ fn supports_semantic_target(
     language_supports_semantic_target(language_name, target)
         || file_path
             .and_then(language_name_for_path)
+            .as_deref()
             .is_some_and(|resolved| language_supports_semantic_target(resolved, target))
 }
 

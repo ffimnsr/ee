@@ -51,6 +51,19 @@ main() {
     ensure try_sudo chmod +x "${BIN_DIR}/${_bin_name}"
     echo "Installed ${PACKAGE_NAME} to ${BIN_DIR}"
 
+    local _runtime_src
+    _runtime_src=""
+    if [ -d "${_filename_no_ext}/runtime" ]; then
+        _runtime_src="${_filename_no_ext}/runtime"
+    elif [ -d "${_filename_no_ext}/share/${PACKAGE_NAME}" ]; then
+        _runtime_src="${_filename_no_ext}/share/${PACKAGE_NAME}"
+    fi
+    if [ -n "${_runtime_src}" ]; then
+        ensure try_sudo mkdir -p -- "${RUNTIME_DIR}"
+        ensure try_sudo cp -R -- "${_runtime_src}/." "${RUNTIME_DIR}/"
+        echo "Installed runtime assets to ${RUNTIME_DIR}"
+    fi
+
     if [ -f "${_filename_no_ext}/README.md" ]; then
         ensure try_sudo mkdir -p -- "${DOC_DIR}/${PACKAGE_NAME}"
         ensure try_sudo cp -- "${_filename_no_ext}/README.md" "${DOC_DIR}/${PACKAGE_NAME}/README.md"
@@ -146,10 +159,12 @@ parse_args() {
     DATA_HOME_DEFAULT="${XDG_DATA_HOME:-${HOME}/.local/share}"
     DOC_DIR_DEFAULT="${DATA_HOME_DEFAULT}/doc"
     LIC_DIR_DEFAULT="${DATA_HOME_DEFAULT}/licenses"
+    RUNTIME_DIR_DEFAULT="${DATA_HOME_DEFAULT}/${PACKAGE_NAME}"
     SUDO_DEFAULT="sudo"
     BIN_DIR="${BIN_DIR_DEFAULT}"
     DOC_DIR="${DOC_DIR_DEFAULT}"
     LIC_DIR="${LIC_DIR_DEFAULT}"
+    RUNTIME_DIR="${RUNTIME_DIR_DEFAULT}"
     SUDO="${SUDO_DEFAULT}"
 
     while [ "$#" -gt 0 ]; do
@@ -162,6 +177,8 @@ parse_args() {
             --doc-dir=*) DOC_DIR="${1#*=}" && shift 1 ;;
             --license-dir) LIC_DIR="$2" && shift 2 ;;
             --license-dir=*) LIC_DIR="${1#*=}" && shift 1 ;;
+            --runtime-dir) RUNTIME_DIR="$2" && shift 2 ;;
+            --runtime-dir=*) RUNTIME_DIR="${1#*=}" && shift 1 ;;
             --sudo) SUDO="$2" && shift 2 ;;
             --sudo=*) SUDO="${1#*=}" && shift 1 ;;
             -h|--help) usage && exit 0 ;;
@@ -186,6 +203,7 @@ ${_text_heading}Options:${_text_reset}
   --bin-dir       Override installation directory [default: ${BIN_DIR_DEFAULT}]
   --doc-dir       Override documentation directory [default: ${DOC_DIR_DEFAULT}]
   --license-dir   Override license directory [default: ${LIC_DIR_DEFAULT}]
+    --runtime-dir   Override bundled runtime installation directory [default: ${RUNTIME_DIR_DEFAULT}]
   --sudo          Override command used to elevate privileges [default: ${SUDO_DEFAULT}]
   -h, --help      Print help
 EOF

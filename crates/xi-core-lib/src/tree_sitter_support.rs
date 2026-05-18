@@ -50,6 +50,9 @@ use std::ops::Range;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::runtime_loader::{
+    RuntimeLoader, RuntimeQueryKind, with_default_runtime_loader, with_default_runtime_loader_mut,
+};
 use crate::text_store::DocumentMode;
 use serde::Serialize;
 use tree_sitter::{Language, Node, ParseOptions, Parser, Point, Tree};
@@ -109,373 +112,6 @@ pub(crate) struct SyntaxFeatureAvailability {
     pub(crate) reindent: bool,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct LanguageRegistryEntry {
-    canonical_name: &'static str,
-    aliases: &'static [&'static str],
-    path_aliases: &'static [&'static str],
-    language: fn() -> Language,
-    metadata: LanguageMetadata,
-}
-
-const NO_UNSUPPORTED_TARGETS: &[SemanticTargetKind] = &[];
-const DATA_ONLY_TARGETS: &[SemanticTargetKind] = &[
-    SemanticTargetKind::Function,
-    SemanticTargetKind::Class,
-    SemanticTargetKind::Parameter,
-    SemanticTargetKind::Test,
-];
-const COMMENT_ONLY_TARGETS: &[SemanticTargetKind] = &[
-    SemanticTargetKind::Function,
-    SemanticTargetKind::Class,
-    SemanticTargetKind::Parameter,
-    SemanticTargetKind::Test,
-];
-
-const fn language_metadata(
-    line_comment: LineCommentStyle,
-    block_comment: BlockCommentStyle,
-    indentation: IndentationStrategy,
-    unsupported_semantic_targets: &'static [SemanticTargetKind],
-) -> LanguageMetadata {
-    LanguageMetadata { line_comment, block_comment, indentation, unsupported_semantic_targets }
-}
-
-fn bash_language() -> Language {
-    tree_sitter_bash::LANGUAGE.into()
-}
-
-fn c_language() -> Language {
-    tree_sitter_c::LANGUAGE.into()
-}
-
-fn c_sharp_language() -> Language {
-    tree_sitter_c_sharp::LANGUAGE.into()
-}
-
-fn cpp_language() -> Language {
-    tree_sitter_cpp::LANGUAGE.into()
-}
-
-fn css_language() -> Language {
-    tree_sitter_css::LANGUAGE.into()
-}
-
-fn elixir_language() -> Language {
-    tree_sitter_elixir::LANGUAGE.into()
-}
-
-fn go_language() -> Language {
-    tree_sitter_go::LANGUAGE.into()
-}
-
-fn haskell_language() -> Language {
-    tree_sitter_haskell::LANGUAGE.into()
-}
-
-fn html_language() -> Language {
-    tree_sitter_html::LANGUAGE.into()
-}
-
-fn java_language() -> Language {
-    tree_sitter_java::LANGUAGE.into()
-}
-
-fn javascript_language() -> Language {
-    tree_sitter_javascript::LANGUAGE.into()
-}
-
-fn json_language() -> Language {
-    tree_sitter_json::LANGUAGE.into()
-}
-
-fn php_language() -> Language {
-    tree_sitter_php::LANGUAGE_PHP.into()
-}
-
-fn python_language() -> Language {
-    tree_sitter_python::LANGUAGE.into()
-}
-
-fn ruby_language() -> Language {
-    tree_sitter_ruby::LANGUAGE.into()
-}
-
-fn rust_language() -> Language {
-    tree_sitter_rust::LANGUAGE.into()
-}
-
-fn scala_language() -> Language {
-    tree_sitter_scala::LANGUAGE.into()
-}
-
-fn typescript_language() -> Language {
-    tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
-}
-
-fn tsx_language() -> Language {
-    tree_sitter_typescript::LANGUAGE_TSX.into()
-}
-
-const LANGUAGE_REGISTRY: &[LanguageRegistryEntry] = &[
-    LanguageRegistryEntry {
-        canonical_name: "Bash",
-        aliases: &["bash", "shell", "shellscript", "sh"],
-        path_aliases: &["sh", "bash", ".bashrc", ".zshrc"],
-        language: bash_language,
-        metadata: language_metadata(
-            LineCommentStyle::Token("#"),
-            BlockCommentStyle::Unsupported,
-            IndentationStrategy::Unsupported,
-            NO_UNSUPPORTED_TARGETS,
-        ),
-    },
-    LanguageRegistryEntry {
-        canonical_name: "C",
-        aliases: &["c"],
-        path_aliases: &["c", "h"],
-        language: c_language,
-        metadata: language_metadata(
-            LineCommentStyle::Token("//"),
-            BlockCommentStyle::Tokens { open: "/*", close: "*/" },
-            IndentationStrategy::TreeSitter,
-            NO_UNSUPPORTED_TARGETS,
-        ),
-    },
-    LanguageRegistryEntry {
-        canonical_name: "C#",
-        aliases: &["c#", "csharp", "cs"],
-        path_aliases: &["cs"],
-        language: c_sharp_language,
-        metadata: language_metadata(
-            LineCommentStyle::Token("//"),
-            BlockCommentStyle::Tokens { open: "/*", close: "*/" },
-            IndentationStrategy::TreeSitter,
-            NO_UNSUPPORTED_TARGETS,
-        ),
-    },
-    LanguageRegistryEntry {
-        canonical_name: "C++",
-        aliases: &["c++", "cpp", "cplusplus"],
-        path_aliases: &["cc", "cpp", "cxx", "hh", "hpp", "hxx"],
-        language: cpp_language,
-        metadata: language_metadata(
-            LineCommentStyle::Token("//"),
-            BlockCommentStyle::Tokens { open: "/*", close: "*/" },
-            IndentationStrategy::TreeSitter,
-            NO_UNSUPPORTED_TARGETS,
-        ),
-    },
-    LanguageRegistryEntry {
-        canonical_name: "CSS",
-        aliases: &["css"],
-        path_aliases: &["css", "less", "scss"],
-        language: css_language,
-        metadata: language_metadata(
-            LineCommentStyle::Unsupported,
-            BlockCommentStyle::Tokens { open: "/*", close: "*/" },
-            IndentationStrategy::Unsupported,
-            DATA_ONLY_TARGETS,
-        ),
-    },
-    LanguageRegistryEntry {
-        canonical_name: "Elixir",
-        aliases: &["elixir", "ex", "exs"],
-        path_aliases: &["ex", "exs"],
-        language: elixir_language,
-        metadata: language_metadata(
-            LineCommentStyle::Token("#"),
-            BlockCommentStyle::Unsupported,
-            IndentationStrategy::Unsupported,
-            NO_UNSUPPORTED_TARGETS,
-        ),
-    },
-    LanguageRegistryEntry {
-        canonical_name: "Go",
-        aliases: &["go", "golang"],
-        path_aliases: &["go"],
-        language: go_language,
-        metadata: language_metadata(
-            LineCommentStyle::Token("//"),
-            BlockCommentStyle::Tokens { open: "/*", close: "*/" },
-            IndentationStrategy::TreeSitter,
-            NO_UNSUPPORTED_TARGETS,
-        ),
-    },
-    LanguageRegistryEntry {
-        canonical_name: "Haskell",
-        aliases: &["haskell", "hs"],
-        path_aliases: &["hs"],
-        language: haskell_language,
-        metadata: language_metadata(
-            LineCommentStyle::Token("--"),
-            BlockCommentStyle::Tokens { open: "{-", close: "-}" },
-            IndentationStrategy::Unsupported,
-            NO_UNSUPPORTED_TARGETS,
-        ),
-    },
-    LanguageRegistryEntry {
-        canonical_name: "HTML",
-        aliases: &["html"],
-        path_aliases: &["htm", "html", "xhtml"],
-        language: html_language,
-        metadata: language_metadata(
-            LineCommentStyle::Unsupported,
-            BlockCommentStyle::Tokens { open: "<!--", close: "-->" },
-            IndentationStrategy::Unsupported,
-            COMMENT_ONLY_TARGETS,
-        ),
-    },
-    LanguageRegistryEntry {
-        canonical_name: "Java",
-        aliases: &["java"],
-        path_aliases: &["java"],
-        language: java_language,
-        metadata: language_metadata(
-            LineCommentStyle::Token("//"),
-            BlockCommentStyle::Tokens { open: "/*", close: "*/" },
-            IndentationStrategy::TreeSitter,
-            NO_UNSUPPORTED_TARGETS,
-        ),
-    },
-    LanguageRegistryEntry {
-        canonical_name: "JavaScript",
-        aliases: &["javascript", "javascriptreact", "js", "jsx"],
-        path_aliases: &["cjs", "js", "jsx", "mjs"],
-        language: javascript_language,
-        metadata: language_metadata(
-            LineCommentStyle::Token("//"),
-            BlockCommentStyle::Tokens { open: "/*", close: "*/" },
-            IndentationStrategy::TreeSitter,
-            NO_UNSUPPORTED_TARGETS,
-        ),
-    },
-    LanguageRegistryEntry {
-        canonical_name: "JSON",
-        aliases: &["json"],
-        path_aliases: &["json"],
-        language: json_language,
-        metadata: language_metadata(
-            LineCommentStyle::Unsupported,
-            BlockCommentStyle::Unsupported,
-            IndentationStrategy::Unsupported,
-            DATA_ONLY_TARGETS,
-        ),
-    },
-    LanguageRegistryEntry {
-        canonical_name: "PHP",
-        aliases: &["php"],
-        path_aliases: &["php", "phtml"],
-        language: php_language,
-        metadata: language_metadata(
-            LineCommentStyle::Token("//"),
-            BlockCommentStyle::Tokens { open: "/*", close: "*/" },
-            IndentationStrategy::TreeSitter,
-            NO_UNSUPPORTED_TARGETS,
-        ),
-    },
-    LanguageRegistryEntry {
-        canonical_name: "Python",
-        aliases: &["py", "python", "python3"],
-        path_aliases: &["py", "pyw"],
-        language: python_language,
-        metadata: language_metadata(
-            LineCommentStyle::Token("#"),
-            BlockCommentStyle::Unsupported,
-            IndentationStrategy::TreeSitter,
-            NO_UNSUPPORTED_TARGETS,
-        ),
-    },
-    LanguageRegistryEntry {
-        canonical_name: "Ruby",
-        aliases: &["rb", "ruby"],
-        path_aliases: &["rb", "gemspec", "gemfile", "rake", "rakefile"],
-        language: ruby_language,
-        metadata: language_metadata(
-            LineCommentStyle::Token("#"),
-            BlockCommentStyle::Tokens { open: "=begin", close: "=end" },
-            IndentationStrategy::Unsupported,
-            NO_UNSUPPORTED_TARGETS,
-        ),
-    },
-    LanguageRegistryEntry {
-        canonical_name: "Rust",
-        aliases: &["rs", "rust"],
-        path_aliases: &["rs"],
-        language: rust_language,
-        metadata: language_metadata(
-            LineCommentStyle::Token("//"),
-            BlockCommentStyle::Tokens { open: "/*", close: "*/" },
-            IndentationStrategy::TreeSitter,
-            NO_UNSUPPORTED_TARGETS,
-        ),
-    },
-    LanguageRegistryEntry {
-        canonical_name: "Scala",
-        aliases: &["scala"],
-        path_aliases: &["sc", "scala"],
-        language: scala_language,
-        metadata: language_metadata(
-            LineCommentStyle::Token("//"),
-            BlockCommentStyle::Tokens { open: "/*", close: "*/" },
-            IndentationStrategy::Unsupported,
-            NO_UNSUPPORTED_TARGETS,
-        ),
-    },
-    LanguageRegistryEntry {
-        canonical_name: "TypeScript",
-        aliases: &["ts", "typescript"],
-        path_aliases: &["cts", "mts", "ts"],
-        language: typescript_language,
-        metadata: language_metadata(
-            LineCommentStyle::Token("//"),
-            BlockCommentStyle::Tokens { open: "/*", close: "*/" },
-            IndentationStrategy::TreeSitter,
-            NO_UNSUPPORTED_TARGETS,
-        ),
-    },
-    LanguageRegistryEntry {
-        canonical_name: "TypeScript",
-        aliases: &["tsx", "typescriptreact"],
-        path_aliases: &["tsx"],
-        language: tsx_language,
-        metadata: language_metadata(
-            LineCommentStyle::Token("//"),
-            BlockCommentStyle::Tokens { open: "/*", close: "*/" },
-            IndentationStrategy::TreeSitter,
-            NO_UNSUPPORTED_TARGETS,
-        ),
-    },
-];
-
-fn normalize_language_key(value: &str) -> String {
-    value
-        .trim()
-        .chars()
-        .filter(|ch| !matches!(ch, ' ' | '_' | '-'))
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-fn registry_entry_for_name(language_name: &str) -> Option<&'static LanguageRegistryEntry> {
-    let key = normalize_language_key(language_name);
-    LANGUAGE_REGISTRY.iter().find(|entry| {
-        normalize_language_key(entry.canonical_name) == key
-            || entry.aliases.iter().any(|alias| normalize_language_key(alias) == key)
-    })
-}
-
-fn registry_entry_for_path(path: &Path) -> Option<&'static LanguageRegistryEntry> {
-    let key = path
-        .extension()
-        .or_else(|| path.file_name())
-        .and_then(|segment| segment.to_str())?
-        .to_ascii_lowercase();
-    LANGUAGE_REGISTRY
-        .iter()
-        .find(|entry| entry.path_aliases.iter().any(|alias| alias.eq_ignore_ascii_case(&key)))
-}
-
 /// Syntax span encoded relative to one rendered line.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VisibleSyntaxSpan {
@@ -509,22 +145,35 @@ impl Default for VisibleSyntaxLimits {
 // ---------------------------------------------------------------------------
 
 /// Returns canonical xi language name for a requested alias.
-pub fn canonical_language_name(requested: &str) -> Option<&'static str> {
-    registry_entry_for_name(requested).map(|entry| entry.canonical_name)
+pub fn canonical_language_name(requested: &str) -> Option<String> {
+    #[cfg(any(test, feature = "test-grammars"))]
+    crate::runtime_loader::ensure_default_runtime_loader_has_test_grammars();
+
+    with_default_runtime_loader(|loader| loader.canonical_language_name(requested))
 }
 
 /// Returns canonical xi language name resolved from a path or file name.
-pub fn language_name_for_path(path: &Path) -> Option<&'static str> {
-    registry_entry_for_path(path).map(|entry| entry.canonical_name)
+pub fn language_name_for_path(path: &Path) -> Option<String> {
+    #[cfg(any(test, feature = "test-grammars"))]
+    crate::runtime_loader::ensure_default_runtime_loader_has_test_grammars();
+
+    with_default_runtime_loader(|loader| {
+        loader.detect_language(Some(path), None, None).map(|language| language.canonical_id)
+    })
 }
 
 #[allow(dead_code)]
-pub(crate) fn language_path_aliases(language_name: &str) -> Option<&'static [&'static str]> {
-    registry_entry_for_name(language_name).map(|entry| entry.path_aliases)
+pub(crate) fn language_path_aliases(_language_name: &str) -> Option<&'static [&'static str]> {
+    None
 }
 
-pub(crate) fn language_metadata_for_name(language_name: &str) -> Option<&'static LanguageMetadata> {
-    registry_entry_for_name(language_name).map(|entry| &entry.metadata)
+pub(crate) fn language_metadata_for_name(language_name: &str) -> Option<LanguageMetadata> {
+    #[cfg(any(test, feature = "test-grammars"))]
+    crate::runtime_loader::ensure_default_runtime_loader_has_test_grammars();
+
+    with_default_runtime_loader(|loader| {
+        loader.language_for_name(language_name).map(|language| language.metadata())
+    })
 }
 
 pub(crate) fn syntax_feature_availability(
@@ -532,67 +181,102 @@ pub(crate) fn syntax_feature_availability(
     file_path: Option<&Path>,
     mode: DocumentMode,
 ) -> SyntaxFeatureAvailability {
-    let entry = language_name
-        .and_then(registry_entry_for_name)
-        .or_else(|| file_path.and_then(registry_entry_for_path));
-    let gates = mode.feature_gates();
-    let Some(entry) = entry else {
-        return SyntaxFeatureAvailability {
-            syntax_spans: false,
-            semantic_motions: false,
-            line_comments: false,
-            block_comments: false,
-            reindent: false,
+    #[cfg(any(test, feature = "test-grammars"))]
+    crate::runtime_loader::ensure_default_runtime_loader_has_test_grammars();
+
+    with_default_runtime_loader_mut(|loader| {
+        let gates = mode.feature_gates();
+        let Some(resolved_language_name) =
+            resolve_runtime_language_name(loader, language_name, file_path)
+        else {
+            return SyntaxFeatureAvailability {
+                syntax_spans: false,
+                semantic_motions: false,
+                line_comments: false,
+                block_comments: false,
+                reindent: false,
+            };
         };
-    };
+        let Some(language) = loader.language_for_name(&resolved_language_name) else {
+            return SyntaxFeatureAvailability {
+                syntax_spans: false,
+                semantic_motions: false,
+                line_comments: false,
+                block_comments: false,
+                reindent: false,
+            };
+        };
+        let metadata = language.metadata();
+        let has_grammar = loader.load_language_for_name(&resolved_language_name).is_ok();
+        let has_semantic_target = [
+            SemanticTargetKind::Function,
+            SemanticTargetKind::Class,
+            SemanticTargetKind::Parameter,
+            SemanticTargetKind::Comment,
+            SemanticTargetKind::Test,
+        ]
+        .iter()
+        .any(|target| !metadata.unsupported_semantic_targets.contains(target));
 
-    let metadata = entry.metadata;
-    let has_semantic_target = [
-        SemanticTargetKind::Function,
-        SemanticTargetKind::Class,
-        SemanticTargetKind::Parameter,
-        SemanticTargetKind::Comment,
-        SemanticTargetKind::Test,
-    ]
-    .iter()
-    .any(|target| !metadata.unsupported_semantic_targets.contains(target));
-
-    SyntaxFeatureAvailability {
-        syntax_spans: gates.syntax,
-        semantic_motions: gates.syntax && has_semantic_target,
-        line_comments: gates.editing && matches!(metadata.line_comment, LineCommentStyle::Token(_)),
-        block_comments: gates.editing
-            && matches!(metadata.block_comment, BlockCommentStyle::Tokens { .. }),
-        reindent: gates.whole_doc_ops
-            && matches!(metadata.indentation, IndentationStrategy::TreeSitter),
-    }
+        SyntaxFeatureAvailability {
+            syntax_spans: gates.syntax
+                && has_grammar
+                && loader.supports_any_query_kind(
+                    &resolved_language_name,
+                    &[
+                        RuntimeQueryKind::Highlights,
+                        RuntimeQueryKind::Injections,
+                        RuntimeQueryKind::Locals,
+                    ],
+                ),
+            semantic_motions: gates.syntax
+                && has_grammar
+                && has_semantic_target
+                && loader
+                    .supports_query_kind(&resolved_language_name, RuntimeQueryKind::Textobjects),
+            line_comments: gates.editing
+                && matches!(metadata.line_comment, LineCommentStyle::Token(_)),
+            block_comments: gates.editing
+                && matches!(metadata.block_comment, BlockCommentStyle::Tokens { .. }),
+            reindent: gates.whole_doc_ops
+                && has_grammar
+                && matches!(metadata.indentation, IndentationStrategy::TreeSitter)
+                && loader.supports_query_kind(&resolved_language_name, RuntimeQueryKind::Indents),
+        }
+    })
 }
 
 pub(crate) fn language_supports_semantic_target(
     language_name: &str,
     target: SemanticTargetKind,
 ) -> bool {
-    language_metadata_for_name(language_name)
-        .map(|metadata| !metadata.unsupported_semantic_targets.contains(&target))
-        .unwrap_or(false)
+    #[cfg(any(test, feature = "test-grammars"))]
+    crate::runtime_loader::ensure_default_runtime_loader_has_test_grammars();
+
+    with_default_runtime_loader(|loader| {
+        loader.language_for_name(language_name).is_some_and(|language| {
+            !language.metadata().unsupported_semantic_targets.contains(&target)
+                && loader.supports_query_kind(language_name, RuntimeQueryKind::Textobjects)
+        })
+    })
 }
 
 pub(crate) fn resolve_ts_language(
     language_name: Option<&str>,
     file_path: Option<&Path>,
 ) -> Option<Language> {
-    language_name
-        .and_then(ts_language_for_name)
-        .or_else(|| file_path.and_then(ts_language_for_path))
+    runtime_language(language_name, file_path, QueryWarmup::None)
 }
 
 /// Returns tree-sitter `Language` for given xi language name.
+#[allow(dead_code)]
 pub(crate) fn ts_language_for_name(language_name: &str) -> Option<Language> {
-    registry_entry_for_name(language_name).map(|entry| (entry.language)())
+    runtime_language(Some(language_name), None, QueryWarmup::None)
 }
 
+#[allow(dead_code)]
 pub(crate) fn ts_language_for_path(path: &Path) -> Option<Language> {
-    registry_entry_for_path(path).map(|entry| (entry.language)())
+    runtime_language(None, Some(path), QueryWarmup::None)
 }
 
 // ---------------------------------------------------------------------------
@@ -604,7 +288,9 @@ pub(crate) fn ts_language_for_path(path: &Path) -> Option<Language> {
 /// This is intentionally bounded by bytes, wall time, match count, and capture
 /// count so VLF highlighting cannot become whole-file work. The input must be a
 /// viewport chunk, optionally with small overscan; callers must not pass full
-/// VLF file contents.
+/// VLF file contents. This path also avoids warming runtime query caches so
+/// query inheritance and runtime reload only affect whole-buffer query
+/// consumers, not viewport-bounded syntax work.
 pub(crate) fn visible_syntax_spans(
     language_name: &str,
     visible_text: &str,
@@ -631,7 +317,7 @@ pub(crate) fn chunk_syntax_spans(
         return per_segment;
     }
 
-    let Some(language) = ts_language_for_name(language_name) else {
+    let Some(language) = runtime_language(Some(language_name), None, QueryWarmup::None) else {
         return per_segment;
     };
 
@@ -781,12 +467,22 @@ fn compact_visible_spans(spans: &mut Vec<VisibleSyntaxSpan>) {
     *spans = compacted;
 }
 
+#[allow(dead_code)]
 fn parse_tree_with_timeout(language_name: &str, text: &str, timeout: Duration) -> Option<Tree> {
+    parse_tree_with_timeout_and_queries(language_name, text, timeout, QueryWarmup::None)
+}
+
+fn parse_tree_with_timeout_and_queries(
+    language_name: &str,
+    text: &str,
+    timeout: Duration,
+    warmup: QueryWarmup,
+) -> Option<Tree> {
     if timeout.is_zero() {
         return None;
     }
 
-    let language = ts_language_for_name(language_name)?;
+    let language = runtime_language(Some(language_name), None, warmup)?;
     let started = Instant::now();
     let mut parser = Parser::new();
     parser.set_language(&language).ok()?;
@@ -913,7 +609,9 @@ pub(crate) fn fold_ranges_for_text(
         return Vec::new();
     }
 
-    let Some(language) = resolve_ts_language(language_name, file_path) else {
+    let Some(language) =
+        runtime_language(language_name, file_path, QueryWarmup::Kind(RuntimeQueryKind::Folds))
+    else {
         return Vec::new();
     };
     let started = Instant::now();
@@ -998,11 +696,16 @@ fn indentation_levels_for_text_with_timeout(
         return None;
     }
 
-    if matches!(canonical_language_name(language_name), Some("Python")) {
+    if canonical_language_name(language_name).as_deref() == Some("Python") {
         return Some(python_indentation_levels(text, max_line));
     }
 
-    let tree = parse_tree_with_timeout(language_name, text, timeout)?;
+    let tree = parse_tree_with_timeout_and_queries(
+        language_name,
+        text,
+        timeout,
+        QueryWarmup::Kind(RuntimeQueryKind::Indents),
+    )?;
     let line_starts = line_start_offsets(text);
     let line_segments = line_segments(text, &line_starts);
     let mut levels = Vec::with_capacity(max_line + 1);
@@ -1110,11 +813,57 @@ fn line_requires_dedent(language_name: &str, line_text: &str) -> bool {
         return true;
     }
 
-    matches!(canonical_language_name(language_name), Some("Python"))
+    canonical_language_name(language_name).as_deref() == Some("Python")
         && (trimmed.starts_with("elif ")
             || trimmed.starts_with("else:")
             || trimmed.starts_with("except")
             || trimmed.starts_with("finally:"))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum QueryWarmup {
+    None,
+    Kind(RuntimeQueryKind),
+}
+
+fn runtime_language(
+    language_name: Option<&str>,
+    file_path: Option<&Path>,
+    warmup: QueryWarmup,
+) -> Option<Language> {
+    #[cfg(any(test, feature = "test-grammars"))]
+    crate::runtime_loader::ensure_default_runtime_loader_has_test_grammars();
+
+    with_default_runtime_loader_mut(|loader| {
+        let resolved_language_name =
+            resolve_runtime_language_name(loader, language_name, file_path)?;
+        match warmup {
+            QueryWarmup::None => {}
+            QueryWarmup::Kind(kind) => {
+                if loader.supports_query_kind(&resolved_language_name, kind)
+                    && loader.compile_query_kind(&resolved_language_name, kind).is_err()
+                {
+                    return None;
+                }
+            }
+        }
+
+        loader.load_language_for_name(&resolved_language_name).ok().map(|handle| handle.language())
+    })
+}
+
+fn resolve_runtime_language_name(
+    loader: &RuntimeLoader,
+    language_name: Option<&str>,
+    file_path: Option<&Path>,
+) -> Option<String> {
+    language_name.and_then(|language_name| loader.canonical_language_name(language_name)).or_else(
+        || {
+            file_path.and_then(|path| {
+                loader.detect_language(Some(path), None, None).map(|language| language.canonical_id)
+            })
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1174,7 +923,7 @@ mod tests {
             ("js", "JavaScript"),
             ("tsx", "TypeScript"),
         ] {
-            assert_eq!(canonical_language_name(alias), Some(canonical));
+            assert_eq!(canonical_language_name(alias).as_deref(), Some(canonical));
             assert!(ts_language_for_name(alias).is_some(), "missing alias support for {alias}");
         }
     }
@@ -1201,7 +950,7 @@ mod tests {
             ("build.sc", "Scala"),
             ("view.tsx", "TypeScript"),
         ] {
-            assert_eq!(language_name_for_path(Path::new(path)), Some(canonical));
+            assert_eq!(language_name_for_path(Path::new(path)).as_deref(), Some(canonical));
             assert!(
                 ts_language_for_path(Path::new(path)).is_some(),
                 "missing path support for {path}"
@@ -1211,8 +960,8 @@ mod tests {
 
     #[test]
     fn test_ts_language_resolution_prefers_explicit_name_then_path() {
-        assert_eq!(canonical_language_name("Python 3"), Some("Python"));
-        assert_eq!(language_name_for_path(Path::new("main.rs")), Some("Rust"));
+        assert_eq!(canonical_language_name("Python 3").as_deref(), Some("Python"));
+        assert_eq!(language_name_for_path(Path::new("main.rs")).as_deref(), Some("Rust"));
         assert!(resolve_ts_language(Some("Plain Text"), Some(Path::new("main.rs"))).is_some());
     }
 
@@ -1299,6 +1048,65 @@ mod tests {
         let capture_count =
             visible_syntax_spans("Rust", src, limited).iter().map(Vec::len).sum::<usize>();
         assert!(capture_count <= 1);
+    }
+
+    #[test]
+    fn visible_syntax_spans_does_not_warm_runtime_queries() {
+        crate::runtime_loader::with_default_runtime_loader_mut(|loader| {
+            loader.invalidate_language("Rust");
+            assert!(
+                loader
+                    .cached_query_artifact(
+                        "Rust",
+                        crate::runtime_loader::RuntimeQueryKind::Highlights
+                    )
+                    .is_none()
+            );
+            assert!(
+                loader
+                    .cached_query_artifact(
+                        "Rust",
+                        crate::runtime_loader::RuntimeQueryKind::Injections
+                    )
+                    .is_none()
+            );
+            assert!(
+                loader
+                    .cached_query_artifact("Rust", crate::runtime_loader::RuntimeQueryKind::Locals)
+                    .is_none()
+            );
+        });
+
+        let spans = visible_syntax_spans(
+            "Rust",
+            "fn main() {\n    let answer = 42;\n}\n",
+            VisibleSyntaxLimits::default(),
+        );
+        assert!(spans.iter().flatten().any(|span| span.scope == "keyword.control"));
+
+        crate::runtime_loader::with_default_runtime_loader_mut(|loader| {
+            assert!(
+                loader
+                    .cached_query_artifact(
+                        "Rust",
+                        crate::runtime_loader::RuntimeQueryKind::Highlights
+                    )
+                    .is_none()
+            );
+            assert!(
+                loader
+                    .cached_query_artifact(
+                        "Rust",
+                        crate::runtime_loader::RuntimeQueryKind::Injections
+                    )
+                    .is_none()
+            );
+            assert!(
+                loader
+                    .cached_query_artifact("Rust", crate::runtime_loader::RuntimeQueryKind::Locals)
+                    .is_none()
+            );
+        });
     }
 
     #[test]

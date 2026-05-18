@@ -431,6 +431,7 @@ main() {
   need_cmd date
   need_cmd git
   need_cmd mktemp
+  need_cmd bash
 
   local repo_root
   repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || die "must be run inside a git repository"
@@ -466,6 +467,8 @@ main() {
   update_workspace_manifest_versions "$version"
   update_root_workspace_dependency_versions "$version"
   update_changelog "$version" "$release_date" "$previous_tag"
+
+  bash scripts/build-runtime.sh --force --source-root target/release-runtime-sources --output-root target/release-runtime
 
   cargo check --workspace --all-targets --quiet
   cargo fmt --all --check

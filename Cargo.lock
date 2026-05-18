@@ -813,45 +813,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "ee-xi-core"
+name = "ee-ts-test-grammars"
 version = "0.8.2"
 dependencies = [
- "chrono",
- "dirs",
- "ee-xi-core-lib",
- "ee-xi-rpc",
- "fern",
- "log",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "ee-xi-core-lib"
-version = "0.8.2"
-dependencies = [
- "bytecount",
- "criterion",
- "ee-xi-rope",
- "ee-xi-rpc",
- "ee-xi-unicode",
- "fs2",
- "jsonschema",
- "libc",
- "log",
- "memchr",
- "notify",
- "regex",
- "schemars",
- "seccompiler",
- "semver",
- "serde",
- "serde_json",
- "tempfile",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-subscriber",
  "tree-sitter",
  "tree-sitter-bash",
  "tree-sitter-c",
@@ -871,6 +835,53 @@ dependencies = [
  "tree-sitter-rust",
  "tree-sitter-scala",
  "tree-sitter-typescript",
+]
+
+[[package]]
+name = "ee-xi-core"
+version = "0.8.2"
+dependencies = [
+ "chrono",
+ "dirs",
+ "ee-xi-core-lib",
+ "ee-xi-rpc",
+ "fern",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ee-xi-core-lib"
+version = "0.8.2"
+dependencies = [
+ "bytecount",
+ "criterion",
+ "dirs",
+ "ee-ts-test-grammars",
+ "ee-xi-rope",
+ "ee-xi-rpc",
+ "ee-xi-unicode",
+ "fs2",
+ "globset",
+ "jsonschema",
+ "libc",
+ "log",
+ "memchr",
+ "notify",
+ "regex",
+ "schemars",
+ "seccompiler",
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "tree-sitter",
+ "tree-sitter-loader",
  "unicode-width 0.2.0",
  "wasmtime",
  "windows-sys 0.61.2",
@@ -1022,6 +1033,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "etcetera"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de48cc4d1c1d97a20fd819def54b890cadde72ed3ad0c614822a0a433361be96"
+dependencies = [
+ "cfg-if",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "fancy-regex"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1128,6 +1149,16 @@ checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
 dependencies = [
  "libc",
  "winapi",
+]
+
+[[package]]
+name = "fs4"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c29c30684418547d476f0b48e84f4821639119c483b1eccd566c8cd0cd05f521"
+dependencies = [
+ "rustix 0.38.44",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1816,6 +1847,16 @@ checksum = "f12a681b7dd8ce12bff52488013ba614b869148d54dd79836ab85aafdd53f08d"
 dependencies = [
  "arbitrary",
  "cc",
+]
+
+[[package]]
+name = "libloading"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
+dependencies = [
+ "cfg-if",
+ "windows-link",
 ]
 
 [[package]]
@@ -2635,6 +2676,10 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+dependencies = [
+ "serde",
+ "serde_core",
+]
 
 [[package]]
 name = "serde"
@@ -3260,6 +3305,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-highlight"
+version = "0.26.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccde2b54a34b58313e69c02496a2a9ad38d59af79b196b5e1df063431752a7e0"
+dependencies = [
+ "regex",
+ "streaming-iterator",
+ "thiserror",
+ "tree-sitter",
+]
+
+[[package]]
 name = "tree-sitter-html"
 version = "0.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3304,6 +3361,30 @@ name = "tree-sitter-language"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "009994f150cc0cd50ff54917d5bc8bffe8cad10ca10d81c34da2ec421ae61782"
+
+[[package]]
+name = "tree-sitter-loader"
+version = "0.26.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c9e517e5b9eb81c9aa903aa2f130fb3f0b5b78bab79750ed695853010905b64"
+dependencies = [
+ "cc",
+ "etcetera",
+ "fs4",
+ "indoc",
+ "libloading",
+ "log",
+ "once_cell",
+ "regex",
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tree-sitter",
+ "tree-sitter-highlight",
+ "tree-sitter-tags",
+]
 
 [[package]]
 name = "tree-sitter-php"
@@ -3353,6 +3434,19 @@ checksum = "de5a4a7ff23a55474ce6a741d52aaeca7a82fe9421bb982b86e98c6ac8629397"
 dependencies = [
  "cc",
  "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-tags"
+version = "0.26.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08bf783234c8ac7d8e323889e16939aa01272ac2ca1a3fc004790d0db84e1a0c"
+dependencies = [
+ "memchr",
+ "regex",
+ "streaming-iterator",
+ "thiserror",
+ "tree-sitter",
 ]
 
 [[package]]
@@ -3978,6 +4072,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "677d2418bec65e3338edb076e806bc1ec15693c5d0104683f2efe857f61056a9"
 dependencies = [
  "windows-targets 0.48.5",
+]
+
+[[package]]
+name = "windows-sys"
+version = "0.52.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
+dependencies = [
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
