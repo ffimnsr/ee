@@ -161,6 +161,78 @@ Real next jump likely needs architectural change: first render from decoded pref
     - [ ] Remove now-obsolete compile-time grammar registry code and related checklist items only after runtime path covers current languages.
     - [ ] Add short architecture note describing final flow: runtime root -> `tree-sitter-loader` -> grammar/query cache -> `xi-core-lib` parse/query consumers -> frontend diagnostics.
 
+### Tree-Sitter Tags for Symbols + Navigation Fallback
+
+- Rules:
+  - Use `tree-sitter-tags` only for code-navigation metadata such as document symbols, local symbol outline, and definition/reference-style tag extraction. Do not treat it as generic structured-data query engine.
+  - Keep backend ownership in `xi-core-lib`; frontends consume normalized `SymbolItem` or navigation payloads only.
+  - Reuse same language resolution and runtime query-loading path as canonical tree-sitter backend. Do not add second grammar or query discovery path just for tags.
+  - Prefer runtime `tags.scm` and `locals.scm` assets once loader lands; avoid hardcoded per-language tagging logic beyond temporary bootstrap needed before runtime cutover.
+  - LSP remains authoritative when active and healthy for richer cross-file/project semantics. Tree-sitter tags provide fallback and local fast-path, not competing source of truth for workspace intelligence.
+  - Any fallback behavior must be explicit in UI and diagnostics so users can tell whether symbol/navigation data came from LSP or local tree-sitter tags.
+  - Every phase must land with regression tests and at least one malformed-query or unsupported-language failure-path test.
+
+- [ ] Phase 0: freeze `tree-sitter-tags` scope and backend contract.
+  - [ ] Why: tags overlap with existing semantic motions and LSP symbol flows; lock exact role before implementation to avoid duplicated navigation stacks.
+  - [ ] Define feature boundary.
+    - [ ] Document that tags cover document-local symbol extraction and optional local definition/reference indexing.
+    - [ ] Exclude generic JSON/YAML/TOML querying, formatting, and non-code document inspection from this work.
+    - [ ] Decide initial command surface: `:symbols`/`:outline` fallback only, or also direct non-LSP definition/reference fallback.
+  - [ ] Define data contract.
+    - [ ] Map tag output into existing `SymbolItem` shape where possible.
+    - [ ] Decide whether current navigation target type is sufficient for tag-based definition/reference results or needs backend-owned tagged range struct.
+    - [ ] Define source marker for UI/status so picker and jump flows can distinguish `lsp` vs `tree-sitter-tags`.
+
+- [ ] Phase 1: add backend tag extraction adapter.
+  - [ ] Why: `tree-sitter-tags` must integrate through one backend façade, not leak crate-specific APIs across editor layers.
+  - [ ] Add dependency and adapter surface in `crates/xi-core-lib`.
+    - [ ] Add `tree-sitter-tags` to workspace/backend dependency graph.
+    - [ ] Define backend helper that accepts resolved `Language`, source bytes, and tagging query inputs, then returns normalized tags.
+    - [ ] Reuse existing parser/language selection path from `tree_sitter_support.rs` instead of creating separate registry.
+  - [ ] Define temporary bootstrap strategy before runtime loader cutover.
+    - [ ] If runtime query loading is not ready yet, decide whether to defer implementation or carry minimal stopgap query source with clear removal plan.
+    - [ ] Do not duplicate long-term query ownership between stopgap and runtime assets.
+
+- [ ] Phase 2: support document symbols fallback through tree-sitter tags.
+  - [ ] Why: current `:symbols` / `:outline` path depends on LSP; local fallback is highest-value first use.
+  - [ ] Add backend symbol extraction.
+    - [ ] Convert tag definitions into `SymbolItem` values with stable kind mapping and byte/line-column conversion.
+    - [ ] Filter out low-signal reference tags from symbol outline output.
+    - [ ] Decide ordering rules: source order, kind grouping, or query-defined order.
+  - [ ] Wire fallback behavior.
+    - [ ] When LSP document symbols unavailable, unsupported, or disabled, serve tree-sitter tag symbols automatically for supported languages.
+    - [ ] Keep current picker and RPC shape stable so frontend integration stays minimal.
+    - [ ] Surface clear status message when fallback engaged or when no tagging query exists for current language.
+
+- [ ] Phase 3: evaluate definition/reference fallback scope.
+  - [ ] Why: tag extraction can produce lightweight def/ref data, but quality and UX tradeoffs differ from LSP and may not justify full command parity.
+  - [ ] Define supported targets.
+    - [ ] Decide whether local go-to-definition from tags is useful enough for first pass.
+    - [ ] Decide whether local references should stay document-local only or wait for project indexing infrastructure.
+    - [ ] Reject low-confidence jumps when ambiguity is too high; prefer explicit picker over silent wrong jump.
+  - [ ] Keep semantics bounded.
+    - [ ] Do not claim workspace-accurate references without index/build step.
+    - [ ] Do not regress current LSP flows when language server is available.
+
+- [ ] Phase 4: align tags with runtime query-loading architecture.
+  - [ ] Why: long-term tags support should ride same runtime grammar/query system already planned for `tags.scm` and `locals.scm`.
+  - [ ] Integrate with runtime assets.
+    - [ ] Load `tags.scm` and optional `locals.scm` from runtime query directories through shared loader-backed path.
+    - [ ] Cache compiled tag configurations alongside other query artifacts.
+    - [ ] Keep missing `tags.scm` isolated to symbol/navigation fallback only.
+  - [ ] Preserve mode constraints.
+    - [ ] Define whether VLF/constrained buffers get disabled tags, visible-range-only tags, or explicit unsupported status.
+    - [ ] Avoid whole-file tag extraction on giant buffers when parse/query budgets would violate large-file goals.
+
+- [ ] Phase 5: validate symbol quality, fallback behavior, and failure containment.
+  - [ ] Why: tag-based navigation only helps if outputs are stable, correctly typed, and clearly bounded when unsupported.
+  - [ ] Add unit and integration coverage.
+    - [ ] Document-symbol fallback returns expected `SymbolItem` values for at least Rust, Python, and JavaScript/TypeScript.
+    - [ ] Missing `tags.scm` disables fallback cleanly without crashing picker or command flow.
+    - [ ] Malformed tagging query reports actionable error with language/query attribution.
+    - [ ] LSP success path still wins over tag fallback when both are available.
+    - [ ] Large-buffer or unsupported-language cases fail closed with explicit status instead of expensive best-effort scan.
+
 
 ### Optional Future Boundary Work
 
@@ -170,8 +242,6 @@ Real next jump likely needs architectural change: first render from decoded pref
 
 ### Other works
 
-- [x] Add `do file head` and `do file tail`, it will be similar to `head` and `tail` command on linux
-would reuse existing functionality from vlf so it will be useful for getting head/tail of a file.
 - [ ] Time it using hyperfine against the original head and tail commands, and implement ways to be on par or much faster than the original command.
 - [ ] Implement a `jq` like command `do file query|q --type json`, to query document files in similar ways
   - [ ] Implement for `json`
@@ -179,39 +249,3 @@ would reuse existing functionality from vlf so it will be useful for getting hea
   - [ ] Implement for `toml`
   - [ ] Implement for `kdl`
 - [ ] When trying to save and user doesn't have permission, ask if they want to re-execute with higher privilage with `sudo`, `su`, `run0`
-- [x] Rework config search hierarchy and `.ee.toml` root semantics.
-  - Why: current loader only merges defaults + `~/.ee.toml` + git-root `.ee.toml` + cwd `.ee.toml`; path contract too narrow and root-stop behavior is undefined.
-  - Define config layers, lowest priority first:
-    - built-in defaults
-    - `/etc/ee/config.toml`
-    - `$XDG_CONFIG_HOME/ee/config.toml` or `~/.config/ee/config.toml`
-    - fallback user config `~/.ee.toml`, but only when XDG user config is missing
-    - every `.ee.toml` from project/file directory walk, applied from outermost to innermost so nearest directory wins
-    - `.editorconfig` remains final per-file override layer
-  - Define walk anchor clearly:
-    - when editing file, walk from file parent directory upward
-    - when no file path exists yet, walk from current working directory upward
-    - do not limit project config lookup to git root only; any ancestor may contribute until root-stop rule triggers
-  - Add `root: Option<bool>` to `.ee.toml` / config schema.
-    - `root = true`: apply that file, then stop searching more distant parent/system/user config layers above it
-    - missing `root` or `root = false`: merge normally and continue walking outward
-    - `/etc/ee/config.toml` is implicit terminal root even if field absent
-  - Merge behavior:
-    - partial config files override only keys they set
-    - nested tables such as keymaps still follow existing field-wise merge behavior unless issue explicitly changes that contract
-    - user XDG config and legacy `~/.ee.toml` are mutually exclusive sources; do not load both
-  - Acceptance examples:
-    - `/home/user/project/folder/.ee.toml (root = true)` -> load only that file for that subtree
-    - `/home/user/project/.ee.toml (root = true)` + `/home/user/project/folder/.ee.toml (root = false)` -> load project, then folder; stop before user/system layers
-    - folder + project with `root = false`, user XDG config with `root = true` -> load user, project, folder; stop before `/etc`
-    - folder + project + user with `root = false` -> merge all of them, then `/etc/ee/config.toml` as final fallback root
-  - Implementation scope:
-    - update loader in `crates/ee-cli/src/config.rs`
-    - update doctor/validate and any config-path reporting to show new precedence and fallback behavior
-    - update help/docs mentioning config locations
-  - Tests:
-    - XDG user config preferred over `~/.ee.toml`
-    - legacy `~/.ee.toml` used when XDG config missing
-    - ancestor `.ee.toml` chain merges outer -> inner
-    - `root = true` stops walk at folder, project, and user layers correctly
-    - `/etc/ee/config.toml` participates as lowest-priority external config and terminal root

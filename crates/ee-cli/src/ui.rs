@@ -1,8 +1,8 @@
-use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use xi_core_lib::plugin_rpc::DiagnosticSeverity;
 
 use crate::app::{App, Mode, SwiftMotionTarget, Viewport, smart_case_sensitive};
@@ -1683,85 +1683,282 @@ fn render_qf_panel(
     frame.render_stateful_widget(List::new(items), inner, &mut list_state);
 }
 
+fn picker_kind_badge(kind: PickerKind) -> &'static str {
+    match kind {
+        PickerKind::Files => " FILES ",
+        PickerKind::Buffers => " BUFFERS ",
+        PickerKind::LiveGrep => " GREP ",
+        PickerKind::Help => " HELP ",
+        PickerKind::Completions => " COMPLETIONS ",
+        PickerKind::CodeActions => " ACTIONS ",
+        PickerKind::Symbols => " SYMBOLS ",
+        PickerKind::Locations => " LOCATIONS ",
+    }
+}
+
+fn truncate_picker_text(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+
+    if text.width() <= max_width {
+        return text.to_owned();
+    }
+
+    let ellipsis = if max_width >= 3 { "..." } else { "." };
+    let ellipsis_width = ellipsis.width().min(max_width);
+    let mut out = String::new();
+    let mut width = 0;
+    for ch in text.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if width + ch_width + ellipsis_width > max_width {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out.push_str(&ellipsis[..ellipsis_width]);
+    out
+}
+
+fn picker_selection_summary(app: &App) -> String {
+    let Some(picker) = &app.picker else { return String::new() };
+    let Some(item) = picker.selected_item() else {
+        return if picker.query.is_empty() {
+            "No matches".to_owned()
+        } else {
+            format!("No matches for '{}'", picker.query)
+        };
+    };
+
+    let mut parts = Vec::new();
+    if let Some(detail) = item.detail.as_ref().filter(|detail| !detail.is_empty()) {
+        parts.push(detail.clone());
+    } else if let Some(path) = &item.path {
+        parts.push(path.to_string_lossy().into_owned());
+    }
+    if let Some(line) = item.line {
+        if let Some(col) = item.col {
+            parts.push(format!("{}:{}", line + 1, col + 1));
+        } else {
+            parts.push(format!("{}", line + 1));
+        }
+    }
+    if parts.is_empty() {
+        parts.push(item.label.clone());
+    }
+    parts.join("  ")
+}
+
 /// Render the floating picker overlay centered in `area`.
 fn render_picker(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let Some(picker) = &app.picker else { return };
 
-    // Popup dimensions: 80 % of the available area, min 20×10.
-    let popup_w = ((area.width as f32 * 0.8) as u16).max(20).min(area.width);
-    let popup_h = ((area.height as f32 * 0.8) as u16).max(10).min(area.height);
+    let popup_w = ((area.width as f32 * 0.84) as u16).max(36).min(area.width);
+    let popup_h = ((area.height as f32 * 0.76) as u16).max(12).min(area.height);
     let popup_x = area.x + (area.width.saturating_sub(popup_w)) / 2;
     let popup_y = area.y + (area.height.saturating_sub(popup_h)) / 2;
     let popup_rect = Rect::new(popup_x, popup_y, popup_w, popup_h);
 
-    // Clear the region behind the popup.
+    let shadow_x = popup_rect.x.saturating_add(1).min(area.right().saturating_sub(1));
+    let shadow_y = popup_rect.y.saturating_add(1).min(area.bottom().saturating_sub(1));
+    let shadow_rect = Rect::new(
+        shadow_x,
+        shadow_y,
+        popup_rect.width.min(area.right().saturating_sub(shadow_x)),
+        popup_rect.height.min(area.bottom().saturating_sub(shadow_y)),
+    );
+
+    if shadow_rect.width > 0 && shadow_rect.height > 0 {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(Color::Rgb(8, 10, 15))),
+            shadow_rect,
+        );
+    }
+
     frame.render_widget(Clear, popup_rect);
 
     let block = Block::default()
-        .title(format!(" {} ", picker.title))
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(137, 220, 235)))
-        .style(Style::default().bg(Color::Rgb(22, 24, 31)));
+        .border_style(Style::default().fg(Color::Rgb(94, 196, 214)))
+        .style(Style::default().bg(Color::Rgb(16, 18, 24)));
 
-    // Inner layout: search bar (1 line) + list (rest).
     let inner = block.inner(popup_rect);
     frame.render_widget(block, popup_rect);
 
-    if inner.height < 2 {
+    if inner.height < 6 {
         return;
     }
 
-    let chunks = Layout::default()
+    let sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
         .split(inner);
 
-    // Search bar.
+    let header = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(12), Constraint::Length(16)])
+        .split(sections[0]);
+
+    let selected_position = if picker.filtered.is_empty() {
+        "0/0".to_owned()
+    } else {
+        format!("{}/{}", picker.selected + 1, picker.filtered.len())
+    };
+    let header_line = Line::from(vec![
+        Span::styled(
+            picker_kind_badge(picker.kind),
+            Style::default()
+                .fg(Color::Rgb(11, 14, 20))
+                .bg(Color::Rgb(94, 196, 214))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            picker.title.as_str(),
+            Style::default().fg(Color::Rgb(232, 236, 241)).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            if picker.query.is_empty() { "" } else { "  filtered" },
+            Style::default().fg(Color::Rgb(116, 126, 147)),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(header_line), header[0]);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!(" {} ", selected_position),
+                Style::default().fg(Color::Rgb(158, 167, 188)),
+            ),
+            Span::styled(" matches ", Style::default().fg(Color::Rgb(94, 196, 214))),
+        ]))
+        .alignment(Alignment::Right),
+        header[1],
+    );
+
     let search_prefix = match picker.kind {
         PickerKind::LiveGrep => "/ ",
         _ => "> ",
     };
+    let search_block = Block::default()
+        .title(" Query ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(59, 66, 86)))
+        .style(Style::default().bg(Color::Rgb(19, 22, 30)));
+    let search_inner = search_block.inner(sections[1]);
+    frame.render_widget(search_block, sections[1]);
     let search_line = Line::from(vec![
-        Span::styled(search_prefix, Style::default().fg(Color::Rgb(137, 220, 235))),
-        Span::raw(picker.query.as_str()),
+        Span::styled(
+            search_prefix,
+            Style::default().fg(Color::Rgb(94, 196, 214)).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            if picker.query.is_empty() { "type to filter" } else { picker.query.as_str() },
+            if picker.query.is_empty() {
+                Style::default().fg(Color::Rgb(94, 104, 126))
+            } else {
+                Style::default().fg(Color::Rgb(224, 228, 235))
+            },
+        ),
     ]);
-    frame.render_widget(Paragraph::new(search_line), chunks[0]);
+    frame.render_widget(Paragraph::new(search_line), search_inner);
 
-    // Position cursor in the search bar.
-    let cursor_x = (chunks[0].x + search_prefix.len() as u16 + picker.query.len() as u16)
-        .min(chunks[0].right().saturating_sub(1));
-    frame.set_cursor_position(Position::new(cursor_x, chunks[0].y));
+    let cursor_x = (search_inner.x + search_prefix.len() as u16 + picker.query.len() as u16)
+        .min(search_inner.right().saturating_sub(1));
+    frame.set_cursor_position(Position::new(cursor_x, search_inner.y));
 
-    // Item list.
-    let list_height = chunks[1].height as usize;
+    let list_title = format!(" Results {} ", picker.filtered.len());
+    let list_block = Block::default()
+        .title(list_title)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(48, 54, 72)))
+        .style(Style::default().bg(Color::Rgb(14, 16, 22)));
+    let list_inner = list_block.inner(sections[2]);
+    frame.render_widget(list_block, sections[2]);
+
+    if list_inner.height == 0 || list_inner.width == 0 {
+        return;
+    }
+
+    let list_height = list_inner.height as usize;
     let selected = picker.selected;
-    // Scroll offset so the selected item stays visible.
     let scroll_off = if selected >= list_height { selected + 1 - list_height } else { 0 };
 
-    let visible = picker.visible_items_range(scroll_off, list_height);
-    let list_items: Vec<ListItem> = visible
-        .into_iter()
-        .enumerate()
-        .map(|(i, label)| {
-            let abs_idx = scroll_off + i;
-            let is_sel = abs_idx == selected;
-            let style = if is_sel {
-                Style::default()
-                    .fg(Color::Rgb(22, 24, 31))
-                    .bg(Color::Rgb(137, 220, 235))
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Rgb(213, 216, 224))
-            };
-            ListItem::new(Line::from(Span::styled(label, style)))
-        })
-        .collect();
+    if picker.filtered.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No results")
+                .style(Style::default().fg(Color::Rgb(112, 121, 144)).bg(Color::Rgb(14, 16, 22)))
+                .alignment(Alignment::Center),
+            list_inner,
+        );
+    } else {
+        let row_width = list_inner.width.saturating_sub(7) as usize;
+        let list_items: Vec<ListItem> = picker
+            .visible_items_range(scroll_off, list_height)
+            .into_iter()
+            .enumerate()
+            .map(|(i, label)| {
+                let abs_idx = scroll_off + i;
+                let is_sel = abs_idx == selected;
+                let row_bg = if is_sel {
+                    Color::Rgb(94, 196, 214)
+                } else if abs_idx % 2 == 0 {
+                    Color::Rgb(14, 16, 22)
+                } else {
+                    Color::Rgb(18, 20, 28)
+                };
+                let marker = if is_sel { ">" } else { " " };
+                let index_style = if is_sel {
+                    Style::default().fg(Color::Rgb(11, 14, 20)).bg(row_bg)
+                } else {
+                    Style::default().fg(Color::Rgb(92, 102, 124)).bg(row_bg)
+                };
+                let label_style = if is_sel {
+                    Style::default()
+                        .fg(Color::Rgb(11, 14, 20))
+                        .bg(row_bg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Rgb(221, 225, 232)).bg(row_bg)
+                };
+                let row_label = truncate_picker_text(&label, row_width.max(1));
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {} ", marker), index_style),
+                    Span::styled(format!("{:>3}", abs_idx + 1), index_style),
+                    Span::styled("  ", Style::default().bg(row_bg)),
+                    Span::styled(row_label, label_style),
+                ]))
+            })
+            .collect();
 
-    let mut list_state = ListState::default();
-    if !picker.filtered.is_empty() {
+        let mut list_state = ListState::default();
         list_state.select(Some(selected.saturating_sub(scroll_off)));
+        frame.render_stateful_widget(List::new(list_items), list_inner, &mut list_state);
     }
-    frame.render_stateful_widget(List::new(list_items), chunks[1], &mut list_state);
+
+    let footer = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(10), Constraint::Length(26)])
+        .split(sections[3]);
+    frame.render_widget(
+        Paragraph::new(truncate_picker_text(
+            &picker_selection_summary(app),
+            footer[0].width as usize,
+        ))
+        .style(Style::default().fg(Color::Rgb(121, 130, 151)).bg(Color::Rgb(16, 18, 24))),
+        footer[0],
+    );
+    frame.render_widget(
+        Paragraph::new("Enter open  Esc close")
+            .style(Style::default().fg(Color::Rgb(94, 196, 214)).bg(Color::Rgb(16, 18, 24)))
+            .alignment(Alignment::Right),
+        footer[1],
+    );
 }
 
 fn render_hover_popup(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
