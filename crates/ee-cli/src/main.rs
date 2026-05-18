@@ -175,6 +175,9 @@ enum DoCommands {
         /// Replace existing grammar libraries before rebuilding
         #[arg(long, action = clap::ArgAction::SetTrue)]
         force: bool,
+        /// Skip host-side dynamic library load validation after compile
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        skip_load: bool,
     },
     /// Run file utility commands
     File {
@@ -512,13 +515,21 @@ fn cmd_runtime_build(
     source_root: Option<&Path>,
     output_root: Option<&Path>,
     force: bool,
+    skip_load: bool,
 ) {
     let source_root =
         source_root.map(Path::to_path_buf).unwrap_or_else(default_runtime_source_root);
     let output_root =
         output_root.map(Path::to_path_buf).unwrap_or_else(default_runtime_output_root);
     let built = with_default_runtime_loader_mut(|loader| {
-        loader.build_runtime_assets(languages, include_all, &source_root, &output_root, force)
+        loader.build_runtime_assets(
+            languages,
+            include_all,
+            &source_root,
+            &output_root,
+            force,
+            skip_load,
+        )
     })
     .unwrap_or_else(|error| exit_with_runtime_operation_error("runtime build failed", error));
 
@@ -743,15 +754,21 @@ fn main() -> io::Result<()> {
                 DoCommands::RuntimeFetch { all, languages, source_root, force } => {
                     cmd_runtime_fetch(&languages, all, source_root.as_deref(), force)
                 }
-                DoCommands::RuntimeBuild { all, languages, source_root, output_root, force } => {
-                    cmd_runtime_build(
-                        &languages,
-                        all,
-                        source_root.as_deref(),
-                        output_root.as_deref(),
-                        force,
-                    )
-                }
+                DoCommands::RuntimeBuild {
+                    all,
+                    languages,
+                    source_root,
+                    output_root,
+                    force,
+                    skip_load,
+                } => cmd_runtime_build(
+                    &languages,
+                    all,
+                    source_root.as_deref(),
+                    output_root.as_deref(),
+                    force,
+                    skip_load,
+                ),
                 DoCommands::File { command } => match command {
                     FileCommands::LineCheck { file } => cmd_file_line_check(&file),
                     FileCommands::Head { lines, file } => cmd_file_head(&file, lines),

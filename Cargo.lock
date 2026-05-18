@@ -855,6 +855,7 @@ name = "ee-xi-core-lib"
 version = "0.8.4"
 dependencies = [
  "bytecount",
+ "cc",
  "criterion",
  "dirs",
  "ee-ts-test-grammars",

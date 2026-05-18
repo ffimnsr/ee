@@ -1278,6 +1278,7 @@ impl RuntimeLoader {
         source_root: &Path,
         output_root: &Path,
         force: bool,
+        skip_load: bool,
     ) -> Result<Vec<RuntimeBuiltGrammar>, RuntimeOperationError> {
         let selected_languages =
             self.resolve_languages_for_operation(requested_languages, include_all)?;
@@ -1322,14 +1323,12 @@ impl RuntimeLoader {
             }
             let build_source_dir =
                 resolve_staged_grammar_build_dir(&fetched.source_dir, &language)?;
-            builder.compile_parser_at_path(&build_source_dir, grammar_path.clone(), &[]).map_err(
-                |error| {
-                    RuntimeOperationError::grammar_source(format!(
-                        "failed building grammar `{}` from {}: {error}",
-                        language.canonical_id(),
-                        build_source_dir.display()
-                    ))
-                },
+            compile_runtime_grammar(
+                &builder,
+                &build_source_dir,
+                &grammar_path,
+                skip_load,
+                language.canonical_id(),
             )?;
             let query_paths =
                 copy_standard_queries_to_runtime(&fetched.source_dir, output_root, &language)
@@ -1749,6 +1748,151 @@ fn shared_library_filename(stem: &str) -> String {
     } else {
         format!("lib{stem}.so")
     }
+}
+
+fn compile_runtime_grammar(
+    builder: &Loader,
+    build_source_dir: &Path,
+    grammar_path: &Path,
+    skip_load: bool,
+    canonical_id: &str,
+) -> Result<(), RuntimeOperationError> {
+    if skip_load {
+        compile_parser_shared_library(build_source_dir, grammar_path).map_err(|error| {
+            RuntimeOperationError::grammar_source(format!(
+                "failed building grammar `{canonical_id}` from {}: {error}",
+                build_source_dir.display()
+            ))
+        })
+    } else {
+        builder.compile_parser_at_path(build_source_dir, grammar_path.to_path_buf(), &[]).map_err(
+            |error| {
+                RuntimeOperationError::grammar_source(format!(
+                    "failed building grammar `{canonical_id}` from {}: {error}",
+                    build_source_dir.display()
+                ))
+            },
+        )
+    }
+}
+
+fn compile_parser_shared_library(
+    grammar_path: &Path,
+    output_path: &Path,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let src_path = grammar_path.join("src");
+    let parser_path = src_path.join("parser.c");
+    if !parser_path.exists() {
+        return Err(format!("missing parser source {}", parser_path.display()).into());
+    }
+
+    let mut cc_config = cc::Build::new();
+    let host_triple = effective_host_triple()?;
+    let target_triple = effective_target_triple(&host_triple)?;
+    cc_config
+        .cargo_metadata(false)
+        .cargo_warnings(false)
+        .debug(false)
+        .opt_level(2)
+        .extra_warnings(false)
+        .host(&host_triple)
+        .target(&target_triple)
+        .file(&parser_path)
+        .include(&src_path)
+        .std("c11");
+
+    let scanner_path = src_path.join("scanner.c");
+    if scanner_path.exists() {
+        cc_config.file(&scanner_path);
+    }
+
+    let compiler = cc_config.get_compiler();
+    let mut command = Command::new(compiler.path());
+    command.args(compiler.args());
+    for (key, value) in compiler.env() {
+        command.env(key, value);
+    }
+
+    if compiler.is_like_msvc() {
+        command.arg(if cfg!(debug_assertions) { "-LDd" } else { "-LD" });
+        command.arg("-utf-8");
+    } else {
+        command.arg("-Werror=implicit-function-declaration");
+        if cfg!(any(target_os = "macos", target_os = "ios")) {
+            command.arg("-dynamiclib");
+            command.arg("-UTREE_SITTER_REUSE_ALLOCATOR");
+        } else {
+            command.arg("-shared");
+            command.arg("-Wl,--no-undefined");
+            #[cfg(target_os = "openbsd")]
+            command.arg("-lc");
+        }
+    }
+
+    command.args(cc_config.get_files());
+    command.arg("-o").arg(output_path);
+
+    let output = command.output().map_err(|error| {
+        format!(
+            "failed starting compiler `{}` for {}: {error}",
+            compiler.path().display(),
+            output_path.display()
+        )
+    })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "compiler exited with status {} while building {}:\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            output_path.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into())
+    }
+}
+
+fn effective_host_triple() -> Result<String, Box<dyn Error + Send + Sync>> {
+    env::var("HOST")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(Ok)
+        .unwrap_or_else(detect_rustc_host_triple)
+}
+
+fn effective_target_triple(host_triple: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
+    Ok(env::var("TARGET")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| host_triple.to_string()))
+}
+
+fn detect_rustc_host_triple() -> Result<String, Box<dyn Error + Send + Sync>> {
+    let rustc = env::var("RUSTC").unwrap_or_else(|_| String::from("rustc"));
+    let output = Command::new(&rustc)
+        .arg("-vV")
+        .output()
+        .map_err(|error| format!("failed starting `{rustc} -vV` to detect host target: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`{rustc} -vV` exited with status {} while detecting host target:\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("`{rustc} -vV` emitted non-utf8 output: {error}"))?;
+    stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("`{rustc} -vV` did not report host target").into())
 }
 
 fn regex_matches(pattern: &str, text: &str) -> bool {
@@ -3914,10 +4058,37 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let source_root = temp_dir.path().join("sources");
         let output_root = temp_dir.path().join("runtime");
+        let original_host = env::var_os("HOST");
+        let original_target = env::var_os("TARGET");
 
-        let built = loader
-            .build_runtime_assets(&[String::from("Rust")], false, &source_root, &output_root, true)
-            .unwrap();
+        unsafe {
+            env::remove_var("HOST");
+            env::remove_var("TARGET");
+        }
+
+        let built = loader.build_runtime_assets(
+            &[String::from("Rust")],
+            false,
+            &source_root,
+            &output_root,
+            true,
+            false,
+        );
+
+        unsafe {
+            if let Some(value) = original_host {
+                env::set_var("HOST", value);
+            } else {
+                env::remove_var("HOST");
+            }
+            if let Some(value) = original_target {
+                env::set_var("TARGET", value);
+            } else {
+                env::remove_var("TARGET");
+            }
+        }
+
+        let built = built.unwrap();
 
         assert_eq!(built.len(), 1);
         assert!(built[0].grammar_path.exists());
@@ -3927,5 +4098,28 @@ mod tests {
                 .iter()
                 .any(|path| path.ends_with(Path::new("Rust").join("highlights.scm")))
         );
+    }
+
+    #[test]
+    fn runtime_loader_builds_runtime_assets_without_host_load_validation() {
+        let _guard = env_lock();
+        let loader = default_runtime_loader();
+        let temp_dir = TempDir::new().unwrap();
+        let source_root = temp_dir.path().join("sources");
+        let output_root = temp_dir.path().join("runtime");
+
+        let built = loader
+            .build_runtime_assets(
+                &[String::from("Rust")],
+                false,
+                &source_root,
+                &output_root,
+                true,
+                true,
+            )
+            .unwrap();
+
+        assert_eq!(built.len(), 1);
+        assert!(built[0].grammar_path.exists());
     }
 }

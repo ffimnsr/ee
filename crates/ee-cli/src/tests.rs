@@ -169,12 +169,15 @@ fn cli_utility_commands_live_under_do() {
         "Rust",
         "--output-root",
         "target/runtime",
+        "--skip-load",
     ])
     .unwrap();
 
     assert!(matches!(
         cli.command,
-        Some(crate::Commands::Do { command: crate::DoCommands::RuntimeBuild { .. } })
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::RuntimeBuild { skip_load: true, .. }
+        })
     ));
 
     let cli =
