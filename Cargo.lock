@@ -770,7 +770,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ee-cli"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "clap",
  "clap_complete",
@@ -797,7 +797,7 @@ dependencies = [
 
 [[package]]
 name = "ee-fuzz"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "arbitrary",
  "ee-xi-core-lib",
@@ -813,7 +813,7 @@ dependencies = [
 
 [[package]]
 name = "ee-ts-test-grammars"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "tree-sitter",
  "tree-sitter-bash",
@@ -838,7 +838,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-core"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "chrono",
  "dirs",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-core-lib"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "bytecount",
  "cc",
@@ -889,7 +889,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-lsp-lib"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "chrono",
  "ee-xi-core-lib",
@@ -909,7 +909,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-plugin-derive"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -918,7 +918,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-plugin-lib"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "bytecount",
  "ee-xi-core-lib",
@@ -937,7 +937,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-rope"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "bytecount",
  "criterion",
@@ -953,7 +953,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-rpc"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "jsonrpc-lite",
  "log",
@@ -966,7 +966,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-unicode"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "criterion",
 ]

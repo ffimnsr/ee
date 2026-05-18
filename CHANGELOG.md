@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.5 - 2026-05-19
+
+### Features
+
+- update the runtime loading due to linux-musl bug (`287a402b`)
+
+
 ## 0.8.4 - 2026-05-18
 
 ### Features
