@@ -70,6 +70,7 @@ pub const MAX_SIZE_LIMIT: usize = 1024 * 1024;
 /// The render delay after an edit occurs; plugin updates received in this
 /// window will be sent to the view along with the edit.
 const RENDER_DELAY: Duration = Duration::from_millis(2);
+const VLF_TAIL_EXACT_LINE_COUNT_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 struct VlfViewportResponse {
     line_start: u64,
@@ -977,9 +978,13 @@ impl<'a> EventContext<'a> {
 
             if line_start == u64::MAX {
                 let requested_count = (line_end.saturating_add(1)).max(1) as usize;
-                let mut approximate_line_count =
-                    vlf_estimate_line_count_from_head(store, line_end.saturating_add(1));
-                let mut line_count_exact = false;
+                let exact_line_count = (store.len_bytes() <= VLF_TAIL_EXACT_LINE_COUNT_MAX_BYTES)
+                    .then(|| vlf_store.exact_logical_line_count_streaming().ok())
+                    .flatten();
+                let mut approximate_line_count = exact_line_count.unwrap_or_else(|| {
+                    vlf_estimate_line_count_from_head(store, line_end.saturating_add(1))
+                });
+                let mut line_count_exact = exact_line_count.is_some();
                 if store.len_bytes() == 0 {
                     return Some(VlfViewportResponse {
                         line_start: 0,
@@ -996,7 +1001,7 @@ impl<'a> EventContext<'a> {
                     if let Some(exact_count) = exact_count {
                         approximate_line_count = exact_count;
                         line_count_exact = true;
-                    } else {
+                    } else if !line_count_exact {
                         approximate_line_count = approximate_line_count
                             .max(response_line_start.saturating_add(lines.len() as u64));
                     }
@@ -5323,6 +5328,35 @@ mod tests {
     }
 
     #[test]
+    fn vlf_viewport_sends_full_crlf_line_range() {
+        let content = (0..200).map(|i| format!("line {i}\r\n")).collect::<String>();
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f.flush().unwrap();
+        let store = VlfStore::open_with_config(f.path(), 4096, 1024 * 1024).unwrap();
+        store.scan_all().unwrap();
+        let harness = ContextHarness::new("");
+        *harness.editor.borrow_mut() = Editor::with_vlf_store(store);
+        harness.editor.borrow_mut().enable_vlf_editing();
+        harness.take_notifications();
+        let mut ctx = harness.make_context();
+
+        ctx.do_edit(EditNotification::VlfViewport { line_start: 100, line_end: 140, generation: 12 });
+
+        let notifications = harness.take_notifications();
+        let (_, params) = notifications
+            .iter()
+            .find(|(m, _)| m == "vlf_chunks")
+            .expect("expected vlf_chunks notification");
+        let lines = params["lines"].as_array().expect("lines must be array");
+
+        assert_eq!(params["line_start"], 100u64);
+        assert_eq!(lines.len(), 41, "CRLF viewport should return full requested range");
+        assert_eq!(lines.first().and_then(|line| line.as_str()), Some("line 100\r"));
+        assert_eq!(lines.last().and_then(|line| line.as_str()), Some("line 140\r"));
+    }
+
+    #[test]
     fn vlf_selected_text_reads_from_text_store() {
         let (harness, _f) = vlf_harness(b"alpha\nbeta\ngamma\n");
         harness.view.borrow_mut().set_selection(&Rope::from("alpha\nbeta\ngamma\n"), SelRegion::new(1, 8));
@@ -5450,7 +5484,8 @@ mod tests {
 
     #[test]
     fn vlf_viewport_tail_sentinel_returns_tail_without_exact_line_count_scan() {
-        let content = (0..40_000).map(|i| format!("line {i}\n")).collect::<String>();
+        let line = format!("{}\n", "x".repeat(1023));
+        let content = line.repeat(33 * 1024);
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(content.as_bytes()).unwrap();
         f.flush().unwrap();
@@ -5476,14 +5511,14 @@ mod tests {
         assert_eq!(params["generation"], 10u64);
         assert!(!params["line_count_exact"].as_bool().unwrap());
         let lines = params["lines"].as_array().expect("lines must be array");
-        assert!(lines.iter().any(|line| line.as_str() == Some("line 39999")));
         assert_eq!(lines.len(), 5);
         assert!(params["approximate_line_count"].as_u64().unwrap() >= 5);
     }
 
     #[test]
     fn vlf_viewport_tail_sentinel_can_request_full_viewport_without_index() {
-        let content = (0..40_000).map(|i| format!("line {i}\n")).collect::<String>();
+        let line = format!("{}\n", "x".repeat(1023));
+        let content = line.repeat(33 * 1024);
         let mut f = NamedTempFile::new().unwrap();
         f.write_all(content.as_bytes()).unwrap();
         f.flush().unwrap();
@@ -5506,7 +5541,6 @@ mod tests {
         assert_eq!(params["generation"], 11u64);
         assert!(!params["line_count_exact"].as_bool().unwrap());
         assert_eq!(lines.len(), 21);
-        assert!(lines.iter().any(|line| line.as_str() == Some("line 39999")));
     }
 
     #[test]

@@ -2757,6 +2757,7 @@ impl App {
         let clamped = line.min(self.backend.line_count().saturating_sub(1));
         self.push_jump();
         if self.backend.is_vlf {
+            self.backend.cancel_vlf_tail_jump();
             self.backend.cursor_line = clamped;
             self.backend.cursor_col = 0;
             return;
@@ -3248,6 +3249,10 @@ impl App {
             let _ = self.backend.request_vlf_tail_viewport(viewport_lines);
             self.backend.status_message = Some(String::from("VLF: jumping to file end"));
             return true;
+        }
+
+        if !move_to_end {
+            self.backend.cancel_vlf_tail_jump();
         }
 
         self.backend.cursor_line = line.min(line_count.saturating_sub(1));

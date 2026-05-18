@@ -468,7 +468,11 @@ impl BufState {
 
         self.vlf_approx_line_count = approximate_line_count;
         self.vlf_line_count_exact = line_count_exact;
-        let tail_jump = std::mem::take(&mut self.pending_vlf_tail_jump);
+        let tail_jump = self.pending_vlf_tail_jump;
+
+        if lines.is_empty() {
+            return;
+        }
 
         let Ok(start) = usize::try_from(line_start) else {
             self.line_cache.clear();
@@ -476,24 +480,21 @@ impl BufState {
         };
         self.vlf_cache_start_line = start;
 
-        if lines.is_empty() {
-            self.line_cache.clear();
-        } else {
-            self.line_cache = lines
-                .iter()
-                .enumerate()
-                .map(|(i, text)| {
-                    let spans = syntax_spans.get(i).cloned().unwrap_or_default();
-                    LineSlot::Known(CachedLine {
-                        text: text.clone(),
-                        cursors: Vec::new(),
-                        syntax_spans: spans,
-                    })
+        self.line_cache = lines
+            .iter()
+            .enumerate()
+            .map(|(i, text)| {
+                let spans = syntax_spans.get(i).cloned().unwrap_or_default();
+                LineSlot::Known(CachedLine {
+                    text: normalize_line_text(Some(text.clone())),
+                    cursors: Vec::new(),
+                    syntax_spans: spans,
                 })
-                .collect();
-            self.last_scroll = Some((start, start.saturating_add(lines.len())));
-        }
+            })
+            .collect();
+        self.last_scroll = Some((start, start.saturating_add(lines.len())));
         if tail_jump && !lines.is_empty() {
+            self.pending_vlf_tail_jump = false;
             self.cursor_line = start + lines.len() - 1;
             self.cursor_col = 0;
         }
@@ -1558,6 +1559,18 @@ impl BufferManager {
                 },
             }),
         )
+    }
+
+    pub(crate) fn cancel_vlf_tail_jump(&mut self) {
+        let buf = &mut self.bufs[self.current];
+        if !buf.is_vlf || !buf.pending_vlf_tail_jump {
+            return;
+        }
+
+        buf.vlf_generation = buf.vlf_generation.wrapping_add(1);
+        buf.pending_line_request = false;
+        buf.pending_vlf_tail_jump = false;
+        buf.last_scroll = None;
     }
 
     pub(crate) fn apply_local_vlf_replace_range(

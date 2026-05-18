@@ -992,6 +992,7 @@ impl VlfStore {
                         b'\r' => pending_cr = true,
                         b'\n' => {
                             lines_seen = lines_seen.saturating_add(1);
+                            pending_cr = false;
                             if lines_seen == line {
                                 found = Some(ByteOffset(abs.saturating_add(1)));
                                 return false;

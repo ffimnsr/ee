@@ -10,6 +10,19 @@ scope_args=()
 needs_rust_checks=0
 needs_workspace_checks=0
 
+package_dir_to_cargo_package() {
+    local package_dir="$1"
+    local manifest_path="crates/$package_dir/Cargo.toml"
+
+    [[ -f "$manifest_path" ]] || return 1
+
+    awk -F'"' '
+        /^\[package\]$/ { in_package = 1; next }
+        /^\[/ { if (in_package) exit }
+        in_package && /^[[:space:]]*name[[:space:]]*=/ { print $2; exit }
+    ' "$manifest_path"
+}
+
 add_scoped_package() {
     local package="$1"
     local existing
@@ -32,6 +45,16 @@ sorted_scoped_packages() {
     fi
 
     printf '%s\n' "${package_scope[@]}" | sort -u
+}
+
+append_scope_arg_for_package_dir() {
+    local package_dir="$1"
+    local package_name
+
+    package_name="$(package_dir_to_cargo_package "$package_dir")" || return 1
+    [[ -n "$package_name" ]] || return 1
+
+    scope_args+=(-p "$package_name")
 }
 
 package_has_lib_target() {
@@ -74,7 +97,7 @@ run_stable_clippy() {
     if [[ "${packages_with_lib[0]+set}" == "set" ]]; then
         scoped_args=()
         for package in "${packages_with_lib[@]}"; do
-            scoped_args+=(-p "$package")
+            scoped_args+=(-p "$(package_dir_to_cargo_package "$package")")
         done
         echo "[pre-commit] lint stable (${scoped_args[*]})"
         cargo +stable clippy "${scoped_args[@]}" "${stable_targets_with_lib[@]}" --all-features -- -D warnings
@@ -83,7 +106,7 @@ run_stable_clippy() {
     if [[ "${packages_without_lib[0]+set}" == "set" ]]; then
         scoped_args=()
         for package in "${packages_without_lib[@]}"; do
-            scoped_args+=(-p "$package")
+            scoped_args+=(-p "$(package_dir_to_cargo_package "$package")")
         done
         echo "[pre-commit] lint stable no-lib (${scoped_args[*]})"
         cargo +stable clippy "${scoped_args[@]}" "${stable_targets_without_lib[@]}" --all-features -- -D warnings
@@ -135,7 +158,7 @@ build_scope_args() {
     local package
     while IFS= read -r package; do
         [[ -z "$package" ]] && continue
-        scope_args+=(-p "$package")
+        append_scope_arg_for_package_dir "$package"
     done < <(sorted_scoped_packages)
 }
 

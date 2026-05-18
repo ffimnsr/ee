@@ -7636,6 +7636,80 @@ fn apply_vlf_chunks_populates_line_cache() {
 }
 
 #[test]
+fn apply_vlf_chunks_normalizes_crlf_line_endings() {
+    let mut buf = test_buf_state();
+    buf.is_vlf = true;
+    buf.vlf_generation = 2;
+
+    let lines = vec![String::from("alpha\r"), String::from("beta\r")];
+    buf.apply_vlf_chunks(VlfChunkUpdate {
+        generation: 2,
+        line_start: 0,
+        lines: &lines,
+        syntax_spans: &[],
+        approximate_line_count: 2,
+        line_count_exact: true,
+    });
+
+    assert_eq!(buf.get_line(0), Some("alpha"));
+    assert_eq!(buf.get_line(1), Some("beta"));
+}
+
+#[test]
+fn apply_vlf_chunks_empty_response_preserves_loaded_cache() {
+    let mut buf = test_buf_state();
+    buf.is_vlf = true;
+    buf.vlf_generation = 3;
+    buf.vlf_cache_start_line = 40;
+    buf.line_cache = vec![
+        LineSlot::Known(CachedLine {
+            text: String::from("line 40"),
+            cursors: vec![],
+            syntax_spans: vec![],
+        }),
+        LineSlot::Known(CachedLine {
+            text: String::from("line 41"),
+            cursors: vec![],
+            syntax_spans: vec![],
+        }),
+    ];
+
+    buf.apply_vlf_chunks(VlfChunkUpdate {
+        generation: 3,
+        line_start: 100,
+        lines: &[],
+        syntax_spans: &[],
+        approximate_line_count: 1_000,
+        line_count_exact: false,
+    });
+
+    assert_eq!(buf.vlf_cache_start_line, 40);
+    assert_eq!(buf.get_line(40), Some("line 40"));
+    assert_eq!(buf.get_line(41), Some("line 41"));
+    assert_eq!(buf.vlf_approx_line_count, 1_000);
+}
+
+#[test]
+fn apply_vlf_chunks_empty_response_keeps_tail_jump_pending() {
+    let mut buf = test_buf_state();
+    buf.is_vlf = true;
+    buf.vlf_generation = 4;
+    buf.pending_vlf_tail_jump = true;
+
+    buf.apply_vlf_chunks(VlfChunkUpdate {
+        generation: 4,
+        line_start: u64::MAX - 1,
+        lines: &[],
+        syntax_spans: &[],
+        approximate_line_count: 10_000,
+        line_count_exact: false,
+    });
+
+    assert!(buf.pending_vlf_tail_jump);
+    assert_eq!((buf.cursor_line, buf.cursor_col), (0, 0));
+}
+
+#[test]
 fn apply_vlf_chunks_stale_generation_discarded() {
     let mut buf = test_buf_state();
     buf.is_vlf = true;
@@ -8284,6 +8358,41 @@ fn vlf_goto_last_line_requests_tail_viewport_when_count_is_approximate() {
 }
 
 #[test]
+fn vlf_navigation_away_from_pending_tail_jump_cancels_tail_request() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    app.backend.is_vlf = true;
+    app.backend.line_cache = vec![LineSlot::Invalid; 500];
+    app.backend.vlf_approx_line_count = 10_000;
+    app.backend.vlf_line_count_exact = false;
+    app.last_editor_height = 40;
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE)));
+    let tail_request: Value =
+        serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
+            .expect("tail viewport request should be json");
+    assert_eq!(tail_request["params"]["params"]["line_start"], u64::MAX);
+    assert!(app.backend.pending_vlf_tail_jump);
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+
+    assert_eq!(app.backend.cursor_line, 0);
+    assert!(!app.backend.pending_vlf_tail_jump);
+    assert!(!app.backend.pending_line_request);
+
+    app.backend.notify_scroll(0, 40).unwrap();
+    let top_request: Value =
+        serde_json::from_str(&rx.recv_timeout(Duration::from_secs(1)).unwrap())
+            .expect("top viewport request should be json");
+    assert_eq!(top_request["params"]["method"], "vlf_viewport");
+    assert_eq!(top_request["params"]["params"]["line_start"], 0);
+    assert_eq!(top_request["params"]["params"]["line_end"], 40);
+}
+
+#[test]
 fn vlf_pending_tail_jump_blocks_regular_viewport_scroll() {
     let (tx, rx) = mpsc::channel();
     let (backend_tx, backend_rx) = mpsc::channel();
@@ -8444,6 +8553,139 @@ fn vlf_open_vbig_2gb_populates_initial_and_tail_scroll_cache() {
         app.backend.get_line(scroll_up_line).is_some(),
         "tail prefetch should cover nearby scroll-up line {scroll_up_line}"
     );
+}
+
+#[test]
+#[ignore = "manual real-fixture check; requires test_assets/world92.txt"]
+fn vlf_open_world92_populates_initial_viewport() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_assets/world92.txt");
+    if !path.exists() {
+        eprintln!("missing {}", path.display());
+        return;
+    }
+
+    let expected_text = String::from_utf8(
+        Command::new("head").arg("-n").arg("1").arg(&path).output().unwrap().stdout,
+    )
+    .unwrap()
+    .trim_end_matches(['\r', '\n'])
+    .to_owned();
+
+    let mut app = App::from_path(Some(path)).unwrap();
+    for _ in 0..80 {
+        app.backend.pump().unwrap();
+        if app.backend.is_vlf && app.backend.get_line(0).is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    assert!(app.backend.is_vlf, "fixture should open in VLF");
+    assert_eq!(app.backend.get_line(0), Some(expected_text.as_str()));
+}
+
+#[test]
+#[ignore = "manual real-fixture check; requires test_assets/world92.txt"]
+fn vlf_world92_populates_top_and_line_100_viewports() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_assets/world92.txt");
+    if !path.exists() {
+        eprintln!("missing {}", path.display());
+        return;
+    }
+
+    let mut app = App::from_path(Some(path)).unwrap();
+    for _ in 0..80 {
+        app.backend.pump().unwrap();
+        if app.backend.is_vlf && app.backend.get_line(0).is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(app.backend.is_vlf, "fixture should open in VLF");
+
+    app.backend.notify_scroll(0, 40).unwrap();
+    for _ in 0..120 {
+        app.backend.pump().unwrap();
+        if (0..40).all(|line| app.backend.get_line(line).is_some()) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let missing_top =
+        (0..40).filter(|&line| app.backend.get_line(line).is_none()).collect::<Vec<_>>();
+    assert!(missing_top.is_empty(), "missing top VLF lines: {missing_top:?}");
+
+    app.backend.cursor_line = 100;
+    app.backend.notify_scroll(100, 140).unwrap();
+    for _ in 0..120 {
+        app.backend.pump().unwrap();
+        if (100..140).all(|line| app.backend.get_line(line).is_some()) {
+            break;
+        }
+        app.backend.notify_scroll(100, 140).unwrap();
+        thread::sleep(Duration::from_millis(10));
+    }
+    let missing_100 =
+        (100..140).filter(|&line| app.backend.get_line(line).is_none()).collect::<Vec<_>>();
+    assert!(missing_100.is_empty(), "missing line-100 VLF lines: {missing_100:?}");
+}
+
+#[test]
+#[ignore = "manual real-fixture check; requires test_assets/world92.txt"]
+fn vlf_world92_tail_scroll_back_populates_full_viewport() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../test_assets/world92.txt");
+    if !path.exists() {
+        eprintln!("missing {}", path.display());
+        return;
+    }
+
+    let wc = Command::new("wc").arg("-l").arg(&path).output().expect("wc -l should run");
+    assert!(wc.status.success(), "wc -l failed: {wc:?}");
+    let stdout = String::from_utf8(wc.stdout).expect("wc output should be utf8");
+    let expected_line_count = stdout
+        .split_whitespace()
+        .next()
+        .expect("wc output should include count")
+        .parse::<usize>()
+        .expect("wc count should parse");
+    let ends_with_newline = fs::read(&path).unwrap().last().is_some_and(|byte| *byte == b'\n');
+    let expected_logical_line_count = expected_line_count + usize::from(ends_with_newline);
+
+    let mut app = App::from_path(Some(path)).unwrap();
+    for _ in 0..80 {
+        app.backend.pump().unwrap();
+        if app.backend.is_vlf && app.backend.get_line(0).is_some() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(app.backend.is_vlf, "fixture should open in VLF");
+
+    app.last_editor_height = 40;
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE)));
+    for _ in 0..120 {
+        app.backend.pump().unwrap();
+        if !app.backend.pending_vlf_tail_jump && app.backend.cursor_line > 65_000 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    assert!(!app.backend.pending_vlf_tail_jump, "tail jump should complete");
+    assert_eq!(app.backend.cursor_line, expected_logical_line_count.saturating_sub(1));
+    let top = app.backend.cursor_line.saturating_sub(40);
+    app.backend.notify_scroll(top, top + 40).unwrap();
+    for _ in 0..120 {
+        app.backend.pump().unwrap();
+        if (top..top + 40).all(|line| app.backend.get_line(line).is_some()) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let missing =
+        (top..top + 40).filter(|&line| app.backend.get_line(line).is_none()).collect::<Vec<_>>();
+    assert!(missing.is_empty(), "missing VLF lines after tail scroll-back: {missing:?}");
 }
 
 #[test]
