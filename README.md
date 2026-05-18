@@ -4,6 +4,8 @@
 
 `ee` is a fast terminal-first editor written in Rust for editing large files, language-aware text, and plugin-driven workflows. It combines a reusable backend core with a polished `ee-cli` terminal UI, tree-sitter parsing, and RPC/plugin extensibility.
 
+![ee screenshot](docs/assets/screenshot.png)
+
 ## Quick start
 
 Install release build with bundled runtime:
