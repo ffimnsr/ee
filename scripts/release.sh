@@ -468,6 +468,7 @@ main() {
   update_root_workspace_dependency_versions "$version"
   update_changelog "$version" "$release_date" "$previous_tag"
 
+  cargo generate-lockfile
   bash scripts/build-runtime.sh --force --source-root target/release-runtime-sources --output-root target/release-runtime
 
   cargo check --workspace --all-targets --quiet
