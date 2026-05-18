@@ -170,18 +170,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          runtime_build_args=()
 
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             export CC=musl-gcc
-            runtime_build_args+=(--skip-load)
+            bash scripts/build-runtime.sh \
+              --force \
+              --source-root target/runtime-sources \
+              --output-root target/runtime-package \
+              --skip-load
+          else
+            bash scripts/build-runtime.sh \
+              --force \
+              --source-root target/runtime-sources \
+              --output-root target/runtime-package
           fi
-
-          bash scripts/build-runtime.sh \
-            --force \
-            --source-root target/runtime-sources \
-            --output-root target/runtime-package \
-            "${runtime_build_args[@]}"
 
       - name: Prepare package metadata
         id: meta

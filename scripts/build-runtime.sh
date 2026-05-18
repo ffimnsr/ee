@@ -53,18 +53,25 @@ main() {
     esac
   done
 
-  local force_args=()
+  local runtime_fetch_cmd=(
+    cargo run --locked -p ee-cli -- do runtime-fetch --all --source-root "$source_root"
+  )
   if (( force )); then
-    force_args+=(--force)
+    runtime_fetch_cmd+=(--force)
   fi
 
-  local runtime_build_args=()
+  local runtime_build_cmd=(
+    cargo run --locked -p ee-cli -- do runtime-build --all --source-root "$source_root" --output-root "$output_root"
+  )
+  if (( force )); then
+    runtime_build_cmd+=(--force)
+  fi
   if (( skip_load )); then
-    runtime_build_args+=(--skip-load)
+    runtime_build_cmd+=(--skip-load)
   fi
 
-  cargo run --locked -p ee-cli -- do runtime-fetch --all --source-root "$source_root" "${force_args[@]}"
-  cargo run --locked -p ee-cli -- do runtime-build --all --source-root "$source_root" --output-root "$output_root" "${force_args[@]}" "${runtime_build_args[@]}"
+  "${runtime_fetch_cmd[@]}"
+  "${runtime_build_cmd[@]}"
 }
 
 main "$@"
