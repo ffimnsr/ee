@@ -5,8 +5,9 @@ use std::path::Path;
 
 use serde_json::Value;
 use xi_core_lib::ConfigTable;
-use xi_plugin_lib::{ChunkCache, CoreProxy, Plugin, View, mainloop};
 use xi_rope::RopeDelta;
+
+use xi_plugin_lib::{ChunkCache, CoreProxy, Plugin, View, mainloop};
 
 struct LoggingPlugin {
     log_path: String,

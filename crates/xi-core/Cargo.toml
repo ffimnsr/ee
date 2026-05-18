@@ -1,5 +1,5 @@
 [package]
-name = "xi-core"
+name = "ee-xi-core"
 version = "0.8.2"
 license = "Apache-2.0"
 authors = ["Raph Levien <raph@google.com>", "Edward Fitz Abucay <gh:ffimnsr>"]

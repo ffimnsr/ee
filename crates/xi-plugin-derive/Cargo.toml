@@ -1,5 +1,5 @@
 [package]
-name = "xi-plugin-derive"
+name = "ee-xi-plugin-derive"
 version = "0.8.2"
 license = "Apache-2.0"
 authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
@@ -9,6 +9,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [lib]
+name = "xi_plugin_derive"
 proc-macro = true
 
 [dependencies]

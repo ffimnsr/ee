@@ -9,7 +9,7 @@ tasks:
     description: Format the code using rustfmt.
   lint:
     commands:
-      - cargo clippy --all -- -D warnings
+      - cargo clippy --workspace --all-targets --all-features -- -D warnings
     description: Lint the code using clippy, treating warnings as errors.
   lint-stable:
     commands:

@@ -778,6 +778,8 @@ dependencies = [
  "criterion",
  "crossterm",
  "dirs",
+ "ee-xi-core-lib",
+ "ee-xi-rpc",
  "globset",
  "grep-regex",
  "grep-searcher",
@@ -792,8 +794,6 @@ dependencies = [
  "tokio",
  "toml",
  "unicode-width 0.2.0",
- "xi-core-lib",
- "xi-rpc",
 ]
 
 [[package]]
@@ -801,15 +801,163 @@ name = "ee-fuzz"
 version = "0.8.2"
 dependencies = [
  "arbitrary",
+ "ee-xi-core-lib",
+ "ee-xi-lsp-lib",
+ "ee-xi-plugin-lib",
+ "ee-xi-rope",
+ "ee-xi-rpc",
+ "ee-xi-unicode",
  "libfuzzer-sys",
  "serde",
  "serde_json",
- "xi-core-lib",
- "xi-lsp-lib",
- "xi-plugin-lib",
- "xi-rope",
- "xi-rpc",
- "xi-unicode",
+]
+
+[[package]]
+name = "ee-xi-core"
+version = "0.8.2"
+dependencies = [
+ "chrono",
+ "dirs",
+ "ee-xi-core-lib",
+ "ee-xi-rpc",
+ "fern",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ee-xi-core-lib"
+version = "0.8.2"
+dependencies = [
+ "bytecount",
+ "criterion",
+ "ee-xi-rope",
+ "ee-xi-rpc",
+ "ee-xi-unicode",
+ "fs2",
+ "jsonschema",
+ "libc",
+ "log",
+ "memchr",
+ "notify",
+ "regex",
+ "schemars",
+ "seccompiler",
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cpp",
+ "tree-sitter-css",
+ "tree-sitter-elixir",
+ "tree-sitter-go",
+ "tree-sitter-haskell",
+ "tree-sitter-html",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-json",
+ "tree-sitter-php",
+ "tree-sitter-python",
+ "tree-sitter-ruby",
+ "tree-sitter-rust",
+ "tree-sitter-scala",
+ "tree-sitter-typescript",
+ "unicode-width 0.2.0",
+ "wasmtime",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ee-xi-lsp-lib"
+version = "0.8.2"
+dependencies = [
+ "chrono",
+ "ee-xi-core-lib",
+ "ee-xi-plugin-lib",
+ "ee-xi-rope",
+ "ee-xi-rpc",
+ "fern",
+ "jsonrpc-lite",
+ "log",
+ "lsp-server",
+ "lsp-types",
+ "serde",
+ "serde_json",
+ "tokio-util",
+ "url",
+]
+
+[[package]]
+name = "ee-xi-plugin-derive"
+version = "0.8.2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "ee-xi-plugin-lib"
+version = "0.8.2"
+dependencies = [
+ "bytecount",
+ "ee-xi-core-lib",
+ "ee-xi-plugin-derive",
+ "ee-xi-rope",
+ "ee-xi-rpc",
+ "log",
+ "memchr",
+ "rand",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "ee-xi-rope"
+version = "0.8.2"
+dependencies = [
+ "bytecount",
+ "criterion",
+ "im",
+ "memchr",
+ "proptest",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_test",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "ee-xi-rpc"
+version = "0.8.2"
+dependencies = [
+ "jsonrpc-lite",
+ "log",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "ee-xi-unicode"
+version = "0.8.2"
+dependencies = [
+ "criterion",
 ]
 
 [[package]]
@@ -4079,154 +4227,6 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
-
-[[package]]
-name = "xi-core"
-version = "0.8.2"
-dependencies = [
- "chrono",
- "dirs",
- "fern",
- "log",
- "serde",
- "serde_json",
- "xi-core-lib",
- "xi-rpc",
-]
-
-[[package]]
-name = "xi-core-lib"
-version = "0.8.2"
-dependencies = [
- "bytecount",
- "criterion",
- "fs2",
- "jsonschema",
- "libc",
- "log",
- "memchr",
- "notify",
- "regex",
- "schemars",
- "seccompiler",
- "semver",
- "serde",
- "serde_json",
- "tempfile",
- "tokio-util",
- "toml",
- "tracing",
- "tracing-subscriber",
- "tree-sitter",
- "tree-sitter-bash",
- "tree-sitter-c",
- "tree-sitter-c-sharp",
- "tree-sitter-cpp",
- "tree-sitter-css",
- "tree-sitter-elixir",
- "tree-sitter-go",
- "tree-sitter-haskell",
- "tree-sitter-html",
- "tree-sitter-java",
- "tree-sitter-javascript",
- "tree-sitter-json",
- "tree-sitter-php",
- "tree-sitter-python",
- "tree-sitter-ruby",
- "tree-sitter-rust",
- "tree-sitter-scala",
- "tree-sitter-typescript",
- "unicode-width 0.2.0",
- "wasmtime",
- "windows-sys 0.61.2",
- "xi-rope",
- "xi-rpc",
- "xi-unicode",
-]
-
-[[package]]
-name = "xi-lsp-lib"
-version = "0.8.2"
-dependencies = [
- "chrono",
- "fern",
- "jsonrpc-lite",
- "log",
- "lsp-server",
- "lsp-types",
- "serde",
- "serde_json",
- "tokio-util",
- "url",
- "xi-core-lib",
- "xi-plugin-lib",
- "xi-rope",
- "xi-rpc",
-]
-
-[[package]]
-name = "xi-plugin-derive"
-version = "0.8.2"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "xi-plugin-lib"
-version = "0.8.2"
-dependencies = [
- "bytecount",
- "log",
- "memchr",
- "rand",
- "serde",
- "serde_json",
- "tempfile",
- "tokio-util",
- "tracing",
- "xi-core-lib",
- "xi-plugin-derive",
- "xi-rope",
- "xi-rpc",
-]
-
-[[package]]
-name = "xi-rope"
-version = "0.8.2"
-dependencies = [
- "bytecount",
- "criterion",
- "im",
- "memchr",
- "proptest",
- "regex",
- "serde",
- "serde_json",
- "serde_test",
- "unicode-segmentation",
-]
-
-[[package]]
-name = "xi-rpc"
-version = "0.8.2"
-dependencies = [
- "jsonrpc-lite",
- "log",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "xi-unicode"
-version = "0.8.2"
-dependencies = [
- "criterion",
-]
 
 [[package]]
 name = "yoke"

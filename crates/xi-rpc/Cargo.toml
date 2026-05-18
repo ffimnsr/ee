@@ -1,5 +1,5 @@
 [package]
-name = "xi-rpc"
+name = "ee-xi-rpc"
 version = "0.8.2"
 license = "Apache-2.0"
 authors = ["Raph Levien <raph@google.com>", "Edward Fitz Abucay <gh:ffimnsr>"]
@@ -7,6 +7,9 @@ repository = "https://github.com/ffimnsr/ee"
 description = "Utilities for building peers (both client and server side) for xi's JSON RPC variant."
 edition.workspace = true
 rust-version.workspace = true
+
+[lib]
+name = "xi_rpc"
 
 [dependencies]
 log.workspace = true
