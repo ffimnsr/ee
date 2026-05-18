@@ -11,9 +11,9 @@ members = [
   "crates/xi-rope",
   "crates/xi-rpc",
   "crates/xi-unicode",
-  "fuzz",
 ]
 default-members = ["crates/ee-cli"]
+exclude = ["fuzz"]
 
 [workspace.package]
 edition = "2024"
