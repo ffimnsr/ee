@@ -56,6 +56,7 @@ const RUNTIME_REPORT_READ_BYTES: u64 = 8 * 1024;
 const EXIT_RUNTIME_CONFIG_MERGE: i32 = 2;
 const EXIT_RUNTIME_GRAMMAR_SOURCE: i32 = 3;
 const EXIT_RUNTIME_ASSET: i32 = 4;
+const LONG_VERSION: &str = env!("EE_LONG_VERSION");
 
 fn is_repeated_arrow_motion(event: &Event) -> bool {
     let Event::Key(key) = event else { return false };
@@ -102,6 +103,7 @@ struct StartupLaunch {
 #[command(
     name = "ee",
     version,
+    long_version = LONG_VERSION,
     about = "A terminal editor",
     long_about = None,
 )]

@@ -9,7 +9,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -227,6 +227,19 @@ fn cli_utility_commands_live_under_do() {
             }
         })
     ));
+}
+
+#[test]
+fn cli_long_version_includes_build_metadata() {
+    let command = crate::Cli::command();
+    let long_version = command.get_long_version().expect("long version missing");
+
+    assert!(long_version.starts_with(env!("CARGO_PKG_VERSION")));
+    assert!(long_version.contains("git "));
+    assert!(long_version.contains("commit "));
+    assert!(long_version.contains("built "));
+    assert!(long_version.contains("profile "));
+    assert!(long_version.contains("rustc "));
 }
 
 #[test]

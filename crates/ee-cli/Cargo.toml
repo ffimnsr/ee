@@ -1,6 +1,7 @@
 [package]
 name = "ee-cli"
 version = "0.8.7"
+build = "build.rs"
 license = "Apache-2.0"
 authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
 description = "Large file viewer and editor for the terminal, built on top of xi-core backend."
@@ -44,6 +45,9 @@ xi-core-lib.workspace = true
 criterion.workspace = true
 tempfile.workspace = true
 xi-core-lib = { workspace = true, features = ["test-grammars"] }
+
+[build-dependencies]
+chrono.workspace = true
 
 [[bench]]
 name = "vlf"
