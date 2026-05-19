@@ -6552,6 +6552,22 @@ fn global_search_and_command_palette_commands_open_expected_pickers() {
 }
 
 #[test]
+fn command_palette_renders_tab_and_historic_alias_rows() {
+    let mut app = App::from_path(None).unwrap();
+
+    run_ex(&mut app, "command_palette");
+
+    let picker = app.picker.as_ref().expect("command palette should open picker");
+    let items = picker.visible_items_range(0, picker.visible_count());
+    assert!(items.iter().any(|line| line.contains(":tabnew / :tabe / :tabedit [path]")));
+    assert!(items.iter().any(|line| line.contains(":config_reload")));
+    assert!(items.iter().any(|line| line.contains(":bpick / :buffer_picker")));
+    assert!(
+        items.iter().any(|line| line.contains(":s / :substitute s/pattern/replacement/[flags]"))
+    );
+}
+
+#[test]
 fn ctrl_p_opens_cwd_file_picker_from_normal_mode() {
     let _cwd_lock = cwd_test_lock().lock().unwrap();
     let _cwd_guard = CurrentDirGuard::capture();

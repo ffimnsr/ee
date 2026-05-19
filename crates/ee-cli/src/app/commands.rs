@@ -1,8 +1,496 @@
 use super::*;
+use std::borrow::Cow;
 use std::path::{Component, Path};
+use std::sync::OnceLock;
 
 use crate::buffer::BufferId;
 use crate::registers::RegisterName;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommandSpec {
+    canonical_id: &'static str,
+    alias: &'static str,
+    summary: Cow<'static, str>,
+    usage: Option<&'static str>,
+    category: Option<&'static str>,
+    dispatch: &'static str,
+}
+
+struct CommandMetadata {
+    summary: Cow<'static, str>,
+    usage: Option<&'static str>,
+    category: &'static str,
+}
+
+const fn command_spec(
+    alias: &'static str,
+    canonical_id: &'static str,
+    dispatch: &'static str,
+) -> CommandSpec {
+    CommandSpec {
+        canonical_id,
+        alias,
+        summary: Cow::Borrowed(canonical_id),
+        usage: None,
+        category: None,
+        dispatch,
+    }
+}
+
+// Flat alias registry preserves current first-match completion semantics.
+// canonical_id groups aliases so execution/help can move off raw strings incrementally.
+const COMMAND_SPECS: &[CommandSpec] = &[
+    command_spec("b#", "alternate_buffer", "b#"),
+    command_spec("bc", "buffer_close", "bc"),
+    command_spec("bc!", "buffer_close_force", "bc!"),
+    command_spec("bd", "buffer_close", "bc"),
+    command_spec("bdelete", "buffer_close", "bc"),
+    command_spec("bclose", "buffer_close", "bc"),
+    command_spec("bclose!", "buffer_close_force", "bc!"),
+    command_spec("bcloseall", "buffer_close_all", "bca"),
+    command_spec("bcloseall!", "buffer_close_all_force", "bca!"),
+    command_spec("bcloseother", "buffer_close_others", "bco"),
+    command_spec("bcloseother!", "buffer_close_others_force", "bco!"),
+    command_spec("bca", "buffer_close_all", "bca"),
+    command_spec("bca!", "buffer_close_all_force", "bca!"),
+    command_spec("bco", "buffer_close_others", "bco"),
+    command_spec("bco!", "buffer_close_others_force", "bco!"),
+    command_spec("buffer_close!", "buffer_close_force", "bc!"),
+    command_spec("buffer_close", "buffer_close", "bc"),
+    command_spec("buffer_close_all", "buffer_close_all", "bca"),
+    command_spec("buffer_close_all!", "buffer_close_all_force", "bca!"),
+    command_spec("buffer_close_others", "buffer_close_others", "bco"),
+    command_spec("buffer_close_others!", "buffer_close_others_force", "bco!"),
+    command_spec("bn", "next_buffer", "bn"),
+    command_spec("bnext", "next_buffer", "bn"),
+    command_spec("goto_next_buffer", "next_buffer", "bn"),
+    command_spec("bp", "previous_buffer", "bp"),
+    command_spec("bprev", "previous_buffer", "bp"),
+    command_spec("bprevious", "previous_buffer", "bp"),
+    command_spec("goto_previous_buffer", "previous_buffer", "bp"),
+    command_spec("buffers", "buffers", "ls"),
+    command_spec("cc", "quickfix_select", "cc"),
+    command_spec("ccl", "quickfix_close", "cclose"),
+    command_spec("cclose", "quickfix_close", "cclose"),
+    command_spec("cfirst", "quickfix_first", "cfirst"),
+    command_spec("cl", "quickfix_list", "clist"),
+    command_spec("clast", "quickfix_last", "clast"),
+    command_spec("clist", "quickfix_list", "clist"),
+    command_spec("cn", "quickfix_next", "cn"),
+    command_spec("cnext", "quickfix_next", "cn"),
+    command_spec("cope", "quickfix_open", "copen"),
+    command_spec("copen", "quickfix_open", "copen"),
+    command_spec("cp", "quickfix_prev", "cp"),
+    command_spec("cprev", "quickfix_prev", "cp"),
+    command_spec("cprevious", "quickfix_prev", "cp"),
+    command_spec("codeaction", "codeaction", "codeaction"),
+    command_spec("codeactions", "codeaction", "codeaction"),
+    command_spec("code_action", "code_action", "code_action"),
+    command_spec("complete", "complete", "complete"),
+    command_spec("completion", "complete", "complete"),
+    command_spec("config_reload", "reload_config", "reload_config"),
+    command_spec("command_palette", "command_palette", "command_palette"),
+    command_spec("d", "delete", "d"),
+    command_spec("s", "substitute", "s"),
+    command_spec("substitute", "substitute", "s"),
+    command_spec("def", "definition", "definition"),
+    command_spec("definition", "definition", "definition"),
+    command_spec("goto_declaration", "goto_declaration", "goto_declaration"),
+    command_spec("goto_definition", "goto_definition", "goto_definition"),
+    command_spec("goto_type_definition", "goto_type_definition", "goto_type_definition"),
+    command_spec("goto_reference", "goto_reference", "goto_reference"),
+    command_spec("goto_implementation", "goto_implementation", "goto_implementation"),
+    command_spec("delete", "delete", "d"),
+    command_spec("diagnostics", "diagnostics", "diagnostics"),
+    command_spec("e", "edit", "e"),
+    command_spec("goto_last_accessed_file", "goto_last_accessed_file", "goto_last_accessed_file"),
+    command_spec("goto_last_modified_file", "goto_last_modified_file", "goto_last_modified_file"),
+    command_spec("e!", "reload", "e!"),
+    command_spec("edit", "edit", "e"),
+    command_spec("goto_window_bottom", "goto_window_bottom", "goto_window_bottom"),
+    command_spec("goto_window_center", "goto_window_center", "goto_window_center"),
+    command_spec("goto_window_top", "goto_window_top", "goto_window_top"),
+    command_spec("edit!", "reload", "e!"),
+    command_spec("g", "goto", "g"),
+    command_spec("commands", "commands", "commands"),
+    command_spec("create_directory", "create_directory", "create_directory"),
+    command_spec("decrement", "decrement", "decrement"),
+    command_spec("delete_char_backward", "delete_char_backward", "delete_char_backward"),
+    command_spec("delete_char_forward", "delete_char_forward", "delete_char_forward"),
+    command_spec("delete_word_backward", "delete_word_backward", "delete_word_backward"),
+    command_spec("delete_word_forward", "delete_word_forward", "delete_word_forward"),
+    command_spec("duplicate_line", "duplicate_line", "duplicate_line"),
+    command_spec("files", "files", "files"),
+    command_spec("file_explorer", "file_explorer", "file_explorer"),
+    command_spec(
+        "file_explorer_in_current_buffer_directory",
+        "file_explorer_in_current_buffer_directory",
+        "file_explorer_in_current_buffer_directory",
+    ),
+    command_spec(
+        "file_explorer_in_current_directory",
+        "file_explorer_in_current_directory",
+        "file_explorer_in_current_directory",
+    ),
+    command_spec("file_picker", "file_picker", "file_picker"),
+    command_spec(
+        "file_picker_in_current_directory",
+        "file_picker_in_current_directory",
+        "file_picker_in_current_directory",
+    ),
+    command_spec("format", "format", "format"),
+    command_spec("grep", "grep", "grep"),
+    command_spec("global_search", "global_search", "global_search"),
+    command_spec("buffer_picker", "buffer_picker", "buffer_picker"),
+    command_spec("changed_file_picker", "changed_file_picker", "changed_file_picker"),
+    command_spec("gblame", "gblame", "gblame"),
+    command_spec("gdiff", "gdiff", "gdiff"),
+    command_spec("ghunkdiff", "ghunkdiff", "ghunkdiff"),
+    command_spec("goto", "goto", "g"),
+    command_spec("goto_column", "goto_column", "goto_column"),
+    command_spec("goto_first_change", "goto_first_change", "goto_first_change"),
+    command_spec("goto_first_diag", "goto_first_diag", "goto_first_diag"),
+    command_spec(
+        "goto_first_nonwhitespace",
+        "goto_first_nonwhitespace",
+        "goto_first_nonwhitespace",
+    ),
+    command_spec("goto_last_change", "goto_last_change", "goto_last_change"),
+    command_spec("goto_last_diag", "goto_last_diag", "goto_last_diag"),
+    command_spec("goto_last_modification", "goto_last_modification", "goto_last_modification"),
+    command_spec("goto_next_change", "goto_next_change", "goto_next_change"),
+    command_spec("goto_next_class", "goto_next_class", "goto_next_class"),
+    command_spec("goto_next_comment", "goto_next_comment", "goto_next_comment"),
+    command_spec("goto_next_diag", "goto_next_diag", "goto_next_diag"),
+    command_spec("goto_next_function", "goto_next_function", "goto_next_function"),
+    command_spec("goto_next_paragraph", "goto_next_paragraph", "goto_next_paragraph"),
+    command_spec("goto_next_parameter", "goto_next_parameter", "goto_next_parameter"),
+    command_spec("goto_next_test", "goto_next_test", "goto_next_test"),
+    command_spec("goto_prev_change", "goto_prev_change", "goto_prev_change"),
+    command_spec("goto_prev_class", "goto_prev_class", "goto_prev_class"),
+    command_spec("goto_prev_comment", "goto_prev_comment", "goto_prev_comment"),
+    command_spec("goto_prev_diag", "goto_prev_diag", "goto_prev_diag"),
+    command_spec("goto_prev_function", "goto_prev_function", "goto_prev_function"),
+    command_spec("goto_prev_paragraph", "goto_prev_paragraph", "goto_prev_paragraph"),
+    command_spec("goto_prev_parameter", "goto_prev_parameter", "goto_prev_parameter"),
+    command_spec("goto_prev_test", "goto_prev_test", "goto_prev_test"),
+    command_spec("goto_word", "goto_word", "goto_word"),
+    command_spec("lang", "set_language", "set_language"),
+    command_spec("hs", "split", "sp"),
+    command_spec("hsplit", "split", "sp"),
+    command_spec("help", "help", "help"),
+    command_spec("hover", "hover", "hover"),
+    command_spec("increment", "increment", "increment"),
+    command_spec("insert_newline", "insert_newline", "insert_newline"),
+    command_spec("insert_register", "insert_register", "insert_register"),
+    command_spec("insert_tab", "insert_tab", "insert_tab"),
+    command_spec("keymap", "keymap", "keymap"),
+    command_spec("kill_line", "kill_line", "kill_line"),
+    command_spec("kill_to_line_end", "kill_to_line_end", "kill_to_line_end"),
+    command_spec("kill_to_line_start", "kill_to_line_start", "kill_to_line_start"),
+    command_spec("lcl", "location_list_close", "lclose"),
+    command_spec("lclose", "location_list_close", "lclose"),
+    command_spec("lfirst", "location_list_first", "lfirst"),
+    command_spec("llast", "location_list_last", "llast"),
+    command_spec("lsp_restart", "lsp_restart", "lsp_restart"),
+    command_spec("lsp_stop", "lsp_stop", "lsp_stop"),
+    command_spec("ll", "location_list_select", "ll"),
+    command_spec("ln", "location_list_next", "lnext"),
+    command_spec("lnext", "location_list_next", "lnext"),
+    command_spec("lop", "location_list_open", "lopen"),
+    command_spec("lopen", "location_list_open", "lopen"),
+    command_spec("lp", "location_list_prev", "lprev"),
+    command_spec("lprev", "location_list_prev", "lprev"),
+    command_spec("lprevious", "location_list_prev", "lprev"),
+    command_spec("ls", "buffers", "ls"),
+    command_spec("multi_find", "multi_find", "multi_find"),
+    command_spec("make", "make", "make"),
+    command_spec("move", "move", "move"),
+    command_spec("move_parent_node_end", "move_parent_node_end", "move_parent_node_end"),
+    command_spec("move_parent_node_start", "move_parent_node_start", "move_parent_node_start"),
+    command_spec("mv", "move", "move"),
+    command_spec("n", "new", "new"),
+    command_spec("new", "new", "new"),
+    command_spec("noh", "nohlsearch", "noh"),
+    command_spec("nohlsearch", "nohlsearch", "noh"),
+    command_spec("o", "edit", "e"),
+    command_spec("outline", "symbols", "symbols"),
+    command_spec("open", "edit", "e"),
+    command_spec("pipe", "pipe", "pipe"),
+    command_spec("pipe_to", "pipe_to", "pipe_to"),
+    command_spec("pwd", "show_directory", "show_directory"),
+    command_spec("q", "quit", "q"),
+    command_spec("q!", "quit_force", "q!"),
+    command_spec("qa", "quit_all", "qa"),
+    command_spec("qa!", "quit_all_force", "qa!"),
+    command_spec("quit", "quit", "q"),
+    command_spec("quit!", "quit_force", "q!"),
+    command_spec("quit_all", "quit_all", "qa"),
+    command_spec("quit_all!", "quit_all_force", "qa!"),
+    command_spec("recover", "recover", "recover"),
+    command_spec("recoverdel", "recoverdel", "recoverdel"),
+    command_spec("reload_config", "reload_config", "reload_config"),
+    command_spec("reset_diff_change", "reset_diff_change", "reset_diff_change"),
+    command_spec("reindent", "reindent", "reindent"),
+    command_spec("rename", "rename", "rename"),
+    command_spec("references", "references", "references"),
+    command_spec("refs", "references", "references"),
+    command_spec("reload", "reload", "e!"),
+    command_spec("reload_all", "reload_all", "reload_all"),
+    command_spec("rl", "reload", "e!"),
+    command_spec("rla", "reload_all", "reload_all"),
+    command_spec("r", "read", "read"),
+    command_spec("read", "read", "read"),
+    command_spec("redraw", "redraw", "redraw"),
+    command_spec("run", "run", "run"),
+    command_spec("run_shell_command", "term", "term"),
+    command_spec("shell_append_output", "shell_append_output", "shell_append_output"),
+    command_spec("shell_insert_output", "shell_insert_output", "shell_insert_output"),
+    command_spec("shell_keep_pipe", "shell_keep_pipe", "shell_keep_pipe"),
+    command_spec("shell_pipe", "pipe", "pipe"),
+    command_spec("shell_pipe_to", "pipe_to", "pipe_to"),
+    command_spec("selection_for_find", "selection_for_find", "selection_for_find"),
+    command_spec("selection_for_replace", "selection_for_replace", "selection_for_replace"),
+    command_spec("select_regex", "select_regex", "select_regex"),
+    command_spec("selection_into_lines", "selection_into_lines", "selection_into_lines"),
+    command_spec("set", "set", "set"),
+    command_spec("set_language", "set_language", "set_language"),
+    command_spec("sh", "term", "term"),
+    command_spec("show_directory", "show_directory", "show_directory"),
+    command_spec("split_selection", "selection_into_lines", "selection_into_lines"),
+    command_spec(
+        "split_selection_on_newline",
+        "split_selection_on_newline",
+        "split_selection_on_newline",
+    ),
+    command_spec("merge_selections", "merge_selections", "merge_selections"),
+    command_spec(
+        "merge_consecutive_selections",
+        "merge_consecutive_selections",
+        "merge_consecutive_selections",
+    ),
+    command_spec("trim_selections", "trim_selections", "trim_selections"),
+    command_spec("align_selections", "align_selections", "align_selections"),
+    command_spec("align_it", "align_it", "align_it"),
+    command_spec("collapse_selection", "collapse_selection", "collapse_selection"),
+    command_spec("clear_register", "clear_register", "clear_register"),
+    command_spec("flip_selections", "flip_selections", "flip_selections"),
+    command_spec("echo", "echo", "echo"),
+    command_spec("encoding", "encoding", "encoding"),
+    command_spec(
+        "ensure_selections_forward",
+        "ensure_selections_forward",
+        "ensure_selections_forward",
+    ),
+    command_spec("expand_selection", "expand_selection", "expand_selection"),
+    command_spec("extend_char_left", "extend_char_left", "extend_char_left"),
+    command_spec("extend_char_right", "extend_char_right", "extend_char_right"),
+    command_spec("extend_line_above", "extend_line_above", "extend_line_above"),
+    command_spec("extend_line_below", "extend_line_below", "extend_line_below"),
+    command_spec("extend_line_down", "extend_line_down", "extend_line_down"),
+    command_spec("extend_line_up", "extend_line_up", "extend_line_up"),
+    command_spec("extend_to_line_bounds", "extend_to_line_bounds", "extend_to_line_bounds"),
+    command_spec("extend_to_file_end", "extend_to_file_end", "extend_to_file_end"),
+    command_spec("extend_to_file_start", "extend_to_file_start", "extend_to_file_start"),
+    command_spec("extend_visual_line_down", "extend_line_down", "extend_line_down"),
+    command_spec("extend_visual_line_up", "extend_line_up", "extend_line_up"),
+    command_spec("join_selections", "join_selections", "join_selections"),
+    command_spec("join_selections_space", "join_selections_space", "join_selections_space"),
+    command_spec("jumplist_picker", "jumplist_picker", "jumplist_picker"),
+    command_spec("keep_selections", "keep_selections", "keep_selections"),
+    command_spec("keep_primary_selection", "keep_primary_selection", "keep_primary_selection"),
+    command_spec("last_picker", "last_picker", "last_picker"),
+    command_spec("match_brackets", "match_brackets", "match_brackets"),
+    command_spec("move_line_down", "move_line_down", "move_line_down"),
+    command_spec("move_line_up", "move_line_up", "move_line_up"),
+    command_spec("goto_file_end", "goto_file_end", "goto_file_end"),
+    command_spec("remove_selections", "remove_selections", "remove_selections"),
+    command_spec(
+        "remove_primary_selection",
+        "remove_primary_selection",
+        "remove_primary_selection",
+    ),
+    command_spec(
+        "rotate_selections_backward",
+        "rotate_selections_backward",
+        "rotate_selections_backward",
+    ),
+    command_spec(
+        "rotate_selections_forward",
+        "rotate_selections_forward",
+        "rotate_selections_forward",
+    ),
+    command_spec("select_line_above", "select_line_above", "select_line_above"),
+    command_spec("select_line_below", "select_line_below", "select_line_below"),
+    command_spec("select_all_children", "select_all_children", "select_all_children"),
+    command_spec("select_all_siblings", "select_all_siblings", "select_all_siblings"),
+    command_spec("symbol_picker", "symbol_picker", "symbol_picker"),
+    command_spec("symbols", "symbols", "symbols"),
+    command_spec("swift", "swift_motion", "swift_motion"),
+    command_spec("swift_motion", "swift_motion", "swift_motion"),
+    command_spec(
+        "select_textobject_around",
+        "select_textobject_around",
+        "select_textobject_around",
+    ),
+    command_spec("select_textobject_inner", "select_textobject_inner", "select_textobject_inner"),
+    command_spec("select_next_sibling", "select_next_sibling", "select_next_sibling"),
+    command_spec("select_prev_sibling", "select_prev_sibling", "select_prev_sibling"),
+    command_spec("select_references_to_symbol_under_cursor", "goto_reference", "goto_reference"),
+    command_spec("shrink_selection", "shrink_selection", "shrink_selection"),
+    command_spec("shrink_to_line_bounds", "shrink_to_line_bounds", "shrink_to_line_bounds"),
+    command_spec(
+        "copy_selection_on_next_line",
+        "copy_selection_on_next_line",
+        "copy_selection_on_next_line",
+    ),
+    command_spec(
+        "copy_selection_on_prev_line",
+        "copy_selection_on_prev_line",
+        "copy_selection_on_prev_line",
+    ),
+    command_spec("diagnostics_picker", "diagnostics_picker", "diagnostics_picker"),
+    command_spec("surround_add", "surround_add", "surround_add"),
+    command_spec("surround_delete", "surround_delete", "surround_delete"),
+    command_spec("surround_replace", "surround_replace", "surround_replace"),
+    command_spec(
+        "workspace_diagnostics_picker",
+        "workspace_diagnostics_picker",
+        "workspace_diagnostics_picker",
+    ),
+    command_spec("workspace_symbol_picker", "workspace_symbol_picker", "workspace_symbol_picker"),
+    command_spec("wsymbol", "workspace_symbols", "wsymbols"),
+    command_spec("wsymbols", "workspace_symbols", "wsymbols"),
+    command_spec("add_newline_above", "add_newline_above", "add_newline_above"),
+    command_spec("add_newline_below", "add_newline_below", "add_newline_below"),
+    command_spec(
+        "reverse_selection_contents",
+        "reverse_selection_contents",
+        "reverse_selection_contents",
+    ),
+    command_spec(
+        "rotate_selection_contents_backward",
+        "rotate_selection_contents_backward",
+        "rotate_selection_contents_backward",
+    ),
+    command_spec(
+        "rotate_selection_contents_forward",
+        "rotate_selection_contents_forward",
+        "rotate_selection_contents_forward",
+    ),
+    command_spec("select_all", "select_all", "select_all"),
+    command_spec("bpick", "buffer_picker", "bpick"),
+    command_spec("sp", "split", "sp"),
+    command_spec("split", "split", "sp"),
+    command_spec("tabc", "tab_close", "tabc"),
+    command_spec("tabclose", "tab_close", "tabc"),
+    command_spec("tabe", "tab_edit", "tabnew"),
+    command_spec("tabedit", "tab_edit", "tabnew"),
+    command_spec("tabn", "tab_next", "tabn"),
+    command_spec("tabnext", "tab_next", "tabn"),
+    command_spec("tabnew", "tab_edit", "tabnew"),
+    command_spec("tabp", "tab_prev", "tabp"),
+    command_spec("tabprev", "tab_prev", "tabp"),
+    command_spec("tabprevious", "tab_prev", "tabp"),
+    command_spec("tabs", "tabs", "tabs"),
+    command_spec("rotate_view", "rotate_view", "rotate_view"),
+    command_spec("cycle_view", "rotate_view", "rotate_view"),
+    command_spec("rotate_view_reverse", "rotate_view_reverse", "rotate_view_reverse"),
+    command_spec("transpose_view", "transpose_view", "transpose_view"),
+    command_spec("wclose", "wclose", "wclose"),
+    command_spec("wonly", "wonly", "wonly"),
+    command_spec("jump_view_left", "jump_view_left", "jump_view_left"),
+    command_spec("jump_view_down", "jump_view_down", "jump_view_down"),
+    command_spec("jump_view_up", "jump_view_up", "jump_view_up"),
+    command_spec("jump_view_right", "jump_view_right", "jump_view_right"),
+    command_spec("swap_view_left", "swap_view_left", "swap_view_left"),
+    command_spec("swap_view_down", "swap_view_down", "swap_view_down"),
+    command_spec("swap_view_up", "swap_view_up", "swap_view_up"),
+    command_spec("swap_view_right", "swap_view_right", "swap_view_right"),
+    command_spec("term", "term", "term"),
+    command_spec("terminal", "term", "term"),
+    command_spec("test", "test", "test"),
+    command_spec("transpose", "transpose", "transpose"),
+    command_spec("sort", "sort", "sort"),
+    command_spec("uniq", "uniq", "uniq"),
+    command_spec("dedup", "uniq", "uniq"),
+    command_spec("add_selection_above", "add_selection_above", "add_selection_above"),
+    command_spec("add_selection_below", "add_selection_below", "add_selection_below"),
+    command_spec(
+        "change_current_directory",
+        "change_current_directory",
+        "change_current_directory",
+    ),
+    command_spec("cd", "change_current_directory", "change_current_directory"),
+    command_spec("commit_undo_checkpoint", "commit_undo_checkpoint", "commit_undo_checkpoint"),
+    command_spec("diffget", "reset_diff_change", "reset_diff_change"),
+    command_spec("diffg", "reset_diff_change", "reset_diff_change"),
+    command_spec("|", "pipe", "pipe"),
+    command_spec("vs", "vsplit", "vs"),
+    command_spec("vsplit", "vsplit", "vs"),
+    command_spec("w", "write", "w"),
+    command_spec("w!", "write", "w"),
+    command_spec("wq", "write_quit", "wq"),
+    command_spec("wq!", "write_quit", "wq"),
+    command_spec("wa", "write_all", "wa"),
+    command_spec("wa!", "write_all", "wa"),
+    command_spec("write!", "write", "w"),
+    command_spec("write_all", "write_all", "wa"),
+    command_spec("write_all!", "write_all", "wa"),
+    command_spec("write_quit", "write_quit", "wq"),
+    command_spec("write_quit!", "write_quit", "wq"),
+    command_spec("write_quit_all", "write_quit_all", "wqa"),
+    command_spec("write_quit_all!", "write_quit_all", "wqa"),
+    command_spec("write", "write", "w"),
+    command_spec("wqa", "write_quit_all", "wqa"),
+    command_spec("wqa!", "write_quit_all", "wqa"),
+    command_spec("u", "update", "u"),
+    command_spec("update", "update", "u"),
+    command_spec("x", "write_quit", "wq"),
+    command_spec("x!", "write_quit", "wq"),
+    command_spec("xa", "write_quit_all", "wqa"),
+    command_spec("xa!", "write_quit_all", "wqa"),
+    command_spec("y", "yank", "y"),
+    command_spec("yank", "yank", "y"),
+    command_spec("paste_clipboard_after", "paste_clipboard_after", "paste_clipboard_after"),
+    command_spec("paste_clipboard_before", "paste_clipboard_before", "paste_clipboard_before"),
+    command_spec("yank_to_clipboard", "yank_to_clipboard", "yank_to_clipboard"),
+    command_spec(
+        "yank_main_selection_to_clipboard",
+        "yank_main_selection_to_clipboard",
+        "yank_main_selection_to_clipboard",
+    ),
+    command_spec(
+        "replace_selections_with_clipboard",
+        "replace_selections_with_clipboard",
+        "replace_selections_with_clipboard",
+    ),
+    command_spec(
+        "paste_primary_clipboard_after",
+        "paste_primary_clipboard_after",
+        "paste_primary_clipboard_after",
+    ),
+    command_spec(
+        "paste_primary_clipboard_before",
+        "paste_primary_clipboard_before",
+        "paste_primary_clipboard_before",
+    ),
+    command_spec(
+        "yank_to_primary_clipboard",
+        "yank_to_primary_clipboard",
+        "yank_to_primary_clipboard",
+    ),
+    command_spec(
+        "yank_main_selection_to_primary_clipboard",
+        "yank_main_selection_to_primary_clipboard",
+        "yank_main_selection_to_primary_clipboard",
+    ),
+    command_spec(
+        "replace_selections_with_primary_clipboard",
+        "replace_selections_with_primary_clipboard",
+        "replace_selections_with_primary_clipboard",
+    ),
+];
 
 #[derive(Clone, Copy)]
 enum WindowLineTarget {
@@ -12,6 +500,534 @@ enum WindowLineTarget {
 }
 
 impl App {
+    fn command_specs() -> &'static [CommandSpec] {
+        static ENRICHED_COMMAND_SPECS: OnceLock<Vec<CommandSpec>> = OnceLock::new();
+        ENRICHED_COMMAND_SPECS
+            .get_or_init(|| {
+                COMMAND_SPECS
+                    .iter()
+                    .cloned()
+                    .map(|mut spec| {
+                        let metadata = Self::command_metadata(spec.canonical_id);
+                        spec.summary = metadata.summary;
+                        spec.usage = metadata.usage;
+                        spec.category = Some(metadata.category);
+                        spec
+                    })
+                    .collect()
+            })
+            .as_slice()
+    }
+
+    fn ex_command_names() -> &'static [&'static str] {
+        static COMMAND_NAMES: OnceLock<Vec<&'static str>> = OnceLock::new();
+        COMMAND_NAMES
+            .get_or_init(|| Self::command_specs().iter().map(|spec| spec.alias).collect())
+            .as_slice()
+    }
+
+    fn resolve_ex_command(head: &str) -> Option<&'static CommandSpec> {
+        Self::command_specs().iter().find(|spec| spec.alias == head)
+    }
+
+    fn canonical_command_spec(canonical_id: &str) -> &'static CommandSpec {
+        Self::command_specs()
+            .iter()
+            .find(|spec| spec.canonical_id == canonical_id)
+            .unwrap_or_else(|| panic!("missing canonical command spec for {canonical_id}"))
+    }
+
+    fn command_help_canonical_ids() -> &'static [&'static str] {
+        static CANONICAL_IDS: OnceLock<Vec<&'static str>> = OnceLock::new();
+        CANONICAL_IDS
+            .get_or_init(|| {
+                let mut seen = std::collections::HashSet::new();
+                Self::command_specs()
+                    .iter()
+                    .filter_map(|spec| seen.insert(spec.canonical_id).then_some(spec.canonical_id))
+                    .collect()
+            })
+            .as_slice()
+    }
+
+    fn ordered_aliases_for(canonical_id: &str) -> Vec<&'static str> {
+        let mut aliases = Self::command_specs()
+            .iter()
+            .filter(|spec| spec.canonical_id == canonical_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        aliases.sort_by(|left, right| {
+            let left_rank = usize::from(left.alias != left.dispatch);
+            let right_rank = usize::from(right.alias != right.dispatch);
+            left_rank
+                .cmp(&right_rank)
+                .then(left.alias.len().cmp(&right.alias.len()))
+                .then(left.alias.cmp(right.alias))
+        });
+        aliases.into_iter().map(|spec| spec.alias).collect()
+    }
+
+    fn command_metadata(canonical_id: &str) -> CommandMetadata {
+        let category = match canonical_id {
+            "help" | "commands" | "keymap" | "command_palette" => "discovery",
+            "term"
+            | "make"
+            | "test"
+            | "run"
+            | "pipe"
+            | "pipe_to"
+            | "shell_insert_output"
+            | "shell_append_output"
+            | "shell_keep_pipe" => "shell",
+            "edit"
+            | "reload"
+            | "reload_all"
+            | "new"
+            | "split"
+            | "vsplit"
+            | "tab_edit"
+            | "tab_close"
+            | "tab_next"
+            | "tab_prev"
+            | "tabs"
+            | "rotate_view"
+            | "rotate_view_reverse"
+            | "transpose_view"
+            | "wclose"
+            | "wonly"
+            | "jump_view_left"
+            | "jump_view_down"
+            | "jump_view_up"
+            | "jump_view_right"
+            | "swap_view_left"
+            | "swap_view_down"
+            | "swap_view_up"
+            | "swap_view_right" => "windows",
+            "quit"
+            | "quit_force"
+            | "quit_all"
+            | "quit_all_force"
+            | "write"
+            | "update"
+            | "write_all"
+            | "write_quit"
+            | "write_quit_all"
+            | "read"
+            | "move"
+            | "change_current_directory"
+            | "show_directory"
+            | "create_directory"
+            | "encoding"
+            | "recover"
+            | "recoverdel"
+            | "reload_config" => "workspace",
+            "buffer_close"
+            | "buffer_close_force"
+            | "buffer_close_others"
+            | "buffer_close_others_force"
+            | "buffer_close_all"
+            | "buffer_close_all_force"
+            | "next_buffer"
+            | "previous_buffer"
+            | "alternate_buffer"
+            | "buffers"
+            | "buffer_picker"
+            | "changed_file_picker"
+            | "files"
+            | "file_picker"
+            | "file_picker_in_current_directory"
+            | "file_explorer"
+            | "file_explorer_in_current_buffer_directory"
+            | "file_explorer_in_current_directory"
+            | "global_search"
+            | "grep"
+            | "jumplist_picker"
+            | "last_picker" => "buffers",
+            "goto"
+            | "goto_column"
+            | "goto_first_nonwhitespace"
+            | "goto_last_modification"
+            | "goto_declaration"
+            | "goto_definition"
+            | "goto_type_definition"
+            | "goto_reference"
+            | "goto_implementation"
+            | "goto_window_top"
+            | "goto_window_center"
+            | "goto_window_bottom"
+            | "goto_last_accessed_file"
+            | "goto_last_modified_file"
+            | "goto_next_diag"
+            | "goto_prev_diag"
+            | "goto_first_diag"
+            | "goto_last_diag"
+            | "goto_word"
+            | "swift_motion"
+            | "goto_next_change"
+            | "goto_prev_change"
+            | "goto_first_change"
+            | "goto_last_change"
+            | "goto_next_function"
+            | "goto_prev_function"
+            | "goto_next_class"
+            | "goto_prev_class"
+            | "goto_next_parameter"
+            | "goto_prev_parameter"
+            | "goto_next_comment"
+            | "goto_prev_comment"
+            | "goto_next_test"
+            | "goto_prev_test"
+            | "goto_next_paragraph"
+            | "goto_prev_paragraph"
+            | "goto_file_end" => "navigation",
+            "definition"
+            | "references"
+            | "symbols"
+            | "workspace_symbols"
+            | "codeaction"
+            | "code_action"
+            | "rename"
+            | "diagnostics"
+            | "hover"
+            | "lsp_restart"
+            | "lsp_stop"
+            | "symbol_picker"
+            | "workspace_symbol_picker"
+            | "diagnostics_picker"
+            | "workspace_diagnostics_picker" => "ide",
+            "quickfix_open"
+            | "quickfix_close"
+            | "quickfix_next"
+            | "quickfix_prev"
+            | "quickfix_first"
+            | "quickfix_last"
+            | "quickfix_select"
+            | "quickfix_list"
+            | "location_list_open"
+            | "location_list_close"
+            | "location_list_next"
+            | "location_list_prev"
+            | "location_list_first"
+            | "location_list_last"
+            | "location_list_select" => "lists",
+            _ => "editing",
+        };
+
+        let (summary, usage) = match canonical_id {
+            "help" => (Cow::Borrowed("open searchable editor help"), None),
+            "commands" => (Cow::Borrowed("list ex commands and features"), None),
+            "keymap" => (Cow::Borrowed("list high-value normal-mode bindings"), None),
+            "command_palette" => (Cow::Borrowed("open searchable command reference picker"), None),
+            "term" => (
+                Cow::Borrowed(
+                    "run shell command and open transcript buffer; bang shorthand available",
+                ),
+                Some("<shell-command>"),
+            ),
+            "make" => (Cow::Borrowed("run cargo build in transcript buffer"), Some("[args]")),
+            "test" => (Cow::Borrowed("run cargo test in transcript buffer"), Some("[args]")),
+            "run" => (Cow::Borrowed("run cargo run in transcript buffer"), Some("[args]")),
+            "edit" => (Cow::Borrowed("open file in current view"), Some("[path]")),
+            "reload" => (Cow::Borrowed("reload active buffer from disk"), None),
+            "reload_all" => (Cow::Borrowed("reload all open buffers from disk"), None),
+            "new" => (Cow::Borrowed("create scratch buffer"), None),
+            "split" => (Cow::Borrowed("open file in horizontal split"), Some("[path]")),
+            "vsplit" => (Cow::Borrowed("open file in vertical split"), Some("[path]")),
+            "goto" => (Cow::Borrowed("jump to 1-based line number"), Some("<line>")),
+            "goto_column" => (
+                Cow::Borrowed("move cursor to 1-based display column on current line"),
+                Some("<column>"),
+            ),
+            "goto_first_nonwhitespace" => {
+                (Cow::Borrowed("jump to first non-whitespace character on current line"), None)
+            }
+            "goto_last_modification" => {
+                (Cow::Borrowed("jump to previous entry in change list"), None)
+            }
+            "goto_declaration" | "goto_definition" | "goto_type_definition" => {
+                (Cow::Borrowed("request LSP navigation at cursor"), None)
+            }
+            "goto_reference" => (Cow::Borrowed("request backend references at cursor"), None),
+            "goto_implementation" => (Cow::Borrowed("request implementation at cursor"), None),
+            "next_buffer" => (Cow::Borrowed("cycle to next open buffer"), None),
+            "previous_buffer" => (Cow::Borrowed("cycle to previous open buffer"), None),
+            "alternate_buffer" => (Cow::Borrowed("jump to alternate buffer"), None),
+            "goto_window_top" | "goto_window_center" | "goto_window_bottom" => {
+                (Cow::Borrowed("jump cursor inside visible window"), None)
+            }
+            "goto_last_accessed_file" => {
+                (Cow::Borrowed("switch to most recently accessed buffer"), None)
+            }
+            "goto_last_modified_file" => {
+                (Cow::Borrowed("switch to most recently modified buffer"), None)
+            }
+            "goto_next_diag" | "goto_prev_diag" | "goto_first_diag" | "goto_last_diag" => {
+                (Cow::Borrowed("jump active-buffer diagnostics"), None)
+            }
+            "goto_word" => {
+                (Cow::Borrowed("move to next word start using normal word semantics"), None)
+            }
+            "swift_motion" => {
+                (Cow::Borrowed("start visible-window two-char jump with labels"), None)
+            }
+            "quit" => (Cow::Borrowed("quit app when active buffer pristine"), None),
+            "quit_force" => (Cow::Borrowed("force quit current session"), None),
+            "quit_all" => (Cow::Borrowed("quit after pristine check across buffers"), None),
+            "quit_all_force" => (Cow::Borrowed("force quit whole session"), None),
+            "write" => (Cow::Borrowed("save current buffer"), None),
+            "update" => (Cow::Borrowed("write current buffer only when dirty"), None),
+            "write_all" => (Cow::Borrowed("save all dirty buffers"), None),
+            "write_quit" => (Cow::Borrowed("save current buffer then quit"), None),
+            "write_quit_all" => (Cow::Borrowed("save dirty buffers then quit"), None),
+            "delete" => (Cow::Borrowed("delete addressed line range"), None),
+            "substitute" => (
+                Cow::Borrowed("replace matches in addressed line range"),
+                Some("s/pattern/replacement/[flags]"),
+            ),
+            "yank" => (Cow::Borrowed("yank addressed line range"), None),
+            "paste_clipboard_after" | "paste_clipboard_before" => {
+                (Cow::Borrowed("paste system clipboard around current selection"), None)
+            }
+            "yank_to_clipboard" | "yank_main_selection_to_clipboard" => {
+                (Cow::Borrowed("copy selection or addressed lines into system clipboard"), None)
+            }
+            "replace_selections_with_clipboard" => {
+                (Cow::Borrowed("replace selections with system clipboard contents"), None)
+            }
+            "paste_primary_clipboard_after" | "paste_primary_clipboard_before" => {
+                (Cow::Borrowed("paste primary clipboard around current selection"), None)
+            }
+            "yank_to_primary_clipboard" | "yank_main_selection_to_primary_clipboard" => {
+                (Cow::Borrowed("copy selection or addressed lines into primary clipboard"), None)
+            }
+            "replace_selections_with_primary_clipboard" => {
+                (Cow::Borrowed("replace selections with primary clipboard contents"), None)
+            }
+            "format" => (Cow::Borrowed("format current document through backend formatter"), None),
+            "complete" => (Cow::Borrowed("open completion picker from backend suggestions"), None),
+            "definition" => (Cow::Borrowed("request definition at cursor"), None),
+            "symbols" => (Cow::Borrowed("request document symbols for current buffer"), None),
+            "workspace_symbols" => (
+                Cow::Borrowed("query workspace symbols with trailing search text"),
+                Some("[query]"),
+            ),
+            "codeaction" => (Cow::Borrowed("request indexed backend code action directly"), None),
+            "code_action" => (Cow::Borrowed("open code-action picker"), None),
+            "rename" => (Cow::Borrowed("request backend rename at cursor"), Some("<new_name>")),
+            "diagnostics" => {
+                (Cow::Borrowed("open location list for active-buffer diagnostics"), None)
+            }
+            "diagnostics_picker" => {
+                (Cow::Borrowed("open picker for active-buffer diagnostics"), None)
+            }
+            "hover" => (Cow::Borrowed("request LSP hover at cursor"), None),
+            "insert_register" => {
+                (Cow::Borrowed("insert register contents at cursor"), Some("<register>"))
+            }
+            "gblame" => (Cow::Borrowed("show git blame metadata for current line"), None),
+            "gdiff" => (Cow::Borrowed("open git diff for current buffer in scratch view"), None),
+            "ghunkdiff" => (Cow::Borrowed("open git diff for current hunk in scratch view"), None),
+            "reindent" => (Cow::Borrowed("run core reindent on current selection or line"), None),
+            "buffer_picker" => (Cow::Borrowed("open buffer picker"), None),
+            "changed_file_picker" => (Cow::Borrowed("open git-changed-file picker"), None),
+            "jumplist_picker" => (Cow::Borrowed("open jump history picker"), None),
+            "last_picker" => (Cow::Borrowed("reopen previous picker"), None),
+            "files" => {
+                (Cow::Borrowed("open file picker rooted at current working directory"), None)
+            }
+            "file_picker" => {
+                (Cow::Borrowed("open file picker rooted at current buffer directory"), None)
+            }
+            "file_picker_in_current_directory" => {
+                (Cow::Borrowed("open file picker rooted at current working directory"), None)
+            }
+            "file_explorer" => (Cow::Borrowed("open explorer rooted at workspace"), None),
+            "file_explorer_in_current_buffer_directory" => {
+                (Cow::Borrowed("open explorer rooted at current buffer directory"), None)
+            }
+            "file_explorer_in_current_directory" => {
+                (Cow::Borrowed("open explorer rooted at current working directory"), None)
+            }
+            "workspace_diagnostics_picker" => {
+                (Cow::Borrowed("open picker for workspace diagnostics"), None)
+            }
+            "global_search" => (Cow::Borrowed("open workspace live-grep picker"), None),
+            "grep" => (Cow::Borrowed("open live grep picker seeded with query"), Some("<query>")),
+            "reload_config" => {
+                (Cow::Borrowed("refresh frontend config and keymap overrides"), None)
+            }
+            "set_language" => {
+                (Cow::Borrowed("set or show current syntax name"), Some("[language]"))
+            }
+            "lsp_restart" => (Cow::Borrowed("restart language-server plugin"), None),
+            "lsp_stop" => (Cow::Borrowed("stop language-server plugin"), None),
+            "change_current_directory" => {
+                (Cow::Borrowed("switch current working directory"), Some("<path>"))
+            }
+            "show_directory" => (Cow::Borrowed("print current working directory"), None),
+            "create_directory" => (
+                Cow::Borrowed("create directory tree under current workspace root"),
+                Some("<path>"),
+            ),
+            "read" => (Cow::Borrowed("insert file contents at cursor"), Some("<path>")),
+            "move" => (Cow::Borrowed("move current buffer to new path"), Some("<path>")),
+            "pipe" => (
+                Cow::Borrowed("replace selections with shell command output"),
+                Some("<shell-command>"),
+            ),
+            "pipe_to" => (
+                Cow::Borrowed("run shell command for each selection and ignore stdout"),
+                Some("<shell-command>"),
+            ),
+            "shell_insert_output" => {
+                (Cow::Borrowed("insert shell output before selections"), Some("<shell-command>"))
+            }
+            "shell_append_output" => {
+                (Cow::Borrowed("append shell output after selections"), Some("<shell-command>"))
+            }
+            "shell_keep_pipe" => (
+                Cow::Borrowed("keep selections whose shell command exits successfully"),
+                Some("<shell-command>"),
+            ),
+            "encoding" => {
+                (Cow::Borrowed("show or set current buffer encoding metadata"), Some("[name]"))
+            }
+            "clear_register" => {
+                (Cow::Borrowed("clear one register or all registers"), Some("[register]"))
+            }
+            "echo" => (Cow::Borrowed("print arguments to status line"), Some("[text...]")),
+            "redraw" => (Cow::Borrowed("clear and repaint UI"), None),
+            "selection_for_find" => (Cow::Borrowed("lift selection into find"), None),
+            "selection_for_replace" => (Cow::Borrowed("lift selection into replace"), None),
+            "selection_into_lines" => {
+                (Cow::Borrowed("split selection into per-line cursors"), None)
+            }
+            "select_regex" => {
+                (Cow::Borrowed("select regex matches inside current selections"), Some("<pattern>"))
+            }
+            "split_selection_on_newline" => {
+                (Cow::Borrowed("split selections on line boundaries"), None)
+            }
+            "merge_selections" | "merge_consecutive_selections" => {
+                (Cow::Borrowed("combine active selections"), None)
+            }
+            "trim_selections" => (Cow::Borrowed("trim current selections"), None),
+            "collapse_selection" => (Cow::Borrowed("collapse selections to cursor points"), None),
+            "align_selections" => (Cow::Borrowed("pad selections into aligned columns"), None),
+            "align_it" => (
+                Cow::Borrowed("align matched lines tabular-style in selection, range, or block"),
+                Some("[N|*|-N]<delimiter>|/regex/ [l1r1l0]"),
+            ),
+            "flip_selections" => (Cow::Borrowed("flip selection direction"), None),
+            "ensure_selections_forward" => {
+                (Cow::Borrowed("rewrite selections to forward direction"), None)
+            }
+            "join_selections" => (Cow::Borrowed("join selected lines"), None),
+            "join_selections_space" => (Cow::Borrowed("join selected lines with spaces"), None),
+            "select_textobject_inner" => {
+                (Cow::Borrowed("select inner text object at cursor"), Some("<spec>"))
+            }
+            "select_textobject_around" => {
+                (Cow::Borrowed("select outer text object at cursor"), Some("<spec>"))
+            }
+            "surround_add" => (Cow::Borrowed("add surrounding delimiters"), Some("<pair> [spec]")),
+            "surround_replace" => (Cow::Borrowed("replace surrounding delimiters"), Some("<pair>")),
+            "surround_delete" => (Cow::Borrowed("delete surrounding delimiters"), None),
+            "keep_selections" => (Cow::Borrowed("keep selections matching regex"), Some("[regex]")),
+            "remove_selections" => {
+                (Cow::Borrowed("remove selections matching regex"), Some("[regex]"))
+            }
+            "keep_primary_selection" => (Cow::Borrowed("keep primary selection only"), None),
+            "remove_primary_selection" => (Cow::Borrowed("drop primary selection"), None),
+            "expand_selection" => (Cow::Borrowed("grow syntax-node selections"), None),
+            "shrink_selection" => (Cow::Borrowed("restore previous syntax-node selections"), None),
+            "rotate_selections_backward" => {
+                (Cow::Borrowed("cycle primary selection backward"), None)
+            }
+            "rotate_selections_forward" => (Cow::Borrowed("cycle primary selection forward"), None),
+            "commit_undo_checkpoint" => {
+                (Cow::Borrowed("split subsequent edits into a fresh undo step"), None)
+            }
+            "multi_find" => {
+                (Cow::Borrowed("run backend multi-find queries"), Some("<term> [term ...]"))
+            }
+            "set" => {
+                (Cow::Borrowed("change editor options inline"), Some("<option>|<option>=<value>"))
+            }
+            "nohlsearch" => (Cow::Borrowed("clear search highlighting"), None),
+            "quickfix_open" => (Cow::Borrowed("open quickfix list"), None),
+            "quickfix_close" => (Cow::Borrowed("close quickfix list"), None),
+            "quickfix_next" => (Cow::Borrowed("jump to next quickfix entry"), None),
+            "quickfix_prev" => (Cow::Borrowed("jump to previous quickfix entry"), None),
+            "quickfix_first" => (Cow::Borrowed("jump to first quickfix entry"), None),
+            "quickfix_last" => (Cow::Borrowed("jump to last quickfix entry"), None),
+            "quickfix_select" => (Cow::Borrowed("jump to quickfix entry"), Some("[N]")),
+            "quickfix_list" => (Cow::Borrowed("print quickfix entries to status line"), None),
+            "location_list_open" => (Cow::Borrowed("open location list"), None),
+            "location_list_close" => (Cow::Borrowed("close location list"), None),
+            "location_list_next" => (Cow::Borrowed("jump to next location-list entry"), None),
+            "location_list_prev" => (Cow::Borrowed("jump to previous location-list entry"), None),
+            "location_list_first" => (Cow::Borrowed("jump to first location-list entry"), None),
+            "location_list_last" => (Cow::Borrowed("jump to last location-list entry"), None),
+            "location_list_select" => (Cow::Borrowed("jump to location-list entry"), Some("[N]")),
+            "buffers" => (Cow::Borrowed("print open buffers to status line"), None),
+            "buffer_close" => (Cow::Borrowed("close current buffer"), None),
+            "buffer_close_force" => {
+                (Cow::Borrowed("force-close current buffer without pristine check"), None)
+            }
+            "buffer_close_others" => (Cow::Borrowed("close non-active buffers"), None),
+            "buffer_close_others_force" => (Cow::Borrowed("force-close non-active buffers"), None),
+            "buffer_close_all" => (Cow::Borrowed("close all buffers"), None),
+            "buffer_close_all_force" => (Cow::Borrowed("force-close all buffers"), None),
+            "tab_edit" => (Cow::Borrowed("open buffer in new tab"), Some("[path]")),
+            "tab_close" => (Cow::Borrowed("close current tab"), None),
+            "tab_next" => (Cow::Borrowed("cycle to next tab"), None),
+            "tab_prev" => (Cow::Borrowed("cycle to previous tab"), None),
+            "tabs" => (Cow::Borrowed("print tab list"), None),
+            _ => (Cow::Owned(humanize_command_summary(canonical_id)), None),
+        };
+
+        CommandMetadata { summary, usage, category }
+    }
+
+    fn format_command_help_item(canonical_id: &str) -> String {
+        let aliases = Self::ordered_aliases_for(canonical_id)
+            .into_iter()
+            .map(|alias| format!(":{alias}"))
+            .collect::<Vec<_>>()
+            .join(" / ");
+        let spec = Self::canonical_command_spec(canonical_id);
+        let category = spec.category.expect("registry metadata missing command category");
+        match spec.usage {
+            Some(usage) => format!("[{category}] {aliases} {usage} {}", spec.summary),
+            None => format!("[{category}] {aliases} {}", spec.summary),
+        }
+    }
+
+    fn rewrite_command_alias(command: &str) -> Cow<'_, str> {
+        let trimmed = command.trim_start();
+        if trimmed.is_empty() {
+            return Cow::Borrowed(command);
+        }
+
+        let split_at = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+        let head = &trimmed[..split_at];
+        let tail = trimmed[split_at..].trim_start();
+        let Some(spec) = Self::resolve_ex_command(head) else {
+            return Cow::Borrowed(command);
+        };
+        if spec.dispatch == head {
+            return Cow::Borrowed(command);
+        }
+
+        let mut rewritten = String::from(spec.dispatch);
+        if !tail.is_empty() {
+            rewritten.push(' ');
+            rewritten.push_str(tail);
+        }
+        Cow::Owned(rewritten)
+    }
+
     const LSP_PLUGIN_NAME: &'static str = "xi-lsp-plugin";
 
     fn current_workspace_root(&self) -> PathBuf {
@@ -257,6 +1273,8 @@ impl App {
         let line_count = self.backend.line_count().max(1);
         let (range, rest) = parse_ex_range(&raw, cursor_line, line_count, &self.marks);
         let command = rest.trim_start();
+        let command = Self::rewrite_command_alias(command);
+        let command = command.as_ref();
 
         match crate::terminal::parse_command(command) {
             Ok(Some(shell_command)) => {
@@ -1712,344 +2730,9 @@ impl App {
     }
 
     pub(super) fn complete_command(&mut self) {
-        const COMMANDS: &[&str] = &[
-            "b#",
-            "bc",
-            "bc!",
-            "bd",
-            "bdelete",
-            "bclose",
-            "bclose!",
-            "bcloseall",
-            "bcloseall!",
-            "bcloseother",
-            "bcloseother!",
-            "bca",
-            "bca!",
-            "bco",
-            "bco!",
-            "buffer_close!",
-            "buffer_close",
-            "buffer_close_all",
-            "buffer_close_all!",
-            "buffer_close_others",
-            "buffer_close_others!",
-            "bn",
-            "bnext",
-            "goto_next_buffer",
-            "bp",
-            "bprev",
-            "bprevious",
-            "goto_previous_buffer",
-            "buffers",
-            "cc",
-            "ccl",
-            "cclose",
-            "cfirst",
-            "cl",
-            "clast",
-            "clist",
-            "cn",
-            "cnext",
-            "cope",
-            "copen",
-            "cp",
-            "cprev",
-            "cprevious",
-            "codeaction",
-            "codeactions",
-            "code_action",
-            "complete",
-            "completion",
-            "command_palette",
-            "d",
-            "def",
-            "definition",
-            "goto_declaration",
-            "goto_definition",
-            "goto_type_definition",
-            "goto_reference",
-            "goto_implementation",
-            "delete",
-            "diagnostics",
-            "e",
-            "goto_last_accessed_file",
-            "goto_last_modified_file",
-            "e!",
-            "edit",
-            "goto_window_bottom",
-            "goto_window_center",
-            "goto_window_top",
-            "edit!",
-            "g",
-            "commands",
-            "create_directory",
-            "decrement",
-            "delete_char_backward",
-            "delete_char_forward",
-            "delete_word_backward",
-            "delete_word_forward",
-            "duplicate_line",
-            "files",
-            "file_explorer",
-            "file_explorer_in_current_buffer_directory",
-            "file_explorer_in_current_directory",
-            "file_picker",
-            "file_picker_in_current_directory",
-            "format",
-            "grep",
-            "global_search",
-            "buffer_picker",
-            "changed_file_picker",
-            "gblame",
-            "gdiff",
-            "ghunkdiff",
-            "goto",
-            "goto_column",
-            "goto_first_change",
-            "goto_first_diag",
-            "goto_first_nonwhitespace",
-            "goto_last_change",
-            "goto_last_diag",
-            "goto_last_modification",
-            "goto_next_change",
-            "goto_next_class",
-            "goto_next_comment",
-            "goto_next_diag",
-            "goto_next_function",
-            "goto_next_paragraph",
-            "goto_next_parameter",
-            "goto_next_test",
-            "goto_prev_change",
-            "goto_prev_class",
-            "goto_prev_comment",
-            "goto_prev_diag",
-            "goto_prev_function",
-            "goto_prev_paragraph",
-            "goto_prev_parameter",
-            "goto_prev_test",
-            "goto_word",
-            "lang",
-            "hs",
-            "hsplit",
-            "help",
-            "hover",
-            "increment",
-            "insert_newline",
-            "insert_register",
-            "insert_tab",
-            "keymap",
-            "kill_line",
-            "kill_to_line_end",
-            "kill_to_line_start",
-            "lcl",
-            "lclose",
-            "lfirst",
-            "llast",
-            "lsp_restart",
-            "lsp_stop",
-            "ln",
-            "lnext",
-            "lop",
-            "lopen",
-            "lp",
-            "lprev",
-            "lprevious",
-            "ls",
-            "multi_find",
-            "make",
-            "move",
-            "move_parent_node_end",
-            "move_parent_node_start",
-            "mv",
-            "n",
-            "new",
-            "o",
-            "open",
-            "pipe",
-            "pipe_to",
-            "pwd",
-            "q",
-            "q!",
-            "qa",
-            "qa!",
-            "quit",
-            "quit!",
-            "quit_all",
-            "quit_all!",
-            "recover",
-            "recoverdel",
-            "reload_config",
-            "reset_diff_change",
-            "reindent",
-            "rename",
-            "references",
-            "refs",
-            "reload",
-            "reload_all",
-            "rl",
-            "rla",
-            "read",
-            "redraw",
-            "run",
-            "run_shell_command",
-            "shell_append_output",
-            "shell_insert_output",
-            "shell_keep_pipe",
-            "shell_pipe",
-            "shell_pipe_to",
-            "selection_for_find",
-            "selection_for_replace",
-            "select_regex",
-            "selection_into_lines",
-            "set_language",
-            "sh",
-            "show_directory",
-            "split_selection",
-            "split_selection_on_newline",
-            "merge_selections",
-            "merge_consecutive_selections",
-            "trim_selections",
-            "align_selections",
-            "align_it",
-            "collapse_selection",
-            "clear_register",
-            "flip_selections",
-            "echo",
-            "encoding",
-            "ensure_selections_forward",
-            "expand_selection",
-            "extend_char_left",
-            "extend_char_right",
-            "extend_line_above",
-            "extend_line_below",
-            "extend_line_down",
-            "extend_line_up",
-            "extend_to_line_bounds",
-            "extend_to_file_end",
-            "extend_to_file_start",
-            "extend_visual_line_down",
-            "extend_visual_line_up",
-            "join_selections",
-            "join_selections_space",
-            "jumplist_picker",
-            "keep_selections",
-            "keep_primary_selection",
-            "last_picker",
-            "match_brackets",
-            "move_line_down",
-            "move_line_up",
-            "goto_file_end",
-            "remove_selections",
-            "remove_primary_selection",
-            "rotate_selections_backward",
-            "rotate_selections_forward",
-            "select_line_above",
-            "select_line_below",
-            "select_all_children",
-            "select_all_siblings",
-            "symbol_picker",
-            "swift",
-            "swift_motion",
-            "select_textobject_around",
-            "select_textobject_inner",
-            "select_next_sibling",
-            "select_prev_sibling",
-            "select_references_to_symbol_under_cursor",
-            "shrink_selection",
-            "shrink_to_line_bounds",
-            "copy_selection_on_next_line",
-            "copy_selection_on_prev_line",
-            "surround_add",
-            "surround_delete",
-            "surround_replace",
-            "workspace_diagnostics_picker",
-            "workspace_symbol_picker",
-            "add_newline_above",
-            "add_newline_below",
-            "reverse_selection_contents",
-            "rotate_selection_contents_backward",
-            "rotate_selection_contents_forward",
-            "select_all",
-            "sp",
-            "split",
-            "tabc",
-            "tabclose",
-            "tabe",
-            "tabedit",
-            "tabn",
-            "tabnext",
-            "tabnew",
-            "tabp",
-            "tabprev",
-            "tabprevious",
-            "tabs",
-            "rotate_view",
-            "cycle_view",
-            "rotate_view_reverse",
-            "transpose_view",
-            "wclose",
-            "wonly",
-            "jump_view_left",
-            "jump_view_down",
-            "jump_view_up",
-            "jump_view_right",
-            "swap_view_left",
-            "swap_view_down",
-            "swap_view_up",
-            "swap_view_right",
-            "term",
-            "terminal",
-            "test",
-            "transpose",
-            "sort",
-            "uniq",
-            "dedup",
-            "add_selection_above",
-            "add_selection_below",
-            "change_current_directory",
-            "cd",
-            "commit_undo_checkpoint",
-            "diffget",
-            "diffg",
-            "|",
-            "vs",
-            "vsplit",
-            "w",
-            "w!",
-            "wq",
-            "wq!",
-            "wa",
-            "wa!",
-            "write!",
-            "write_all",
-            "write_all!",
-            "write_quit",
-            "write_quit!",
-            "write_quit_all",
-            "write_quit_all!",
-            "write",
-            "wqa",
-            "wqa!",
-            "x",
-            "x!",
-            "xa",
-            "xa!",
-            "y",
-            "yank",
-            "paste_clipboard_after",
-            "paste_clipboard_before",
-            "yank_to_clipboard",
-            "yank_main_selection_to_clipboard",
-            "replace_selections_with_clipboard",
-            "paste_primary_clipboard_after",
-            "paste_primary_clipboard_before",
-            "yank_to_primary_clipboard",
-            "yank_main_selection_to_primary_clipboard",
-            "replace_selections_with_primary_clipboard",
-        ];
         let prefix = self.command_buffer.clone();
-        let candidates: Vec<&&str> = COMMANDS.iter().filter(|c| c.starts_with(&*prefix)).collect();
+        let candidates: Vec<&&str> =
+            Self::ex_command_names().iter().filter(|c| c.starts_with(&*prefix)).collect();
         if let Some(&&first) = candidates.first() {
             self.command_buffer = first.to_owned();
         }
@@ -2508,164 +3191,127 @@ impl App {
 
     fn help_items() -> Vec<String> {
         vec![
-            "Discovery: :commands | :keymap".to_owned(),
-            "Modes: i insert | v visual | V visual-line | Ctrl-V visual-block | : command".to_owned(),
+            format!(
+                "Discovery: {} | {}",
+                Self::command_brief("commands"),
+                Self::command_brief("keymap")
+            ),
+            "Modes: i insert | v visual | V visual-line | Ctrl-V visual-block | : command"
+                .to_owned(),
             "Move: h j k l | w b e | gg G | % | * # | n N".to_owned(),
-            "Edit: d c y operators | p/P register paste | u undo | Ctrl-R redo | . repeat".to_owned(),
-            "IDE: :hover :complete :codeaction :definition :references :rename :diagnostics".to_owned(),
-            "Backend ops: :transpose :duplicate_line :increment :decrement :reindent".to_owned(),
-            "Selections: :select_regex :selection_into_lines :trim_selections :collapse_selection :select_all".to_owned(),
-            "Search sets: :multi_find term [term ...]".to_owned(),
-            "Shell: :term cmd | :!cmd | :make [args] | :test [args] | :run [args]".to_owned(),
-            "Workspace: :file_picker :file_picker_in_current_directory :buffer_picker :changed_file_picker :symbol_picker :workspace_symbol_picker :diagnostics_picker :workspace_diagnostics_picker :last_picker".to_owned(),
-            "Explorer: :file_explorer :file_explorer_in_current_buffer_directory :file_explorer_in_current_directory".to_owned(),
+            "Edit: d c y operators | p/P register paste | u undo | Ctrl-R redo | . repeat"
+                .to_owned(),
+            format!(
+                "IDE: {} | {} | {} | {} | {} | {} | {}",
+                Self::command_brief("hover"),
+                Self::command_brief("complete"),
+                Self::command_brief("codeaction"),
+                Self::command_brief("definition"),
+                Self::command_brief("references"),
+                Self::command_brief("rename"),
+                Self::command_brief("diagnostics")
+            ),
+            format!(
+                "Backend ops: {} {} {} {} {}",
+                Self::command_name("transpose"),
+                Self::command_name("duplicate_line"),
+                Self::command_name("increment"),
+                Self::command_name("decrement"),
+                Self::command_name("reindent")
+            ),
+            format!(
+                "Selections: {} {} {} {} {}",
+                Self::command_name("select_regex"),
+                Self::command_name("selection_into_lines"),
+                Self::command_name("trim_selections"),
+                Self::command_name("collapse_selection"),
+                Self::command_name("select_all")
+            ),
+            format!("Search sets: {}", Self::command_brief("multi_find")),
+            format!(
+                "Shell: {} | !command shorthand shell runner | {} | {} | {}",
+                Self::command_brief("term"),
+                Self::command_brief("make"),
+                Self::command_brief("test"),
+                Self::command_brief("run")
+            ),
+            format!(
+                "Workspace: {} {} {} {} {} {} {} {} {}",
+                Self::command_name("file_picker"),
+                Self::command_name("file_picker_in_current_directory"),
+                Self::command_name("buffer_picker"),
+                Self::command_name("changed_file_picker"),
+                Self::command_name("symbol_picker"),
+                Self::command_name("workspace_symbol_picker"),
+                Self::command_name("diagnostics_picker"),
+                Self::command_name("workspace_diagnostics_picker"),
+                Self::command_name("last_picker")
+            ),
+            format!(
+                "Explorer: {} {} {}",
+                Self::command_name("file_explorer"),
+                Self::command_name("file_explorer_in_current_buffer_directory"),
+                Self::command_name("file_explorer_in_current_directory")
+            ),
         ]
     }
 
     fn command_help_items() -> Vec<String> {
-        vec![
-            ":help open searchable editor help".to_owned(),
-            ":commands list ex commands and features".to_owned(),
-            ":keymap list high-value normal-mode bindings".to_owned(),
-            ":hover request LSP hover at cursor".to_owned(),
-            ":command_palette open searchable command reference picker".to_owned(),
-            ":term cmd run shell command and open transcript buffer".to_owned(),
-            ":!cmd shorthand shell command runner".to_owned(),
-            ":run_shell_command / :sh aliases for :term shell-command".to_owned(),
-            ":make [args] run cargo build in transcript buffer".to_owned(),
-            ":test [args] run cargo test in transcript buffer".to_owned(),
-            ":run [args] run cargo run in transcript buffer".to_owned(),
-            ":open / :o open file in current view | :new create scratch buffer".to_owned(),
-            ":hsplit / :hs open file in horizontal split | :goto / :g jump to line".to_owned(),
-            ":goto_column <column> move cursor to 1-based display column on current line".to_owned(),
-            ":goto_first_nonwhitespace jump to first non-whitespace character on current line"
-                .to_owned(),
-            ":goto_last_modification jump to previous entry in change list".to_owned(),
-            ":goto_declaration / :goto_definition / :goto_type_definition / :goto_reference / :goto_implementation request LSP navigation at cursor"
-                .to_owned(),
-            ":goto_next_buffer / :goto_previous_buffer cycle open buffers".to_owned(),
-            ":goto_window_top / :goto_window_center / :goto_window_bottom jump cursor inside visible window"
-                .to_owned(),
-            ":goto_last_accessed_file / :goto_last_modified_file switch recent buffers"
-                .to_owned(),
-            ":goto_next_diag / :goto_prev_diag / :goto_first_diag / :goto_last_diag jump active-buffer diagnostics"
-                .to_owned(),
-            ":goto_word move to next word start using normal word semantics".to_owned(),
-            ":swift_motion / :swift start visible-window two-char jump with labels".to_owned(),
-            ":write! :write_all :write_quit :write_quit_all add Vim-style aliases".to_owned(),
-            ":buffer_close :buffer_close_others :buffer_close_all manage buffers".to_owned(),
-            ":reload / :reload_all discard edits and reopen from disk".to_owned(),
-            ":reload_config refresh frontend config and keymap overrides".to_owned(),
-            ":lsp_restart / :lsp_stop restart or stop language-server plugin".to_owned(),
-            ":change_current_directory / :cd switch current working directory | :show_directory / :pwd print cwd"
-                .to_owned(),
-            ":create_directory <path> create directory tree under current workspace root"
-                .to_owned(),
-            ":rotate_view / :rotate_view_reverse / :transpose_view / :jump_view_* / :swap_view_* / :wclose / :wonly manage split focus and ordering"
-                .to_owned(),
-            ":set_language / :lang set or show current syntax name".to_owned(),
-            ":read / :r insert file contents at cursor".to_owned(),
-            ":move / :mv move current buffer to new path".to_owned(),
-            ":encoding show or set current buffer encoding metadata".to_owned(),
-            ":clear_register [name] clear one register or all registers".to_owned(),
-            ":insert_register <name> insert register contents at cursor".to_owned(),
-            ":echo print arguments to status line | :redraw clear and repaint UI".to_owned(),
-            ":pipe / :| / :pipe_to run shell commands on current selections".to_owned(),
-            ":shell_insert_output / :shell_append_output insert shell output around selections"
-                .to_owned(),
-            ":shell_keep_pipe keep selections whose shell command exits successfully".to_owned(),
-            ":gblame show git blame metadata for current line".to_owned(),
-            ":gdiff open git diff for current buffer in scratch view".to_owned(),
-            ":ghunkdiff open git diff for current hunk in scratch view".to_owned(),
-            ":global_search open workspace live-grep picker".to_owned(),
-            ":goto_next_change / :goto_prev_change / :goto_first_change / :goto_last_change jump across git hunks"
-                .to_owned(),
-            ":reset_diff_change / :diffget / :diffg restore current git hunk from HEAD"
-                .to_owned(),
-            ":complete / :completion open completion picker from backend suggestions".to_owned(),
-            ":codeaction / :code_action open backend code-action picker".to_owned(),
-            ":rename new_name request backend rename at cursor".to_owned(),
-            ":select_references_to_symbol_under_cursor request backend references at cursor"
-                .to_owned(),
-            ":diagnostics open location list for active-buffer diagnostics".to_owned(),
-            ":file_picker / :file_picker_in_current_directory open file pickers rooted at buffer dir or cwd".to_owned(),
-            ":file_explorer / :file_explorer_in_current_buffer_directory / :file_explorer_in_current_directory open explorer-style pickers rooted at workspace, buffer dir, or cwd".to_owned(),
-            ":buffer_picker / :changed_file_picker open buffer or git-changed-file pickers".to_owned(),
-            ":symbol_picker / :workspace_symbol_picker request symbol pickers".to_owned(),
-            ":diagnostics_picker / :workspace_diagnostics_picker open diagnostic pickers".to_owned(),
-            ":jumplist_picker / :last_picker open jump history or reopen prior picker".to_owned(),
-            ":reindent run core reindent on current selection or line".to_owned(),
-            ":toggle_comments toggle comments using line comment when available, else block comment"
-                .to_owned(),
-            ":toggle_line_comments force line-comment toggle on current selection or line"
-                .to_owned(),
-            ":toggle_block_comments force block-comment toggle on current selection or line"
-                .to_owned(),
-            ":transpose backend transpose at cursor".to_owned(),
-            ":sort sort selected lines or whole buffer when nothing is selected".to_owned(),
-            ":uniq / :dedup remove duplicate lines from selection or whole buffer".to_owned(),
-            ":duplicate_line backend duplicate current selection line(s)".to_owned(),
-            ":increment / :decrement adjust number under cursor".to_owned(),
-            ":selection_for_find / :selection_for_replace lift selection into find or replace"
-                .to_owned(),
-            ":selection_into_lines split selection into per-line cursors".to_owned(),
-            ":select_regex pattern select regex matches inside current selections".to_owned(),
-            ":split_selection_on_newline split selections on line boundaries".to_owned(),
-            ":merge_selections / :merge_consecutive_selections combine active selections"
-                .to_owned(),
-            ":trim_selections / :collapse_selection normalize current selections".to_owned(),
-            ":align_selections pad selections into aligned columns".to_owned(),
-            ":align_it [N|*|-N]<delimiter>|/regex/ [l1r1l0] align matched lines tabular-style in selection, range, or contiguous block".to_owned(),
-            ":flip_selections / :ensure_selections_forward rewrite selection direction".to_owned(),
-            ":move_line_up / :move_line_down swap current line with adjacent line".to_owned(),
-            ":match_brackets jump to matching bracket around cursor".to_owned(),
-            ":extend_char_left / :extend_char_right / :extend_line_up / :extend_line_down / :extend_visual_line_up / :extend_visual_line_down grow selections with motions"
-                .to_owned(),
-            ":extend_line_above / :extend_line_below / :select_line_above / :select_line_below rewrite whole-line selections"
-                .to_owned(),
-            ":goto_file_end / :extend_to_file_start / :extend_to_file_end jump or extend to document edges"
-                .to_owned(),
-            ":extend_to_line_bounds / :shrink_to_line_bounds rewrite line selections"
-                .to_owned(),
-            ":join_selections / :join_selections_space join selected lines".to_owned(),
-            ":select_textobject_inner <spec> / :select_textobject_around <spec> select text object at cursor"
-                .to_owned(),
-            ":surround_add <pair> [spec] / :surround_replace <pair> / :surround_delete edit surrounding delimiters"
-                .to_owned(),
-            ":keep_selections [regex] / :remove_selections [regex] filter selections"
-                .to_owned(),
-            ":keep_primary_selection / :remove_primary_selection keep or drop primary selection"
-                .to_owned(),
-            ":rotate_selections_backward / :rotate_selections_forward cycle primary selection"
-                .to_owned(),
-            ":expand_selection / :shrink_selection grow or restore syntax-node selections"
-                .to_owned(),
-            ":select_prev_sibling / :select_next_sibling / :select_all_siblings / :select_all_children syntax-tree multi-selection"
-                .to_owned(),
-            ":move_parent_node_start / :move_parent_node_end jump cursor to parent syntax node boundary"
-                .to_owned(),
-            ":goto_next_function / :goto_prev_function / :goto_next_class / :goto_prev_class syntax-aware structural jumps"
-                .to_owned(),
-            ":goto_next_parameter / :goto_prev_parameter / :goto_next_comment / :goto_prev_comment / :goto_next_test / :goto_prev_test / :goto_next_paragraph / :goto_prev_paragraph"
-                .to_owned(),
-            ":copy_selection_on_next_line / :copy_selection_on_prev_line clone selection to adjacent line"
-                .to_owned(),
-            ":rotate_selection_contents_backward / :rotate_selection_contents_forward cycle selected text"
-                .to_owned(),
-            ":reverse_selection_contents reverse characters inside each selection".to_owned(),
-            ":commit_undo_checkpoint split subsequent edits into a fresh undo step"
-                .to_owned(),
-            ":select_all select entire buffer".to_owned(),
-            ":delete_word_backward / :delete_word_forward delete adjacent word".to_owned(),
-            ":kill_to_line_start / :kill_to_line_end delete to line bound".to_owned(),
-            ":kill_line remove current line".to_owned(),
-            ":delete_char_backward / :delete_char_forward delete adjacent char".to_owned(),
-            ":insert_newline insert line ending at cursor".to_owned(),
-            ":add_newline_above / :add_newline_below insert blank line without entering insert mode"
-                .to_owned(),
-            ":add_selection_above / :add_selection_below grow multi-cursor set".to_owned(),
-            ":multi_find term [term ...] run backend multi-find queries".to_owned(),
-        ]
+        Self::command_help_canonical_ids()
+            .iter()
+            .copied()
+            .map(Self::format_command_help_item)
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn command_registry_aliases() -> Vec<&'static str> {
+        Self::ex_command_names().to_vec()
+    }
+
+    #[cfg(test)]
+    fn documented_command_aliases() -> Vec<String> {
+        Self::command_help_items()
+            .iter()
+            .flat_map(|line| {
+                line.split_whitespace().filter_map(|token| {
+                    token
+                        .strip_prefix(':')
+                        .map(|alias| alias.trim_end_matches('/').trim_end_matches(',').to_owned())
+                })
+            })
+            .filter(|alias| Self::resolve_ex_command(alias).is_some())
+            .collect()
+    }
+
+    #[cfg(test)]
+    fn claimed_command_aliases() -> Vec<String> {
+        Self::command_help_items()
+            .iter()
+            .flat_map(|line| {
+                line.split_whitespace().filter_map(|token| {
+                    token
+                        .strip_prefix(':')
+                        .map(|alias| alias.trim_end_matches('/').trim_end_matches(',').to_owned())
+                })
+            })
+            .collect()
+    }
+
+    fn command_brief(canonical_id: &str) -> String {
+        let alias =
+            Self::ordered_aliases_for(canonical_id).into_iter().next().unwrap_or(canonical_id);
+        let spec = Self::canonical_command_spec(canonical_id);
+        match spec.usage {
+            Some(usage) => format!(":{alias} {usage} {}", spec.summary),
+            None => format!(":{alias} {}", spec.summary),
+        }
+    }
+
+    fn command_name(canonical_id: &str) -> String {
+        let alias =
+            Self::ordered_aliases_for(canonical_id).into_iter().next().unwrap_or(canonical_id);
+        format!(":{alias}")
     }
 
     fn keymap_help_items() -> Vec<String> {
@@ -2687,6 +3333,150 @@ impl App {
             "Ctrl-O / Tab jump list older/newer".to_owned(),
             "g; / g, change list older/newer".to_owned(),
         ]
+    }
+}
+
+#[cfg(test)]
+mod command_registry_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn command_registry_keeps_aliases_unique() {
+        let aliases = App::command_registry_aliases();
+        assert_eq!(aliases.len(), App::command_specs().len());
+        let unique = aliases.iter().copied().collect::<HashSet<_>>();
+        assert_eq!(aliases.len(), unique.len());
+    }
+
+    #[test]
+    fn command_registry_resolves_aliases_to_canonical_dispatch() {
+        let completion = App::resolve_ex_command("completion").unwrap();
+        assert_eq!(completion.canonical_id, "complete");
+        assert_eq!(completion.dispatch, "complete");
+
+        let terminal = App::resolve_ex_command("terminal").unwrap();
+        assert_eq!(terminal.canonical_id, "term");
+        assert_eq!(terminal.dispatch, "term");
+
+        let pipe = App::resolve_ex_command("|").unwrap();
+        assert_eq!(pipe.canonical_id, "pipe");
+        assert_eq!(pipe.dispatch, "pipe");
+    }
+
+    #[test]
+    fn command_registry_rewrite_preserves_tail() {
+        assert_eq!(
+            App::rewrite_command_alias("terminal cargo test -p ee-cli").as_ref(),
+            "term cargo test -p ee-cli"
+        );
+        assert_eq!(App::rewrite_command_alias("completion").as_ref(), "complete");
+        assert_eq!(App::rewrite_command_alias("goto_next_function").as_ref(), "goto_next_function");
+    }
+
+    #[test]
+    fn command_registry_preserves_existing_completion_order_for_prefixes() {
+        let aliases = App::command_registry_aliases();
+        let wr = aliases.iter().copied().find(|alias| alias.starts_with("wr")).unwrap();
+        assert_eq!(wr, "write!");
+
+        let bp = aliases.iter().copied().find(|alias| alias.starts_with("bp")).unwrap();
+        assert_eq!(bp, "bp");
+
+        let ed = aliases.iter().copied().find(|alias| alias.starts_with("ed")).unwrap();
+        assert_eq!(ed, "edit");
+    }
+
+    #[test]
+    fn command_help_items_document_phase_three_aliases() {
+        let help = App::command_help_items().join("\n");
+        assert!(help.contains(":config_reload"));
+        assert!(help.contains(":bpick"));
+        assert!(help.contains(":outline"));
+        assert!(help.contains(":wsymbols"));
+        assert!(help.contains(":set"));
+    }
+
+    #[test]
+    fn completion_now_covers_new_registry_aliases() {
+        let mut app = App::from_path(None).unwrap();
+
+        app.command_buffer = String::from("conf");
+        app.complete_command();
+        assert_eq!(app.command_buffer, "config_reload");
+
+        app.command_buffer = String::from("nohl");
+        app.complete_command();
+        assert_eq!(app.command_buffer, "nohlsearch");
+
+        app.command_buffer = String::from("wsy");
+        app.complete_command();
+        assert_eq!(app.command_buffer, "wsymbol");
+    }
+
+    #[test]
+    fn completable_aliases_all_resolve_through_registry() {
+        let unresolved: Vec<_> = App::command_registry_aliases()
+            .into_iter()
+            .filter(|alias| App::resolve_ex_command(alias).is_none())
+            .collect();
+        assert!(unresolved.is_empty(), "completion aliases missing from registry: {unresolved:?}");
+    }
+
+    #[test]
+    fn command_help_rows_only_claim_resolvable_aliases() {
+        let unresolved: Vec<_> = App::claimed_command_aliases()
+            .into_iter()
+            .filter(|alias| App::resolve_ex_command(alias).is_none())
+            .collect();
+        assert!(unresolved.is_empty(), "help rows mention unknown aliases: {unresolved:?}");
+    }
+
+    #[test]
+    fn command_help_rows_include_category_usage_and_grouped_aliases() {
+        let tab_row = App::format_command_help_item("tab_edit");
+        assert!(tab_row.starts_with("[windows] "));
+        assert!(tab_row.contains(":tabnew / :tabe / :tabedit [path]"));
+
+        let grep_row = App::format_command_help_item("grep");
+        assert!(grep_row.starts_with("[buffers] "));
+        assert!(grep_row.contains(":grep <query>"));
+
+        let complete_row = App::format_command_help_item("complete");
+        assert!(complete_row.contains(":complete / :completion"));
+
+        let substitute_row = App::format_command_help_item("substitute");
+        assert!(substitute_row.starts_with("[editing] "));
+        assert!(substitute_row.contains(":s / :substitute s/pattern/replacement/[flags]"));
+    }
+
+    #[test]
+    fn help_items_partially_reuse_registry_briefs() {
+        let help = App::help_items();
+        assert!(help[0].contains(":commands list ex commands and features"));
+        assert!(help[0].contains(":keymap list high-value normal-mode bindings"));
+        assert!(help[4].contains(":hover request LSP hover at cursor"));
+        assert!(
+            help[8].contains(":term <shell-command> run shell command and open transcript buffer")
+        );
+    }
+
+    #[test]
+    fn help_items_command_mentions_resolve_through_registry() {
+        let help = App::help_items();
+        let unresolved: Vec<_> = help
+            .iter()
+            .flat_map(|line| {
+                line.split_whitespace().filter_map(|token| {
+                    token
+                        .trim_matches(|ch: char| ch == '|' || ch == ',')
+                        .strip_prefix(':')
+                        .filter(|alias| !alias.is_empty())
+                })
+            })
+            .filter(|alias| App::resolve_ex_command(alias).is_none())
+            .collect();
+        assert!(unresolved.is_empty(), "general help mentions unknown aliases: {unresolved:?}");
     }
 }
 
@@ -2814,4 +3604,83 @@ fn validate_align_it_format(spec: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::App;
+
+    #[test]
+    fn command_help_items_cover_all_ex_commands() {
+        let help = App::command_help_items().join("\n");
+        let missing: Vec<_> = App::ex_command_names()
+            .iter()
+            .copied()
+            .filter(|command| !help.contains(&format!(":{command}")))
+            .collect();
+        assert!(missing.is_empty(), "missing commands from command palette: {missing:?}");
+    }
+
+    #[test]
+    fn documented_aliases_are_completable() {
+        let completable =
+            App::command_registry_aliases().into_iter().collect::<std::collections::HashSet<_>>();
+        let missing: Vec<_> = App::documented_command_aliases()
+            .into_iter()
+            .filter(|alias| !completable.contains(alias.as_str()))
+            .collect();
+        assert!(missing.is_empty(), "documented aliases missing from completion: {missing:?}");
+    }
+}
+
+fn humanize_command_summary(canonical_id: &str) -> String {
+    if let Some(rest) = canonical_id.strip_prefix("goto_next_") {
+        return format!("jump to next {}", rest.replace('_', " "));
+    }
+    if let Some(rest) = canonical_id.strip_prefix("goto_prev_") {
+        return format!("jump to previous {}", rest.replace('_', " "));
+    }
+    if let Some(rest) = canonical_id.strip_prefix("goto_first_") {
+        return format!("jump to first {}", rest.replace('_', " "));
+    }
+    if let Some(rest) = canonical_id.strip_prefix("goto_last_") {
+        return format!("jump to last {}", rest.replace('_', " "));
+    }
+    if let Some(rest) = canonical_id.strip_prefix("goto_") {
+        return format!("jump to {}", rest.replace('_', " "));
+    }
+    if let Some(rest) = canonical_id.strip_prefix("select_") {
+        return format!("select {}", rest.replace('_', " "));
+    }
+    if let Some(rest) = canonical_id.strip_prefix("move_") {
+        return format!("move {}", rest.replace('_', " "));
+    }
+    if let Some(rest) = canonical_id.strip_prefix("extend_") {
+        return format!("extend {}", rest.replace('_', " "));
+    }
+    if let Some(rest) = canonical_id.strip_prefix("rotate_") {
+        return format!("rotate {}", rest.replace('_', " "));
+    }
+    if let Some(rest) = canonical_id.strip_prefix("toggle_") {
+        return format!("toggle {}", rest.replace('_', " "));
+    }
+    if let Some(rest) = canonical_id.strip_prefix("add_") {
+        return format!("add {}", rest.replace('_', " "));
+    }
+    if let Some(rest) = canonical_id.strip_prefix("paste_") {
+        return format!("paste {}", rest.replace('_', " "));
+    }
+    if let Some(rest) = canonical_id.strip_prefix("yank_") {
+        return format!("yank {}", rest.replace('_', " "));
+    }
+    if let Some(rest) = canonical_id.strip_prefix("keep_") {
+        return format!("keep {}", rest.replace('_', " "));
+    }
+    if let Some(rest) = canonical_id.strip_prefix("remove_") {
+        return format!("remove {}", rest.replace('_', " "));
+    }
+    if let Some(rest) = canonical_id.strip_prefix("delete_") {
+        return format!("delete {}", rest.replace('_', " "));
+    }
+    canonical_id.replace('_', " ")
 }

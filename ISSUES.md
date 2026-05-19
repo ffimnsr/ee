@@ -94,6 +94,80 @@ Real next jump likely needs architectural change: first render from decoded pref
     - [ ] LSP success path still wins over tag fallback when both are available.
     - [ ] Large-buffer or unsupported-language cases fail closed with explicit status instead of expensive best-effort scan.
 
+### Keymap Help + Binding Discovery Unification
+
+- Rules:
+  - Keep keymap help derived from active binding data, not hand-maintained prose that can drift from actual defaults or user overrides.
+  - Respect user-configured keymaps. `:keymap` and any keybinding discovery UI must reflect effective bindings after config/custom sequence bindings load.
+  - Separate binding metadata from presentation. Binding tables stay source of truth; help rendering may group or filter them, but must not invent stale shortcuts.
+  - Preserve high-signal help output. Derived help should surface important bindings and descriptions without dumping unreadable raw tables by default.
+  - Every binding shown in keymap help must resolve in current mode/context, and every curated high-value binding policy must be testable.
+  - Every phase must land with regression coverage proving help output tracks both built-in bindings and user overrides.
+
+- [ ] Phase 0: freeze keymap-help scope and effective-binding contract.
+  - Why: current `keymap_help_items()` is curated static text; replacing it needs clear boundary between full binding inspection and concise discovery help.
+  - [ ] Define output contract.
+    - [ ] Decide whether `:keymap` should show curated high-value bindings, full effective binding table, or both views.
+    - [ ] Decide how sequences, mode-specific bindings, and prefix maps appear in help output.
+    - [ ] Decide whether hidden/internal bindings stay excluded from discovery output.
+  - [ ] Define effective-binding semantics.
+    - [ ] Confirm help reads post-config merged bindings, not compile-time defaults only.
+    - [ ] Confirm user override/removal semantics propagate into help output.
+    - [ ] Decide how conflicts or shadowed bindings should display when multiple mappings target same key path.
+
+- [ ] Phase 1: introduce registry-backed binding discovery helpers.
+  - Why: help cannot stay accurate until it reads from same binding state used for dispatch.
+  - [ ] Add helper surface around effective key bindings.
+    - [ ] Define data shape for discovered bindings: mode, key sequence, action, description, source, and visibility flags.
+    - [ ] Add helper to enumerate active bindings after defaults and user config merge.
+    - [ ] Reuse existing sequence/binding metadata instead of adding parallel static help tables.
+  - [ ] Preserve readability.
+    - [ ] Keep helper output stable enough for tests and help rendering.
+    - [ ] Avoid coupling UI string formatting directly into binding storage structures.
+
+- [ ] Phase 2: move `:keymap` help onto effective bindings.
+  - Why: static `keymap_help_items()` misses changes whenever defaults or user preferences shift.
+  - [ ] Render help from active binding metadata.
+    - [ ] Replace hardcoded keymap-help rows with generated rows from effective bindings.
+    - [ ] Preserve concise descriptions for high-value actions using binding descriptions already present in config/default tables.
+    - [ ] Group results by mode, prefix, or category so derived help stays readable.
+  - [ ] Respect user changes.
+    - [ ] User-added bindings should appear automatically when they have descriptions.
+    - [ ] User-overridden bindings should replace default help output rather than showing stale defaults.
+    - [ ] Removed or shadowed defaults should not remain in derived keymap help.
+
+- [ ] Phase 3: define curated-discovery layer on top of raw binding data.
+  - Why: full binding dumps and concise onboarding help solve different problems; one view may not fit both.
+  - [ ] Decide presentation strategy.
+    - [ ] Keep `:keymap` as concise curated discovery and add separate full binding inspector if needed.
+    - [ ] Or extend `:keymap` to support filtered/full modes without duplicating source data.
+    - [ ] Ensure prefix-driven sequences like `g`, `z`, and `SPC` remain discoverable.
+  - [ ] Keep descriptions trustworthy.
+    - [ ] Reuse action or binding descriptions from real bindings where available.
+    - [ ] Add explicit metadata only when binding tables lack enough human-readable text.
+
+- [ ] Phase 4: validate drift resistance with user-config coverage.
+  - Why: keymap help only solves real problem if custom config changes immediately reflect in help and picker output.
+  - [ ] Add regression coverage.
+    - [ ] Help output changes when user config overrides a default binding.
+    - [ ] Help output includes user-added sequence bindings with descriptions.
+    - [ ] Help output excludes removed or shadowed default bindings.
+    - [ ] Built-in defaults still render expected high-value bindings when no config overrides exist.
+  - [ ] Add edge-case coverage.
+    - [ ] Conflicting bindings produce deterministic help output.
+    - [ ] Mode-specific bindings stay scoped to correct help view.
+    - [ ] Prefix/help discovery remains correct for nested sequences.
+
+- [ ] Phase 5: optional follow-up UX cleanup.
+  - Why: once keymap help derives from real bindings, richer discovery tooling becomes safer to build.
+  - [ ] Evaluate next steps.
+    - [ ] Decide whether command palette should also surface keybinding hints from same data model.
+    - [ ] Decide whether key-hint footer, `:keymap`, and sequence-help popups should share one presentation layer.
+    - [ ] Decide whether exporting effective keymaps for docs/tests is worth adding.
+  - [ ] Keep scope bounded.
+    - [ ] Do not mix this work with unrelated binding behavior changes.
+    - [ ] Do not redesign keybinding UX until derived-data model lands first.
+
 
 ### Optional Future Boundary Work
 
