@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.8.7 - 2026-05-19
+
+### Features
+
+- update prefix keymaps with hints (`9c21c4d3`)
+- centralized the UI and syntax color to theme file (`d68a9cda`)
+- centralize command metadata for command palette upgrade (`dc4cc108`)
+
+
+### Fixes
+
+- sanitize and normalize line endings on paste (`9fb76665`)
+
+
+### Tests
+
+- update the flaky test on ci linux (`d30e86e1`)
+
+
 ## 0.8.6 - 2026-05-19
 
 ### CI

@@ -1,6 +1,6 @@
 [package]
 name = "ee-xi-unicode"
-version = "0.8.6"
+version = "0.8.7"
 license = "Apache-2.0"
 authors = ["Raph Levien <raph.levien@gmail.com>", "Edward Fitz Abucay <gh:ffimnsr>"]
 repository = "https://github.com/ffimnsr/ee"
