@@ -45,6 +45,7 @@ use crate::text::{
     byte_col_to_display_col, display_col_to_byte, find_char_backward, find_char_forward,
     next_char_start, next_word_end, next_word_start, prev_char_start, prev_word_start,
 };
+use crate::theme::{syntax, ui as theme};
 use crate::ui::ui;
 
 fn cwd_test_lock() -> &'static crate::config::TestCwdLock {
@@ -555,10 +556,10 @@ fn ui_render_uses_backend_syntax_spans_only() {
     let vlf_fg = render_numeric_fg(false, true);
 
     assert_ne!(backend_fg, plain_fg);
-    assert_eq!(backend_fg, ratatui::style::Color::Rgb(211, 120, 70));
-    assert_eq!(plain_fg, ratatui::style::Color::Rgb(213, 216, 224));
+    assert_eq!(backend_fg, syntax::FG_NUMBER);
+    assert_eq!(plain_fg, theme::FG_BUFFER);
     assert_eq!(vlf_fg, plain_fg);
-    assert_eq!(vlf_fg, ratatui::style::Color::Rgb(213, 216, 224));
+    assert_eq!(vlf_fg, theme::FG_BUFFER);
 }
 
 #[test]
@@ -2982,7 +2983,7 @@ fn ui_render_inserts_blank_column_between_gutter_and_text() {
     let spacer_x: u16 = 6;
     let text_x: u16 = 7;
     assert_eq!(buf.cell((spacer_x, 0)).unwrap().symbol(), " ");
-    assert_eq!(buf.cell((spacer_x, 0)).unwrap().bg, ratatui::style::Color::Rgb(22, 24, 31));
+    assert_eq!(buf.cell((spacer_x, 0)).unwrap().bg, theme::BG_APP);
     assert_eq!(buf.cell((text_x, 0)).unwrap().symbol(), "a");
 }
 
@@ -5465,6 +5466,39 @@ description = "delta"
 }
 
 #[test]
+fn key_hint_panel_and_prompt_share_chrome_background() {
+    let mut app = App::from_path(None).unwrap();
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+
+    let backend = TestBackend::new(80, 10);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    let mut prompt_bg = None;
+    let mut hint_bg = None;
+    for y in 0..10 {
+        for x in 0..80 {
+            let cell = buffer.cell((x, y)).unwrap();
+            if prompt_bg.is_none() && cell.symbol() == "k" {
+                let next = buffer.cell((x + 1, y)).unwrap();
+                if next.symbol() == "e" {
+                    prompt_bg = Some(cell.bg);
+                }
+            }
+            if hint_bg.is_none() && cell.symbol() == "E" {
+                let next = buffer.cell((x + 1, y)).unwrap();
+                if next.symbol() == "s" {
+                    hint_bg = Some(cell.bg);
+                }
+            }
+        }
+    }
+
+    assert_eq!(prompt_bg, hint_bg, "prompt and key hint chrome should share background");
+}
+
+#[test]
 fn count_digits_accumulate_in_normal_mode() {
     let mut app = App::from_path(None).unwrap();
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE)));
@@ -7663,7 +7697,7 @@ fn visual_line_mode_highlights_selected_lines_in_render() {
     let buf = terminal.backend().buffer();
 
     // Rows 0 and 1 should carry the visual selection background (Rgb(68,71,90)).
-    let vis_bg = ratatui::style::Color::Rgb(68, 71, 90);
+    let vis_bg = theme::BG_SELECTION;
     let row0_has_vis = (0..width).any(|x| buf.cell((x, 0)).unwrap().bg == vis_bg);
     let row1_has_vis = (0..width).any(|x| buf.cell((x, 1)).unwrap().bg == vis_bg);
     // Row 2 (line "ghi") is outside the selection — should NOT be highlighted.
@@ -7703,7 +7737,7 @@ fn visual_char_mode_highlights_single_line_selection() {
     terminal.draw(|frame| ui(frame, &app)).unwrap();
     let buf = terminal.backend().buffer();
 
-    let vis_bg = ratatui::style::Color::Rgb(68, 71, 90);
+    let vis_bg = theme::BG_SELECTION;
     // Gutter occupies ~4 cols; buffer adds one black padding col before text.
     // Columns 5..9 (display cols 0..3) should be highlighted.
     let gutter_width: u16 = 4;
@@ -7729,7 +7763,7 @@ fn multi_line_core_annotation_highlights_rendered_rows() {
     terminal.draw(|frame| ui(frame, &app)).unwrap();
     let buf = terminal.backend().buffer();
 
-    let annotation_bg = ratatui::style::Color::Rgb(43, 82, 74);
+    let annotation_bg = theme::BG_ANNOTATION;
     let gutter_width: u16 = 5;
     let row0_has_annotation =
         (gutter_width + 2..gutter_width + 6).any(|x| buf.cell((x, 0)).unwrap().bg == annotation_bg);

@@ -12,6 +12,7 @@ use crate::config::{NumberStyle, StatuslineFormat};
 use crate::picker::PickerKind;
 use crate::quickfix::QfList;
 use crate::text::{byte_col_to_display_col, display_col_to_byte};
+use crate::theme::ui as theme;
 
 #[derive(Clone, Copy)]
 struct RootAreas {
@@ -166,7 +167,7 @@ pub(crate) fn hit_test_buffer_cell(
 pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
     let area = frame.area();
     frame.render_widget(Clear, area);
-    frame.render_widget(Block::default().style(Style::default().bg(Color::Rgb(22, 24, 31))), area);
+    frame.render_widget(Block::default().style(Style::default().bg(theme::BG_APP)), area);
     let root = split_root_areas(area, app);
 
     // Tab bar (only when more than one tab is open).
@@ -249,7 +250,7 @@ pub(crate) fn compute_editor_width(terminal_size: ratatui::layout::Rect, app: &A
 /// Substitute space `' '` → `'·'` and tab `'\t'` → `'→'` in rendered spans,
 /// applying a dimmed style to the replaced characters.
 fn apply_visible_whitespace(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
-    let dim = Style::default().fg(Color::Rgb(70, 80, 100));
+    let dim = Style::default().fg(theme::FG_SUBTLE);
     let mut out: Vec<Span<'static>> = Vec::new();
     for span in spans {
         let style = span.style;
@@ -285,7 +286,7 @@ fn apply_visible_whitespace(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
 /// get the color-column background.  When the line is shorter than `screen_col`,
 /// a trailing colored space is appended.
 fn apply_color_column(spans: Vec<Span<'static>>, screen_col: usize) -> Vec<Span<'static>> {
-    let col_bg = Color::Rgb(55, 35, 35);
+    let col_bg = theme::BG_COLOR_COLUMN;
     let mut out: Vec<Span<'static>> = Vec::new();
     let mut col = 0usize;
     let mut injected = false;
@@ -381,8 +382,8 @@ fn apply_visual_highlight(
     col_end: Option<usize>,
     left: usize,
 ) -> Vec<Span<'static>> {
-    let vis_bg = Color::Rgb(68, 71, 90); // muted purple-grey selection
-    let vis_fg = Color::Rgb(205, 214, 244);
+    let vis_bg = theme::BG_SELECTION;
+    let vis_fg = theme::FG_TEXT;
 
     // Whole-line highlight (VisualLine): just paint every span.
     if col_start.is_none() {
@@ -500,10 +501,8 @@ fn apply_search_highlights(
         return spans;
     }
 
-    let match_hl = Style::default()
-        .fg(Color::Rgb(22, 24, 31))
-        .bg(Color::Rgb(250, 179, 135)) // warm orange highlight
-        .add_modifier(Modifier::BOLD);
+    let match_hl =
+        Style::default().fg(theme::BG_APP).bg(theme::BG_FIND).add_modifier(Modifier::BOLD);
 
     // Re-build spans, splitting on match boundaries inside the rendered slice.
     let mut out: Vec<Span<'static>> = Vec::new();
@@ -570,20 +569,18 @@ struct LineAnnotationSegment {
 fn annotation_visual(kind: &str) -> AnnotationVisual {
     match kind {
         "selection" => AnnotationVisual {
-            bg: Color::Rgb(68, 71, 90),
-            fg: Some(Color::Rgb(205, 214, 244)),
+            bg: theme::BG_SELECTION,
+            fg: Some(theme::FG_TEXT),
             modifier: Modifier::empty(),
         },
         "find" => AnnotationVisual {
-            bg: Color::Rgb(250, 179, 135),
-            fg: Some(Color::Rgb(22, 24, 31)),
+            bg: theme::BG_FIND,
+            fg: Some(theme::BG_APP),
             modifier: Modifier::BOLD,
         },
-        _ => AnnotationVisual {
-            bg: Color::Rgb(43, 82, 74),
-            fg: None,
-            modifier: Modifier::UNDERLINED,
-        },
+        _ => {
+            AnnotationVisual { bg: theme::BG_ANNOTATION, fg: None, modifier: Modifier::UNDERLINED }
+        }
     }
 }
 
@@ -597,9 +594,9 @@ fn annotation_priority(kind: &str) -> u8 {
 
 fn annotation_marker_color(kind: &str) -> Color {
     match kind {
-        "find" => Color::Rgb(250, 179, 135),
-        "selection" => Color::Rgb(137, 180, 250),
-        _ => Color::Rgb(166, 227, 161),
+        "find" => theme::FG_WARNING,
+        "selection" => theme::FG_INFO,
+        _ => theme::FG_MARKER_HINT,
     }
 }
 
@@ -772,15 +769,10 @@ fn apply_swift_motion_targets(
     targets: &[SwiftMotionTarget],
     left: usize,
 ) -> Vec<Span<'static>> {
-    let visual = AnnotationVisual {
-        bg: Color::Rgb(137, 220, 235),
-        fg: Some(Color::Rgb(22, 24, 31)),
-        modifier: Modifier::BOLD,
-    };
-    let label_style = Style::default()
-        .fg(Color::Rgb(22, 24, 31))
-        .bg(Color::Rgb(245, 194, 231))
-        .add_modifier(Modifier::BOLD);
+    let visual =
+        AnnotationVisual { bg: theme::FG_KEY, fg: Some(theme::BG_APP), modifier: Modifier::BOLD };
+    let label_style =
+        Style::default().fg(theme::BG_APP).bg(theme::BG_SWIFT_LABEL).add_modifier(Modifier::BOLD);
 
     for target in targets {
         if target.end_display_col <= left || target.display_col < left {
@@ -899,19 +891,16 @@ fn render_tab_bar(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
                 .map(|b| b.title())
                 .unwrap_or_else(|| format!("[{}]", i + 1));
             let style = if i == focused_idx {
-                Style::default()
-                    .fg(Color::Rgb(22, 24, 31))
-                    .bg(Color::Rgb(137, 220, 235))
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(theme::BG_APP).bg(theme::FG_KEY).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Rgb(186, 194, 222)).bg(Color::Rgb(30, 32, 39))
+                Style::default().fg(theme::FG_TAB_INACTIVE).bg(theme::BG_CHROME)
             };
             [Span::styled(format!(" {} ", label), style), Span::raw(" ")]
         })
         .collect();
 
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(22, 24, 31))),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::BG_APP)),
         area,
     );
 }
@@ -929,8 +918,8 @@ fn render_gutter(
     let top = vp.top_line;
     let sign_col = app.config.sign_column;
     let num_digits = line_count.to_string().len().max(3);
-    let cursor_line_bg = Color::Rgb(35, 38, 50);
-    let vis_sel_bg = Color::Rgb(68, 71, 90);
+    let cursor_line_bg = theme::BG_CURSOR_LINE;
+    let vis_sel_bg = theme::BG_SELECTION;
 
     // Pre-compute visual selection line range for gutter highlight.
     let visual_line_range: Option<(usize, usize)> = if app.mode.is_visual() {
@@ -945,7 +934,7 @@ fn render_gutter(
 
     let mut lines: Vec<Line> = Vec::with_capacity(height);
     let mut li = top;
-    let tilde_style = Style::default().fg(Color::Rgb(65, 72, 95)).bg(Color::Rgb(30, 32, 39));
+    let tilde_style = Style::default().fg(theme::FG_TILDE).bg(theme::BG_CHROME);
     for _ in 0..height {
         if li >= line_count {
             lines.push(Line::from(Span::styled("~", tilde_style)));
@@ -958,29 +947,29 @@ fn render_gutter(
         } else if is_cursor && app.config.cursor_line {
             cursor_line_bg
         } else {
-            Color::Rgb(30, 32, 39)
+            theme::BG_CHROME
         };
 
         // Sign column: show fold markers when applicable.
         let sign_spans = if sign_col {
             let (marker, fg) = if let Some(severity) = diagnostic_marker_for_line(buf, li) {
                 match severity {
-                    DiagnosticSeverity::Error => ('E', Color::Rgb(243, 139, 168)),
-                    DiagnosticSeverity::Warning => ('W', Color::Rgb(250, 179, 135)),
-                    DiagnosticSeverity::Information => ('I', Color::Rgb(137, 220, 235)),
-                    DiagnosticSeverity::Hint => ('H', Color::Rgb(166, 227, 161)),
+                    DiagnosticSeverity::Error => ('E', theme::FG_ERROR),
+                    DiagnosticSeverity::Warning => ('W', theme::FG_WARNING),
+                    DiagnosticSeverity::Information => ('I', theme::FG_KEY),
+                    DiagnosticSeverity::Hint => ('H', theme::FG_MARKER_HINT),
                 }
             } else if app.folds.fold_at(buf.id, li).is_some() {
-                ('▸', Color::Rgb(100, 130, 160))
+                ('▸', theme::FG_FOLD)
             } else {
-                (' ', Color::Rgb(100, 130, 160))
+                (' ', theme::FG_FOLD)
             };
             let (annotation_marker, annotation_fg) = app
                 .git_status(buf.id)
                 .and_then(|status| status.sign_for_line(li))
                 .map(|sign| (sign.marker(), git_sign_color(sign)))
                 .or_else(|| annotation_marker_for_line(buf, li))
-                .unwrap_or((' ', Color::Rgb(90, 100, 125)));
+                .unwrap_or((' ', theme::FG_GUTTER_DIM));
             vec![
                 Span::styled(marker.to_string(), Style::default().fg(fg).bg(bg)),
                 Span::styled(
@@ -1011,7 +1000,7 @@ fn render_gutter(
                 }
             }
         };
-        let num_fg = if is_cursor { Color::Rgb(205, 214, 244) } else { Color::DarkGray };
+        let num_fg = if is_cursor { theme::FG_TEXT } else { theme::FG_EMPTY };
         let num_span = Span::styled(num_text, Style::default().fg(num_fg).bg(bg));
 
         // Fold-aware: advance past fold body.
@@ -1030,10 +1019,7 @@ fn render_gutter(
         }
     }
 
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(Color::Rgb(30, 32, 39))),
-        area,
-    );
+    frame.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::BG_CHROME)), area);
 }
 
 fn render_buffer(
@@ -1049,8 +1035,8 @@ fn render_buffer(
     let left = vp.left_col;
     let viewport_width = content_area.width as usize;
     let cursor_line = buf.cursor_line;
-    let cursor_line_bg = Color::Rgb(35, 38, 50);
-    let buf_bg = Color::Rgb(22, 24, 31);
+    let cursor_line_bg = theme::BG_CURSOR_LINE;
+    let buf_bg = theme::BG_APP;
 
     frame.render_widget(Block::default().style(Style::default().bg(buf_bg)), area);
 
@@ -1078,12 +1064,12 @@ fn render_buffer(
         };
         let text = vec![Line::from(Span::styled(
             label,
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            Style::default().fg(theme::FG_EMPTY).add_modifier(Modifier::ITALIC),
         ))];
         frame.render_widget(
             Paragraph::new(text)
                 .block(Block::default().borders(Borders::NONE))
-                .style(Style::default().fg(Color::Rgb(213, 216, 224)).bg(buf_bg)),
+                .style(Style::default().fg(theme::FG_BUFFER).bg(buf_bg)),
             content_area,
         );
         return;
@@ -1102,7 +1088,7 @@ fn render_buffer(
         }
     }
     // Style for lines not yet loaded in VLF mode.
-    let loading_style = Style::default().fg(Color::Rgb(90, 95, 115)).add_modifier(Modifier::ITALIC);
+    let loading_style = Style::default().fg(theme::FG_LOADING).add_modifier(Modifier::ITALIC);
 
     let text: Vec<Line> = visible
         .iter()
@@ -1133,10 +1119,7 @@ fn render_buffer(
                 let preview: String = line.chars().take(40).collect();
                 vec![Span::styled(
                     format!("{preview}  ··· (folded)",),
-                    Style::default()
-                        .fg(Color::Rgb(100, 130, 160))
-                        .bg(bg)
-                        .add_modifier(Modifier::ITALIC),
+                    Style::default().fg(theme::FG_FOLD).bg(bg).add_modifier(Modifier::ITALIC),
                 )]
             } else {
                 let backend_syntax = match buf.line_slot(log_idx) {
@@ -1254,7 +1237,7 @@ fn render_buffer(
 
     let mut widget = Paragraph::new(text)
         .block(Block::default().borders(Borders::NONE))
-        .style(Style::default().fg(Color::Rgb(213, 216, 224)).bg(buf_bg));
+        .style(Style::default().fg(theme::FG_BUFFER).bg(buf_bg));
 
     if app.config.wrap_lines {
         widget = widget.wrap(Wrap { trim: false });
@@ -1273,30 +1256,24 @@ fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     };
     let mode = Span::styled(
         format!(" {} ", mode_label),
-        Style::default().fg(Color::Rgb(22, 24, 31)).bg(Color::Rgb(137, 220, 235)),
+        Style::default().fg(theme::BG_APP).bg(theme::FG_KEY),
     );
     let file = Span::styled(
         format!(" {}", app.backend.title()),
-        Style::default().fg(Color::Rgb(238, 238, 238)).bg(Color::Rgb(49, 54, 68)),
+        Style::default().fg(theme::FG_STATUS_FILE).bg(theme::BG_STATUS),
     );
     let modified = if app.backend.pristine {
         Span::raw("")
     } else {
-        Span::styled(
-            " [+]",
-            Style::default().fg(Color::Rgb(250, 179, 135)).bg(Color::Rgb(49, 54, 68)),
-        )
+        Span::styled(" [+]", Style::default().fg(theme::FG_WARNING).bg(theme::BG_STATUS))
     };
     let vlf_gap = if app.backend.active().is_vlf {
-        Span::styled(" ", Style::default().bg(Color::Rgb(49, 54, 68)))
+        Span::styled(" ", Style::default().bg(theme::BG_STATUS))
     } else {
         Span::raw("")
     };
     let vlf = if app.backend.active().is_vlf {
-        Span::styled(
-            " VLF ",
-            Style::default().fg(Color::Rgb(22, 24, 31)).bg(Color::Rgb(250, 179, 135)),
-        )
+        Span::styled(" VLF ", Style::default().fg(theme::BG_APP).bg(theme::BG_FIND))
     } else {
         Span::raw("")
     };
@@ -1304,7 +1281,7 @@ fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         format!("  Ln {}, Col {} ", app.backend.cursor_line + 1, app.backend.cursor_col + 1);
     let position = Span::styled(
         position_text.as_str(),
-        Style::default().fg(Color::Rgb(186, 194, 222)).bg(Color::Rgb(49, 54, 68)),
+        Style::default().fg(theme::FG_TAB_INACTIVE).bg(theme::BG_STATUS),
     );
 
     let mut spans = match app.config.statusline_format {
@@ -1320,7 +1297,7 @@ fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             let buf_indicator = if buf_count > 1 {
                 Span::styled(
                     format!("  [{}/{}]", app.backend.current_idx() + 1, buf_count),
-                    Style::default().fg(Color::Rgb(166, 173, 200)).bg(Color::Rgb(49, 54, 68)),
+                    Style::default().fg(theme::FG_MUTED).bg(theme::BG_STATUS),
                 )
             } else {
                 Span::raw("")
@@ -1341,7 +1318,7 @@ fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             } else {
                 Span::styled(
                     format!(" │{}", flags),
-                    Style::default().fg(Color::Rgb(100, 120, 150)).bg(Color::Rgb(49, 54, 68)),
+                    Style::default().fg(theme::FG_STATUS_FLAG).bg(theme::BG_STATUS),
                 )
             };
             let mut spans = vec![mode, file, modified, vlf_gap, vlf];
@@ -1360,22 +1337,22 @@ fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     if left_width + position_width < status_width {
         spans.push(Span::styled(
             " ".repeat(status_width - left_width - position_width),
-            Style::default().bg(Color::Rgb(49, 54, 68)),
+            Style::default().bg(theme::BG_STATUS),
         ));
     }
     spans.push(position);
 
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(49, 54, 68))),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::BG_STATUS)),
         area,
     );
 }
 
 fn git_sign_color(sign: crate::git::GitSign) -> Color {
     match sign {
-        crate::git::GitSign::Added => Color::Rgb(166, 227, 161),
-        crate::git::GitSign::Modified => Color::Rgb(250, 179, 135),
-        crate::git::GitSign::Deleted => Color::Rgb(243, 139, 168),
+        crate::git::GitSign::Added => theme::FG_SUCCESS,
+        crate::git::GitSign::Modified => theme::FG_WARNING,
+        crate::git::GitSign::Deleted => theme::FG_ERROR,
     }
 }
 
@@ -1383,7 +1360,7 @@ fn git_status_span(app: &App) -> Option<Span<'static>> {
     if app.backend.active().is_vlf {
         return Some(Span::styled(
             "  git:off(vlf)",
-            Style::default().fg(Color::Rgb(250, 179, 135)).bg(Color::Rgb(49, 54, 68)),
+            Style::default().fg(theme::FG_WARNING).bg(theme::BG_STATUS),
         ));
     }
 
@@ -1391,7 +1368,7 @@ fn git_status_span(app: &App) -> Option<Span<'static>> {
     let dirty = if status.dirty { '*' } else { ' ' };
     Some(Span::styled(
         format!("  git:{}{}", status.branch, dirty),
-        Style::default().fg(Color::Rgb(166, 227, 161)).bg(Color::Rgb(49, 54, 68)),
+        Style::default().fg(theme::FG_SUCCESS).bg(theme::BG_STATUS),
     ))
 }
 
@@ -1399,7 +1376,7 @@ fn render_prompt(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     if let Some(swift_motion) = app.swift_motion.as_ref() {
         frame.render_widget(
             Paragraph::new(Line::from(swift_motion.prompt()))
-                .style(Style::default().fg(Color::Rgb(22, 24, 31)).bg(Color::Rgb(137, 220, 235))),
+                .style(Style::default().fg(theme::BG_APP).bg(theme::FG_KEY)),
             area,
         );
         return;
@@ -1408,7 +1385,7 @@ fn render_prompt(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     if let Some(label) = app.active_key_hint_label() {
         frame.render_widget(
             Paragraph::new(Line::from(format!("keys: {label}")))
-                .style(Style::default().fg(Color::Rgb(166, 173, 200)).bg(Color::Rgb(24, 25, 38))),
+                .style(Style::default().fg(theme::FG_MUTED).bg(theme::BG_CHROME)),
             area,
         );
         return;
@@ -1417,7 +1394,7 @@ fn render_prompt(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     if let Some(message) = app.pending_input_label() {
         frame.render_widget(
             Paragraph::new(Line::from(message))
-                .style(Style::default().fg(Color::Rgb(166, 173, 200)).bg(Color::Rgb(24, 25, 38))),
+                .style(Style::default().fg(theme::FG_MUTED).bg(theme::BG_CHROME)),
             area,
         );
         return;
@@ -1469,8 +1446,7 @@ fn render_prompt(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     };
 
     frame.render_widget(
-        Paragraph::new(prompt)
-            .style(Style::default().fg(Color::Rgb(166, 173, 200)).bg(Color::Rgb(24, 25, 38))),
+        Paragraph::new(prompt).style(Style::default().fg(theme::FG_MUTED).bg(theme::BG_CHROME)),
         area,
     );
 }
@@ -1481,9 +1457,9 @@ fn render_key_hints(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
 
     let block = Block::default()
         .borders(Borders::TOP)
-        .border_style(Style::default().fg(Color::Rgb(88, 91, 112)))
+        .border_style(Style::default().fg(theme::BORDER_MUTED))
         .title(key_hint_title(&label))
-        .style(Style::default().bg(Color::Rgb(30, 30, 46)));
+        .style(Style::default().bg(theme::BG_CHROME));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1523,12 +1499,12 @@ fn render_key_hints(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
 
             spans.push(Span::styled(
                 format!(" {} ", key_label),
-                Style::default().fg(Color::Rgb(137, 220, 235)).add_modifier(Modifier::BOLD),
+                Style::default().fg(theme::FG_KEY).add_modifier(Modifier::BOLD),
             ));
             if desc_width > 0 {
                 spans.push(Span::styled(
                     desc_label,
-                    Style::default().fg(Color::Rgb(205, 214, 244)).bg(Color::Rgb(30, 30, 46)),
+                    Style::default().fg(theme::FG_TEXT).bg(theme::BG_CHROME),
                 ));
             }
             if col + 1 < cols {
@@ -1546,19 +1522,13 @@ fn render_key_hints(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     }
 
     lines.truncate(inner.height as usize);
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(Color::Rgb(30, 30, 46))),
-        inner,
-    );
+    frame.render_widget(Paragraph::new(lines).style(Style::default().bg(theme::BG_CHROME)), inner);
 }
 
 fn key_hint_title(label: &str) -> Line<'static> {
     let mut spans = vec![Span::styled(
         String::from(" keys "),
-        Style::default()
-            .fg(Color::Rgb(166, 173, 200))
-            .bg(Color::Rgb(30, 30, 46))
-            .add_modifier(Modifier::DIM),
+        Style::default().fg(theme::FG_MUTED).bg(theme::BG_CHROME).add_modifier(Modifier::DIM),
     )];
 
     let parts = label.split_whitespace().collect::<Vec<_>>();
@@ -1567,10 +1537,10 @@ fn key_hint_title(label: &str) -> Line<'static> {
         spans.push(Span::styled(
             format!(" {} ", part),
             if is_last {
-                Style::default().fg(Color::Rgb(205, 214, 244)).add_modifier(Modifier::BOLD)
+                Style::default().fg(theme::FG_TEXT).add_modifier(Modifier::BOLD)
             } else {
                 Style::default()
-                    .fg(Color::Rgb(148, 156, 187))
+                    .fg(theme::FG_DIM)
                     .add_modifier(Modifier::DIM)
                     .add_modifier(Modifier::BOLD)
             },
@@ -1641,9 +1611,9 @@ fn render_qf_panel(
     is_location_list: bool,
 ) {
     let border_style = if focused {
-        Style::default().fg(Color::Rgb(137, 220, 235))
+        Style::default().fg(theme::FG_KEY)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme::FG_EMPTY)
     };
     let kind = if is_location_list { "Location List" } else { "Quickfix" };
     let title = format!(
@@ -1656,7 +1626,7 @@ fn render_qf_panel(
         .title(title.as_str())
         .borders(Borders::ALL)
         .border_style(border_style)
-        .style(Style::default().bg(Color::Rgb(24, 25, 38)));
+        .style(Style::default().bg(theme::BG_CHROME_ALT));
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1678,12 +1648,9 @@ fn render_qf_panel(
         .map(|(i, entry)| {
             let is_sel = i == selected;
             let style = if is_sel {
-                Style::default()
-                    .fg(Color::Rgb(22, 24, 31))
-                    .bg(Color::Rgb(137, 220, 235))
-                    .add_modifier(Modifier::BOLD)
+                Style::default().fg(theme::BG_APP).bg(theme::FG_KEY).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Rgb(213, 216, 224))
+                Style::default().fg(theme::FG_BUFFER)
             };
             ListItem::new(Line::from(Span::styled(
                 format!(" {:>3}  {}", i + 1, entry.display_label()),
@@ -1785,7 +1752,7 @@ fn render_picker(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
 
     if shadow_rect.width > 0 && shadow_rect.height > 0 {
         frame.render_widget(
-            Block::default().style(Style::default().bg(Color::Rgb(8, 10, 15))),
+            Block::default().style(Style::default().bg(theme::BG_OVERLAY_SHADOW)),
             shadow_rect,
         );
     }
@@ -1794,8 +1761,8 @@ fn render_picker(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(94, 196, 214)))
-        .style(Style::default().bg(Color::Rgb(16, 18, 24)));
+        .border_style(Style::default().fg(theme::BORDER_PICKER))
+        .style(Style::default().bg(theme::BG_PICKER));
 
     let inner = block.inner(popup_rect);
     frame.render_widget(block, popup_rect);
@@ -1828,18 +1795,18 @@ fn render_picker(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         Span::styled(
             picker_kind_badge(picker.kind),
             Style::default()
-                .fg(Color::Rgb(11, 14, 20))
-                .bg(Color::Rgb(94, 196, 214))
+                .fg(theme::FG_INVERTED)
+                .bg(theme::BORDER_PICKER)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(
             picker.title.as_str(),
-            Style::default().fg(Color::Rgb(232, 236, 241)).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::FG_PICKER_TITLE).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             if picker.query.is_empty() { "" } else { "  filtered" },
-            Style::default().fg(Color::Rgb(116, 126, 147)),
+            Style::default().fg(theme::FG_PICKER_SUBTLE),
         ),
     ]);
     frame.render_widget(Paragraph::new(header_line), header[0]);
@@ -1847,9 +1814,9 @@ fn render_picker(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         Paragraph::new(Line::from(vec![
             Span::styled(
                 format!(" {} ", selected_position),
-                Style::default().fg(Color::Rgb(158, 167, 188)),
+                Style::default().fg(theme::FG_PICKER_COUNT),
             ),
-            Span::styled(" matches ", Style::default().fg(Color::Rgb(94, 196, 214))),
+            Span::styled(" matches ", Style::default().fg(theme::BORDER_PICKER)),
         ]))
         .alignment(Alignment::Right),
         header[1],
@@ -1862,21 +1829,21 @@ fn render_picker(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let search_block = Block::default()
         .title(" Query ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(59, 66, 86)))
-        .style(Style::default().bg(Color::Rgb(19, 22, 30)));
+        .border_style(Style::default().fg(theme::BORDER_PICKER_QUERY))
+        .style(Style::default().bg(theme::BG_PICKER_QUERY));
     let search_inner = search_block.inner(sections[1]);
     frame.render_widget(search_block, sections[1]);
     let search_line = Line::from(vec![
         Span::styled(
             search_prefix,
-            Style::default().fg(Color::Rgb(94, 196, 214)).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme::BORDER_PICKER).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             if picker.query.is_empty() { "type to filter" } else { picker.query.as_str() },
             if picker.query.is_empty() {
-                Style::default().fg(Color::Rgb(94, 104, 126))
+                Style::default().fg(theme::FG_PICKER_PLACEHOLDER)
             } else {
-                Style::default().fg(Color::Rgb(224, 228, 235))
+                Style::default().fg(theme::FG_PICKER_QUERY)
             },
         ),
     ]);
@@ -1890,8 +1857,8 @@ fn render_picker(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let list_block = Block::default()
         .title(list_title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(48, 54, 72)))
-        .style(Style::default().bg(Color::Rgb(14, 16, 22)));
+        .border_style(Style::default().fg(theme::BORDER_PICKER_RESULTS))
+        .style(Style::default().bg(theme::BG_PICKER_RESULTS));
     let list_inner = list_block.inner(sections[2]);
     frame.render_widget(list_block, sections[2]);
 
@@ -1906,7 +1873,7 @@ fn render_picker(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     if picker.filtered.is_empty() {
         frame.render_widget(
             Paragraph::new("No results")
-                .style(Style::default().fg(Color::Rgb(112, 121, 144)).bg(Color::Rgb(14, 16, 22)))
+                .style(Style::default().fg(theme::FG_PICKER_EMPTY).bg(theme::BG_PICKER_RESULTS))
                 .alignment(Alignment::Center),
             list_inner,
         );
@@ -1920,25 +1887,22 @@ fn render_picker(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
                 let abs_idx = scroll_off + i;
                 let is_sel = abs_idx == selected;
                 let row_bg = if is_sel {
-                    Color::Rgb(94, 196, 214)
+                    theme::BORDER_PICKER
                 } else if abs_idx % 2 == 0 {
-                    Color::Rgb(14, 16, 22)
+                    theme::BG_PICKER_RESULTS
                 } else {
-                    Color::Rgb(18, 20, 28)
+                    theme::BG_PICKER_ROW_ALT
                 };
                 let marker = if is_sel { ">" } else { " " };
                 let index_style = if is_sel {
-                    Style::default().fg(Color::Rgb(11, 14, 20)).bg(row_bg)
+                    Style::default().fg(theme::FG_INVERTED).bg(row_bg)
                 } else {
-                    Style::default().fg(Color::Rgb(92, 102, 124)).bg(row_bg)
+                    Style::default().fg(theme::FG_PICKER_INDEX).bg(row_bg)
                 };
                 let label_style = if is_sel {
-                    Style::default()
-                        .fg(Color::Rgb(11, 14, 20))
-                        .bg(row_bg)
-                        .add_modifier(Modifier::BOLD)
+                    Style::default().fg(theme::FG_INVERTED).bg(row_bg).add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::Rgb(221, 225, 232)).bg(row_bg)
+                    Style::default().fg(theme::FG_BUFFER).bg(row_bg)
                 };
                 let row_label = truncate_picker_text(&label, row_width.max(1));
                 ListItem::new(Line::from(vec![
@@ -1964,12 +1928,12 @@ fn render_picker(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             &picker_selection_summary(app),
             footer[0].width as usize,
         ))
-        .style(Style::default().fg(Color::Rgb(121, 130, 151)).bg(Color::Rgb(16, 18, 24))),
+        .style(Style::default().fg(theme::FG_PICKER_FOOTER).bg(theme::BG_PICKER)),
         footer[0],
     );
     frame.render_widget(
         Paragraph::new("Enter open  Esc close")
-            .style(Style::default().fg(Color::Rgb(94, 196, 214)).bg(Color::Rgb(16, 18, 24)))
+            .style(Style::default().fg(theme::BORDER_PICKER).bg(theme::BG_PICKER))
             .alignment(Alignment::Right),
         footer[1],
     );
@@ -1990,10 +1954,10 @@ fn render_hover_popup(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
                 Block::default()
                     .title(format!(" {} ", popup.title))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Rgb(137, 220, 235)))
-                    .style(Style::default().bg(Color::Rgb(22, 24, 31))),
+                    .border_style(Style::default().fg(theme::FG_KEY))
+                    .style(Style::default().bg(theme::BG_APP)),
             )
-            .style(Style::default().fg(Color::Rgb(213, 216, 224)).bg(Color::Rgb(22, 24, 31)))
+            .style(Style::default().fg(theme::FG_BUFFER).bg(theme::BG_APP))
             .wrap(Wrap { trim: false }),
         popup_rect,
     );
@@ -2036,7 +2000,7 @@ mod tests {
 
     #[test]
     fn apply_annotation_overlay_styles_target_range() {
-        let spans = vec![Span::styled("alpha", Style::default().fg(Color::Rgb(1, 2, 3)))];
+        let spans = vec![Span::styled("alpha", Style::default().fg(theme::BORDER_PICKER_RESULTS))];
         let visual = annotation_visual("find");
 
         let out = apply_annotation_overlay(spans, 1, 3, 0, visual);
@@ -2047,7 +2011,7 @@ mod tests {
         assert_eq!(out[2].content, "ha");
         assert_eq!(
             out[1].style,
-            Style::default().fg(Color::Rgb(22, 24, 31)).bg(visual.bg).add_modifier(Modifier::BOLD)
+            Style::default().fg(theme::BG_APP).bg(visual.bg).add_modifier(Modifier::BOLD)
         );
     }
 
@@ -2067,7 +2031,7 @@ mod tests {
         assert_eq!(out[1].content, "cde");
         assert_eq!(
             out[1].style,
-            Style::default().bg(Color::Rgb(43, 82, 74)).add_modifier(Modifier::UNDERLINED)
+            Style::default().bg(theme::BG_ANNOTATION).add_modifier(Modifier::UNDERLINED)
         );
     }
 
@@ -2152,7 +2116,7 @@ mod tests {
             vlf_search_ranges: Vec::new(),
         };
 
-        assert_eq!(annotation_marker_for_line(&buf, 0), Some(('T', Color::Rgb(166, 227, 161))));
+        assert_eq!(annotation_marker_for_line(&buf, 0), Some(('T', theme::FG_MARKER_HINT)));
     }
 
     #[test]
@@ -2173,7 +2137,7 @@ mod tests {
         terminal.draw(|frame| ui(frame, &app)).unwrap();
         let buf = terminal.backend().buffer();
 
-        let find_bg = ratatui::style::Color::Rgb(250, 179, 135);
+        let find_bg = theme::BG_FIND;
         let gutter_width: u16 = 5;
         let highlighted =
             (gutter_width + 6..gutter_width + 12).any(|x| buf.cell((x, 0)).unwrap().bg == find_bg);

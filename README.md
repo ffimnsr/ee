@@ -130,6 +130,19 @@ Development builds use fetched runtime assets, not vendored parser sources in th
 scripts/build-runtime.sh --output-root target/runtime-package
 ```
 
+For test-focused local setup, install runtime into user runtime directory
+(`~/.local/share/ee` or `XDG_DATA_HOME/ee`) with:
+
+```sh
+scripts/install-tree-sitter-runtime.sh
+```
+
+To build runtime and run tests in one step:
+
+```sh
+scripts/install-tree-sitter-runtime.sh -- cargo test -p ee-cli
+```
+
 Then point the editor at that runtime:
 
 ```sh

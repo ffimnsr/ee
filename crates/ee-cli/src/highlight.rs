@@ -3,12 +3,13 @@
 //! Render-only layer. Backend syntax spans are authoritative; this module only
 //! maps scope strings to styles and slices spans for visible text.
 
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::Span;
 use std::path::Path;
 use xi_core_lib::tree_sitter_support::language_name_for_path;
 
 use crate::backend::CoreSyntaxSpan;
+use crate::theme::syntax as theme;
 
 /// Loaded once at startup; used only for frontend syntax-span rendering.
 pub(crate) struct Highlighter;
@@ -146,40 +147,40 @@ impl Highlighter {
 
     fn lookup_scope_style(scope: &str) -> Option<Style> {
         let color = if scope.starts_with("comment") {
-            Color::Rgb(101, 115, 126)
+            theme::FG_COMMENT
         } else if scope.starts_with("string") {
-            Color::Rgb(195, 151, 66)
+            theme::FG_STRING
         } else if scope.starts_with("constant.numeric")
             || scope.starts_with("constant.language")
             || scope.starts_with("constant.character")
         {
-            Color::Rgb(211, 120, 70)
+            theme::FG_NUMBER
         } else if scope.starts_with("keyword")
             || scope.starts_with("storage")
             || scope == "support.macro"
         {
-            Color::Rgb(180, 142, 173)
+            theme::FG_KEYWORD
         } else if scope.starts_with("entity.name.function")
             || scope.starts_with("support.function")
             || scope.starts_with("meta.function")
         {
-            Color::Rgb(136, 192, 208)
+            theme::FG_FUNCTION
         } else if scope.starts_with("entity.name.type")
             || scope.starts_with("support.type")
             || scope.starts_with("storage.type")
             || scope.starts_with("entity.name.namespace")
         {
-            Color::Rgb(143, 188, 187)
+            theme::FG_TYPE
         } else if scope.starts_with("variable") {
-            Color::Rgb(216, 222, 233)
+            theme::FG_VARIABLE
         } else if scope.starts_with("entity.name.tag") || scope.starts_with("keyword.operator") {
-            Color::Rgb(129, 161, 193)
+            theme::FG_TAG_OPERATOR
         } else if scope.starts_with("punctuation") {
-            Color::Rgb(171, 178, 191)
+            theme::FG_PUNCTUATION
         } else if scope.starts_with("invalid") {
-            Color::Rgb(239, 83, 80)
+            theme::FG_INVALID
         } else if scope.starts_with("markup.heading") {
-            Color::Rgb(94, 129, 172)
+            theme::FG_HEADING
         } else {
             return None;
         };
@@ -257,6 +258,6 @@ mod tests {
     #[test]
     fn style_for_scope_falls_back_to_parent_segments() {
         let style = Highlighter::style_for_scope("meta.function variable.parameter.rust");
-        assert_eq!(style.fg, Some(Color::Rgb(216, 222, 233)));
+        assert_eq!(style.fg, Some(theme::FG_VARIABLE));
     }
 }

@@ -16,6 +16,7 @@ mod render_metrics;
 mod session;
 mod terminal;
 mod text;
+mod theme;
 mod ui;
 pub mod vlf_bench_support;
 mod window;
