@@ -36,7 +36,9 @@ use crate::backend::{
 };
 use crate::buffer::{BufState, BufferManager, VlfChunkUpdate};
 use crate::git::{GitBufferCache, GitBufferStatus, GitHunk, GitSign};
-use crate::keymap::{Action, BindingKey, bindings, parse_action_spec};
+use crate::keymap::{
+    Action, BindingKey, KeymapSettings, bindings, bindings_for, parse_action_spec,
+};
 use crate::picker::PickerKind;
 use crate::picker::PickerState;
 use crate::quickfix::{QfEntry, QfList};
@@ -120,6 +122,30 @@ fn input_loop_does_not_coalesce_typed_repeat_chars() {
     let coalesced = crate::coalesce_input_events(vec![repeat.clone(), repeat.clone()]);
 
     assert_eq!(coalesced, vec![repeat.clone(), repeat]);
+}
+
+#[test]
+fn default_keymap_binds_page_keys_to_editor_scroll() {
+    let bindings = bindings_for(&KeymapSettings::default());
+
+    assert_eq!(
+        bindings.get(&BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::PageDown,
+            modifiers: KeyModifiers::NONE,
+            prefix: None,
+        }),
+        Some(&Action::Edit("scroll_page_down"))
+    );
+    assert_eq!(
+        bindings.get(&BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::PageUp,
+            modifiers: KeyModifiers::NONE,
+            prefix: None,
+        }),
+        Some(&Action::Edit("scroll_page_up"))
+    );
 }
 
 #[test]

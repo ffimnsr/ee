@@ -1587,6 +1587,8 @@ fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(Normal, KeyCode::Char('^'), none, None, GotoFirstNonWhitespace);
     bind!(Normal, KeyCode::Char('$'), none, None, Edit("move_to_right_end_of_line"));
     bind!(Normal, KeyCode::Char('G'), none, None, Edit("move_to_end_of_document"));
+    bind!(Normal, KeyCode::PageDown, none, None, Edit("scroll_page_down"));
+    bind!(Normal, KeyCode::PageUp, none, None, Edit("scroll_page_up"));
     bind!(Normal, KeyCode::Char('d'), ctrl, None, Edit("scroll_page_down"));
     bind!(Normal, KeyCode::Char('u'), ctrl, None, Edit("scroll_page_up"));
     bind!(Normal, KeyCode::Char('w'), ctrl, None, WindowCommandPrefix);

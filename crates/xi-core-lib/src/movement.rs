@@ -162,14 +162,12 @@ fn selection_position(
     (col, line)
 }
 
-/// When paging through a file, the number of lines from the previous page
-/// that will also be visible in the next.
-const SCROLL_OVERLAP: isize = 2;
-
-/// Computes the actual desired amount of scrolling (generally slightly
-/// less than the height of the viewport, to allow overlap).
+/// Computes the actual desired amount of page scrolling.
+///
+/// We use half the viewport height to match the editor's vim-style
+/// half-page motions that back both Ctrl-U/Ctrl-D and PageUp/PageDown.
 fn scroll_height(height: usize) -> isize {
-    max(height as isize - SCROLL_OVERLAP, 1)
+    max((height / 2) as isize, 1)
 }
 
 /// Compute the result of movement on one selection region.
@@ -332,5 +330,16 @@ mod tests {
 
         assert_eq!(moved.min(), region.min());
         assert_eq!(moved.max(), region.max());
+    }
+
+    #[test]
+    fn page_motion_uses_half_viewport_height() {
+        let text: Rope = "0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n".into();
+        let region = SelRegion::new(0, 0);
+
+        let moved = region_movement(Movement::DownPage, region, &LogicalLines, 6, &text, false);
+
+        assert_eq!(moved.min(), 6);
+        assert_eq!(moved.max(), 6);
     }
 }

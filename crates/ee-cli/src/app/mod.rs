@@ -3341,13 +3341,14 @@ impl App {
                 Some((line, self.backend.get_line(line).map(str::len).unwrap_or(0)))
             }
             "scroll_page_down" => Some((
-                line.saturating_add(self.last_editor_height.max(1) * count)
+                line.saturating_add((self.last_editor_height.max(1) / 2).max(1) * count)
                     .min(line_count.saturating_sub(1)),
                 col,
             )),
-            "scroll_page_up" => {
-                Some((line.saturating_sub(self.last_editor_height.max(1) * count), col))
-            }
+            "scroll_page_up" => Some((
+                line.saturating_sub((self.last_editor_height.max(1) / 2).max(1) * count),
+                col,
+            )),
             "move_to_beginning_of_document"
             | "move_to_beginning_of_document_and_modify_selection" => Some((0, 0)),
             "move_to_end_of_document" | "move_to_end_of_document_and_modify_selection" => {

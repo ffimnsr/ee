@@ -66,6 +66,14 @@ fn main() {
                 "extensions": ["json", "jsonc"],
                 "supports_single_file": true,
             },
+            // Install with: npm install -g yaml-language-server
+            "yaml": {
+                "language_name": "Yaml",
+                "start_command": "yaml-language-server",
+                "start_arguments": ["--stdio"],
+                "extensions": ["yaml", "yml"],
+                "supports_single_file": true
+            },
             // Install with: npm install -g javascript-typescript-langserver
             "typescript": {
                 "language_name": "Typescript",
