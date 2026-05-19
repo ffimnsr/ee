@@ -1286,6 +1286,7 @@ impl App {
     }
 
     fn handle_paste(&mut self, text: String) {
+        let text = normalize_pasted_line_endings(text);
         match self.mode {
             Mode::Insert => {
                 self.insert_buffer.push_str(&text);
@@ -4805,6 +4806,26 @@ impl App {
                 Some(format!("{count} substitution(s) on {count} line(s)"));
         }
     }
+}
+
+fn normalize_pasted_line_endings(text: String) -> String {
+    if !text.contains('\r') {
+        return text;
+    }
+
+    let mut normalized = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            normalized.push('\n');
+        } else {
+            normalized.push(ch);
+        }
+    }
+    normalized
 }
 
 fn parse_surround_pair(spec: &str) -> Option<(String, String)> {

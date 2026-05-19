@@ -486,6 +486,22 @@ fn ctrl_m_key_is_treated_as_enter() {
 }
 
 #[test]
+fn bracketed_paste_normalizes_legacy_and_windows_line_endings() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    app.handle_event(Event::Paste(String::from("alpha\rbeta\r\ngamma")));
+    app.backend.pump().unwrap();
+
+    assert_eq!(
+        app.backend.lines,
+        vec![String::from("alpha"), String::from("beta"), String::from("gamma")]
+    );
+    assert_eq!(app.insert_buffer, "alpha\nbeta\ngamma");
+    assert_eq!((app.backend.cursor_line, app.backend.cursor_col), (2, 5));
+}
+
+#[test]
 fn ui_render_shows_scrolled_gutter_after_many_enters() {
     let mut app = App::from_path(None).unwrap();
 
@@ -560,6 +576,27 @@ fn ui_render_uses_backend_syntax_spans_only() {
     assert_eq!(plain_fg, theme::FG_BUFFER);
     assert_eq!(vlf_fg, plain_fg);
     assert_eq!(vlf_fg, theme::FG_BUFFER);
+}
+
+#[test]
+fn ui_render_sanitizes_carriage_returns_in_buffer_text() {
+    let mut app = App::from_path(None).unwrap();
+    let line = String::from("alpha\rbeta");
+    app.backend.lines = vec![line.clone()];
+    app.backend.line_cache = vec![LineSlot::Known(CachedLine {
+        text: line,
+        cursors: Vec::new(),
+        syntax_spans: Vec::new(),
+    })];
+
+    let backend = TestBackend::new(40, 6);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+
+    let row: String = (0..40).map(|x| buffer.cell((x, 0)).unwrap().symbol()).collect();
+    assert!(row.contains("alpha␍beta"), "rendered row should show CR placeholder: {row:?}");
+    assert!(!row.contains('\r'), "rendered row should not contain raw carriage return: {row:?}");
 }
 
 #[test]

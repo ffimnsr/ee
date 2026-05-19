@@ -279,6 +279,37 @@ fn apply_visible_whitespace(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
     out
 }
 
+fn control_picture(ch: char) -> Option<char> {
+    match ch {
+        '\0'..='\u{1f}' if ch != '\t' => char::from_u32(0x2400 + ch as u32),
+        '\u{7f}' => Some('\u{2421}'),
+        _ => None,
+    }
+}
+
+/// Replace raw control characters with visible glyphs before terminal paint.
+///
+/// This keeps files containing legacy CR-only line endings or pasted control
+/// bytes from moving the terminal cursor and corrupting the frame.
+fn sanitize_control_chars(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
+    spans
+        .into_iter()
+        .map(|span| {
+            let mut text = String::with_capacity(span.content.len());
+            let mut changed = false;
+            for ch in span.content.chars() {
+                if let Some(picture) = control_picture(ch) {
+                    text.push(picture);
+                    changed = true;
+                } else {
+                    text.push(ch);
+                }
+            }
+            if changed { Span::styled(text, span.style) } else { span }
+        })
+        .collect()
+}
+
 // ── Color column injection ────────────────────────────────────────────────────
 
 /// Inject a distinct background color at display column `screen_col` within
@@ -1175,6 +1206,8 @@ fn render_buffer(
             {
                 spans = apply_search_highlights(spans, line, pat, byte_start, byte_end, bg);
             }
+
+            spans = sanitize_control_chars(spans);
 
             // Apply color column highlight.
             if let Some(cc) = app.config.color_column
