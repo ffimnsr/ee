@@ -614,6 +614,52 @@ impl Editor {
         }
     }
 
+    fn do_sort_lines(&mut self, view: &View, descending: bool, range: Option<LineRange>) {
+        let delta = edit_ops::sort_lines(
+            &self.text,
+            view.sel_regions(),
+            descending,
+            Self::normalize_line_range(range),
+        );
+        if !delta.is_identity() {
+            self.this_edit_type = EditType::Other;
+            self.add_delta(delta);
+        }
+    }
+
+    fn do_reflow_lines(
+        &mut self,
+        view: &View,
+        config: &BufferItems,
+        width: usize,
+        range: Option<LineRange>,
+    ) {
+        let delta = edit_ops::reflow_lines(
+            &self.text,
+            view.sel_regions(),
+            width,
+            config.tab_size,
+            Self::normalize_line_range(range),
+        );
+        if !delta.is_identity() {
+            self.this_edit_type = EditType::Other;
+            self.add_delta(delta);
+        }
+    }
+
+    fn do_expand_tabs(&mut self, view: &View, config: &BufferItems, range: Option<LineRange>) {
+        let delta = edit_ops::expand_tabs_in_lines(
+            &self.text,
+            view.sel_regions(),
+            config.tab_size,
+            Self::normalize_line_range(range),
+        );
+        if !delta.is_identity() {
+            self.this_edit_type = EditType::Other;
+            self.add_delta(delta);
+        }
+    }
+
     fn do_transform_text<F: Fn(&str) -> String>(&mut self, view: &View, transform_function: F) {
         let delta = edit_ops::transform_text(&self.text, view.sel_regions(), transform_function);
         if !delta.is_identity() {
@@ -742,6 +788,9 @@ impl Editor {
             AlignIt { pattern, regex, occurrence, all, format, range } => {
                 self.do_align_it(view, config, &pattern, regex, occurrence, all, &format, range)
             }
+            ExpandTabs { range } => self.do_expand_tabs(view, config, range),
+            ReflowLines { width, range } => self.do_reflow_lines(view, config, width, range),
+            SortLines { descending, range } => self.do_sort_lines(view, descending, range),
             RotateSelectionContentsBackward => self.do_rotate_selection_contents(view, false),
             RotateSelectionContentsForward => self.do_rotate_selection_contents(view, true),
             ReverseSelectionContents => {
@@ -758,6 +807,15 @@ impl Editor {
     /// (always at least 1, even for an empty buffer).
     pub fn plugin_n_lines(&self) -> usize {
         self.text.measure::<LinesMetric>() + 1
+    }
+
+    fn normalize_line_range(range: Option<LineRange>) -> Option<(usize, usize)> {
+        range.and_then(|range| {
+            if range.first < 0 || range.last < 0 {
+                return None;
+            }
+            Some((min(range.first, range.last) as usize, max(range.first, range.last) as usize))
+        })
     }
 
     /// Applies annotation span updates from a plugin, transforming spans if

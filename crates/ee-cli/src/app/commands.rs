@@ -111,6 +111,7 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     command_spec("goto_window_center", "goto_window_center", "goto_window_center"),
     command_spec("goto_window_top", "goto_window_top", "goto_window_top"),
     command_spec("edit!", "reload", "e!"),
+    command_spec("expandtab", "expandtab", "expandtab"),
     command_spec("g", "goto", "g"),
     command_spec("commands", "commands", "commands"),
     command_spec("create_directory", "create_directory", "create_directory"),
@@ -232,6 +233,8 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     command_spec("reload_config", "reload_config", "reload_config"),
     command_spec("reset_diff_change", "reset_diff_change", "reset_diff_change"),
     command_spec("reindent", "reindent", "reindent"),
+    command_spec("reflow", "reflow", "reflow"),
+    command_spec("renormalize", "renormalize", "renormalize"),
     command_spec("rename", "rename", "rename"),
     command_spec("references", "references", "references"),
     command_spec("refs", "references", "references"),
@@ -412,6 +415,7 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     command_spec("test", "test", "test"),
     command_spec("transpose", "transpose", "transpose"),
     command_spec("sort", "sort", "sort"),
+    command_spec("rsort", "rsort", "rsort"),
     command_spec("uniq", "uniq", "uniq"),
     command_spec("dedup", "uniq", "uniq"),
     command_spec("add_selection_above", "add_selection_above", "add_selection_above"),
@@ -827,7 +831,15 @@ impl App {
             "gblame" => (Cow::Borrowed("show git blame metadata for current line"), None),
             "gdiff" => (Cow::Borrowed("open git diff for current buffer in scratch view"), None),
             "ghunkdiff" => (Cow::Borrowed("open git diff for current hunk in scratch view"), None),
+            "expandtab" => {
+                (Cow::Borrowed("convert tabs to spaces in selection or addressed lines"), None)
+            }
             "reindent" => (Cow::Borrowed("run core reindent on current selection or line"), None),
+            "reflow" => (
+                Cow::Borrowed("hard-wrap selection or addressed lines to a width"),
+                Some("<width>"),
+            ),
+            "renormalize" => (Cow::Borrowed("convert buffer line-ending setting to LF"), None),
             "buffer_picker" => (Cow::Borrowed("open buffer picker"), None),
             "changed_file_picker" => (Cow::Borrowed("open git-changed-file picker"), None),
             "jumplist_picker" => (Cow::Borrowed("open jump history picker"), None),
@@ -1635,8 +1647,40 @@ impl App {
                 self.enter_normal_mode();
                 return;
             }
+            "expandtab" => {
+                let _ = self.backend.send_edit(
+                    "expand_tabs",
+                    json!({ "range": range.map(|(start, end)| [start as i64, end as i64]) }),
+                );
+            }
             "reindent" => {
                 let _ = self.backend.send_edit("reindent", json!([]));
+            }
+            "reflow" => {
+                let Some(width) = parts
+                    .next()
+                    .and_then(|part| part.parse::<usize>().ok())
+                    .filter(|width| *width > 0)
+                else {
+                    self.backend.status_message = Some("reflow: usage: :reflow <width>".to_owned());
+                    return;
+                };
+                if parts.next().is_some() {
+                    self.backend.status_message = Some("reflow: usage: :reflow <width>".to_owned());
+                    return;
+                }
+                let _ = self.backend.send_edit(
+                    "reflow_lines",
+                    json!({
+                        "width": width,
+                        "range": range.map(|(start, end)| [start as i64, end as i64]),
+                    }),
+                );
+            }
+            "renormalize" => {
+                let _ = self
+                    .backend
+                    .send_edit("normalize_line_endings", json!({ "line_ending": "\n" }));
             }
             "toggle_comments" => {
                 let _ = self.backend.send_edit("toggle_comment", json!([]));
@@ -1671,13 +1715,22 @@ impl App {
                 let _ = self.backend.send_edit("transpose", json!([]));
             }
             "sort" => {
-                let result = match range {
-                    Some((start, end)) => self.sort_line_range(start, end),
-                    None => self.sort_selected_or_all_lines(),
-                };
-                match result {
-                    Ok(message) | Err(message) => self.backend.status_message = Some(message),
-                }
+                let _ = self.backend.send_edit(
+                    "sort_lines",
+                    json!({
+                        "descending": false,
+                        "range": range.map(|(start, end)| [start as i64, end as i64]),
+                    }),
+                );
+            }
+            "rsort" => {
+                let _ = self.backend.send_edit(
+                    "sort_lines",
+                    json!({
+                        "descending": true,
+                        "range": range.map(|(start, end)| [start as i64, end as i64]),
+                    }),
+                );
             }
             "uniq" | "dedup" => {
                 let result = match range {

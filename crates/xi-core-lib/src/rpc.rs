@@ -517,6 +517,24 @@ pub enum EditNotification {
     ToggleLineComment,
     ToggleBlockComment,
     Reindent,
+    ExpandTabs {
+        #[serde(default)]
+        range: Option<LineRange>,
+    },
+    ReflowLines {
+        width: usize,
+        #[serde(default)]
+        range: Option<LineRange>,
+    },
+    SortLines {
+        #[serde(default)]
+        descending: bool,
+        #[serde(default)]
+        range: Option<LineRange>,
+    },
+    NormalizeLineEndings {
+        line_ending: String,
+    },
     Indent,
     Outdent,
     /// Indicates whether find highlights should be rendered

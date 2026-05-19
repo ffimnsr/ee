@@ -733,6 +733,51 @@ pub fn align_it(
     builder.build()
 }
 
+pub fn sort_lines(
+    base: &Rope,
+    regions: &[SelRegion],
+    descending: bool,
+    line_range: Option<(usize, usize)>,
+) -> RopeDelta {
+    transform_linewise(base, regions, line_range, |lines| {
+        if descending {
+            lines.sort_by(|left, right| right.cmp(left));
+        } else {
+            lines.sort();
+        }
+    })
+}
+
+pub fn reflow_lines(
+    base: &Rope,
+    regions: &[SelRegion],
+    width: usize,
+    tab_size: usize,
+    line_range: Option<(usize, usize)>,
+) -> RopeDelta {
+    if width == 0 {
+        return identity_delta(base);
+    }
+    transform_linewise(base, regions, line_range, |lines| {
+        *lines = hard_wrap_lines(lines, width, tab_size);
+    })
+}
+
+pub fn expand_tabs_in_lines(
+    base: &Rope,
+    regions: &[SelRegion],
+    tab_size: usize,
+    line_range: Option<(usize, usize)>,
+) -> RopeDelta {
+    transform_linewise(base, regions, line_range, |lines| {
+        for line in lines {
+            if line.contains('\t') {
+                *line = expand_tabs(line, tab_size);
+            }
+        }
+    })
+}
+
 pub fn transform_text<F: Fn(&str) -> String>(
     base: &Rope,
     regions: &[SelRegion],
@@ -933,9 +978,160 @@ fn contiguous_matching_block(
     Some((start, end))
 }
 
+fn transform_linewise<F>(
+    base: &Rope,
+    regions: &[SelRegion],
+    line_range: Option<(usize, usize)>,
+    mut transform: F,
+) -> RopeDelta
+where
+    F: FnMut(&mut Vec<String>),
+{
+    let total_lines = base.measure::<LinesMetric>() + 1;
+    if total_lines == 0 {
+        return identity_delta(base);
+    }
+
+    let Some((start_line, end_line)) =
+        resolve_linewise_range(base, regions, line_range, total_lines)
+    else {
+        return identity_delta(base);
+    };
+
+    let original =
+        (start_line..=end_line).map(|line| logical_line_contents(base, line).1).collect::<Vec<_>>();
+    let mut updated = original.clone();
+    transform(&mut updated);
+    if original == updated {
+        return identity_delta(base);
+    }
+
+    let start_offset = LogicalLines.offset_of_line(base, start_line);
+    let end_offset = if end_line + 1 < total_lines {
+        LogicalLines.offset_of_line(base, end_line + 1)
+    } else {
+        base.len()
+    };
+    let original_segment = base.slice_to_cow(start_offset..end_offset);
+    let mut replacement = updated.join("\n");
+    if original_segment.ends_with('\n') || original_segment.ends_with('\r') {
+        replacement.push('\n');
+    }
+
+    let mut builder = DeltaBuilder::new(base.len());
+    builder.replace(Interval::new(start_offset, end_offset), Rope::from(replacement));
+    builder.build()
+}
+
+fn resolve_linewise_range(
+    base: &Rope,
+    regions: &[SelRegion],
+    line_range: Option<(usize, usize)>,
+    total_lines: usize,
+) -> Option<(usize, usize)> {
+    let last = total_lines.saturating_sub(1);
+    line_range
+        .map(|(start, end)| (start.min(last), end.min(last).max(start.min(last))))
+        .or_else(|| selected_line_range(base, regions))
+        .or(Some((0, last)))
+}
+
 fn line_matches(base: &Rope, line: usize, pattern: &Regex) -> bool {
     let (_, content) = logical_line_contents(base, line);
     pattern.find(&content).is_some_and(|found| found.start() != found.end())
+}
+
+fn hard_wrap_lines(lines: &[String], width: usize, tab_size: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut wrapped = Vec::with_capacity(lines.len());
+    let mut paragraph_words: Vec<String> = Vec::new();
+    let mut paragraph_indent = String::new();
+
+    for line in lines {
+        if line.trim().is_empty() {
+            flush_wrapped_paragraph(
+                &mut wrapped,
+                &mut paragraph_words,
+                &mut paragraph_indent,
+                width,
+                tab_size,
+            );
+            wrapped.push(String::new());
+            continue;
+        }
+
+        if paragraph_words.is_empty() {
+            paragraph_indent = line.chars().take_while(|ch| ch.is_whitespace()).collect();
+        }
+        paragraph_words.extend(line.split_whitespace().map(str::to_owned));
+    }
+
+    flush_wrapped_paragraph(
+        &mut wrapped,
+        &mut paragraph_words,
+        &mut paragraph_indent,
+        width,
+        tab_size,
+    );
+    wrapped
+}
+
+fn flush_wrapped_paragraph(
+    wrapped: &mut Vec<String>,
+    words: &mut Vec<String>,
+    indent: &mut String,
+    width: usize,
+    tab_size: usize,
+) {
+    if words.is_empty() {
+        indent.clear();
+        return;
+    }
+
+    let indent_text = expand_tabs(indent, tab_size);
+    let indent_width = display_col_for_str(&indent_text, tab_size);
+    let mut current = indent_text.clone();
+    let mut current_width = indent_width;
+
+    for word in words.drain(..) {
+        let word_width = display_col_for_str(&word, tab_size);
+        let separator_width = usize::from(current_width > indent_width);
+        if current_width > indent_width && current_width + separator_width + word_width > width {
+            wrapped.push(current);
+            current = indent_text.clone();
+            current.push_str(&word);
+            current_width = indent_width + word_width;
+            continue;
+        }
+
+        if current_width > indent_width {
+            current.push(' ');
+            current_width += 1;
+        }
+        current.push_str(&word);
+        current_width += word_width;
+    }
+
+    wrapped.push(current);
+    indent.clear();
+}
+
+fn expand_tabs(text: &str, tab_size: usize) -> String {
+    let tab_size = tab_size.max(1);
+    let mut expanded = String::with_capacity(text.len());
+    let mut display_col = 0usize;
+    for ch in text.chars() {
+        if ch == '\t' {
+            let width = tab_size - (display_col % tab_size);
+            let width = if width == 0 { tab_size } else { width };
+            expanded.extend(std::iter::repeat_n(' ', width));
+            display_col += width;
+        } else {
+            expanded.push(ch);
+            display_col += UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+    }
+    expanded
 }
 
 fn select_align_it_matches<'a>(
@@ -1057,8 +1253,8 @@ fn n_spaces(n: usize) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        align_it, align_selections, delete_backward, reverse_selection_contents,
-        rotate_selection_contents, transpose,
+        align_it, align_selections, delete_backward, expand_tabs_in_lines, reflow_lines,
+        reverse_selection_contents, rotate_selection_contents, sort_lines, transpose,
     };
     use crate::config::BufferItems;
     use crate::selection::SelRegion;
@@ -1238,5 +1434,45 @@ mod tests {
         let delta = align_it(&text, &regions, 4, "=", false, 1, false, "l0r0l0", None);
 
         assert_eq!(String::from(delta.apply(&text)), "a  =1\nbbb=22");
+    }
+
+    #[test]
+    fn sort_lines_uses_whole_buffer_when_only_caret_present() {
+        let text: Rope = "z\nc\na\nb".into();
+        let regions = [SelRegion::new(0, 0)];
+
+        let delta = sort_lines(&text, &regions, false, None);
+
+        assert_eq!(String::from(delta.apply(&text)), "a\nb\nc\nz");
+    }
+
+    #[test]
+    fn sort_lines_supports_explicit_reverse_range() {
+        let text: Rope = "keep\naaa\nccc\nbbb\nstay".into();
+        let regions = [SelRegion::new(0, 0)];
+
+        let delta = sort_lines(&text, &regions, true, Some((1, 3)));
+
+        assert_eq!(String::from(delta.apply(&text)), "keep\nccc\nbbb\naaa\nstay");
+    }
+
+    #[test]
+    fn reflow_lines_wraps_selected_or_explicit_lines() {
+        let text: Rope = "alpha beta\ngamma delta\n\nkeep".into();
+        let regions = [SelRegion::new(0, 0)];
+
+        let delta = reflow_lines(&text, &regions, 10, 4, Some((0, 1)));
+
+        assert_eq!(String::from(delta.apply(&text)), "alpha beta\ngamma\ndelta\n\nkeep");
+    }
+
+    #[test]
+    fn expand_tabs_in_lines_rewrites_selected_lines() {
+        let text: Rope = "\talpha\nb\tcd".into();
+        let regions = [SelRegion::new(0, text.len())];
+
+        let delta = expand_tabs_in_lines(&text, &regions, 4, None);
+
+        assert_eq!(String::from(delta.apply(&text)), "    alpha\nb   cd");
     }
 }

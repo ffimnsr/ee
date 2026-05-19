@@ -105,6 +105,17 @@ pub(crate) enum BufferEvent {
         format: String,
         range: Option<LineRange>,
     },
+    ExpandTabs {
+        range: Option<LineRange>,
+    },
+    ReflowLines {
+        width: usize,
+        range: Option<LineRange>,
+    },
+    SortLines {
+        descending: bool,
+        range: Option<LineRange>,
+    },
     RotateSelectionContentsBackward,
     RotateSelectionContentsForward,
     ReverseSelectionContents,
@@ -192,6 +203,9 @@ pub(crate) enum SpecialEvent {
     ToggleLineComment,
     ToggleBlockComment,
     Reindent,
+    NormalizeLineEndings {
+        line_ending: String,
+    },
     SyntaxSelection(SyntaxSelectionAction),
     SyntaxNavigation(SyntaxNavigationAction),
     GotoParagraph {
@@ -403,6 +417,12 @@ impl From<EditNotification> for EventDomain {
             Indent => BufferEvent::Indent.into(),
             Outdent => BufferEvent::Outdent.into(),
             Reindent => SpecialEvent::Reindent.into(),
+            ExpandTabs { range } => BufferEvent::ExpandTabs { range }.into(),
+            ReflowLines { width, range } => BufferEvent::ReflowLines { width, range }.into(),
+            SortLines { descending, range } => BufferEvent::SortLines { descending, range }.into(),
+            NormalizeLineEndings { line_ending } => {
+                SpecialEvent::NormalizeLineEndings { line_ending }.into()
+            }
             HighlightFind { visible } => ViewEvent::HighlightFind { visible }.into(),
             SelectionForFind { case_sensitive } =>
                 ViewEvent::SelectionForFind { case_sensitive }.into(),

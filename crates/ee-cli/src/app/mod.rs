@@ -2358,14 +2358,6 @@ impl App {
         }
     }
 
-    fn sort_selected_or_all_lines(&mut self) -> Result<String, String> {
-        self.transform_selected_or_all_lines("sort", |lines| lines.sort())
-    }
-
-    fn sort_line_range(&mut self, start_line: usize, end_line: usize) -> Result<String, String> {
-        self.transform_line_range("sort", start_line, end_line, |lines| lines.sort())
-    }
-
     fn dedup_selected_or_all_lines(&mut self) -> Result<String, String> {
         self.transform_selected_or_all_lines("dedup", |lines| {
             let mut seen = std::collections::HashSet::new();

@@ -2921,6 +2921,24 @@ fn reindent_command_uses_backend_edit() {
 }
 
 #[test]
+fn expandtab_command_uses_backend_edit_from_command_mode() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    for ch in [':', 'e', 'x', 'p', 'a', 'n', 'd', 't', 'a', 'b'] {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "expand_tabs");
+}
+
+#[test]
 fn toggle_comment_commands_use_backend_edit() {
     for (command, method) in [
         ("toggle_comments", "toggle_comment"),
@@ -6726,33 +6744,86 @@ fn pipe_to_and_append_output_commands_run_shell_without_replacing_buffer() {
 }
 
 #[test]
-fn sort_command_sorts_selected_lines_or_whole_buffer() {
+fn sort_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
     let mut app = App::from_path(None).unwrap();
-    insert_text(&mut app, "keep\nccc\naaa\nbbb\nstay");
-    app.backend.pump().unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
 
-    run_ex(&mut app, "2,4sort");
-    app.backend.pump().unwrap();
-    assert_eq!(
-        app.backend.lines,
-        vec![
-            String::from("keep"),
-            String::from("aaa"),
-            String::from("bbb"),
-            String::from("ccc"),
-            String::from("stay"),
-        ]
-    );
+    run_ex(&mut app, "sort");
 
-    let mut whole = App::from_path(None).unwrap();
-    insert_text(&mut whole, "z\nc\na\nb");
-    whole.backend.pump().unwrap();
-    run_ex(&mut whole, "sort");
-    whole.backend.pump().unwrap();
-    assert_eq!(
-        whole.backend.lines,
-        vec![String::from("a"), String::from("b"), String::from("c"), String::from("z"),]
-    );
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "sort_lines");
+    assert_eq!(value["params"]["params"]["descending"], Value::Bool(false));
+    assert_eq!(value["params"]["params"]["range"], Value::Null);
+}
+
+#[test]
+fn rsort_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    run_ex(&mut app, "rsort");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "sort_lines");
+    assert_eq!(value["params"]["params"]["descending"], Value::Bool(true));
+    assert_eq!(value["params"]["params"]["range"], Value::Null);
+}
+
+#[test]
+fn reflow_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    run_ex(&mut app, "reflow 10");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "reflow_lines");
+    assert_eq!(value["params"]["params"]["width"], json!(10));
+    assert_eq!(value["params"]["params"]["range"], Value::Null);
+}
+
+#[test]
+fn expandtab_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    run_ex(&mut app, "expandtab");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "expand_tabs");
+    assert_eq!(value["params"]["params"]["range"], Value::Null);
+}
+
+#[test]
+fn renormalize_command_uses_backend_edit() {
+    let (tx, rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    run_ex(&mut app, "renormalize");
+
+    let message = rx.recv().expect("message should be sent");
+    let value: Value = serde_json::from_str(&message).expect("message should be json");
+    assert_eq!(value["method"], "edit");
+    assert_eq!(value["params"]["method"], "normalize_line_endings");
+    assert_eq!(value["params"]["params"]["line_ending"], Value::String(String::from("\n")));
 }
 
 #[test]

@@ -636,6 +636,7 @@ impl<'a> EventContext<'a> {
                 self.begin_async_reindent();
                 None
             }
+            SpecialEvent::NormalizeLineEndings { .. } => None,
             SpecialEvent::SyntaxSelection(action) => {
                 self.do_syntax_selection(action);
                 None
@@ -2685,6 +2686,9 @@ fn vlf_buffer_feature_name(cmd: &crate::edit_types::BufferEvent) -> &'static str
         BufferEvent::DuplicateLine => "duplicate-line",
         BufferEvent::IncreaseNumber | BufferEvent::DecreaseNumber => "number-change",
         BufferEvent::AlignSelections | BufferEvent::AlignIt { .. } => "align",
+        BufferEvent::ExpandTabs { .. }
+        | BufferEvent::ReflowLines { .. }
+        | BufferEvent::SortLines { .. } => "linewise-transform",
         BufferEvent::RotateSelectionContentsBackward
         | BufferEvent::RotateSelectionContentsForward
         | BufferEvent::ReverseSelectionContents => "selection-rotation",

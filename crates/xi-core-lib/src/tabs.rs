@@ -266,6 +266,10 @@ impl CoreState {
         }
     }
 
+    pub(crate) fn set_buffer_user_config(&mut self, buffer_id: BufferId, table: Table) {
+        self.set_config(ConfigDomain::UserOverride(buffer_id), table);
+    }
+
     /// Notify editors/views/plugins of config changes.
     fn handle_config_changes(&self, changes: Vec<(BufferId, Table)>) {
         for (id, table) in changes {
@@ -391,9 +395,35 @@ impl CoreState {
     }
 
     fn do_edit(&mut self, view_id: ViewId, cmd: EditNotification) {
+        if let EditNotification::NormalizeLineEndings { line_ending } = cmd {
+            self.do_normalize_line_endings(view_id, line_ending);
+            return;
+        }
+
         if let Some(mut edit_ctx) = self.make_context(view_id) {
             edit_ctx.do_edit(cmd);
         }
+    }
+
+    fn do_normalize_line_endings(&mut self, view_id: ViewId, line_ending: String) {
+        let Some(view) = self.views.get(&view_id) else {
+            return;
+        };
+        let buffer_id = view.borrow().get_buffer_id();
+        let current = self.config_manager.get_buffer_config(buffer_id).items.line_ending.clone();
+        if current == line_ending {
+            return;
+        }
+
+        let mut changes = Table::new();
+        changes.insert("line_ending".into(), line_ending.clone().into());
+        self.set_buffer_user_config(buffer_id, changes);
+        self.peer.alert(match line_ending.as_str() {
+            "\n" => "Line endings normalized to LF.",
+            "\r\n" => "Line endings normalized to CRLF.",
+            "\r" => "Line endings normalized to CR.",
+            _ => "Line endings updated.",
+        });
     }
 
     fn do_select_chars_preview(
@@ -1946,6 +1976,45 @@ mod tests {
 
         let verified = core.inner().config_manager.get_buffer_config(buffer_id).items.clone();
         assert_eq!(verified.line_ending, "\r\n");
+    }
+
+    #[test]
+    fn normalize_line_endings_edit_updates_buffer_config() {
+        let peer = Box::new(DummyPeer);
+        let ctx = RpcCtx::new(peer.box_clone());
+        let mut core = crate::XiCore::new();
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::ClientStarted {
+                config_dir: None,
+                client_extras_dir: None,
+            },
+        );
+
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        tmp.write_all(b"alpha\r\nbeta\r\n").unwrap();
+        tmp.flush().unwrap();
+
+        let view_id_value = core.inner().do_new_view(Some(tmp.path().to_path_buf())).unwrap();
+        let view_id: ViewId = serde_json::from_value(view_id_value).unwrap();
+        core.inner().handle_idle(NEW_VIEW_IDLE_TOKEN);
+
+        let buffer_id = core.inner().views.get(&view_id).unwrap().borrow().get_buffer_id();
+        let initial = core.inner().config_manager.get_buffer_config(buffer_id).items.clone();
+        assert_eq!(initial.line_ending, "\r\n");
+
+        core.handle_notification(
+            &ctx,
+            crate::rpc::CoreNotification::Edit(crate::rpc::EditCommand {
+                view_id,
+                cmd: crate::rpc::EditNotification::NormalizeLineEndings {
+                    line_ending: "\n".to_owned(),
+                },
+            }),
+        );
+
+        let updated = core.inner().config_manager.get_buffer_config(buffer_id).items.clone();
+        assert_eq!(updated.line_ending, "\n");
     }
 
     #[test]
