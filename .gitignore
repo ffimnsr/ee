@@ -24,5 +24,6 @@ build
 
 .atlas/
 .codex/
+.code-assist/
 
 /gh-run-*-logs/

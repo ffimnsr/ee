@@ -699,6 +699,7 @@ impl VlfStore {
         let raw_cache_byte_cap = self.pager.metrics().cache_byte_cap;
         let decoded_cache_byte_cap = self.decoded_cache.get_mut().byte_cap();
         let viewport = self.viewport.get_mut().clone();
+        let restart_background_indexing = self.scan_rx.get_mut().is_some();
 
         let overlay_limits =
             self.overlay.get_mut().as_ref().map(|overlay| overlay.limits().clone());
@@ -739,7 +740,9 @@ impl VlfStore {
             overlay
         });
 
-        self.start_background_indexing();
+        if restart_background_indexing {
+            self.start_background_indexing();
+        }
         Ok(())
     }
 
@@ -3102,6 +3105,30 @@ mod tests {
             Some(VlfSavePolicy::SameSizeInPlaceOverwrite)
         ));
         assert_eq!(store.known_line_count(), KnownLineCount::Unknown);
+    }
+
+    #[test]
+    fn refresh_after_save_restarts_background_indexing_only_when_already_active() {
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(b"alpha\nbeta\n").unwrap();
+        file.flush().unwrap();
+
+        let mut without_indexer = VlfStore::open_with_config(file.path(), 64, 1024 * 1024).unwrap();
+        without_indexer.refresh_after_save(file.path()).unwrap();
+        assert!(
+            without_indexer.scan_rx.borrow().is_none(),
+            "refresh should not start background indexing for stores that never enabled it"
+        );
+
+        let mut with_indexer = VlfStore::open_with_config(file.path(), 64, 1024 * 1024).unwrap();
+        with_indexer.start_background_indexing();
+        assert!(with_indexer.scan_rx.borrow().is_some(), "precondition: scanner should be active");
+
+        with_indexer.refresh_after_save(file.path()).unwrap();
+        assert!(
+            with_indexer.scan_rx.borrow().is_some(),
+            "refresh should restart background indexing when it was already active"
+        );
     }
 
     #[test]
