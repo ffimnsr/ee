@@ -125,6 +125,11 @@ impl App {
             return;
         }
 
+        if key.code == KeyCode::Esc && self.has_pending_input_state() {
+            self.cancel_pending_input_state();
+            return;
+        }
+
         // Capture keystrokes for the active macro recording (before processing).
         // We always push first and pop afterward if this key stops recording,
         // so the terminating `q` is not stored in the macro.
@@ -267,6 +272,125 @@ impl App {
     pub(crate) fn active_key_sequence_label(&self) -> Option<String> {
         self.active_key_sequence_node()?;
         Some(crate::keymap::format_key_sequence(&self.input_state.key_sequence))
+    }
+
+    pub(crate) fn active_key_hint_label(&self) -> Option<String> {
+        if let Some(label) = self.active_key_sequence_label() {
+            return Some(label);
+        }
+        if let Some(prefix) = self.input_state.prefix {
+            return Some(prefix.to_string());
+        }
+        if self.input_state.awaiting_register {
+            return Some(if self.input_state.awaiting_register_insert {
+                String::from("Ctrl+r")
+            } else {
+                String::from("\"")
+            });
+        }
+        if self.input_state.awaiting_mark_set {
+            return Some(String::from("m"));
+        }
+        if let Some(line_start) = self.input_state.awaiting_mark_jump {
+            return Some(if line_start { String::from("'") } else { String::from("`") });
+        }
+        if self.input_state.awaiting_macro_record {
+            return Some(String::from("record macro"));
+        }
+        if self.input_state.awaiting_macro_replay {
+            return Some(String::from("replay macro"));
+        }
+        if self.input_state.awaiting_window_cmd {
+            return Some(String::from("Ctrl+w"));
+        }
+        if self.input_state.awaiting_replace_char {
+            return Some(String::from("replace"));
+        }
+        None
+    }
+
+    pub(crate) fn active_key_hint_entries(&self) -> Option<Vec<crate::keymap::KeyHintEntry>> {
+        let entries = if let Some(node) = self.active_key_sequence_node() {
+            Some(node.hint_entries())
+        } else if let Some(prefix) = self.input_state.prefix {
+            let entries = crate::keymap::prefix_hint_entries(&self.key_bindings, self.mode, prefix);
+            if entries.is_empty() { None } else { Some(entries) }
+        } else if self.input_state.awaiting_register {
+            Some(crate::keymap::register_hint_entries())
+        } else if self.input_state.awaiting_mark_set {
+            Some(crate::keymap::mark_set_hint_entries())
+        } else if let Some(line_start) = self.input_state.awaiting_mark_jump {
+            Some(crate::keymap::mark_jump_hint_entries(line_start))
+        } else if self.input_state.awaiting_macro_record {
+            Some(crate::keymap::macro_record_hint_entries())
+        } else if self.input_state.awaiting_macro_replay {
+            Some(crate::keymap::macro_replay_hint_entries())
+        } else if self.input_state.awaiting_window_cmd {
+            Some(crate::keymap::window_command_hint_entries())
+        } else if self.input_state.awaiting_replace_char {
+            Some(crate::keymap::replace_char_hint_entries())
+        } else {
+            None
+        }?;
+
+        Some(crate::keymap::with_cancel_hint(entries))
+    }
+
+    fn has_pending_input_state(&self) -> bool {
+        !self.input_state.key_sequence.is_empty()
+            || self.input_state.prefix.is_some()
+            || self.input_state.pending_find.is_some()
+            || self.input_state.awaiting_register
+            || self.input_state.awaiting_register_insert
+            || self.input_state.awaiting_mark_set
+            || self.input_state.awaiting_mark_jump.is_some()
+            || self.input_state.awaiting_macro_record
+            || self.input_state.awaiting_macro_replay
+            || self.input_state.awaiting_window_cmd
+            || self.input_state.awaiting_replace_char
+    }
+
+    fn cancel_pending_input_state(&mut self) {
+        self.clear_active_key_sequence();
+        self.input_state.reset();
+        self.backend.status_message = Some(String::from("pending input cancelled"));
+    }
+
+    pub(crate) fn pending_input_label(&self) -> Option<String> {
+        if self.input_state.awaiting_register {
+            return Some(if self.input_state.awaiting_register_insert {
+                String::from("insert register | press register name")
+            } else {
+                String::from("register | press register name")
+            });
+        }
+        if self.input_state.awaiting_mark_set {
+            return Some(String::from("set mark | press a-z"));
+        }
+        if let Some(line_start) = self.input_state.awaiting_mark_jump {
+            return Some(if line_start {
+                String::from("jump to mark line | press mark")
+            } else {
+                String::from("jump to mark | press mark")
+            });
+        }
+        if self.input_state.awaiting_macro_record {
+            return Some(String::from("record macro | press a-z"));
+        }
+        if self.input_state.awaiting_macro_replay {
+            return Some(String::from("replay macro | press a-z or @"));
+        }
+        if self.input_state.awaiting_replace_char {
+            return Some(String::from("replace | press character"));
+        }
+        if self.mode != Mode::OperatorPending
+            && let Some(find) = self.input_state.pending_find
+        {
+            let direction = if find.forward { "forward" } else { "backward" };
+            let kind = if find.inclusive { "find" } else { "till" };
+            return Some(format!("{kind} char {direction} | press target"));
+        }
+        None
     }
 
     pub(crate) fn expire_key_sequence_if_idle(&mut self) {

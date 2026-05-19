@@ -110,3 +110,5 @@ Real next jump likely needs architectural change: first render from decoded pref
   - [ ] Implement for `toml`
   - [ ] Implement for `kdl`
 - [ ] When trying to save and user doesn't have permission, ask if they want to re-execute with higher privilage with `sudo`, `su`, `run0`
+- [ ] Make sparse editing workable on VLF
+- [ ] vsplit and hsplit problems on working with same file showing empty buffer

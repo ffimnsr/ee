@@ -25,7 +25,7 @@ struct RootAreas {
 
 fn split_root_areas(area: Rect, app: &App) -> RootAreas {
     let tab_count = app.tabs.tab_count();
-    let key_hint_visible = app.active_key_sequence_node().is_some();
+    let key_hint_visible = app.active_key_hint_entries().is_some();
 
     let qf_panel_visible = (app.quickfix_open && app.quickfix.is_some())
         || (app.location_list_open && app.location_list.is_some());
@@ -1405,9 +1405,18 @@ fn render_prompt(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         return;
     }
 
-    if let Some(label) = app.active_key_sequence_label() {
+    if let Some(label) = app.active_key_hint_label() {
         frame.render_widget(
             Paragraph::new(Line::from(format!("keys: {label}")))
+                .style(Style::default().fg(Color::Rgb(166, 173, 200)).bg(Color::Rgb(24, 25, 38))),
+            area,
+        );
+        return;
+    }
+
+    if let Some(message) = app.pending_input_label() {
+        frame.render_widget(
+            Paragraph::new(Line::from(message))
                 .style(Style::default().fg(Color::Rgb(166, 173, 200)).bg(Color::Rgb(24, 25, 38))),
             area,
         );
@@ -1467,8 +1476,8 @@ fn render_prompt(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_key_hints(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    let Some(node) = app.active_key_sequence_node() else { return };
-    let Some(label) = app.active_key_sequence_label() else { return };
+    let Some(label) = app.active_key_hint_label() else { return };
+    let Some(entries) = app.active_key_hint_entries() else { return };
 
     let block = Block::default()
         .borders(Borders::TOP)
@@ -1482,7 +1491,6 @@ fn render_key_hints(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         return;
     }
 
-    let entries = node.hint_entries();
     let rows = (inner.height as usize).max(1);
     let min_cell_width = 24usize;
     let mut cols = (inner.width as usize / min_cell_width).max(1).min(entries.len().max(1));
@@ -1510,32 +1518,17 @@ fn render_key_hints(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             }
             let entry = &entries[index];
             let key_label = pad_or_trim(&entry.key, key_width.saturating_sub(2));
-            let desc_text = if entry.is_group {
-                format!("-> {}", entry.description)
-            } else {
-                entry.description.clone()
-            };
+            let desc_text = entry.description.clone();
             let desc_label = pad_or_trim(&desc_text, desc_width);
 
             spans.push(Span::styled(
                 format!(" {} ", key_label),
-                if entry.is_group {
-                    Style::default().fg(Color::Rgb(250, 179, 135)).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::Rgb(137, 220, 235)).add_modifier(Modifier::BOLD)
-                },
+                Style::default().fg(Color::Rgb(137, 220, 235)).add_modifier(Modifier::BOLD),
             ));
             if desc_width > 0 {
                 spans.push(Span::styled(
                     desc_label,
-                    if entry.is_group {
-                        Style::default()
-                            .fg(Color::Rgb(250, 179, 135))
-                            .bg(Color::Rgb(30, 30, 46))
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::Rgb(205, 214, 244)).bg(Color::Rgb(30, 30, 46))
-                    },
+                    Style::default().fg(Color::Rgb(205, 214, 244)).bg(Color::Rgb(30, 30, 46)),
                 ));
             }
             if col + 1 < cols {

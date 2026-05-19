@@ -4420,6 +4420,36 @@ fn replace_action_waits_for_next_character() {
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT)));
 
     assert!(app.input_state.awaiting_replace_char);
+    assert_eq!(app.active_key_hint_label().as_deref(), Some("replace"));
+    let entries = app.active_key_hint_entries().expect("replace wait should show hints");
+    assert!(
+        entries
+            .iter()
+            .any(|entry| { entry.key == "char" && entry.description == "replacement character" })
+    );
+    assert!(entries.iter().any(|entry| entry.key == "Esc" && entry.description == "cancel"));
+}
+
+#[test]
+fn esc_cancels_replace_wait_state() {
+    let mut app = App::from_path(None).unwrap();
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('r'),
+            modifiers: KeyModifiers::ALT,
+            prefix: None,
+        },
+        Action::Replace,
+    );
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT)));
+    assert!(app.input_state.awaiting_replace_char);
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+
+    assert!(!app.input_state.awaiting_replace_char);
+    assert!(app.active_key_hint_label().is_none());
 }
 
 #[test]
@@ -4905,6 +4935,119 @@ description = "buffer picker"
 }
 
 #[test]
+fn prefix_binding_exposes_key_hints_for_follow_up_keys() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)));
+
+    assert_eq!(app.active_key_hint_label().as_deref(), Some("z"));
+    let entries = app.active_key_hint_entries().expect("z prefix should show hints");
+    assert_eq!(
+        entries.first().map(|entry| (entry.key.as_str(), entry.description.as_str())),
+        Some(("Esc", "cancel"))
+    );
+    assert!(entries.iter().any(|entry| entry.key == "a" && entry.description == "toggle fold"));
+    assert!(entries.iter().any(|entry| entry.key == "o" && entry.description == "open fold"));
+    assert!(entries.iter().any(|entry| entry.key == "R" && entry.description == "open all folds"));
+    assert!(entries.iter().any(|entry| entry.key == "Esc" && entry.description == "cancel"));
+}
+
+#[test]
+fn esc_cancels_prefix_hint_state() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+    assert_eq!(app.input_state.prefix, Some('g'));
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+
+    assert!(app.input_state.prefix.is_none());
+    assert!(app.active_key_hint_label().is_none());
+    assert_eq!(app.backend.status_message.as_deref(), Some("pending input cancelled"));
+}
+
+#[test]
+fn window_command_prefix_exposes_key_hints() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)));
+
+    assert_eq!(app.active_key_hint_label().as_deref(), Some("Ctrl+w"));
+    let entries = app.active_key_hint_entries().expect("window prefix should show hints");
+    assert!(
+        entries.iter().any(|entry| entry.key == "s" && entry.description == "split horizontally")
+    );
+    assert!(entries.iter().any(|entry| entry.key == "o" && entry.description == "only window"));
+}
+
+#[test]
+fn register_prefix_exposes_key_hints() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('"'), KeyModifiers::NONE)));
+
+    assert_eq!(app.active_key_hint_label().as_deref(), Some("\""));
+    let entries = app.active_key_hint_entries().expect("register prefix should show hints");
+    assert!(entries.iter().any(|entry| entry.key == "a-z / A-Z" && entry.description == "named register / append"));
+    assert!(
+        entries.iter().any(|entry| entry.key == "+" && entry.description == "system clipboard")
+    );
+    assert!(
+        entries.iter().any(|entry| entry.key == "1-9" && entry.description == "delete history")
+    );
+}
+
+#[test]
+fn mark_prefixes_expose_key_hints() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE)));
+
+    assert_eq!(app.active_key_hint_label().as_deref(), Some("m"));
+    let set_entries = app.active_key_hint_entries().expect("mark set prefix should show hints");
+    assert!(
+        set_entries.iter().any(|entry| entry.key == "a-z" && entry.description == "named mark")
+    );
+
+    app.input_state.awaiting_mark_set = false;
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('\''), KeyModifiers::NONE)));
+
+    assert_eq!(app.active_key_hint_label().as_deref(), Some("'"));
+    let jump_entries = app.active_key_hint_entries().expect("mark jump prefix should show hints");
+    assert!(
+        jump_entries
+            .iter()
+            .any(|entry| entry.key == "a-z" && entry.description == "named mark line")
+    );
+    assert!(
+        jump_entries
+            .iter()
+            .any(|entry| entry.key == "`" && entry.description == "previous jump line")
+    );
+}
+
+#[test]
+fn custom_prefix_binding_uses_human_readable_action_description() {
+    let mut app = App::from_path(None).unwrap();
+    app.key_bindings.insert(
+        BindingKey {
+            mode: Mode::Normal,
+            key: KeyCode::Char('x'),
+            modifiers: KeyModifiers::NONE,
+            prefix: Some('g'),
+        },
+        Action::ReplaceSelectionsWithPrimaryClipboard,
+    );
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+
+    let entries = app.active_key_hint_entries().expect("g prefix should show hints");
+    assert!(entries.iter().any(|entry| {
+        entry.key == "x" && entry.description == "replace selections with primary clipboard"
+    }));
+}
+
+#[test]
 fn swift_motion_sequence_starts_and_jumps_to_labeled_visible_match() {
     let mut app = App::from_path(None).unwrap();
     app.last_editor_height = 10;
@@ -5219,6 +5362,10 @@ description = "list buffers"
     assert!(screen.contains("f"), "screen missing active sequence tail: {screen}");
     assert!(screen.contains("find files"), "screen missing leaf description: {screen}");
     assert!(screen.contains("list buffers"), "screen missing sibling description: {screen}");
+    assert!(
+        !screen.contains("->"),
+        "sequence hints should match prefix styling without arrow markers: {screen}"
+    );
 }
 
 #[test]
@@ -5287,15 +5434,21 @@ description = "delta"
     assert!(screen.contains("keys"), "screen missing title label: {screen}");
     assert!(screen.contains("SPC"), "screen missing sequence prefix in title: {screen}");
     assert!(screen.contains("f"), "screen missing current sequence key in title: {screen}");
+    assert!(screen.contains("Esc cancel"), "screen missing sequence cancel hint: {screen}");
     let alpha_row = screen.lines().position(|line| line.contains("alpha")).unwrap();
     let beta_row = screen.lines().position(|line| line.contains("beta")).unwrap();
     let gamma_row = screen.lines().position(|line| line.contains("gamma")).unwrap();
     let delta_row = screen.lines().position(|line| line.contains("delta")).unwrap();
+    let esc_row = screen.lines().position(|line| line.contains("Esc cancel")).unwrap();
+    assert_eq!(esc_row, gamma_row, "expected first row to hold cancel and gamma columns: {screen}");
     assert_eq!(
-        alpha_row, gamma_row,
-        "expected first row to hold alpha and gamma columns: {screen}"
+        alpha_row, delta_row,
+        "expected second row to hold alpha and delta columns: {screen}"
     );
-    assert_eq!(beta_row, delta_row, "expected second row to hold beta and delta columns: {screen}");
+    assert!(
+        beta_row > alpha_row,
+        "expected beta to flow into the last row after cancel takes first cell: {screen}"
+    );
 
     let (title_y, title_line) = screen
         .lines()
@@ -6380,6 +6533,7 @@ fn insert_register_action_inserts_named_register_contents_in_insert_mode() {
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
     assert!(app.input_state.awaiting_register);
     assert!(app.input_state.awaiting_register_insert);
+    assert_eq!(app.pending_input_label().as_deref(), Some("insert register | press register name"));
 
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
     app.backend.pump().unwrap();
@@ -7194,6 +7348,11 @@ fn q_then_char_starts_recording() {
     let mut app = App::from_path(None).unwrap();
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
     assert!(app.input_state.awaiting_macro_record);
+    assert_eq!(app.active_key_hint_label().as_deref(), Some("record macro"));
+    let entries = app.active_key_hint_entries().expect("macro record wait should show hints");
+    assert!(
+        entries.iter().any(|entry| entry.key == "a-z" && entry.description == "macro register")
+    );
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
     assert_eq!(app.macro_register, Some('a'));
 }
@@ -7245,6 +7404,10 @@ fn at_at_replays_last_macro() {
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::NONE)));
     // awaiting_macro_replay should be set.
     assert!(app.input_state.awaiting_macro_replay);
+    assert_eq!(app.active_key_hint_label().as_deref(), Some("replay macro"));
+    let entries = app.active_key_hint_entries().expect("macro replay wait should show hints");
+    assert!(entries.iter().any(|entry| entry.key == "@" && entry.description == "last macro"));
+    assert!(entries.iter().any(|entry| entry.key == "a-z" && entry.description == "named macro"));
     // Sending '@' again (@@) should consume and trigger replay.
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::NONE)));
     // No crash; macro_register is None (not recording).
