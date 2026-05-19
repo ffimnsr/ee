@@ -145,9 +145,32 @@ enum DoCommands {
         /// Explicit language name to resolve before path/content detection
         #[arg(long, value_name = "LANGUAGE")]
         language: Option<String>,
+        #[command(subcommand)]
+        command: Option<RuntimeCommands>,
     },
+    /// Run file utility commands
+    File {
+        #[command(subcommand)]
+        command: FileCommands,
+    },
+    /// Validate config file syntax and values
+    Validate {
+        /// Config file to validate
+        #[arg(long, value_name = "FILE")]
+        config: Option<PathBuf>,
+    },
+    /// Generate shell completion script
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RuntimeCommands {
     /// Materialize pinned grammar sources from the cargo registry
-    RuntimeFetch {
+    Fetch {
         /// Fetch all configured runtime grammars
         #[arg(long, action = clap::ArgAction::SetTrue)]
         all: bool,
@@ -162,7 +185,7 @@ enum DoCommands {
         force: bool,
     },
     /// Build runtime grammar libraries and query assets
-    RuntimeBuild {
+    Build {
         /// Build all configured runtime grammars
         #[arg(long, action = clap::ArgAction::SetTrue)]
         all: bool,
@@ -181,23 +204,6 @@ enum DoCommands {
         /// Skip host-side dynamic library load validation after compile
         #[arg(long, action = clap::ArgAction::SetTrue)]
         skip_load: bool,
-    },
-    /// Run file utility commands
-    File {
-        #[command(subcommand)]
-        command: FileCommands,
-    },
-    /// Validate config file syntax and values
-    Validate {
-        /// Config file to validate
-        #[arg(long, value_name = "FILE")]
-        config: Option<PathBuf>,
-    },
-    /// Generate shell completion script
-    Completions {
-        /// Shell to generate completions for
-        #[arg(value_enum)]
-        shell: Shell,
     },
 }
 
@@ -751,27 +757,27 @@ fn main() -> io::Result<()> {
         Some(Commands::Do { command }) => {
             match command {
                 DoCommands::Doctor => cmd_doctor(cli.config.as_ref()),
-                DoCommands::Runtime { file, language } => {
-                    cmd_runtime(file.as_deref(), language.as_deref())
-                }
-                DoCommands::RuntimeFetch { all, languages, source_root, force } => {
-                    cmd_runtime_fetch(&languages, all, source_root.as_deref(), force)
-                }
-                DoCommands::RuntimeBuild {
-                    all,
-                    languages,
-                    source_root,
-                    output_root,
-                    force,
-                    skip_load,
-                } => cmd_runtime_build(
-                    &languages,
-                    all,
-                    source_root.as_deref(),
-                    output_root.as_deref(),
-                    force,
-                    skip_load,
-                ),
+                DoCommands::Runtime { file, language, command } => match command {
+                    None => cmd_runtime(file.as_deref(), language.as_deref()),
+                    Some(RuntimeCommands::Fetch { all, languages, source_root, force }) => {
+                        cmd_runtime_fetch(&languages, all, source_root.as_deref(), force)
+                    }
+                    Some(RuntimeCommands::Build {
+                        all,
+                        languages,
+                        source_root,
+                        output_root,
+                        force,
+                        skip_load,
+                    }) => cmd_runtime_build(
+                        &languages,
+                        all,
+                        source_root.as_deref(),
+                        output_root.as_deref(),
+                        force,
+                        skip_load,
+                    ),
+                },
                 DoCommands::File { command } => match command {
                     FileCommands::LineCheck { file } => cmd_file_line_check(&file),
                     FileCommands::Head { lines, file } => cmd_file_head(&file, lines),

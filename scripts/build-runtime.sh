@@ -54,14 +54,14 @@ main() {
   done
 
   local runtime_fetch_cmd=(
-    cargo run --locked -p ee-cli -- do runtime-fetch --all --source-root "$source_root"
+    cargo run --locked -p ee-cli -- do runtime fetch --all --source-root "$source_root"
   )
   if (( force )); then
     runtime_fetch_cmd+=(--force)
   fi
 
   local runtime_build_cmd=(
-    cargo run --locked -p ee-cli -- do runtime-build --all --source-root "$source_root" --output-root "$output_root"
+    cargo run --locked -p ee-cli -- do runtime build --all --source-root "$source_root" --output-root "$output_root"
   )
   if (( force )); then
     runtime_build_cmd+=(--force)

@@ -144,13 +144,14 @@ fn cli_utility_commands_live_under_do() {
 
     assert!(matches!(
         cli.command,
-        Some(crate::Commands::Do { command: crate::DoCommands::Runtime { .. } })
+        Some(crate::Commands::Do { command: crate::DoCommands::Runtime { command: None, .. } })
     ));
 
     let cli = crate::Cli::try_parse_from([
         "ee",
         "do",
-        "runtime-fetch",
+        "runtime",
+        "fetch",
         "--all",
         "--source-root",
         "target/runtime-sources",
@@ -159,13 +160,19 @@ fn cli_utility_commands_live_under_do() {
 
     assert!(matches!(
         cli.command,
-        Some(crate::Commands::Do { command: crate::DoCommands::RuntimeFetch { all: true, .. } })
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Runtime {
+                command: Some(crate::RuntimeCommands::Fetch { all: true, .. }),
+                ..
+            }
+        })
     ));
 
     let cli = crate::Cli::try_parse_from([
         "ee",
         "do",
-        "runtime-build",
+        "runtime",
+        "build",
         "--language",
         "Rust",
         "--output-root",
@@ -177,7 +184,10 @@ fn cli_utility_commands_live_under_do() {
     assert!(matches!(
         cli.command,
         Some(crate::Commands::Do {
-            command: crate::DoCommands::RuntimeBuild { skip_load: true, .. }
+            command: crate::DoCommands::Runtime {
+                command: Some(crate::RuntimeCommands::Build { skip_load: true, .. }),
+                ..
+            }
         })
     ));
 
