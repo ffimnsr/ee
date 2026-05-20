@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.8 - 2026-05-20
+
+### Features
+
+- add git hash and build profile on version (`2491f180`)
+- move runtime-fetch under runtime scope (`f9e9c156`)
+- add reflow command and move some commands to backend to thin frontend (`a98359bb`)
+- add wiki submodule and add keybindings to PgUp and PgDown (`6c4e7e73`)
+- add plugin loading with lsp-plugin but with hiccup on initial loading times (`53641391`)
+- add more wiki docs and create schema to check drift (`f62c73c4`)
+- update linux plugin loader due to seccomp (`9ea9a1bd`)
+- add lsp and grammars section on config (`f8bdf23f`)
+
+
 ## 0.8.7 - 2026-05-19
 
 ### Features
