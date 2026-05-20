@@ -159,6 +159,11 @@ enum DoCommands {
         #[arg(long, value_name = "FILE")]
         config: Option<PathBuf>,
     },
+    /// Generate or check repository config schema
+    Schema {
+        #[command(subcommand)]
+        command: SchemaCommands,
+    },
     /// Generate shell completion script
     Completions {
         /// Shell to generate completions for
@@ -232,6 +237,22 @@ enum FileCommands {
         /// File to inspect
         #[arg(value_name = "FILE")]
         file: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SchemaCommands {
+    /// Write generated config JSON Schema to schemas/
+    Generate {
+        /// Schema output path
+        #[arg(long, default_value = "schemas/ee-config.schema.json", value_name = "FILE")]
+        output: PathBuf,
+    },
+    /// Fail when checked-in config schema differs from generated output
+    Check {
+        /// Schema path to compare against generated output
+        #[arg(long, default_value = "schemas/ee-config.schema.json", value_name = "FILE")]
+        schema: PathBuf,
     },
 }
 
@@ -316,6 +337,22 @@ fn cmd_validate(config_path: Option<&PathBuf>) {
         }
         println!("Config {path:?} is valid.");
     }
+}
+
+fn cmd_schema_generate(output: &Path) {
+    if let Err(err) = config::write_config_schema(output) {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
+    println!("Generated config schema: {}", output.display());
+}
+
+fn cmd_schema_check(schema: &Path) {
+    if let Err(err) = config::check_config_schema(schema) {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
+    println!("Config schema is up to date: {}", schema.display());
 }
 
 fn cmd_completions(shell: Shell) {
@@ -787,6 +824,10 @@ fn main() -> io::Result<()> {
                     let config_path = config.as_ref().or(cli.config.as_ref());
                     cmd_validate(config_path);
                 }
+                DoCommands::Schema { command } => match command {
+                    SchemaCommands::Generate { output } => cmd_schema_generate(&output),
+                    SchemaCommands::Check { schema } => cmd_schema_check(&schema),
+                },
                 DoCommands::Completions { shell } => cmd_completions(shell),
             }
             return Ok(());

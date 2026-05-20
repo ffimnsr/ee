@@ -22,6 +22,7 @@ use std::cell::Cell;
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 use globset::GlobBuilder;
+use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
 use serde_json::Value;
 use xi_core_lib::config::Table as XiConfigTable;
@@ -506,7 +507,7 @@ fn diff_xi_config_tables(base: &XiConfigTable, updated: &XiConfigTable) -> XiCon
 // ── .ee.toml raw shape ────────────────────────────────────────────────────────
 
 /// Raw `.ee.toml` shape; all fields optional so partial files work.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct EeToml {
     pub root: Option<bool>,
@@ -539,14 +540,14 @@ pub(crate) struct EeToml {
     pub keymap: Option<KeymapToml>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LspToml {
     #[serde(default)]
     pub servers: BTreeMap<String, LspServerToml>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LspServerToml {
     pub language_name: Option<String>,
@@ -711,7 +712,7 @@ struct ConfigDiscovery {
     root_stop_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct KeymapToml {
     pub inherit_defaults: Option<bool>,
@@ -724,7 +725,7 @@ pub(crate) struct KeymapToml {
     pub sequence_bindings: Vec<KeySequenceBindingToml>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct KeyBindingTargetToml {
     pub mode: String,
@@ -732,7 +733,7 @@ pub(crate) struct KeyBindingTargetToml {
     pub prefix: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct KeyBindingEntryToml {
     pub mode: String,
@@ -741,7 +742,7 @@ pub(crate) struct KeyBindingEntryToml {
     pub action: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct KeySequenceBindingToml {
     pub mode: String,
@@ -1149,6 +1150,39 @@ pub(crate) fn validate_config_file(path: &Path) -> Result<(), String> {
         .map_err(|err| format!("Config parse error in {}: {err}", path.display()))
 }
 
+pub(crate) fn config_schema_json() -> Result<String, String> {
+    let schema = serde_json::to_value(schema_for!(EeToml))
+        .map_err(|err| format!("Cannot serialize config schema: {err}"))?;
+    serde_json::to_string_pretty(&schema)
+        .map(|mut text| {
+            text.push('\n');
+            text
+        })
+        .map_err(|err| format!("Cannot format config schema: {err}"))
+}
+
+pub(crate) fn write_config_schema(path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("Cannot create {}: {err}", parent.display()))?;
+    }
+    std::fs::write(path, config_schema_json()?)
+        .map_err(|err| format!("Cannot write {}: {err}", path.display()))
+}
+
+pub(crate) fn check_config_schema(path: &Path) -> Result<(), String> {
+    let expected = config_schema_json()?;
+    let actual = std::fs::read_to_string(path)
+        .map_err(|err| format!("Cannot read {}: {err}", path.display()))?;
+    if actual == expected {
+        return Ok(());
+    }
+    Err(format!(
+        "Config schema drift detected at {}. Run `cargo run -p ee-cli -- do schema generate`.",
+        path.display()
+    ))
+}
+
 /// Walk up directory tree from `start` looking for `.git` or `.git` file.
 /// Returns the directory that contains `.git`, or `None`.
 pub(crate) fn find_git_root(start: &Path) -> Option<PathBuf> {
@@ -1445,6 +1479,13 @@ tab_width = 4
         s.merge_toml(&raw);
         assert_eq!(s.indent_style, IndentStyle::Spaces); // unchanged
         assert!(s.trim_trailing_whitespace);
+    }
+
+    #[test]
+    fn checked_in_config_schema_is_current() {
+        let schema_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../schemas/ee-config.schema.json");
+        check_config_schema(&schema_path).unwrap();
     }
 
     #[test]

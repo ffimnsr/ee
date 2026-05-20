@@ -86,6 +86,9 @@ jobs:
       - name: Build project
         run: cargo build --all
 
+      - name: Check generated config schema
+        run: cargo run -p ee-cli --locked -- do schema check
+
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

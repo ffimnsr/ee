@@ -771,6 +771,7 @@ dependencies = [
  "ignore",
  "ratatui",
  "regex",
+ "schemars",
  "serde",
  "serde_json",
  "signal-hook",

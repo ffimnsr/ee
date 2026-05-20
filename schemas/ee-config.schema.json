@@ -1,0 +1,333 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EeToml",
+  "description": "Raw `.ee.toml` shape; all fields optional so partial files work.",
+  "type": "object",
+  "properties": {
+    "root": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "indent_style": {
+      "description": "`\"spaces\"` or `\"tabs\"` (aliases: `\"space\"`, `\"tab\"`).",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "indent_size": {
+      "description": "Number of spaces per indent level.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0
+    },
+    "tab_width": {
+      "description": "Visual width of a hard-tab character.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0
+    },
+    "end_of_line": {
+      "description": "`\"lf\"`, `\"crlf\"`, or `\"cr\"`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "charset": {
+      "description": "Expected charset, e.g. `\"utf-8\"`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "trim_trailing_whitespace": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "insert_final_newline": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "number_style": {
+      "description": "`\"absolute\"`, `\"relative\"`, or `\"relative_absolute\"`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "color_column": {
+      "description": "Column position for the color column guide (e.g. `80`).  Omit to disable.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0
+    },
+    "show_visible_whitespace": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "scroll_offset": {
+      "description": "Minimum rows between cursor and screen top/bottom edge.",
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint",
+      "minimum": 0
+    },
+    "wrap_lines": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "sign_column": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "cursor_line": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "statusline_format": {
+      "description": "`\"default\"` or `\"minimal\"`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "lsp": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LspToml"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "keymap": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/KeymapToml"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "LspToml": {
+      "type": "object",
+      "properties": {
+        "servers": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/LspServerToml"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "LspServerToml": {
+      "type": "object",
+      "properties": {
+        "language_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "args": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "extensions": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "supports_single_file": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "workspace_identifier": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "initialization_options": true
+      },
+      "additionalProperties": false
+    },
+    "KeymapToml": {
+      "type": "object",
+      "properties": {
+        "inherit_defaults": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "sequence_timeout_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "unbind": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KeyBindingTargetToml"
+          }
+        },
+        "bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KeyBindingEntryToml"
+          }
+        },
+        "sequence_bindings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/KeySequenceBindingToml"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "KeyBindingTargetToml": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "prefix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "key"
+      ]
+    },
+    "KeyBindingEntryToml": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "prefix": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "action": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "key",
+        "action"
+      ]
+    },
+    "KeySequenceBindingToml": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string"
+        },
+        "keys": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "action": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "keys",
+        "action"
+      ]
+    }
+  }
+}
