@@ -347,7 +347,14 @@ impl XiClient {
             let _ = rpc_loop.mainloop(|| ChannelReader { rx: to_core_rx }, &mut core);
         });
 
-        send_rpc_notification(&to_core_tx, "client_started", json!({}))?;
+        send_rpc_notification(
+            &to_core_tx,
+            "client_started",
+            json!({
+                "config_dir": crate::config::xi_core_config_dir(),
+                "client_extras_dir": crate::config::xi_core_client_extras_dir(),
+            }),
+        )?;
 
         let new_view_id = 1_u64;
         send_rpc_request(

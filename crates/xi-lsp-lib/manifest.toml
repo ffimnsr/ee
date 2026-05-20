@@ -1,6 +1,6 @@
 manifest_version = 1
 name = "xi-lsp-plugin"
-version = "0.0"
+version = "0.0.0"
 capabilities = ["edit", "hover", "status_items", "filesystem", "network"]
 exec_path="./bin/xi-lsp-plugin"
 
@@ -70,6 +70,12 @@ params = {}
 [[commands]]
 title = "Workspace Symbols"
 description = "Search symbols across the workspace"
+
+[[commands.args]]
+title = "Query"
+description = "Search term"
+key = "query"
+arg_type = "String"
 
 [commands.rpc_cmd]
 rpc_type = "notification"

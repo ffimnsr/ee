@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -9,7 +10,7 @@ use std::time::{Duration, Instant};
 use lsp_types::{Hover, Position, Range, ServerCapabilities, TextDocumentContentChangeEvent, Uri};
 use serde_json::{Value, json};
 use xi_lsp_lib::language_server_client::LanguageServerClient;
-use xi_lsp_lib::{ResultQueue, shutdown_language_server, start_new_server};
+use xi_lsp_lib::{ResultQueue, ServerStartOptions, shutdown_language_server, start_new_server};
 use xi_plugin_lib::CoreProxy;
 use xi_rpc::test_utils::make_reader;
 use xi_rpc::{Handler, NewlineWriter, RpcCtx, RpcLoop};
@@ -125,6 +126,14 @@ fn initialize_client(client: &std::sync::Arc<std::sync::Mutex<LanguageServerClie
     rx.recv_timeout(Duration::from_secs(2)).expect("initialize callback should complete");
 }
 
+fn read_log_entries(path: &PathBuf) -> Vec<Value> {
+    fs::read_to_string(path)
+        .expect("log should be readable")
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("log line should parse"))
+        .collect()
+}
+
 #[test]
 fn fake_language_server_covers_migration_flows() {
     let log_path = test_log_path("xi-lsp-migration");
@@ -133,10 +142,13 @@ fn fake_language_server_covers_migration_flows() {
     let client = start_new_server(
         server_path.display().to_string(),
         vec![log_path.display().to_string()],
-        vec![String::from("rs")],
         "rust",
         test_core_proxy(),
         queue.clone(),
+        ServerStartOptions {
+            file_extensions: vec![String::from("rs")],
+            ..ServerStartOptions::default()
+        },
     )
     .expect("fake language server should start");
 
@@ -234,10 +246,8 @@ fn fake_language_server_covers_migration_flows() {
         .expect("didClose should send");
     shutdown_language_server(&client).expect("shutdown should succeed");
 
-    let methods = fs::read_to_string(&log_path)
-        .expect("log should be readable")
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).expect("log line should parse"))
+    let methods = read_log_entries(&log_path)
+        .into_iter()
         .map(|entry| {
             entry
                 .get("method")
@@ -256,4 +266,51 @@ fn fake_language_server_covers_migration_flows() {
     assert!(methods.contains(&String::from("textDocument/didClose")));
     assert!(methods.contains(&String::from("shutdown")));
     assert!(methods.contains(&String::from("exit")));
+}
+
+#[test]
+fn fake_language_server_receives_args_env_and_initialization_options() {
+    let log_path = test_log_path("xi-lsp-spawn-config");
+    let server_path = fake_server_binary_path();
+    let client = start_new_server(
+        server_path.display().to_string(),
+        vec![log_path.display().to_string(), String::from("--probe-arg"), String::from("payload")],
+        "gleam",
+        test_core_proxy(),
+        ResultQueue::new(),
+        ServerStartOptions {
+            file_extensions: vec![String::from("gleam")],
+            env_overrides: BTreeMap::from([(
+                String::from("XI_LSP_FAKE_ENV"),
+                String::from("configured-value"),
+            )]),
+            initialization_options: Some(json!({ "phase": 4, "feature": "enabled" })),
+        },
+    )
+    .expect("fake language server should start");
+
+    initialize_client(&client);
+    shutdown_language_server(&client).expect("shutdown should succeed");
+
+    let entries = read_log_entries(&log_path);
+    let _ = fs::remove_file(log_path);
+
+    let startup = entries
+        .iter()
+        .find(|entry| entry.get("method") == Some(&Value::String(String::from("process"))))
+        .expect("startup log should exist");
+    assert_eq!(startup["params"]["args"], json!(["--probe-arg", "payload"]));
+    assert_eq!(
+        startup["params"]["env"]["XI_LSP_FAKE_ENV"],
+        Value::String(String::from("configured-value"))
+    );
+
+    let initialize = entries
+        .iter()
+        .find(|entry| entry.get("method") == Some(&Value::String(String::from("initialize"))))
+        .expect("initialize log should exist");
+    assert_eq!(
+        initialize["params"]["initializationOptions"],
+        json!({ "phase": 4, "feature": "enabled" })
+    );
 }

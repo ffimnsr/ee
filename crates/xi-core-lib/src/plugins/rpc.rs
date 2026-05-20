@@ -132,10 +132,15 @@ pub enum HostNotification {
     Initialize {
         plugin_id: PluginPid,
         buffer_info: Vec<PluginBufferInfo>,
+        #[serde(default)]
+        plugin_config: Table,
         #[serde(default = "default_protocol_version")]
         protocol_version: u32,
         #[serde(default)]
         core_capabilities: Vec<ProtocolCapability>,
+    },
+    PluginConfigChanged {
+        changes: Table,
     },
     DidSave {
         view_id: ViewId,

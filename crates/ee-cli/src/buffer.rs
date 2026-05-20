@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
@@ -746,6 +746,7 @@ impl BufferManager {
         path: Option<PathBuf>,
         general_config: Table,
         initial_overrides: Table,
+        lsp_config: Table,
     ) -> io::Result<Self> {
         let (to_core_tx, to_core_rx) = mpsc::channel::<String>(256);
         let (from_core_tx, from_core_rx) = std_mpsc::channel::<String>();
@@ -757,9 +758,21 @@ impl BufferManager {
             let _ = rpc_loop.mainloop(|| ChannelReader { rx: to_core_rx }, &mut core);
         });
 
-        send_rpc_notification(&to_core_tx, "client_started", json!({}))?;
+        send_rpc_notification(
+            &to_core_tx,
+            "client_started",
+            json!({
+                "config_dir": crate::config::xi_core_config_dir(),
+                "client_extras_dir": crate::config::xi_core_client_extras_dir(),
+            }),
+        )?;
 
         send_config_notification(&to_core_tx, json!("general"), general_config)?;
+        send_config_notification(
+            &to_core_tx,
+            json!({ "plugin": crate::config::LSP_PLUGIN_NAME }),
+            lsp_config,
+        )?;
 
         let new_view_id = 1_u64;
         let new_view_started = Instant::now();
@@ -1097,6 +1110,7 @@ impl BufferManager {
     pub(crate) fn reload_editor_config(&mut self) -> io::Result<()> {
         let (_, general_config, _) = crate::config::xi_config_tables_for_file(None);
         send_config_notification(&self.tx, json!("general"), general_config)?;
+        send_lsp_config_notification(&self.tx, self.active().path.as_deref())?;
         for idx in 0..self.bufs.len() {
             self.sync_buffer_editor_config(idx)?;
         }
@@ -2027,6 +2041,8 @@ impl BufferManager {
         let rpc_id = self.next_rpc_id;
         self.next_rpc_id += 1;
 
+        send_lsp_config_notification(&self.tx, path.as_deref())?;
+
         // Register a one-shot channel so the reader thread can hand us the
         // view_id response without blocking the reader loop.
         let (resp_tx, resp_rx) = std_mpsc::sync_channel::<Value>(1);
@@ -2452,6 +2468,7 @@ impl BufferManager {
         self.view_to_idx.remove(&old_view_id);
 
         // Open a new xi view for the same path.
+        send_lsp_config_notification(&self.tx, path.as_deref())?;
         let rpc_id = self.next_rpc_id;
         self.next_rpc_id += 1;
 
@@ -2557,6 +2574,14 @@ fn send_config_notification(
             "domain": domain,
             "changes": changes,
         }),
+    )
+}
+
+fn send_lsp_config_notification(tx: &mpsc::Sender<String>, path: Option<&Path>) -> io::Result<()> {
+    send_config_notification(
+        tx,
+        json!({ "plugin": crate::config::LSP_PLUGIN_NAME }),
+        crate::config::lsp_config_table_for_file(path),
     )
 }
 

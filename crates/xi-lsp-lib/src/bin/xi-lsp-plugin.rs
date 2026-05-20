@@ -11,7 +11,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-use serde_json::json;
 use xi_lsp_lib::{Config, LspPlugin, start_mainloop};
 
 fn init_logger() -> Result<(), fern::InitError> {
@@ -47,56 +46,11 @@ fn main() {
     // the PATH variable of your shell. See the answers below to modify PATH to
     // have language servers in PATH while running from XCode.
     // https://stackoverflow.com/a/17394454 and https://stackoverflow.com/a/43043687
-    let config = json!({
-        "language_config": {
-            // Install instructions here: https://github.com/rust-lang-nursery/rls
-            "rust" : {
-                "language_name": "Rust",
-                "start_command": "rls",
-                "start_arguments": [],
-                "extensions": ["rs"],
-                "supports_single_file": false,
-                "workspace_identifier": "Cargo.toml"
-            },
-            // Install with: npm install -g vscode-json-languageserver
-            "json": {
-                "language_name": "Json",
-                "start_command": "vscode-json-languageserver",
-                "start_arguments": ["--stdio"],
-                "extensions": ["json", "jsonc"],
-                "supports_single_file": true,
-            },
-            // Install with: npm install -g yaml-language-server
-            "yaml": {
-                "language_name": "Yaml",
-                "start_command": "yaml-language-server",
-                "start_arguments": ["--stdio"],
-                "extensions": ["yaml", "yml"],
-                "supports_single_file": true
-            },
-            // Install with: npm install -g javascript-typescript-langserver
-            "typescript": {
-                "language_name": "Typescript",
-                "start_command": "javascript-typescript-stdio",
-                "start_arguments": [],
-                "extensions": ["ts", "js", "jsx", "tsx"],
-                "supports_single_file": true,
-                "workspace_identifier": "package.json"
-            }
-        }
-    });
-
     if let Err(err) = init_logger() {
         eprintln!("Failed to start logger for LSP Plugin: {err}");
         std::process::exit(1);
     }
-    let config: Config = match serde_json::from_value(config) {
-        Ok(config) => config,
-        Err(err) => {
-            eprintln!("Failed to parse LSP plugin config: {err}");
-            std::process::exit(1);
-        }
-    };
+    let config: Config = Config::bundled();
     let mut plugin = LspPlugin::new(config);
 
     if let Err(err) = start_mainloop(&mut plugin) {

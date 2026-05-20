@@ -200,14 +200,24 @@ impl Plugin {
     //TODO: initialize should be sent automatically during launch,
     //and should only send the plugin_id. We can just use the existing 'new_buffer'
     // RPC for adding views
-    pub fn initialize(&self, info: Vec<PluginBufferInfo>) {
+    pub fn initialize(&self, info: Vec<PluginBufferInfo>, plugin_config: &Table) {
         self.peer.send_rpc_notification(
             "initialize",
             &json!({
                 "plugin_id": self.id,
                 "buffer_info": info,
+                "plugin_config": plugin_config,
                 "protocol_version": crate::plugins::rpc::PLUGIN_PROTOCOL_VERSION,
                 "core_capabilities": core_protocol_capabilities(),
+            }),
+        )
+    }
+
+    pub fn plugin_config_changed(&self, changes: &Table) {
+        self.peer.send_rpc_notification(
+            "plugin_config_changed",
+            &json!({
+                "changes": changes,
             }),
         )
     }

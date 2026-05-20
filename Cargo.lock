@@ -763,6 +763,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "ee-xi-core-lib",
+ "ee-xi-lsp-lib",
  "ee-xi-rpc",
  "globset",
  "grep-regex",

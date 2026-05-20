@@ -58,6 +58,7 @@ pub struct LanguageServerClient {
     pub opened_documents: HashMap<ViewId, OpenDocumentState>,
     pub server_capabilities: Option<ServerCapabilities>,
     pub file_extensions: Vec<String>,
+    initialization_options: Option<Value>,
 }
 
 /// Get numeric id from the request id.
@@ -93,6 +94,7 @@ impl LanguageServerClient {
         result_queue: ResultQueue,
         language_id: String,
         file_extensions: Vec<String>,
+        initialization_options: Option<Value>,
     ) -> Self {
         LanguageServerClient {
             writer,
@@ -108,6 +110,7 @@ impl LanguageServerClient {
             server_capabilities: None,
             opened_documents: HashMap::new(),
             file_extensions,
+            initialization_options,
         }
     }
 
@@ -402,6 +405,7 @@ impl LanguageServerClient {
         CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
     {
         #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
         struct InitializeParamsCompat {
             process_id: Option<u32>,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -433,7 +437,7 @@ impl LanguageServerClient {
 
         let init_params = InitializeParamsCompat {
             process_id: Some(process::id()),
-            initialization_options: None,
+            initialization_options: self.initialization_options.clone(),
             capabilities: client_capabilities,
             trace: Some(TraceValue::Verbose),
             workspace_folders,
@@ -1045,6 +1049,7 @@ mod tests {
             ResultQueue::new(),
             String::from("rust"),
             vec![String::from("rs")],
+            None,
         );
 
         client.handle_message(&json!({ "jsonrpc": "2.0", "result": { "ok": true } }).to_string());
@@ -1071,6 +1076,7 @@ mod tests {
             queue.clone(),
             String::from("rust"),
             vec![String::from("rs")],
+            None,
         );
         let uri: Uri = "file:///tmp/test.rs".parse().expect("uri should parse");
         client.opened_documents.insert(

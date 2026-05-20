@@ -94,6 +94,7 @@ impl<P: Plugin, H: DerefMut<Target = P>> Dispatcher<P, H> {
         ctx: &RpcCtx,
         plugin_id: PluginPid,
         buffers: Vec<PluginBufferInfo>,
+        plugin_config: ConfigTable,
         protocol_version: u32,
         core_capabilities: Vec<ProtocolCapability>,
     ) {
@@ -110,8 +111,13 @@ impl<P: Plugin, H: DerefMut<Target = P>> Dispatcher<P, H> {
                 .filter(|capability| Self::supported_protocol_capabilities().contains(capability)),
         );
         self.plugin.initialize(core_proxy);
+        self.plugin.plugin_config_changed(&plugin_config);
 
         self.do_new_buffer(ctx, buffers);
+    }
+
+    fn do_plugin_config_changed(&mut self, changes: &ConfigTable) {
+        self.plugin.plugin_config_changed(changes);
     }
 
     fn do_did_save(&mut self, view_id: ViewId, path: PathBuf) {
@@ -160,11 +166,48 @@ impl<P: Plugin, H: DerefMut<Target = P>> Dispatcher<P, H> {
     fn do_new_buffer(&mut self, ctx: &RpcCtx, buffers: Vec<PluginBufferInfo>) {
         let plugin_id = self.pid.unwrap();
         buffers.into_iter().for_each(|info| {
+            let existing_buffer_keys = info
+                .views
+                .iter()
+                .filter_map(|view_id| self.view_to_buffer.get(view_id).copied())
+                .collect::<Vec<_>>();
+            if let Some(buffer_key) = existing_buffer_keys.first().copied() {
+                let Some(view) = self.buffers.get_mut(&buffer_key) else {
+                    warn!("failed to merge plugin view for {:?}: missing existing buffer state", plugin_id);
+                    return;
+                };
+
+                let previous_active = view.get_id();
+                for view_id in info.views {
+                    if !view.add_view_id(view_id) {
+                        continue;
+                    }
+                    self.view_to_buffer.insert(view_id, buffer_key);
+                    if view.set_active_view(view_id).is_ok() {
+                        self.plugin.new_view(view);
+                    }
+                }
+                let _ = view.set_active_view(previous_active);
+                return;
+            }
+
             match View::new(ctx.get_peer().clone(), plugin_id, info) {
                 Ok(mut view) => {
                     let primary_view_id = view.primary_view_id();
                     if view.get_view_ids().iter().any(|view_id| self.view_to_buffer.contains_key(view_id)) {
-                        warn!("failed to create plugin view for {:?}: duplicate view id in buffer state", plugin_id);
+                        let duplicate_view_ids = view
+                            .get_view_ids()
+                            .iter()
+                            .filter(|view_id| self.view_to_buffer.contains_key(view_id))
+                            .copied()
+                            .collect::<Vec<_>>();
+                        warn!(
+                            "failed to create plugin view for {:?}: duplicate view id in buffer state; incoming={:?}; duplicates={:?}; existing_keys={:?}",
+                            plugin_id,
+                            view.get_view_ids(),
+                            duplicate_view_ids,
+                            existing_buffer_keys,
+                        );
                         return;
                     }
 
@@ -287,9 +330,21 @@ impl<P: Plugin, H: DerefMut<Target = P>> RpcHandler for Dispatcher<P, H> {
         use self::HostNotification::*;
         let _t = tracing::trace_span!("Dispatcher::handle_notif", categories = "plugin").entered();
         match rpc {
-            Initialize { plugin_id, buffer_info, protocol_version, core_capabilities } => {
-                self.do_initialize(ctx, plugin_id, buffer_info, protocol_version, core_capabilities)
-            }
+            Initialize {
+                plugin_id,
+                buffer_info,
+                plugin_config,
+                protocol_version,
+                core_capabilities,
+            } => self.do_initialize(
+                ctx,
+                plugin_id,
+                buffer_info,
+                plugin_config,
+                protocol_version,
+                core_capabilities,
+            ),
+            PluginConfigChanged { changes } => self.do_plugin_config_changed(&changes),
             DidSave { view_id, path } => self.do_did_save(view_id, path),
             ConfigChanged { view_id, changes } => self.do_config_changed(view_id, &changes),
             NewBuffer { buffer_info } => self.do_new_buffer(ctx, buffer_info),
@@ -332,9 +387,11 @@ impl<P: Plugin, H: DerefMut<Target = P>> RpcHandler for Dispatcher<P, H> {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::path::PathBuf;
 
     use serde_json::{Value, json};
-    use xi_rpc::test_utils::DummyPeer;
+    use xi_rpc::test_utils::{DummyPeer, make_reader};
+    use xi_rpc::{Handler, NewlineWriter, RpcCtx, RpcLoop};
 
     use super::*;
     use crate::ChunkCache;
@@ -371,6 +428,82 @@ mod tests {
         fn config_changed(&mut self, _view: &mut View<Self::Cache>, _changes: &ConfigTable) {
             self.changed_calls += 1;
         }
+    }
+
+    #[derive(Default)]
+    struct InitOrderPlugin {
+        events: Vec<&'static str>,
+        plugin_config: Option<ConfigTable>,
+        new_view_paths: Vec<Option<PathBuf>>,
+    }
+
+    impl Plugin for InitOrderPlugin {
+        type Cache = ChunkCache;
+
+        fn initialize(&mut self, _core: CoreProxy) {
+            self.events.push("initialize");
+        }
+
+        fn plugin_config_changed(&mut self, changes: &ConfigTable) {
+            self.events.push("plugin_config_changed");
+            self.plugin_config = Some(changes.clone());
+        }
+
+        fn update(
+            &mut self,
+            _view: &mut View<Self::Cache>,
+            _delta: Option<&RopeDelta>,
+            _edit_type: String,
+            _author: String,
+        ) {
+        }
+
+        fn did_save(&mut self, _view: &mut View<Self::Cache>, _old_path: Option<&Path>) {}
+
+        fn did_close(&mut self, _view: &View<Self::Cache>) {}
+
+        fn new_view(&mut self, view: &mut View<Self::Cache>) {
+            self.events.push("new_view");
+            self.new_view_paths.push(view.get_path().map(PathBuf::from));
+            assert!(self.plugin_config.is_some(), "plugin config should arrive before new_view");
+        }
+
+        fn config_changed(&mut self, _view: &mut View<Self::Cache>, _changes: &ConfigTable) {}
+    }
+
+    struct CtxRunner<F> {
+        callback: Option<F>,
+    }
+
+    impl<F> Handler for CtxRunner<F>
+    where
+        F: FnOnce(&RpcCtx),
+    {
+        type Notification = serde_json::Value;
+        type Request = serde_json::Value;
+
+        fn handle_notification(&mut self, ctx: &RpcCtx, _rpc: Self::Notification) {
+            if let Some(callback) = self.callback.take() {
+                callback(ctx);
+            }
+            ctx.get_peer().request_shutdown();
+        }
+
+        fn handle_request(
+            &mut self,
+            _ctx: &RpcCtx,
+            _rpc: Self::Request,
+            _cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<serde_json::Value, xi_rpc::RemoteError> {
+            Ok(Value::Null)
+        }
+    }
+
+    fn with_rpc_ctx(f: impl FnOnce(&RpcCtx)) {
+        let mut handler = CtxRunner { callback: Some(f) };
+        let mut loop_ = RpcLoop::new(NewlineWriter::new(std::io::sink()));
+        let reader = make_reader(r#"{"method":"ping","params":{}}"#);
+        loop_.mainloop(|| reader, &mut handler).expect("test rpc loop should exit cleanly");
     }
 
     fn valid_config() -> serde_json::Map<String, Value> {
@@ -416,6 +549,20 @@ mod tests {
             "buf_size": 12,
             "nb_lines": 1,
             "path": null,
+            "syntax": "plain_text",
+            "config": config,
+        }))
+        .unwrap()
+    }
+
+    fn path_buffer_info(path: &str, config: serde_json::Map<String, Value>) -> PluginBufferInfo {
+        serde_json::from_value(json!({
+            "buffer_id": 1,
+            "views": ["view-id-1"],
+            "rev": 7,
+            "buf_size": 12,
+            "nb_lines": 1,
+            "path": path,
             "syntax": "plain_text",
             "config": config,
         }))
@@ -483,5 +630,96 @@ mod tests {
         assert_eq!(dispatcher.plugin.closed_view_ids[1].0, 2usize.into());
         assert!(dispatcher.buffers.is_empty());
         assert!(dispatcher.view_to_buffer.is_empty());
+    }
+
+    #[test]
+    fn initialize_delivers_plugin_config_before_new_view() {
+        let mut plugin = InitOrderPlugin::default();
+        let mut dispatcher = Dispatcher::new(&mut plugin);
+        let plugin_id = serde_json::from_value(json!(9)).unwrap();
+        let plugin_config = json!({
+            "language_config": {
+                "gleam": {
+                    "extensions": ["gleam"]
+                }
+            }
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+
+        with_rpc_ctx(|ctx| {
+            dispatcher.handle_notification(
+                ctx,
+                HostNotification::Initialize {
+                    plugin_id,
+                    buffer_info: vec![path_buffer_info("/tmp/sample.gleam", valid_config())],
+                    plugin_config: plugin_config.clone(),
+                    protocol_version: 1,
+                    core_capabilities: Vec::new(),
+                },
+            );
+        });
+
+        assert_eq!(
+            dispatcher.plugin.events,
+            vec!["initialize", "plugin_config_changed", "new_view"]
+        );
+        assert_eq!(dispatcher.plugin.plugin_config, Some(plugin_config));
+        assert_eq!(
+            dispatcher.plugin.new_view_paths,
+            vec![Some(PathBuf::from("/tmp/sample.gleam"))]
+        );
+    }
+
+    #[test]
+    fn duplicate_new_buffer_for_initialized_view_is_ignored() {
+        let mut plugin = ConfigPlugin {
+            changed_calls: 0,
+            new_view_ids: Vec::new(),
+            closed_view_ids: Vec::new(),
+        };
+        let mut dispatcher = Dispatcher::new(&mut plugin);
+
+        with_rpc_ctx(|ctx| {
+            dispatcher.do_initialize(
+                ctx,
+                serde_json::from_value(json!(9)).unwrap(),
+                vec![buffer_info(valid_config())],
+                json!({}).as_object().cloned().unwrap(),
+                1,
+                Vec::new(),
+            );
+            dispatcher.do_new_buffer(ctx, vec![buffer_info(valid_config())]);
+        });
+
+        assert_eq!(dispatcher.plugin.new_view_ids.len(), 1);
+        assert_eq!(dispatcher.plugin.new_view_ids[0].0, 1usize.into());
+    }
+
+    #[test]
+    fn overlapping_new_buffer_adds_missing_view_ids() {
+        let mut plugin = ConfigPlugin {
+            changed_calls: 0,
+            new_view_ids: Vec::new(),
+            closed_view_ids: Vec::new(),
+        };
+        let mut dispatcher = Dispatcher::new(&mut plugin);
+
+        with_rpc_ctx(|ctx| {
+            dispatcher.do_initialize(
+                ctx,
+                serde_json::from_value(json!(9)).unwrap(),
+                vec![buffer_info(valid_config())],
+                json!({}).as_object().cloned().unwrap(),
+                1,
+                Vec::new(),
+            );
+            dispatcher.do_new_buffer(ctx, vec![multi_view_buffer_info(valid_config())]);
+        });
+
+        assert_eq!(dispatcher.plugin.new_view_ids.len(), 2);
+        assert_eq!(dispatcher.plugin.new_view_ids[0].0, 1usize.into());
+        assert_eq!(dispatcher.plugin.new_view_ids[1].0, 2usize.into());
     }
 }

@@ -10,9 +10,11 @@
 //!
 //! Later layers override earlier ones for any key that is explicitly set.
 
+use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::{env, fs};
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -23,10 +25,15 @@ use globset::GlobBuilder;
 use serde::Deserialize;
 use serde_json::Value;
 use xi_core_lib::config::Table as XiConfigTable;
+use xi_lsp_lib::{
+    Config as PluginLspConfig, DisabledLanguageConfig as PluginDisabledLanguageConfig,
+    LanguageConfig as PluginLanguageConfig,
+};
 
 use crate::keymap::{self, KeymapOperation, KeymapSettings, SequenceBinding};
 
 const SYSTEM_CONFIG_PATH: &str = "/etc/ee/config.toml";
+pub(crate) const LSP_PLUGIN_NAME: &str = "xi-lsp-plugin";
 
 // ── Public settings ───────────────────────────────────────────────────────────
 
@@ -97,6 +104,8 @@ pub(crate) struct EditorSettings {
     pub cursor_line: bool,
     /// Statusline layout variant.
     pub statusline_format: StatuslineFormat,
+    /// Effective LSP settings resolved from bundled defaults and ee TOML layers.
+    pub lsp: LspSettings,
     /// Resolved keymap overrides layered from `.ee.toml` files.
     pub keymap: KeymapSettings,
 }
@@ -119,9 +128,313 @@ impl Default for EditorSettings {
             sign_column: true,
             cursor_line: false,
             statusline_format: StatuslineFormat::Default,
+            lsp: LspSettings::default(),
             keymap: KeymapSettings::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LspSettings {
+    pub servers: BTreeMap<String, LspServerSettings>,
+    pub disabled_servers: BTreeMap<String, DisabledLspServerSettings>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DisabledLspServerSettings {
+    pub extensions: Vec<String>,
+}
+
+impl Default for LspSettings {
+    fn default() -> Self {
+        Self::from_plugin_config(PluginLspConfig::bundled())
+    }
+}
+
+impl LspSettings {
+    fn from_plugin_config(config: PluginLspConfig) -> Self {
+        Self {
+            servers: config
+                .language_config
+                .into_iter()
+                .map(|(id, server)| {
+                    (
+                        id,
+                        LspServerSettings {
+                            language_name: server.language_name,
+                            command: server.start_command,
+                            args: server.start_arguments,
+                            extensions: server.extensions,
+                            supports_single_file: server.supports_single_file,
+                            workspace_identifier: server.workspace_identifier,
+                            env: server.env,
+                            initialization_options: server.initialization_options,
+                        },
+                    )
+                })
+                .collect(),
+            disabled_servers: config
+                .disabled_language_config
+                .into_iter()
+                .map(|(id, server)| {
+                    (id, DisabledLspServerSettings { extensions: server.extensions })
+                })
+                .collect(),
+        }
+    }
+
+    fn to_plugin_config(&self) -> PluginLspConfig {
+        PluginLspConfig {
+            language_config: self
+                .servers
+                .iter()
+                .map(|(id, server)| {
+                    (
+                        id.clone(),
+                        PluginLanguageConfig {
+                            language_name: server.language_name.clone(),
+                            start_command: server.command.clone(),
+                            start_arguments: server.args.clone(),
+                            extensions: server.extensions.clone(),
+                            supports_single_file: server.supports_single_file,
+                            workspace_identifier: server.workspace_identifier.clone(),
+                            env: server.env.clone(),
+                            initialization_options: server.initialization_options.clone(),
+                        },
+                    )
+                })
+                .collect(),
+            disabled_language_config: self
+                .disabled_servers
+                .iter()
+                .map(|(id, server)| {
+                    (
+                        id.clone(),
+                        PluginDisabledLanguageConfig { extensions: server.extensions.clone() },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn to_config_table(&self) -> XiConfigTable {
+        match serde_json::to_value(self.to_plugin_config()) {
+            Ok(Value::Object(table)) => table,
+            Ok(_) | Err(_) => XiConfigTable::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LspServerSettings {
+    pub language_name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub extensions: Vec<String>,
+    pub supports_single_file: bool,
+    pub workspace_identifier: Option<String>,
+    pub env: BTreeMap<String, String>,
+    pub initialization_options: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+struct LspSettingsBuilder {
+    servers: BTreeMap<String, LspServerSettingsBuilder>,
+}
+
+impl Default for LspSettingsBuilder {
+    fn default() -> Self {
+        Self::from_settings(&LspSettings::default())
+    }
+}
+
+impl LspSettingsBuilder {
+    fn from_settings(settings: &LspSettings) -> Self {
+        Self {
+            servers: settings
+                .servers
+                .iter()
+                .map(|(id, server)| {
+                    (
+                        id.clone(),
+                        LspServerSettingsBuilder {
+                            language_name: Some(server.language_name.clone()),
+                            command: Some(server.command.clone()),
+                            args: Some(server.args.clone()),
+                            extensions: Some(server.extensions.clone()),
+                            supports_single_file: Some(server.supports_single_file),
+                            workspace_identifier: server.workspace_identifier.clone(),
+                            enabled: Some(true),
+                            env: server.env.clone(),
+                            initialization_options: server.initialization_options.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn merge_toml(&mut self, patch: &LspToml) {
+        for (id, server_patch) in &patch.servers {
+            let server = self.servers.entry(id.clone()).or_default();
+            if let Some(language_name) = &server_patch.language_name {
+                server.language_name = Some(language_name.clone());
+            }
+            if let Some(command) = &server_patch.command {
+                server.command = Some(command.clone());
+            }
+            if let Some(args) = &server_patch.args {
+                server.args = Some(args.clone());
+            }
+            if let Some(extensions) = &server_patch.extensions {
+                server.extensions = Some(extensions.clone());
+            }
+            if let Some(supports_single_file) = server_patch.supports_single_file {
+                server.supports_single_file = Some(supports_single_file);
+            }
+            if let Some(workspace_identifier) = &server_patch.workspace_identifier {
+                server.workspace_identifier = Some(workspace_identifier.clone());
+            }
+            if let Some(enabled) = server_patch.enabled {
+                server.enabled = Some(enabled);
+            }
+            for (key, value) in &server_patch.env {
+                server.env.insert(key.clone(), value.clone());
+            }
+            if let Some(initialization_options) = &server_patch.initialization_options {
+                server.initialization_options = Some(initialization_options.clone());
+            }
+        }
+    }
+
+    fn finalize(self) -> LspSettings {
+        let mut servers = BTreeMap::new();
+        let mut disabled_servers = BTreeMap::new();
+        for (id, server) in self.servers {
+            if server.enabled == Some(false) {
+                if let Some(extensions) = server.extensions {
+                    let extensions = normalize_lsp_extensions(&id, &extensions);
+                    if !extensions.is_empty() {
+                        disabled_servers.insert(id, DisabledLspServerSettings { extensions });
+                    }
+                }
+                continue;
+            }
+
+            let missing = [
+                ("language_name", server.language_name.is_none()),
+                ("command", server.command.is_none()),
+                ("extensions", server.extensions.is_none()),
+            ]
+            .into_iter()
+            .filter_map(|(field, missing)| missing.then_some(field))
+            .collect::<Vec<_>>();
+
+            if !missing.is_empty() {
+                eprintln!(
+                    "ee: warning: invalid lsp server config for {}: missing {}",
+                    id,
+                    missing.join(", ")
+                );
+                continue;
+            }
+
+            let extensions =
+                normalize_lsp_extensions(&id, server.extensions.as_ref().expect("validated above"));
+
+            if extensions.is_empty() {
+                eprintln!(
+                    "ee: warning: invalid lsp server config for {}: missing non-empty extensions",
+                    id
+                );
+                continue;
+            }
+
+            servers.insert(
+                id,
+                LspServerSettings {
+                    language_name: server.language_name.expect("validated above"),
+                    command: server.command.expect("validated above"),
+                    args: server.args.unwrap_or_default(),
+                    extensions,
+                    supports_single_file: server.supports_single_file.unwrap_or(true),
+                    workspace_identifier: server.workspace_identifier,
+                    env: server.env,
+                    initialization_options: server.initialization_options,
+                },
+            );
+        }
+        resolve_lsp_extension_ownership(&mut servers, &mut disabled_servers);
+        LspSettings { servers, disabled_servers }
+    }
+}
+
+fn normalize_lsp_extensions(server_id: &str, extensions: &[String]) -> Vec<String> {
+    extensions
+        .iter()
+        .filter_map(|extension| {
+            let normalized = extension.trim_start_matches('.').to_owned();
+            if normalized.is_empty() {
+                eprintln!(
+                    "ee: warning: invalid lsp server config for {}: empty extension ignored",
+                    server_id
+                );
+                None
+            } else {
+                Some(normalized)
+            }
+        })
+        .collect()
+}
+
+fn resolve_lsp_extension_ownership(
+    servers: &mut BTreeMap<String, LspServerSettings>,
+    disabled_servers: &mut BTreeMap<String, DisabledLspServerSettings>,
+) {
+    let mut owner_by_extension = BTreeMap::<String, String>::new();
+    let mut ids = servers.keys().chain(disabled_servers.keys()).cloned().collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+
+    for id in ids {
+        let extensions = servers
+            .get(&id)
+            .map(|server| &server.extensions)
+            .or_else(|| disabled_servers.get(&id).map(|server| &server.extensions));
+        if let Some(extensions) = extensions {
+            for extension in extensions {
+                if let Some(previous) = owner_by_extension.insert(extension.clone(), id.clone()) {
+                    eprintln!(
+                        "ee: warning: lsp extension .{} moved from {} to {}",
+                        extension, previous, id
+                    );
+                }
+            }
+        }
+    }
+
+    for (id, server) in servers.iter_mut() {
+        server.extensions.retain(|extension| owner_by_extension.get(extension) == Some(id));
+    }
+    servers.retain(|_, server| !server.extensions.is_empty());
+
+    for (id, server) in disabled_servers.iter_mut() {
+        server.extensions.retain(|extension| owner_by_extension.get(extension) == Some(id));
+    }
+    disabled_servers.retain(|_, server| !server.extensions.is_empty());
+}
+
+#[derive(Debug, Clone, Default)]
+struct LspServerSettingsBuilder {
+    language_name: Option<String>,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    extensions: Option<Vec<String>>,
+    supports_single_file: Option<bool>,
+    workspace_identifier: Option<String>,
+    enabled: Option<bool>,
+    env: BTreeMap<String, String>,
+    initialization_options: Option<Value>,
 }
 
 impl EditorSettings {
@@ -176,6 +489,10 @@ pub(crate) fn xi_config_tables_for_file(
     (effective, general_table, override_table)
 }
 
+pub(crate) fn lsp_config_table_for_file(file_path: Option<&Path>) -> XiConfigTable {
+    load_config(file_path).lsp.to_config_table()
+}
+
 fn diff_xi_config_tables(base: &XiConfigTable, updated: &XiConfigTable) -> XiConfigTable {
     updated
         .iter()
@@ -218,7 +535,30 @@ pub(crate) struct EeToml {
     pub cursor_line: Option<bool>,
     /// `"default"` or `"minimal"`.
     pub statusline_format: Option<String>,
+    pub lsp: Option<LspToml>,
     pub keymap: Option<KeymapToml>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LspToml {
+    #[serde(default)]
+    pub servers: BTreeMap<String, LspServerToml>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LspServerToml {
+    pub language_name: Option<String>,
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub extensions: Option<Vec<String>>,
+    pub supports_single_file: Option<bool>,
+    pub workspace_identifier: Option<String>,
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    pub initialization_options: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -277,7 +617,7 @@ impl ConfigEnvironment {
         Self {
             cwd: std::env::current_dir().unwrap_or_default(),
             home_dir: dirs::home_dir(),
-            config_dir: dirs::config_dir(),
+            config_dir: process_config_dir(),
             system_config_path: PathBuf::from(SYSTEM_CONFIG_PATH),
         }
     }
@@ -310,6 +650,53 @@ impl ConfigEnvironment {
         candidates.reverse();
         candidates
     }
+}
+
+pub(crate) fn xi_core_config_dir() -> Option<PathBuf> {
+    process_config_dir().map(|dir| dir.join("ee"))
+}
+
+pub(crate) fn xi_core_client_extras_dir() -> Option<PathBuf> {
+    let bundled_plugins_dir = bundled_runtime_root().join("plugins");
+    fs::metadata(&bundled_plugins_dir).ok().filter(|meta| meta.is_dir())?;
+    Some(bundled_plugins_dir)
+}
+
+fn process_config_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::config_dir)
+}
+
+fn bundled_runtime_root() -> PathBuf {
+    let env_override = env::var_os("EE_RUNTIME_DIR").map(PathBuf::from);
+    let exe_path = env::current_exe().ok();
+    let fallback_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    resolve_bundled_runtime_root(env_override.as_deref(), exe_path.as_deref(), &fallback_dir)
+}
+
+fn resolve_bundled_runtime_root(
+    env_override: Option<&Path>,
+    exe_path: Option<&Path>,
+    fallback_dir: &Path,
+) -> PathBuf {
+    if let Some(path) = env_override.filter(|path| !path.as_os_str().is_empty()) {
+        return path.to_path_buf();
+    }
+    if let Some(exe_path) = exe_path {
+        if cfg!(windows) {
+            if let Some(parent) = exe_path.parent() {
+                return parent.join("runtime");
+            }
+        } else if let Some(bin_dir) = exe_path.parent()
+            && bin_dir.file_name().is_some_and(|name| name == "bin")
+            && let Some(prefix_dir) = bin_dir.parent()
+        {
+            return prefix_dir.join("share").join("ee");
+        }
+    }
+    fallback_dir.join("runtime")
 }
 
 #[derive(Debug, Clone)]
@@ -524,17 +911,18 @@ impl EditorSettings {
 
 // ── Loading helpers ───────────────────────────────────────────────────────────
 
-/// Parse and apply one `.ee.toml` file if it exists and is readable.
-fn load_ee_toml(settings: &mut EditorSettings, path: &Path) {
+/// Parse one `.ee.toml` file if it exists and is readable.
+fn parse_ee_toml(path: &Path) -> Option<EeToml> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
-        Err(_) => return,
+        Err(_) => return None,
     };
     match toml::from_str::<EeToml>(&text) {
-        Ok(patch) => settings.merge_toml(&patch),
+        Ok(patch) => Some(patch),
         Err(e) => {
             // Surface parse errors so users can fix them, but don't abort.
             eprintln!("ee: warning: failed to parse {}: {}", path.display(), e);
+            None
         }
     }
 }
@@ -619,14 +1007,22 @@ fn discover_config_layers_with_env(
 
 fn load_config_with_env(file_path: Option<&Path>, env: &ConfigEnvironment) -> EditorSettings {
     let mut settings = EditorSettings::default();
+    let mut lsp = LspSettingsBuilder::default();
 
     for layer in discover_config_layers_with_env(env, file_path).layers {
-        load_ee_toml(&mut settings, &layer.path);
+        if let Some(patch) = parse_ee_toml(&layer.path) {
+            settings.merge_toml(&patch);
+            if let Some(lsp_patch) = &patch.lsp {
+                lsp.merge_toml(lsp_patch);
+            }
+        }
     }
 
     if let Some(file_path) = file_path {
         apply_editorconfig(&mut settings, file_path);
     }
+
+    settings.lsp = lsp.finalize();
 
     settings
 }
@@ -949,6 +1345,12 @@ pub(crate) struct TestCwdGuard {
 }
 
 #[cfg(test)]
+pub(crate) struct TestEnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+#[cfg(test)]
 impl TestCwdLock {
     pub(crate) fn lock(
         &'static self,
@@ -981,6 +1383,31 @@ impl Drop for TestCwdGuard {
             debug_assert!(current > 0, "cwd lock depth underflow");
             depth.set(current.saturating_sub(1));
         });
+    }
+}
+
+#[cfg(test)]
+impl TestEnvVarGuard {
+    pub(crate) fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+        let previous = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestEnvVarGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => unsafe {
+                std::env::set_var(self.key, value);
+            },
+            None => unsafe {
+                std::env::remove_var(self.key);
+            },
+        }
     }
 }
 
@@ -1147,6 +1574,54 @@ tab_width = 4
     }
 
     #[test]
+    fn xi_core_config_dir_prefers_xdg_config_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let xdg_config_home = temp.path().join("xdg-home");
+        let _guard = super::TestEnvVarGuard::set("XDG_CONFIG_HOME", &xdg_config_home);
+
+        assert_eq!(xi_core_config_dir(), Some(xdg_config_home.join("ee")));
+    }
+
+    #[test]
+    fn bundled_runtime_root_prefers_env_then_release_layouts() {
+        let fallback = Path::new("/tmp/runtime-fallback");
+        let windows_exe = Path::new("C:/Program Files/ee/ee.exe");
+
+        assert_eq!(
+            resolve_bundled_runtime_root(
+                Some(Path::new("/custom/runtime")),
+                Some(Path::new("/opt/ee/bin/ee")),
+                fallback
+            ),
+            PathBuf::from("/custom/runtime")
+        );
+        assert_eq!(
+            resolve_bundled_runtime_root(None, Some(Path::new("/opt/ee/bin/ee")), fallback),
+            PathBuf::from("/opt/ee/share/ee")
+        );
+        let expected_windows = if cfg!(windows) {
+            PathBuf::from("C:/Program Files/ee/runtime")
+        } else {
+            fallback.join("runtime")
+        };
+        assert_eq!(
+            resolve_bundled_runtime_root(None, Some(windows_exe), fallback),
+            expected_windows
+        );
+    }
+
+    #[test]
+    fn xi_core_client_extras_dir_uses_bundled_plugin_tree() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_root = temp.path().join("runtime");
+        let plugins_dir = runtime_root.join("plugins");
+        std::fs::create_dir_all(&plugins_dir).unwrap();
+        let _guard = super::TestEnvVarGuard::set("EE_RUNTIME_DIR", &runtime_root);
+
+        assert_eq!(xi_core_client_extras_dir(), Some(plugins_dir));
+    }
+
+    #[test]
     fn ancestor_chain_merges_outer_to_inner() {
         let temp = tempfile::tempdir().unwrap();
         let env = test_env(temp.path());
@@ -1250,6 +1725,227 @@ tab_width = 4
     }
 
     #[test]
+    fn lsp_config_merges_system_user_and_project_layers() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        let folder = project.join("folder");
+        let file = folder.join("main.rs");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(env.system_config_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+        std::fs::write(
+            env.system_config_path.as_path(),
+            "[lsp.servers.gleam]\nlanguage_name = \"Gleam\"\ncommand = \"gleam\"\nextensions = [\"gleam\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            env.config_dir.as_ref().unwrap().join("ee").join("config.toml"),
+            "[lsp.servers.gleam]\nargs = [\"lsp\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(".ee.toml"),
+            "[lsp.servers.gleam]\nsupports_single_file = false\nworkspace_identifier = \"gleam.toml\"\n",
+        )
+        .unwrap();
+
+        let settings = load_config_with_env(Some(&file), &env);
+        let gleam = settings.lsp.servers.get("gleam").unwrap();
+
+        assert_eq!(gleam.language_name, "Gleam");
+        assert_eq!(gleam.command, "gleam");
+        assert_eq!(gleam.args, vec!["lsp"]);
+        assert_eq!(gleam.extensions, vec!["gleam"]);
+        assert!(!gleam.supports_single_file);
+        assert_eq!(gleam.workspace_identifier.as_deref(), Some("gleam.toml"));
+    }
+
+    #[test]
+    fn lsp_config_replaces_scalars_and_arrays() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        let folder = project.join("folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            project.join(".ee.toml"),
+            "[lsp.servers.rust]\nlanguage_name = \"Rust\"\ncommand = \"rust-analyzer\"\nargs = [\"--stdio\"]\nextensions = [\"rs\", \"ron\"]\nworkspace_identifier = \"Cargo.toml\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            folder.join(".ee.toml"),
+            "[lsp.servers.rust]\ncommand = \"rust-analyzer-nightly\"\nargs = [\"--nightly\"]\nextensions = [\"rs\"]\nworkspace_identifier = \"Rust.toml\"\n",
+        )
+        .unwrap();
+
+        let settings = load_config_with_env(Some(&folder.join("main.rs")), &env);
+        let rust = settings.lsp.servers.get("rust").unwrap();
+
+        assert_eq!(rust.command, "rust-analyzer-nightly");
+        assert_eq!(rust.args, vec!["--nightly"]);
+        assert_eq!(rust.extensions, vec!["rs"]);
+        assert_eq!(rust.workspace_identifier.as_deref(), Some("Rust.toml"));
+    }
+
+    #[test]
+    fn lsp_config_shallow_merges_env_and_replaces_initialization_options() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        let file = project.join("main.ts");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+        std::fs::write(
+            env.config_dir.as_ref().unwrap().join("ee").join("config.toml"),
+            "[lsp.servers.typescript]\nlanguage_name = \"Typescript\"\ncommand = \"typescript-language-server\"\nextensions = [\"ts\"]\nenv = { PATH_HINT = \"/opt/bin\", KEEP = \"yes\" }\ninitialization_options = { format = true }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(".ee.toml"),
+            "[lsp.servers.typescript]\nenv = { PATH_HINT = \"/custom/bin\", EXTRA = \"1\" }\ninitialization_options = { format = false, lint = true }\n",
+        )
+        .unwrap();
+
+        let settings = load_config_with_env(Some(&file), &env);
+        let ts = settings.lsp.servers.get("typescript").unwrap();
+
+        assert_eq!(ts.env.get("PATH_HINT").map(String::as_str), Some("/custom/bin"));
+        assert_eq!(ts.env.get("KEEP").map(String::as_str), Some("yes"));
+        assert_eq!(ts.env.get("EXTRA").map(String::as_str), Some("1"));
+        assert_eq!(
+            ts.initialization_options
+                .as_ref()
+                .and_then(|value| value.get("format"))
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            ts.initialization_options
+                .as_ref()
+                .and_then(|value| value.get("lint"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn lsp_config_enabled_false_removes_server() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        let file = project.join("main.ts");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join(".ee.toml"), "[lsp.servers.typescript]\nenabled = false\n")
+            .unwrap();
+
+        let settings = load_config_with_env(Some(&file), &env);
+
+        assert!(!settings.lsp.servers.contains_key("typescript"));
+        assert_eq!(
+            settings
+                .lsp
+                .disabled_servers
+                .get("typescript")
+                .map(|server| server.extensions.as_slice()),
+            Some(
+                &[String::from("ts"), String::from("js"), String::from("jsx"), String::from("tsx")]
+                    [..]
+            )
+        );
+    }
+
+    #[test]
+    fn lsp_config_normalizes_extensions_and_rejects_empty_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(".ee.toml"),
+            "[lsp.servers.gleam]\nlanguage_name = \"Gleam\"\ncommand = \"gleam\"\nextensions = [\".gleam\", \".\", \"\"]\n",
+        )
+        .unwrap();
+
+        let settings = load_config_with_env(Some(&project.join("main.gleam")), &env);
+        let gleam = settings.lsp.servers.get("gleam").unwrap();
+
+        assert_eq!(gleam.extensions, vec!["gleam"]);
+    }
+
+    #[test]
+    fn lsp_config_duplicate_extensions_later_server_wins() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(".ee.toml"),
+            "[lsp.servers.alpha]\nlanguage_name = \"Alpha\"\ncommand = \"alpha\"\nextensions = [\"demo\", \"alpha\"]\n\n[lsp.servers.beta]\nlanguage_name = \"Beta\"\ncommand = \"beta\"\nextensions = [\"demo\", \"beta\"]\n",
+        )
+        .unwrap();
+
+        let settings = load_config_with_env(Some(&project.join("main.demo")), &env);
+        let alpha = settings.lsp.servers.get("alpha").unwrap();
+        let beta = settings.lsp.servers.get("beta").unwrap();
+
+        assert_eq!(alpha.extensions, vec!["alpha"]);
+        assert_eq!(beta.extensions, vec!["demo", "beta"]);
+    }
+
+    #[test]
+    fn lsp_config_table_includes_disabled_matching_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join(".ee.toml"), "[lsp.servers.typescript]\nenabled = false\n")
+            .unwrap();
+
+        let settings = load_config_with_env(Some(&project.join("main.ts")), &env);
+        let table = settings.lsp.to_config_table();
+
+        assert_eq!(
+            table
+                .get("disabled_language_config")
+                .and_then(Value::as_object)
+                .and_then(|servers| servers.get("typescript"))
+                .and_then(|server| server.get("extensions"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn lsp_config_root_true_stops_project_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        let folder = project.join("folder");
+        let file = folder.join("main.rs");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+        std::fs::write(
+            env.config_dir.as_ref().unwrap().join("ee").join("config.toml"),
+            "[lsp.servers.rust]\ncommand = \"rust-analyzer\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(".ee.toml"),
+            "root = true\n[lsp.servers.rust]\ncommand = \"project-rust\"\n",
+        )
+        .unwrap();
+        std::fs::write(folder.join(".ee.toml"), "[lsp.servers.rust]\ncommand = \"inner-rust\"\n")
+            .unwrap();
+
+        let settings = load_config_with_env(Some(&file), &env);
+        let rust = settings.lsp.servers.get("rust").unwrap();
+
+        assert_eq!(rust.command, "inner-rust");
+    }
+
+    #[test]
     fn system_config_is_lowest_priority_external_layer() {
         let temp = tempfile::tempdir().unwrap();
         let env = test_env(temp.path());
@@ -1306,6 +2002,114 @@ key = "K"
 
         assert!(!settings.keymap.inherit_defaults);
         assert_eq!(settings.keymap.operations.len(), 2);
+    }
+
+    #[test]
+    fn ee_toml_parses_lsp_servers() {
+        let toml = r#"
+[lsp.servers.gleam]
+language_name = "Gleam"
+command = "gleam"
+args = ["lsp"]
+extensions = ["gleam"]
+supports_single_file = false
+workspace_identifier = "gleam.toml"
+
+[lsp.servers.rust]
+command = "rust-analyzer"
+extensions = ["rs"]
+"#;
+        let raw: EeToml = toml::from_str(toml).unwrap();
+
+        let gleam = raw.lsp.as_ref().unwrap().servers.get("gleam").unwrap();
+        assert_eq!(gleam.language_name.as_deref(), Some("Gleam"));
+        assert_eq!(gleam.command.as_deref(), Some("gleam"));
+        assert_eq!(gleam.args, Some(vec!["lsp".to_owned()]));
+        assert_eq!(gleam.extensions, Some(vec!["gleam".to_owned()]));
+        assert_eq!(gleam.supports_single_file, Some(false));
+        assert_eq!(gleam.workspace_identifier.as_deref(), Some("gleam.toml"));
+        assert_eq!(gleam.enabled, None);
+        assert!(gleam.env.is_empty());
+        assert_eq!(gleam.initialization_options, None);
+
+        let rust = raw.lsp.as_ref().unwrap().servers.get("rust").unwrap();
+        assert_eq!(rust.command.as_deref(), Some("rust-analyzer"));
+        assert_eq!(rust.extensions, Some(vec!["rs".to_owned()]));
+        assert_eq!(rust.language_name, None);
+    }
+
+    #[test]
+    fn ee_toml_rejects_unknown_lsp_server_fields() {
+        let toml = r#"
+[lsp.servers.rust]
+command = "rust-analyzer"
+extensions = ["rs"]
+bogus = true
+"#;
+
+        let err = toml::from_str::<EeToml>(toml).unwrap_err();
+
+        assert!(err.to_string().contains("unknown field `bogus`"));
+    }
+
+    #[test]
+    fn ee_toml_parses_disabled_lsp_server() {
+        let toml = r#"
+[lsp.servers.typescript]
+enabled = false
+"#;
+        let raw: EeToml = toml::from_str(toml).unwrap();
+
+        let server = raw.lsp.as_ref().unwrap().servers.get("typescript").unwrap();
+        assert_eq!(server.enabled, Some(false));
+        assert_eq!(server.command, None);
+        assert_eq!(server.extensions, None);
+    }
+
+    #[test]
+    fn ee_toml_parses_lsp_env() {
+        let toml = r#"
+[lsp.servers.typescript]
+command = "typescript-language-server"
+extensions = ["ts"]
+env = { NODE_NO_WARNINGS = "1", PATH_HINT = "/opt/bin" }
+"#;
+        let raw: EeToml = toml::from_str(toml).unwrap();
+
+        let server = raw.lsp.as_ref().unwrap().servers.get("typescript").unwrap();
+        assert_eq!(server.env.get("NODE_NO_WARNINGS").map(String::as_str), Some("1"));
+        assert_eq!(server.env.get("PATH_HINT").map(String::as_str), Some("/opt/bin"));
+    }
+
+    #[test]
+    fn ee_toml_parses_lsp_initialization_options() {
+        let toml = r#"
+[lsp.servers.json]
+command = "vscode-json-languageserver"
+extensions = ["json"]
+initialization_options = { provideFormatter = true, nested = { mode = "strict" } }
+"#;
+        let raw: EeToml = toml::from_str(toml).unwrap();
+
+        let server = raw.lsp.as_ref().unwrap().servers.get("json").unwrap();
+        let init = server.initialization_options.as_ref().unwrap();
+        assert_eq!(init.get("provideFormatter").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            init.get("nested")
+                .and_then(Value::as_object)
+                .and_then(|nested| nested.get("mode"))
+                .and_then(Value::as_str),
+            Some("strict")
+        );
+    }
+
+    #[test]
+    fn readme_documents_lsp_server_config() {
+        let readme = include_str!("../../../README.md");
+
+        assert!(readme.contains("[lsp.servers.<id>]"));
+        assert!(readme.contains("Config precedence"));
+        assert!(readme.contains("typescript"));
     }
 
     #[test]

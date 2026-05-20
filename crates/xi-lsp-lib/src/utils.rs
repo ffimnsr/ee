@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
+use std::env;
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, BufWriter};
 use std::path::Path;
@@ -36,6 +38,13 @@ const MAX_LSP_BODY_BYTES: usize = 16 * 1024 * 1024;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(500);
 use lsp_types::Uri;
 use lsp_types::*;
+
+#[derive(Debug, Clone, Default)]
+pub struct ServerStartOptions {
+    pub file_extensions: Vec<String>,
+    pub env_overrides: BTreeMap<String, String>,
+    pub initialization_options: Option<serde_json::Value>,
+}
 
 fn stderr_is_user_visible(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
@@ -387,12 +396,14 @@ pub fn get_workspace_root_uri(
 pub fn start_new_server(
     command: String,
     arguments: Vec<String>,
-    file_extensions: Vec<String>,
     language_id: &str,
     core: CoreProxy,
     result_queue: ResultQueue,
+    options: ServerStartOptions,
 ) -> Result<Arc<Mutex<LanguageServerClient>>, Error> {
-    let mut process = Command::new(command)
+    let mut process_builder = Command::new(command);
+    configure_language_server_env(&mut process_builder, &options.env_overrides);
+    let mut process = process_builder
         .args(arguments)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -422,13 +433,64 @@ pub fn start_new_server(
         core,
         result_queue,
         language_id.to_owned(),
-        file_extensions,
+        options.file_extensions,
+        options.initialization_options,
     )));
 
     spawn_stdout_thread(language_id, stdout, Arc::clone(&language_server_client))?;
     spawn_stderr_thread(language_id, stderr, Arc::clone(&language_server_client))?;
 
     Ok(language_server_client)
+}
+
+fn configure_language_server_env(
+    process_builder: &mut Command,
+    env_overrides: &BTreeMap<String, String>,
+) {
+    process_builder.env_clear();
+    for (key, value) in env::vars_os() {
+        if should_inherit_language_server_env_var(key.as_os_str()) {
+            process_builder.env(&key, &value);
+        }
+    }
+    for (key, value) in env_overrides {
+        process_builder.env(key, value);
+    }
+}
+
+fn should_inherit_language_server_env_var(key: &OsStr) -> bool {
+    #[cfg(windows)]
+    const ALLOWED: &[&str] = &[
+        "COMSPEC",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "LOCALAPPDATA",
+        "PATH",
+        "PATHEXT",
+        "SYSTEMDRIVE",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+    ];
+    #[cfg(not(windows))]
+    const ALLOWED: &[&str] = &[
+        "HOME",
+        "LANG",
+        "LC_ALL",
+        "LC_COLLATE",
+        "LC_CTYPE",
+        "LC_MESSAGES",
+        "LC_NUMERIC",
+        "LC_TIME",
+        "LOGNAME",
+        "PATH",
+        "SHELL",
+        "TMPDIR",
+        "USER",
+    ];
+
+    key.to_str().is_some_and(|key| ALLOWED.contains(&key))
 }
 
 #[cfg(test)]
@@ -484,10 +546,13 @@ mod tests {
         let client = start_new_server(
             String::from("sh"),
             vec![String::from("-c"), String::from("echo request failed 1>&2; tail -f /dev/null")],
-            vec![String::from("rs")],
             "rust",
             test_core_proxy(),
             ResultQueue::new(),
+            ServerStartOptions {
+                file_extensions: vec![String::from("rs")],
+                ..ServerStartOptions::default()
+            },
         )
         .expect("test language server should spawn");
 
@@ -504,10 +569,13 @@ mod tests {
         let client = start_new_server(
             String::from("sh"),
             vec![String::from("-c"), String::from("tail -f /dev/null")],
-            vec![String::from("rs")],
             "rust",
             test_core_proxy(),
             ResultQueue::new(),
+            ServerStartOptions {
+                file_extensions: vec![String::from("rs")],
+                ..ServerStartOptions::default()
+            },
         )
         .expect("test language server should spawn");
 
@@ -515,6 +583,34 @@ mod tests {
 
         let client = client.lock().expect("client lock should succeed");
         assert!(client.exit_status().expect("exit status should be readable").is_some());
+    }
+
+    #[test]
+    fn spawn_failure_does_not_echo_configured_env_values() {
+        let secret = "phase4-super-secret";
+        let err = match start_new_server(
+            String::from("__definitely_missing_language_server__"),
+            Vec::new(),
+            "rust",
+            test_core_proxy(),
+            ResultQueue::new(),
+            ServerStartOptions {
+                file_extensions: vec![String::from("rs")],
+                env_overrides: BTreeMap::from([(
+                    String::from("XI_LSP_SECRET"),
+                    String::from(secret),
+                )]),
+                ..ServerStartOptions::default()
+            },
+        ) {
+            Ok(_) => panic!("spawn should fail for missing binary"),
+            Err(err) => err,
+        };
+
+        match err {
+            Error::ServerStart { message, .. } => assert!(!message.contains(secret)),
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

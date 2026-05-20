@@ -122,6 +122,38 @@ Bundled runtime is treated as read-only. Bundled and user/workspace overlays all
 
 Query overlays merge deterministically in bundled, then user, then workspace order for each language and query kind.
 
+## Language servers
+
+`ee` ships bundled LSP definitions for Rust, JSON, YAML, and TypeScript/JavaScript. Add or override servers in ee config TOML with `[lsp.servers.<id>]`, where `<id>` is the stable server id sent to `xi-lsp-plugin`.
+
+Enabled servers require `language_name`, `command`, and `extensions`. Optional fields are `args`, `supports_single_file`, `workspace_identifier`, `enabled`, `env`, and `initialization_options`. Defaults are `args = []`, `supports_single_file = true`, `enabled = true`, `env = {}`, and `initialization_options = null`. Extension matching strips a leading `.` from configured extensions; empty extension strings are ignored.
+
+```toml
+[lsp.servers.gleam]
+language_name = "Gleam"
+command = "gleam"
+args = ["lsp"]
+extensions = ["gleam"]
+supports_single_file = false
+workspace_identifier = "gleam.toml"
+env = { GLEAM_LOG = "info" }
+
+[lsp.servers.rust]
+command = "rust-analyzer"
+args = []
+workspace_identifier = "Cargo.toml"
+
+[lsp.servers.typescript]
+enabled = false
+
+[lsp.servers.json]
+initialization_options = { provideFormatter = true }
+```
+
+Config precedence, from lowest to highest, is `/etc/ee/config.toml`, `$XDG_CONFIG_HOME/ee/config.toml`, legacy `~/.ee.toml` only when XDG config is missing, then ancestor `.ee.toml` files from outermost to innermost. `root = true` stops discovery above that config file. Later layers replace scalar fields, replace arrays, shallow-merge `env`, replace `initialization_options`, and `enabled = false` disables that server id.
+
+Matching is extension-based. After all config layers merge, one effective server owns each extension; duplicate ownership resolves deterministically and the later server id wins. There is no multi-server fanout for one extension yet. Missing executables, disabled matching servers, and workspace-root-only servers opened outside a matching root fail closed with status items instead of blocking editing.
+
 ### Development runtime flow
 
 Development builds use fetched runtime assets, not vendored parser sources in this repository. Build the runtime package with:

@@ -94,6 +94,119 @@ Real next jump likely needs architectural change: first render from decoded pref
     - [ ] LSP success path still wins over tag fallback when both are available.
     - [ ] Large-buffer or unsupported-language cases fail closed with explicit status instead of expensive best-effort scan.
 
+### Configurable Bundled + User Tree-Sitter Languages
+
+- Rules:
+  - Adding a tree-sitter language must not require editing `crates/xi-core-lib/src/runtime_loader.rs`.
+  - Keep bundled runtime languages as defaults, but let ee TOML config add, override, or disable runtime language definitions.
+  - Use the same ee config precedence as editor settings and LSP config: system, XDG user, legacy user fallback, then ancestor `.ee.toml`.
+  - Runtime language config must feed the existing `ee do runtime fetch` and `ee do runtime build` commands.
+  - Grammar sources may come from a crates.io grammar crate or a git repository pinned by `branch`, `tag`, or `rev`.
+  - Git grammar sources must be pinned deterministically for reproducible runtime builds; `rev` is preferred for release/runtime packaging.
+  - Workspace runtime overrides remain trusted-only; untrusted workspace config must not fetch, build, or load arbitrary native grammar code.
+  - Missing grammar source, invalid source pins, duplicate file-type ownership, unsupported queries, and build failures fail closed with clear diagnostics.
+  - Every phase must land with regression tests and clippy success.
+
+- Final config contract:
+  - TOML key: `[languages.<id>]`, where `<id>` is stable runtime language id.
+  - Required fields for enabled language: `name`, `file_types`, and `[languages.<id>.grammar]`.
+  - Optional language fields: `enabled`, `aliases`, `globs`, `shebangs`, `scope`, `query_language`, `content_regex`, `first_line_regex`, `injection_regex`, `match_priority`, and `supported_query_kinds`.
+  - Required grammar fields: `library`, `symbol`, and `[languages.<id>.grammar.source]`.
+  - Grammar source must be exactly one of:
+    - `[languages.<id>.grammar.source.crate]` with `name = "tree-sitter-demo"` plus `version = "1.2.3"`
+    - `[languages.<id>.grammar.source.git]` with `url = "https://github.com/example/tree-sitter-demo"` plus exactly one of `branch`, `tag`, or `rev`
+  - Defaults: `enabled = true`, `aliases = []`, `globs = []`, `shebangs = []`, `supported_query_kinds = ["highlights", "injections", "locals", "tags", "textobjects", "indents", "folds", "rainbows"]`.
+  - Merge semantics: later config layers replace scalars, replace arrays, replace grammar source as one unit, and `enabled = false` disables the language id.
+  - Example:
+    ```toml
+    [languages.gleam]
+    name = "Gleam"
+    file_types = ["gleam"]
+    scope = "source.gleam"
+    aliases = ["gleam"]
+
+    [languages.gleam.grammar]
+    library = "tree-sitter-gleam"
+    symbol = "tree_sitter_gleam"
+    [languages.gleam.grammar.source.git]
+    url = "https://github.com/gleam-lang/tree-sitter-gleam"
+    tag = "v1.0.0"
+
+    [languages.demo.grammar]
+    library = "tree-sitter-demo"
+    symbol = "tree_sitter_demo"
+    [languages.demo.grammar.source.crate]
+    name = "tree-sitter-demo"
+    version = "1.2.3"
+    ```
+
+- [ ] Phase 0: define runtime language TOML schema.
+  - [ ] Add TOML structs for `[languages.<id>]` and nested `[languages.<id>.grammar]`.
+  - [ ] Model grammar source as enum: crates.io `{ name, version }` or git `{ url, branch|tag|rev }`.
+  - [ ] Reject configs with no source, multiple source kinds, multiple git refs, missing `library`, missing `symbol`, empty `file_types`, or empty language id.
+  - [ ] Add parser tests for crates.io source, git branch source, git tag source, git rev source, and invalid mixed source fields.
+
+- [ ] Phase 1: merge config-defined runtime languages.
+  - [ ] Extend runtime config merge so user/project definitions can add new `LanguageDefinition`s, not only override built-ins.
+  - [ ] Preserve current built-in language behavior when no `[languages]` config exists.
+  - [ ] Apply `enabled = false` by removing language id from effective runtime language set.
+  - [ ] Normalize file types by stripping leading `.` and rejecting empty values.
+  - [ ] Add tests for adding new language, overriding built-in grammar metadata, disabling built-in language, duplicate file-type ownership, and config precedence.
+
+- [ ] Phase 2: teach runtime fetch about git grammar sources.
+  - [ ] Extend `fetch_grammar_sources` to fetch crates.io sources through current temporary cargo manifest path and git sources through explicit clone/fetch checkout path.
+  - [ ] Use deterministic source directory names including language id and source pin.
+  - [ ] For git `branch` and `tag`, record resolved commit SHA in fetch output and build metadata.
+  - [ ] For git `rev`, checkout exact revision and fail if missing.
+  - [ ] Add tests using a local git fixture for branch, tag, rev, missing ref, and source cache reuse.
+
+- [ ] Phase 3: build runtime assets from config-defined sources.
+  - [ ] Reuse existing grammar build path for fetched crates.io and git source directories.
+  - [ ] Keep query copy/discovery behavior identical for built-in and user-defined languages.
+  - [ ] Support standard query paths from grammar repository `tree-sitter.json` when present.
+  - [ ] Add tests proving git-sourced grammar builds into `grammars/` and queries copy into `queries/<language>/`.
+  - [ ] Add failure-path tests for missing `src/parser.c`, bad `tree-sitter.json`, and grammar symbol mismatch.
+
+- [ ] Phase 4: protect runtime loading and workspace trust boundaries.
+  - [ ] Ensure untrusted workspace `.ee.toml` cannot introduce native grammar source fetch/build/load.
+  - [ ] Allow trusted workspace runtime roots only through existing trusted-workspace mechanism.
+  - [ ] Keep bundled and user runtime roots read/write behavior unchanged: bundled read-only, user build output writable.
+  - [ ] Add diagnostics that include language id, source type, and ref, but not credentials embedded in URLs.
+  - [ ] Add tests for untrusted workspace language ignored, trusted workspace language applied, and credential-redacted git URL diagnostics.
+
+- [ ] Phase 5: document user workflow and examples.
+  - [ ] Document `[languages.<id>]` and `[languages.<id>.grammar]` config fields.
+  - [ ] Include examples for crates.io source, git branch source, git tag source, and git rev source.
+  - [ ] Document recommendation: use `rev` for reproducible release builds; use `branch` only for local development.
+  - [ ] Document commands: `ee do runtime fetch`, `ee do runtime build`, `scripts/build-runtime.sh`, and `EE_RUNTIME_DIR`.
+  - [ ] Document limitations: native grammar code requires trusted source, one effective owner per file type, and LSP config remains separate.
+
+- [ ] Phase 6: optional unified language config follow-up.
+  - Why: runtime grammar config and LSP config likely belong under one user-facing language surface even if backend ownership stays split.
+  - [ ] Design unified schema.
+    - [ ] Evaluate nested `[languages.<id>.lsp.<server_id>]` or equivalent shape that keeps grammar and language-server metadata together.
+    - [ ] Define merge and disable semantics so unified language config still compiles into current runtime-loader and `xi-lsp-plugin` inputs.
+    - [ ] Decide whether one language may own multiple server entries and how per-server enable/disable interacts with file-type matching.
+  - [ ] Keep migration bounded.
+    - [ ] Decide whether to support legacy `[lsp.servers.<id>]` as transitional input or replace it outright.
+    - [ ] Avoid mixing unified schema work with native grammar trust changes or file-type multi-owner resolution.
+
+- [ ] Phase 7: optional LSP matching and routing expansion.
+  - Why: unified language config becomes more useful if LSP routing no longer stays locked to extension-only single-winner matching.
+  - [ ] Expand server selection signals.
+    - [ ] Replace extension-only matching with richer language/server selection signals such as globs, shebangs, first-line hints, workspace markers, or explicit language id.
+    - [ ] Define whether routing happens from resolved language id first, from direct server rules, or from both with deterministic precedence.
+  - [ ] Define multi-server behavior.
+    - [ ] Decide whether one buffer may fan out to multiple language servers for distinct capabilities or whether routing stays single-primary-server with explicit secondary roles.
+    - [ ] Define capability ownership boundaries if multiple servers attach to one buffer.
+  - [ ] Preserve inspectability and failure semantics.
+    - [ ] Define deterministic conflict resolution and status/UI so active server ownership stays inspectable.
+    - [ ] Keep current fail-closed behavior for missing executables, unsupported workspace roots, and disabled servers.
+
+- [ ] Backlog goals beyond current scope.
+  - [ ] Revisit trusted-only native grammar loading if runtime grammar execution moves to a sandboxed or non-native format.
+  - [ ] Revisit one-effective-owner-per-file-type if language detection grows beyond extension matching into ranked per-buffer resolution.
+
 ### Keymap Help + Binding Discovery Unification
 
 - Rules:
@@ -181,8 +294,8 @@ Real next jump likely needs architectural change: first render from decoded pref
 - [ ] Implement a `jq` like command `do file query|q --type json`, to query document files in similar ways
   - [ ] Implement for `json`
   - [ ] Implement for `yaml`
-  - [ ] Implement for `toml`
-  - [ ] Implement for `kdl`
+- [ ] Implement for `toml`
+- [ ] Implement for `kdl`
 - [ ] When trying to save and user doesn't have permission, ask if they want to re-execute with higher privilage with `sudo`, `su`, `run0`
 - [ ] Make sparse editing workable on VLF
 - [ ] vsplit and hsplit problems on working with same file showing empty buffer

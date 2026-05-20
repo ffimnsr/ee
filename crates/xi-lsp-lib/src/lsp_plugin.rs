@@ -14,8 +14,8 @@
 
 //! Implementation of Language Server Plugin
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -28,7 +28,7 @@ use xi_plugin_lib::{ChunkCache, CoreProxy, Plugin, View};
 use xi_rope::rope::RopeDelta;
 
 use crate::conversion_utils::*;
-use crate::language_server_client::LanguageServerClient;
+use crate::language_server_client::{LanguageServerClient, OpenDocumentState};
 use crate::result_queue::ResultQueue;
 use crate::types::{
     Config, Error, LanguageResponseError, LspCodeAction, LspResponse, PendingCompletionItem,
@@ -43,6 +43,13 @@ pub struct ViewInfo {
     language_id: String,
     ls_identifier: String,
     workspace_root: Option<Uri>,
+    path: PathBuf,
+}
+
+struct ClientRestartGroup {
+    language_id: String,
+    workspace_root: Option<Uri>,
+    documents: Vec<(ViewId, OpenDocumentState)>,
 }
 
 /// Represents the state of the Language Server Plugin
@@ -54,6 +61,14 @@ pub struct LspPlugin {
     pending_code_actions: HashMap<ViewId, Vec<LspCodeAction>>,
     pending_completions: HashMap<ViewId, Vec<PendingCompletionItem>>,
     language_server_clients: HashMap<String, Arc<Mutex<LanguageServerClient>>>,
+    disabled_views: HashMap<ViewId, String>,
+    inactive_views: HashMap<ViewId, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LanguageMatch {
+    Enabled(String),
+    Disabled(String),
 }
 
 impl LspPlugin {
@@ -66,7 +81,267 @@ impl LspPlugin {
             pending_code_actions: HashMap::new(),
             pending_completions: HashMap::new(),
             language_server_clients: HashMap::new(),
+            disabled_views: HashMap::new(),
+            inactive_views: HashMap::new(),
         }
+    }
+
+    fn apply_plugin_config(&mut self, next_config: Config) {
+        let affected_languages = self.changed_language_ids(&next_config);
+        self.config = next_config;
+
+        if affected_languages.is_empty() {
+            return;
+        }
+
+        let restart_groups = self.rebuild_view_mappings(&affected_languages);
+        self.restart_groups(restart_groups);
+    }
+
+    fn changed_language_ids(&self, next_config: &Config) -> HashSet<String> {
+        let known_ids = self
+            .config
+            .language_config
+            .keys()
+            .chain(next_config.language_config.keys())
+            .chain(self.config.disabled_language_config.keys())
+            .chain(next_config.disabled_language_config.keys())
+            .cloned()
+            .collect::<HashSet<_>>();
+
+        known_ids
+            .into_iter()
+            .filter(|language_id| {
+                serde_json::to_value(self.config.language_config.get(language_id)).ok()
+                    != serde_json::to_value(next_config.language_config.get(language_id)).ok()
+                    || serde_json::to_value(self.config.disabled_language_config.get(language_id))
+                        .ok()
+                        != serde_json::to_value(
+                            next_config.disabled_language_config.get(language_id),
+                        )
+                        .ok()
+            })
+            .collect()
+    }
+
+    fn rebuild_view_mappings(
+        &mut self,
+        affected_languages: &HashSet<String>,
+    ) -> BTreeMap<String, ClientRestartGroup> {
+        let mut previous_documents = HashMap::<ViewId, OpenDocumentState>::new();
+        let mut groups = BTreeMap::<String, ClientRestartGroup>::new();
+        let affected_keys = self
+            .language_server_clients
+            .keys()
+            .filter(|key| {
+                affected_languages
+                    .iter()
+                    .any(|language_id| key.starts_with(&format!("{language_id}:")))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        for key in &affected_keys {
+            if let Some(client) = self.language_server_clients.remove(key) {
+                if let Ok(client) = client.lock() {
+                    for (view_id, state) in client.open_document_states() {
+                        previous_documents.insert(view_id, state);
+                    }
+                }
+                if let Err(err) = shutdown_language_server(&client) {
+                    error!("failed to shutdown language server during config update: {}", err);
+                }
+            }
+        }
+
+        let affected_views = self
+            .view_info
+            .iter()
+            .filter(|(_, info)| affected_languages.contains(&info.language_id))
+            .map(|(view_id, info)| (*view_id, info.clone()))
+            .collect::<Vec<_>>();
+
+        for (view_id, info) in affected_views {
+            let path = info.path.clone();
+            let Some(language_id) = self.enabled_language_for_path(&path) else {
+                self.view_info.remove(&view_id);
+                continue;
+            };
+            let workspace_root = self.workspace_root_for_path(&path, &language_id);
+            let Some(ls_identifier) = self.language_server_key(&language_id, &workspace_root)
+            else {
+                self.view_info.remove(&view_id);
+                continue;
+            };
+
+            if let Some(view_info) = self.view_info.get_mut(&view_id) {
+                view_info.language_id = language_id.clone();
+                view_info.workspace_root = workspace_root.clone();
+                view_info.ls_identifier = ls_identifier.clone();
+            }
+
+            let entry = groups.entry(ls_identifier.clone()).or_insert_with(|| ClientRestartGroup {
+                language_id: language_id.clone(),
+                workspace_root: workspace_root.clone(),
+                documents: Vec::new(),
+            });
+            if let Some(state) = previous_documents.remove(&view_id) {
+                entry.documents.push((view_id, state));
+            }
+        }
+
+        groups
+    }
+
+    fn restart_groups(&mut self, restart_groups: BTreeMap<String, ClientRestartGroup>) {
+        for (identifier, group) in restart_groups {
+            if self.language_server_clients.contains_key(&identifier) {
+                continue;
+            }
+
+            let Some(config) = self.config.language_config.get(&group.language_id) else {
+                continue;
+            };
+            let Some(core) = self.core.clone() else {
+                continue;
+            };
+
+            let client = match start_new_server(
+                config.start_command.clone(),
+                config.start_arguments.clone(),
+                &group.language_id,
+                core,
+                self.result_queue.clone(),
+                ServerStartOptions {
+                    file_extensions: config.extensions.clone(),
+                    env_overrides: config.env.clone(),
+                    initialization_options: config.initialization_options.clone(),
+                },
+            ) {
+                Ok(client) => client,
+                Err(err) => {
+                    Self::log_spawn_failure(&group.language_id, &config.start_command, &err);
+                    continue;
+                }
+            };
+
+            let initialized = if let Ok(mut server) = client.lock() {
+                for (view_id, state) in group.documents {
+                    server.opened_documents.insert(view_id, state);
+                }
+                if !server.is_initialized && !server.initialization_pending {
+                    let workspace_root = group.workspace_root.clone();
+                    server
+                        .send_initialize(workspace_root, move |ls_client, result| {
+                            ls_client.initialization_pending = false;
+                            match result {
+                                Ok(result) => match serde_json::from_value::<InitializeResult>(result) {
+                                    Ok(init_result) => {
+                                        ls_client.server_capabilities = Some(init_result.capabilities);
+                                        ls_client.is_initialized = true;
+                                        ls_client.clear_server_failure();
+                                        if let Err(err) = ls_client.resend_open_documents() {
+                                            ls_client.record_server_failure(format!(
+                                                "failed to resend open documents after initialize: {err}"
+                                            ));
+                                        }
+                                    }
+                                    Err(err) => ls_client.record_server_failure(format!(
+                                        "failed to parse initialize response: {err}"
+                                    )),
+                                },
+                                Err(err) => ls_client.record_server_failure(format!(
+                                    "initialize request failed: {err:?}"
+                                )),
+                            }
+                        })
+                        .is_ok()
+                } else {
+                    true
+                }
+            } else {
+                false
+            };
+
+            if initialized {
+                self.language_server_clients.insert(identifier, client);
+            }
+        }
+    }
+
+    fn workspace_root_for_path(&self, path: &Path, language_id: &str) -> Option<Uri> {
+        let config = self.config.language_config.get(language_id)?;
+
+        config
+            .workspace_identifier
+            .as_ref()
+            .and_then(|identifier| get_workspace_root_uri(identifier, path).ok())
+    }
+
+    fn language_match_for_path(&self, path: &Path) -> Option<LanguageMatch> {
+        path.extension().and_then(|extension| extension.to_str()).and_then(|extension_str| {
+            for (lang, config) in &self.config.language_config {
+                if config.extensions.iter().any(|candidate| candidate == extension_str) {
+                    return Some(LanguageMatch::Enabled(lang.clone()));
+                }
+            }
+            for (lang, config) in &self.config.disabled_language_config {
+                if config.extensions.iter().any(|candidate| candidate == extension_str) {
+                    return Some(LanguageMatch::Disabled(lang.clone()));
+                }
+            }
+            None
+        })
+    }
+
+    fn enabled_language_for_path(&self, path: &Path) -> Option<String> {
+        match self.language_match_for_path(path) {
+            Some(LanguageMatch::Enabled(language_id)) => Some(language_id),
+            Some(LanguageMatch::Disabled(_)) | None => None,
+        }
+    }
+
+    fn add_status_item(&self, view_id: ViewId, key: &str, value: &str) {
+        if let Some(core) = &self.core {
+            core.add_status_item(view_id, key, value, "left");
+        }
+    }
+
+    fn remove_status_item(&self, view_id: ViewId, key: &str) {
+        if let Some(core) = &self.core {
+            core.remove_status_item(view_id, key);
+        }
+    }
+
+    fn add_spawn_failure_status(
+        &self,
+        view_id: ViewId,
+        language_id: &str,
+        command: &str,
+    ) -> String {
+        let (key, value) = Self::spawn_failure_status(language_id, command);
+        self.add_status_item(view_id, &key, &value);
+        key
+    }
+
+    fn spawn_failure_status(language_id: &str, command: &str) -> (String, String) {
+        (format!("lsp:{language_id}:status"), format!("lsp:{language_id}:spawn failed: {command}"))
+    }
+
+    fn add_disabled_status(&self, view_id: ViewId, language_id: &str) -> String {
+        let key = format!("lsp:{language_id}:disabled");
+        self.add_status_item(view_id, &key, &key);
+        key
+    }
+
+    fn add_unsupported_workspace_status(&self, view_id: ViewId, language_id: &str) -> String {
+        let key = format!("lsp:{language_id}:unsupported-workspace");
+        self.add_status_item(view_id, &key, &key);
+        key
+    }
+
+    fn log_spawn_failure(language_id: &str, command: &str, err: &Error) {
+        error!("lsp:{language_id}: spawn failed for command {command}: {err}");
     }
 }
 
@@ -148,6 +423,12 @@ impl Plugin for LspPlugin {
         {
             ls_client.record_server_failure(format!("failed to send didClose: {err}"));
         }
+        if let Some(key) = self.disabled_views.remove(&view.get_id()) {
+            self.remove_status_item(view.get_id(), &key);
+        }
+        if let Some(key) = self.inactive_views.remove(&view.get_id()) {
+            self.remove_status_item(view.get_id(), &key);
+        }
     }
 
     fn new_view(&mut self, view: &mut View<Self::Cache>) {
@@ -155,30 +436,70 @@ impl Plugin for LspPlugin {
 
         // TODO: Use Language Idenitifier assigned by core when the
         // implementation is settled
-        if let Some(language_id) = self.get_language_for_view(view) {
-            let workspace_root_uri = self.workspace_root_for_view(view, &language_id);
-            if let Some((identifier, ls_client)) =
-                self.get_lsclient_from_workspace_root(&language_id, &workspace_root_uri)
-            {
-                self.view_info.insert(
-                    view.get_id(),
-                    ViewInfo {
-                        version: 0,
-                        language_id,
-                        ls_identifier: identifier,
-                        workspace_root: workspace_root_uri.clone(),
-                    },
-                );
+        let Some(language_match) = self.get_language_for_view(view) else {
+            return;
+        };
 
-                if let Err(err) = self.open_view_on_client(view, workspace_root_uri, &ls_client) {
-                    error!(
-                        "failed to initialize language server view {}: {:?}",
+        match language_match {
+            LanguageMatch::Disabled(language_id) => {
+                let key = self.add_disabled_status(view.get_id(), &language_id);
+                self.disabled_views.insert(view.get_id(), key);
+            }
+            LanguageMatch::Enabled(language_id) => {
+                let workspace_root_uri = self.workspace_root_for_view(view, &language_id);
+                if self.language_server_key(&language_id, &workspace_root_uri).is_none() {
+                    let key = self.add_unsupported_workspace_status(view.get_id(), &language_id);
+                    self.inactive_views.insert(view.get_id(), key);
+                    return;
+                }
+
+                if let Some((identifier, ls_client)) =
+                    self.get_lsclient_from_workspace_root(&language_id, &workspace_root_uri)
+                {
+                    let Some(path) = view.get_path() else {
+                        return;
+                    };
+                    self.view_info.insert(
                         view.get_id(),
-                        err
+                        ViewInfo {
+                            version: 0,
+                            language_id,
+                            ls_identifier: identifier,
+                            workspace_root: workspace_root_uri.clone(),
+                            path: path.to_path_buf(),
+                        },
                     );
+
+                    if let Err(err) = self.open_view_on_client(view, workspace_root_uri, &ls_client)
+                    {
+                        error!(
+                            "failed to initialize language server view {}: {:?}",
+                            view.get_id(),
+                            err
+                        );
+                    }
+                } else if let Some(config) = self.config.language_config.get(&language_id) {
+                    let key = self.add_spawn_failure_status(
+                        view.get_id(),
+                        &language_id,
+                        &config.start_command,
+                    );
+                    self.inactive_views.insert(view.get_id(), key);
                 }
             }
         }
+    }
+
+    fn plugin_config_changed(&mut self, changes: &ConfigTable) {
+        let next_config = match serde_json::from_value::<Config>(Value::Object(changes.clone())) {
+            Ok(config) => config,
+            Err(err) => {
+                error!("failed to parse lsp plugin config update: {}", err);
+                return;
+            }
+        };
+
+        self.apply_plugin_config(next_config);
     }
 
     fn config_changed(&mut self, _view: &mut View<Self::Cache>, _changes: &ConfigTable) {}
@@ -1284,10 +1605,14 @@ impl LspPlugin {
                     let client = start_new_server(
                         config.start_command.clone(),
                         config.start_arguments.clone(),
-                        config.extensions.clone(),
                         language_id,
                         self.core.clone()?,
                         self.result_queue.clone(),
+                        ServerStartOptions {
+                            file_extensions: config.extensions.clone(),
+                            env_overrides: config.env.clone(),
+                            initialization_options: config.initialization_options.clone(),
+                        },
                     );
 
                     match client {
@@ -1299,9 +1624,10 @@ impl LspPlugin {
                             Some((language_server_identifier, client_clone))
                         }
                         Err(err) => {
-                            error!(
-                                "Error occured while starting server for Language: {}: {:?}",
-                                language_id, err
+                            Self::log_spawn_failure(
+                                language_id,
+                                &self.config.language_config[language_id].start_command,
+                                &err,
                             );
                             None
                         }
@@ -1314,14 +1640,19 @@ impl LspPlugin {
     /// Tries to get language for the View using the extension of the document.
     /// Only searches for the languages supported by the Language Plugin as
     /// defined in the config
-    fn get_language_for_view(&mut self, view: &View<ChunkCache>) -> Option<String> {
+    fn get_language_for_view(&mut self, view: &View<ChunkCache>) -> Option<LanguageMatch> {
         view.get_path()
             .and_then(|path| path.extension())
             .and_then(|extension| extension.to_str())
             .and_then(|extension_str| {
                 for (lang, config) in &self.config.language_config {
                     if config.extensions.iter().any(|x| x == extension_str) {
-                        return Some(lang.clone());
+                        return Some(LanguageMatch::Enabled(lang.clone()));
+                    }
+                }
+                for (lang, config) in &self.config.disabled_language_config {
+                    if config.extensions.iter().any(|x| x == extension_str) {
+                        return Some(LanguageMatch::Disabled(lang.clone()));
                     }
                 }
                 None
@@ -1397,10 +1728,14 @@ impl LspPlugin {
         let client = start_new_server(
             config.start_command.clone(),
             config.start_arguments.clone(),
-            config.extensions.clone(),
             &view_info.language_id,
             core,
             self.result_queue.clone(),
+            ServerStartOptions {
+                file_extensions: config.extensions.clone(),
+                env_overrides: config.env.clone(),
+                initialization_options: config.initialization_options.clone(),
+            },
         )?;
 
         {
@@ -1439,5 +1774,115 @@ impl LspPlugin {
         }
 
         Ok(client)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, HashMap, HashSet};
+
+    use serde_json::json;
+
+    use super::{Config, LanguageMatch, LspPlugin};
+    use crate::types::{DisabledLanguageConfig, LanguageConfig};
+
+    fn language_config(
+        command: &str,
+        extensions: &[&str],
+        supports_single_file: bool,
+        workspace_identifier: Option<&str>,
+    ) -> LanguageConfig {
+        LanguageConfig {
+            language_name: String::from("Test"),
+            start_command: String::from(command),
+            start_arguments: Vec::new(),
+            extensions: extensions.iter().map(|ext| (*ext).to_owned()).collect(),
+            supports_single_file,
+            workspace_identifier: workspace_identifier.map(str::to_owned),
+            env: BTreeMap::new(),
+            initialization_options: None,
+        }
+    }
+
+    #[test]
+    fn changed_language_ids_only_reports_modified_servers() {
+        let current = Config {
+            language_config: HashMap::from([
+                (
+                    String::from("rust"),
+                    language_config("rust-analyzer", &["rs"], false, Some("Cargo.toml")),
+                ),
+                (
+                    String::from("json"),
+                    language_config("vscode-json-languageserver", &["json"], true, None),
+                ),
+            ]),
+            disabled_language_config: HashMap::new(),
+        };
+        let next = Config {
+            language_config: HashMap::from([
+                (
+                    String::from("rust"),
+                    LanguageConfig {
+                        env: BTreeMap::from([(String::from("RUST_LOG"), String::from("debug"))]),
+                        ..language_config("rust-analyzer", &["rs"], false, Some("Cargo.toml"))
+                    },
+                ),
+                (
+                    String::from("gleam"),
+                    LanguageConfig {
+                        initialization_options: Some(json!({ "feature": true })),
+                        ..language_config("gleam", &["gleam"], true, None)
+                    },
+                ),
+            ]),
+            disabled_language_config: HashMap::new(),
+        };
+
+        let plugin = LspPlugin::new(current);
+
+        assert_eq!(
+            plugin.changed_language_ids(&next),
+            HashSet::from([String::from("rust"), String::from("json"), String::from("gleam")])
+        );
+    }
+
+    #[test]
+    fn path_matching_reports_disabled_server() {
+        let plugin = LspPlugin::new(Config {
+            language_config: HashMap::new(),
+            disabled_language_config: HashMap::from([(
+                String::from("typescript"),
+                DisabledLanguageConfig { extensions: vec![String::from("ts")] },
+            )]),
+        });
+
+        assert_eq!(
+            plugin.language_match_for_path(std::path::Path::new("main.ts")),
+            Some(LanguageMatch::Disabled(String::from("typescript")))
+        );
+    }
+
+    #[test]
+    fn unsupported_single_file_server_has_no_key_without_workspace_root() {
+        let plugin = LspPlugin::new(Config {
+            language_config: HashMap::from([(
+                String::from("gleam"),
+                language_config("gleam", &["gleam"], false, Some("gleam.toml")),
+            )]),
+            disabled_language_config: HashMap::new(),
+        });
+
+        assert_eq!(plugin.language_server_key("gleam", &None), None);
+    }
+
+    #[test]
+    fn spawn_failure_status_names_language_and_command_only() {
+        let (key, value) = LspPlugin::spawn_failure_status("gleam", "gleam");
+
+        assert_eq!(key, "lsp:gleam:status");
+        assert_eq!(value, "lsp:gleam:spawn failed: gleam");
+        assert!(!value.contains("initialization_options"));
+        assert!(!value.contains("XI_LSP_SECRET"));
     }
 }

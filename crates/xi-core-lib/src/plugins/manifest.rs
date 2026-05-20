@@ -155,6 +155,8 @@ pub struct Command {
     /// Template of the command RPC as it should be sent to the plugin.
     pub rpc_cmd: PlaceholderRpc,
     /// A list of `CommandArgument`s, which the client should use to build the RPC.
+    #[serde(default)]
+    #[schemars(default)]
     pub args: Vec<CommandArgument>,
 }
 
@@ -698,4 +700,45 @@ mod tests {
         assert!(plugin_desc.supports_command("reindent"));
         assert!(!plugin_desc.supports_command("toggle_comment"));
     }
+}
+
+#[test]
+fn command_args_default_to_empty() {
+    let json = r#"
+        {
+            "name": "test_plugin",
+            "version": "0.0.0",
+            "exec_path": "path/to/binary",
+            "commands": [
+                {
+                    "title": "Format Document",
+                    "description": "Format active document",
+                    "rpc_cmd": {
+                        "rpc_type": "notification",
+                        "method": "format_document",
+                        "params": {}
+                    }
+                }
+            ]
+        }
+        "#;
+
+    let plugin_desc: PluginDescription = serde_json::from_str(json).unwrap();
+
+    assert_eq!(plugin_desc.commands.len(), 1);
+    assert!(plugin_desc.commands[0].args.is_empty());
+}
+
+#[test]
+fn command_args_not_required_in_schema() {
+    let schema = PluginDescription::json_schema();
+    let command_required = schema
+        .get("$defs")
+        .and_then(|defs| defs.get("Command"))
+        .and_then(|command| command.get("required"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    assert!(!command_required.iter().any(|value| value == "args"));
 }

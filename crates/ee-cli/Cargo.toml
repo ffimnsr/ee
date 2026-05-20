@@ -38,6 +38,7 @@ similar = "2.7.0"
 tokio.workspace = true
 toml.workspace = true
 unicode-width = "0.2"
+xi-lsp-lib.workspace = true
 xi-rpc.workspace = true
 xi-core-lib.workspace = true
 

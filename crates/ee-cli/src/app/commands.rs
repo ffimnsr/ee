@@ -1040,7 +1040,7 @@ impl App {
         Cow::Owned(rewritten)
     }
 
-    const LSP_PLUGIN_NAME: &'static str = "xi-lsp-plugin";
+    const LSP_PLUGIN_NAME: &'static str = crate::config::LSP_PLUGIN_NAME;
 
     fn current_workspace_root(&self) -> PathBuf {
         self.backend

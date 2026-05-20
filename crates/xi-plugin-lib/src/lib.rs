@@ -167,6 +167,11 @@ pub trait Plugin {
     /// in the existing config, accessible through `view.get_config()`.
     fn config_changed(&mut self, view: &mut View<Self::Cache>, changes: &ConfigTable);
 
+    /// Called when plugin-scoped config changes. This is delivered before any
+    /// `new_view` callbacks during initialize if host has plugin config.
+    #[allow(unused_variables)]
+    fn plugin_config_changed(&mut self, changes: &ConfigTable) {}
+
     /// Called when syntax language has changed for this view.
     /// New language is available in the `view`, and old language is available in `old_lang`.
     #[allow(unused_variables)]

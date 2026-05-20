@@ -19,12 +19,24 @@ fn append_log(
             "params": params,
         }),
     )?;
-    writeln!(log)
+    writeln!(log)?;
+    log.flush()
 }
 
 fn main() -> io::Result<()> {
     let log_path = env::args().nth(1).expect("missing log path");
     let mut log = BufWriter::new(OpenOptions::new().create(true).append(true).open(log_path)?);
+    append_log(
+        &mut log,
+        "startup",
+        "process",
+        Some(json!({
+            "args": env::args().skip(2).collect::<Vec<_>>(),
+            "env": {
+                "XI_LSP_FAKE_ENV": env::var("XI_LSP_FAKE_ENV").ok()
+            }
+        })),
+    )?;
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut reader = BufReader::new(stdin.lock());

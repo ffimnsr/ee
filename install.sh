@@ -51,17 +51,17 @@ main() {
     ensure try_sudo chmod +x "${BIN_DIR}/${_bin_name}"
     echo "Installed ${PACKAGE_NAME} to ${BIN_DIR}"
 
-    local _runtime_src
-    _runtime_src=""
+    local _bundle_src
+    _bundle_src=""
     if [ -d "${_filename_no_ext}/runtime" ]; then
-        _runtime_src="${_filename_no_ext}/runtime"
+        _bundle_src="${_filename_no_ext}/runtime"
     elif [ -d "${_filename_no_ext}/share/${PACKAGE_NAME}" ]; then
-        _runtime_src="${_filename_no_ext}/share/${PACKAGE_NAME}"
+        _bundle_src="${_filename_no_ext}/share/${PACKAGE_NAME}"
     fi
-    if [ -n "${_runtime_src}" ]; then
+    if [ -n "${_bundle_src}" ]; then
         ensure try_sudo mkdir -p -- "${RUNTIME_DIR}"
-        ensure try_sudo cp -R -- "${_runtime_src}/." "${RUNTIME_DIR}/"
-        echo "Installed runtime assets to ${RUNTIME_DIR}"
+        ensure try_sudo cp -R -- "${_bundle_src}/." "${RUNTIME_DIR}/"
+        echo "Installed bundled runtime and plugins to ${RUNTIME_DIR}"
     fi
 
     if [ -f "${_filename_no_ext}/README.md" ]; then
@@ -203,7 +203,7 @@ ${_text_heading}Options:${_text_reset}
   --bin-dir       Override installation directory [default: ${BIN_DIR_DEFAULT}]
   --doc-dir       Override documentation directory [default: ${DOC_DIR_DEFAULT}]
   --license-dir   Override license directory [default: ${LIC_DIR_DEFAULT}]
-    --runtime-dir   Override bundled runtime installation directory [default: ${RUNTIME_DIR_DEFAULT}]
+    --runtime-dir   Override bundled runtime/plugins installation directory [default: ${RUNTIME_DIR_DEFAULT}]
   --sudo          Override command used to elevate privileges [default: ${SUDO_DEFAULT}]
   -h, --help      Print help
 EOF

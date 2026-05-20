@@ -174,6 +174,15 @@ impl<C: Cache> View<C> {
         true
     }
 
+    pub(crate) fn add_view_id(&mut self, view_id: ViewId) -> bool {
+        if self.has_view(view_id) {
+            return false;
+        }
+
+        self.view_ids.push(view_id);
+        true
+    }
+
     pub fn get_line(&mut self, line_num: usize) -> Result<&str, Error> {
         let ctx = self.make_ctx();
         self.cache.get_line(&ctx, line_num)

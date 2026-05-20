@@ -242,7 +242,9 @@ impl CoreState {
         // the plugin catalog and reload automatically
         let plugin_paths = self.config_manager.get_plugin_paths();
         self.plugins.reload_from_paths(&plugin_paths).into_iter().for_each(|err| {
-            warn!("error loading plugin {:?}", err);
+            let message = format!("error loading plugin {err:?}");
+            warn!("{message}");
+            self.peer.alert(message);
         });
         let plugin_languages = self.plugins.make_languages_map();
         let languages = merged_runtime_languages(&plugin_languages);
@@ -260,9 +262,21 @@ impl CoreState {
 
     /// Sets (overwriting) the config for a given domain.
     fn set_config(&mut self, domain: ConfigDomain, table: Table) {
-        match self.config_manager.set_user_config(domain, table) {
+        let plugin_name = match &domain {
+            ConfigDomain::PluginConfig(name) => Some(name.clone()),
+            _ => None,
+        };
+        match self.config_manager.set_user_config(domain, table.clone()) {
             Err(e) => self.peer.alert(format!("{}", e)),
-            Ok(changes) => self.handle_config_changes(changes),
+            Ok(changes) => {
+                if let Some(plugin_name) = plugin_name {
+                    self.running_plugins
+                        .iter()
+                        .filter(|plugin| plugin.name == plugin_name)
+                        .for_each(|plugin| plugin.plugin_config_changed(&table));
+                }
+                self.handle_config_changes(changes)
+            }
         }
     }
 
@@ -848,6 +862,7 @@ impl CoreState {
         match domain {
             ConfigDomainExternal::General => Some(ConfigDomain::General),
             ConfigDomainExternal::Language(language) => Some(ConfigDomain::Language(language)),
+            ConfigDomainExternal::Plugin(plugin) => Some(ConfigDomain::PluginConfig(plugin)),
             ConfigDomainExternal::UserOverride(view_id) => self
                 .views
                 .get(&view_id)
@@ -1393,7 +1408,9 @@ impl CoreState {
             EventKind::Create(CreateKind::Any) | EventKind::Modify(ModifyKind::Any) => {
                 self.plugins.load_from_paths(&[event.paths[0].clone()]).into_iter().for_each(
                     |err| {
-                        warn!("error loading plugin {:?}", err);
+                        let message = format!("error loading plugin {err:?}");
+                        warn!("{message}");
+                        self.peer.alert(message);
                     },
                 );
                 if let Some(plugin) = self.plugins.get_from_path(&event.paths[0]) {
@@ -1429,7 +1446,9 @@ impl CoreState {
 
                 self.plugins.load_from_paths(std::slice::from_ref(new)).into_iter().for_each(
                     |err| {
-                        warn!("error loading plugin {:?}", err);
+                        let message = format!("error loading plugin {err:?}");
+                        warn!("{message}");
+                        self.peer.alert(message);
                     },
                 );
                 if let Some(new_plugin) = self.plugins.get_from_path(new) {
@@ -1488,11 +1507,16 @@ impl CoreState {
                 self.launching_plugins.remove(&plugin.name);
                 let pending_commands = self.take_pending_plugin_commands(&plugin.name);
                 let init_info = self.plugin_init_info(&plugin, &pending_commands);
+                let plugin_config = self
+                    .config_manager
+                    .get_plugin_config(&plugin.name)
+                    .cloned()
+                    .unwrap_or_default();
                 let should_shutdown =
                     pending_commands.iter().any(|command| command.shutdown_after_dispatch)
                         || (plugin.is_single_invocation() && !pending_commands.is_empty());
                 let plugin_id = plugin.id;
-                plugin.initialize(init_info);
+                plugin.initialize(init_info, &plugin_config);
                 pending_commands.iter().for_each(|command| {
                     plugin.dispatch_command(command.view_id, &command.method, &command.params);
                 });

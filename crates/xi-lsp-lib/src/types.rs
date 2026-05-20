@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::io::Error as IOError;
 
@@ -53,12 +53,90 @@ pub struct LanguageConfig {
     pub extensions: Vec<String>,
     pub supports_single_file: bool,
     pub workspace_identifier: Option<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub initialization_options: Option<Value>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct DisabledLanguageConfig {
+    pub extensions: Vec<String>,
 }
 
 /// Represents the config for the Language Plugin
 #[derive(Serialize, Deserialize)]
 pub struct Config {
     pub language_config: HashMap<String, LanguageConfig>,
+    #[serde(default)]
+    pub disabled_language_config: HashMap<String, DisabledLanguageConfig>,
+}
+
+impl Config {
+    pub fn bundled() -> Self {
+        Self {
+            language_config: HashMap::from([
+                (
+                    "rust".to_owned(),
+                    LanguageConfig {
+                        language_name: "Rust".to_owned(),
+                        start_command: "rls".to_owned(),
+                        start_arguments: Vec::new(),
+                        extensions: vec!["rs".to_owned()],
+                        supports_single_file: false,
+                        workspace_identifier: Some("Cargo.toml".to_owned()),
+                        env: BTreeMap::new(),
+                        initialization_options: None,
+                    },
+                ),
+                (
+                    "json".to_owned(),
+                    LanguageConfig {
+                        language_name: "Json".to_owned(),
+                        start_command: "vscode-json-languageserver".to_owned(),
+                        start_arguments: vec!["--stdio".to_owned()],
+                        extensions: vec!["json".to_owned(), "jsonc".to_owned()],
+                        supports_single_file: true,
+                        workspace_identifier: None,
+                        env: BTreeMap::new(),
+                        initialization_options: None,
+                    },
+                ),
+                (
+                    "yaml".to_owned(),
+                    LanguageConfig {
+                        language_name: "Yaml".to_owned(),
+                        start_command: "yaml-language-server".to_owned(),
+                        start_arguments: vec!["--stdio".to_owned()],
+                        extensions: vec!["yaml".to_owned(), "yml".to_owned()],
+                        supports_single_file: true,
+                        workspace_identifier: None,
+                        env: BTreeMap::new(),
+                        initialization_options: None,
+                    },
+                ),
+                (
+                    "typescript".to_owned(),
+                    LanguageConfig {
+                        language_name: "Typescript".to_owned(),
+                        start_command: "javascript-typescript-stdio".to_owned(),
+                        start_arguments: Vec::new(),
+                        extensions: vec![
+                            "ts".to_owned(),
+                            "js".to_owned(),
+                            "jsx".to_owned(),
+                            "tsx".to_owned(),
+                        ],
+                        supports_single_file: true,
+                        workspace_identifier: Some("package.json".to_owned()),
+                        env: BTreeMap::new(),
+                        initialization_options: None,
+                    },
+                ),
+            ]),
+            disabled_language_config: HashMap::new(),
+        }
+    }
 }
 
 // TODO: Improve Error handling in module and add more types as necessary
@@ -192,7 +270,7 @@ mod tests {
     use serde_json::Value;
     use xi_rpc::RemoteError;
 
-    use super::LanguageResponseError;
+    use super::{Config, LanguageResponseError};
 
     #[test]
     fn language_response_error_converts_into_remote_error() {
@@ -206,5 +284,50 @@ mod tests {
                 Some(Value::String("connection reset".into())),
             )
         );
+    }
+
+    #[test]
+    fn bundled_config_preserves_current_defaults() {
+        let config = Config::bundled();
+
+        let rust = config.language_config.get("rust").unwrap();
+        assert_eq!(rust.language_name, "Rust");
+        assert_eq!(rust.start_command, "rls");
+        assert!(rust.start_arguments.is_empty());
+        assert_eq!(rust.extensions, vec!["rs"]);
+        assert!(!rust.supports_single_file);
+        assert_eq!(rust.workspace_identifier.as_deref(), Some("Cargo.toml"));
+        assert!(rust.env.is_empty());
+        assert_eq!(rust.initialization_options, None);
+
+        let json = config.language_config.get("json").unwrap();
+        assert_eq!(json.language_name, "Json");
+        assert_eq!(json.start_command, "vscode-json-languageserver");
+        assert_eq!(json.start_arguments, vec!["--stdio"]);
+        assert_eq!(json.extensions, vec!["json", "jsonc"]);
+        assert!(json.supports_single_file);
+        assert_eq!(json.workspace_identifier, None);
+        assert!(json.env.is_empty());
+        assert_eq!(json.initialization_options, None);
+
+        let yaml = config.language_config.get("yaml").unwrap();
+        assert_eq!(yaml.language_name, "Yaml");
+        assert_eq!(yaml.start_command, "yaml-language-server");
+        assert_eq!(yaml.start_arguments, vec!["--stdio"]);
+        assert_eq!(yaml.extensions, vec!["yaml", "yml"]);
+        assert!(yaml.supports_single_file);
+        assert_eq!(yaml.workspace_identifier, None);
+        assert!(yaml.env.is_empty());
+        assert_eq!(yaml.initialization_options, None);
+
+        let typescript = config.language_config.get("typescript").unwrap();
+        assert_eq!(typescript.language_name, "Typescript");
+        assert_eq!(typescript.start_command, "javascript-typescript-stdio");
+        assert!(typescript.start_arguments.is_empty());
+        assert_eq!(typescript.extensions, vec!["ts", "js", "jsx", "tsx"]);
+        assert!(typescript.supports_single_file);
+        assert_eq!(typescript.workspace_identifier.as_deref(), Some("package.json"));
+        assert!(typescript.env.is_empty());
+        assert_eq!(typescript.initialization_options, None);
     }
 }

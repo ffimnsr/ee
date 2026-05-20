@@ -317,10 +317,15 @@ impl App {
     pub(crate) fn from_path(path: Option<PathBuf>) -> io::Result<Self> {
         let (config, general_config, initial_overrides) =
             crate::config::xi_config_tables_for_file(path.as_deref());
+        let lsp_config = crate::config::lsp_config_table_for_file(path.as_deref());
         let key_bindings = crate::keymap::bindings_for(&config.keymap);
         let key_sequences = crate::keymap::sequence_bindings_for(&config.keymap);
-        let mut backend =
-            BufferManager::new_with_initial_config(path, general_config, initial_overrides)?;
+        let mut backend = BufferManager::new_with_initial_config(
+            path,
+            general_config,
+            initial_overrides,
+            lsp_config,
+        )?;
         let initial_buf_id = backend.active().id;
 
         // Notify user if a crash-recovery artifact exists for this file.

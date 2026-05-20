@@ -58,6 +58,7 @@ pub enum ConfigDomainExternal {
     General,
     #[serde(alias = "syntax")]
     Language(LanguageId),
+    Plugin(String),
     UserOverride(ViewId),
 }
 
@@ -817,6 +818,10 @@ mod tests {
         assert_eq!(serde_json::to_string(&d).unwrap(), "{\"language\":\"Swift\"}");
         let d: ConfigDomainExternal = serde_json::from_str("{\"syntax\":\"Swift\"}").unwrap();
         assert_eq!(d, ConfigDomainExternal::Language("Swift".into()));
+
+        let d: ConfigDomainExternal =
+            serde_json::from_str("{\"plugin\":\"xi-lsp-plugin\"}").unwrap();
+        assert_eq!(d, ConfigDomainExternal::Plugin("xi-lsp-plugin".into()));
     }
 
     #[test]

@@ -163,8 +163,10 @@ jobs:
         shell: bash
         run: echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "${GITHUB_ENV}"
 
-      - name: Build release binary
-        run: cargo build --locked --release -p ee-cli --target ${{ matrix.target }}
+      - name: Build release binaries
+        run: |
+          cargo build --locked --release -p ee-cli --target ${{ matrix.target }}
+          cargo build --locked --release -p ee-xi-lsp-lib --bin xi-lsp-plugin --target ${{ matrix.target }}
 
       - name: Build bundled runtime assets
         shell: bash
@@ -215,6 +217,10 @@ jobs:
           cp README.md LICENSE "${BASENAME}/"
           mkdir -p "${BASENAME}/share/ee"
           cp -R target/runtime-package/. "${BASENAME}/share/ee/"
+          mkdir -p "${BASENAME}/share/ee/plugins/xi-lsp-plugin/bin"
+          cp crates/xi-lsp-lib/manifest.toml "${BASENAME}/share/ee/plugins/xi-lsp-plugin/manifest.toml"
+          cp "target/${{ matrix.target }}/release/xi-lsp-plugin" \
+            "${BASENAME}/share/ee/plugins/xi-lsp-plugin/bin/xi-lsp-plugin"
 
           tar -czf "${BASENAME}.tar.gz" "${BASENAME}"
           shasum -a 256 "${BASENAME}.tar.gz" | awk -v name="${BASENAME}.tar.gz" '{print $1 "  " name}' > "${BASENAME}.tar.gz.sha256"

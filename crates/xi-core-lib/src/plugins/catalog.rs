@@ -905,6 +905,27 @@ requires = ["syntax-runtime>=0.2.0"]
     }
 
     #[test]
+    fn load_from_paths_accepts_xi_lsp_manifest() {
+        let temp_dir = TempDir::new().unwrap();
+        let plugin_dir = temp_dir.path().join("xi-lsp-plugin");
+        let exec_path = plugin_dir.join("bin/xi-lsp-plugin");
+        let manifest_src = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../xi-lsp-lib/manifest.toml")
+            .canonicalize()
+            .unwrap();
+
+        fs::create_dir_all(exec_path.parent().unwrap()).unwrap();
+        fs::write(&exec_path, b"#!/bin/sh\n").unwrap();
+        fs::copy(manifest_src, plugin_dir.join("manifest.toml")).unwrap();
+
+        let mut catalog = PluginCatalog::default();
+        let errors = catalog.load_from_paths(&[plugin_dir]);
+
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert!(catalog.get_named("xi-lsp-plugin").is_some());
+    }
+
+    #[test]
     fn load_from_paths_accepts_satisfied_requirements() {
         let temp_dir = TempDir::new().unwrap();
         let provider_dir = temp_dir.path().join("syntax-runtime");
