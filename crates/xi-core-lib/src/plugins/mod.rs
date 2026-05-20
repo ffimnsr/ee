@@ -594,11 +594,11 @@ fn configure_native_plugin_sandbox(
     command: &mut ProcCommand,
     plugin_desc: &PluginDescription,
 ) -> Result<(), PluginStartErrorKind> {
-    let _ = plugin_desc;
-
     #[cfg(target_os = "linux")]
     {
-        configure_linux_plugin_sandbox(command)?;
+        if should_apply_linux_plugin_sandbox(plugin_desc) {
+            configure_linux_plugin_sandbox(command)?;
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -617,6 +617,12 @@ fn configure_native_plugin_sandbox(
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn should_apply_linux_plugin_sandbox(plugin_desc: &PluginDescription) -> bool {
+    !plugin_desc.has_capability(PluginCapability::Filesystem)
+        && !plugin_desc.has_capability(PluginCapability::Network)
 }
 
 #[cfg(target_os = "linux")]
@@ -875,16 +881,21 @@ fn spawn_stderr_thread(name: String, stderr: std::process::ChildStderr, core: We
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use serde_json::Value;
 
-    #[cfg(target_os = "linux")]
-    use super::linux_denied_syscalls;
+    use super::manifest::{PluginLaunchConfig, PluginScope};
     use super::rpc::PluginUpdate;
-    use super::{PluginController, PluginId, PluginTerminationHandle, drive_plugin_update};
+    use super::{
+        PluginCapability, PluginController, PluginDescription, PluginId, PluginRuntime,
+        PluginTerminationHandle, drive_plugin_update,
+    };
+    #[cfg(target_os = "linux")]
+    use super::{linux_denied_syscalls, should_apply_linux_plugin_sandbox};
     use xi_rpc::{Callback, Error as RpcError, Peer, RequestId};
 
     /// Minimal mock peer that captures the most-recently registered callback so
@@ -1054,6 +1065,37 @@ mod tests {
         assert!(denied.contains(&libc::SYS_socket));
         assert!(denied.contains(&libc::SYS_open));
         assert!(denied.contains(&libc::SYS_openat));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_sandbox_skips_plugins_with_filesystem_or_network_capabilities() {
+        let base = PluginDescription {
+            name: "sandbox-test".into(),
+            version: "0.1.0".into(),
+            requires: Vec::new(),
+            scope: PluginScope::Global,
+            runtime: PluginRuntime::Native,
+            capabilities: Vec::new(),
+            launch: PluginLaunchConfig::default(),
+            max_rss_bytes: None,
+            max_cpu_seconds: None,
+            rpc_timeout_ms: None,
+            exec_path: PathBuf::from("plugin"),
+            activations: Vec::new(),
+            commands: Vec::new(),
+            languages: Vec::new(),
+        };
+
+        assert!(should_apply_linux_plugin_sandbox(&base));
+
+        let mut filesystem = base.clone();
+        filesystem.capabilities.push(PluginCapability::Filesystem);
+        assert!(!should_apply_linux_plugin_sandbox(&filesystem));
+
+        let mut network = base;
+        network.capabilities.push(PluginCapability::Network);
+        assert!(!should_apply_linux_plugin_sandbox(&network));
     }
 
     /// When a coalesced update is present at response time, it is sent
