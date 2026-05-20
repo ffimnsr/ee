@@ -10,7 +10,7 @@
 //!
 //! Later layers override earlier ones for any key that is explicitly set.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -26,6 +26,9 @@ use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
 use serde_json::Value;
 use xi_core_lib::config::Table as XiConfigTable;
+use xi_core_lib::runtime_loader::{
+    RuntimeLanguageConfig, RuntimeLanguageOverrides, configure_default_runtime_loader_overrides,
+};
 use xi_lsp_lib::{
     Config as PluginLspConfig, DisabledLanguageConfig as PluginDisabledLanguageConfig,
     LanguageConfig as PluginLanguageConfig,
@@ -139,6 +142,7 @@ impl Default for EditorSettings {
 pub(crate) struct LspSettings {
     pub servers: BTreeMap<String, LspServerSettings>,
     pub disabled_servers: BTreeMap<String, DisabledLspServerSettings>,
+    pub language_servers: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,6 +185,7 @@ impl LspSettings {
                     (id, DisabledLspServerSettings { extensions: server.extensions })
                 })
                 .collect(),
+            language_servers: config.language_servers.into_iter().collect(),
         }
     }
 
@@ -215,6 +220,11 @@ impl LspSettings {
                     )
                 })
                 .collect(),
+            language_servers: self
+                .language_servers
+                .iter()
+                .map(|(language_id, server_ids)| (language_id.clone(), server_ids.clone()))
+                .collect(),
         }
     }
 
@@ -241,6 +251,8 @@ pub(crate) struct LspServerSettings {
 #[derive(Debug, Clone)]
 struct LspSettingsBuilder {
     servers: BTreeMap<String, LspServerSettingsBuilder>,
+    language_servers: BTreeMap<String, Vec<String>>,
+    disabled_languages: BTreeSet<String>,
 }
 
 impl Default for LspSettingsBuilder {
@@ -272,6 +284,8 @@ impl LspSettingsBuilder {
                     )
                 })
                 .collect(),
+            language_servers: settings.language_servers.clone(),
+            disabled_languages: BTreeSet::new(),
         }
     }
 
@@ -308,24 +322,46 @@ impl LspSettingsBuilder {
         }
     }
 
+    fn merge_language_toml(&mut self, language_id: &str, patch: &RuntimeLanguageConfig) {
+        let normalized_id = normalize_runtime_language_id(language_id);
+
+        if let Some(enabled) = patch.enabled {
+            if enabled {
+                self.disabled_languages.remove(&normalized_id);
+            } else {
+                self.disabled_languages.insert(normalized_id.clone());
+            }
+        }
+
+        if let Some(server_ids) = &patch.lsp {
+            self.language_servers
+                .insert(normalized_id, normalize_lsp_server_ids(language_id, server_ids));
+        }
+    }
+
     fn finalize(self) -> LspSettings {
         let mut servers = BTreeMap::new();
         let mut disabled_servers = BTreeMap::new();
+        let referenced_server_ids = self
+            .language_servers
+            .values()
+            .flat_map(|server_ids| server_ids.iter().cloned())
+            .collect::<BTreeSet<_>>();
+
         for (id, server) in self.servers {
             if server.enabled == Some(false) {
-                if let Some(extensions) = server.extensions {
-                    let extensions = normalize_lsp_extensions(&id, &extensions);
-                    if !extensions.is_empty() {
-                        disabled_servers.insert(id, DisabledLspServerSettings { extensions });
-                    }
-                }
+                let extensions = server
+                    .extensions
+                    .as_ref()
+                    .map(|extensions| normalize_lsp_extensions(&id, extensions))
+                    .unwrap_or_default();
+                disabled_servers.insert(id, DisabledLspServerSettings { extensions });
                 continue;
             }
 
             let missing = [
                 ("language_name", server.language_name.is_none()),
                 ("command", server.command.is_none()),
-                ("extensions", server.extensions.is_none()),
             ]
             .into_iter()
             .filter_map(|(field, missing)| missing.then_some(field))
@@ -340,15 +376,17 @@ impl LspSettingsBuilder {
                 continue;
             }
 
-            let extensions =
-                normalize_lsp_extensions(&id, server.extensions.as_ref().expect("validated above"));
+            let extensions = server
+                .extensions
+                .as_ref()
+                .map(|extensions| normalize_lsp_extensions(&id, extensions))
+                .unwrap_or_default();
 
-            if extensions.is_empty() {
+            if extensions.is_empty() && !referenced_server_ids.contains(&id) {
                 eprintln!(
-                    "ee: warning: invalid lsp server config for {}: missing non-empty extensions",
+                    "ee: warning: lsp server config for {} has no routing metadata; add [languages.<id>].lsp or legacy extensions",
                     id
                 );
-                continue;
             }
 
             servers.insert(
@@ -365,9 +403,53 @@ impl LspSettingsBuilder {
                 },
             );
         }
-        resolve_lsp_extension_ownership(&mut servers, &mut disabled_servers);
-        LspSettings { servers, disabled_servers }
+        resolve_lsp_extension_ownership(
+            &mut servers,
+            &mut disabled_servers,
+            &referenced_server_ids,
+        );
+        let mut language_servers = self.language_servers;
+        for language_id in self.disabled_languages {
+            language_servers.insert(language_id, Vec::new());
+        }
+
+        for (language_id, server_ids) in &mut language_servers {
+            server_ids.retain(|server_id| {
+                if servers.contains_key(server_id) || disabled_servers.contains_key(server_id) {
+                    true
+                } else {
+                    eprintln!(
+                        "ee: warning: language {} references unknown lsp server {}",
+                        language_id, server_id
+                    );
+                    false
+                }
+            });
+        }
+
+        LspSettings { servers, disabled_servers, language_servers }
     }
+}
+
+fn normalize_lsp_server_ids(language_id: &str, server_ids: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for server_id in server_ids {
+        let server_id = server_id.trim();
+        if server_id.is_empty() {
+            eprintln!(
+                "ee: warning: invalid runtime language config for {}: empty lsp server id ignored",
+                language_id
+            );
+            continue;
+        }
+        if seen.insert(server_id.to_string()) {
+            normalized.push(server_id.to_string());
+        }
+    }
+
+    normalized
 }
 
 fn normalize_lsp_extensions(server_id: &str, extensions: &[String]) -> Vec<String> {
@@ -391,6 +473,7 @@ fn normalize_lsp_extensions(server_id: &str, extensions: &[String]) -> Vec<Strin
 fn resolve_lsp_extension_ownership(
     servers: &mut BTreeMap<String, LspServerSettings>,
     disabled_servers: &mut BTreeMap<String, DisabledLspServerSettings>,
+    referenced_server_ids: &BTreeSet<String>,
 ) {
     let mut owner_by_extension = BTreeMap::<String, String>::new();
     let mut ids = servers.keys().chain(disabled_servers.keys()).cloned().collect::<Vec<_>>();
@@ -417,12 +500,14 @@ fn resolve_lsp_extension_ownership(
     for (id, server) in servers.iter_mut() {
         server.extensions.retain(|extension| owner_by_extension.get(extension) == Some(id));
     }
-    servers.retain(|_, server| !server.extensions.is_empty());
+    servers
+        .retain(|id, server| !server.extensions.is_empty() || referenced_server_ids.contains(id));
 
     for (id, server) in disabled_servers.iter_mut() {
         server.extensions.retain(|extension| owner_by_extension.get(extension) == Some(id));
     }
-    disabled_servers.retain(|_, server| !server.extensions.is_empty());
+    disabled_servers
+        .retain(|id, server| !server.extensions.is_empty() || referenced_server_ids.contains(id));
 }
 
 #[derive(Debug, Clone, Default)]
@@ -436,6 +521,128 @@ struct LspServerSettingsBuilder {
     enabled: Option<bool>,
     env: BTreeMap<String, String>,
     initialization_options: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RuntimeLanguageSettings {
+    pub user_overrides: RuntimeLanguageOverrides,
+    pub workspace_overrides: RuntimeLanguageOverrides,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RuntimeLanguageSettingsBuilder {
+    user_overrides: RuntimeLanguageOverrides,
+    workspace_overrides: RuntimeLanguageOverrides,
+}
+
+impl RuntimeLanguageSettingsBuilder {
+    fn merge_toml(&mut self, patch: &EeToml, kind: ConfigLayerKind) {
+        let target = match kind {
+            ConfigLayerKind::Ancestor => &mut self.workspace_overrides,
+            ConfigLayerKind::System | ConfigLayerKind::UserXdg | ConfigLayerKind::UserLegacy => {
+                &mut self.user_overrides
+            }
+        };
+
+        for (language_id, language_patch) in &patch.languages {
+            let normalized_id = normalize_runtime_language_id(language_id);
+            merge_runtime_language_patch(
+                target.entry(normalized_id).or_default(),
+                language_patch,
+                language_id,
+            );
+        }
+    }
+
+    fn finalize(self) -> RuntimeLanguageSettings {
+        RuntimeLanguageSettings {
+            user_overrides: self.user_overrides,
+            workspace_overrides: self.workspace_overrides,
+        }
+    }
+}
+
+fn normalize_runtime_language_id(language_id: &str) -> String {
+    language_id.trim().to_ascii_lowercase()
+}
+
+fn normalize_runtime_file_types(language_id: &str, file_types: &[String]) -> Vec<String> {
+    file_types
+        .iter()
+        .filter_map(|file_type| {
+            let normalized = file_type.trim().trim_start_matches('.').to_string();
+            if normalized.is_empty() {
+                eprintln!(
+                    "ee: warning: invalid runtime language config for {}: empty file type ignored",
+                    language_id
+                );
+                None
+            } else {
+                Some(normalized)
+            }
+        })
+        .collect()
+}
+
+fn merge_runtime_language_patch(
+    target: &mut RuntimeLanguageConfig,
+    patch: &RuntimeLanguageConfig,
+    language_id: &str,
+) {
+    if let Some(enabled) = patch.enabled {
+        target.enabled = Some(enabled);
+    }
+    if let Some(lsp) = &patch.lsp {
+        target.lsp = Some(normalize_lsp_server_ids(language_id, lsp));
+    }
+    if let Some(name) = &patch.name {
+        target.name = Some(name.clone());
+    }
+    if let Some(query_language) = &patch.query_language {
+        target.query_language = Some(query_language.clone());
+    }
+    if let Some(scope) = &patch.scope {
+        target.scope = Some(scope.clone());
+    }
+    if let Some(content_regex) = &patch.content_regex {
+        target.content_regex = Some(content_regex.clone());
+    }
+    if let Some(first_line_regex) = &patch.first_line_regex {
+        target.first_line_regex = Some(first_line_regex.clone());
+    }
+    if let Some(injection_regex) = &patch.injection_regex {
+        target.injection_regex = Some(injection_regex.clone());
+    }
+    if let Some(aliases) = &patch.aliases {
+        target.aliases = Some(aliases.clone());
+    }
+    if let Some(file_types) = &patch.file_types {
+        target.file_types = Some(normalize_runtime_file_types(language_id, file_types));
+    }
+    if let Some(globs) = &patch.globs {
+        target.globs = Some(globs.clone());
+    }
+    if let Some(shebangs) = &patch.shebangs {
+        target.shebangs = Some(shebangs.clone());
+    }
+    if let Some(supported_query_kinds) = &patch.supported_query_kinds {
+        target.supported_query_kinds = Some(supported_query_kinds.clone());
+    }
+    if let Some(match_priority) = patch.match_priority {
+        target.match_priority = Some(match_priority);
+    }
+    if let Some(grammar_patch) = &patch.grammar {
+        let grammar = target.grammar.get_or_insert_with(Default::default);
+        if let Some(library) = &grammar_patch.library {
+            grammar.library = Some(library.clone());
+        }
+        if let Some(symbol) = &grammar_patch.symbol {
+            grammar.symbol = Some(symbol.clone());
+        }
+        if let Some(source) = &grammar_patch.source {
+            grammar.source = Some(source.clone());
+        }
+    }
 }
 
 impl EditorSettings {
@@ -537,6 +744,8 @@ pub(crate) struct EeToml {
     /// `"default"` or `"minimal"`.
     pub statusline_format: Option<String>,
     pub lsp: Option<LspToml>,
+    #[serde(default)]
+    pub languages: BTreeMap<String, RuntimeLanguageConfig>,
     pub keymap: Option<KeymapToml>,
 }
 
@@ -1016,6 +1225,9 @@ fn load_config_with_env(file_path: Option<&Path>, env: &ConfigEnvironment) -> Ed
             if let Some(lsp_patch) = &patch.lsp {
                 lsp.merge_toml(lsp_patch);
             }
+            for (language_id, language_patch) in &patch.languages {
+                lsp.merge_language_toml(language_id, language_patch);
+            }
         }
     }
 
@@ -1026,6 +1238,35 @@ fn load_config_with_env(file_path: Option<&Path>, env: &ConfigEnvironment) -> Ed
     settings.lsp = lsp.finalize();
 
     settings
+}
+
+fn runtime_languages_with_env(
+    file_path: Option<&Path>,
+    env: &ConfigEnvironment,
+) -> RuntimeLanguageSettings {
+    let mut runtime_languages = RuntimeLanguageSettingsBuilder::default();
+
+    for layer in discover_config_layers_with_env(env, file_path).layers {
+        if let Some(patch) = parse_ee_toml(&layer.path) {
+            runtime_languages.merge_toml(&patch, layer.kind);
+        }
+    }
+
+    runtime_languages.finalize()
+}
+
+pub(crate) fn configure_runtime_loader_for_file(
+    file_path: Option<&Path>,
+    workspace_trusted: bool,
+) -> Result<(), String> {
+    let runtime_languages =
+        runtime_languages_with_env(file_path, &ConfigEnvironment::from_process());
+    configure_default_runtime_loader_overrides(
+        runtime_languages.user_overrides,
+        runtime_languages.workspace_overrides,
+        workspace_trusted,
+    )
+    .map_err(|error| error.to_string())
 }
 
 pub(crate) fn default_config_layers(file_path: Option<&Path>) -> Vec<ConfigLayer> {
@@ -1489,6 +1730,32 @@ tab_width = 4
     }
 
     #[test]
+    fn runtime_git_source_schema_requires_exactly_one_pin() {
+        let schema = serde_json::to_value(schema_for!(EeToml)).unwrap();
+        let git_source = schema
+            .get("$defs")
+            .and_then(|defs| defs.get("RuntimeGrammarGitSource"))
+            .and_then(Value::as_object)
+            .unwrap();
+
+        assert_eq!(
+            git_source.get("required").and_then(Value::as_array).cloned().unwrap_or_default(),
+            vec![Value::String(String::from("url"))]
+        );
+
+        let one_of = git_source.get("oneOf").and_then(Value::as_array).unwrap();
+        assert_eq!(one_of.len(), 3);
+        for pin in ["branch", "tag", "rev"] {
+            assert!(one_of.iter().any(|branch| {
+                branch
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .is_some_and(|required| required == &[Value::String(pin.to_string())])
+            }));
+        }
+    }
+
+    #[test]
     fn editorconfig_star_section_applies() {
         let ec = "[*]\nindent_style = tab\nindent_size = 2\n";
         let target = std::path::Path::new("/foo/bar.rs");
@@ -1894,6 +2161,10 @@ tab_width = 4
                     [..]
             )
         );
+        assert_eq!(
+            settings.lsp.language_servers.get("typescript"),
+            Some(&vec![String::from("typescript")])
+        );
     }
 
     #[test]
@@ -1956,6 +2227,62 @@ tab_width = 4
                 .map(Vec::len),
             Some(4)
         );
+        assert_eq!(
+            table
+                .get("language_servers")
+                .and_then(Value::as_object)
+                .and_then(|languages| languages.get("typescript"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn unified_language_lsp_attachments_allow_extensionless_server_defs() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        let file = project.join("main.ts");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(".ee.toml"),
+            "[lsp.servers.tsserver]\nlanguage_name = \"TypeScript\"\ncommand = \"typescript-language-server\"\n\n[languages.typescript]\nlsp = [\"tsserver\"]\n",
+        )
+        .unwrap();
+
+        let settings = load_config_with_env(Some(&file), &env);
+
+        assert!(settings.lsp.servers.contains_key("tsserver"));
+        assert_eq!(
+            settings.lsp.language_servers.get("typescript"),
+            Some(&vec![String::from("tsserver")])
+        );
+    }
+
+    #[test]
+    fn unified_language_lsp_attachments_replace_across_layers() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        let folder = project.join("folder");
+        let file = folder.join("main.ts");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+        std::fs::write(
+            env.config_dir.as_ref().unwrap().join("ee").join("config.toml"),
+            "[lsp.servers.typescript]\nlanguage_name = \"TypeScript\"\ncommand = \"typescript-language-server\"\nextensions = [\"ts\"]\n\n[lsp.servers.eslint]\nlanguage_name = \"ESLint\"\ncommand = \"vscode-eslint-language-server\"\n\n[languages.typescript]\nlsp = [\"typescript\", \"eslint\"]\n",
+        )
+        .unwrap();
+        std::fs::write(project.join(".ee.toml"), "[languages.typescript]\nlsp = [\"eslint\"]\n")
+            .unwrap();
+
+        let settings = load_config_with_env(Some(&file), &env);
+
+        assert_eq!(
+            settings.lsp.language_servers.get("typescript"),
+            Some(&vec![String::from("eslint")])
+        );
     }
 
     #[test]
@@ -1984,6 +2311,122 @@ tab_width = 4
         let rust = settings.lsp.servers.get("rust").unwrap();
 
         assert_eq!(rust.command, "inner-rust");
+    }
+
+    #[test]
+    fn runtime_language_toml_parses_crate_source() {
+        let raw: EeToml = toml::from_str(
+            r#"
+[languages.gleam]
+name = "Gleam"
+file_types = ["gleam"]
+
+[languages.gleam.grammar]
+library = "tree-sitter-gleam"
+symbol = "tree_sitter_gleam"
+
+[languages.gleam.grammar.source.crate]
+name = "tree-sitter-gleam"
+version = "1.2.3"
+"#,
+        )
+        .unwrap();
+
+        let gleam = raw.languages.get("gleam").unwrap();
+        assert_eq!(gleam.name.as_deref(), Some("Gleam"));
+        assert_eq!(gleam.file_types.as_deref(), Some(&[String::from("gleam")][..]));
+        assert!(matches!(
+            gleam.grammar.as_ref().and_then(|grammar| grammar.source.as_ref()),
+            Some(xi_core_lib::runtime_loader::RuntimeGrammarSource::Crate(source))
+                if source.name == "tree-sitter-gleam" && source.version == "1.2.3"
+        ));
+    }
+
+    #[test]
+    fn runtime_language_toml_parses_git_branch_tag_and_rev_sources() {
+        for (label, source_table) in [
+            ("branch", "branch = \"main\""),
+            ("tag", "tag = \"v1.0.0\""),
+            ("rev", "rev = \"abc123\""),
+        ] {
+            let text = format!(
+                "[languages.demo]\nname = \"Demo\"\nfile_types = [\"demo\"]\n\n[languages.demo.grammar]\nlibrary = \"tree-sitter-demo\"\nsymbol = \"tree_sitter_demo\"\n\n[languages.demo.grammar.source.git]\nurl = \"https://example.com/tree-sitter-demo\"\n{source_table}\n"
+            );
+            let raw: EeToml = toml::from_str(&text).unwrap();
+            let demo = raw.languages.get("demo").unwrap();
+            match demo.grammar.as_ref().and_then(|grammar| grammar.source.as_ref()) {
+                Some(xi_core_lib::runtime_loader::RuntimeGrammarSource::Git(source)) => {
+                    assert_eq!(source.url, "https://example.com/tree-sitter-demo");
+                    match label {
+                        "branch" => assert_eq!(source.branch.as_deref(), Some("main")),
+                        "tag" => assert_eq!(source.tag.as_deref(), Some("v1.0.0")),
+                        "rev" => assert_eq!(source.rev.as_deref(), Some("abc123")),
+                        _ => unreachable!(),
+                    }
+                }
+                other => panic!("unexpected source for {label}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_language_toml_rejects_mixed_source_kinds() {
+        let error = toml::from_str::<EeToml>(
+            r#"
+[languages.demo]
+name = "Demo"
+file_types = ["demo"]
+
+[languages.demo.grammar]
+library = "tree-sitter-demo"
+symbol = "tree_sitter_demo"
+
+[languages.demo.grammar.source.crate]
+name = "tree-sitter-demo"
+version = "1.2.3"
+
+[languages.demo.grammar.source.git]
+url = "https://example.com/tree-sitter-demo"
+rev = "abc123"
+"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("source"));
+    }
+
+    #[test]
+    fn runtime_language_config_uses_same_layer_precedence_as_lsp() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        let folder = project.join("folder");
+        let file = folder.join("main.gleam");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::create_dir_all(env.system_config_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+        std::fs::write(
+            env.system_config_path.as_path(),
+            "[languages.gleam]\nname = \"Gleam\"\nfile_types = [\".gleam\"]\n\n[languages.gleam.grammar]\nlibrary = \"tree-sitter-gleam\"\nsymbol = \"tree_sitter_gleam\"\n\n[languages.gleam.grammar.source.crate]\nname = \"tree-sitter-gleam\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            env.config_dir.as_ref().unwrap().join("ee").join("config.toml"),
+            "[languages.gleam.grammar]\nlibrary = \"tree-sitter-gleam-user\"\n\n[languages.gleam.grammar.source.crate]\nname = \"tree-sitter-gleam-user\"\nversion = \"1.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(project.join(".ee.toml"), "[languages.gleam]\nenabled = false\n").unwrap();
+
+        let runtime = runtime_languages_with_env(Some(&file), &env);
+        let user = runtime.user_overrides.get("gleam").unwrap();
+        let workspace = runtime.workspace_overrides.get("gleam").unwrap();
+
+        assert_eq!(user.file_types.as_deref(), Some(&[String::from("gleam")][..]));
+        assert_eq!(
+            user.grammar.as_ref().and_then(|grammar| grammar.library.as_deref()),
+            Some("tree-sitter-gleam-user")
+        );
+        assert_eq!(workspace.enabled, Some(false));
     }
 
     #[test]
@@ -2080,6 +2523,20 @@ extensions = ["rs"]
     }
 
     #[test]
+    fn ee_toml_parses_unified_language_lsp_attachments() {
+        let toml = r#"
+[languages.typescript]
+lsp = ["typescript", "eslint"]
+"#;
+        let raw: EeToml = toml::from_str(toml).unwrap();
+
+        assert_eq!(
+            raw.languages.get("typescript").and_then(|language| language.lsp.as_deref()),
+            Some(&[String::from("typescript"), String::from("eslint")][..])
+        );
+    }
+
+    #[test]
     fn ee_toml_rejects_unknown_lsp_server_fields() {
         let toml = r#"
 [lsp.servers.rust]
@@ -2149,6 +2606,7 @@ initialization_options = { provideFormatter = true, nested = { mode = "strict" }
         let readme = include_str!("../../../README.md");
 
         assert!(readme.contains("[lsp.servers.<id>]"));
+        assert!(readme.contains("lsp = [\"typescript\", \"eslint\"]"));
         assert!(readme.contains("Config precedence"));
         assert!(readme.contains("typescript"));
     }

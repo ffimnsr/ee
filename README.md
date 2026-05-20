@@ -124,9 +124,9 @@ Query overlays merge deterministically in bundled, then user, then workspace ord
 
 ## Language servers
 
-`ee` ships bundled LSP definitions for Rust, JSON, YAML, and TypeScript/JavaScript. Add or override servers in ee config TOML with `[lsp.servers.<id>]`, where `<id>` is the stable server id sent to `xi-lsp-plugin`.
+`ee` ships bundled LSP definitions for Rust, JSON, YAML, and TypeScript/JavaScript. Add or override servers in ee config TOML with `[lsp.servers.<id>]`, where `<id>` is stable server id sent to `xi-lsp-plugin`.
 
-Enabled servers require `language_name`, `command`, and `extensions`. Optional fields are `args`, `supports_single_file`, `workspace_identifier`, `enabled`, `env`, and `initialization_options`. Defaults are `args = []`, `supports_single_file = true`, `enabled = true`, `env = {}`, and `initialization_options = null`. Extension matching strips a leading `.` from configured extensions; empty extension strings are ignored.
+Enabled servers require `language_name` and `command`. `extensions` stays supported as legacy extension fallback and server metadata, but preferred routing now lives under `[languages.<id>].lsp`. Optional fields are `args`, `extensions`, `supports_single_file`, `workspace_identifier`, `enabled`, `env`, and `initialization_options`. Defaults are `args = []`, `supports_single_file = true`, `enabled = true`, `env = {}`, and `initialization_options = null`. Extension matching strips a leading `.` from configured extensions; empty extension strings are ignored.
 
 ```toml
 [lsp.servers.gleam]
@@ -148,11 +148,76 @@ enabled = false
 
 [lsp.servers.json]
 initialization_options = { provideFormatter = true }
+
+[lsp.servers.eslint]
+language_name = "ESLint"
+command = "vscode-eslint-language-server"
+args = ["--stdio"]
+
+[languages.typescript]
+lsp = ["typescript", "eslint"]
 ```
 
 Config precedence, from lowest to highest, is `/etc/ee/config.toml`, `$XDG_CONFIG_HOME/ee/config.toml`, legacy `~/.ee.toml` only when XDG config is missing, then ancestor `.ee.toml` files from outermost to innermost. `root = true` stops discovery above that config file. Later layers replace scalar fields, replace arrays, shallow-merge `env`, replace `initialization_options`, and `enabled = false` disables that server id.
 
-Matching is extension-based. After all config layers merge, one effective server owns each extension; duplicate ownership resolves deterministically and the later server id wins. There is no multi-server fanout for one extension yet. Missing executables, disabled matching servers, and workspace-root-only servers opened outside a matching root fail closed with status items instead of blocking editing.
+Routing now resolves runtime language id first, then maps `[languages.<id>].lsp` attachments to candidate servers. Legacy extension matching remains as fallback when a language has no explicit `lsp` attachment list. Multiple attached servers are allowed. First attached server is primary for interactive pull-style features such as completion, hover, go-to-definition, references, symbols, formatting, and rename. All attached servers still receive document lifecycle sync and can publish diagnostics. Missing executables, disabled attached servers, and workspace-root-only servers opened outside a matching root fail closed with status items instead of blocking editing.
+
+### Runtime language config
+
+Runtime language configuration lives under `[languages.<id>]`, where `<id>` is the stable runtime language id. Enabled entries need `name`, `file_types`, and a nested `[languages.<id>.grammar]` table with `library`, `symbol`, and exactly one source definition.
+
+```toml
+[languages.gleam]
+name = "Gleam"
+file_types = ["gleam"]
+scope = "source.gleam"
+aliases = ["gleam"]
+lsp = ["gleam"]
+
+[languages.gleam.grammar]
+library = "tree-sitter-gleam"
+symbol = "tree_sitter_gleam"
+[languages.gleam.grammar.source.crate]
+name = "tree-sitter-gleam"
+version = "1.0.0"
+
+[languages.demo_branch]
+name = "DemoBranch"
+file_types = ["demo-branch"]
+
+[languages.demo_branch.grammar]
+library = "tree-sitter-demo"
+symbol = "tree_sitter_demo"
+[languages.demo_branch.grammar.source.git]
+url = "https://github.com/example/tree-sitter-demo"
+branch = "main"
+
+[languages.demo_tag]
+name = "DemoTag"
+file_types = ["demo-tag"]
+
+[languages.demo_tag.grammar]
+library = "tree-sitter-demo"
+symbol = "tree_sitter_demo"
+[languages.demo_tag.grammar.source.git]
+url = "https://github.com/example/tree-sitter-demo"
+tag = "v1.0.0"
+
+[languages.demo_rev]
+name = "DemoRev"
+file_types = ["demo-rev"]
+
+[languages.demo_rev.grammar]
+library = "tree-sitter-demo"
+symbol = "tree_sitter_demo"
+[languages.demo_rev.grammar.source.git]
+url = "https://github.com/example/tree-sitter-demo"
+rev = "33f12ef0f6f2d9f2fcb6f6c2d69b4eb9b6a0b4d2"
+```
+
+Use `rev` for reproducible release builds and packaged runtimes. `branch` is best kept for local development where moving heads are acceptable.
+
+Runtime grammar sources compile native code. Workspace `.ee.toml` runtime languages should only be trusted when workspace itself is trusted. Bundled runtime assets stay read-only, user runtime build output stays writable, and one effective runtime language still owns each file type after config merge. LSP server definitions stay canonical under `[lsp.servers.<id>]`, while language attachments live under `[languages.<id>].lsp`.
 
 ### Development runtime flow
 
@@ -160,6 +225,13 @@ Development builds use fetched runtime assets, not vendored parser sources in th
 
 ```sh
 scripts/build-runtime.sh --output-root target/runtime-package
+```
+
+The lower-level commands stay available when you want to inspect each step explicitly:
+
+```sh
+ee do runtime fetch --all
+ee do runtime build --all
 ```
 
 For test-focused local setup, install runtime into user runtime directory

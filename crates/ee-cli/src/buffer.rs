@@ -2590,6 +2590,11 @@ impl BufferManager {
         let Some(buf) = self.bufs.get_mut(idx) else {
             return Ok(());
         };
+        if let Err(error) =
+            crate::config::configure_runtime_loader_for_file(buf.path.as_deref(), true)
+        {
+            eprintln!("ee: warning: failed to configure runtime languages: {error}");
+        }
         let (_, _, overrides) = crate::config::xi_config_tables_for_file(buf.path.as_deref());
         send_config_notification(&self.tx, json!({ "user_override": buf.view_id }), overrides)?;
         buf.editor_config_synced = true;

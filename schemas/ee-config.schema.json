@@ -127,6 +127,13 @@
         }
       ]
     },
+    "languages": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/RuntimeLanguageConfig"
+      },
+      "default": {}
+    },
     "keymap": {
       "anyOf": [
         {
@@ -213,6 +220,333 @@
         "initialization_options": true
       },
       "additionalProperties": false
+    },
+    "RuntimeLanguageConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "lsp": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "default": null
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "query_language": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "scope": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "content_regex": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "first_line_regex": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "injection_regex": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "aliases": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "default": null
+        },
+        "file_types": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "default": null
+        },
+        "globs": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "default": null
+        },
+        "shebangs": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "default": null
+        },
+        "supported_query_kinds": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/RuntimeQueryKind"
+          },
+          "default": null
+        },
+        "match_priority": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32",
+          "default": null
+        },
+        "grammar": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RuntimeGrammarConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeQueryKind": {
+      "type": "string",
+      "enum": [
+        "highlights",
+        "injections",
+        "locals",
+        "tags",
+        "textobjects",
+        "indents",
+        "folds",
+        "rainbows"
+      ]
+    },
+    "RuntimeGrammarConfig": {
+      "type": "object",
+      "properties": {
+        "library": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "symbol": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "source": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RuntimeGrammarSource"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeGrammarSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "crate": {
+              "$ref": "#/$defs/RuntimeGrammarCrateSource"
+            }
+          },
+          "required": [
+            "crate"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "git": {
+              "$ref": "#/$defs/RuntimeGrammarGitSource"
+            }
+          },
+          "required": [
+            "git"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "RuntimeGrammarCrateSource": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version"
+      ]
+    },
+    "RuntimeGrammarGitSource": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string"
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tag": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rev": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "branch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "tag"
+                ]
+              },
+              {
+                "required": [
+                  "rev"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "tag": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "tag"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "branch"
+                ]
+              },
+              {
+                "required": [
+                  "rev"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "rev": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "rev"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "branch"
+                ]
+              },
+              {
+                "required": [
+                  "tag"
+                ]
+              }
+            ]
+          }
+        }
+      ]
     },
     "KeymapToml": {
       "type": "object",

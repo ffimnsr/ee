@@ -17,9 +17,9 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use xi_core_lib::runtime_loader::{
-    RuntimeGrammarHealth, RuntimeHealthReport, RuntimeLanguageDetectionSource,
-    RuntimeOperationError, RuntimeOperationErrorKind, RuntimeQueryHealth, RuntimeQueryKind,
-    with_default_runtime_loader_mut,
+    RuntimeGrammarHealth, RuntimeGrammarSource, RuntimeHealthReport,
+    RuntimeLanguageDetectionSource, RuntimeOperationError, RuntimeOperationErrorKind,
+    RuntimeQueryHealth, RuntimeQueryKind, with_default_runtime_loader_mut,
 };
 use xi_core_lib::text_store::{ByteRange, TextChunkResult, TextStore};
 use xi_core_lib::vlf::store::VlfStore;
@@ -57,6 +57,10 @@ const EXIT_RUNTIME_CONFIG_MERGE: i32 = 2;
 const EXIT_RUNTIME_GRAMMAR_SOURCE: i32 = 3;
 const EXIT_RUNTIME_ASSET: i32 = 4;
 const LONG_VERSION: &str = env!("EE_LONG_VERSION");
+
+pub(crate) fn runtime_workspace_trusted_for_cli_build_fetch() -> bool {
+    false
+}
 
 fn is_repeated_arrow_motion(event: &Event) -> bool {
     let Event::Key(key) = event else { return false };
@@ -145,6 +149,9 @@ enum DoCommands {
         /// Explicit language name to resolve before path/content detection
         #[arg(long, value_name = "LANGUAGE")]
         language: Option<String>,
+        /// Resolve injected language identifier through `injection_regex`
+        #[arg(long = "injection-language", value_name = "TEXT")]
+        injection_language: Option<String>,
         #[command(subcommand)]
         command: Option<RuntimeCommands>,
     },
@@ -174,6 +181,8 @@ enum DoCommands {
 
 #[derive(Debug, Subcommand)]
 enum RuntimeCommands {
+    /// Show effective merged runtime languages after layered merge
+    Languages,
     /// Materialize pinned grammar sources from the cargo registry
     Fetch {
         /// Fetch all configured runtime grammars
@@ -447,8 +456,22 @@ fn render_runtime_report(report: &RuntimeHealthReport) -> String {
     if let Some(requested_language) = &report.requested_language {
         out.push_str(&format!("requested language: {requested_language}\n"));
     }
+    if let Some(requested_injection_language) = &report.requested_injection_language {
+        out.push_str(&format!("requested injection language: {requested_injection_language}\n"));
+    }
     if let Some(file_path) = &report.file_path {
         out.push_str(&format!("file: {}\n", file_path.display()));
+    }
+
+    match &report.injection_match {
+        Some(injection_match) => out.push_str(&format!(
+            "injection language: {} [{}]\n",
+            injection_match.display_name, injection_match.canonical_id
+        )),
+        None if report.requested_injection_language.is_some() => {
+            out.push_str("injection language: <none>\n")
+        }
+        None => {}
     }
 
     match (&report.language_id, &report.display_name, report.detection_source) {
@@ -501,7 +524,113 @@ fn render_runtime_report(report: &RuntimeHealthReport) -> String {
     out
 }
 
-fn cmd_runtime(file_path: Option<&Path>, explicit_language: Option<&str>) {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EffectiveRuntimeLanguageRow {
+    canonical_id: String,
+    display_name: String,
+    asset_source: String,
+    file_types: Vec<String>,
+    globs: Vec<String>,
+    shebangs: Vec<String>,
+    query_language: String,
+    scope: Option<String>,
+    grammar_library: Option<String>,
+    grammar_symbol: Option<String>,
+    grammar_source: Option<String>,
+    injection_regex: Option<String>,
+    match_priority: i32,
+}
+
+fn grammar_source_summary(source: Option<&RuntimeGrammarSource>) -> Option<String> {
+    match source {
+        Some(RuntimeGrammarSource::Crate(source)) => {
+            Some(format!("crate {}@{}", source.name, source.version))
+        }
+        Some(RuntimeGrammarSource::Git(source)) => {
+            let pin = source
+                .branch
+                .as_deref()
+                .map(|branch| format!("branch {branch}"))
+                .or_else(|| source.tag.as_deref().map(|tag| format!("tag {tag}")))
+                .or_else(|| source.rev.as_deref().map(|rev| format!("rev {rev}")))
+                .unwrap_or_else(|| String::from("unresolved pin"));
+            Some(format!("git {pin}"))
+        }
+        None => None,
+    }
+}
+
+fn effective_runtime_language_rows() -> Vec<EffectiveRuntimeLanguageRow> {
+    with_default_runtime_loader_mut(|loader| {
+        loader
+            .languages()
+            .map(|language| EffectiveRuntimeLanguageRow {
+                canonical_id: language.canonical_id().to_string(),
+                display_name: language.display_name().to_string(),
+                asset_source: format!("{:?}", language.asset_source()),
+                file_types: language.file_types().to_vec(),
+                globs: language.globs().to_vec(),
+                shebangs: language.shebangs().to_vec(),
+                query_language: language.query_language().to_string(),
+                scope: language.scope().map(str::to_string),
+                grammar_library: language.grammar_library_name().map(str::to_string),
+                grammar_symbol: language.grammar_symbol_name().map(str::to_string),
+                grammar_source: grammar_source_summary(language.grammar_source()),
+                injection_regex: language.injection_regex().map(str::to_string),
+                match_priority: language.match_priority(),
+            })
+            .collect()
+    })
+}
+
+fn render_runtime_languages_report(rows: &[EffectiveRuntimeLanguageRow]) -> String {
+    let mut out = String::from("ee do runtime languages\n───────────────────────\n");
+    if rows.is_empty() {
+        out.push_str("<no runtime languages loaded>\n");
+        return out;
+    }
+
+    for row in rows {
+        out.push_str(&format!("{} [{}]\n", row.display_name, row.canonical_id));
+        out.push_str(&format!("  source: {}\n", row.asset_source));
+        out.push_str(&format!("  file types: {}\n", row.file_types.join(", ")));
+        if !row.globs.is_empty() {
+            out.push_str(&format!("  globs: {}\n", row.globs.join(", ")));
+        }
+        if !row.shebangs.is_empty() {
+            out.push_str(&format!("  shebangs: {}\n", row.shebangs.join(", ")));
+        }
+        out.push_str(&format!("  query language: {}\n", row.query_language));
+        if let Some(scope) = &row.scope {
+            out.push_str(&format!("  scope: {scope}\n"));
+        }
+        if let Some(grammar_library) = &row.grammar_library {
+            out.push_str(&format!("  grammar library: {grammar_library}\n"));
+        }
+        if let Some(grammar_symbol) = &row.grammar_symbol {
+            out.push_str(&format!("  grammar symbol: {grammar_symbol}\n"));
+        }
+        if let Some(grammar_source) = &row.grammar_source {
+            out.push_str(&format!("  grammar source: {grammar_source}\n"));
+        }
+        if let Some(injection_regex) = &row.injection_regex {
+            out.push_str(&format!("  injection regex: {injection_regex}\n"));
+        }
+        out.push_str(&format!("  match priority: {}\n", row.match_priority));
+    }
+
+    out
+}
+
+fn cmd_runtime(
+    file_path: Option<&Path>,
+    explicit_language: Option<&str>,
+    injection_language: Option<&str>,
+) {
+    if let Err(error) = config::configure_runtime_loader_for_file(file_path, true) {
+        eprintln!("runtime config failed: {error}");
+        std::process::exit(EXIT_RUNTIME_CONFIG_MERGE);
+    }
     let (first_line, content) = match file_path {
         Some(path) => match read_runtime_probe(path) {
             Ok(probe) => probe,
@@ -519,6 +648,7 @@ fn cmd_runtime(file_path: Option<&Path>, explicit_language: Option<&str>) {
             file_path,
             first_line.as_deref(),
             content.as_deref(),
+            injection_language,
         )
     });
     print!("{}", render_runtime_report(&report));
@@ -526,6 +656,14 @@ fn cmd_runtime(file_path: Option<&Path>, explicit_language: Option<&str>) {
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
+}
+
+fn cmd_runtime_languages(file_path: Option<&Path>) {
+    if let Err(error) = config::configure_runtime_loader_for_file(file_path, true) {
+        eprintln!("runtime config failed: {error}");
+        std::process::exit(EXIT_RUNTIME_CONFIG_MERGE);
+    }
+    print!("{}", render_runtime_languages_report(&effective_runtime_language_rows()));
 }
 
 fn default_runtime_source_root() -> PathBuf {
@@ -542,6 +680,13 @@ fn cmd_runtime_fetch(
     source_root: Option<&Path>,
     force: bool,
 ) {
+    if let Err(error) = config::configure_runtime_loader_for_file(
+        None,
+        runtime_workspace_trusted_for_cli_build_fetch(),
+    ) {
+        eprintln!("runtime config failed: {error}");
+        std::process::exit(EXIT_RUNTIME_CONFIG_MERGE);
+    }
     let source_root =
         source_root.map(Path::to_path_buf).unwrap_or_else(default_runtime_source_root);
     let fetched = with_default_runtime_loader_mut(|loader| {
@@ -551,7 +696,15 @@ fn cmd_runtime_fetch(
 
     println!("fetched {} grammar source trees into {}", fetched.len(), source_root.display());
     for grammar in fetched {
-        println!("  {} -> {}", grammar.language_id, grammar.source_dir.display());
+        let revision_suffix =
+            grammar.resolved_rev.as_deref().map(|rev| format!(" @ {rev}")).unwrap_or_default();
+        println!(
+            "  {} -> {} ({}){}",
+            grammar.language_id,
+            grammar.source_dir.display(),
+            grammar.source_pin,
+            revision_suffix
+        );
     }
 }
 
@@ -563,6 +716,13 @@ fn cmd_runtime_build(
     force: bool,
     skip_load: bool,
 ) {
+    if let Err(error) = config::configure_runtime_loader_for_file(
+        None,
+        runtime_workspace_trusted_for_cli_build_fetch(),
+    ) {
+        eprintln!("runtime config failed: {error}");
+        std::process::exit(EXIT_RUNTIME_CONFIG_MERGE);
+    }
     let source_root =
         source_root.map(Path::to_path_buf).unwrap_or_else(default_runtime_source_root);
     let output_root =
@@ -586,10 +746,14 @@ fn cmd_runtime_build(
         } else {
             format!("{} query files", grammar.query_paths.len())
         };
+        let revision_suffix =
+            grammar.resolved_rev.as_deref().map(|rev| format!(", rev {rev}")).unwrap_or_default();
         println!(
-            "  {} -> {} ({query_summary})",
+            "  {} -> {} ({query_summary}, {}{})",
             grammar.language_id,
-            grammar.grammar_path.display()
+            grammar.grammar_path.display(),
+            grammar.source_pin,
+            revision_suffix
         );
     }
 }
@@ -794,27 +958,34 @@ fn main() -> io::Result<()> {
         Some(Commands::Do { command }) => {
             match command {
                 DoCommands::Doctor => cmd_doctor(cli.config.as_ref()),
-                DoCommands::Runtime { file, language, command } => match command {
-                    None => cmd_runtime(file.as_deref(), language.as_deref()),
-                    Some(RuntimeCommands::Fetch { all, languages, source_root, force }) => {
-                        cmd_runtime_fetch(&languages, all, source_root.as_deref(), force)
+                DoCommands::Runtime { file, language, injection_language, command } => {
+                    match command {
+                        None => cmd_runtime(
+                            file.as_deref(),
+                            language.as_deref(),
+                            injection_language.as_deref(),
+                        ),
+                        Some(RuntimeCommands::Languages) => cmd_runtime_languages(file.as_deref()),
+                        Some(RuntimeCommands::Fetch { all, languages, source_root, force }) => {
+                            cmd_runtime_fetch(&languages, all, source_root.as_deref(), force)
+                        }
+                        Some(RuntimeCommands::Build {
+                            all,
+                            languages,
+                            source_root,
+                            output_root,
+                            force,
+                            skip_load,
+                        }) => cmd_runtime_build(
+                            &languages,
+                            all,
+                            source_root.as_deref(),
+                            output_root.as_deref(),
+                            force,
+                            skip_load,
+                        ),
                     }
-                    Some(RuntimeCommands::Build {
-                        all,
-                        languages,
-                        source_root,
-                        output_root,
-                        force,
-                        skip_load,
-                    }) => cmd_runtime_build(
-                        &languages,
-                        all,
-                        source_root.as_deref(),
-                        output_root.as_deref(),
-                        force,
-                        skip_load,
-                    ),
-                },
+                }
                 DoCommands::File { command } => match command {
                     FileCommands::LineCheck { file } => cmd_file_line_check(&file),
                     FileCommands::Head { lines, file } => cmd_file_head(&file, lines),

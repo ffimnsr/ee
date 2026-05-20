@@ -315,6 +315,10 @@ pub(crate) struct App {
 
 impl App {
     pub(crate) fn from_path(path: Option<PathBuf>) -> io::Result<Self> {
+        if let Err(error) = crate::config::configure_runtime_loader_for_file(path.as_deref(), true)
+        {
+            eprintln!("ee: warning: failed to configure runtime languages: {error}");
+        }
         let (config, general_config, initial_overrides) =
             crate::config::xi_config_tables_for_file(path.as_deref());
         let lsp_config = crate::config::lsp_config_table_for_file(path.as_deref());

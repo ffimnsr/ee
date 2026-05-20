@@ -231,6 +231,11 @@ fn scratch_title_is_default() {
 }
 
 #[test]
+fn runtime_cli_build_and_fetch_do_not_trust_workspace_overrides() {
+    assert!(!crate::runtime_workspace_trusted_for_cli_build_fetch());
+}
+
+#[test]
 fn ctrl_c_quits() {
     let mut app = App::from_path(None).unwrap();
 
@@ -530,10 +535,12 @@ fn file_head_keeps_partial_last_line_without_trailing_newline() {
 fn runtime_report_renders_resolution_and_query_health() {
     let report = RuntimeHealthReport {
         requested_language: Some(String::from("Rust")),
+        requested_injection_language: None,
         file_path: Some(PathBuf::from("sample.rs")),
         detection_source: Some(RuntimeLanguageDetectionSource::Explicit),
         language_id: Some(String::from("Rust")),
         display_name: Some(String::from("Rust")),
+        injection_match: None,
         asset_source: None,
         effective_runtime_root: Some(PathBuf::from("/runtime")),
         grammar_path: Some(PathBuf::from("/runtime/grammars/libtree-sitter-rust.so")),
@@ -569,10 +576,12 @@ fn runtime_report_renders_resolution_and_query_health() {
 fn runtime_report_exit_code_classifies_runtime_failures() {
     let mut healthy = RuntimeHealthReport {
         requested_language: Some(String::from("Rust")),
+        requested_injection_language: None,
         file_path: None,
         detection_source: Some(RuntimeLanguageDetectionSource::Explicit),
         language_id: Some(String::from("Rust")),
         display_name: Some(String::from("Rust")),
+        injection_match: None,
         asset_source: None,
         effective_runtime_root: None,
         grammar_path: None,
@@ -596,6 +605,56 @@ fn runtime_report_exit_code_classifies_runtime_failures() {
         source_paths: Vec::new(),
     }];
     assert_eq!(crate::runtime_report_exit_code(&healthy), crate::EXIT_RUNTIME_ASSET);
+}
+
+#[test]
+fn runtime_report_renders_injection_resolution() {
+    let report = RuntimeHealthReport {
+        requested_language: None,
+        requested_injection_language: Some(String::from("tsx")),
+        file_path: None,
+        detection_source: None,
+        language_id: Some(String::from("TypeScript")),
+        display_name: Some(String::from("TypeScript")),
+        injection_match: Some(xi_core_lib::runtime_loader::RuntimeInjectionMatch {
+            canonical_id: String::from("TypeScript"),
+            display_name: String::from("TypeScript"),
+        }),
+        asset_source: None,
+        effective_runtime_root: None,
+        grammar_path: None,
+        grammar_status: RuntimeGrammarHealth::Loaded,
+        query_reports: Vec::new(),
+        runtime_roots: RuntimeRoots::new("/bundle", "/user/ee", None),
+    };
+
+    let rendered = crate::render_runtime_report(&report);
+    assert!(rendered.contains("requested injection language: tsx"));
+    assert!(rendered.contains("injection language: TypeScript [TypeScript]"));
+}
+
+#[test]
+fn runtime_languages_report_renders_effective_rows() {
+    let rendered = crate::render_runtime_languages_report(&[crate::EffectiveRuntimeLanguageRow {
+        canonical_id: String::from("Rust"),
+        display_name: String::from("Rust"),
+        asset_source: String::from("Bundled"),
+        file_types: vec![String::from("rs")],
+        globs: vec![String::from("*.rs.in")],
+        shebangs: Vec::new(),
+        query_language: String::from("Rust"),
+        scope: Some(String::from("source.rust")),
+        grammar_library: Some(String::from("tree-sitter-rust")),
+        grammar_symbol: Some(String::from("tree_sitter_rust")),
+        grammar_source: Some(String::from("crate tree-sitter-rust@0.23.0")),
+        injection_regex: Some(String::from("^(rust|rs)$")),
+        match_priority: 10,
+    }]);
+
+    assert!(rendered.contains("ee do runtime languages"));
+    assert!(rendered.contains("Rust [Rust]"));
+    assert!(rendered.contains("grammar source: crate tree-sitter-rust@0.23.0"));
+    assert!(rendered.contains("injection regex: ^(rust|rs)$"));
 }
 
 #[test]

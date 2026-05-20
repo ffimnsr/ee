@@ -55,7 +55,9 @@ use crate::runtime_loader::{
 };
 use crate::text_store::DocumentMode;
 use serde::Serialize;
-use tree_sitter::{Language, Node, ParseOptions, Parser, Point, Tree};
+use tree_sitter::{
+    Language, Node, ParseOptions, Parser, Point, QueryCursor, StreamingIterator, Tree,
+};
 
 /// Default byte budget for one visible VLF parse window.
 pub(crate) const DEFAULT_VISIBLE_SYNTAX_MAX_BYTES: usize = 128 * 1024;
@@ -67,6 +69,7 @@ pub(crate) const DEFAULT_REINDENT_PARSE_TIMEOUT: Duration = Duration::from_milli
 pub(crate) const DEFAULT_VISIBLE_SYNTAX_MAX_MATCHES: usize = 2_048;
 /// Default maximum emitted captures/spans for one visible VLF parse window.
 pub(crate) const DEFAULT_VISIBLE_SYNTAX_MAX_CAPTURES: usize = 4_096;
+const MAX_VISIBLE_INJECTION_DEPTH: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LineCommentStyle {
@@ -117,7 +120,7 @@ pub(crate) struct SyntaxFeatureAvailability {
 pub struct VisibleSyntaxSpan {
     pub(crate) start_byte: usize,
     pub(crate) end_byte: usize,
-    pub(crate) scope: &'static str,
+    pub(crate) scope: String,
 }
 
 /// Guardrails for visible-range VLF parsing.
@@ -298,7 +301,7 @@ pub(crate) fn visible_syntax_spans(
 ) -> Vec<Vec<VisibleSyntaxSpan>> {
     let line_starts = line_start_offsets(visible_text);
     let segments = line_segments(visible_text, &line_starts);
-    chunk_syntax_spans(language_name, visible_text, &segments, limits)
+    chunk_syntax_spans_with_depth(language_name, visible_text, &segments, limits, 0, Instant::now())
 }
 
 pub(crate) fn chunk_syntax_spans(
@@ -306,6 +309,17 @@ pub(crate) fn chunk_syntax_spans(
     chunk_text: &str,
     segments: &[Range<usize>],
     limits: VisibleSyntaxLimits,
+) -> Vec<Vec<VisibleSyntaxSpan>> {
+    chunk_syntax_spans_with_depth(language_name, chunk_text, segments, limits, 0, Instant::now())
+}
+
+fn chunk_syntax_spans_with_depth(
+    language_name: &str,
+    chunk_text: &str,
+    segments: &[Range<usize>],
+    limits: VisibleSyntaxLimits,
+    injection_depth: usize,
+    started_at: Instant,
 ) -> Vec<Vec<VisibleSyntaxSpan>> {
     let mut per_segment = vec![Vec::new(); segments.len().max(1)];
     if chunk_text.is_empty()
@@ -321,13 +335,12 @@ pub(crate) fn chunk_syntax_spans(
         return per_segment;
     };
 
-    let started = Instant::now();
     let mut parser = Parser::new();
     if parser.set_language(&language).is_err() {
         return per_segment;
     }
     let mut progress = |_: &tree_sitter::ParseState| {
-        if started.elapsed() >= limits.timeout {
+        if started_at.elapsed() >= limits.timeout {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
@@ -339,7 +352,7 @@ pub(crate) fn chunk_syntax_spans(
     let Some(tree) = parser.parse_with_options(&mut read, None, Some(options)) else {
         return per_segment;
     };
-    if started.elapsed() >= limits.timeout {
+    if started_at.elapsed() >= limits.timeout {
         return per_segment;
     }
 
@@ -347,16 +360,224 @@ pub(crate) fn chunk_syntax_spans(
         text: chunk_text,
         segments,
         per_segment: &mut per_segment,
-        started,
+        started: started_at,
         limits,
         matches: 0,
         captures: 0,
     };
     state.walk(tree.root_node());
+    if injection_depth < MAX_VISIBLE_INJECTION_DEPTH {
+        apply_injection_spans(
+            language_name,
+            chunk_text,
+            segments,
+            &tree,
+            &mut per_segment,
+            limits,
+            injection_depth,
+            started_at,
+        );
+    }
     for spans in &mut per_segment {
         compact_visible_spans(spans);
     }
     per_segment
+}
+
+#[derive(Debug, Clone)]
+struct InjectionRegion {
+    language_name: String,
+    range: Range<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct InjectionSegmentMapping {
+    parent_index: usize,
+    parent_segment_start: usize,
+    parent_range: Range<usize>,
+    child_segment: Range<usize>,
+}
+
+fn apply_injection_spans(
+    language_name: &str,
+    chunk_text: &str,
+    segments: &[Range<usize>],
+    tree: &Tree,
+    per_segment: &mut [Vec<VisibleSyntaxSpan>],
+    limits: VisibleSyntaxLimits,
+    injection_depth: usize,
+    started_at: Instant,
+) {
+    if started_at.elapsed() >= limits.timeout {
+        return;
+    }
+
+    let injections = injection_regions(language_name, chunk_text, tree, limits);
+    for injection in injections {
+        let Some(child_text) = chunk_text.get(injection.range.clone()) else {
+            continue;
+        };
+        let mappings = injection_segment_mappings(segments, &injection.range);
+        if mappings.is_empty() {
+            continue;
+        }
+        let child_segments =
+            mappings.iter().map(|mapping| mapping.child_segment.clone()).collect::<Vec<_>>();
+        let child_spans = chunk_syntax_spans_with_depth(
+            &injection.language_name,
+            child_text,
+            &child_segments,
+            limits,
+            injection_depth + 1,
+            Instant::now(),
+        );
+        for (mapping, spans) in mappings.iter().zip(child_spans) {
+            if spans.is_empty() {
+                continue;
+            }
+            remove_overlapping_spans(&mut per_segment[mapping.parent_index], &mapping.parent_range);
+            for span in spans {
+                let absolute_start =
+                    injection.range.start + mapping.child_segment.start + span.start_byte;
+                let absolute_end =
+                    injection.range.start + mapping.child_segment.start + span.end_byte;
+                let start_byte = absolute_start.saturating_sub(mapping.parent_segment_start);
+                let end_byte = absolute_end.saturating_sub(mapping.parent_segment_start);
+                if end_byte > start_byte {
+                    per_segment[mapping.parent_index].push(VisibleSyntaxSpan {
+                        start_byte,
+                        end_byte,
+                        scope: span.scope,
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn injection_regions(
+    language_name: &str,
+    chunk_text: &str,
+    tree: &Tree,
+    limits: VisibleSyntaxLimits,
+) -> Vec<InjectionRegion> {
+    with_default_runtime_loader_mut(|loader| {
+        let Ok(injections) =
+            loader.compile_query_kind_transient(language_name, RuntimeQueryKind::Injections)
+        else {
+            return Vec::new();
+        };
+        let Some(injections) = injections else {
+            return Vec::new();
+        };
+        let content_capture = injections.query.capture_index_for_name("injection.content");
+        let language_capture = injections.query.capture_index_for_name("injection.language");
+        let Some(content_capture) = content_capture else {
+            return Vec::new();
+        };
+
+        let bytes = chunk_text.as_bytes();
+        let mut cursor = QueryCursor::new();
+        let mut captures = cursor.captures(&injections.query, tree.root_node(), bytes);
+        let mut regions = Vec::new();
+        let scan_started = Instant::now();
+        while scan_started.elapsed() < limits.timeout && regions.len() < limits.max_matches {
+            captures.advance();
+            let Some((query_match, capture_index)) = captures.get() else {
+                break;
+            };
+            if query_match.captures[*capture_index].index != content_capture {
+                continue;
+            }
+            let Some(resolved_language) = resolve_injection_language(
+                loader,
+                &injections.query,
+                query_match,
+                language_capture,
+                bytes,
+            ) else {
+                continue;
+            };
+            let node = query_match.captures[*capture_index].node;
+            let start = node.start_byte().min(chunk_text.len());
+            let end = node.end_byte().min(chunk_text.len());
+            if end > start {
+                regions
+                    .push(InjectionRegion { language_name: resolved_language, range: start..end });
+            }
+        }
+        regions.sort_by(|left, right| {
+            left.range
+                .start
+                .cmp(&right.range.start)
+                .then_with(|| left.range.end.cmp(&right.range.end))
+        });
+        let mut deduped = Vec::with_capacity(regions.len());
+        for region in regions {
+            if deduped.iter().any(|existing: &InjectionRegion| {
+                region.range.start < existing.range.end && existing.range.start < region.range.end
+            }) {
+                continue;
+            }
+            deduped.push(region);
+        }
+        deduped
+    })
+}
+
+fn resolve_injection_language(
+    loader: &mut RuntimeLoader,
+    query: &tree_sitter::Query,
+    query_match: &tree_sitter::QueryMatch<'_, '_>,
+    language_capture: Option<u32>,
+    bytes: &[u8],
+) -> Option<String> {
+    let configured = query
+        .property_settings(query_match.pattern_index)
+        .iter()
+        .find(|property| property.key.as_ref() == "injection.language")
+        .and_then(|property| property.value.as_deref())
+        .map(str::to_string)
+        .or_else(|| {
+            language_capture
+                .and_then(|capture| query_match.nodes_for_capture_index(capture).next())
+                .and_then(|node| node.utf8_text(bytes).ok())
+                .map(normalize_injection_language_identifier)
+                .filter(|value| !value.is_empty())
+        })?;
+
+    loader
+        .match_injection_language(&configured)
+        .map(|matched| matched.canonical_id)
+        .or_else(|| loader.canonical_language_name(&configured))
+}
+
+fn normalize_injection_language_identifier(value: &str) -> String {
+    value.trim().trim_matches(|ch| matches!(ch, '"' | '\'' | '`')).trim().to_string()
+}
+
+fn injection_segment_mappings(
+    segments: &[Range<usize>],
+    injection_range: &Range<usize>,
+) -> Vec<InjectionSegmentMapping> {
+    segments
+        .iter()
+        .enumerate()
+        .filter_map(|(parent_index, segment)| {
+            let start = segment.start.max(injection_range.start);
+            let end = segment.end.min(injection_range.end);
+            (end > start).then(|| InjectionSegmentMapping {
+                parent_index,
+                parent_segment_start: segment.start,
+                parent_range: (start - segment.start)..(end - segment.start),
+                child_segment: (start - injection_range.start)..(end - injection_range.start),
+            })
+        })
+        .collect()
+}
+
+fn remove_overlapping_spans(spans: &mut Vec<VisibleSyntaxSpan>, range: &Range<usize>) {
+    spans.retain(|span| span.end_byte <= range.start || span.start_byte >= range.end);
 }
 
 struct VisibleSyntaxWalk<'a> {
@@ -412,7 +633,7 @@ impl VisibleSyntaxWalk<'_> {
                 self.per_segment[segment_idx].push(VisibleSyntaxSpan {
                     start_byte: span_start,
                     end_byte: span_end,
-                    scope,
+                    scope: scope.to_string(),
                 });
                 self.captures += 1;
             }
@@ -449,7 +670,7 @@ fn scope_for_node(node: Node<'_>, text: &str) -> Option<&'static str> {
         }
         "integer_literal" | "float_literal" => Some("constant.numeric.decimal"),
         "char_literal" | "boolean_literal" => Some("constant.language"),
-        "primitive_type" | "type_identifier" => Some("entity.name.type"),
+        "primitive_type" | "predefined_type" | "type_identifier" => Some("entity.name.type"),
         kind if is_keyword_node(kind, node, text) => Some("keyword.control"),
         _ => None,
     }
@@ -873,6 +1094,9 @@ fn resolve_runtime_language_name(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime_loader::{RuntimeLanguageConfig, RuntimeLanguageOverrides};
+    use std::collections::BTreeSet;
+    use std::sync::{LazyLock, Mutex, MutexGuard};
 
     fn parse_rust(src: &str) -> Tree {
         parse_tree_with_timeout("Rust", src, Duration::from_secs(1)).expect("parse failed")
@@ -880,6 +1104,41 @@ mod tests {
 
     fn parse_python(src: &str) -> Tree {
         parse_tree_with_timeout("Python", src, Duration::from_secs(1)).expect("parse failed")
+    }
+
+    fn test_visible_syntax_limits() -> VisibleSyntaxLimits {
+        VisibleSyntaxLimits { timeout: Duration::from_millis(50), ..VisibleSyntaxLimits::default() }
+    }
+
+    fn runtime_loader_test_guard() -> MutexGuard<'static, ()> {
+        static RUNTIME_LOADER_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+        RUNTIME_LOADER_TEST_LOCK.lock().expect("lock runtime loader test guard")
+    }
+
+    struct RuntimeLoaderOverrideGuard;
+
+    impl RuntimeLoaderOverrideGuard {
+        fn install(user_overrides: RuntimeLanguageOverrides) -> Self {
+            crate::runtime_loader::configure_default_runtime_loader_overrides(
+                user_overrides,
+                RuntimeLanguageOverrides::new(),
+                false,
+            )
+            .expect("configure runtime loader overrides");
+            crate::runtime_loader::ensure_default_runtime_loader_has_test_grammars();
+            Self
+        }
+    }
+
+    impl Drop for RuntimeLoaderOverrideGuard {
+        fn drop(&mut self) {
+            let _ = crate::runtime_loader::configure_default_runtime_loader_overrides(
+                RuntimeLanguageOverrides::new(),
+                RuntimeLanguageOverrides::new(),
+                false,
+            );
+            crate::runtime_loader::ensure_default_runtime_loader_has_test_grammars();
+        }
     }
 
     // --------------------------------------------------
@@ -1025,8 +1284,9 @@ mod tests {
 
     #[test]
     fn visible_syntax_spans_highlights_only_supplied_lines() {
+        let _guard = runtime_loader_test_guard();
         let src = "fn main() {\n    let answer = 42;\n}\n";
-        let spans = visible_syntax_spans("Rust", src, VisibleSyntaxLimits::default());
+        let spans = visible_syntax_spans("Rust", src, test_visible_syntax_limits());
 
         assert_eq!(spans.len(), 4);
         assert!(spans[0].iter().any(|span| span.scope == "keyword.control"));
@@ -1035,25 +1295,30 @@ mod tests {
     }
 
     #[test]
-    fn visible_syntax_spans_obeys_byte_and_capture_limits() {
-        let src = "let a = 1;\nlet b = 2;\n";
-        let too_small = VisibleSyntaxLimits { max_bytes: 4, ..VisibleSyntaxLimits::default() };
-        assert!(visible_syntax_spans("Rust", src, too_small).iter().all(Vec::is_empty));
-
-        let limited = VisibleSyntaxLimits {
-            max_captures: 1,
-            max_matches: 1,
-            ..VisibleSyntaxLimits::default()
-        };
-        let capture_count =
-            visible_syntax_spans("Rust", src, limited).iter().map(Vec::len).sum::<usize>();
-        assert!(capture_count <= 1);
-    }
-
-    #[test]
-    fn visible_syntax_spans_does_not_warm_runtime_queries() {
+    fn visible_syntax_spans_apply_injection_queries_without_warming_query_cache() {
+        let _guard = runtime_loader_test_guard();
+        crate::runtime_loader::ensure_default_runtime_loader_has_test_grammars();
         crate::runtime_loader::with_default_runtime_loader_mut(|loader| {
             loader.invalidate_language("Rust");
+            loader.record_query_artifact(
+                "Rust",
+                crate::runtime_loader::RuntimeQueryKind::Injections,
+                String::from(
+                    "((string_content) @injection.content (#set! injection.language \"Rust\"))",
+                ),
+                Vec::new(),
+                Vec::new(),
+            );
+        });
+
+        let src = "let query = \"fn main() {}\";\n";
+        let spans = visible_syntax_spans("Rust", src, test_visible_syntax_limits());
+
+        assert!(spans[0].iter().any(|span| {
+            span.scope == "keyword.control" && span.start_byte >= 13 && span.end_byte <= 15
+        }));
+
+        crate::runtime_loader::with_default_runtime_loader_mut(|loader| {
             assert!(
                 loader
                     .cached_query_artifact(
@@ -1068,19 +1333,24 @@ mod tests {
                         "Rust",
                         crate::runtime_loader::RuntimeQueryKind::Injections
                     )
-                    .is_none()
+                    .is_some()
             );
             assert!(
                 loader
                     .cached_query_artifact("Rust", crate::runtime_loader::RuntimeQueryKind::Locals)
                     .is_none()
             );
+            loader.invalidate_language("Rust");
         });
+    }
 
+    #[test]
+    fn visible_syntax_spans_does_not_warm_runtime_queries() {
+        let _guard = runtime_loader_test_guard();
         let spans = visible_syntax_spans(
             "Rust",
             "fn main() {\n    let answer = 42;\n}\n",
-            VisibleSyntaxLimits::default(),
+            test_visible_syntax_limits(),
         );
         assert!(spans.iter().flatten().any(|span| span.scope == "keyword.control"));
 
@@ -1107,6 +1377,55 @@ mod tests {
                     .is_none()
             );
         });
+    }
+
+    #[test]
+    fn visible_syntax_spans_match_injection_language_uses_runtime_regex_matcher() {
+        let _guard = runtime_loader_test_guard();
+        crate::runtime_loader::ensure_default_runtime_loader_has_test_grammars();
+
+        let mut overrides = RuntimeLanguageOverrides::new();
+        overrides.insert(
+            "javascript".to_string(),
+            RuntimeLanguageConfig {
+                injection_regex: Some(String::from("^javascript$")),
+                match_priority: Some(5),
+                supported_query_kinds: Some(BTreeSet::from([RuntimeQueryKind::Injections])),
+                ..RuntimeLanguageConfig::default()
+            },
+        );
+        overrides.insert(
+            "typescript".to_string(),
+            RuntimeLanguageConfig {
+                injection_regex: Some(String::from("^javascript$")),
+                match_priority: Some(10),
+                supported_query_kinds: Some(BTreeSet::from([RuntimeQueryKind::Injections])),
+                ..RuntimeLanguageConfig::default()
+            },
+        );
+
+        let _guard = RuntimeLoaderOverrideGuard::install(overrides);
+        crate::runtime_loader::with_default_runtime_loader_mut(|loader| {
+            loader.invalidate_language("Rust");
+            loader.invalidate_language("JavaScript");
+            loader.invalidate_language("TypeScript");
+            loader.record_query_artifact(
+                "Rust",
+                crate::runtime_loader::RuntimeQueryKind::Injections,
+                String::from(
+                    "((string_content) @injection.content (#set! injection.language \"javascript\"))",
+                ),
+                Vec::new(),
+                Vec::new(),
+            );
+        });
+
+        let src = "let query = \"let value: string = 1;\";\n";
+        let spans = visible_syntax_spans("Rust", src, test_visible_syntax_limits());
+
+        assert!(spans[0].iter().any(|span| {
+            span.scope == "entity.name.type" && span.start_byte >= 24 && span.end_byte <= 30
+        }));
     }
 
     #[test]

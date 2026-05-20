@@ -70,6 +70,8 @@ pub struct Config {
     pub language_config: HashMap<String, LanguageConfig>,
     #[serde(default)]
     pub disabled_language_config: HashMap<String, DisabledLanguageConfig>,
+    #[serde(default)]
+    pub language_servers: HashMap<String, Vec<String>>,
 }
 
 impl Config {
@@ -135,6 +137,12 @@ impl Config {
                 ),
             ]),
             disabled_language_config: HashMap::new(),
+            language_servers: HashMap::from([
+                ("json".to_owned(), vec!["json".to_owned()]),
+                ("rust".to_owned(), vec!["rust".to_owned()]),
+                ("typescript".to_owned(), vec!["typescript".to_owned()]),
+                ("yaml".to_owned(), vec!["yaml".to_owned()]),
+            ]),
         }
     }
 }

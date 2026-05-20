@@ -2064,11 +2064,15 @@ mod tests {
         let view = View::new(1.into(), BufferId::new(2));
         let text = Rope::from("let x = 1;\n");
         let syntax_spans = vec![
-            VisibleSyntaxSpan { start_byte: 0, end_byte: 3, scope: "keyword.control.rust" },
+            VisibleSyntaxSpan {
+                start_byte: 0,
+                end_byte: 3,
+                scope: String::from("keyword.control.rust"),
+            },
             VisibleSyntaxSpan {
                 start_byte: 8,
                 end_byte: 9,
-                scope: "constant.numeric.decimal.rust",
+                scope: String::from("constant.numeric.decimal.rust"),
             },
         ];
 
@@ -2089,8 +2093,11 @@ mod tests {
     fn encode_line_keeps_line_relative_syntax_spans() {
         let view = View::new(1.into(), BufferId::new(2));
         let text = Rope::from("first\nsecond();\n");
-        let syntax_spans =
-            vec![VisibleSyntaxSpan { start_byte: 0, end_byte: 6, scope: "entity.name.function.c" }];
+        let syntax_spans = vec![VisibleSyntaxSpan {
+            start_byte: 0,
+            end_byte: 6,
+            scope: String::from("entity.name.function.c"),
+        }];
 
         let line = VisualLine { interval: Interval::new(6, 16), line_num: Some(2) };
         let encoded = view.encode_line(line, Some(&text), &syntax_spans, text.len());

@@ -35,19 +35,25 @@ use crate::types::{
 };
 use crate::utils::*;
 use lsp_types::*;
-use xi_core_lib::{ConfigTable, ViewId};
+use xi_core_lib::{ConfigTable, LanguageId, ViewId};
+
+#[derive(Clone)]
+struct ViewServerRoute {
+    server_id: String,
+    ls_identifier: String,
+    workspace_root: Option<Uri>,
+}
 
 #[derive(Clone)]
 pub struct ViewInfo {
     version: i32,
     language_id: String,
-    ls_identifier: String,
-    workspace_root: Option<Uri>,
+    routes: Vec<ViewServerRoute>,
     path: PathBuf,
 }
 
 struct ClientRestartGroup {
-    language_id: String,
+    server_id: String,
     workspace_root: Option<Uri>,
     documents: Vec<(ViewId, OpenDocumentState)>,
 }
@@ -63,6 +69,7 @@ pub struct LspPlugin {
     language_server_clients: HashMap<String, Arc<Mutex<LanguageServerClient>>>,
     disabled_views: HashMap<ViewId, String>,
     inactive_views: HashMap<ViewId, String>,
+    route_views: HashMap<ViewId, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +90,7 @@ impl LspPlugin {
             language_server_clients: HashMap::new(),
             disabled_views: HashMap::new(),
             inactive_views: HashMap::new(),
+            route_views: HashMap::new(),
         }
     }
 
@@ -106,6 +114,8 @@ impl LspPlugin {
             .chain(next_config.language_config.keys())
             .chain(self.config.disabled_language_config.keys())
             .chain(next_config.disabled_language_config.keys())
+            .chain(self.config.language_servers.keys())
+            .chain(next_config.language_servers.keys())
             .cloned()
             .collect::<HashSet<_>>();
 
@@ -120,6 +130,8 @@ impl LspPlugin {
                             next_config.disabled_language_config.get(language_id),
                         )
                         .ok()
+                    || serde_json::to_value(self.config.language_servers.get(language_id)).ok()
+                        != serde_json::to_value(next_config.language_servers.get(language_id)).ok()
             })
             .collect()
     }
@@ -133,11 +145,7 @@ impl LspPlugin {
         let affected_keys = self
             .language_server_clients
             .keys()
-            .filter(|key| {
-                affected_languages
-                    .iter()
-                    .any(|language_id| key.starts_with(&format!("{language_id}:")))
-            })
+            .filter(|key| affected_languages.iter().any(|id| key.starts_with(&format!("{id}:"))))
             .cloned()
             .collect::<Vec<_>>();
 
@@ -154,39 +162,38 @@ impl LspPlugin {
             }
         }
 
+        // Recompute every tracked view. A changed server id does not necessarily match the
+        // buffer's detected language id, especially for extension-routed legacy configs.
         let affected_views = self
             .view_info
             .iter()
-            .filter(|(_, info)| affected_languages.contains(&info.language_id))
             .map(|(view_id, info)| (*view_id, info.clone()))
             .collect::<Vec<_>>();
 
         for (view_id, info) in affected_views {
             let path = info.path.clone();
-            let Some(language_id) = self.enabled_language_for_path(&path) else {
+            let matches = self.language_matches_for_path(&path, Some(&info.language_id));
+            let routes = self.routes_for_path(&path, &matches);
+            if routes.is_empty() {
                 self.view_info.remove(&view_id);
                 continue;
-            };
-            let workspace_root = self.workspace_root_for_path(&path, &language_id);
-            let Some(ls_identifier) = self.language_server_key(&language_id, &workspace_root)
-            else {
-                self.view_info.remove(&view_id);
-                continue;
-            };
-
-            if let Some(view_info) = self.view_info.get_mut(&view_id) {
-                view_info.language_id = language_id.clone();
-                view_info.workspace_root = workspace_root.clone();
-                view_info.ls_identifier = ls_identifier.clone();
             }
 
-            let entry = groups.entry(ls_identifier.clone()).or_insert_with(|| ClientRestartGroup {
-                language_id: language_id.clone(),
-                workspace_root: workspace_root.clone(),
-                documents: Vec::new(),
-            });
+            if let Some(view_info) = self.view_info.get_mut(&view_id) {
+                view_info.routes = routes.clone();
+            }
+
             if let Some(state) = previous_documents.remove(&view_id) {
-                entry.documents.push((view_id, state));
+                for route in routes {
+                    let entry = groups.entry(route.ls_identifier.clone()).or_insert_with(|| {
+                        ClientRestartGroup {
+                            server_id: route.server_id.clone(),
+                            workspace_root: route.workspace_root.clone(),
+                            documents: Vec::new(),
+                        }
+                    });
+                    entry.documents.push((view_id, state.clone()));
+                }
             }
         }
 
@@ -199,7 +206,7 @@ impl LspPlugin {
                 continue;
             }
 
-            let Some(config) = self.config.language_config.get(&group.language_id) else {
+            let Some(config) = self.config.language_config.get(&group.server_id) else {
                 continue;
             };
             let Some(core) = self.core.clone() else {
@@ -209,7 +216,7 @@ impl LspPlugin {
             let client = match start_new_server(
                 config.start_command.clone(),
                 config.start_arguments.clone(),
-                &group.language_id,
+                &group.server_id,
                 core,
                 self.result_queue.clone(),
                 ServerStartOptions {
@@ -220,7 +227,7 @@ impl LspPlugin {
             ) {
                 Ok(client) => client,
                 Err(err) => {
-                    Self::log_spawn_failure(&group.language_id, &config.start_command, &err);
+                    Self::log_spawn_failure(&group.server_id, &config.start_command, &err);
                     continue;
                 }
             };
@@ -269,13 +276,33 @@ impl LspPlugin {
         }
     }
 
-    fn workspace_root_for_path(&self, path: &Path, language_id: &str) -> Option<Uri> {
-        let config = self.config.language_config.get(language_id)?;
+    fn workspace_root_for_path(&self, path: &Path, server_id: &str) -> Option<Uri> {
+        let config = self.config.language_config.get(server_id)?;
 
         config
             .workspace_identifier
             .as_ref()
             .and_then(|identifier| get_workspace_root_uri(identifier, path).ok())
+    }
+
+    fn configured_server_matches_for_language(
+        &self,
+        language_id: &str,
+    ) -> Option<Vec<LanguageMatch>> {
+        self.config.language_servers.get(language_id).map(|server_ids| {
+            server_ids
+                .iter()
+                .filter_map(|server_id| {
+                    if self.config.language_config.contains_key(server_id) {
+                        Some(LanguageMatch::Enabled(server_id.clone()))
+                    } else if self.config.disabled_language_config.contains_key(server_id) {
+                        Some(LanguageMatch::Disabled(server_id.clone()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
     }
 
     fn language_match_for_path(&self, path: &Path) -> Option<LanguageMatch> {
@@ -294,11 +321,42 @@ impl LspPlugin {
         })
     }
 
-    fn enabled_language_for_path(&self, path: &Path) -> Option<String> {
-        match self.language_match_for_path(path) {
-            Some(LanguageMatch::Enabled(language_id)) => Some(language_id),
-            Some(LanguageMatch::Disabled(_)) | None => None,
+    fn normalized_view_language_id(&self, language_id: impl AsRef<str>) -> String {
+        language_id.as_ref().trim().to_ascii_lowercase()
+    }
+
+    fn language_matches_for_path(
+        &self,
+        path: &Path,
+        language_id: Option<&str>,
+    ) -> Vec<LanguageMatch> {
+        if let Some(language_id) = language_id {
+            let normalized_id = self.normalized_view_language_id(language_id);
+            if let Some(matches) = self.configured_server_matches_for_language(&normalized_id) {
+                return matches;
+            }
         }
+
+        self.language_match_for_path(path).into_iter().collect()
+    }
+
+    fn routes_for_path(&self, path: &Path, matches: &[LanguageMatch]) -> Vec<ViewServerRoute> {
+        matches
+            .iter()
+            .filter_map(|language_match| match language_match {
+                LanguageMatch::Enabled(server_id) => {
+                    let workspace_root = self.workspace_root_for_path(path, server_id);
+                    self.language_server_key(server_id, &workspace_root).map(|ls_identifier| {
+                        ViewServerRoute {
+                            server_id: server_id.clone(),
+                            ls_identifier,
+                            workspace_root,
+                        }
+                    })
+                }
+                LanguageMatch::Disabled(_) => None,
+            })
+            .collect()
     }
 
     fn add_status_item(&self, view_id: ViewId, key: &str, value: &str) {
@@ -340,6 +398,41 @@ impl LspPlugin {
         key
     }
 
+    fn route_status_key(view_id: ViewId) -> String {
+        format!("lsp:{}:routes", view_id)
+    }
+
+    fn route_status_value(language_id: &str, routes: &[ViewServerRoute]) -> String {
+        let mut server_ids = routes.iter().map(|route| route.server_id.as_str());
+        let Some(primary) = server_ids.next() else {
+            return format!("lsp:{language_id}: inactive");
+        };
+        let secondary = server_ids.collect::<Vec<_>>();
+        if secondary.is_empty() {
+            format!("lsp:{language_id}: {primary}")
+        } else {
+            format!("lsp:{language_id}: primary {primary}; secondary {}", secondary.join(", "))
+        }
+    }
+
+    fn update_route_status(
+        &mut self,
+        view_id: ViewId,
+        language_id: &str,
+        routes: &[ViewServerRoute],
+    ) {
+        if let Some(key) = self.route_views.remove(&view_id) {
+            self.remove_status_item(view_id, &key);
+        }
+        if routes.is_empty() {
+            return;
+        }
+        let key = Self::route_status_key(view_id);
+        let value = Self::route_status_value(language_id, routes);
+        self.add_status_item(view_id, &key, &value);
+        self.route_views.insert(view_id, key);
+    }
+
     fn log_spawn_failure(language_id: &str, command: &str, err: &Error) {
         error!("lsp:{language_id}: spawn failed for command {command}: {err}");
     }
@@ -368,15 +461,12 @@ impl Plugin for LspPlugin {
                 }
             };
 
-            let Ok(ls_client_arc) = self.client_for_view(view) else {
+            let Ok(ls_clients) = self.clients_for_view(view) else {
                 return;
             };
-            let Ok(mut ls_client) = ls_client_arc.lock() else {
-                error!("language server client lock poisoned for view {}", view.get_id());
-                return;
-            };
-
-            let sync_kind = ls_client.get_sync_kind();
+            let sync_kind = ls_clients
+                .iter()
+                .find_map(|client| client.lock().ok().map(|mut client| client.get_sync_kind()));
             let next_version = {
                 let Some(view_info) = self.view_info.get_mut(&view.get_id()) else {
                     return;
@@ -384,11 +474,23 @@ impl Plugin for LspPlugin {
                 view_info.version += 1;
                 view_info.version
             };
-            if let Some(changes) = get_change_for_sync_kind(sync_kind, view, delta)
-                && let Err(err) =
-                    ls_client.send_did_change(view.get_id(), changes, next_version, document_text)
+            if let Some(sync_kind) = sync_kind
+                && let Some(changes) = get_change_for_sync_kind(sync_kind, view, delta)
             {
-                ls_client.record_server_failure(format!("failed to send didChange: {err}"));
+                for ls_client_arc in ls_clients {
+                    let Ok(mut ls_client) = ls_client_arc.lock() else {
+                        error!("language server client lock poisoned for view {}", view.get_id());
+                        continue;
+                    };
+                    if let Err(err) = ls_client.send_did_change(
+                        view.get_id(),
+                        changes.clone(),
+                        next_version,
+                        document_text.clone(),
+                    ) {
+                        ls_client.record_server_failure(format!("failed to send didChange: {err}"));
+                    }
+                }
             }
         }
     }
@@ -404,24 +506,30 @@ impl Plugin for LspPlugin {
             }
         };
 
-        if let Ok(ls_client_arc) = self.client_for_view(view)
-            && let Ok(mut ls_client) = ls_client_arc.lock()
-            && let Err(err) = ls_client.send_did_save(view.get_id(), &document_text)
-        {
-            ls_client.record_server_failure(format!("failed to send didSave: {err}"));
+        if let Ok(ls_clients) = self.clients_for_view(view) {
+            for ls_client_arc in ls_clients {
+                if let Ok(mut ls_client) = ls_client_arc.lock()
+                    && let Err(err) = ls_client.send_did_save(view.get_id(), &document_text)
+                {
+                    ls_client.record_server_failure(format!("failed to send didSave: {err}"));
+                }
+            }
         }
     }
 
     fn did_close(&mut self, view: &View<Self::Cache>) {
         trace!("close view {}", view.get_id());
 
-        if let Some(view_info) = self.view_info.remove(&view.get_id())
-            && let Some(ls_client_arc) =
-                self.language_server_clients.get(&view_info.ls_identifier).cloned()
-            && let Ok(mut ls_client) = ls_client_arc.lock()
-            && let Err(err) = ls_client.send_did_close(view.get_id())
-        {
-            ls_client.record_server_failure(format!("failed to send didClose: {err}"));
+        if let Some(view_info) = self.view_info.remove(&view.get_id()) {
+            for route in view_info.routes {
+                if let Some(ls_client_arc) =
+                    self.language_server_clients.get(&route.ls_identifier).cloned()
+                    && let Ok(mut ls_client) = ls_client_arc.lock()
+                    && let Err(err) = ls_client.send_did_close(view.get_id())
+                {
+                    ls_client.record_server_failure(format!("failed to send didClose: {err}"));
+                }
+            }
         }
         if let Some(key) = self.disabled_views.remove(&view.get_id()) {
             self.remove_status_item(view.get_id(), &key);
@@ -429,65 +537,94 @@ impl Plugin for LspPlugin {
         if let Some(key) = self.inactive_views.remove(&view.get_id()) {
             self.remove_status_item(view.get_id(), &key);
         }
+        if let Some(key) = self.route_views.remove(&view.get_id()) {
+            self.remove_status_item(view.get_id(), &key);
+        }
     }
 
     fn new_view(&mut self, view: &mut View<Self::Cache>) {
         trace!("new view {}", view.get_id());
 
-        // TODO: Use Language Idenitifier assigned by core when the
-        // implementation is settled
-        let Some(language_match) = self.get_language_for_view(view) else {
+        let language_id = self.normalized_view_language_id(view.get_language_id());
+        let language_matches = self.language_matches_for_view(view);
+        if language_matches.is_empty() {
+            return;
+        }
+
+        let disabled_server_ids = language_matches
+            .iter()
+            .filter_map(|language_match| match language_match {
+                LanguageMatch::Disabled(server_id) => Some(server_id.clone()),
+                LanguageMatch::Enabled(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let Some(path) = view.get_path() else {
             return;
         };
+        let path = path.to_path_buf();
+        let routes = self.routes_for_path(&path, &language_matches);
 
-        match language_match {
-            LanguageMatch::Disabled(language_id) => {
+        if routes.is_empty() {
+            if !disabled_server_ids.is_empty() {
                 let key = self.add_disabled_status(view.get_id(), &language_id);
                 self.disabled_views.insert(view.get_id(), key);
+            } else {
+                let key = self.add_unsupported_workspace_status(view.get_id(), &language_id);
+                self.inactive_views.insert(view.get_id(), key);
             }
-            LanguageMatch::Enabled(language_id) => {
-                let workspace_root_uri = self.workspace_root_for_view(view, &language_id);
-                if self.language_server_key(&language_id, &workspace_root_uri).is_none() {
-                    let key = self.add_unsupported_workspace_status(view.get_id(), &language_id);
-                    self.inactive_views.insert(view.get_id(), key);
-                    return;
-                }
+            return;
+        }
 
-                if let Some((identifier, ls_client)) =
-                    self.get_lsclient_from_workspace_root(&language_id, &workspace_root_uri)
+        let mut active_routes = Vec::new();
+        for route in routes {
+            if let Some((identifier, ls_client)) =
+                self.get_lsclient_from_workspace_root(&route.server_id, &route.workspace_root)
+            {
+                let route = ViewServerRoute {
+                    server_id: route.server_id,
+                    ls_identifier: identifier,
+                    workspace_root: route.workspace_root,
+                };
+                if let Err(err) =
+                    self.open_view_on_client(view, route.workspace_root.clone(), &ls_client)
                 {
-                    let Some(path) = view.get_path() else {
-                        return;
-                    };
-                    self.view_info.insert(
+                    error!(
+                        "failed to initialize language server view {}: {:?}",
                         view.get_id(),
-                        ViewInfo {
-                            version: 0,
-                            language_id,
-                            ls_identifier: identifier,
-                            workspace_root: workspace_root_uri.clone(),
-                            path: path.to_path_buf(),
-                        },
+                        err
                     );
-
-                    if let Err(err) = self.open_view_on_client(view, workspace_root_uri, &ls_client)
-                    {
-                        error!(
-                            "failed to initialize language server view {}: {:?}",
-                            view.get_id(),
-                            err
-                        );
-                    }
-                } else if let Some(config) = self.config.language_config.get(&language_id) {
-                    let key = self.add_spawn_failure_status(
-                        view.get_id(),
-                        &language_id,
-                        &config.start_command,
-                    );
-                    self.inactive_views.insert(view.get_id(), key);
+                    continue;
                 }
+                active_routes.push(route);
+            } else if let Some(config) = self.config.language_config.get(&route.server_id) {
+                let key = self.add_spawn_failure_status(
+                    view.get_id(),
+                    &route.server_id,
+                    &config.start_command,
+                );
+                self.inactive_views.insert(view.get_id(), key);
             }
         }
+
+        if active_routes.is_empty() {
+            return;
+        }
+
+        self.view_info.insert(
+            view.get_id(),
+            ViewInfo {
+                version: 0,
+                language_id: language_id.clone(),
+                routes: active_routes.clone(),
+                path,
+            },
+        );
+        self.update_route_status(view.get_id(), &language_id, &active_routes);
+    }
+
+    fn language_changed(&mut self, view: &mut View<Self::Cache>, _old_lang: LanguageId) {
+        self.did_close(view);
+        self.new_view(view);
     }
 
     fn plugin_config_changed(&mut self, changes: &ConfigTable) {
@@ -1559,15 +1696,6 @@ impl LspPlugin {
         }
     }
 
-    fn workspace_root_for_view(&self, view: &View<ChunkCache>, language_id: &str) -> Option<Uri> {
-        let config = self.config.language_config.get(language_id)?;
-
-        config.workspace_identifier.as_ref().and_then(|identifier| {
-            let path = view.get_path()?;
-            get_workspace_root_uri(identifier, path).ok()
-        })
-    }
-
     fn language_server_key(
         &self,
         language_id: &str,
@@ -1637,26 +1765,12 @@ impl LspPlugin {
         )
     }
 
-    /// Tries to get language for the View using the extension of the document.
-    /// Only searches for the languages supported by the Language Plugin as
-    /// defined in the config
-    fn get_language_for_view(&mut self, view: &View<ChunkCache>) -> Option<LanguageMatch> {
-        view.get_path()
-            .and_then(|path| path.extension())
-            .and_then(|extension| extension.to_str())
-            .and_then(|extension_str| {
-                for (lang, config) in &self.config.language_config {
-                    if config.extensions.iter().any(|x| x == extension_str) {
-                        return Some(LanguageMatch::Enabled(lang.clone()));
-                    }
-                }
-                for (lang, config) in &self.config.disabled_language_config {
-                    if config.extensions.iter().any(|x| x == extension_str) {
-                        return Some(LanguageMatch::Disabled(lang.clone()));
-                    }
-                }
-                None
-            })
+    fn language_matches_for_view(&self, view: &View<ChunkCache>) -> Vec<LanguageMatch> {
+        let Some(path) = view.get_path() else {
+            return Vec::new();
+        };
+        let language_id = self.normalized_view_language_id(view.get_language_id());
+        self.language_matches_for_path(path, Some(&language_id))
     }
 
     fn open_view_on_client(
@@ -1705,21 +1819,21 @@ impl LspPlugin {
         ls_client.send_did_open(view_id, document_uri, document_text)
     }
 
-    fn restart_client_for_view(
+    fn restart_client_for_route(
         &mut self,
         view: &mut View<ChunkCache>,
-        view_info: &ViewInfo,
+        route: &ViewServerRoute,
     ) -> Result<Arc<Mutex<LanguageServerClient>>, Error> {
-        let Some(config) = self.config.language_config.get(&view_info.language_id) else {
+        let Some(config) = self.config.language_config.get(&route.server_id) else {
             return Err(Error::Protocol(format!(
                 "missing language config for {}",
-                view_info.language_id
+                route.server_id
             )));
         };
 
         let previous_documents = self
             .language_server_clients
-            .get(&view_info.ls_identifier)
+            .get(&route.ls_identifier)
             .and_then(|client| client.lock().ok().map(|client| client.open_document_states()))
             .unwrap_or_default();
 
@@ -1728,7 +1842,7 @@ impl LspPlugin {
         let client = start_new_server(
             config.start_command.clone(),
             config.start_arguments.clone(),
-            &view_info.language_id,
+            &route.server_id,
             core,
             self.result_queue.clone(),
             ServerStartOptions {
@@ -1746,21 +1860,18 @@ impl LspPlugin {
             }
         }
 
-        self.language_server_clients.insert(view_info.ls_identifier.clone(), client.clone());
-        self.open_view_on_client(view, view_info.workspace_root.clone(), &client)?;
+        self.language_server_clients.insert(route.ls_identifier.clone(), client.clone());
+        self.open_view_on_client(view, route.workspace_root.clone(), &client)?;
         Ok(client)
     }
 
-    fn client_for_view(
+    fn client_for_route(
         &mut self,
         view: &mut View<ChunkCache>,
+        route: &ViewServerRoute,
     ) -> Result<Arc<Mutex<LanguageServerClient>>, Error> {
-        let Some(view_info) = self.view_info.get(&view.get_id()).cloned() else {
-            return Err(Error::Protocol(format!("missing language server view {}", view.get_id())));
-        };
-        let Some(client) = self.language_server_clients.get(&view_info.ls_identifier).cloned()
-        else {
-            return self.restart_client_for_view(view, &view_info);
+        let Some(client) = self.language_server_clients.get(&route.ls_identifier).cloned() else {
+            return self.restart_client_for_route(view, route);
         };
 
         let exited = {
@@ -1770,10 +1881,37 @@ impl LspPlugin {
         };
 
         if exited {
-            return self.restart_client_for_view(view, &view_info);
+            return self.restart_client_for_route(view, route);
         }
 
         Ok(client)
+    }
+
+    fn clients_for_view(
+        &mut self,
+        view: &mut View<ChunkCache>,
+    ) -> Result<Vec<Arc<Mutex<LanguageServerClient>>>, Error> {
+        let Some(view_info) = self.view_info.get(&view.get_id()).cloned() else {
+            return Err(Error::Protocol(format!("missing language server view {}", view.get_id())));
+        };
+
+        view_info.routes.iter().map(|route| self.client_for_route(view, route)).collect()
+    }
+
+    fn client_for_view(
+        &mut self,
+        view: &mut View<ChunkCache>,
+    ) -> Result<Arc<Mutex<LanguageServerClient>>, Error> {
+        let Some(view_info) = self.view_info.get(&view.get_id()).cloned() else {
+            return Err(Error::Protocol(format!("missing language server view {}", view.get_id())));
+        };
+        let Some(route) = view_info.routes.first() else {
+            return Err(Error::Protocol(format!(
+                "missing primary language server view {}",
+                view.get_id()
+            )));
+        };
+        self.client_for_route(view, route)
     }
 }
 
@@ -1818,6 +1956,10 @@ mod tests {
                 ),
             ]),
             disabled_language_config: HashMap::new(),
+            language_servers: HashMap::from([
+                (String::from("rust"), vec![String::from("rust")]),
+                (String::from("json"), vec![String::from("json")]),
+            ]),
         };
         let next = Config {
             language_config: HashMap::from([
@@ -1837,6 +1979,10 @@ mod tests {
                 ),
             ]),
             disabled_language_config: HashMap::new(),
+            language_servers: HashMap::from([
+                (String::from("rust"), vec![String::from("rust")]),
+                (String::from("gleam"), vec![String::from("gleam")]),
+            ]),
         };
 
         let plugin = LspPlugin::new(current);
@@ -1855,6 +2001,7 @@ mod tests {
                 String::from("typescript"),
                 DisabledLanguageConfig { extensions: vec![String::from("ts")] },
             )]),
+            language_servers: HashMap::new(),
         });
 
         assert_eq!(
@@ -1871,6 +2018,7 @@ mod tests {
                 language_config("gleam", &["gleam"], false, Some("gleam.toml")),
             )]),
             disabled_language_config: HashMap::new(),
+            language_servers: HashMap::new(),
         });
 
         assert_eq!(plugin.language_server_key("gleam", &None), None);
@@ -1884,5 +2032,31 @@ mod tests {
         assert_eq!(value, "lsp:gleam:spawn failed: gleam");
         assert!(!value.contains("initialization_options"));
         assert!(!value.contains("XI_LSP_SECRET"));
+    }
+
+    #[test]
+    fn language_matches_use_explicit_language_attachments_before_extensions() {
+        let plugin = LspPlugin::new(Config {
+            language_config: HashMap::from([
+                (String::from("eslint"), language_config("eslint", &["js"], true, None)),
+                (
+                    String::from("typescript"),
+                    language_config("typescript-language-server", &["ts"], true, None),
+                ),
+            ]),
+            disabled_language_config: HashMap::new(),
+            language_servers: HashMap::from([(
+                String::from("typescript"),
+                vec![String::from("typescript"), String::from("eslint")],
+            )]),
+        });
+
+        assert_eq!(
+            plugin.language_matches_for_path(std::path::Path::new("main.ts"), Some("typescript"),),
+            vec![
+                LanguageMatch::Enabled(String::from("typescript")),
+                LanguageMatch::Enabled(String::from("eslint")),
+            ]
+        );
     }
 }
