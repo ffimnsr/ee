@@ -50,7 +50,7 @@ use crate::tracing_support;
 use self::rpc::{PluginBufferInfo, PluginUpdate, core_protocol_capabilities};
 use self::wasm::run_wasm_plugin;
 
-pub(crate) use self::catalog::PluginCatalog;
+pub use self::catalog::{PluginCatalog, PluginLoadError};
 pub use self::manifest::{
     Command, ManifestValidationError, PlaceholderRpc, PluginCapability, PluginDescription,
     PluginRuntime, PluginTransport,

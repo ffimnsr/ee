@@ -74,6 +74,14 @@ pub fn read_transport_message<R: BufRead>(
 }
 
 pub fn file_path_to_uri(path: &Path) -> Result<Uri, Error> {
+    let absolute_path;
+    let path = if path.is_absolute() {
+        path
+    } else {
+        absolute_path = env::current_dir().map_err(|_| Error::PathError)?.join(path);
+        absolute_path.as_path()
+    };
+
     Url::from_file_path(path)
         .map_err(|_| Error::FileUrlParseError)?
         .as_str()
@@ -611,6 +619,15 @@ mod tests {
             Error::ServerStart { message, .. } => assert!(!message.contains(secret)),
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn file_path_to_uri_accepts_relative_paths() {
+        let uri = file_path_to_uri(Path::new("crates/xi-lsp-lib/manifest.toml"))
+            .expect("relative workspace path should convert to file URI");
+
+        assert!(uri.as_str().starts_with("file://"));
+        assert!(uri.as_str().ends_with("/crates/xi-lsp-lib/manifest.toml"));
     }
 
     #[test]

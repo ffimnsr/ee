@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use xi_core_lib::XiCore;
 use xi_core_lib::config::Table;
 use xi_core_lib::plugin_rpc::{Diagnostic, SelectionRange, SymbolItem};
+use xi_core_lib::plugins::rpc::ClientPluginInfo;
 use xi_core_lib::rpc::{FoldRangePreview, LineReplacement};
 use xi_rpc::RpcLoop;
 
@@ -690,6 +691,7 @@ pub(crate) struct BufferManager {
     pub(crate) pending_locations: Vec<(String, String, Vec<NavigationTarget>)>,
     /// Symbol results awaiting dispatch to the App-level picker.
     pub(crate) pending_symbols: Vec<(String, String, Vec<SymbolItem>)>,
+    available_plugins_by_view: HashMap<String, Vec<ClientPluginInfo>>,
     pub(crate) pending_ui_actions: Vec<PendingUiAction>,
     startup_profile: StartupProfile,
     startup_profile_active: bool,
@@ -872,6 +874,7 @@ impl BufferManager {
             pending,
             pending_locations: Vec::new(),
             pending_symbols: Vec::new(),
+            available_plugins_by_view: HashMap::new(),
             pending_ui_actions: Vec::new(),
             startup_profile: StartupProfile {
                 new_view_rpc,
@@ -1834,6 +1837,12 @@ impl BufferManager {
                 // Collect for the App to dispatch to the symbols picker.
                 self.pending_symbols.push((view_id, title, symbols));
             }
+            BackendEvent::AvailablePlugins { view_id, plugins } => {
+                if self.buffer_index_for_view(&view_id).is_none() {
+                    return Ok(());
+                }
+                self.available_plugins_by_view.insert(view_id, plugins);
+            }
             BackendEvent::Diagnostics { view_id, diagnostics } => {
                 let Some(idx) = self.buffer_index_for_view(&view_id) else {
                     return Ok(());
@@ -2412,6 +2421,7 @@ impl BufferManager {
             pending: Arc::new(Mutex::new(HashMap::new())),
             pending_locations: Vec::new(),
             pending_symbols: Vec::new(),
+            available_plugins_by_view: HashMap::new(),
             pending_ui_actions: Vec::new(),
             startup_profile: StartupProfile::default(),
             startup_profile_active: false,
@@ -2429,6 +2439,13 @@ impl BufferManager {
 
     pub(crate) fn drain_pending_symbols(&mut self) -> Vec<(String, String, Vec<SymbolItem>)> {
         std::mem::take(&mut self.pending_symbols)
+    }
+
+    pub(crate) fn available_plugins_for_current_view(&self) -> &[ClientPluginInfo] {
+        self.available_plugins_by_view
+            .get(&self.bufs[self.current].view_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     pub(crate) fn drain_pending_ui_actions(&mut self) -> Vec<PendingUiAction> {

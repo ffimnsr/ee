@@ -28,3 +28,6 @@ build
 
 /.ee.toml
 /gh-run-*-logs/
+
+
+*.log

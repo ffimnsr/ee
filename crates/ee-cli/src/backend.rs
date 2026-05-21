@@ -14,6 +14,7 @@ use unicode_width::UnicodeWidthStr;
 use xi_core_lib::XiCore;
 use xi_core_lib::plugin_rpc::{CodeActionDescriptor, Diagnostic, SymbolItem};
 use xi_core_lib::plugins::PluginTerminationReason;
+use xi_core_lib::plugins::rpc::ClientPluginInfo;
 use xi_rpc::{ReadTransport, RpcLoop, WriteTransport};
 
 use crate::text::previous_char_boundary;
@@ -76,6 +77,10 @@ pub(crate) enum BackendEvent {
         view_id: String,
         title: String,
         symbols: Vec<SymbolItem>,
+    },
+    AvailablePlugins {
+        view_id: String,
+        plugins: Vec<ClientPluginInfo>,
     },
     Diagnostics {
         view_id: String,
@@ -147,6 +152,9 @@ impl BackendEvent {
             Self::Diagnostics { view_id, .. } => {
                 Some(BackendEventCoalesceKey::Diagnostics(view_id.clone()))
             }
+            Self::AvailablePlugins { view_id, .. } => {
+                Some(BackendEventCoalesceKey::AvailablePlugins(view_id.clone()))
+            }
             Self::CodeActions { view_id, .. } => {
                 Some(BackendEventCoalesceKey::CodeActions(view_id.clone()))
             }
@@ -169,6 +177,7 @@ enum BackendEventCoalesceKey {
     Hover(String),
     Completions(String),
     Diagnostics(String),
+    AvailablePlugins(String),
     CodeActions(String),
     DocumentMode(String),
     VlfChunks(String),
@@ -783,6 +792,13 @@ impl XiClient {
                 self.status_message = Some(format!("{}: {} symbols", title, symbols.len()));
                 self.pending_symbols.push((view_id, title, symbols));
             }
+            BackendEvent::AvailablePlugins { plugins, .. } => {
+                self.status_message = Some(if plugins.is_empty() {
+                    String::from("plugins: none running")
+                } else {
+                    format!("plugins: {} running", plugins.len())
+                });
+            }
             BackendEvent::Diagnostics { diagnostics, .. } => {
                 let count = diagnostics.len();
                 self.diagnostics = diagnostics;
@@ -1377,6 +1393,13 @@ pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendE
             let symbols =
                 serde_json::from_value::<Vec<SymbolItem>>(params.get("symbols")?.clone()).ok()?;
             Some(BackendEvent::Symbols { view_id, title, symbols })
+        }
+        "available_plugins" => {
+            let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
+            let plugins =
+                serde_json::from_value::<Vec<ClientPluginInfo>>(params.get("plugins")?.clone())
+                    .ok()?;
+            Some(BackendEvent::AvailablePlugins { view_id, plugins })
         }
         "diagnostics" => {
             let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();

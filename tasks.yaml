@@ -26,6 +26,10 @@ tasks:
   install:
     commands:
       - cargo install --path crates/ee-cli
+      - name: Install bundled tree-sitter runtime
+        command: ./scripts/install-tree-sitter-runtime.sh
+      - name: Install bundled plugins
+        command: ./scripts/install-plugins.sh
     description: Install the ee-editor using cargo.
   install-githooks:
     commands:

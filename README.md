@@ -241,6 +241,13 @@ For test-focused local setup, install runtime into user runtime directory
 scripts/install-tree-sitter-runtime.sh
 ```
 
+Install bundled plugins into user config plugin directory
+(`~/.config/ee/plugins` or `XDG_CONFIG_HOME/ee/plugins`) with:
+
+```sh
+scripts/install-plugins.sh
+```
+
 To build runtime and run tests in one step:
 
 ```sh

@@ -22,6 +22,7 @@ use xi_core_lib::open_policy::OpenThresholds;
 use xi_core_lib::plugin_rpc::{
     CodeActionDescriptor, Diagnostic, DiagnosticSeverity, Range, SelectionRange, SymbolItem,
 };
+use xi_core_lib::plugins::rpc::ClientPluginInfo;
 use xi_core_lib::rpc::LineReplacement;
 use xi_core_lib::runtime_loader::{
     RuntimeGrammarHealth, RuntimeHealthReport, RuntimeLanguageDetectionSource, RuntimeQueryHealth,
@@ -353,6 +354,24 @@ fn cli_utility_commands_live_under_do() {
         Some(crate::Commands::Do { command: crate::DoCommands::Doctor })
     ));
 
+    let cli = crate::Cli::try_parse_from(["ee", "do", "plugins", "list"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Plugins { command: crate::PluginCommands::List }
+        })
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "plugins", "ls"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Plugins { command: crate::PluginCommands::List }
+        })
+    ));
+
     let cli =
         crate::Cli::try_parse_from(["ee", "do", "language", "list", "--dir", "sample"]).unwrap();
 
@@ -516,6 +535,93 @@ fn cli_utility_commands_live_under_do() {
             }
         })
     ));
+}
+
+#[test]
+fn plugin_labels_render_expected_values() {
+    let startup = xi_core_lib::plugin_manifest::PluginDescription {
+        name: String::from("startup-plugin"),
+        version: String::from("1.0.0"),
+        requires: Vec::new(),
+        scope: Default::default(),
+        runtime: xi_core_lib::plugin_manifest::PluginRuntime::Native,
+        capabilities: Vec::new(),
+        launch: Default::default(),
+        max_rss_bytes: None,
+        max_cpu_seconds: None,
+        rpc_timeout_ms: None,
+        exec_path: std::path::PathBuf::from("bin/startup-plugin"),
+        activations: Vec::new(),
+        commands: Vec::new(),
+        languages: Vec::new(),
+    };
+    let command = xi_core_lib::plugin_manifest::PluginDescription {
+        name: String::from("command-plugin"),
+        version: String::from("2.0.0"),
+        requires: Vec::new(),
+        scope: Default::default(),
+        runtime: xi_core_lib::plugin_manifest::PluginRuntime::Wasm,
+        capabilities: Vec::new(),
+        launch: Default::default(),
+        max_rss_bytes: None,
+        max_cpu_seconds: None,
+        rpc_timeout_ms: None,
+        exec_path: std::path::PathBuf::from("bin/command-plugin"),
+        activations: vec![xi_core_lib::plugin_manifest::PluginActivation::OnCommand],
+        commands: Vec::new(),
+        languages: Vec::new(),
+    };
+
+    assert_eq!(crate::plugin_activation_label(&startup), "startup");
+    assert_eq!(crate::plugin_activation_label(&command), "command");
+    assert_eq!(crate::plugin_runtime_label(&startup), "native");
+    assert_eq!(crate::plugin_runtime_label(&command), "wasm");
+}
+
+#[test]
+fn available_plugins_notification_updates_buffer_manager_snapshot() {
+    let (tx, _rx) = mpsc::channel();
+    let (backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+
+    backend_tx
+        .send(BackendEvent::AvailablePlugins {
+            view_id: String::from("view-id-1"),
+            plugins: vec![ClientPluginInfo { name: String::from("lsp"), running: true }],
+        })
+        .expect("send should succeed");
+
+    client.drain_events().expect("drain should not fail");
+
+    assert_eq!(client.available_plugins_for_current_view().len(), 1);
+    assert_eq!(client.available_plugins_for_current_view()[0].name, "lsp");
+    assert!(client.available_plugins_for_current_view()[0].running);
+}
+
+#[test]
+fn parse_available_plugins_notification() {
+    let params = json!({
+        "view_id": "view-id-1",
+        "plugins": [
+            { "name": "lsp", "running": true },
+            { "name": "fmt", "running": false }
+        ]
+    });
+
+    let event =
+        parse_notification("available_plugins", params).expect("available_plugins should parse");
+
+    match event {
+        BackendEvent::AvailablePlugins { view_id, plugins } => {
+            assert_eq!(view_id, "view-id-1");
+            assert_eq!(plugins.len(), 2);
+            assert_eq!(plugins[0].name, "lsp");
+            assert!(plugins[0].running);
+            assert_eq!(plugins[1].name, "fmt");
+            assert!(!plugins[1].running);
+        }
+        other => panic!("unexpected event: {:?}", other),
+    }
 }
 
 #[test]
