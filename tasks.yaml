@@ -37,6 +37,83 @@ tasks:
       - mkdir -p .git/hooks
       - cp -r .githooks/* .git/hooks/
     description: Install git hooks from the .githooks directory.
+  logs:
+    commands:
+      - |
+        set -eu
+
+        editor_log=""
+        for candidate in \
+          "${EE_EDITOR_LOG:-}" \
+          "$PWD/ee.log" \
+          "$PWD/editor.log" \
+          "${XDG_STATE_HOME:-$HOME/.local/state}/ee/editor.log"
+        do
+          if [ -n "$candidate" ] && [ -f "$candidate" ]; then
+            editor_log="$candidate"
+            break
+          fi
+        done
+
+        plugin_log=""
+        for candidate in \
+          "${EE_PLUGIN_LOG:-}" \
+          "$PWD/xi-lsp-plugin.log" \
+          "${XDG_STATE_HOME:-$HOME/.local/state}/ee/xi-lsp-plugin.log"
+        do
+          if [ -n "$candidate" ] && [ -f "$candidate" ]; then
+            plugin_log="$candidate"
+            break
+          fi
+        done
+
+        if [ -z "$editor_log" ] && [ -z "$plugin_log" ]; then
+          printf '%s\n' \
+            "No editor/plugin logs found." \
+            "Checked EE_EDITOR_LOG, EE_PLUGIN_LOG, $PWD/{ee.log,editor.log,xi-lsp-plugin.log}, and XDG state dir." >&2
+          exit 1
+        fi
+
+        if [ -n "$editor_log" ] && [ -n "$plugin_log" ]; then
+          cargo run -p ee-cli -- "$editor_log" "$plugin_log"
+        elif [ -n "$editor_log" ]; then
+          cargo run -p ee-cli -- "$editor_log"
+        else
+          cargo run -p ee-cli -- "$plugin_log"
+        fi
+    description: Open discovered editor and plugin logs in ee.
+  config-nearest:
+    commands:
+      - |
+        set -eu
+
+        dir="$PWD"
+        config_path=""
+        while [ "$dir" != "/" ]; do
+          candidate="$dir/.ee.toml"
+          if [ -f "$candidate" ]; then
+            config_path="$candidate"
+            break
+          fi
+          dir="$(dirname "$dir")"
+        done
+
+        if [ -z "$config_path" ]; then
+          xdg_config="${XDG_CONFIG_HOME:-$HOME/.config}/ee/config.toml"
+          legacy_config="$HOME/.ee.toml"
+          if [ -f "$xdg_config" ]; then
+            config_path="$xdg_config"
+          elif [ -f "$legacy_config" ]; then
+            config_path="$legacy_config"
+          else
+            mkdir -p "$(dirname "$xdg_config")"
+            : > "$xdg_config"
+            config_path="$xdg_config"
+          fi
+        fi
+
+        cargo run -p ee-cli -- "$config_path"
+    description: Open nearest workspace config, or user config fallback, in ee.
   uninstall-githooks:
     commands:
       - rm -rf .git/hooks

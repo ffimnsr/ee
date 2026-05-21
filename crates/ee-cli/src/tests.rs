@@ -2216,6 +2216,47 @@ fn diagnostics_picker_command_opens_picker() {
 }
 
 #[test]
+fn logs_command_opens_log_picker_modal() {
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    let temp = tempfile::tempdir().unwrap();
+    env::set_current_dir(temp.path()).unwrap();
+    fs::write(temp.path().join("ee.log"), "editor\n").unwrap();
+    fs::write(temp.path().join("xi-lsp-plugin.log"), "plugin\n").unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+
+    run_ex(&mut app, "logs");
+
+    let picker = app.picker.as_ref().expect("logs should open picker");
+    assert_eq!(picker.kind, PickerKind::Locations);
+    assert_eq!(picker.title, "Logs");
+    assert_eq!(picker.visible_count(), 2);
+}
+
+#[test]
+fn edit_config_command_opens_nearest_workspace_config() {
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    let temp = tempfile::tempdir().unwrap();
+    let project = temp.path().join("project");
+    let src = project.join("src");
+    fs::create_dir_all(&src).unwrap();
+    let config_path = project.join(".ee.toml");
+    let file_path = src.join("main.rs");
+    fs::write(&config_path, "cursor_line = true\n").unwrap();
+    fs::write(&file_path, "fn main() {}\n").unwrap();
+    env::set_current_dir(&src).unwrap();
+
+    let mut app = App::from_path(Some(file_path)).unwrap();
+
+    run_ex(&mut app, "edit_config");
+
+    assert_eq!(app.backend.active().path.as_deref(), Some(config_path.as_path()));
+    assert!(app.picker.is_none());
+}
+
+#[test]
 fn workspace_diagnostics_picker_command_aggregates_open_buffers() {
     let first = unique_temp_path("workspace-diag-a");
     let second = unique_temp_path("workspace-diag-b");

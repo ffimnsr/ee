@@ -1,6 +1,6 @@
 use super::*;
 use std::borrow::Cow;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::buffer::BufferId;
@@ -107,6 +107,7 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     command_spec("goto_last_modified_file", "goto_last_modified_file", "goto_last_modified_file"),
     command_spec("e!", "reload", "e!"),
     command_spec("edit", "edit", "e"),
+    command_spec("edit_config", "edit_config", "edit_config"),
     command_spec("goto_window_bottom", "goto_window_bottom", "goto_window_bottom"),
     command_spec("goto_window_center", "goto_window_center", "goto_window_center"),
     command_spec("goto_window_top", "goto_window_top", "goto_window_top"),
@@ -198,6 +199,7 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     command_spec("ll", "location_list_select", "ll"),
     command_spec("ln", "location_list_next", "lnext"),
     command_spec("lnext", "location_list_next", "lnext"),
+    command_spec("logs", "logs", "logs"),
     command_spec("lop", "location_list_open", "lopen"),
     command_spec("lopen", "location_list_open", "lopen"),
     command_spec("lp", "location_list_prev", "lprev"),
@@ -624,6 +626,8 @@ impl App {
             | "encoding"
             | "recover"
             | "recoverdel"
+            | "edit_config"
+            | "logs"
             | "reload_config" => "workspace",
             "buffer_close"
             | "buffer_close_force"
@@ -732,6 +736,7 @@ impl App {
             "test" => (Cow::Borrowed("run cargo test in transcript buffer"), Some("[args]")),
             "run" => (Cow::Borrowed("run cargo run in transcript buffer"), Some("[args]")),
             "edit" => (Cow::Borrowed("open file in current view"), Some("[path]")),
+            "edit_config" => (Cow::Borrowed("open nearest ee config file"), None),
             "reload" => (Cow::Borrowed("reload active buffer from disk"), None),
             "reload_all" => (Cow::Borrowed("reload all open buffers from disk"), None),
             "new" => (Cow::Borrowed("create scratch buffer"), None),
@@ -824,6 +829,7 @@ impl App {
             "diagnostics_picker" => {
                 (Cow::Borrowed("open picker for active-buffer diagnostics"), None)
             }
+            "logs" => (Cow::Borrowed("open picker for discovered editor and plugin logs"), None),
             "hover" => (Cow::Borrowed("request LSP hover at cursor"), None),
             "insert_register" => {
                 (Cow::Borrowed("insert register contents at cursor"), Some("<register>"))
@@ -1103,6 +1109,25 @@ impl App {
             .map(|buffer| (buffer.id, buffer.title(), buffer.path.clone()))
             .collect();
         self.open_picker(PickerState::new_buffers(entries));
+    }
+
+    fn open_path_in_current_view(&mut self, path: PathBuf) -> Result<(), String> {
+        let existing_id = self
+            .backend
+            .all_bufs()
+            .iter()
+            .find(|buffer| buffer.path.as_ref().is_some_and(|buffer_path| *buffer_path == path))
+            .map(|buffer| buffer.id);
+        let buf_id = match existing_id {
+            Some(id) => id,
+            None => {
+                self.backend.open_buffer(Some(path)).map_err(|err| format!("open failed: {err}"))?
+            }
+        };
+        self.backend.switch_to_id(buf_id).map_err(|err| format!("open failed: {err}"))?;
+        self.tabs.focused_windows_mut().set_focused_buffer(buf_id);
+        self.viewport = Viewport::default();
+        Ok(())
     }
 
     fn open_location_picker(
@@ -1695,6 +1720,11 @@ impl App {
                 self.open_help_picker("Help", Self::help_items());
                 return;
             }
+            "logs" => {
+                self.open_logs_picker();
+                self.enter_normal_mode();
+                return;
+            }
             "commands" => {
                 self.open_help_picker("Commands", Self::command_help_items());
                 return;
@@ -2149,6 +2179,11 @@ impl App {
                     Ok(message) => message,
                     Err(message) => message,
                 });
+            }
+            "edit_config" => {
+                if let Err(message) = self.edit_nearest_config() {
+                    self.backend.status_message = Some(message);
+                }
             }
             "lsp_restart" => {
                 self.backend.status_message =
@@ -2794,6 +2829,105 @@ impl App {
     fn open_help_picker(&mut self, title: &str, items: Vec<String>) {
         self.open_picker(PickerState::new_help(title, items));
         self.enter_normal_mode();
+    }
+
+    fn log_picker_items(&self) -> Vec<crate::picker::PickerItem> {
+        fn push_log_item(
+            items: &mut Vec<crate::picker::PickerItem>,
+            seen: &mut std::collections::HashSet<PathBuf>,
+            label: &str,
+            path: PathBuf,
+        ) {
+            if !path.is_file() || !seen.insert(path.clone()) {
+                return;
+            }
+            items.push(crate::picker::PickerItem {
+                label: label.to_owned(),
+                detail: Some(path.display().to_string()),
+                path: Some(path),
+                buf_id: None,
+                line: None,
+                col: None,
+                choice_index: None,
+            });
+        }
+
+        let mut items = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let state_dir = std::env::var_os("XDG_STATE_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(dirs::state_dir)
+            .map(|dir| dir.join("ee"));
+
+        if let Some(path) =
+            std::env::var_os("EE_EDITOR_LOG").filter(|value| !value.is_empty()).map(PathBuf::from)
+        {
+            push_log_item(&mut items, &mut seen, "editor", path);
+        }
+        push_log_item(&mut items, &mut seen, "editor", cwd.join("ee.log"));
+        push_log_item(&mut items, &mut seen, "editor", cwd.join("editor.log"));
+        if let Some(state_dir) = state_dir.as_ref() {
+            push_log_item(&mut items, &mut seen, "editor", state_dir.join("editor.log"));
+        }
+
+        if let Some(path) =
+            std::env::var_os("EE_PLUGIN_LOG").filter(|value| !value.is_empty()).map(PathBuf::from)
+        {
+            push_log_item(&mut items, &mut seen, "plugin", path);
+        }
+        push_log_item(&mut items, &mut seen, "plugin", cwd.join("xi-lsp-plugin.log"));
+        if let Some(state_dir) = state_dir.as_ref() {
+            push_log_item(&mut items, &mut seen, "plugin", state_dir.join("xi-lsp-plugin.log"));
+        }
+
+        items
+    }
+
+    fn open_logs_picker(&mut self) {
+        self.open_location_picker("Logs", "no logs found", self.log_picker_items());
+    }
+
+    fn nearest_config_path(&self) -> Option<PathBuf> {
+        let mut dir = self
+            .backend
+            .active()
+            .path
+            .as_deref()
+            .and_then(|path| path.parent())
+            .map(Path::to_path_buf)
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        loop {
+            let candidate = dir.join(".ee.toml");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            if !dir.pop() {
+                break;
+            }
+        }
+
+        let xdg = crate::config::xi_core_config_dir().map(|dir| dir.join("config.toml"));
+        if xdg.as_ref().is_some_and(|path| path.is_file()) {
+            return xdg;
+        }
+
+        let legacy = dirs::home_dir().map(|home| home.join(".ee.toml"));
+        if legacy.as_ref().is_some_and(|path| path.is_file()) {
+            return legacy;
+        }
+
+        xdg.or(legacy)
+    }
+
+    fn edit_nearest_config(&mut self) -> Result<(), String> {
+        let path = self
+            .nearest_config_path()
+            .ok_or_else(|| String::from("edit_config failed: no config directory available"))?;
+        self.open_path_in_current_view(path)
     }
 
     pub(super) fn current_buffer_language(&self) -> String {
