@@ -221,7 +221,8 @@ impl RuntimeRoots {
     }
 
     pub fn query_dir_for(&self, source: RuntimeConfigSource, language_id: &str) -> Option<PathBuf> {
-        self.root_for(source).map(|root| root.join(QUERIES_DIR_NAME).join(language_id))
+        self.root_for(source)
+            .map(|root| root.join(QUERIES_DIR_NAME).join(runtime_query_dir_name(language_id)))
     }
 
     pub fn source_dir_for(&self, source: RuntimeConfigSource) -> Option<PathBuf> {
@@ -634,6 +635,15 @@ impl RuntimeLanguage {
 
     pub fn query_dir(&self, roots: &RuntimeRoots) -> Option<PathBuf> {
         roots.query_dir_for(self.asset_source, &self.canonical_id)
+    }
+
+    pub fn staged_source_dir(&self, roots: &RuntimeRoots) -> Option<PathBuf> {
+        if matches!(self.asset_source, RuntimeConfigSource::Bundled) {
+            return None;
+        }
+        let plan = grammar_fetch_plan_for_language(self).ok()?;
+        let source_root = roots.source_dir_for(self.asset_source)?;
+        Some(source_root.join(plan.stage_dir_name(self)))
     }
 }
 
@@ -2044,8 +2054,9 @@ impl RuntimeLoader {
             self.runtime_roots
                 .query_dir_for(RuntimeConfigSource::Bundled, language.query_language()),
             self.runtime_roots.query_dir_for(RuntimeConfigSource::User, language.query_language()),
-            self.workspace_runtime_root()
-                .map(|root| root.join(QUERIES_DIR_NAME).join(language.query_language())),
+            self.workspace_runtime_root().map(|root| {
+                root.join(QUERIES_DIR_NAME).join(runtime_query_dir_name(language.query_language()))
+            }),
         ]
         .into_iter()
         .flatten()
@@ -2323,6 +2334,14 @@ fn normalize_lookup_key(value: &str) -> String {
         .filter(|ch| !matches!(ch, ' ' | '_' | '-'))
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+fn runtime_query_dir_name(language_name: &str) -> String {
+    match normalize_lookup_key(language_name).as_str() {
+        "c#" => String::from("csharp"),
+        "c++" => String::from("cpp"),
+        normalized => normalized.to_string(),
+    }
 }
 
 fn metadata_modified_time(path: &Path) -> Option<SystemTime> {
@@ -2973,7 +2992,8 @@ fn copy_standard_queries_to_runtime(
 ) -> Result<Vec<PathBuf>, RuntimeOperationError> {
     let manifest_query_paths = resolve_manifest_standard_query_paths(source_dir, language)?;
     let source_query_dir = source_dir.join("queries");
-    let destination_query_dir = output_root.join(QUERIES_DIR_NAME).join(language.query_language());
+    let destination_query_dir =
+        output_root.join(QUERIES_DIR_NAME).join(runtime_query_dir_name(language.query_language()));
     fs::create_dir_all(&destination_query_dir).map_err(|error| {
         RuntimeOperationError::runtime_asset(format!(
             "failed creating query output dir {}: {error}",
@@ -3283,24 +3303,24 @@ fn builtin_language_definition(name: &str, file_types: &[&str]) -> LanguageDefin
 fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
     let mut overrides = RuntimeLanguageOverrides::new();
     let definitions = vec![
-        builtin_language_definition("Bash", &["sh", "bash", ".bashrc", ".zshrc"]),
-        builtin_language_definition("C", &["c", "h"]),
-        builtin_language_definition("C#", &["cs"]),
-        builtin_language_definition("C++", &["cc", "cpp", "cxx", "hh", "hpp", "hxx"]),
-        builtin_language_definition("CSS", &["css", "less", "scss"]),
-        builtin_language_definition("Elixir", &["ex", "exs"]),
-        builtin_language_definition("Go", &["go"]),
-        builtin_language_definition("Haskell", &["hs"]),
-        builtin_language_definition("HTML", &["htm", "html", "xhtml"]),
-        builtin_language_definition("Java", &["java"]),
-        builtin_language_definition("JavaScript", &["cjs", "js", "jsx", "mjs"]),
-        builtin_language_definition("JSON", &["json"]),
-        builtin_language_definition("PHP", &["php", "phtml"]),
-        builtin_language_definition("Python", &["py", "pyw"]),
-        builtin_language_definition("Ruby", &["rb", "gemspec", "gemfile", "rake", "rakefile"]),
-        builtin_language_definition("Rust", &["rs"]),
-        builtin_language_definition("Scala", &["sc", "scala"]),
-        builtin_language_definition("TypeScript", &["cts", "mts", "ts", "tsx"]),
+        builtin_language_definition("bash", &["sh", "bash", ".bashrc", ".zshrc"]),
+        builtin_language_definition("c", &["c", "h"]),
+        builtin_language_definition("csharp", &["cs"]),
+        builtin_language_definition("cpp", &["cc", "cpp", "cxx", "hh", "hpp", "hxx"]),
+        builtin_language_definition("css", &["css", "less", "scss"]),
+        builtin_language_definition("elixir", &["ex", "exs"]),
+        builtin_language_definition("go", &["go"]),
+        builtin_language_definition("haskell", &["hs"]),
+        builtin_language_definition("html", &["htm", "html", "xhtml"]),
+        builtin_language_definition("java", &["java"]),
+        builtin_language_definition("javascript", &["cjs", "js", "jsx", "mjs"]),
+        builtin_language_definition("json", &["json"]),
+        builtin_language_definition("php", &["php", "phtml"]),
+        builtin_language_definition("python", &["py", "pyw"]),
+        builtin_language_definition("ruby", &["rb", "gemspec", "gemfile", "rake", "rakefile"]),
+        builtin_language_definition("rust", &["rs"]),
+        builtin_language_definition("scala", &["sc", "scala"]),
+        builtin_language_definition("typescript", &["cts", "mts", "ts", "tsx"]),
     ];
     let standard_and_ee = RuntimeQueryKind::STANDARD
         .into_iter()
@@ -3341,7 +3361,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
     }
 
     builtin_language!(
-        "Bash",
+        "bash",
         "tree-sitter-bash",
         "0.25.1",
         "tree_sitter_bash",
@@ -3354,7 +3374,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         )
     );
     builtin_language!(
-        "C",
+        "c",
         "tree-sitter-c",
         "0.24.2",
         "tree_sitter_c",
@@ -3367,7 +3387,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         )
     );
     builtin_language!(
-        "C#",
+        "csharp",
         "tree-sitter-c-sharp",
         "0.23.5",
         "tree_sitter_c_sharp",
@@ -3380,7 +3400,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         )
     );
     builtin_language!(
-        "C++",
+        "cpp",
         "tree-sitter-cpp",
         "0.23.4",
         "tree_sitter_cpp",
@@ -3393,7 +3413,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         )
     );
     builtin_language!(
-        "CSS",
+        "css",
         "tree-sitter-css",
         "0.25.0",
         "tree_sitter_css",
@@ -3411,7 +3431,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         )
     );
     builtin_language!(
-        "Elixir",
+        "elixir",
         "tree-sitter-elixir",
         "0.3.5",
         "tree_sitter_elixir",
@@ -3424,7 +3444,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         )
     );
     builtin_language!(
-        "Go",
+        "go",
         "tree-sitter-go",
         "0.25.0",
         "tree_sitter_go",
@@ -3437,7 +3457,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         )
     );
     builtin_language!(
-        "Haskell",
+        "haskell",
         "tree-sitter-haskell",
         "0.23.1",
         "tree_sitter_haskell",
@@ -3450,7 +3470,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         )
     );
     builtin_language!(
-        "HTML",
+        "html",
         "tree-sitter-html",
         "0.23.2",
         "tree_sitter_html",
@@ -3468,7 +3488,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         )
     );
     builtin_language!(
-        "Java",
+        "java",
         "tree-sitter-java",
         "0.23.5",
         "tree_sitter_java",
@@ -3481,7 +3501,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         )
     );
     builtin_language!(
-        "JavaScript",
+        "javascript",
         "tree-sitter-javascript",
         "0.25.0",
         "tree_sitter_javascript",
@@ -3494,7 +3514,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         )
     );
     builtin_language!(
-        "JSON",
+        "json",
         "tree-sitter-json",
         "0.24.8",
         "tree_sitter_json",
@@ -3512,7 +3532,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         )
     );
     builtin_language!(
-        "PHP",
+        "php",
         "tree-sitter-php",
         "0.24.2",
         "tree_sitter_php",
@@ -3525,7 +3545,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         )
     );
     builtin_language!(
-        "Python",
+        "python",
         "tree-sitter-python",
         "0.25.0",
         "tree_sitter_python",
@@ -3538,7 +3558,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         )
     );
     builtin_language!(
-        "Ruby",
+        "ruby",
         "tree-sitter-ruby",
         "0.23.1",
         "tree_sitter_ruby",
@@ -3551,7 +3571,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         )
     );
     builtin_language!(
-        "Rust",
+        "rust",
         "tree-sitter-rust",
         "0.24.2",
         "tree_sitter_rust",
@@ -3564,7 +3584,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         )
     );
     builtin_language!(
-        "Scala",
+        "scala",
         "tree-sitter-scala",
         "0.26.0",
         "tree_sitter_scala",
@@ -3652,6 +3672,27 @@ pub fn reload_default_runtime_loader_languages(
     })
 }
 
+pub fn validate_runtime_language_overrides(
+    user_overrides: &RuntimeLanguageOverrides,
+    workspace_overrides: &RuntimeLanguageOverrides,
+    workspace_trusted: bool,
+) -> Result<(), RuntimeLoaderError> {
+    let (languages, mut overrides) = builtin_runtime_components();
+    merge_runtime_language_overrides(&mut overrides, user_overrides);
+    let roots = RuntimeRoots::new(
+        bundled_runtime_root_from_env(),
+        PathBuf::from(".ee-runtime-validation"),
+        workspace_trusted.then(|| PathBuf::from(".ee-runtime-validation-workspace")),
+    );
+    let mut loader =
+        RuntimeLoader::new(roots.clone(), roots.parser_directories(workspace_trusted))?;
+    let workspace = (!workspace_overrides.is_empty()).then_some(WorkspaceRuntimeOverrides {
+        trusted: workspace_trusted,
+        overrides: workspace_overrides,
+    });
+    loader.reload_merged_languages(&languages, &overrides, workspace)
+}
+
 pub fn configure_default_runtime_loader_overrides(
     user_overrides: RuntimeLanguageOverrides,
     workspace_overrides: RuntimeLanguageOverrides,
@@ -3672,7 +3713,7 @@ pub fn configure_default_runtime_loader_overrides(
 #[cfg(any(test, feature = "test-grammars"))]
 pub(crate) fn ensure_default_runtime_loader_has_test_grammars() {
     with_default_runtime_loader_mut(|loader| {
-        if loader.language_for_name("Rust").is_none() || loader.language_for_name("Bash").is_none()
+        if loader.language_for_name("rust").is_none() || loader.language_for_name("bash").is_none()
         {
             *loader = default_runtime_loader();
         }
@@ -3695,24 +3736,24 @@ fn preload_builtin_test_grammars(loader: &mut RuntimeLoader) {
         };
     }
 
-    preload_test_language!("Bash", test_grammars::bash(), "tree_sitter_bash");
-    preload_test_language!("C", test_grammars::c(), "tree_sitter_c");
-    preload_test_language!("C#", test_grammars::c_sharp(), "tree_sitter_c_sharp");
-    preload_test_language!("C++", test_grammars::cpp(), "tree_sitter_cpp");
-    preload_test_language!("CSS", test_grammars::css(), "tree_sitter_css");
-    preload_test_language!("Elixir", test_grammars::elixir(), "tree_sitter_elixir");
-    preload_test_language!("Go", test_grammars::go(), "tree_sitter_go");
-    preload_test_language!("Haskell", test_grammars::haskell(), "tree_sitter_haskell");
-    preload_test_language!("HTML", test_grammars::html(), "tree_sitter_html");
-    preload_test_language!("Java", test_grammars::java(), "tree_sitter_java");
-    preload_test_language!("JavaScript", test_grammars::javascript(), "tree_sitter_javascript");
-    preload_test_language!("JSON", test_grammars::json(), "tree_sitter_json");
-    preload_test_language!("PHP", test_grammars::php(), "tree_sitter_php");
-    preload_test_language!("Python", test_grammars::python(), "tree_sitter_python");
-    preload_test_language!("Ruby", test_grammars::ruby(), "tree_sitter_ruby");
-    preload_test_language!("Rust", test_grammars::rust(), "tree_sitter_rust");
-    preload_test_language!("Scala", test_grammars::scala(), "tree_sitter_scala");
-    preload_test_language!("TypeScript", test_grammars::typescript(), "tree_sitter_typescript");
+    preload_test_language!("bash", test_grammars::bash(), "tree_sitter_bash");
+    preload_test_language!("c", test_grammars::c(), "tree_sitter_c");
+    preload_test_language!("csharp", test_grammars::c_sharp(), "tree_sitter_c_sharp");
+    preload_test_language!("cpp", test_grammars::cpp(), "tree_sitter_cpp");
+    preload_test_language!("css", test_grammars::css(), "tree_sitter_css");
+    preload_test_language!("elixir", test_grammars::elixir(), "tree_sitter_elixir");
+    preload_test_language!("go", test_grammars::go(), "tree_sitter_go");
+    preload_test_language!("haskell", test_grammars::haskell(), "tree_sitter_haskell");
+    preload_test_language!("html", test_grammars::html(), "tree_sitter_html");
+    preload_test_language!("java", test_grammars::java(), "tree_sitter_java");
+    preload_test_language!("javascript", test_grammars::javascript(), "tree_sitter_javascript");
+    preload_test_language!("json", test_grammars::json(), "tree_sitter_json");
+    preload_test_language!("php", test_grammars::php(), "tree_sitter_php");
+    preload_test_language!("python", test_grammars::python(), "tree_sitter_python");
+    preload_test_language!("ruby", test_grammars::ruby(), "tree_sitter_ruby");
+    preload_test_language!("rust", test_grammars::rust(), "tree_sitter_rust");
+    preload_test_language!("scala", test_grammars::scala(), "tree_sitter_scala");
+    preload_test_language!("typescript", test_grammars::typescript(), "tree_sitter_typescript");
 }
 
 static DEFAULT_RUNTIME_LOADER: LazyLock<RwLock<RuntimeLoader>> =
@@ -3897,6 +3938,14 @@ mod tests {
     }
 
     #[test]
+    fn runtime_query_dir_names_are_terminal_friendly() {
+        assert_eq!(runtime_query_dir_name("rust"), "rust");
+        assert_eq!(runtime_query_dir_name("csharp"), "csharp");
+        assert_eq!(runtime_query_dir_name("cpp"), "cpp");
+        assert_eq!(runtime_query_dir_name("typescript"), "typescript");
+    }
+
+    #[test]
     fn bundled_runtime_root_prefers_env_then_release_layouts() {
         let fallback = Path::new("/tmp/runtime-fallback");
         let windows_exe = Path::new("C:/Program Files/ee/ee.exe");
@@ -3931,7 +3980,7 @@ mod tests {
 
     #[test]
     fn runtime_loader_merges_built_in_user_and_workspace_layers() {
-        let languages = Languages::new(&[language_definition("Rust", &["rs"])]);
+        let languages = Languages::new(&[language_definition("rust", &["rs"])]);
         let roots = RuntimeRoots::new("/bundle", "/user/ee", Some(PathBuf::from("/workspace/.ee")));
         let mut loader = RuntimeLoader::new(roots, vec![PathBuf::from("/parser-dir")]).unwrap();
 
@@ -3957,7 +4006,7 @@ mod tests {
 
         let mut workspace_overrides = RuntimeLanguageOverrides::new();
         workspace_overrides.insert(
-            "Rust".to_string(),
+            "rust".to_string(),
             RuntimeLanguageConfig {
                 file_types: Some(vec!["rs.in".to_string()]),
                 globs: Some(vec!["*.rs.in".to_string()]),
@@ -3975,8 +4024,8 @@ mod tests {
             .unwrap();
 
         let language = loader.language_for_name("rscript").unwrap();
-        assert_eq!(language.canonical_id(), "Rust");
-        assert_eq!(language.display_name(), "Rust");
+        assert_eq!(language.canonical_id(), "rust");
+        assert_eq!(language.display_name(), "rust");
         assert_eq!(language.grammar_library_name(), Some("tree-sitter-rust"));
         assert_eq!(language.asset_source(), RuntimeConfigSource::User);
         assert!(language.file_types().iter().any(|value| value == "rs.in"));
@@ -3988,13 +4037,13 @@ mod tests {
 
     #[test]
     fn runtime_loader_ignores_untrusted_workspace_overrides() {
-        let languages = Languages::new(&[language_definition("Rust", &["rs"])]);
+        let languages = Languages::new(&[language_definition("rust", &["rs"])]);
         let roots = RuntimeRoots::new("/bundle", "/user/ee", Some(PathBuf::from("/workspace/.ee")));
         let mut loader = RuntimeLoader::new(roots, Vec::new()).unwrap();
 
         let mut workspace_overrides = RuntimeLanguageOverrides::new();
         workspace_overrides.insert(
-            "Rust".to_string(),
+            "rust".to_string(),
             RuntimeLanguageConfig {
                 file_types: Some(vec!["workspace-rs".to_string()]),
                 ..RuntimeLanguageConfig::default()
@@ -4046,7 +4095,7 @@ mod tests {
 
     #[test]
     fn runtime_loader_disables_language_when_enabled_false() {
-        let languages = Languages::new(&[language_definition("Rust", &["rs"])]);
+        let languages = Languages::new(&[language_definition("rust", &["rs"])]);
         let roots = RuntimeRoots::new("/bundle", "/user/ee", None);
         let mut loader = RuntimeLoader::new(roots, Vec::new()).unwrap();
         let mut overrides = RuntimeLanguageOverrides::new();
@@ -4057,7 +4106,7 @@ mod tests {
 
         loader.reload_merged_languages(&languages, &overrides, None).unwrap();
 
-        assert!(loader.language_for_name("Rust").is_none());
+        assert!(loader.language_for_name("rust").is_none());
         assert!(loader.language_for_path(Path::new("main.rs")).is_none());
     }
 
@@ -4092,7 +4141,7 @@ mod tests {
 
     #[test]
     fn runtime_loader_prefers_workspace_runtime_root_for_grammar_assets() {
-        let languages = Languages::new(&[language_definition("Rust", &["rs"])]);
+        let languages = Languages::new(&[language_definition("rust", &["rs"])]);
         let roots = RuntimeRoots::new(
             "/bundle/ee",
             "/user/ee",
@@ -4102,7 +4151,7 @@ mod tests {
 
         let mut user_overrides = RuntimeLanguageOverrides::new();
         user_overrides.insert(
-            "Rust".to_string(),
+            "rust".to_string(),
             RuntimeLanguageConfig {
                 grammar: Some(runtime_grammar_config(
                     "tree-sitter-rust-user",
@@ -4114,7 +4163,7 @@ mod tests {
         );
         let mut workspace_overrides = RuntimeLanguageOverrides::new();
         workspace_overrides.insert(
-            "Rust".to_string(),
+            "rust".to_string(),
             RuntimeLanguageConfig {
                 query_language: Some("rust-workspace".to_string()),
                 grammar: Some(runtime_grammar_config(
@@ -4134,7 +4183,7 @@ mod tests {
             )
             .unwrap();
 
-        let language = loader.language_for_name("Rust").unwrap();
+        let language = loader.language_for_name("rust").unwrap();
         assert_eq!(language.asset_source(), RuntimeConfigSource::Workspace);
         assert_eq!(
             language.grammar_library_path(&roots).as_deref(),
@@ -4146,7 +4195,7 @@ mod tests {
         );
         assert_eq!(
             language.query_dir(&roots).as_deref(),
-            Some(Path::new("/workspace/project/.ee/queries/Rust"))
+            Some(Path::new("/workspace/project/.ee/queries/rust"))
         );
     }
 
@@ -4161,17 +4210,17 @@ mod tests {
             (&user_root, "((identifier) @user)\n"),
             (&workspace_root, "((identifier) @workspace)\n"),
         ] {
-            let query_dir = root.join("queries").join("Rust");
+            let query_dir = root.join("queries").join("rust");
             fs::create_dir_all(&query_dir).unwrap();
             fs::write(query_dir.join("indents.scm"), text).unwrap();
         }
 
         let roots = RuntimeRoots::new(&bundled_root, &user_root, Some(workspace_root));
         let mut loader = RuntimeLoader::new(roots, Vec::new()).unwrap();
-        let languages = Languages::new(&[language_definition("Rust", &["rs"])]);
+        let languages = Languages::new(&[language_definition("rust", &["rs"])]);
         let mut overrides = RuntimeLanguageOverrides::new();
         overrides.insert(
-            "Rust".to_string(),
+            "rust".to_string(),
             RuntimeLanguageConfig {
                 supported_query_kinds: Some(BTreeSet::from([RuntimeQueryKind::Indents])),
                 ..RuntimeLanguageConfig::default()
@@ -4189,18 +4238,18 @@ mod tests {
             .unwrap();
 
         let artifact =
-            loader.resolve_query_source("Rust", RuntimeQueryKind::Indents).unwrap().unwrap();
+            loader.resolve_query_source("rust", RuntimeQueryKind::Indents).unwrap().unwrap();
         assert_eq!(
             artifact.source_paths,
             vec![
-                bundled_root.join("queries").join("Rust").join("indents.scm"),
-                user_root.join("queries").join("Rust").join("indents.scm"),
+                bundled_root.join("queries").join("rust").join("indents.scm"),
+                user_root.join("queries").join("rust").join("indents.scm"),
                 temp_dir
                     .path()
                     .join("workspace")
                     .join(".ee")
                     .join("queries")
-                    .join("Rust")
+                    .join("rust")
                     .join("indents.scm"),
             ]
         );
@@ -4220,17 +4269,17 @@ mod tests {
             (&user_root, "((identifier) @user)\n"),
             (&workspace_root, "((identifier) @workspace)\n"),
         ] {
-            let query_dir = root.join("queries").join("Rust");
+            let query_dir = root.join("queries").join("rust");
             fs::create_dir_all(&query_dir).unwrap();
             fs::write(query_dir.join("indents.scm"), text).unwrap();
         }
 
         let roots = RuntimeRoots::new(&bundled_root, &user_root, Some(workspace_root));
         let mut loader = RuntimeLoader::new(roots, Vec::new()).unwrap();
-        let languages = Languages::new(&[language_definition("Rust", &["rs"])]);
+        let languages = Languages::new(&[language_definition("rust", &["rs"])]);
         let mut overrides = RuntimeLanguageOverrides::new();
         overrides.insert(
-            "Rust".to_string(),
+            "rust".to_string(),
             RuntimeLanguageConfig {
                 supported_query_kinds: Some(BTreeSet::from([RuntimeQueryKind::Indents])),
                 ..RuntimeLanguageConfig::default()
@@ -4248,12 +4297,12 @@ mod tests {
             .unwrap();
 
         let artifact =
-            loader.resolve_query_source("Rust", RuntimeQueryKind::Indents).unwrap().unwrap();
+            loader.resolve_query_source("rust", RuntimeQueryKind::Indents).unwrap().unwrap();
         assert_eq!(
             artifact.source_paths,
             vec![
-                bundled_root.join("queries").join("Rust").join("indents.scm"),
-                user_root.join("queries").join("Rust").join("indents.scm"),
+                bundled_root.join("queries").join("rust").join("indents.scm"),
+                user_root.join("queries").join("rust").join("indents.scm"),
             ]
         );
         assert!(artifact.source_text.contains("@base"));
@@ -4466,14 +4515,14 @@ mod tests {
         .unwrap();
 
         let resolved =
-            resolve_staged_grammar_build_dir(&root, &test_runtime_language("TypeScript")).unwrap();
+            resolve_staged_grammar_build_dir(&root, &test_runtime_language("typescript")).unwrap();
         assert_eq!(resolved, root.join("typescript"));
     }
 
     #[test]
     fn runtime_loader_rejects_ambiguous_file_type_without_priority() {
         let languages = Languages::new(&[
-            language_definition("Rust", &["rs"]),
+            language_definition("rust", &["rs"]),
             language_definition("Reason", &["rs"]),
         ]);
         let roots = RuntimeRoots::new("/bundle", "/user/ee", None);
@@ -4489,7 +4538,7 @@ mod tests {
     #[test]
     fn runtime_loader_uses_priority_to_break_file_type_tie() {
         let languages = Languages::new(&[
-            language_definition("Rust", &["rs"]),
+            language_definition("rust", &["rs"]),
             language_definition("Reason", &["rs"]),
         ]);
         let roots = RuntimeRoots::new("/bundle", "/user/ee", None);
@@ -4512,7 +4561,7 @@ mod tests {
     #[test]
     fn runtime_loader_detects_shebang_glob_then_file_type() {
         let languages = Languages::new(&[
-            language_definition("Rust", &["rs"]),
+            language_definition("rust", &["rs"]),
             language_definition("Shell", &["sh"]),
         ]);
         let roots = RuntimeRoots::new("/bundle", "/user/ee", None);
@@ -4548,24 +4597,24 @@ mod tests {
         assert_eq!(shebang.detection_source, RuntimeLanguageDetectionSource::Shebang);
 
         let glob = loader.detect_language(Some(Path::new("main.rs.in")), None, None).unwrap();
-        assert_eq!(glob.canonical_id, "Rust");
+        assert_eq!(glob.canonical_id, "rust");
         assert_eq!(glob.detection_source, RuntimeLanguageDetectionSource::Glob);
 
         let file_type = loader.detect_language(Some(Path::new("main.rs")), None, None).unwrap();
-        assert_eq!(file_type.canonical_id, "Rust");
+        assert_eq!(file_type.canonical_id, "rust");
         assert_eq!(file_type.detection_source, RuntimeLanguageDetectionSource::FileType);
 
         let content =
             loader.detect_language(None, None, Some("fn main() { println!(\"hi\"); }")).unwrap();
-        assert_eq!(content.canonical_id, "Rust");
+        assert_eq!(content.canonical_id, "rust");
         assert_eq!(content.detection_source, RuntimeLanguageDetectionSource::ContentRegex);
     }
 
     #[test]
     fn runtime_loader_matches_injection_language_by_regex_and_priority() {
         let languages = Languages::new(&[
-            language_definition("JavaScript", &["js"]),
-            language_definition("TypeScript", &["ts"]),
+            language_definition("javascript", &["js"]),
+            language_definition("typescript", &["ts"]),
         ]);
         let roots = RuntimeRoots::new("/bundle", "/user/ee", None);
         let mut loader = RuntimeLoader::new(roots, Vec::new()).unwrap();
@@ -4591,10 +4640,10 @@ mod tests {
         loader.reload_merged_languages(&languages, &overrides, None).unwrap();
 
         let tsx = loader.match_injection_language("tsx").unwrap();
-        assert_eq!(tsx.canonical_id, "TypeScript");
+        assert_eq!(tsx.canonical_id, "typescript");
 
         let javascript = loader.match_injection_language("javascript").unwrap();
-        assert_eq!(javascript.canonical_id, "TypeScript");
+        assert_eq!(javascript.canonical_id, "typescript");
 
         assert!(loader.match_injection_language("sql").is_none());
     }
@@ -4641,10 +4690,10 @@ mod tests {
 
         let roots = RuntimeRoots::new(&bundled_root, &user_root, None);
         let mut loader = RuntimeLoader::new(roots, Vec::new()).unwrap();
-        let languages = Languages::new(&[language_definition("Rust", &["rs"])]);
+        let languages = Languages::new(&[language_definition("rust", &["rs"])]);
         let mut overrides = RuntimeLanguageOverrides::new();
         overrides.insert(
-            "Rust".to_string(),
+            "rust".to_string(),
             runtime_language_override("tree-sitter-rust", "tree_sitter_rust"),
         );
         loader.reload_merged_languages(&languages, &overrides, None).unwrap();
@@ -4653,13 +4702,13 @@ mod tests {
             GrammarHandle::from_loaded(test_grammars::rust(), &library_path, "tree_sitter_rust");
         loader.record_grammar_handle(cached.clone());
 
-        let first = loader.load_language_for_name("Rust").unwrap();
+        let first = loader.load_language_for_name("rust").unwrap();
         assert_eq!(first.canonical_library_path(), cached.canonical_library_path());
 
         write_until_modified(&library_path, b"changed-stub".to_vec());
 
         assert!(loader.cached_grammar_handle(&library_path).is_none());
-        let error = loader.load_language_for_name("Rust").unwrap_err();
+        let error = loader.load_language_for_name("rust").unwrap_err();
         assert!(matches!(error, RuntimeLoaderError::Loader(_)));
     }
 
@@ -4667,17 +4716,17 @@ mod tests {
     fn query_cache_refreshes_when_query_file_changes() {
         let temp_dir = TempDir::new().unwrap();
         let bundled_root = temp_dir.path().join("bundle");
-        let query_dir = bundled_root.join(QUERIES_DIR_NAME).join("Rust");
+        let query_dir = bundled_root.join(QUERIES_DIR_NAME).join("rust");
         fs::create_dir_all(&query_dir).unwrap();
         let query_path = query_dir.join("highlights.scm");
         fs::write(&query_path, "((identifier) @old)").unwrap();
 
         let roots = RuntimeRoots::new(&bundled_root, temp_dir.path().join("user"), None);
         let mut loader = RuntimeLoader::new(roots, Vec::new()).unwrap();
-        let languages = Languages::new(&[language_definition("Rust", &["rs"])]);
+        let languages = Languages::new(&[language_definition("rust", &["rs"])]);
         let mut overrides = RuntimeLanguageOverrides::new();
         overrides.insert(
-            "Rust".to_string(),
+            "rust".to_string(),
             RuntimeLanguageConfig {
                 supported_query_kinds: Some(BTreeSet::from([RuntimeQueryKind::Highlights])),
                 ..runtime_language_override("tree-sitter-rust", "tree_sitter_rust")
@@ -4685,7 +4734,7 @@ mod tests {
         );
         loader.reload_merged_languages(&languages, &overrides, None).unwrap();
         loader.preload_language(
-            "Rust",
+            "rust",
             GrammarHandle::from_loaded(
                 test_grammars::rust(),
                 "__builtin__/rust",
@@ -4694,16 +4743,16 @@ mod tests {
         );
 
         let first =
-            loader.resolve_query_source("Rust", RuntimeQueryKind::Highlights).unwrap().unwrap();
+            loader.resolve_query_source("rust", RuntimeQueryKind::Highlights).unwrap().unwrap();
         assert!(first.source_text.contains("@old"));
 
         write_until_modified(&query_path, b"((identifier) @new)".to_vec());
 
         let refreshed =
-            loader.resolve_query_source("Rust", RuntimeQueryKind::Highlights).unwrap().unwrap();
+            loader.resolve_query_source("rust", RuntimeQueryKind::Highlights).unwrap().unwrap();
         assert!(refreshed.source_text.contains("@new"));
 
-        let compiled = loader.compile_query_kind("Rust", RuntimeQueryKind::Highlights).unwrap();
+        let compiled = loader.compile_query_kind("rust", RuntimeQueryKind::Highlights).unwrap();
         assert!(compiled.unwrap().source_text.contains("@new"));
     }
 
@@ -4711,19 +4760,19 @@ mod tests {
     fn compiled_query_cache_reuses_compiled_query_until_invalidation() {
         let temp_dir = TempDir::new().unwrap();
         let bundled_root = temp_dir.path().join("bundle");
-        fs::create_dir_all(bundled_root.join("queries").join("Rust")).unwrap();
+        fs::create_dir_all(bundled_root.join("queries").join("rust")).unwrap();
         fs::write(
-            bundled_root.join("queries").join("Rust").join("tags.scm"),
+            bundled_root.join("queries").join("rust").join("tags.scm"),
             "((function_item name: (identifier) @definition.function))",
         )
         .unwrap();
 
         let roots = RuntimeRoots::new(&bundled_root, temp_dir.path().join("user"), None);
         let mut loader = RuntimeLoader::new(roots, Vec::new()).unwrap();
-        let languages = Languages::new(&[language_definition("Rust", &["rs"])]);
+        let languages = Languages::new(&[language_definition("rust", &["rs"])]);
         let mut overrides = RuntimeLanguageOverrides::new();
         overrides.insert(
-            "Rust".to_string(),
+            "rust".to_string(),
             RuntimeLanguageConfig {
                 supported_query_kinds: Some(BTreeSet::from([RuntimeQueryKind::Tags])),
                 ..runtime_language_override("tree-sitter-rust", "tree_sitter_rust")
@@ -4731,7 +4780,7 @@ mod tests {
         );
         loader.reload_merged_languages(&languages, &overrides, None).unwrap();
         loader.preload_language(
-            "Rust",
+            "rust",
             GrammarHandle::from_loaded(
                 test_grammars::rust(),
                 "__builtin__/rust",
@@ -4739,12 +4788,12 @@ mod tests {
             ),
         );
 
-        let first = loader.compile_query_kind("Rust", RuntimeQueryKind::Tags).unwrap().unwrap();
-        let second = loader.compile_query_kind("Rust", RuntimeQueryKind::Tags).unwrap().unwrap();
+        let first = loader.compile_query_kind("rust", RuntimeQueryKind::Tags).unwrap().unwrap();
+        let second = loader.compile_query_kind("rust", RuntimeQueryKind::Tags).unwrap().unwrap();
         assert!(Arc::ptr_eq(&first, &second));
 
-        loader.invalidate_language("Rust");
-        let third = loader.compile_query_kind("Rust", RuntimeQueryKind::Tags).unwrap().unwrap();
+        loader.invalidate_language("rust");
+        let third = loader.compile_query_kind("rust", RuntimeQueryKind::Tags).unwrap().unwrap();
         assert!(!Arc::ptr_eq(&first, &third));
     }
 
@@ -4752,17 +4801,17 @@ mod tests {
     fn runtime_loader_bootstraps_builtin_runtime_metadata() {
         let loader = default_runtime_loader();
         let rust = loader.language_for_name("rust").unwrap();
-        assert_eq!(rust.display_name(), "Rust");
+        assert_eq!(rust.display_name(), "rust");
         assert_eq!(rust.grammar_symbol_name(), Some("tree_sitter_rust"));
         assert_eq!(rust.metadata().line_comment, LineCommentStyle::Token("//"));
-        assert!(!loader.preloaded_grammars.contains_key(&normalize_lookup_key("Rust")));
+        assert!(!loader.preloaded_grammars.contains_key(&normalize_lookup_key("rust")));
     }
 
     #[test]
     fn test_grammar_bootstrap_populates_default_loader_only_in_tests() {
         ensure_default_runtime_loader_has_test_grammars();
         with_default_runtime_loader(|loader| {
-            assert!(loader.preloaded_grammars.contains_key(&normalize_lookup_key("Rust")));
+            assert!(loader.preloaded_grammars.contains_key(&normalize_lookup_key("rust")));
         });
     }
 
@@ -4770,15 +4819,16 @@ mod tests {
     fn query_inheritance_merges_parent_before_child() {
         let temp_dir = TempDir::new().unwrap();
         let bundled_root = temp_dir.path().join("bundle");
-        fs::create_dir_all(bundled_root.join("queries").join("Rust")).unwrap();
-        fs::create_dir_all(bundled_root.join("queries").join("Base")).unwrap();
+        fs::create_dir_all(bundled_root.join("queries").join("rust")).unwrap();
+        let base_query_dir = runtime_query_dir_name("Base");
+        fs::create_dir_all(bundled_root.join("queries").join(&base_query_dir)).unwrap();
         fs::write(
-            bundled_root.join("queries").join("Base").join("textobjects.scm"),
+            bundled_root.join("queries").join(&base_query_dir).join("textobjects.scm"),
             "((identifier) @base)",
         )
         .unwrap();
         fs::write(
-            bundled_root.join("queries").join("Rust").join("textobjects.scm"),
+            bundled_root.join("queries").join("rust").join("textobjects.scm"),
             "; inherits: Base\n((function_item) @function.outer)",
         )
         .unwrap();
@@ -4787,11 +4837,11 @@ mod tests {
         let mut loader = RuntimeLoader::new(roots.clone(), Vec::new()).unwrap();
         let languages = Languages::new(&[
             language_definition("Base", &["base"]),
-            language_definition("Rust", &["rs"]),
+            language_definition("rust", &["rs"]),
         ]);
         let mut overrides = RuntimeLanguageOverrides::new();
         overrides.insert(
-            "Rust".to_string(),
+            "rust".to_string(),
             RuntimeLanguageConfig {
                 supported_query_kinds: Some(BTreeSet::from([RuntimeQueryKind::Textobjects])),
                 ..runtime_language_override("tree-sitter-rust", "tree_sitter_rust")
@@ -4806,7 +4856,7 @@ mod tests {
         );
         loader.reload_merged_languages(&languages, &overrides, None).unwrap();
         loader.preload_language(
-            "Rust",
+            "rust",
             GrammarHandle::from_loaded(
                 test_grammars::rust(),
                 "__builtin__/rust",
@@ -4823,7 +4873,7 @@ mod tests {
         );
 
         let artifact =
-            loader.compile_query_kind("Rust", RuntimeQueryKind::Textobjects).unwrap().unwrap();
+            loader.compile_query_kind("rust", RuntimeQueryKind::Textobjects).unwrap().unwrap();
         assert!(artifact.source_text.contains("@base"));
         assert!(artifact.source_text.contains("@function.outer"));
         assert!(
@@ -4836,15 +4886,16 @@ mod tests {
     fn query_inheritance_cycle_reports_error() {
         let temp_dir = TempDir::new().unwrap();
         let bundled_root = temp_dir.path().join("bundle");
-        fs::create_dir_all(bundled_root.join("queries").join("Rust")).unwrap();
-        fs::create_dir_all(bundled_root.join("queries").join("Base")).unwrap();
+        fs::create_dir_all(bundled_root.join("queries").join("rust")).unwrap();
+        let base_query_dir = runtime_query_dir_name("Base");
+        fs::create_dir_all(bundled_root.join("queries").join(&base_query_dir)).unwrap();
         fs::write(
-            bundled_root.join("queries").join("Rust").join("indents.scm"),
+            bundled_root.join("queries").join("rust").join("indents.scm"),
             "; inherits: Base\n((block) @indent)",
         )
         .unwrap();
         fs::write(
-            bundled_root.join("queries").join("Base").join("indents.scm"),
+            bundled_root.join("queries").join(&base_query_dir).join("indents.scm"),
             "; inherits: Rust\n((source_file) @indent)",
         )
         .unwrap();
@@ -4853,11 +4904,11 @@ mod tests {
         let mut loader = RuntimeLoader::new(roots, Vec::new()).unwrap();
         let languages = Languages::new(&[
             language_definition("Base", &["base"]),
-            language_definition("Rust", &["rs"]),
+            language_definition("rust", &["rs"]),
         ]);
         loader.reload_merged_languages(&languages, &RuntimeLanguageOverrides::new(), None).unwrap();
 
-        let error = loader.resolve_query_source("Rust", RuntimeQueryKind::Indents).unwrap_err();
+        let error = loader.resolve_query_source("rust", RuntimeQueryKind::Indents).unwrap_err();
         assert!(matches!(error, RuntimeLoaderError::QueryInheritanceCycle { .. }));
     }
 
@@ -4865,24 +4916,24 @@ mod tests {
     fn syntax_queries_compile_standard_groups_together() {
         let temp_dir = TempDir::new().unwrap();
         let bundled_root = temp_dir.path().join("bundle");
-        fs::create_dir_all(bundled_root.join("queries").join("Rust")).unwrap();
+        fs::create_dir_all(bundled_root.join("queries").join("rust")).unwrap();
         fs::write(
-            bundled_root.join("queries").join("Rust").join("highlights.scm"),
+            bundled_root.join("queries").join("rust").join("highlights.scm"),
             "((function_item name: (identifier) @function))",
         )
         .unwrap();
         fs::write(
-            bundled_root.join("queries").join("Rust").join("locals.scm"),
+            bundled_root.join("queries").join("rust").join("locals.scm"),
             "((identifier) @local.reference)",
         )
         .unwrap();
 
         let roots = RuntimeRoots::new(&bundled_root, temp_dir.path().join("user"), None);
         let mut loader = RuntimeLoader::new(roots, Vec::new()).unwrap();
-        let languages = Languages::new(&[language_definition("Rust", &["rs"])]);
+        let languages = Languages::new(&[language_definition("rust", &["rs"])]);
         let mut overrides = RuntimeLanguageOverrides::new();
         overrides.insert(
-            "Rust".to_string(),
+            "rust".to_string(),
             RuntimeLanguageConfig {
                 supported_query_kinds: Some(BTreeSet::from([
                     RuntimeQueryKind::Highlights,
@@ -4893,7 +4944,7 @@ mod tests {
         );
         loader.reload_merged_languages(&languages, &overrides, None).unwrap();
         loader.preload_language(
-            "Rust",
+            "rust",
             GrammarHandle::from_loaded(
                 test_grammars::rust(),
                 "__builtin__/rust",
@@ -4901,7 +4952,7 @@ mod tests {
             ),
         );
 
-        let syntax = loader.compile_syntax_queries("Rust").unwrap();
+        let syntax = loader.compile_syntax_queries("rust").unwrap();
         assert!(syntax.combined_query.is_some());
         assert!(syntax.combined_source.contains("@function"));
         assert!(syntax.combined_source.contains("@local.reference"));
@@ -4911,19 +4962,19 @@ mod tests {
     fn missing_optional_queries_do_not_disable_loaded_syntax_queries() {
         let temp_dir = TempDir::new().unwrap();
         let bundled_root = temp_dir.path().join("bundle");
-        fs::create_dir_all(bundled_root.join(QUERIES_DIR_NAME).join("Rust")).unwrap();
+        fs::create_dir_all(bundled_root.join(QUERIES_DIR_NAME).join("rust")).unwrap();
         fs::write(
-            bundled_root.join(QUERIES_DIR_NAME).join("Rust").join("highlights.scm"),
+            bundled_root.join(QUERIES_DIR_NAME).join("rust").join("highlights.scm"),
             "((function_item name: (identifier) @function))",
         )
         .unwrap();
 
         let roots = RuntimeRoots::new(&bundled_root, temp_dir.path().join("user"), None);
         let mut loader = RuntimeLoader::new(roots, Vec::new()).unwrap();
-        let languages = Languages::new(&[language_definition("Rust", &["rs"])]);
+        let languages = Languages::new(&[language_definition("rust", &["rs"])]);
         let mut overrides = RuntimeLanguageOverrides::new();
         overrides.insert(
-            "Rust".to_string(),
+            "rust".to_string(),
             RuntimeLanguageConfig {
                 supported_query_kinds: Some(BTreeSet::from([
                     RuntimeQueryKind::Highlights,
@@ -4935,7 +4986,7 @@ mod tests {
         );
         loader.reload_merged_languages(&languages, &overrides, None).unwrap();
         loader.preload_language(
-            "Rust",
+            "rust",
             GrammarHandle::from_loaded(
                 test_grammars::rust(),
                 "__builtin__/rust",
@@ -4943,14 +4994,14 @@ mod tests {
             ),
         );
 
-        let syntax = loader.compile_syntax_queries("Rust").unwrap();
+        let syntax = loader.compile_syntax_queries("rust").unwrap();
         assert!(syntax.combined_query.is_some());
         assert!(syntax.highlights.is_some());
 
-        let semantic = loader.compile_semantic_queries("Rust").unwrap();
+        let semantic = loader.compile_semantic_queries("rust").unwrap();
         assert!(semantic.textobjects.is_none());
         assert!(semantic.tags.is_none());
-        assert!(loader.compile_query_kind("Rust", RuntimeQueryKind::Indents).unwrap().is_none());
+        assert!(loader.compile_query_kind("rust", RuntimeQueryKind::Indents).unwrap().is_none());
     }
 
     #[test]
@@ -4963,7 +5014,7 @@ mod tests {
             r#"{
   "grammars": [
     {
-      "name": "Rust",
+      "name": "rust",
       "scope": "source.rust",
       "file-types": ["rs"],
       "highlights": "queries/highlights.scm",
@@ -4999,10 +5050,10 @@ mod tests {
             None,
         );
         let mut loader = RuntimeLoader::new(roots, vec![temp_dir.path().join("bundle")]).unwrap();
-        let languages = Languages::new(&[language_definition("Rust", &["rs"])]);
+        let languages = Languages::new(&[language_definition("rust", &["rs"])]);
         let mut overrides = RuntimeLanguageOverrides::new();
         overrides.insert(
-            "Rust".to_string(),
+            "rust".to_string(),
             RuntimeLanguageConfig {
                 supported_query_kinds: Some(BTreeSet::from([
                     RuntimeQueryKind::Highlights,
@@ -5014,7 +5065,7 @@ mod tests {
         );
         loader.reload_merged_languages(&languages, &overrides, None).unwrap();
         loader.preload_language(
-            "Rust",
+            "rust",
             GrammarHandle::from_loaded(
                 test_grammars::rust(),
                 "__builtin__/rust",
@@ -5022,11 +5073,11 @@ mod tests {
             ),
         );
 
-        let syntax = loader.compile_syntax_queries("Rust").unwrap();
+        let syntax = loader.compile_syntax_queries("rust").unwrap();
         assert!(syntax.combined_source.contains("@function"));
         assert!(syntax.combined_source.contains("@local.reference"));
 
-        let tags = loader.compile_query_kind("Rust", RuntimeQueryKind::Tags).unwrap().unwrap();
+        let tags = loader.compile_query_kind("rust", RuntimeQueryKind::Tags).unwrap().unwrap();
         assert!(tags.source_text.contains("@definition.function"));
         assert!(
             tags.source_paths
@@ -5047,7 +5098,7 @@ mod tests {
             r#"{
   "grammars": [
     {
-      "name": "Rust",
+      "name": "rust",
       "scope": "source.rust",
       "file-types": ["rs"],
             "highlights": "queries/highlights.scm",
@@ -5081,10 +5132,10 @@ mod tests {
             None,
         );
         let mut loader = RuntimeLoader::new(roots, vec![temp_dir.path().join("bundle")]).unwrap();
-        let languages = Languages::new(&[language_definition("Rust", &["rs"])]);
+        let languages = Languages::new(&[language_definition("rust", &["rs"])]);
         let mut overrides = RuntimeLanguageOverrides::new();
         overrides.insert(
-            "Rust".to_string(),
+            "rust".to_string(),
             RuntimeLanguageConfig {
                 supported_query_kinds: Some(BTreeSet::from([
                     RuntimeQueryKind::Highlights,
@@ -5096,7 +5147,7 @@ mod tests {
         );
         loader.reload_merged_languages(&languages, &overrides, None).unwrap();
         loader.preload_language(
-            "Rust",
+            "rust",
             GrammarHandle::from_loaded(
                 test_grammars::rust(),
                 "__builtin__/rust",
@@ -5104,7 +5155,7 @@ mod tests {
             ),
         );
 
-        let error = loader.compile_syntax_queries("Rust").unwrap_err();
+        let error = loader.compile_syntax_queries("rust").unwrap_err();
         match error {
             RuntimeLoaderError::QueryCompile { kind, file, .. } => {
                 assert_eq!(kind, RuntimeQueryKind::Highlights);
@@ -5127,12 +5178,12 @@ mod tests {
         let roots = RuntimeRoots::new(&bundled_root, &user_root, None);
         let mut loader = RuntimeLoader::new(roots, Vec::new()).unwrap();
         let languages = Languages::new(&[
-            language_definition("Rust", &["rs"]),
+            language_definition("rust", &["rs"]),
             language_definition("JSON", &["json"]),
         ]);
         let mut overrides = RuntimeLanguageOverrides::new();
         overrides.insert(
-            "Rust".to_string(),
+            "rust".to_string(),
             runtime_language_override("tree-sitter-rust", "tree_sitter_rust"),
         );
         loader.reload_merged_languages(&languages, &overrides, None).unwrap();
@@ -5146,7 +5197,7 @@ mod tests {
         );
 
         let report = loader.runtime_health_report(
-            Some("Rust"),
+            Some("rust"),
             Some(Path::new("main.rs")),
             None,
             None,
@@ -5160,7 +5211,7 @@ mod tests {
         }
 
         assert!(matches!(
-            loader.load_language_for_name("Rust"),
+            loader.load_language_for_name("rust"),
             Err(RuntimeLoaderError::Loader(_))
         ));
         assert!(loader.load_language_for_name("JSON").is_ok());
@@ -5170,19 +5221,19 @@ mod tests {
     fn runtime_health_report_distinguishes_loaded_missing_and_unsupported_queries() {
         let temp_dir = TempDir::new().unwrap();
         let bundled_root = temp_dir.path().join("bundle");
-        fs::create_dir_all(bundled_root.join("queries").join("Rust")).unwrap();
+        fs::create_dir_all(bundled_root.join("queries").join("rust")).unwrap();
         fs::write(
-            bundled_root.join("queries").join("Rust").join("highlights.scm"),
+            bundled_root.join("queries").join("rust").join("highlights.scm"),
             "((function_item name: (identifier) @function))",
         )
         .unwrap();
 
         let roots = RuntimeRoots::new(&bundled_root, temp_dir.path().join("user"), None);
         let mut loader = RuntimeLoader::new(roots, Vec::new()).unwrap();
-        let languages = Languages::new(&[language_definition("Rust", &["rs"])]);
+        let languages = Languages::new(&[language_definition("rust", &["rs"])]);
         let mut overrides = RuntimeLanguageOverrides::new();
         overrides.insert(
-            "Rust".to_string(),
+            "rust".to_string(),
             RuntimeLanguageConfig {
                 supported_query_kinds: Some(BTreeSet::from([
                     RuntimeQueryKind::Highlights,
@@ -5193,7 +5244,7 @@ mod tests {
         );
         loader.reload_merged_languages(&languages, &overrides, None).unwrap();
         loader.preload_language(
-            "Rust",
+            "rust",
             GrammarHandle::from_loaded(
                 test_grammars::rust(),
                 "__builtin__/rust",
@@ -5202,7 +5253,7 @@ mod tests {
         );
 
         let report = loader.runtime_health_report(
-            Some("Rust"),
+            Some("rust"),
             Some(Path::new("main.rs")),
             None,
             None,
@@ -5228,7 +5279,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let fetched = loader
-            .fetch_grammar_sources(&[String::from("Rust")], false, temp_dir.path(), true)
+            .fetch_grammar_sources(&[String::from("rust")], false, temp_dir.path(), true)
             .unwrap();
 
         assert_eq!(fetched.len(), 1);
@@ -5338,7 +5389,7 @@ mod tests {
         }
 
         let built = loader.build_runtime_assets(
-            &[String::from("Rust")],
+            &[String::from("rust")],
             false,
             &source_root,
             &output_root,
@@ -5369,7 +5420,7 @@ mod tests {
             built[0]
                 .query_paths
                 .iter()
-                .any(|path| path.ends_with(Path::new("Rust").join("highlights.scm")))
+                .any(|path| path.ends_with(Path::new("rust").join("highlights.scm")))
         );
     }
 
@@ -5383,7 +5434,7 @@ mod tests {
 
         let built = loader
             .build_runtime_assets(
-                &[String::from("Rust")],
+                &[String::from("rust")],
                 false,
                 &source_root,
                 &output_root,
@@ -5605,14 +5656,17 @@ mod tests {
 
         assert_eq!(built[0].resolved_rev.as_deref(), Some(branch_rev.as_str()));
         assert!(built[0].grammar_path.exists());
+        assert!(built[0].query_paths.iter().any(|path| {
+            path.ends_with(Path::new(&runtime_query_dir_name("Demo")).join("highlights.scm"))
+        }));
         assert!(
-            built[0]
-                .query_paths
-                .iter()
-                .any(|path| path.ends_with(Path::new("Demo").join("highlights.scm")))
-        );
-        assert!(
-            temp_dir.path().join("runtime").join("queries").join("Demo").join("tags.scm").exists()
+            temp_dir
+                .path()
+                .join("runtime")
+                .join("queries")
+                .join(runtime_query_dir_name("Demo"))
+                .join("tags.scm")
+                .exists()
         );
     }
 

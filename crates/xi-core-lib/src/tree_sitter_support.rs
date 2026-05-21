@@ -917,7 +917,7 @@ fn indentation_levels_for_text_with_timeout(
         return None;
     }
 
-    if canonical_language_name(language_name).as_deref() == Some("Python") {
+    if canonical_language_name(language_name).as_deref() == Some("python") {
         return Some(python_indentation_levels(text, max_line));
     }
 
@@ -1034,7 +1034,7 @@ fn line_requires_dedent(language_name: &str, line_text: &str) -> bool {
         return true;
     }
 
-    canonical_language_name(language_name).as_deref() == Some("Python")
+    canonical_language_name(language_name).as_deref() == Some("python")
         && (trimmed.starts_with("elif ")
             || trimmed.starts_with("else:")
             || trimmed.starts_with("except")
@@ -1099,11 +1099,11 @@ mod tests {
     use std::sync::{LazyLock, Mutex, MutexGuard};
 
     fn parse_rust(src: &str) -> Tree {
-        parse_tree_with_timeout("Rust", src, Duration::from_secs(1)).expect("parse failed")
+        parse_tree_with_timeout("rust", src, Duration::from_secs(1)).expect("parse failed")
     }
 
     fn parse_python(src: &str) -> Tree {
-        parse_tree_with_timeout("Python", src, Duration::from_secs(1)).expect("parse failed")
+        parse_tree_with_timeout("python", src, Duration::from_secs(1)).expect("parse failed")
     }
 
     fn test_visible_syntax_limits() -> VisibleSyntaxLimits {
@@ -1148,24 +1148,24 @@ mod tests {
     #[test]
     fn test_ts_language_registry_covers_bundled_grammars() {
         for language in [
-            "Bash",
-            "C",
-            "C#",
-            "C++",
-            "CSS",
-            "Elixir",
-            "Go",
-            "Haskell",
-            "HTML",
-            "Java",
-            "JavaScript",
-            "JSON",
-            "PHP",
-            "Python",
-            "Ruby",
-            "Rust",
-            "Scala",
-            "TypeScript",
+            "bash",
+            "c",
+            "csharp",
+            "cpp",
+            "css",
+            "elixir",
+            "go",
+            "haskell",
+            "html",
+            "java",
+            "javascript",
+            "json",
+            "php",
+            "python",
+            "ruby",
+            "rust",
+            "scala",
+            "typescript",
         ] {
             assert!(ts_language_for_name(language).is_some(), "missing grammar for {language}");
         }
@@ -1174,13 +1174,13 @@ mod tests {
     #[test]
     fn test_ts_language_registry_normalizes_aliases() {
         for (alias, canonical) in [
-            ("rust", "Rust"),
-            ("python3", "Python"),
-            ("sh", "Bash"),
-            ("cpp", "C++"),
-            ("csharp", "C#"),
-            ("js", "JavaScript"),
-            ("tsx", "TypeScript"),
+            ("rust", "rust"),
+            ("python3", "python"),
+            ("sh", "bash"),
+            ("cpp", "cpp"),
+            ("csharp", "csharp"),
+            ("js", "javascript"),
+            ("tsx", "typescript"),
         ] {
             assert_eq!(canonical_language_name(alias).as_deref(), Some(canonical));
             assert!(ts_language_for_name(alias).is_some(), "missing alias support for {alias}");
@@ -1190,24 +1190,24 @@ mod tests {
     #[test]
     fn test_ts_language_registry_resolves_paths() {
         for (path, canonical) in [
-            ("build.sh", "Bash"),
-            ("main.c", "C"),
-            ("Program.cs", "C#"),
-            ("main.cpp", "C++"),
-            ("app.css", "CSS"),
-            ("mix.exs", "Elixir"),
-            ("main.go", "Go"),
-            ("Main.hs", "Haskell"),
-            ("index.html", "HTML"),
-            ("Main.java", "Java"),
-            ("app.jsx", "JavaScript"),
-            ("data.json", "JSON"),
-            ("index.php", "PHP"),
-            ("tool.py", "Python"),
-            ("Gemfile", "Ruby"),
-            ("lib.rs", "Rust"),
-            ("build.sc", "Scala"),
-            ("view.tsx", "TypeScript"),
+            ("build.sh", "bash"),
+            ("main.c", "c"),
+            ("Program.cs", "csharp"),
+            ("main.cpp", "cpp"),
+            ("app.css", "css"),
+            ("mix.exs", "elixir"),
+            ("main.go", "go"),
+            ("Main.hs", "haskell"),
+            ("index.html", "html"),
+            ("Main.java", "java"),
+            ("app.jsx", "javascript"),
+            ("data.json", "json"),
+            ("index.php", "php"),
+            ("tool.py", "python"),
+            ("Gemfile", "ruby"),
+            ("lib.rs", "rust"),
+            ("build.sc", "scala"),
+            ("view.tsx", "typescript"),
         ] {
             assert_eq!(language_name_for_path(Path::new(path)).as_deref(), Some(canonical));
             assert!(
@@ -1219,8 +1219,8 @@ mod tests {
 
     #[test]
     fn test_ts_language_resolution_prefers_explicit_name_then_path() {
-        assert_eq!(canonical_language_name("Python 3").as_deref(), Some("Python"));
-        assert_eq!(language_name_for_path(Path::new("main.rs")).as_deref(), Some("Rust"));
+        assert_eq!(canonical_language_name("Python 3").as_deref(), Some("python"));
+        assert_eq!(language_name_for_path(Path::new("main.rs")).as_deref(), Some("rust"));
         assert!(resolve_ts_language(Some("Plain Text"), Some(Path::new("main.rs"))).is_some());
     }
 
@@ -1231,14 +1231,14 @@ mod tests {
 
     #[test]
     fn syntax_feature_availability_uses_language_and_document_mode() {
-        let normal = syntax_feature_availability(Some("Rust"), None, DocumentMode::Normal);
+        let normal = syntax_feature_availability(Some("rust"), None, DocumentMode::Normal);
         assert!(normal.syntax_spans);
         assert!(normal.semantic_motions);
         assert!(normal.line_comments);
         assert!(normal.block_comments);
         assert!(normal.reindent);
 
-        let vlf = syntax_feature_availability(Some("Rust"), None, DocumentMode::Vlf);
+        let vlf = syntax_feature_availability(Some("rust"), None, DocumentMode::Vlf);
         assert!(vlf.syntax_spans);
         assert!(vlf.semantic_motions);
         assert!(!vlf.line_comments);
@@ -1246,7 +1246,7 @@ mod tests {
         assert!(!vlf.reindent);
 
         let constrained =
-            syntax_feature_availability(Some("Rust"), None, DocumentMode::ConstrainedNormal);
+            syntax_feature_availability(Some("rust"), None, DocumentMode::ConstrainedNormal);
         assert!(constrained.syntax_spans);
         assert!(constrained.semantic_motions);
         assert!(constrained.line_comments);
@@ -1286,7 +1286,7 @@ mod tests {
     fn visible_syntax_spans_highlights_only_supplied_lines() {
         let _guard = runtime_loader_test_guard();
         let src = "fn main() {\n    let answer = 42;\n}\n";
-        let spans = visible_syntax_spans("Rust", src, test_visible_syntax_limits());
+        let spans = visible_syntax_spans("rust", src, test_visible_syntax_limits());
 
         assert_eq!(spans.len(), 4);
         assert!(spans[0].iter().any(|span| span.scope == "keyword.control"));
@@ -1299,9 +1299,9 @@ mod tests {
         let _guard = runtime_loader_test_guard();
         crate::runtime_loader::ensure_default_runtime_loader_has_test_grammars();
         crate::runtime_loader::with_default_runtime_loader_mut(|loader| {
-            loader.invalidate_language("Rust");
+            loader.invalidate_language("rust");
             loader.record_query_artifact(
-                "Rust",
+                "rust",
                 crate::runtime_loader::RuntimeQueryKind::Injections,
                 String::from(
                     "((string_content) @injection.content (#set! injection.language \"Rust\"))",
@@ -1312,7 +1312,7 @@ mod tests {
         });
 
         let src = "let query = \"fn main() {}\";\n";
-        let spans = visible_syntax_spans("Rust", src, test_visible_syntax_limits());
+        let spans = visible_syntax_spans("rust", src, test_visible_syntax_limits());
 
         assert!(spans[0].iter().any(|span| {
             span.scope == "keyword.control" && span.start_byte >= 13 && span.end_byte <= 15
@@ -1322,7 +1322,7 @@ mod tests {
             assert!(
                 loader
                     .cached_query_artifact(
-                        "Rust",
+                        "rust",
                         crate::runtime_loader::RuntimeQueryKind::Highlights
                     )
                     .is_none()
@@ -1330,17 +1330,17 @@ mod tests {
             assert!(
                 loader
                     .cached_query_artifact(
-                        "Rust",
+                        "rust",
                         crate::runtime_loader::RuntimeQueryKind::Injections
                     )
                     .is_some()
             );
             assert!(
                 loader
-                    .cached_query_artifact("Rust", crate::runtime_loader::RuntimeQueryKind::Locals)
+                    .cached_query_artifact("rust", crate::runtime_loader::RuntimeQueryKind::Locals)
                     .is_none()
             );
-            loader.invalidate_language("Rust");
+            loader.invalidate_language("rust");
         });
     }
 
@@ -1348,7 +1348,7 @@ mod tests {
     fn visible_syntax_spans_does_not_warm_runtime_queries() {
         let _guard = runtime_loader_test_guard();
         let spans = visible_syntax_spans(
-            "Rust",
+            "rust",
             "fn main() {\n    let answer = 42;\n}\n",
             test_visible_syntax_limits(),
         );
@@ -1358,7 +1358,7 @@ mod tests {
             assert!(
                 loader
                     .cached_query_artifact(
-                        "Rust",
+                        "rust",
                         crate::runtime_loader::RuntimeQueryKind::Highlights
                     )
                     .is_none()
@@ -1366,14 +1366,14 @@ mod tests {
             assert!(
                 loader
                     .cached_query_artifact(
-                        "Rust",
+                        "rust",
                         crate::runtime_loader::RuntimeQueryKind::Injections
                     )
                     .is_none()
             );
             assert!(
                 loader
-                    .cached_query_artifact("Rust", crate::runtime_loader::RuntimeQueryKind::Locals)
+                    .cached_query_artifact("rust", crate::runtime_loader::RuntimeQueryKind::Locals)
                     .is_none()
             );
         });
@@ -1406,11 +1406,11 @@ mod tests {
 
         let _guard = RuntimeLoaderOverrideGuard::install(overrides);
         crate::runtime_loader::with_default_runtime_loader_mut(|loader| {
-            loader.invalidate_language("Rust");
-            loader.invalidate_language("JavaScript");
-            loader.invalidate_language("TypeScript");
+            loader.invalidate_language("rust");
+            loader.invalidate_language("javascript");
+            loader.invalidate_language("typescript");
             loader.record_query_artifact(
-                "Rust",
+                "rust",
                 crate::runtime_loader::RuntimeQueryKind::Injections,
                 String::from(
                     "((string_content) @injection.content (#set! injection.language \"javascript\"))",
@@ -1421,7 +1421,7 @@ mod tests {
         });
 
         let src = "let query = \"let value: string = 1;\";\n";
-        let spans = visible_syntax_spans("Rust", src, test_visible_syntax_limits());
+        let spans = visible_syntax_spans("rust", src, test_visible_syntax_limits());
 
         assert!(spans[0].iter().any(|span| {
             span.scope == "entity.name.type" && span.start_byte >= 24 && span.end_byte <= 30
@@ -1431,7 +1431,7 @@ mod tests {
     #[test]
     fn indentation_levels_returns_none_when_parse_budget_is_zero() {
         let src = "fn main() {\nlet x = 1;\n}\n";
-        assert!(indentation_levels_for_text_with_timeout("Rust", src, 2, Duration::ZERO).is_none());
+        assert!(indentation_levels_for_text_with_timeout("rust", src, 2, Duration::ZERO).is_none());
     }
 
     // --------------------------------------------------
@@ -1505,21 +1505,21 @@ mod tests {
     #[test]
     fn test_indentation_levels_python() {
         let src = "def foo():\n    x = 1\n";
-        let levels = indentation_levels_for_text("Python", src, 1).unwrap();
+        let levels = indentation_levels_for_text("python", src, 1).unwrap();
         assert_eq!(levels, vec![0, 1]);
     }
 
     #[test]
     fn indentation_levels_dedent_rust_closing_brace() {
         let src = "fn main() {\nlet x = 1;\n}\n";
-        let levels = indentation_levels_for_text("Rust", src, 2).unwrap();
+        let levels = indentation_levels_for_text("rust", src, 2).unwrap();
         assert_eq!(levels, vec![0, 1, 0]);
     }
 
     #[test]
     fn indentation_levels_dedent_python_else_clause() {
         let src = "if ready:\nprint(\"yes\")\nelse:\nprint(\"no\")\n";
-        let levels = indentation_levels_for_text("Python", src, 3).unwrap();
+        let levels = indentation_levels_for_text("python", src, 3).unwrap();
         assert_eq!(levels, vec![0, 1, 0, 1]);
     }
 

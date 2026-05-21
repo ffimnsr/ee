@@ -2471,6 +2471,9 @@ impl App {
     }
 
     fn ensure_editable_selections(&mut self) -> Result<Vec<SelectionRange>, String> {
+        self.backend
+            .sync_pending_events()
+            .map_err(|err| format!("selection preview failed: {err}"))?;
         let mut selections = self
             .backend
             .selections_preview()
@@ -2481,6 +2484,9 @@ impl App {
             if !self.select_chars_from_cursor(1) {
                 return Err(String::from("no selection available"));
             }
+            self.backend
+                .sync_pending_events()
+                .map_err(|err| format!("selection preview failed: {err}"))?;
             selections = self
                 .backend
                 .selections_preview()
@@ -2705,12 +2711,24 @@ impl App {
         Ok(())
     }
 
+    fn shell_working_dir(&self) -> PathBuf {
+        self.backend
+            .active()
+            .path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .filter(|path| path.is_dir())
+            .or_else(|| self.working_dir.is_dir().then(|| self.working_dir.clone()))
+            .unwrap_or_else(std::env::temp_dir)
+    }
+
     fn run_shell_command_on_selections(
         &mut self,
         command: &str,
         mode: ShellSelectionMode,
     ) -> Result<String, String> {
-        let cwd = std::env::current_dir().map_err(|err| format!("shell failed: {err}"))?;
+        let cwd = self.shell_working_dir();
         let selections = self.ensure_editable_selections()?;
         let buffer_text = self.current_buffer_text();
 
@@ -2747,6 +2765,7 @@ impl App {
                 for (selection, output) in selections.iter().zip(outputs.iter()).rev() {
                     self.replace_range_with_text(selection.clone(), output)?;
                 }
+                self.backend.sync_pending_events().map_err(|err| format!("pipe failed: {err}"))?;
                 self.push_change();
                 Ok(format!("pipe: {} selection(s)", selections.len()))
             }
@@ -2757,6 +2776,9 @@ impl App {
                 for (selection, output) in selections.iter().zip(outputs.iter()).rev() {
                     self.insert_at_offset(selection.start.min(selection.end), output)?;
                 }
+                self.backend
+                    .sync_pending_events()
+                    .map_err(|err| format!("shell_insert_output failed: {err}"))?;
                 self.push_change();
                 Ok(format!("shell_insert_output: {} selection(s)", selections.len()))
             }
@@ -2764,6 +2786,9 @@ impl App {
                 for (selection, output) in selections.iter().zip(outputs.iter()).rev() {
                     self.insert_at_offset(selection.start.max(selection.end), output)?;
                 }
+                self.backend
+                    .sync_pending_events()
+                    .map_err(|err| format!("shell_append_output failed: {err}"))?;
                 self.push_change();
                 Ok(format!("shell_append_output: {} selection(s)", selections.len()))
             }
@@ -2773,6 +2798,9 @@ impl App {
                 }
                 self.backend
                     .set_selections(&kept)
+                    .map_err(|err| format!("shell_keep_pipe failed: {err}"))?;
+                self.backend
+                    .sync_pending_events()
                     .map_err(|err| format!("shell_keep_pipe failed: {err}"))?;
                 Ok(format!("shell_keep_pipe: {} selection(s)", kept.len()))
             }
@@ -3780,13 +3808,7 @@ impl App {
     }
 
     fn run_terminal_command(&mut self, command: crate::terminal::TerminalCommand) {
-        let cwd = match std::env::current_dir() {
-            Ok(path) => path,
-            Err(err) => {
-                self.backend.status_message = Some(format!("shell failed: {err}"));
-                return;
-            }
-        };
+        let cwd = self.shell_working_dir();
 
         match crate::terminal::run_command(&command, &cwd) {
             Ok(result) => {

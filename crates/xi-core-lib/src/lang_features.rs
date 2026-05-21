@@ -356,7 +356,7 @@ mod tests {
 
     #[test]
     fn test_line_comment_token_rust() {
-        assert_eq!(line_comment_token("Rust"), Some("//"));
+        assert_eq!(line_comment_token("rust"), Some("//"));
     }
 
     #[test]
@@ -392,7 +392,7 @@ mod tests {
         assert!(!language_supports_reindent("JSON"));
         assert!(language_supports_reindent("TypeScript"));
         assert!(language_supports_reindent("tsx"));
-        assert!(language_supports_reindent("Rust"));
+        assert!(language_supports_reindent("rust"));
         assert!(language_supports_reindent("Python"));
         assert!(!language_supports_reindent("HTML"));
         assert!(!language_supports_reindent("Ruby"));
@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn test_reindent_rust_uses_tree_sitter_levels() {
         let text = rope("fn main() {\nlet value = 1;\n}\n");
-        let delta = reindent(&text, &[(0usize, 2usize)], "Rust", "    ").unwrap();
+        let delta = reindent(&text, &[(0usize, 2usize)], "rust", "    ").unwrap();
         let result = apply_delta(text, delta);
         assert_eq!(result, "fn main() {\n    let value = 1;\n}\n");
     }
@@ -441,7 +441,7 @@ mod tests {
     fn test_toggle_comment_add() {
         let text = rope("fn main() {\n    let x = 1;\n}\n");
         let line_ranges = vec![(0usize, 0usize)];
-        let delta = toggle_comment(&text, &line_ranges, "Rust").unwrap();
+        let delta = toggle_comment(&text, &line_ranges, "rust").unwrap();
         let result = apply_delta(text, delta);
         assert!(result.starts_with("// fn main()"), "got: {result:?}");
     }
@@ -450,7 +450,7 @@ mod tests {
     fn test_toggle_comment_remove() {
         let text = rope("// fn main() {\n    let x = 1;\n}\n");
         let line_ranges = vec![(0usize, 0usize)];
-        let delta = toggle_comment(&text, &line_ranges, "Rust").unwrap();
+        let delta = toggle_comment(&text, &line_ranges, "rust").unwrap();
         let result = apply_delta(text, delta);
         assert!(result.starts_with("fn main()"), "got: {result:?}");
     }
@@ -460,7 +460,7 @@ mod tests {
         // Indented line: comment token should go after the whitespace.
         let text = rope("    let x = 1;\n");
         let line_ranges = vec![(0usize, 0usize)];
-        let delta = toggle_comment(&text, &line_ranges, "Rust").unwrap();
+        let delta = toggle_comment(&text, &line_ranges, "rust").unwrap();
         let result = apply_delta(text, delta);
         assert_eq!(result, "    // let x = 1;\n");
     }
@@ -469,7 +469,7 @@ mod tests {
     fn test_toggle_comment_multiline_all_commented_removes() {
         let text = rope("// a\n// b\n// c\n");
         let line_ranges = vec![(0usize, 2usize)];
-        let delta = toggle_comment(&text, &line_ranges, "Rust").unwrap();
+        let delta = toggle_comment(&text, &line_ranges, "rust").unwrap();
         let result = apply_delta(text, delta);
         assert_eq!(result, "a\nb\nc\n");
     }
@@ -479,7 +479,7 @@ mod tests {
         // Mixed: not all commented → add to all.
         let text = rope("// a\nb\n");
         let line_ranges = vec![(0usize, 1usize)];
-        let delta = toggle_comment(&text, &line_ranges, "Rust").unwrap();
+        let delta = toggle_comment(&text, &line_ranges, "rust").unwrap();
         let result = apply_delta(text, delta);
         // Line 0 is already commented, line 1 should get a comment added.
         assert!(result.contains("// b"), "got: {result:?}");

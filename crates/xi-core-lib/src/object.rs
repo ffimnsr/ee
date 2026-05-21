@@ -845,7 +845,7 @@ mod tests {
 
     fn rust_region(source: &str, needle: &str) -> SelRegion {
         let mut parser = Parser::new();
-        let language = ts_language_for_name("Rust").unwrap();
+        let language = ts_language_for_name("rust").unwrap();
         parser.set_language(&language).unwrap();
         let tree = parser.parse(source, None).unwrap();
         let start = source.find(needle).unwrap();
@@ -865,7 +865,7 @@ mod tests {
             &text,
             &current,
             &mut history,
-            "Rust",
+            "rust",
             None,
             SyntaxSelectionAction::Expand,
         )
@@ -879,7 +879,7 @@ mod tests {
             &text,
             &expanded,
             &mut history,
-            "Rust",
+            "rust",
             None,
             SyntaxSelectionAction::Shrink,
         )
@@ -899,7 +899,7 @@ mod tests {
             &text,
             &current,
             &mut history,
-            "Rust",
+            "rust",
             None,
             SyntaxSelectionAction::SelectNextSibling,
         )
@@ -913,7 +913,7 @@ mod tests {
             &text,
             &current,
             &mut history,
-            "Rust",
+            "rust",
             None,
             SyntaxSelectionAction::SelectPrevSibling,
         )
@@ -935,7 +935,7 @@ mod tests {
             &text,
             &current,
             &mut history,
-            "Rust",
+            "rust",
             None,
             SyntaxSelectionAction::SelectAllSiblings,
         )
@@ -966,7 +966,7 @@ mod tests {
             &text,
             &current,
             &mut history,
-            "Rust",
+            "rust",
             None,
             SyntaxSelectionAction::SelectAllChildren,
         )
@@ -1031,7 +1031,7 @@ mod tests {
             &text,
             &current,
             &mut history,
-            "Rust",
+            "rust",
             None,
             SyntaxSelectionAction::MoveParentNodeStart,
         )
@@ -1045,7 +1045,7 @@ mod tests {
             &text,
             &current,
             &mut history,
-            "Rust",
+            "rust",
             None,
             SyntaxSelectionAction::MoveParentNodeEnd,
         )
@@ -1064,7 +1064,7 @@ mod tests {
         let next = apply_syntax_navigation(
             &text,
             &caret(source.find("alpha").unwrap()),
-            "Rust",
+            "rust",
             None,
             SyntaxNavigationAction::new(SyntaxNavigationTarget::Function, true),
         )
@@ -1074,7 +1074,7 @@ mod tests {
         let prev = apply_syntax_navigation(
             &text,
             &caret(source.find("gamma").unwrap()),
-            "Rust",
+            "rust",
             None,
             SyntaxNavigationAction::new(SyntaxNavigationTarget::Function, false),
         )
@@ -1090,7 +1090,7 @@ mod tests {
         let next = apply_syntax_navigation(
             &text,
             &caret(source.find("Alpha").unwrap()),
-            "Rust",
+            "rust",
             None,
             SyntaxNavigationAction::new(SyntaxNavigationTarget::Class, true),
         )
@@ -1100,7 +1100,7 @@ mod tests {
         let prev = apply_syntax_navigation(
             &text,
             &caret(source.find("trait Gamma").unwrap()),
-            "Rust",
+            "rust",
             None,
             SyntaxNavigationAction::new(SyntaxNavigationTarget::Class, false),
         )
@@ -1116,7 +1116,7 @@ mod tests {
         let next = apply_syntax_navigation(
             &text,
             &caret(source.find("first").unwrap()),
-            "Rust",
+            "rust",
             None,
             SyntaxNavigationAction::new(SyntaxNavigationTarget::Parameter, true),
         )
@@ -1126,7 +1126,7 @@ mod tests {
         let prev = apply_syntax_navigation(
             &text,
             &caret(source.find("third").unwrap()),
-            "Rust",
+            "rust",
             None,
             SyntaxNavigationAction::new(SyntaxNavigationTarget::Parameter, false),
         )
@@ -1142,7 +1142,7 @@ mod tests {
         let next = apply_syntax_navigation(
             &text,
             &caret(0),
-            "Rust",
+            "rust",
             None,
             SyntaxNavigationAction::new(SyntaxNavigationTarget::Comment, true),
         )
@@ -1152,7 +1152,7 @@ mod tests {
         let prev = apply_syntax_navigation(
             &text,
             &caret(source.find("// gamma").unwrap()),
-            "Rust",
+            "rust",
             None,
             SyntaxNavigationAction::new(SyntaxNavigationTarget::Comment, false),
         )
@@ -1168,7 +1168,7 @@ mod tests {
         let next = apply_syntax_navigation(
             &text,
             &caret(source.find("alpha").unwrap()),
-            "Rust",
+            "rust",
             None,
             SyntaxNavigationAction::new(SyntaxNavigationTarget::Test, true),
         )
@@ -1178,7 +1178,7 @@ mod tests {
         let prev = apply_syntax_navigation(
             &text,
             &caret(source.find("beta").unwrap()),
-            "Rust",
+            "rust",
             None,
             SyntaxNavigationAction::new(SyntaxNavigationTarget::Test, false),
         )
@@ -1269,7 +1269,7 @@ mod tests {
             &source[..source.find("fn beta").unwrap()],
             0,
             &current,
-            "Rust",
+            "rust",
             None,
             SyntaxNavigationAction::new(SyntaxNavigationTarget::Function, true),
         )
@@ -1291,7 +1291,7 @@ mod tests {
             base,
             &current,
             &mut history,
-            "Rust",
+            "rust",
             None,
             SyntaxSelectionAction::SelectAllChildren,
         )
@@ -1315,7 +1315,7 @@ mod tests {
             0,
             &current,
             &mut history,
-            "Rust",
+            "rust",
             None,
             SyntaxSelectionAction::Expand,
         )

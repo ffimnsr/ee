@@ -231,11 +231,6 @@ fn scratch_title_is_default() {
 }
 
 #[test]
-fn runtime_cli_build_and_fetch_do_not_trust_workspace_overrides() {
-    assert!(!crate::runtime_workspace_trusted_for_cli_build_fetch());
-}
-
-#[test]
 fn ctrl_c_quits() {
     let mut app = App::from_path(None).unwrap();
 
@@ -358,6 +353,16 @@ fn cli_utility_commands_live_under_do() {
         Some(crate::Commands::Do { command: crate::DoCommands::Doctor })
     ));
 
+    let cli =
+        crate::Cli::try_parse_from(["ee", "do", "language", "list", "--dir", "sample"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Language { command: crate::LanguageCommands::List { .. } }
+        })
+    ));
+
     let cli = crate::Cli::try_parse_from([
         "ee",
         "do",
@@ -365,7 +370,7 @@ fn cli_utility_commands_live_under_do() {
         "--file",
         "sample.rs",
         "--language",
-        "Rust",
+        "rust",
     ])
     .unwrap();
 
@@ -389,7 +394,29 @@ fn cli_utility_commands_live_under_do() {
         cli.command,
         Some(crate::Commands::Do {
             command: crate::DoCommands::Runtime {
-                command: Some(crate::RuntimeCommands::Fetch { all: true, .. }),
+                command: Some(crate::RuntimeCommands::Fetch {
+                    all: true,
+                    trust_workspace: false,
+                    ..
+                }),
+                ..
+            }
+        })
+    ));
+
+    let cli =
+        crate::Cli::try_parse_from(["ee", "do", "runtime", "fetch", "--all", "--trust-workspace"])
+            .unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Runtime {
+                command: Some(crate::RuntimeCommands::Fetch {
+                    all: true,
+                    trust_workspace: true,
+                    ..
+                }),
                 ..
             }
         })
@@ -401,7 +428,7 @@ fn cli_utility_commands_live_under_do() {
         "runtime",
         "build",
         "--language",
-        "Rust",
+        "rust",
         "--output-root",
         "target/runtime",
         "--skip-load",
@@ -412,7 +439,32 @@ fn cli_utility_commands_live_under_do() {
         cli.command,
         Some(crate::Commands::Do {
             command: crate::DoCommands::Runtime {
-                command: Some(crate::RuntimeCommands::Build { skip_load: true, .. }),
+                command: Some(crate::RuntimeCommands::Build {
+                    skip_load: true,
+                    trust_workspace: false,
+                    ..
+                }),
+                ..
+            }
+        })
+    ));
+
+    let cli = crate::Cli::try_parse_from([
+        "ee",
+        "do",
+        "runtime",
+        "build",
+        "--language",
+        "rust",
+        "--trust-workspace",
+    ])
+    .unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Runtime {
+                command: Some(crate::RuntimeCommands::Build { trust_workspace: true, .. }),
                 ..
             }
         })
@@ -534,12 +586,12 @@ fn file_head_keeps_partial_last_line_without_trailing_newline() {
 #[test]
 fn runtime_report_renders_resolution_and_query_health() {
     let report = RuntimeHealthReport {
-        requested_language: Some(String::from("Rust")),
+        requested_language: Some(String::from("C++")),
         requested_injection_language: None,
         file_path: Some(PathBuf::from("sample.rs")),
         detection_source: Some(RuntimeLanguageDetectionSource::Explicit),
-        language_id: Some(String::from("Rust")),
-        display_name: Some(String::from("Rust")),
+        language_id: Some(String::from("C++")),
+        display_name: Some(String::from("C++")),
         injection_match: None,
         asset_source: None,
         effective_runtime_root: Some(PathBuf::from("/runtime")),
@@ -565,7 +617,8 @@ fn runtime_report_renders_resolution_and_query_health() {
     };
 
     let rendered = crate::render_runtime_report(&report);
-    assert!(rendered.contains("resolved language: Rust [Rust] via explicit"));
+    assert!(rendered.contains("requested language: cpp"));
+    assert!(rendered.contains("resolved language: cpp [cpp] via explicit"));
     assert!(rendered.contains("grammar: loaded"));
     assert!(rendered.contains("highlights  loaded"));
     assert!(rendered.contains("indents     missing"));
@@ -575,12 +628,12 @@ fn runtime_report_renders_resolution_and_query_health() {
 #[test]
 fn runtime_report_exit_code_classifies_runtime_failures() {
     let mut healthy = RuntimeHealthReport {
-        requested_language: Some(String::from("Rust")),
+        requested_language: Some(String::from("rust")),
         requested_injection_language: None,
         file_path: None,
         detection_source: Some(RuntimeLanguageDetectionSource::Explicit),
-        language_id: Some(String::from("Rust")),
-        display_name: Some(String::from("Rust")),
+        language_id: Some(String::from("rust")),
+        display_name: Some(String::from("rust")),
         injection_match: None,
         asset_source: None,
         effective_runtime_root: None,
@@ -594,7 +647,7 @@ fn runtime_report_exit_code_classifies_runtime_failures() {
     healthy.language_id = None;
     assert_eq!(crate::runtime_report_exit_code(&healthy), crate::EXIT_RUNTIME_CONFIG_MERGE);
 
-    healthy.language_id = Some(String::from("Rust"));
+    healthy.language_id = Some(String::from("rust"));
     healthy.grammar_status = RuntimeGrammarHealth::Missing;
     assert_eq!(crate::runtime_report_exit_code(&healthy), crate::EXIT_RUNTIME_ASSET);
 
@@ -614,11 +667,11 @@ fn runtime_report_renders_injection_resolution() {
         requested_injection_language: Some(String::from("tsx")),
         file_path: None,
         detection_source: None,
-        language_id: Some(String::from("TypeScript")),
-        display_name: Some(String::from("TypeScript")),
+        language_id: Some(String::from("C#")),
+        display_name: Some(String::from("C#")),
         injection_match: Some(xi_core_lib::runtime_loader::RuntimeInjectionMatch {
-            canonical_id: String::from("TypeScript"),
-            display_name: String::from("TypeScript"),
+            canonical_id: String::from("C#"),
+            display_name: String::from("C#"),
         }),
         asset_source: None,
         effective_runtime_root: None,
@@ -630,31 +683,45 @@ fn runtime_report_renders_injection_resolution() {
 
     let rendered = crate::render_runtime_report(&report);
     assert!(rendered.contains("requested injection language: tsx"));
-    assert!(rendered.contains("injection language: TypeScript [TypeScript]"));
+    assert!(rendered.contains("injection language: csharp [csharp]"));
 }
 
 #[test]
 fn runtime_languages_report_renders_effective_rows() {
-    let rendered = crate::render_runtime_languages_report(&[crate::EffectiveRuntimeLanguageRow {
-        canonical_id: String::from("Rust"),
-        display_name: String::from("Rust"),
+    let row = crate::EffectiveRuntimeLanguageRow {
+        canonical_id: String::from("C#"),
+        display_name: String::from("C#"),
         asset_source: String::from("Bundled"),
+        fetch_status: String::from("bundled"),
+        grammar_status: String::from("loaded"),
+        query_status: String::from("loaded 4, missing 0, unsupported 4, errors 0"),
         file_types: vec![String::from("rs")],
         globs: vec![String::from("*.rs.in")],
         shebangs: Vec::new(),
-        query_language: String::from("Rust"),
+        query_language: String::from("C++"),
         scope: Some(String::from("source.rust")),
         grammar_library: Some(String::from("tree-sitter-rust")),
         grammar_symbol: Some(String::from("tree_sitter_rust")),
         grammar_source: Some(String::from("crate tree-sitter-rust@0.23.0")),
         injection_regex: Some(String::from("^(rust|rs)$")),
         match_priority: 10,
-    }]);
+    };
 
-    assert!(rendered.contains("ee do runtime languages"));
-    assert!(rendered.contains("Rust [Rust]"));
-    assert!(rendered.contains("grammar source: crate tree-sitter-rust@0.23.0"));
-    assert!(rendered.contains("injection regex: ^(rust|rs)$"));
+    let runtime_rendered = crate::render_runtime_languages_report(
+        "ee do runtime languages",
+        std::slice::from_ref(&row),
+    );
+    assert!(runtime_rendered.contains("ee do runtime languages"));
+    assert!(runtime_rendered.contains("csharp [csharp]"));
+    assert!(runtime_rendered.contains("fetch status: bundled"));
+    assert!(runtime_rendered.contains("grammar status: loaded"));
+    assert!(runtime_rendered.contains("queries: loaded 4, missing 0, unsupported 4, errors 0"));
+    assert!(runtime_rendered.contains("query language: cpp"));
+    assert!(runtime_rendered.contains("grammar source: crate tree-sitter-rust@0.23.0"));
+    assert!(runtime_rendered.contains("injection regex: ^(rust|rs)$"));
+
+    let language_rendered = crate::render_runtime_languages_report("ee do language list", &[row]);
+    assert!(language_rendered.contains("ee do language list"));
 }
 
 #[test]
@@ -6840,12 +6907,12 @@ fn language_encoding_echo_register_and_redraw_commands_update_state() {
     run_ex(&mut app, "set_language rust");
     assert_eq!(
         app.syntax_overrides.get(&app.backend.active().id).map(String::as_str),
-        Some("Rust")
+        Some("rust")
     );
-    assert_eq!(app.backend.status_message.as_deref(), Some("language: Rust"));
+    assert_eq!(app.backend.status_message.as_deref(), Some("language: rust"));
 
     run_ex(&mut app, "set_language");
-    assert_eq!(app.backend.status_message.as_deref(), Some("language: Rust"));
+    assert_eq!(app.backend.status_message.as_deref(), Some("language: rust"));
 
     run_ex(&mut app, "encoding utf-16");
     assert_eq!(app.config.charset, "utf-16");
@@ -7002,19 +7069,68 @@ fn pipe_commands_transform_and_filter_selections() {
     app.backend.pump().unwrap();
 
     app.backend.set_selections(&[SelectionRange { start: 0, end: 2 }]).unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "initial pipe selection",
+        Duration::from_secs(2),
+        |backend| {
+            backend.annotations.iter().any(|annotation| {
+                annotation.annotation_type == "selection"
+                    && annotation.ranges.as_slice() == [[0, 0, 0, 2]]
+            })
+        },
+    );
     run_ex(&mut app, "| tr a-z A-Z");
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "pipe replace output",
+        Duration::from_secs(2),
+        |backend| backend.lines.as_slice() == [String::from("AB")],
+    );
     assert_eq!(app.backend.lines, vec![String::from("AB")]);
 
     app.backend.set_selections(&[SelectionRange { start: 0, end: 1 }]).unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "insert-output selection",
+        Duration::from_secs(2),
+        |backend| {
+            backend.annotations.iter().any(|annotation| {
+                annotation.annotation_type == "selection"
+                    && annotation.ranges.as_slice() == [[0, 0, 0, 1]]
+            })
+        },
+    );
     run_ex(&mut app, "shell_insert_output printf x");
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "insert-output text",
+        Duration::from_secs(2),
+        |backend| backend.lines.as_slice() == [String::from("xAB")],
+    );
     assert_eq!(app.backend.lines, vec![String::from("xAB")]);
 
     app.backend
         .set_selections(&[SelectionRange { start: 0, end: 1 }, SelectionRange { start: 1, end: 2 }])
         .unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "keep-pipe selections",
+        Duration::from_secs(2),
+        |backend| {
+            backend.annotations.iter().any(|annotation| {
+                annotation.annotation_type == "selection"
+                    && annotation.ranges.as_slice() == [[0, 0, 0, 1], [0, 1, 0, 2]]
+            })
+        },
+    );
     run_ex(&mut app, "shell_keep_pipe grep -q x");
+    wait_until_with_backend(
+        &mut app.backend,
+        "keep-pipe filtered text",
+        Duration::from_secs(2),
+        |backend| backend.selected_text_preview(false).ok().as_deref() == Some("x"),
+    );
     let kept = app.backend.selected_text_preview(false).unwrap();
     assert_eq!(kept, "x");
 }
@@ -7028,15 +7144,77 @@ fn pipe_to_and_append_output_commands_run_shell_without_replacing_buffer() {
     insert_text(&mut app, "abc");
     app.backend.pump().unwrap();
     app.backend.set_selections(&[SelectionRange { start: 0, end: 3 }]).unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "pipe-to selection",
+        Duration::from_secs(2),
+        |backend| {
+            backend.annotations.iter().any(|annotation| {
+                annotation.annotation_type == "selection"
+                    && annotation.ranges.as_slice() == [[0, 0, 0, 3]]
+            })
+        },
+    );
 
     run_ex(&mut app, &format!("pipe_to cat > {}", output.display()));
     assert_eq!(fs::read_to_string(&output).unwrap(), "abc");
     assert_eq!(app.backend.lines, vec![String::from("abc")]);
 
     app.backend.set_selections(&[SelectionRange { start: 1, end: 2 }]).unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "append-output selection",
+        Duration::from_secs(2),
+        |backend| {
+            backend.annotations.iter().any(|annotation| {
+                annotation.annotation_type == "selection"
+                    && annotation.ranges.as_slice() == [[0, 1, 0, 2]]
+            })
+        },
+    );
     run_ex(&mut app, "shell_append_output printf z");
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "append-output text",
+        Duration::from_secs(2),
+        |backend| backend.lines.as_slice() == [String::from("abzc")],
+    );
     assert_eq!(app.backend.lines, vec![String::from("abzc")]);
+}
+
+#[test]
+fn shell_selection_commands_use_app_working_dir_not_process_cwd() {
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    let deleted_cwd = tempfile::tempdir().unwrap();
+
+    let mut app = App::from_path(None).unwrap();
+    insert_text(&mut app, "a");
+    app.backend.pump().unwrap();
+    app.backend.set_selections(&[SelectionRange { start: 0, end: 1 }]).unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "stable shell selection",
+        Duration::from_secs(2),
+        |backend| {
+            backend.annotations.iter().any(|annotation| {
+                annotation.annotation_type == "selection"
+                    && annotation.ranges.as_slice() == [[0, 0, 0, 1]]
+            })
+        },
+    );
+
+    env::set_current_dir(deleted_cwd.path()).unwrap();
+    drop(deleted_cwd);
+
+    run_ex(&mut app, "shell_append_output printf b");
+    wait_until_with_backend(
+        &mut app.backend,
+        "stable shell output",
+        Duration::from_secs(2),
+        |backend| backend.lines.as_slice() == [String::from("ab")],
+    );
+    assert_eq!(app.backend.lines, vec![String::from("ab")]);
 }
 
 #[test]

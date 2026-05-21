@@ -200,10 +200,10 @@ mod tests {
     #[test]
     fn syntax_name_for_path_uses_core_registry() {
         let hl = make_highlighter();
-        assert_eq!(hl.syntax_name_for_path(Some(&PathBuf::from("main.rs"))), Some("Rust".into()));
+        assert_eq!(hl.syntax_name_for_path(Some(&PathBuf::from("main.rs"))), Some("rust".into()));
         assert_eq!(
             hl.syntax_name_for_path(Some(&PathBuf::from("component.tsx"))),
-            Some("TypeScript".into())
+            Some("typescript".into())
         );
         assert_eq!(hl.syntax_name_for_path(Some(&PathBuf::from("notes.txt"))), None);
     }

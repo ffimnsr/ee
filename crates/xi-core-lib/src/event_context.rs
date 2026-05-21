@@ -3671,7 +3671,7 @@ mod tests {
         harness.take_notifications();
 
         let mut ctx = harness.make_context();
-        ctx.language_changed(&LanguageId::from("Rust"));
+        ctx.language_changed(&LanguageId::from("rust"));
 
         let notifications = harness.take_notifications();
         assert!(notifications.iter().any(|(method, _)| method == "language_changed"));
@@ -3938,7 +3938,7 @@ mod tests {
     fn toggle_line_comment_edits_current_line() {
         let harness = ContextHarness::new("fn main() {}\n");
         let mut ctx = harness.make_context();
-        ctx.language = LanguageId::from("Rust");
+        ctx.language = LanguageId::from("rust");
 
         ctx.do_edit(EditNotification::ToggleLineComment);
 
@@ -5794,7 +5794,7 @@ mod tests {
         let (harness, _f) = vlf_harness(source);
         harness.take_notifications();
         let mut ctx = harness.make_context();
-        ctx.language = LanguageId::from("Rust");
+        ctx.language = LanguageId::from("rust");
 
         ctx.do_edit(EditNotification::VlfViewport { line_start: 0, line_end: 0, generation: 1 });
         harness.take_notifications();
@@ -5805,7 +5805,7 @@ mod tests {
             let store = editor.vlf_store.as_ref().expect("vlf store");
             let window_range = ctx.current_vlf_semantic_range(store).expect("semantic window");
             let window_text = ctx
-                .current_vlf_semantic_window_text(store, window_range, "Rust", None)
+                .current_vlf_semantic_window_text(store, window_range, "rust", None)
                 .expect("semantic window text");
             assert_eq!(window_text, source);
             assert_eq!(window_range.start.0 as usize, 0);
@@ -5834,7 +5834,7 @@ mod tests {
         let (harness, _f) = vlf_harness(b"fn alpha() {}\nfn beta() {}\n");
         harness.take_notifications();
         let mut ctx = harness.make_context();
-        ctx.language = LanguageId::from("Rust");
+        ctx.language = LanguageId::from("rust");
 
         ctx.do_edit(EditNotification::VlfViewport { line_start: 0, line_end: 0, generation: 1 });
         harness.take_notifications();
@@ -5844,7 +5844,7 @@ mod tests {
             let store = editor.vlf_store.as_ref().expect("vlf store");
             let window_range = ctx.current_vlf_semantic_range(store).expect("semantic window");
             let window_text = ctx
-                .current_vlf_semantic_window_text(store, window_range, "Rust", None)
+                .current_vlf_semantic_window_text(store, window_range, "rust", None)
                 .expect("semantic window text");
             assert_eq!(window_text, "fn alpha() {}\n");
             assert_eq!(window_range.start.0 as usize, 0);
@@ -5872,7 +5872,7 @@ mod tests {
         let (harness, _f) = vlf_harness(b"fn alpha() {}\nfn beta() {}\n");
         harness.take_notifications();
         let mut ctx = harness.make_context();
-        ctx.language = LanguageId::from("Rust");
+        ctx.language = LanguageId::from("rust");
 
         ctx.do_edit(EditNotification::VlfViewport { line_start: 0, line_end: 2, generation: 1 });
         harness.take_notifications();
@@ -5896,7 +5896,7 @@ mod tests {
         let (harness, _f) = vlf_harness(b"fn alpha() { beta(gamma); }\nfn delta() {}\n");
         harness.take_notifications();
         let mut ctx = harness.make_context();
-        ctx.language = LanguageId::from("Rust");
+        ctx.language = LanguageId::from("rust");
 
         ctx.do_edit(EditNotification::VlfViewport { line_start: 0, line_end: 1, generation: 1 });
         harness.take_notifications();

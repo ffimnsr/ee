@@ -81,7 +81,7 @@ impl Config {
                 (
                     "rust".to_owned(),
                     LanguageConfig {
-                        language_name: "Rust".to_owned(),
+                        language_name: "rust".to_owned(),
                         start_command: "rls".to_owned(),
                         start_arguments: Vec::new(),
                         extensions: vec!["rs".to_owned()],
@@ -299,7 +299,7 @@ mod tests {
         let config = Config::bundled();
 
         let rust = config.language_config.get("rust").unwrap();
-        assert_eq!(rust.language_name, "Rust");
+        assert_eq!(rust.language_name, "rust");
         assert_eq!(rust.start_command, "rls");
         assert!(rust.start_arguments.is_empty());
         assert_eq!(rust.extensions, vec!["rs"]);

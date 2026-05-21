@@ -198,6 +198,7 @@ pub(crate) struct App {
     pub(crate) config: crate::config::EditorSettings,
     pub(crate) key_bindings: HashMap<crate::keymap::BindingKey, crate::keymap::Action>,
     pub(crate) key_sequences: crate::keymap::SequenceBindings,
+    pub(crate) working_dir: PathBuf,
     pub(crate) backend: BufferManager,
     pub(crate) tabs: TabManager,
     pub(crate) mode: Mode,
@@ -324,6 +325,7 @@ impl App {
         let lsp_config = crate::config::lsp_config_table_for_file(path.as_deref());
         let key_bindings = crate::keymap::bindings_for(&config.keymap);
         let key_sequences = crate::keymap::sequence_bindings_for(&config.keymap);
+        let working_dir = std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir());
         let mut backend = BufferManager::new_with_initial_config(
             path,
             general_config,
@@ -347,6 +349,7 @@ impl App {
             config,
             key_bindings,
             key_sequences,
+            working_dir,
             backend,
             tabs: TabManager::new(initial_buf_id),
             mode: Mode::Normal,

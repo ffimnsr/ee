@@ -758,7 +758,7 @@ mod tests {
         let rust_config = table_from_toml_str(r#"tab_size = 31"#).unwrap();
 
         let lang_def = rust_lang_def(None);
-        let rust_id: LanguageId = "Rust".into();
+        let rust_id: LanguageId = "rust".into();
 
         let buf_id_1 = BufferId(1); // no language
         let buf_id_2 = BufferId(2); // just rust
@@ -796,14 +796,14 @@ mod tests {
     fn fuzz_apply_user_config_payload_accepts_json_and_toml_tables() {
         ConfigManager::fuzz_apply_user_config_payload(
             0,
-            "Rust",
+            "rust",
             0,
             br#"{"tab_size": 4, "translate_tabs_to_spaces": true}"#,
         );
 
         ConfigManager::fuzz_apply_user_config_payload(
             3,
-            "Rust",
+            "rust",
             1,
             b"tab_size = 8\ntranslate_tabs_to_spaces = false\n",
         );
@@ -895,7 +895,7 @@ translate_tabs_to_spaces = true
         let lang_defaults = json!({"font_size": 69, "font_face": "nice"});
         let lang_overrides = json!({"font_size": 420, "font_face": "cool"});
         let lang_def = rust_lang_def(lang_defaults.as_object().cloned());
-        let lang_id: LanguageId = "Rust".into();
+        let lang_id: LanguageId = "rust".into();
         let domain: ConfigDomain = lang_id.into();
 
         manager.set_languages(Languages::new(std::slice::from_ref(&lang_def)));
@@ -943,7 +943,7 @@ translate_tabs_to_spaces = true
     }
 
     fn rust_lang_def<T: Into<Option<Table>>>(defaults: T) -> LanguageDefinition {
-        LanguageDefinition::simple("Rust", &["rs"], "source.rust", defaults.into())
+        LanguageDefinition::simple("rust", &["rs"], "source.rust", defaults.into())
     }
 
     #[test]

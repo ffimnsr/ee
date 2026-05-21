@@ -2170,7 +2170,10 @@ impl App {
                 } else {
                     match std::env::set_current_dir(PathBuf::from(tail)) {
                         Ok(()) => match std::env::current_dir() {
-                            Ok(path) => format!("cwd: {}", path.display()),
+                            Ok(path) => {
+                                self.working_dir = path.clone();
+                                format!("cwd: {}", path.display())
+                            }
                             Err(err) => format!("cd failed: {err}"),
                         },
                         Err(err) => format!("cd failed: {err}"),
@@ -2178,10 +2181,7 @@ impl App {
                 });
             }
             "show_directory" | "pwd" => {
-                self.backend.status_message = Some(match std::env::current_dir() {
-                    Ok(path) => format!("cwd: {}", path.display()),
-                    Err(err) => format!("pwd failed: {err}"),
-                });
+                self.backend.status_message = Some(format!("cwd: {}", self.working_dir.display()));
             }
             "pipe" | "|" | "shell_pipe" => {
                 self.backend.status_message = Some(if tail.is_empty() {

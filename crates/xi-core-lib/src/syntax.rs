@@ -137,7 +137,7 @@ mod tests {
     #[test]
     pub fn language_for_path() {
         let ld_rust = LanguageDefinition {
-            name: LanguageId::from("Rust"),
+            name: LanguageId::from("rust"),
             extensions: vec![String::from("rs")],
             scope: String::from("source.rust"),
             first_line_match: None,

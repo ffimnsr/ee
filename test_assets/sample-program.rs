@@ -5904,12 +5904,12 @@ fn language_encoding_echo_register_and_redraw_commands_update_state() {
     run_ex(&mut app, "set_language rust");
     assert_eq!(
         app.syntax_overrides.get(&app.backend.active().id).map(String::as_str),
-        Some("Rust")
+        Some("rust")
     );
-    assert_eq!(app.backend.status_message.as_deref(), Some("language: Rust"));
+    assert_eq!(app.backend.status_message.as_deref(), Some("language: rust"));
 
     run_ex(&mut app, "set_language");
-    assert_eq!(app.backend.status_message.as_deref(), Some("language: Rust"));
+    assert_eq!(app.backend.status_message.as_deref(), Some("language: rust"));
 
     run_ex(&mut app, "encoding utf-16");
     assert_eq!(app.config.charset, "utf-16");

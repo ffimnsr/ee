@@ -2127,7 +2127,7 @@ mod tests {
         let (client, peer) = recording_client();
         view.debug_force_rewrap_cols(editor.get_buffer(), 80);
 
-        view.render_if_dirty(editor.get_buffer(), &client, true, "Rust", true);
+        view.render_if_dirty(editor.get_buffer(), &client, true, "rust", true);
         let notifications = peer.take_notifications();
 
         let syntax_refresh = notifications.iter().any(|(method, params)| {
@@ -2179,10 +2179,10 @@ mod tests {
         let baseline_client = Client::new(Box::new(RecordingPeer::default()));
         let (syntax_client, syntax_peer) = recording_client();
 
-        view.request_lines(&text, &baseline_client, 0, 199, true, "Rust", false);
+        view.request_lines(&text, &baseline_client, 0, 199, true, "rust", false);
 
         let started = Instant::now();
-        view.request_lines(&text, &syntax_client, 0, 199, true, "Rust", true);
+        view.request_lines(&text, &syntax_client, 0, 199, true, "rust", true);
         let elapsed = started.elapsed();
 
         let syntax_bytes: usize = syntax_peer

@@ -28,6 +28,7 @@ use serde_json::Value;
 use xi_core_lib::config::Table as XiConfigTable;
 use xi_core_lib::runtime_loader::{
     RuntimeLanguageConfig, RuntimeLanguageOverrides, configure_default_runtime_loader_overrides,
+    validate_runtime_language_overrides,
 };
 use xi_lsp_lib::{
     Config as PluginLspConfig, DisabledLanguageConfig as PluginDisabledLanguageConfig,
@@ -1386,9 +1387,24 @@ fn config_search_report_with_env(
 pub(crate) fn validate_config_file(path: &Path) -> Result<(), String> {
     let contents = std::fs::read_to_string(path)
         .map_err(|err| format!("Cannot read {}: {err}", path.display()))?;
-    toml::from_str::<EeToml>(&contents)
-        .map(|_| ())
-        .map_err(|err| format!("Config parse error in {}: {err}", path.display()))
+    let parsed = toml::from_str::<EeToml>(&contents)
+        .map_err(|err| format!("Config parse error in {}: {err}", path.display()))?;
+
+    if parsed.languages.is_empty() {
+        return Ok(());
+    }
+
+    let is_workspace_layer = path.file_name().is_some_and(|name| name == ".ee.toml");
+    let mut user_overrides = RuntimeLanguageOverrides::new();
+    let mut workspace_overrides = RuntimeLanguageOverrides::new();
+    if is_workspace_layer {
+        workspace_overrides = parsed.languages;
+    } else {
+        user_overrides = parsed.languages;
+    }
+
+    validate_runtime_language_overrides(&user_overrides, &workspace_overrides, is_workspace_layer)
+        .map_err(|err| format!("Config validation error in {}: {err}", path.display()))
 }
 
 pub(crate) fn config_schema_json() -> Result<String, String> {
@@ -2393,6 +2409,41 @@ rev = "abc123"
         .unwrap_err();
 
         assert!(error.to_string().contains("source"));
+    }
+
+    #[test]
+    fn validate_config_file_rejects_incomplete_runtime_language_definition() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".ee.toml");
+        std::fs::write(
+            &path,
+            r#"
+[languages.yaml]
+lsp = ["yaml"]
+"#,
+        )
+        .unwrap();
+
+        let error = validate_config_file(&path).unwrap_err();
+
+        assert!(error.contains("Config validation error"));
+        assert!(error.contains("runtime language `yaml` is missing non-empty file_types"));
+    }
+
+    #[test]
+    fn validate_config_file_allows_partial_builtin_runtime_override() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".ee.toml");
+        std::fs::write(
+            &path,
+            r#"
+[languages.rust]
+lsp = ["rust"]
+"#,
+        )
+        .unwrap();
+
+        validate_config_file(&path).unwrap();
     }
 
     #[test]

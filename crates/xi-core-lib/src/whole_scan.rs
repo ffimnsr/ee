@@ -356,11 +356,11 @@ mod tests {
 
     #[test]
     fn reindent_task_completes_and_poll_returns_result() {
-        // "Rust" has built-in tree-sitter reindent; result may or may not produce a delta
+        // "rust" has built-in tree-sitter reindent; result may or may not produce a delta
         // depending on the content, but the result slot must be populated.
         let text = Rope::from("fn foo() {\n}\n");
         let mut task = WholeScanTask::new();
-        task.start_reindent(text, vec![(0, 2)], "Rust".to_string(), "    ".to_string());
+        task.start_reindent(text, vec![(0, 2)], "rust".to_string(), "    ".to_string());
         // Spin-wait up to 2 s for the background thread.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
@@ -383,12 +383,12 @@ mod tests {
         let mut task = WholeScanTask::new();
 
         // Start first task and let it complete.
-        task.start_reindent(text.clone(), vec![(0, 2)], "Rust".to_string(), "    ".to_string());
+        task.start_reindent(text.clone(), vec![(0, 2)], "rust".to_string(), "    ".to_string());
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         // Start a second task before polling — the first result's generation is
         // now stale so poll() must skip it and return the second result.
-        task.start_reindent(text, vec![(0, 1)], "Rust".to_string(), "    ".to_string());
+        task.start_reindent(text, vec![(0, 1)], "rust".to_string(), "    ".to_string());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             if let Some(r) = task.poll() {
