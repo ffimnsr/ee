@@ -5458,7 +5458,7 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
-    fn create_demo_git_repo(temp_dir: &TempDir) -> (PathBuf, String, String) {
+    fn create_demo_git_repo(temp_dir: &TempDir) -> (PathBuf, String, String, String) {
         let repo = temp_dir.path().join("demo-repo");
         run_git_fixture(temp_dir.path(), &["init", "demo-repo"]);
         run_git_fixture(&repo, &["config", "user.name", "EE Tests"]);
@@ -5500,9 +5500,10 @@ mod tests {
             .unwrap();
         run_git_fixture(&repo, &["add", "."]);
         run_git_fixture(&repo, &["commit", "-m", "branch update"]);
+        let branch_name = git_output(&repo, &["branch", "--show-current"]);
         let second_rev = git_output(&repo, &["rev-parse", "HEAD"]);
 
-        (repo, first_rev, second_rev)
+        (repo, first_rev, branch_name, second_rev)
     }
 
     fn demo_git_loader(
@@ -5560,15 +5561,15 @@ mod tests {
     fn runtime_loader_fetches_git_branch_source_and_reuses_checkout() {
         let _guard = env_lock();
         let temp_dir = TempDir::new().unwrap();
-        let (repo, _tag_rev, branch_rev) = create_demo_git_repo(&temp_dir);
-        let loader = demo_git_loader(&repo, "branch", "master", "tree_sitter_demo");
+        let (repo, _tag_rev, branch_name, branch_rev) = create_demo_git_repo(&temp_dir);
+        let loader = demo_git_loader(&repo, "branch", &branch_name, "tree_sitter_demo");
         let source_root = temp_dir.path().join("sources");
 
         let fetched = loader
             .fetch_grammar_sources(&[String::from("Demo")], false, &source_root, false)
             .unwrap();
         assert_eq!(fetched[0].resolved_rev.as_deref(), Some(branch_rev.as_str()));
-        assert!(fetched[0].source_pin.contains("branch:master"));
+        assert!(fetched[0].source_pin.contains(&format!("branch:{branch_name}")));
 
         fs::write(fetched[0].source_dir.join("cache-marker"), "keep\n").unwrap();
         let fetched_again = loader
@@ -5582,7 +5583,7 @@ mod tests {
     fn runtime_loader_fetches_git_tag_source_with_resolved_commit() {
         let _guard = env_lock();
         let temp_dir = TempDir::new().unwrap();
-        let (repo, tag_rev, _branch_rev) = create_demo_git_repo(&temp_dir);
+        let (repo, tag_rev, _branch_name, _branch_rev) = create_demo_git_repo(&temp_dir);
         let loader = demo_git_loader(&repo, "tag", "v1.0.0", "tree_sitter_demo");
 
         let fetched = loader
@@ -5602,7 +5603,7 @@ mod tests {
     fn runtime_loader_fetches_git_rev_source_with_exact_commit() {
         let _guard = env_lock();
         let temp_dir = TempDir::new().unwrap();
-        let (repo, tag_rev, _branch_rev) = create_demo_git_repo(&temp_dir);
+        let (repo, tag_rev, _branch_name, _branch_rev) = create_demo_git_repo(&temp_dir);
         let loader = demo_git_loader(&repo, "rev", &tag_rev, "tree_sitter_demo");
 
         let fetched = loader
@@ -5621,7 +5622,7 @@ mod tests {
     fn runtime_loader_rejects_missing_git_ref() {
         let _guard = env_lock();
         let temp_dir = TempDir::new().unwrap();
-        let (repo, _tag_rev, _branch_rev) = create_demo_git_repo(&temp_dir);
+        let (repo, _tag_rev, _branch_name, _branch_rev) = create_demo_git_repo(&temp_dir);
         let loader = demo_git_loader(&repo, "tag", "missing-tag", "tree_sitter_demo");
 
         let error = loader
@@ -5640,8 +5641,8 @@ mod tests {
     fn runtime_loader_builds_runtime_assets_from_git_sources_and_manifest_queries() {
         let _guard = env_lock();
         let temp_dir = TempDir::new().unwrap();
-        let (repo, _tag_rev, branch_rev) = create_demo_git_repo(&temp_dir);
-        let loader = demo_git_loader(&repo, "branch", "master", "tree_sitter_demo");
+        let (repo, _tag_rev, branch_name, branch_rev) = create_demo_git_repo(&temp_dir);
+        let loader = demo_git_loader(&repo, "branch", &branch_name, "tree_sitter_demo");
 
         let built = loader
             .build_runtime_assets(
@@ -5674,11 +5675,11 @@ mod tests {
     fn runtime_loader_build_fails_when_git_source_missing_parser() {
         let _guard = env_lock();
         let temp_dir = TempDir::new().unwrap();
-        let (repo, _tag_rev, _branch_rev) = create_demo_git_repo(&temp_dir);
+        let (repo, _tag_rev, branch_name, _branch_rev) = create_demo_git_repo(&temp_dir);
         fs::remove_file(repo.join("src").join("parser.c")).unwrap();
         run_git_fixture(&repo, &["add", "-u"]);
         run_git_fixture(&repo, &["commit", "-m", "remove parser"]);
-        let loader = demo_git_loader(&repo, "branch", "master", "tree_sitter_demo");
+        let loader = demo_git_loader(&repo, "branch", &branch_name, "tree_sitter_demo");
 
         let error = loader
             .build_runtime_assets(
@@ -5699,11 +5700,11 @@ mod tests {
     fn runtime_loader_build_fails_for_bad_git_tree_sitter_manifest() {
         let _guard = env_lock();
         let temp_dir = TempDir::new().unwrap();
-        let (repo, _tag_rev, _branch_rev) = create_demo_git_repo(&temp_dir);
+        let (repo, _tag_rev, branch_name, _branch_rev) = create_demo_git_repo(&temp_dir);
         fs::write(repo.join("tree-sitter.json"), "{not json\n").unwrap();
         run_git_fixture(&repo, &["add", "tree-sitter.json"]);
         run_git_fixture(&repo, &["commit", "-m", "break manifest"]);
-        let loader = demo_git_loader(&repo, "branch", "master", "tree_sitter_demo");
+        let loader = demo_git_loader(&repo, "branch", &branch_name, "tree_sitter_demo");
 
         let error = loader
             .build_runtime_assets(
@@ -5723,8 +5724,8 @@ mod tests {
     fn runtime_loader_build_fails_for_grammar_symbol_mismatch() {
         let _guard = env_lock();
         let temp_dir = TempDir::new().unwrap();
-        let (repo, _tag_rev, _branch_rev) = create_demo_git_repo(&temp_dir);
-        let loader = demo_git_loader(&repo, "branch", "master", "tree_sitter_not_demo");
+        let (repo, _tag_rev, branch_name, _branch_rev) = create_demo_git_repo(&temp_dir);
+        let loader = demo_git_loader(&repo, "branch", &branch_name, "tree_sitter_not_demo");
         let original_host = env::var_os("HOST");
         let original_target = env::var_os("TARGET");
 
