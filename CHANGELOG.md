@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.8.10 - 2026-06-27
+
+### Features
+
+- add plugins command (`73364d8`)
+- add logs and edit_config command (`8ce7a9f`)
+- add keymap binding for tab (`d6a5c83`)
+
+
+### Fixes
+
+- flaky tests and language subcommand (`0103ad7`)
+
+
+### Tests
+
+- update branch related test errors (`b03ab30`)
+
+
 ## 0.8.9 - 2026-06-27
 
 ### Features
