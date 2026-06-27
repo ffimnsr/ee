@@ -1767,6 +1767,7 @@ fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(Insert, KeyCode::Up, none, None, Edit("move_up"));
     bind!(Insert, KeyCode::Down, none, None, Edit("move_down"));
     bind!(Insert, KeyCode::Enter, none, None, Edit("insert_newline"));
+    bind!(Insert, KeyCode::Tab, none, None, Edit("insert_tab"));
     bind!(Insert, KeyCode::Backspace, none, None, DeleteBackward);
     bind!(Insert, KeyCode::Char('r'), ctrl, None, InsertRegister);
     bind!(Insert, KeyCode::Char('w'), ctrl, None, DeleteWordBackward);

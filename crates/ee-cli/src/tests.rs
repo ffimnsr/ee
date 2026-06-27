@@ -898,6 +898,18 @@ fn insert_mode_writes_to_scratch_buffer() {
 }
 
 #[test]
+fn insert_tab_writes_default_soft_tab_to_scratch_buffer() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+    app.backend.pump().unwrap();
+
+    assert_eq!(app.backend.lines, vec!["    "]);
+    assert_eq!((app.backend.cursor_line, app.backend.cursor_col), (0, 4));
+}
+
+#[test]
 fn enter_splits_line_and_backspace_joins_it() {
     let mut app = App::from_path(None).unwrap();
 
@@ -3817,6 +3829,14 @@ fn k_binding_requests_hover() {
 #[test]
 fn insert_ctrl_bindings_cover_register_and_completion() {
     let b = bindings();
+    let insert_tab = b
+        .get(&BindingKey {
+            mode: Mode::Insert,
+            key: KeyCode::Tab,
+            modifiers: KeyModifiers::NONE,
+            prefix: None,
+        })
+        .cloned();
     let insert_register = b
         .get(&BindingKey {
             mode: Mode::Insert,
@@ -3834,6 +3854,7 @@ fn insert_ctrl_bindings_cover_register_and_completion() {
         })
         .cloned();
 
+    assert_eq!(insert_tab, Some(Action::Edit("insert_tab")));
     assert_eq!(insert_register, Some(Action::InsertRegister));
     assert_eq!(completion, Some(Action::RequestCompletion));
 }
