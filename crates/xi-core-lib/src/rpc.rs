@@ -265,6 +265,14 @@ pub enum CoreRequest {
     SaveStatus {
         view_id: ViewId,
     },
+    PrepareElevatedSaveDraft {
+        view_id: ViewId,
+    },
+    FinalizeElevatedSave {
+        view_id: ViewId,
+        file_path: String,
+        saved_rev_id: xi_rope::engine::RevId,
+    },
     BlockTextPreview {
         view_id: ViewId,
         start_line: usize,

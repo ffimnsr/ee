@@ -80,6 +80,10 @@ pub(crate) struct BufState {
     pub(crate) save_complete: bool,
     pub(crate) last_save_generation: u64,
     pub(crate) completed_save_generation: u64,
+    pub(crate) last_save_result_generation: u64,
+    pub(crate) last_save_succeeded: bool,
+    pub(crate) last_save_permission_denied: bool,
+    pub(crate) last_save_error_message: Option<String>,
     pub(crate) status_message: Option<String>,
     pub(crate) last_scroll: Option<(usize, usize)>,
     /// Last-known mtime of the backing file; `None` for scratch buffers.
@@ -835,6 +839,10 @@ impl BufferManager {
             save_complete: true,
             last_save_generation: 0,
             completed_save_generation: 0,
+            last_save_result_generation: 0,
+            last_save_succeeded: true,
+            last_save_permission_denied: false,
+            last_save_error_message: None,
             status_message: None,
             last_scroll: None,
             mtime: path
@@ -972,6 +980,44 @@ impl BufferManager {
         self.save_buffer(id)
     }
 
+    pub(crate) fn prepare_elevated_save_draft(&mut self) -> io::Result<(PathBuf, PathBuf, Value)> {
+        let view_id = self.active().view_id.clone();
+        let response =
+            self.send_request("prepare_elevated_save_draft", json!({ "view_id": view_id }))?;
+        let draft_path = response
+            .get("draft_path")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing draft_path"))?;
+        let file_path = response
+            .get("file_path")
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing file_path"))?;
+        let saved_rev_id = response
+            .get("saved_rev_id")
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing saved_rev_id"))?;
+        Ok((draft_path, file_path, saved_rev_id))
+    }
+
+    pub(crate) fn finalize_elevated_save(
+        &mut self,
+        path: &std::path::Path,
+        saved_rev_id: Value,
+    ) -> io::Result<()> {
+        let view_id = self.active().view_id.clone();
+        let _ = self.send_request(
+            "finalize_elevated_save",
+            json!({
+                "view_id": view_id,
+                "file_path": path.to_string_lossy().to_string(),
+                "saved_rev_id": saved_rev_id,
+            }),
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn save_buffer(&mut self, id: BufferId) -> io::Result<()> {
         let idx = self
             .bufs
@@ -994,6 +1040,7 @@ impl BufferManager {
         )?;
         let baseline_generation = self.bufs[idx].last_save_generation;
         self.bufs[idx].save_complete = false;
+        self.bufs[idx].last_save_error_message = None;
         self.wait_for_buffer_save(id, &path, baseline_generation)?;
         let display = path.display().to_string();
         // Refresh mtime after the save so external-change detection stays accurate.
@@ -1083,13 +1130,40 @@ impl BufferManager {
                 self.bufs[idx].completed_save_generation =
                     self.bufs[idx].completed_save_generation.max(status_generation);
                 self.bufs[idx].save_complete = true;
-                return Ok(());
+                if self.bufs[idx].last_save_result_generation >= status_generation {
+                    if self.bufs[idx].last_save_succeeded {
+                        return Ok(());
+                    }
+                    let kind = if self.bufs[idx].last_save_permission_denied {
+                        io::ErrorKind::PermissionDenied
+                    } else {
+                        io::ErrorKind::Other
+                    };
+                    let message = self.bufs[idx]
+                        .last_save_error_message
+                        .clone()
+                        .unwrap_or_else(|| format!("save failed: {}", path.display()));
+                    return Err(io::Error::new(kind, message));
+                }
             }
-            if target_generation
-                .is_some_and(|generation| self.bufs[idx].completed_save_generation >= generation)
-            {
+            if target_generation.is_some_and(|generation| {
+                self.bufs[idx].completed_save_generation >= generation
+                    && self.bufs[idx].last_save_result_generation >= generation
+            }) {
                 self.bufs[idx].save_complete = true;
-                return Ok(());
+                if self.bufs[idx].last_save_succeeded {
+                    return Ok(());
+                }
+                let kind = if self.bufs[idx].last_save_permission_denied {
+                    io::ErrorKind::PermissionDenied
+                } else {
+                    io::ErrorKind::Other
+                };
+                let message = self.bufs[idx]
+                    .last_save_error_message
+                    .clone()
+                    .unwrap_or_else(|| format!("save failed: {}", path.display()));
+                return Err(io::Error::new(kind, message));
             }
             if Instant::now() >= deadline {
                 return Err(io::Error::new(
@@ -1965,6 +2039,25 @@ impl BufferManager {
                     self.bufs[idx].save_complete = true;
                 }
             }
+            BackendEvent::SaveResult {
+                view_id,
+                generation,
+                success,
+                permission_denied,
+                message,
+            } => {
+                let Some(idx) = self.buffer_index_for_view(&view_id) else {
+                    return Ok(());
+                };
+                self.bufs[idx].last_save_result_generation =
+                    self.bufs[idx].last_save_result_generation.max(generation);
+                self.bufs[idx].last_save_succeeded = success;
+                self.bufs[idx].last_save_permission_denied = permission_denied;
+                self.bufs[idx].last_save_error_message = message.clone();
+                if let Some(message) = message {
+                    self.bufs[idx].status_message = Some(message);
+                }
+            }
         }
         Ok(())
     }
@@ -2099,6 +2192,10 @@ impl BufferManager {
             save_complete: true,
             last_save_generation: 0,
             completed_save_generation: 0,
+            last_save_result_generation: 0,
+            last_save_succeeded: true,
+            last_save_permission_denied: false,
+            last_save_error_message: None,
             status_message: None,
             last_scroll: None,
             mtime,
@@ -2358,6 +2455,11 @@ impl BufferManager {
     /// Test-only constructor that builds a minimal `BufferManager` around
     /// pre-existing channel ends and a known view_id.
     #[cfg(test)]
+    pub(crate) fn pending_requests_for_test(&self) -> PendingRequests {
+        Arc::clone(&self.pending)
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_new(
         tx: std_mpsc::Sender<String>,
         backend_rx: std_mpsc::Receiver<BackendEvent>,
@@ -2387,6 +2489,10 @@ impl BufferManager {
             save_complete: true,
             last_save_generation: 0,
             completed_save_generation: 0,
+            last_save_result_generation: 0,
+            last_save_succeeded: true,
+            last_save_permission_denied: false,
+            last_save_error_message: None,
             status_message: None,
             last_scroll: None,
             mtime: None,

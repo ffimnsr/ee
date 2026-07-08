@@ -189,6 +189,28 @@ impl Client {
         );
     }
 
+    pub fn save_result<S: AsRef<str>>(
+        &self,
+        view_id: ViewId,
+        file_path: &std::path::Path,
+        generation: u64,
+        success: bool,
+        permission_denied: bool,
+        message: Option<S>,
+    ) {
+        self.0.send_rpc_notification(
+            "save_result",
+            &json!({
+                "view_id": view_id,
+                "file_path": file_path.to_string_lossy(),
+                "generation": generation,
+                "success": success,
+                "permission_denied": permission_denied,
+                "message": message.as_ref().map(|value| value.as_ref()),
+            }),
+        );
+    }
+
     pub fn add_status_item(
         &self,
         view_id: ViewId,

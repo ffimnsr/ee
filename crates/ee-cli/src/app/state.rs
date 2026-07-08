@@ -33,6 +33,8 @@ pub(crate) enum Mode {
     LocationList,
     /// Awaiting `y`/`n`/`a`/`q` confirmation for a `:s///c` substitute.
     SubstituteConfirm,
+    /// Awaiting confirmation before retrying a failed save with privilege escalation.
+    PrivilegeConfirm,
 }
 
 impl Mode {
@@ -50,6 +52,7 @@ impl Mode {
             Mode::Quickfix => "QFX",
             Mode::LocationList => "LOC",
             Mode::SubstituteConfirm => "SUB",
+            Mode::PrivilegeConfirm => "SUD",
         }
     }
 
@@ -132,6 +135,15 @@ impl SwiftMotionState {
             _ => format!("swift_motion {} | choose label | esc cancel", self.query),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrivilegedSavePending {
+    pub(crate) draft_path: std::path::PathBuf,
+    pub(crate) target_path: std::path::PathBuf,
+    pub(crate) saved_rev_id: serde_json::Value,
+    pub(crate) command: String,
+    pub(crate) helper_name: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -308,6 +320,8 @@ pub(crate) struct App {
     // ── Substitute confirm state ──────────────────────────────────────────────────
     /// Pending substitutions awaiting `y`/`n`/`a`/`q` confirmation.
     pub(crate) substitute_pending: Option<SubstitutePending>,
+    /// Pending privileged save confirmation after permission-denied write.
+    pub(crate) privileged_save_pending: Option<PrivilegedSavePending>,
     /// Force next frame to clear and redraw the terminal surface.
     pub(crate) redraw_requested: bool,
     /// Per-session render observability counters.
@@ -402,6 +416,7 @@ impl App {
             last_input_at: Instant::now(),
             swift_motion: None,
             substitute_pending: None,
+            privileged_save_pending: None,
             redraw_requested: false,
             render_metrics: crate::render_metrics::RenderMetrics::new(),
         })

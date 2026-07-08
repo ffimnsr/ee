@@ -1462,6 +1462,10 @@ fn render_prompt(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             Some(msg) => msg.to_owned(),
             None => "substitute — replace? [y]es [n]o [a]ll [q]uit".to_owned(),
         }),
+        Mode::PrivilegeConfirm => Line::from(match app.backend.status_message.as_deref() {
+            Some(msg) => msg.to_owned(),
+            None => "permission denied — retry with elevated save? [y]es [n]o".to_owned(),
+        }),
         Mode::OperatorPending => Line::from(
             match app.input_state.pending_operator {
                 Some(crate::app::Operator::Delete) => "-- DELETE (motion / text-obj) --",
@@ -2129,6 +2133,10 @@ mod tests {
             save_complete: true,
             last_save_generation: 0,
             completed_save_generation: 0,
+            last_save_result_generation: 0,
+            last_save_succeeded: true,
+            last_save_permission_denied: false,
+            last_save_error_message: None,
             status_message: None,
             last_scroll: None,
             mtime: None,

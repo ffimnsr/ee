@@ -129,6 +129,13 @@ pub(crate) enum BackendEvent {
         complete: bool,
         generation: u64,
     },
+    SaveResult {
+        view_id: String,
+        generation: u64,
+        success: bool,
+        permission_denied: bool,
+        message: Option<String>,
+    },
 }
 
 impl BackendEvent {
@@ -772,10 +779,13 @@ impl XiClient {
                     format!("completions: {}", preview.join(", "))
                 });
             }
-            BackendEvent::SaveProgress { complete, .. } => {
-                if complete {
-                    self.status_message = Some(String::from("saved"));
-                }
+            BackendEvent::SaveProgress { .. } => {}
+            BackendEvent::SaveResult { success, message, .. } => {
+                self.status_message = Some(if success {
+                    String::from("saved")
+                } else {
+                    message.unwrap_or_else(|| String::from("save failed"))
+                });
             }
             BackendEvent::Locations { title, locations, .. } => {
                 let same_file = locations.len() == 1
@@ -1478,6 +1488,21 @@ pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendE
             let complete = params.get("complete").and_then(Value::as_bool).unwrap_or(false);
             let generation = params.get("generation").and_then(Value::as_u64).unwrap_or(0);
             Some(BackendEvent::SaveProgress { view_id, complete, generation })
+        }
+        "save_result" => {
+            let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
+            let generation = params.get("generation").and_then(Value::as_u64).unwrap_or(0);
+            let success = params.get("success").and_then(Value::as_bool).unwrap_or(false);
+            let permission_denied =
+                params.get("permission_denied").and_then(Value::as_bool).unwrap_or(false);
+            let message = params.get("message").and_then(Value::as_str).map(str::to_owned);
+            Some(BackendEvent::SaveResult {
+                view_id,
+                generation,
+                success,
+                permission_denied,
+                message,
+            })
         }
         _ => None,
     }

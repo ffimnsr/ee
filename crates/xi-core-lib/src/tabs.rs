@@ -25,11 +25,12 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+use std::fs::OpenOptions;
 use std::io::ErrorKind;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use log::{debug, error, info, warn};
 use serde::de::{self, Deserializer, Unexpected};
@@ -91,13 +92,34 @@ fn save_failed_alert(error: &crate::file::FileError) -> String {
     format!("save failed: {}", error)
 }
 
-fn save_error_alert(error: &crate::file::FileError, path: &Path) -> String {
+fn save_error_details(error: &crate::file::FileError, path: &Path) -> (String, bool) {
     match error {
         crate::file::FileError::Io(io_error, _) if io_error.kind() == ErrorKind::Interrupted => {
-            save_cancelled_alert(path)
+            (save_cancelled_alert(path), false)
         }
-        _ => save_failed_alert(error),
+        crate::file::FileError::Io(io_error, _)
+            if io_error.kind() == ErrorKind::PermissionDenied =>
+        {
+            (save_failed_alert(error), true)
+        }
+        _ => (save_failed_alert(error), false),
     }
+}
+
+fn save_error_alert(error: &crate::file::FileError, path: &Path) -> String {
+    save_error_details(error, path).0
+}
+
+fn elevated_save_temp_path(target_path: &Path) -> Result<PathBuf, std::io::Error> {
+    let stem = target_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("buffer");
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let candidate = std::env::temp_dir().join(format!("ee-elevated-save-{stem}-{now}.tmp"));
+    OpenOptions::new().create_new(true).write(true).open(&candidate)?;
+    Ok(candidate)
 }
 
 // old-style names; will be deprecated
@@ -398,6 +420,10 @@ impl CoreState {
             SelectionsPreview { view_id } => self.do_selections_preview(view_id),
             BufferPristine { view_id } => self.do_buffer_pristine(view_id),
             SaveStatus { view_id } => self.do_save_status(view_id),
+            PrepareElevatedSaveDraft { view_id } => self.do_prepare_elevated_save_draft(view_id),
+            FinalizeElevatedSave { view_id, file_path, saved_rev_id } => {
+                self.do_finalize_elevated_save(view_id, PathBuf::from(file_path), saved_rev_id)
+            }
             BlockTextPreview { view_id, start_line, end_line, left_col, right_col } => {
                 self.do_block_text_preview(view_id, start_line, end_line, left_col, right_col)
             }
@@ -503,6 +529,140 @@ impl CoreState {
             "generation": generation,
             "complete": complete,
         }))
+    }
+
+    fn do_prepare_elevated_save_draft(&mut self, view_id: ViewId) -> Result<Value, RemoteError> {
+        let buffer_id = self
+            .views
+            .get(&view_id)
+            .map(|view| view.borrow().get_buffer_id())
+            .ok_or_else(|| RemoteError::custom(404, "missing view", None))?;
+        let path = self
+            .file_manager
+            .get_info(buffer_id)
+            .map(|info| info.path.clone())
+            .ok_or_else(|| RemoteError::custom(404, "missing file metadata", None))?;
+        let draft_path = elevated_save_temp_path(&path).map_err(|err| {
+            RemoteError::custom(500, format!("elevated save temp file failed: {err}"), None)
+        })?;
+
+        let saved_rev_id = {
+            let editor = self
+                .editors
+                .get(&buffer_id)
+                .ok_or_else(|| RemoteError::custom(404, "missing editor", None))?;
+            let editor = editor.borrow();
+            let saved_rev_id = editor.get_head_rev_id();
+            if let Some(store) = editor.vlf_store.as_ref() {
+                let plan = store.prepare_save_plan().map_err(|err| {
+                    RemoteError::custom(500, format!("prepare elevated save failed: {err}"), None)
+                })?;
+                crate::vlf::save::stream_save_snapshot(
+                    &plan,
+                    &draft_path,
+                    &crate::vlf::overlay::VlfSavePolicy::SaveAs(draft_path.clone()),
+                    &mut |_| true,
+                )
+                .map_err(|err| {
+                    RemoteError::custom(
+                        500,
+                        format!("write elevated save draft failed: {err}"),
+                        None,
+                    )
+                })?;
+            } else {
+                let mut save_ctx = self
+                    .make_context(view_id)
+                    .ok_or_else(|| RemoteError::custom(404, "missing view", None))?;
+                let (text, _) = save_ctx.rope_snapshot_for_save();
+                let request =
+                    self.file_manager.prepare_rope_save(&draft_path, buffer_id).map_err(|err| {
+                        RemoteError::custom(
+                            500,
+                            format!("prepare elevated save failed: {err}"),
+                            None,
+                        )
+                    })?;
+                crate::file::execute_prepared_rope_save(&request, &text, &mut || true).map_err(
+                    |err| {
+                        RemoteError::custom(
+                            500,
+                            format!("write elevated save draft failed: {err}"),
+                            None,
+                        )
+                    },
+                )?;
+            }
+            saved_rev_id
+        };
+
+        Ok(json!({
+            "draft_path": draft_path.to_string_lossy(),
+            "file_path": path.to_string_lossy(),
+            "saved_rev_id": saved_rev_id,
+        }))
+    }
+
+    fn do_finalize_elevated_save(
+        &mut self,
+        view_id: ViewId,
+        path: PathBuf,
+        saved_rev_id: xi_rope::engine::RevId,
+    ) -> Result<Value, RemoteError> {
+        let buffer_id = self
+            .views
+            .get(&view_id)
+            .map(|view| view.borrow().get_buffer_id())
+            .ok_or_else(|| RemoteError::custom(404, "missing view", None))?;
+
+        let is_vlf = self
+            .editors
+            .get(&buffer_id)
+            .ok_or_else(|| RemoteError::custom(404, "missing editor", None))?
+            .borrow()
+            .is_vlf();
+
+        if is_vlf {
+            let request = self
+                .file_manager
+                .prepare_vlf_save(
+                    &path,
+                    buffer_id,
+                    crate::vlf::overlay::VlfSavePolicy::TempFileRewrite { temp_dir: None },
+                )
+                .map_err(|err| {
+                    RemoteError::custom(500, format!("finalize elevated save failed: {err}"), None)
+                })?;
+            self.file_manager.finish_vlf_save(&request).map_err(|err| {
+                RemoteError::custom(500, format!("finalize elevated save failed: {err}"), None)
+            })?;
+            let editor = self
+                .editors
+                .get(&buffer_id)
+                .ok_or_else(|| RemoteError::custom(404, "missing editor", None))?;
+            editor.borrow_mut().refresh_after_vlf_save(&path).map_err(|err| {
+                RemoteError::custom(500, format!("finalize elevated save failed: {err}"), None)
+            })?;
+        } else {
+            let request = self.file_manager.prepare_rope_save(&path, buffer_id).map_err(|err| {
+                RemoteError::custom(500, format!("finalize elevated save failed: {err}"), None)
+            })?;
+            self.file_manager.finish_rope_save(&request).map_err(|err| {
+                RemoteError::custom(500, format!("finalize elevated save failed: {err}"), None)
+            })?;
+        }
+
+        let changes = self.config_manager.update_buffer_path(buffer_id, &path);
+        let language = self.config_manager.get_buffer_language(buffer_id);
+        if let Some(mut ctx) = self.make_context(view_id) {
+            ctx.after_save_with_rev(&path, saved_rev_id);
+            ctx.language_changed(&language);
+            if let Some(changes) = changes {
+                ctx.config_changed(&changes);
+            }
+        }
+
+        Ok(json!({ "ok": true }))
     }
 
     fn do_block_text_preview(
@@ -744,7 +904,15 @@ impl CoreState {
                 };
 
                 if let Err(e) = finish_result {
-                    let error_message = save_error_alert(&e, &path);
+                    let (error_message, permission_denied) = save_error_details(&e, &path);
+                    self.peer.save_result(
+                        view_id,
+                        &path,
+                        result.generation,
+                        false,
+                        permission_denied,
+                        Some(error_message.as_str()),
+                    );
                     error!("File error: {:?}", error_message);
                     self.peer.alert(error_message);
                     return;
@@ -772,6 +940,7 @@ impl CoreState {
                 }
 
                 self.peer.save_progress(view_id, 0, 0, true, result.generation);
+                self.peer.save_result(view_id, &path, result.generation, true, false, None::<&str>);
 
                 let changes = self.config_manager.update_buffer_path(buffer_id, &path);
                 let language = self.config_manager.get_buffer_language(buffer_id);
@@ -795,10 +964,18 @@ impl CoreState {
             }
             Err(e) => {
                 self.peer.save_progress(view_id, 0, 0, true, result.generation);
-                let error_message = save_error_alert(&e, &path);
+                let (error_message, permission_denied) = save_error_details(&e, &path);
+                self.peer.save_result(
+                    view_id,
+                    &path,
+                    result.generation,
+                    false,
+                    permission_denied,
+                    Some(error_message.as_str()),
+                );
                 if matches!(&e, crate::file::FileError::Io(io_error, _) if io_error.kind() == ErrorKind::Interrupted)
                 {
-                    info!("Save cancelled: {}", path.display());
+                    info!("File save cancelled: {:?}", error_message);
                 } else {
                     error!("File error: {:?}", error_message);
                 }

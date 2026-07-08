@@ -1565,6 +1565,98 @@ fn write_command_saves_file() {
 }
 
 #[test]
+fn write_non_permission_error_does_not_enter_privilege_confirm() {
+    let mut app = App::from_path(None).unwrap();
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.privileged_save_pending.is_none());
+    assert!(
+        app.backend
+            .status_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("scratch buffer has no path")
+    );
+}
+
+#[test]
+fn save_buffer_returns_permission_denied_when_save_result_reports_permission_error() {
+    let path = unique_temp_path("ee-cli-save-permission-denied");
+    fs::write(&path, "seed\n").unwrap();
+
+    let (tx, rx) = mpsc::channel();
+    let (backend_tx, backend_rx) = mpsc::channel();
+    let mut client = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    let pending = client.pending_requests_for_test();
+    let buf_id = client.active().id;
+    client.set_buffer_path(buf_id, path.clone()).unwrap();
+
+    let save_thread = thread::spawn(move || client.save_buffer(buf_id));
+    let mut save_seen = false;
+    let deadline = Instant::now() + Duration::from_secs(2);
+
+    while Instant::now() < deadline {
+        if save_seen && save_thread.is_finished() {
+            break;
+        }
+
+        let raw = match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+        let message: Value = serde_json::from_str(&raw).unwrap();
+        let method = message.get("method").and_then(Value::as_str).unwrap_or_default();
+        if let Some(id) = message.get("id").and_then(Value::as_u64) {
+            let response = match method {
+                "selections_preview" => Some(json!({ "jsonrpc": "2.0", "id": id, "result": null })),
+                "save_status" => Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": { "generation": 1, "complete": true }
+                })),
+                _ => None,
+            };
+            if let Some(response) = response {
+                let sender = pending.lock().unwrap().remove(&id).expect("pending rpc sender");
+                sender.send(response).unwrap();
+            }
+            continue;
+        }
+
+        if method == "save" {
+            save_seen = true;
+            backend_tx
+                .send(BackendEvent::SaveProgress {
+                    view_id: String::from("view-id-1"),
+                    complete: true,
+                    generation: 1,
+                })
+                .unwrap();
+            backend_tx
+                .send(BackendEvent::SaveResult {
+                    view_id: String::from("view-id-1"),
+                    generation: 1,
+                    success: false,
+                    permission_denied: true,
+                    message: Some(String::from("permission denied")),
+                })
+                .unwrap();
+        }
+    }
+
+    assert!(save_seen, "save notification not observed");
+    assert!(save_thread.is_finished(), "save thread did not finish");
+    let err = save_thread.join().unwrap().expect_err("save should fail");
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(err.to_string().contains("permission denied"));
+
+    fs::remove_file(&path).unwrap();
+}
+
+#[test]
 fn parse_notification_handles_completions() {
     let event = parse_notification(
         "completions",
@@ -6559,6 +6651,10 @@ fn test_buf_state() -> BufState {
         save_complete: true,
         last_save_generation: 0,
         completed_save_generation: 0,
+        last_save_result_generation: 0,
+        last_save_succeeded: true,
+        last_save_permission_denied: false,
+        last_save_error_message: None,
         status_message: None,
         last_scroll: None,
         mtime: None,

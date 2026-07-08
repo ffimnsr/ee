@@ -39,8 +39,8 @@ pub(crate) use parsing::{
     text_obj_bracket, text_obj_quote, text_obj_tag, text_obj_word,
 };
 pub(crate) use state::{
-    App, HoverPopup, Mode, Operator, PendingCharFind, RepeatableMotion, SubstitutePending,
-    SwiftMotionState, SwiftMotionTarget, Viewport,
+    App, HoverPopup, Mode, Operator, PendingCharFind, PrivilegedSavePending, RepeatableMotion,
+    SubstitutePending, SwiftMotionState, SwiftMotionTarget, Viewport,
 };
 
 const SWIFT_MOTION_LABELS: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
@@ -118,6 +118,10 @@ impl App {
 
         if self.mode == Mode::SubstituteConfirm {
             self.dispatch_context_key(key, Mode::SubstituteConfirm);
+            return;
+        }
+        if self.mode == Mode::PrivilegeConfirm {
+            self.handle_privileged_save_confirm_key(key);
             return;
         }
 
@@ -1205,9 +1209,8 @@ impl App {
             }
             // Context-specific pseudo-modes are intercepted before `handle_default`.
             Mode::Picker | Mode::Quickfix | Mode::LocationList => {}
-            // SubstituteConfirm only accepts key codes (handled before we reach here);
-            // any stray char is a no-op.
-            Mode::SubstituteConfirm => {}
+            // SubstituteConfirm/PrivilegeConfirm only accept dedicated keys.
+            Mode::SubstituteConfirm | Mode::PrivilegeConfirm => {}
         }
     }
 
@@ -4754,6 +4757,96 @@ impl App {
             self.backend.status_message =
                 Some(format!("substitute ({}/{total}) replace? [y/n/a/q]", current + 1));
         }
+    }
+
+    // ── Privileged save confirm ───────────────────────────────────────────
+
+    fn handle_privileged_save_confirm_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm_privileged_save(),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                self.cancel_privileged_save_confirm()
+            }
+            _ => {}
+        }
+    }
+
+    fn start_privileged_save_confirm(&mut self) -> Result<(), String> {
+        let (draft_path, target_path, saved_rev_id) = self
+            .backend
+            .prepare_elevated_save_draft()
+            .map_err(|err| format!("prepare elevated save failed: {err}"))?;
+        let Some(tool) = crate::terminal::detect_elevation_tool() else {
+            let _ = std::fs::remove_file(&draft_path);
+            return Err(String::from(
+                "save failed: permission denied and no `sudo`, `run0`, or `su` found in PATH",
+            ));
+        };
+        let command = crate::terminal::build_elevated_copy_command(tool, &draft_path, &target_path);
+        let helper_name = tool.binary_name();
+        self.privileged_save_pending = Some(PrivilegedSavePending {
+            draft_path,
+            target_path: target_path.clone(),
+            saved_rev_id,
+            command: command.clone(),
+            helper_name,
+        });
+        self.mode = Mode::PrivilegeConfirm;
+        self.backend.status_message = Some(format!(
+            "permission denied: retry save to {} with {helper_name}? [y/N] cmd: {command}",
+            target_path.display()
+        ));
+        Ok(())
+    }
+
+    fn cancel_privileged_save_confirm(&mut self) {
+        if let Some(pending) = self.privileged_save_pending.take() {
+            let _ = std::fs::remove_file(&pending.draft_path);
+        }
+        self.mode = Mode::Normal;
+        self.backend.status_message = Some(String::from("privileged save cancelled"));
+    }
+
+    fn confirm_privileged_save(&mut self) {
+        let Some(pending) = self.privileged_save_pending.take() else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        let cwd = self.shell_working_dir();
+        let command = crate::terminal::TerminalCommand {
+            title: format!("privileged save: {}", pending.target_path.display()),
+            command: pending.command.clone(),
+        };
+        let result = crate::terminal::run_command(&command, &cwd);
+        match result {
+            Ok(result) if result.success => {
+                if let Err(err) = self
+                    .backend
+                    .finalize_elevated_save(&pending.target_path, pending.saved_rev_id.clone())
+                {
+                    self.backend.status_message =
+                        Some(format!("finalize elevated save failed: {err}"));
+                } else {
+                    self.backend.status_message = Some(format!(
+                        "saved {} with {}",
+                        pending.target_path.display(),
+                        pending.helper_name
+                    ));
+                }
+            }
+            Ok(result) => {
+                let title = command.title.clone();
+                let body = crate::terminal::render_transcript(&result);
+                self.open_generated_buffer(&title, &body);
+                self.backend.status_message =
+                    Some(format!("privileged save failed via {}", pending.helper_name));
+            }
+            Err(err) => {
+                self.backend.status_message = Some(format!("privileged save failed: {err}"));
+            }
+        }
+        let _ = std::fs::remove_file(&pending.draft_path);
+        self.mode = Mode::Normal;
     }
 
     // ── Substitute helper ─────────────────────────────────────────────────

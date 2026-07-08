@@ -1440,6 +1440,10 @@ mod tests {
 
     impl RuntimeLoaderOverrideGuard {
         fn install(languages: &[&str]) -> Self {
+            Self::install_with_query_language(languages, None)
+        }
+
+        fn install_with_query_language(languages: &[&str], query_language: Option<&str>) -> Self {
             let mut overrides = RuntimeLanguageOverrides::new();
             for language in languages {
                 overrides.insert(
@@ -1448,6 +1452,7 @@ mod tests {
                         supported_query_kinds: Some(BTreeSet::from([
                             crate::runtime_loader::RuntimeQueryKind::Indents,
                         ])),
+                        query_language: query_language.map(str::to_string),
                         ..RuntimeLanguageConfig::default()
                     },
                 );
@@ -1693,7 +1698,10 @@ mod tests {
     #[test]
     fn insert_newline_with_syntax_context_falls_back_to_heuristic_when_query_missing() {
         let _guard = runtime_loader_test_guard();
-        let _override_guard = RuntimeLoaderOverrideGuard::install(&["rust"]);
+        let _override_guard = RuntimeLoaderOverrideGuard::install_with_query_language(
+            &["rust"],
+            Some("rust-missing-indent-query"),
+        );
 
         let text: Rope = "if ready {".into();
         let config = test_config();
@@ -1823,7 +1831,10 @@ mod tests {
     #[test]
     fn insert_newline_with_syntax_context_respects_disabled_smart_indent_on_query_miss() {
         let _guard = runtime_loader_test_guard();
-        let _override_guard = RuntimeLoaderOverrideGuard::install(&["rust"]);
+        let _override_guard = RuntimeLoaderOverrideGuard::install_with_query_language(
+            &["rust"],
+            Some("rust-missing-indent-query"),
+        );
 
         let text: Rope = "if ready {".into();
         let mut config = test_config();

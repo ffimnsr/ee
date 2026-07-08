@@ -834,6 +834,7 @@ fn mode_hint_description(mode: Mode) -> &'static str {
         Mode::Quickfix => "quickfix",
         Mode::LocationList => "location list",
         Mode::SubstituteConfirm => "substitute confirm",
+        Mode::PrivilegeConfirm => "privileged save confirm",
     }
 }
 

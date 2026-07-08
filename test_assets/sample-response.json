@@ -1,0 +1,26 @@
+{
+  "name": "Sample Project",
+  "version": "1.0.0",
+  "enabled": true,
+  "items": [
+    {
+      "id": 1,
+      "title": "First item",
+      "tags": ["alpha", "beta"],
+      "metadata": {
+        "created_at": "2026-07-08T14:27:00",
+        "priority": "high"
+      }
+    },
+    {
+      "id": 2,
+      "title": "Second item",
+      "tags": ["gamma"],
+      "metadata": {
+        "created_at": "2026-07-08T14:28:00",
+        "priority": "low"
+      }
+    }
+  ]
+}
+

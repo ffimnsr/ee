@@ -6,6 +6,12 @@ use std::sync::OnceLock;
 use crate::buffer::BufferId;
 use crate::registers::RegisterName;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SaveOutcome {
+    Saved,
+    AwaitingPrivilegeConfirm,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CommandSpec {
     canonical_id: &'static str,
@@ -1369,16 +1375,16 @@ impl App {
             }
             "u" | "update" => {
                 if !self.backend.active().pristine
-                    && let Err(message) = self.save_current_buffer()
+                    && let Err(message) = self.save_current_buffer().map(|_| ())
                 {
                     self.backend.status_message = Some(message);
                 }
             }
             "wq" | "x" | "wq!" | "x!" | "write_quit" | "write_quit!" => {
-                if let Err(message) = self.save_current_buffer() {
-                    self.backend.status_message = Some(message);
-                } else {
-                    self.should_quit = true;
+                match self.save_current_buffer() {
+                    Err(message) => self.backend.status_message = Some(message),
+                    Ok(SaveOutcome::Saved) => self.should_quit = true,
+                    Ok(SaveOutcome::AwaitingPrivilegeConfirm) => {}
                 }
             }
             "wa" | "wa!" | "write_all" | "write_all!" => {
@@ -1387,10 +1393,10 @@ impl App {
                 }
             }
             "wqa" | "xa" | "wqa!" | "xa!" | "write_quit_all" | "write_quit_all!" => {
-                if let Err(message) = self.save_all_dirty_buffers() {
-                    self.backend.status_message = Some(message);
-                } else {
-                    self.should_quit = true;
+                match self.save_all_dirty_buffers() {
+                    Err(message) => self.backend.status_message = Some(message),
+                    Ok(SaveOutcome::Saved) => self.should_quit = true,
+                    Ok(SaveOutcome::AwaitingPrivilegeConfirm) => {}
                 }
             }
             cmd if cmd == "s"
@@ -3264,11 +3270,18 @@ impl App {
         Ok(format!("inserted register {name}"))
     }
 
-    fn save_current_buffer(&mut self) -> Result<(), String> {
-        self.backend.save().map_err(|err| format!("save failed: {err}"))
+    fn save_current_buffer(&mut self) -> Result<SaveOutcome, String> {
+        match self.backend.save() {
+            Ok(()) => Ok(SaveOutcome::Saved),
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                self.start_privileged_save_confirm()?;
+                Ok(SaveOutcome::AwaitingPrivilegeConfirm)
+            }
+            Err(err) => Err(format!("save failed: {err}")),
+        }
     }
 
-    fn save_all_dirty_buffers(&mut self) -> Result<(), String> {
+    fn save_all_dirty_buffers(&mut self) -> Result<SaveOutcome, String> {
         use std::collections::HashSet;
 
         self.backend.flush_all_pending_edits().map_err(|err| format!("save failed: {err}"))?;
@@ -3288,9 +3301,28 @@ impl App {
             if self.backend.buffer_pristine(id).map_err(|err| format!("save failed: {err}"))? {
                 continue;
             }
-            self.backend.save_buffer(id).map_err(|err| format!("save failed: {err}"))?;
+            match self.backend.save_buffer(id) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                    if id == self.backend.active().id {
+                        self.start_privileged_save_confirm()?;
+                        return Ok(SaveOutcome::AwaitingPrivilegeConfirm);
+                    }
+                    return Err(format!(
+                        "save failed: permission denied for {}",
+                        self.backend
+                            .all_bufs()
+                            .iter()
+                            .find(|buf| buf.id == id)
+                            .and_then(|buf| buf.path.as_ref())
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_else(|| String::from("buffer"))
+                    ));
+                }
+                Err(err) => return Err(format!("save failed: {err}")),
+            }
         }
-        Ok(())
+        Ok(SaveOutcome::Saved)
     }
 
     fn reload_all_buffers(&mut self) -> Result<(), String> {
@@ -3796,6 +3828,43 @@ fn validate_align_it_format(spec: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::App;
+    use crate::app::Mode;
+
+    #[test]
+    fn start_privileged_save_confirm_populates_prompt_and_cancel_cleans_draft() {
+        let Some(_tool) = crate::terminal::detect_elevation_tool() else {
+            return;
+        };
+
+        let path = std::env::temp_dir().join(format!(
+            "ee-privileged-save-test-{}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::write(&path, "seed\n").unwrap();
+
+        let mut app = App::from_path(Some(path.clone())).unwrap();
+        app.start_privileged_save_confirm().unwrap();
+
+        assert_eq!(app.mode, Mode::PrivilegeConfirm);
+        let prompt = app.backend.status_message.clone().unwrap_or_default();
+        assert!(prompt.contains("cmd:"));
+        assert!(prompt.contains(path.to_string_lossy().as_ref()));
+
+        let draft_path = app
+            .privileged_save_pending
+            .as_ref()
+            .expect("pending privileged save")
+            .draft_path
+            .clone();
+        assert!(draft_path.exists());
+
+        app.cancel_privileged_save_confirm();
+        assert_eq!(app.mode, Mode::Normal);
+        assert!(app.privileged_save_pending.is_none());
+        assert!(!draft_path.exists());
+
+        std::fs::remove_file(&path).unwrap();
+    }
 
     #[test]
     fn command_help_items_cover_all_ex_commands() {

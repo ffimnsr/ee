@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsStr;
 use std::io;
 use std::io::Write;
 use std::path::Path;
@@ -20,6 +21,75 @@ pub(crate) struct TerminalRunResult {
     pub(crate) success: bool,
     pub(crate) exit_code: Option<i32>,
     pub(crate) duration: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ElevationTool {
+    Sudo,
+    Run0,
+    Su,
+}
+
+impl ElevationTool {
+    pub(crate) fn binary_name(self) -> &'static str {
+        match self {
+            Self::Sudo => "sudo",
+            Self::Run0 => "run0",
+            Self::Su => "su",
+        }
+    }
+}
+
+pub(crate) fn detect_elevation_tool() -> Option<ElevationTool> {
+    detect_elevation_tool_in_path(env::var_os("PATH").as_deref())
+}
+
+fn detect_elevation_tool_in_path(path_env: Option<&OsStr>) -> Option<ElevationTool> {
+    [ElevationTool::Sudo, ElevationTool::Run0, ElevationTool::Su]
+        .into_iter()
+        .find(|tool| command_exists_in_path(tool.binary_name(), path_env))
+}
+
+fn command_exists_in_path(command: &str, path_env: Option<&OsStr>) -> bool {
+    let Some(path_env) = path_env else {
+        return false;
+    };
+
+    env::split_paths(path_env).any(|dir| dir.join(command).is_file())
+}
+
+pub(crate) fn build_elevated_copy_command(
+    tool: ElevationTool,
+    draft_path: &Path,
+    target_path: &Path,
+) -> String {
+    let copy_command = format!(
+        "cp -- {} {}",
+        shell_quote(draft_path.to_string_lossy().as_ref()),
+        shell_quote(target_path.to_string_lossy().as_ref())
+    );
+    match tool {
+        ElevationTool::Sudo => format!("sudo {copy_command}"),
+        ElevationTool::Run0 => format!("run0 {copy_command}"),
+        ElevationTool::Su => format!("su root -c {}", shell_quote(&copy_command)),
+    }
+}
+
+pub(crate) fn shell_quote(raw: &str) -> String {
+    if raw.is_empty() {
+        return String::from("''");
+    }
+    let mut quoted = String::with_capacity(raw.len() + 2);
+    quoted.push('\'');
+    for ch in raw.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 pub(crate) fn parse_command(command: &str) -> Result<Option<TerminalCommand>, &'static str> {
@@ -189,6 +259,45 @@ fn format_duration(duration: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn build_elevated_copy_command_quotes_paths() {
+        let draft = PathBuf::from("/tmp/draft file's.txt");
+        let target = PathBuf::from("/root/target file.txt");
+
+        let sudo = build_elevated_copy_command(ElevationTool::Sudo, &draft, &target);
+        assert_eq!(sudo, "sudo cp -- '/tmp/draft file'\\''s.txt' '/root/target file.txt'");
+
+        let su = build_elevated_copy_command(ElevationTool::Su, &draft, &target);
+        assert!(su.starts_with("su root -c 'cp -- "));
+        assert!(su.contains("/tmp/draft file"));
+        assert!(su.contains("/root/target file.txt"));
+    }
+
+    #[test]
+    fn detect_elevation_tool_prefers_declared_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let sudo = temp.path().join("sudo");
+        let run0 = temp.path().join("run0");
+        let su = temp.path().join("su");
+        std::fs::write(&sudo, "#!/bin/sh\n").unwrap();
+        std::fs::write(&run0, "#!/bin/sh\n").unwrap();
+        std::fs::write(&su, "#!/bin/sh\n").unwrap();
+
+        let path = env::join_paths([temp.path()]).unwrap();
+        assert_eq!(
+            detect_elevation_tool_in_path(Some(path.as_os_str())),
+            Some(ElevationTool::Sudo)
+        );
+        std::fs::remove_file(&sudo).unwrap();
+        assert_eq!(
+            detect_elevation_tool_in_path(Some(path.as_os_str())),
+            Some(ElevationTool::Run0)
+        );
+        std::fs::remove_file(&run0).unwrap();
+        assert_eq!(detect_elevation_tool_in_path(Some(path.as_os_str())), Some(ElevationTool::Su));
+    }
 
     #[test]
     fn parse_terminal_aliases_and_shell_shorthand() {

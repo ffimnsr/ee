@@ -183,8 +183,14 @@ Real next jump likely needs architectural change: first render from decoded pref
   - [ ] Implement for `yaml`
   - [ ] Implement for `toml`
   - [ ] Implement for `kdl`
-- [ ] When trying to save and user doesn't have permission, ask if they want to re-execute with higher privilage with `sudo`, `su`, `run0`
-- [ ] Make sparse editing workable on VLF
+- [x] On save permission denial, detect write failure and prompt user to retry with elevated privileges via `sudo`, `su`, or `run0`
+  - [x] Trigger only on permission-related save errors, not generic I/O failures
+  - [x] Preserve pending buffer changes before privileged re-execution
+  - [x] Show target path and exact elevated command before confirmation
+- [ ] Make sparse editing workable for VLF (very large files)
+  - [ ] Support insert/replace/delete against unloaded regions without loading entire file into memory
+  - [ ] Keep cursor/selection mapping correct when edits shift later offsets
+  - [ ] Save only touched spans plus required surrounding context, then verify on-disk patch result
 - [ ] vsplit and hsplit problems on working with same file showing empty buffer on the other half
 
 - [ ] Backlog goals beyond current scope.
