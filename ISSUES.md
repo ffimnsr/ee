@@ -190,3 +190,79 @@ Real next jump likely needs architectural change: first render from decoded pref
 - [ ] Backlog goals beyond current scope.
   - [ ] Revisit trusted-only native grammar loading if runtime grammar execution moves to a sandboxed or wasmtime format / non-native format.
   - [ ] Revisit one-effective-owner-per-file-type if language detection grows beyond extension matching into ranked per-buffer resolution.
+
+### Auto Indent + Smart Indent
+
+- Rules:
+  - Keep newline indentation semantics owned by backend in `xi-core-lib`; frontend should trigger newline commands, not reimplement indentation policy.
+  - Make `auto_indent` existing config authoritative for baseline newline indentation. Do not add duplicate toggle for same behavior.
+  - Treat smart indent as additive on top of baseline auto indent. When syntax-aware indentation unavailable, editor must fall back cleanly to plain auto-indent or plain newline depending on config.
+  - Reuse existing tab/indent settings such as `translate_tabs_to_spaces`, `tab_size`, and current indent helpers before adding new formatting logic.
+  - Preserve deterministic multi-cursor and selection behavior. Newline indentation must produce stable results regardless of cursor count or selection order.
+  - Keep large-file and degraded-mode behavior fast. Do not require whole-buffer parse or expensive synchronous query work on every Enter keypress.
+  - Tree-sitter may provide structural signals, but `ee` must own final indentation decisions, fallback rules, and failure handling.
+  - Every phase must land with regression tests, including disabled-config and parser-unavailable cases.
+
+- [x] Phase 0: freeze auto-indent and smart-indent behavior contract.
+  - Why: current config already exposes `auto_indent`, but newline path ignores it. Need exact semantics before wiring behavior through editor core.
+  - [x] Define baseline newline behavior.
+    - [x] Confirm `auto_indent = false` keeps current plain newline insertion semantics.
+    - [x] Confirm `auto_indent = true` copies leading whitespace from current logical line on Enter.
+    - [x] Define behavior for caret inside indentation, mid-line Enter, end-of-line Enter, and newline with active non-caret selections.
+  - [x] Define smart-indent boundaries.
+    - [x] Decide whether smart indent ships under new `smart_indent` config or remains implicit behind syntax availability at first.
+    - [x] Confirm syntax-aware indentation never blocks basic editing when parser, runtime, or query assets are missing.
+    - [x] Decide initial supported behaviors: indent-after-opener only, dedent-before-closer, brace-pair expansion, alignment, or narrower MVP.
+
+- [x] Phase 1: implement baseline auto indent using existing config.
+  - Why: highest-value missing behavior is simple indent carry-forward on Enter, and existing `auto_indent` field should start working before any syntax-aware work.
+  - [x] Wire `auto_indent` into newline edit path.
+    - [x] Update newline handling in `crates/xi-core-lib/src/edit_ops.rs` to copy current line leading whitespace when `auto_indent` is enabled.
+    - [x] Preserve current line-ending behavior and selection replacement semantics.
+    - [x] Reuse existing tab/space policy helpers so copied plus added indentation stays consistent with buffer settings.
+  - [x] Add baseline regression coverage.
+    - [x] Plain newline remains unchanged when `auto_indent = false`.
+    - [x] Leading whitespace copies correctly for spaces, tabs, and mixed-indentation source lines.
+    - [x] Multi-cursor Enter and selection-replacement Enter produce deterministic results.
+
+- [x] Phase 2: add heuristic smart-indent fallback without tree-sitter dependency.
+  - Why: simple structural heuristics deliver immediate value and provide fallback when syntax runtime unavailable.
+  - [x] Add bounded syntax-agnostic indentation heuristics.
+    - [x] Increase one indent level after trailing opener tokens such as `{`, `[`, or `(` when appropriate.
+    - [x] Optionally reduce indentation when newline created before closing tokens such as `}`, `]`, or `)`.
+    - [x] Keep heuristic scope narrow and predictable; do not add language-specific guesswork yet.
+  - [x] Keep fallback behavior explicit.
+    - [x] Heuristics should layer on top of baseline copied indentation, not replace it.
+    - [x] When heuristics do not match, editor should fall back to copied-indent behavior only.
+
+- [ ] Phase 3: design and load tree-sitter indent query assets.
+  - Why: long-term smart indent should use same runtime grammar/query architecture instead of hardcoded per-language indentation logic.
+  - [ ] Extend runtime query model.
+    - [ ] Define minimal indent-query contract and capture vocabulary for `indent.scm` or equivalent runtime asset.
+    - [ ] Extend runtime loader in `crates/xi-core-lib` to discover and cache indent query assets alongside existing query types.
+    - [ ] Keep missing indent-query assets isolated so languages without support still edit normally.
+  - [ ] Preserve architecture boundaries.
+    - [ ] Reuse existing language resolution and query directory precedence rules.
+    - [ ] Do not introduce a second grammar or query loading path just for indentation.
+
+- [ ] Phase 4: implement syntax-aware smart indent evaluation.
+  - Why: tree-sitter gives structural context, but editor still needs backend logic that converts captures and syntax position into concrete indent edits.
+  - [ ] Add backend indent engine.
+    - [ ] Introduce backend-owned indent evaluation module in `crates/xi-core-lib` that computes newline indentation from syntax tree context plus buffer settings.
+    - [ ] Support at least inherit-indent, indent-one-level, and dedent-one-level outcomes for MVP.
+    - [ ] Fail closed to heuristic or baseline auto-indent when parse state incomplete, query missing, or language unsupported.
+  - [ ] Wire editor context into newline command.
+    - [ ] Pass enough syntax/runtime context from editor layer to newline path without pushing parser ownership into frontend.
+    - [ ] Keep text mutation logic separate from syntax-query evaluation so newline edits remain testable in isolation.
+
+- [ ] Phase 5: validate behavior, config, and mode-specific fallbacks.
+  - Why: indentation features are high-frequency editing paths; must prove correctness, performance, and non-support behavior before broadening language coverage.
+  - [ ] Add regression and failure-path coverage.
+    - [ ] Baseline auto-indent tests for plain text and non-code buffers.
+    - [ ] Smart-indent tests for at least Rust, JSON, and one indentation-sensitive language only if query semantics are ready.
+    - [ ] Missing parser, missing indent query, and disabled config all fall back without panic or stale indentation artifacts.
+    - [ ] Multi-cursor and selection cases remain deterministic under smart-indent path too.
+  - [ ] Validate mode/performance constraints.
+    - [ ] Confirm large or constrained buffers avoid expensive whole-file syntax work on Enter.
+    - [ ] Define whether VLF or parser-disabled modes use baseline auto-indent only, heuristic smart-indent, or explicit unsupported status.
+    - [ ] Document config semantics and supported smart-indent behavior in user-facing docs once implementation lands.

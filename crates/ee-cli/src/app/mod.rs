@@ -4513,7 +4513,7 @@ impl App {
     fn handle_visual_char(&mut self, ch: char) {
         match ch {
             // Operators
-            'd' => {
+            'd' | 'x' => {
                 self.begin_record();
                 if self.mode == Mode::VisualLine {
                     self.apply_visual_line_delete();

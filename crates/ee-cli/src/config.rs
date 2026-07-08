@@ -659,6 +659,7 @@ impl EditorSettings {
         table.insert("font_face".into(), Value::String(String::from("Noto Mono")));
         table.insert("font_size".into(), Value::from(14.0_f32));
         table.insert("auto_indent".into(), Value::Bool(true));
+        table.insert("smart_indent".into(), Value::Bool(true));
         table.insert("scroll_past_end".into(), Value::Bool(false));
         table.insert("wrap_width".into(), Value::from(0));
         table.insert("word_wrap".into(), Value::Bool(self.wrap_lines));

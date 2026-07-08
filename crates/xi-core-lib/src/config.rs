@@ -144,6 +144,10 @@ where
     }
 }
 
+const fn default_true() -> bool {
+    true
+}
+
 /// The concrete type for buffer-related settings.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct BufferItems {
@@ -155,6 +159,8 @@ pub struct BufferItems {
     pub font_face: String,
     pub font_size: f32,
     pub auto_indent: bool,
+    #[serde(default = "default_true")]
+    pub smart_indent: bool,
     pub scroll_past_end: bool,
     pub wrap_width: usize,
     pub word_wrap: bool,
@@ -173,6 +179,7 @@ impl Default for BufferItems {
             font_face: "InconsolataGo".to_owned(),
             font_size: 14.0,
             auto_indent: true,
+            smart_indent: true,
             scroll_past_end: false,
             wrap_width: 0,
             word_wrap: false,

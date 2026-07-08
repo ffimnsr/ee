@@ -394,7 +394,110 @@ fn base_ends_with_newline(base: &Rope) -> bool {
 }
 
 pub fn insert_newline(base: &Rope, regions: &[SelRegion], config: &BufferItems) -> RopeDelta {
-    insert(base, regions, &config.line_ending)
+    if !config.auto_indent {
+        return insert(base, regions, &config.line_ending);
+    }
+
+    let mut builder = DeltaBuilder::new(base.len());
+    for region in regions {
+        let mut insert_text =
+            String::with_capacity(config.line_ending.len() + (config.tab_size.max(1) * 2));
+        insert_text.push_str(&config.line_ending);
+        insert_text.push_str(&newline_indent_for_region(base, region, config));
+
+        let iv = Interval::new(region.min(), region.max());
+        builder.replace(iv, Rope::from(insert_text));
+    }
+
+    builder.build()
+}
+
+fn newline_indent_for_region(base: &Rope, region: &SelRegion, config: &BufferItems) -> String {
+    let mut indent = carried_indent_for_region(base, region);
+    if config.smart_indent {
+        apply_smart_indent_heuristic(base, region, config, &mut indent);
+    }
+    indent
+}
+
+fn carried_indent_for_region(base: &Rope, region: &SelRegion) -> String {
+    let anchor = region.min().min(base.len());
+    let line = base.line_of_offset(anchor);
+    let (line_start, content) = logical_line_contents(base, line);
+    let indent_end = content
+        .char_indices()
+        .find_map(|(idx, ch)| (!ch.is_whitespace()).then_some(idx))
+        .unwrap_or(content.len());
+    let anchor_in_line = anchor.saturating_sub(line_start).min(content.len());
+    let carry_end = anchor_in_line.min(indent_end);
+
+    if anchor_in_line < indent_end {
+        content[..carry_end].to_owned()
+    } else {
+        content[..indent_end].to_owned()
+    }
+}
+
+fn apply_smart_indent_heuristic(
+    base: &Rope,
+    region: &SelRegion,
+    config: &BufferItems,
+    indent: &mut String,
+) {
+    let anchor = region.min().min(base.len());
+    let region_end = region.max().min(base.len());
+    let line = base.line_of_offset(anchor);
+    if base.line_of_offset(region_end) != line {
+        return;
+    }
+
+    let (line_start, content) = logical_line_contents(base, line);
+    let anchor_in_line = anchor.saturating_sub(line_start).min(content.len());
+    let region_end_in_line = region_end.saturating_sub(line_start).min(content.len());
+    let indent_end = content
+        .char_indices()
+        .find_map(|(idx, ch)| (!ch.is_whitespace()).then_some(idx))
+        .unwrap_or(content.len());
+
+    let before = &content[..anchor_in_line];
+    let after = &content[region_end_in_line..];
+
+    if trimmed_line_ends_with_opener(before) {
+        indent.push_str(get_tab_text(config, None));
+    }
+
+    if anchor_in_line <= indent_end && trimmed_line_starts_with_closer(after) {
+        trim_one_indent_level(indent, config);
+    }
+}
+
+fn trimmed_line_ends_with_opener(before: &str) -> bool {
+    before.trim_end().chars().last().is_some_and(|ch| matches!(ch, '{' | '[' | '('))
+}
+
+fn trimmed_line_starts_with_closer(after: &str) -> bool {
+    after.trim_start().chars().next().is_some_and(|ch| matches!(ch, '}' | ']' | ')'))
+}
+
+fn trim_one_indent_level(indent: &mut String, config: &BufferItems) {
+    let tab_text = get_tab_text(config, None);
+    if indent.ends_with(tab_text) {
+        indent.truncate(indent.len() - tab_text.len());
+        return;
+    }
+
+    if indent.ends_with('\t') {
+        indent.pop();
+        return;
+    }
+
+    let trailing_spaces = indent.as_bytes().iter().rev().take_while(|&&byte| byte == b' ').count();
+    if trailing_spaces == 0 {
+        return;
+    }
+
+    let remove = trailing_spaces.min(config.tab_size.max(1));
+    indent.truncate(indent.len() - remove);
 }
 
 pub fn insert_tab(base: &Rope, regions: &[SelRegion], config: &BufferItems) -> RopeDelta {
@@ -1253,8 +1356,8 @@ fn n_spaces(n: usize) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        align_it, align_selections, delete_backward, expand_tabs_in_lines, reflow_lines,
-        reverse_selection_contents, rotate_selection_contents, sort_lines, transpose,
+        align_it, align_selections, delete_backward, expand_tabs_in_lines, insert_newline,
+        reflow_lines, reverse_selection_contents, rotate_selection_contents, sort_lines, transpose,
     };
     use crate::config::BufferItems;
     use crate::selection::SelRegion;
@@ -1290,29 +1393,181 @@ mod tests {
         assert_eq!(String::from(delta.apply(&text)), "1\nё");
     }
 
-    #[test]
-    fn delete_backward_merges_overlapping_regions() {
-        let text: Rope = "abcd".into();
-        let config = BufferItems {
+    fn test_config() -> BufferItems {
+        BufferItems {
             line_ending: "\n".to_owned(),
             tab_size: 4,
             translate_tabs_to_spaces: false,
             use_tab_stops: true,
             font_face: String::new(),
             font_size: 12.0,
-            auto_indent: false,
+            auto_indent: true,
+            smart_indent: true,
             scroll_past_end: false,
             wrap_width: 0,
             word_wrap: false,
             autodetect_whitespace: false,
             surrounding_pairs: Vec::new(),
             save_with_newline: false,
-        };
+        }
+    }
+
+    #[test]
+    fn delete_backward_merges_overlapping_regions() {
+        let text: Rope = "abcd".into();
+        let mut config = test_config();
+        config.auto_indent = false;
         let regions = [SelRegion::new(2, 2), SelRegion::new(3, 3)];
 
         let delta = delete_backward(&text, &regions, &config);
 
         assert_eq!(String::from(delta.apply(&text)), "ad");
+    }
+
+    #[test]
+    fn insert_newline_plain_when_auto_indent_disabled() {
+        let text: Rope = "    hello".into();
+        let mut config = test_config();
+        config.auto_indent = false;
+
+        let delta = insert_newline(&text, &[SelRegion::caret(text.len())], &config);
+
+        assert_eq!(String::from(delta.apply(&text)), "    hello\n");
+    }
+
+    #[test]
+    fn insert_newline_copies_full_leading_whitespace_at_or_after_content() {
+        let cases = [
+            ("    hello", 9, "    hello\n    "),
+            ("\thello", 6, "\thello\n\t"),
+            (" \thello", 7, " \thello\n \t"),
+            ("    hello", 6, "    he\n    llo"),
+        ];
+
+        let config = test_config();
+        for (input, offset, expected) in cases {
+            let text: Rope = input.into();
+            let delta = insert_newline(&text, &[SelRegion::caret(offset)], &config);
+            assert_eq!(
+                String::from(delta.apply(&text)),
+                expected,
+                "input={input:?}, offset={offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn insert_newline_inside_indentation_copies_prefix_only() {
+        let text: Rope = "    hello".into();
+        let config = test_config();
+
+        let delta = insert_newline(&text, &[SelRegion::caret(2)], &config);
+
+        assert_eq!(String::from(delta.apply(&text)), "  \n    hello");
+    }
+
+    #[test]
+    fn insert_newline_replaces_selection_using_start_line_indent() {
+        let text: Rope = "    hello world".into();
+        let config = test_config();
+
+        let delta = insert_newline(&text, &[SelRegion::new(6, 11)], &config);
+
+        assert_eq!(String::from(delta.apply(&text)), "    he\n    orld");
+    }
+
+    #[test]
+    fn insert_newline_replaces_multiline_selection_using_start_line_indent() {
+        let text: Rope = "    alpha\n  beta".into();
+        let config = test_config();
+
+        let delta = insert_newline(&text, &[SelRegion::new(6, text.len())], &config);
+
+        assert_eq!(String::from(delta.apply(&text)), "    al\n    ");
+    }
+
+    #[test]
+    fn insert_newline_handles_multiple_cursors_deterministically() {
+        let text: Rope = "    one\n\ttwo".into();
+        let config = test_config();
+        let regions = [SelRegion::caret(7), SelRegion::caret(text.len())];
+
+        let delta = insert_newline(&text, &regions, &config);
+
+        assert_eq!(String::from(delta.apply(&text)), "    one\n    \n\ttwo\n\t");
+    }
+
+    #[test]
+    fn insert_newline_preserves_configured_line_ending() {
+        let text: Rope = "  hi".into();
+        let mut config = test_config();
+        config.line_ending = "\r\n".to_owned();
+
+        let delta = insert_newline(&text, &[SelRegion::caret(text.len())], &config);
+
+        assert_eq!(String::from(delta.apply(&text)), "  hi\r\n  ");
+    }
+
+    #[test]
+    fn insert_newline_after_opener_adds_one_indent_level() {
+        let text: Rope = "if ready {".into();
+        let config = test_config();
+
+        let delta = insert_newline(&text, &[SelRegion::caret(text.len())], &config);
+
+        assert_eq!(String::from(delta.apply(&text)), "if ready {\n\t");
+    }
+
+    #[test]
+    fn insert_newline_after_opener_uses_space_indent_policy() {
+        let text: Rope = "if ready {".into();
+        let mut config = test_config();
+        config.translate_tabs_to_spaces = true;
+
+        let delta = insert_newline(&text, &[SelRegion::caret(text.len())], &config);
+
+        assert_eq!(String::from(delta.apply(&text)), "if ready {\n    ");
+    }
+
+    #[test]
+    fn insert_newline_before_closer_dedents_one_level() {
+        let text: Rope = "    }".into();
+        let config = test_config();
+
+        let delta = insert_newline(&text, &[SelRegion::caret(4)], &config);
+
+        assert_eq!(String::from(delta.apply(&text)), "    \n}");
+    }
+
+    #[test]
+    fn insert_newline_between_braces_keeps_opener_indent_without_brace_expansion() {
+        let text: Rope = "{}".into();
+        let config = test_config();
+
+        let delta = insert_newline(&text, &[SelRegion::caret(1)], &config);
+
+        assert_eq!(String::from(delta.apply(&text)), "{\n\t}");
+    }
+
+    #[test]
+    fn insert_newline_heuristics_disable_cleanly_when_smart_indent_disabled() {
+        let text: Rope = "if ready {".into();
+        let mut config = test_config();
+        config.smart_indent = false;
+
+        let delta = insert_newline(&text, &[SelRegion::caret(text.len())], &config);
+
+        assert_eq!(String::from(delta.apply(&text)), "if ready {\n");
+    }
+
+    #[test]
+    fn insert_newline_multiline_selection_falls_back_to_baseline_indent() {
+        let text: Rope = "if ready {\n    work();\n}".into();
+        let config = test_config();
+
+        let delta = insert_newline(&text, &[SelRegion::new(3, text.len() - 1)], &config);
+
+        assert_eq!(String::from(delta.apply(&text)), "if \n}");
     }
 
     #[test]

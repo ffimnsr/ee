@@ -14,6 +14,7 @@ fn valid_config() -> serde_json::Value {
         "font_face": "monospace",
         "font_size": 14.0,
         "auto_indent": true,
+        "smart_indent": true,
         "scroll_past_end": false,
         "wrap_width": 0,
         "word_wrap": false,

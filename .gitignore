@@ -21,6 +21,9 @@ build
 !/CHANGELOG.md
 !/CONTRIBUTING.md
 !/.github/copilot-instructions.md
+!/docs/
+!/docs/upgrades/
+!/docs/upgrades/*.md
 
 .atlas/
 .codex/

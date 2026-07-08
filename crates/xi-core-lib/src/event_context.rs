@@ -4979,15 +4979,15 @@ mod tests {
         ctx.do_edit(EditNotification::Indent);
         ctx.do_edit(EditNotification::InsertNewline);
         ctx.do_edit(EditNotification::Insert { chars: "world".into() });
-        assert_eq!(harness.debug_render(),"    hello\nworld|");
+        assert_eq!(harness.debug_render(),"    hello\n    world|");
 
         ctx.do_edit(EditNotification::MoveWordLeft);
         ctx.do_edit(EditNotification::MoveToBeginningOfDocumentAndModifySelection);
         ctx.do_edit(EditNotification::Indent);
-        assert_eq!(harness.debug_render(),"    [|    hello\n]world");
+        assert_eq!(harness.debug_render(),"    [|    hello\n        ]world");
 
         ctx.do_edit(EditNotification::Outdent);
-        assert_eq!(harness.debug_render(),"[|    hello\n]world");
+        assert_eq!(harness.debug_render(),"[|    hello\n    ]world");
 
         ctx.do_edit(EditNotification::SelectAll);
         ctx.do_edit(EditNotification::DeleteBackward);
