@@ -339,8 +339,8 @@ update_local_path_dependency_versions() {
         path_match = match($0, /path[[:space:]]*=[[:space:]]*"[^"]+"/)
         if (path_match) {
           path_value = substr($0, RSTART, RLENGTH)
-          gsub(/^[^\"]*\"/, "", path_value)
-          gsub(/\"$/, "", path_value)
+          gsub(/^[^"]*"/, "", path_value)
+          gsub(/"$/, "", path_value)
           if (index(path_value, path_prefix) == 1) {
             sub(/version[[:space:]]*=[[:space:]]*"[^"]*"/, "version = \"" version "\"")
           }
