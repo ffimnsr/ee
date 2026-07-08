@@ -42,6 +42,7 @@ pub mod editor;
 pub mod event_context;
 pub mod file;
 pub mod find;
+pub mod indent;
 pub mod index_set;
 pub mod lang_features;
 pub mod line_cache_shadow;

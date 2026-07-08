@@ -1096,7 +1096,7 @@ mod tests {
     use super::*;
     use crate::runtime_loader::{RuntimeLanguageConfig, RuntimeLanguageOverrides};
     use std::collections::BTreeSet;
-    use std::sync::{LazyLock, Mutex, MutexGuard};
+    use std::sync::MutexGuard;
 
     fn parse_rust(src: &str) -> Tree {
         parse_tree_with_timeout("rust", src, Duration::from_secs(1)).expect("parse failed")
@@ -1111,8 +1111,7 @@ mod tests {
     }
 
     fn runtime_loader_test_guard() -> MutexGuard<'static, ()> {
-        static RUNTIME_LOADER_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-        RUNTIME_LOADER_TEST_LOCK.lock().expect("lock runtime loader test guard")
+        crate::runtime_loader::runtime_loader_test_guard()
     }
 
     struct RuntimeLoaderOverrideGuard;

@@ -181,11 +181,11 @@ Real next jump likely needs architectural change: first render from decoded pref
 - [ ] Implement a `jq` like command `do file query|q --type json`, to query document files in similar ways
   - [ ] Implement for `json`
   - [ ] Implement for `yaml`
-- [ ] Implement for `toml`
-- [ ] Implement for `kdl`
+  - [ ] Implement for `toml`
+  - [ ] Implement for `kdl`
 - [ ] When trying to save and user doesn't have permission, ask if they want to re-execute with higher privilage with `sudo`, `su`, `run0`
 - [ ] Make sparse editing workable on VLF
-- [ ] vsplit and hsplit problems on working with same file showing empty buffer
+- [ ] vsplit and hsplit problems on working with same file showing empty buffer on the other half
 
 - [ ] Backlog goals beyond current scope.
   - [ ] Revisit trusted-only native grammar loading if runtime grammar execution moves to a sandboxed or wasmtime format / non-native format.
@@ -235,34 +235,34 @@ Real next jump likely needs architectural change: first render from decoded pref
     - [x] Heuristics should layer on top of baseline copied indentation, not replace it.
     - [x] When heuristics do not match, editor should fall back to copied-indent behavior only.
 
-- [ ] Phase 3: design and load tree-sitter indent query assets.
+- [x] Phase 3: design and load tree-sitter indent query assets.
   - Why: long-term smart indent should use same runtime grammar/query architecture instead of hardcoded per-language indentation logic.
-  - [ ] Extend runtime query model.
-    - [ ] Define minimal indent-query contract and capture vocabulary for `indent.scm` or equivalent runtime asset.
-    - [ ] Extend runtime loader in `crates/xi-core-lib` to discover and cache indent query assets alongside existing query types.
-    - [ ] Keep missing indent-query assets isolated so languages without support still edit normally.
-  - [ ] Preserve architecture boundaries.
-    - [ ] Reuse existing language resolution and query directory precedence rules.
-    - [ ] Do not introduce a second grammar or query loading path just for indentation.
+  - [x] Extend runtime query model.
+    - [x] Define minimal indent-query contract and capture vocabulary for `indent.scm` or equivalent runtime asset.
+    - [x] Extend runtime loader in `crates/xi-core-lib` to discover and cache indent query assets alongside existing query types.
+    - [x] Keep missing indent-query assets isolated so languages without support still edit normally.
+  - [x] Preserve architecture boundaries.
+    - [x] Reuse existing language resolution and query directory precedence rules.
+    - [x] Do not introduce a second grammar or query loading path just for indentation.
 
-- [ ] Phase 4: implement syntax-aware smart indent evaluation.
+- [x] Phase 4: implement syntax-aware smart indent evaluation.
   - Why: tree-sitter gives structural context, but editor still needs backend logic that converts captures and syntax position into concrete indent edits.
-  - [ ] Add backend indent engine.
-    - [ ] Introduce backend-owned indent evaluation module in `crates/xi-core-lib` that computes newline indentation from syntax tree context plus buffer settings.
-    - [ ] Support at least inherit-indent, indent-one-level, and dedent-one-level outcomes for MVP.
-    - [ ] Fail closed to heuristic or baseline auto-indent when parse state incomplete, query missing, or language unsupported.
-  - [ ] Wire editor context into newline command.
-    - [ ] Pass enough syntax/runtime context from editor layer to newline path without pushing parser ownership into frontend.
-    - [ ] Keep text mutation logic separate from syntax-query evaluation so newline edits remain testable in isolation.
+  - [x] Add backend indent engine.
+    - [x] Introduce backend-owned indent evaluation module in `crates/xi-core-lib` that computes newline indentation from syntax tree context plus buffer settings.
+    - [x] Support at least inherit-indent, indent-one-level, and dedent-one-level outcomes for MVP.
+    - [x] Fail closed to heuristic or baseline auto-indent when parse state incomplete, query missing, or language unsupported.
+  - [x] Wire editor context into newline command.
+    - [x] Pass enough syntax/runtime context from editor layer to newline path without pushing parser ownership into frontend.
+    - [x] Keep text mutation logic separate from syntax-query evaluation so newline edits remain testable in isolation.
 
-- [ ] Phase 5: validate behavior, config, and mode-specific fallbacks.
+- [x] Phase 5: validate behavior, config, and mode-specific fallbacks.
   - Why: indentation features are high-frequency editing paths; must prove correctness, performance, and non-support behavior before broadening language coverage.
-  - [ ] Add regression and failure-path coverage.
-    - [ ] Baseline auto-indent tests for plain text and non-code buffers.
-    - [ ] Smart-indent tests for at least Rust, JSON, and one indentation-sensitive language only if query semantics are ready.
-    - [ ] Missing parser, missing indent query, and disabled config all fall back without panic or stale indentation artifacts.
-    - [ ] Multi-cursor and selection cases remain deterministic under smart-indent path too.
-  - [ ] Validate mode/performance constraints.
-    - [ ] Confirm large or constrained buffers avoid expensive whole-file syntax work on Enter.
-    - [ ] Define whether VLF or parser-disabled modes use baseline auto-indent only, heuristic smart-indent, or explicit unsupported status.
-    - [ ] Document config semantics and supported smart-indent behavior in user-facing docs once implementation lands.
+  - [x] Add regression and failure-path coverage.
+    - [x] Baseline auto-indent tests for plain text and non-code buffers.
+    - [x] Smart-indent tests for at least Rust, JSON, and one indentation-sensitive language only if query semantics are ready.
+    - [x] Missing parser, missing indent query, and disabled config all fall back without panic or stale indentation artifacts.
+    - [x] Multi-cursor and selection cases remain deterministic under smart-indent path too.
+  - [x] Validate mode/performance constraints.
+    - [x] Confirm large or constrained buffers avoid expensive whole-file syntax work on Enter.
+    - [x] Define whether VLF or parser-disabled modes use baseline auto-indent only, heuristic smart-indent, or explicit unsupported status.
+    - [x] Document config semantics and supported smart-indent behavior in user-facing docs once implementation lands.

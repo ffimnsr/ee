@@ -13,6 +13,7 @@
 - User runtime root is `dirs::data_dir()/ee/`. On Linux this maps to `$XDG_DATA_HOME/ee/`.
 - Compiled shared libraries live under `grammars/` as platform-native dynamic libraries.
 - Query files live under `queries/<language>/` and use file-backed `.scm` assets such as `highlights.scm`, `injections.scm`, `locals.scm`, `tags.scm`, `textobjects.scm`, `indents.scm`, `folds.scm`, and `rainbows.scm`.
+- `indents.scm` now has frozen minimal capture vocabulary: `@indent` for nodes whose interior lines gain one indent level, and `@dedent` for nodes whose own line drops one indent level. Unknown indent captures are rejected during runtime query compilation.
 - Runtime metadata keeps one canonical language id plus aliases, file types, optional globs, optional shebangs, grammar id, grammar library name, optional query-language override, and supported query kinds.
 
 ## Merge Rules

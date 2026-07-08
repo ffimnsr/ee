@@ -31,6 +31,7 @@ use crate::config::BufferItems;
 use crate::edit_ops::{self, IndentDirection};
 use crate::edit_types::BufferEvent;
 use crate::event_context::MAX_SIZE_LIMIT;
+use crate::indent::SyntaxIndentContext;
 use crate::line_offset::{LineOffset, LogicalLines};
 use crate::movement::Movement;
 use crate::plugins::PluginId;
@@ -691,7 +692,21 @@ impl Editor {
     }
 
     fn do_insert_newline(&mut self, view: &View, config: &BufferItems) {
-        let delta = edit_ops::insert_newline(&self.text, view.sel_regions(), config);
+        self.do_insert_newline_with_context(view, config, None);
+    }
+
+    pub(crate) fn do_insert_newline_with_context(
+        &mut self,
+        view: &View,
+        config: &BufferItems,
+        syntax_context: Option<&SyntaxIndentContext<'_>>,
+    ) {
+        let delta = edit_ops::insert_newline_with_context(
+            &self.text,
+            view.sel_regions(),
+            config,
+            syntax_context,
+        );
         self.add_delta(delta);
         self.this_edit_type = EditType::InsertNewline;
     }

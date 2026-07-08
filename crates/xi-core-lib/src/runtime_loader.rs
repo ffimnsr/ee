@@ -8,6 +8,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, LazyLock, RwLock};
+#[cfg(test)]
+use std::sync::{Mutex, MutexGuard};
 use std::time::SystemTime;
 
 #[cfg(any(test, feature = "test-grammars"))]
@@ -47,6 +49,41 @@ pub enum RuntimeQueryKind {
     Indents,
     Folds,
     Rainbows,
+}
+
+/// Minimal capture vocabulary for `indents.scm` runtime assets.
+///
+/// Phase 3 defines only bounded, backend-owned indentation signals:
+///
+/// - `@indent` marks syntax nodes whose interior lines gain one indent level.
+/// - `@dedent` marks syntax nodes whose own line should drop one indent level.
+///
+/// Later phases may consume these captures for newline indentation and richer
+/// reindent logic, but the query-loading contract is frozen here so malformed
+/// runtime assets fail clearly instead of silently drifting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum IndentQueryCapture {
+    Indent,
+    Dedent,
+}
+
+impl IndentQueryCapture {
+    pub const ALL: [Self; 2] = [Self::Indent, Self::Dedent];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Indent => "indent",
+            Self::Dedent => "dedent",
+        }
+    }
+
+    pub fn from_capture_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|capture| capture.as_str() == name)
+    }
+
+    pub fn allowed_names() -> Vec<&'static str> {
+        Self::ALL.into_iter().map(Self::as_str).collect()
+    }
 }
 
 impl RuntimeQueryKind {
@@ -993,17 +1030,57 @@ fn grammar_fetch_plan_for_language(
 #[derive(Debug)]
 pub enum RuntimeLoaderError {
     Loader(LoaderError),
-    RuntimeDisabled { reason: &'static str },
-    InvalidConfig { message: String },
-    AmbiguousAlias { alias: String, first_language: String, second_language: String },
-    AmbiguousFileType { file_type: String, first_language: String, second_language: String },
-    UnknownLanguage { requested: String },
-    MissingGrammar { language_id: String, path: Option<PathBuf> },
-    GrammarOutsideRuntimeRoot { path: PathBuf, allowed_roots: Vec<PathBuf> },
-    QueryIo { kind: RuntimeQueryKind, path: PathBuf, error: io::Error },
-    QueryCompile { kind: RuntimeQueryKind, file: Option<PathBuf>, error: QueryError },
-    QueryInheritanceCycle { kind: RuntimeQueryKind, chain: Vec<String> },
-    UnknownInheritedLanguage { kind: RuntimeQueryKind, language: String },
+    RuntimeDisabled {
+        reason: &'static str,
+    },
+    InvalidConfig {
+        message: String,
+    },
+    AmbiguousAlias {
+        alias: String,
+        first_language: String,
+        second_language: String,
+    },
+    AmbiguousFileType {
+        file_type: String,
+        first_language: String,
+        second_language: String,
+    },
+    UnknownLanguage {
+        requested: String,
+    },
+    MissingGrammar {
+        language_id: String,
+        path: Option<PathBuf>,
+    },
+    GrammarOutsideRuntimeRoot {
+        path: PathBuf,
+        allowed_roots: Vec<PathBuf>,
+    },
+    QueryIo {
+        kind: RuntimeQueryKind,
+        path: PathBuf,
+        error: io::Error,
+    },
+    QueryCompile {
+        kind: RuntimeQueryKind,
+        file: Option<PathBuf>,
+        error: QueryError,
+    },
+    InvalidQueryCapture {
+        kind: RuntimeQueryKind,
+        file: Option<PathBuf>,
+        capture: String,
+        allowed: Vec<&'static str>,
+    },
+    QueryInheritanceCycle {
+        kind: RuntimeQueryKind,
+        chain: Vec<String>,
+    },
+    UnknownInheritedLanguage {
+        kind: RuntimeQueryKind,
+        language: String,
+    },
 }
 
 impl fmt::Display for RuntimeLoaderError {
@@ -1044,6 +1121,21 @@ impl fmt::Display for RuntimeLoaderError {
                 }
                 None => write!(f, "failed compiling {:?} query: {error}", kind),
             },
+            Self::InvalidQueryCapture { kind, file, capture, allowed } => match file {
+                Some(file) => write!(
+                    f,
+                    "invalid capture `@{capture}` in {:?} query {} (allowed: {})",
+                    kind,
+                    file.display(),
+                    allowed.join(", ")
+                ),
+                None => write!(
+                    f,
+                    "invalid capture `@{capture}` in {:?} query (allowed: {})",
+                    kind,
+                    allowed.join(", ")
+                ),
+            },
             Self::QueryInheritanceCycle { kind, chain } => {
                 write!(f, "query inheritance cycle for {:?}: {}", kind, chain.join(" -> "))
             }
@@ -1061,6 +1153,7 @@ impl Error for RuntimeLoaderError {
             Self::QueryIo { error, .. } => Some(error),
             Self::QueryCompile { error, .. } => Some(error),
             Self::InvalidConfig { .. }
+            | Self::InvalidQueryCapture { .. }
             | Self::RuntimeDisabled { .. }
             | Self::AmbiguousAlias { .. }
             | Self::AmbiguousFileType { .. }
@@ -1425,6 +1518,13 @@ impl RuntimeLoader {
         Ok(self.query_cache.get(&cache_key).filter(|entry| query_artifact_is_fresh(entry)))
     }
 
+    pub fn resolve_indent_query_source(
+        &mut self,
+        language_name: &str,
+    ) -> Result<Option<&QueryArtifactCacheEntry>, RuntimeLoaderError> {
+        self.resolve_query_source(language_name, RuntimeQueryKind::Indents)
+    }
+
     pub fn compile_query_kind(
         &mut self,
         language_name: &str,
@@ -1447,6 +1547,13 @@ impl RuntimeLoader {
         let compiled = self.compile_query_artifact(language_name, kind, artifact)?;
         self.compiled_query_cache.insert(cache_key, Arc::clone(&compiled));
         Ok(Some(compiled))
+    }
+
+    pub fn compile_indent_query(
+        &mut self,
+        language_name: &str,
+    ) -> Result<Option<Arc<CompiledQueryArtifact>>, RuntimeLoaderError> {
+        self.compile_query_kind(language_name, RuntimeQueryKind::Indents)
     }
 
     pub fn compile_query_kind_transient(
@@ -1493,6 +1600,7 @@ impl RuntimeLoader {
         let handle = self.load_language_for_name(language_name)?;
         let query = Query::new(&handle.language(), &artifact.source_text)
             .map_err(|error| map_query_error(kind, error, &artifact.path_ranges))?;
+        validate_query_contract(kind, &artifact.source_paths, &query)?;
         Ok(Arc::new(CompiledQueryArtifact {
             kind,
             source_text: artifact.source_text,
@@ -1870,7 +1978,7 @@ impl RuntimeLoader {
             if !skip_load {
                 validate_built_grammar_symbol(&grammar_path, &language)?;
             }
-            let query_paths =
+            let mut query_paths =
                 copy_standard_queries_to_runtime(&fetched.source_dir, output_root, &language)
                     .map_err(|error| {
                         RuntimeOperationError::runtime_asset(format!(
@@ -1878,6 +1986,16 @@ impl RuntimeLoader {
                             language.canonical_id()
                         ))
                     })?;
+            query_paths.extend(
+                copy_bundled_ee_owned_queries_to_runtime(output_root, &language).map_err(
+                    |error| {
+                        RuntimeOperationError::runtime_asset(format!(
+                            "failed copying bundled ee-owned queries for `{}`: {error}",
+                            language.canonical_id()
+                        ))
+                    },
+                )?,
+            );
             built.push(RuntimeBuiltGrammar {
                 language_id: language.canonical_id().to_string(),
                 source_pin: fetched.source_pin.clone(),
@@ -2992,8 +3110,7 @@ fn copy_standard_queries_to_runtime(
 ) -> Result<Vec<PathBuf>, RuntimeOperationError> {
     let manifest_query_paths = resolve_manifest_standard_query_paths(source_dir, language)?;
     let source_query_dir = source_dir.join("queries");
-    let destination_query_dir =
-        output_root.join(QUERIES_DIR_NAME).join(runtime_query_dir_name(language.query_language()));
+    let destination_query_dir = runtime_output_query_dir(output_root, language);
     fs::create_dir_all(&destination_query_dir).map_err(|error| {
         RuntimeOperationError::runtime_asset(format!(
             "failed creating query output dir {}: {error}",
@@ -3011,16 +3128,69 @@ fn copy_standard_queries_to_runtime(
             continue;
         }
         let destination_path = destination_query_dir.join(kind.file_name());
-        fs::copy(&source_path, &destination_path).map_err(|error| {
-            RuntimeOperationError::runtime_asset(format!(
-                "failed copying query {} to {}: {error}",
-                source_path.display(),
-                destination_path.display()
-            ))
-        })?;
+        copy_runtime_query_file(&source_path, &destination_path)?;
         copied.push(destination_path);
     }
     Ok(copied)
+}
+
+fn copy_bundled_ee_owned_queries_to_runtime(
+    output_root: &Path,
+    language: &RuntimeLanguage,
+) -> Result<Vec<PathBuf>, RuntimeOperationError> {
+    let source_query_dir = bundled_repo_runtime_root()
+        .join(QUERIES_DIR_NAME)
+        .join(runtime_query_dir_name(language.query_language()));
+    if !source_query_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let destination_query_dir = runtime_output_query_dir(output_root, language);
+    fs::create_dir_all(&destination_query_dir).map_err(|error| {
+        RuntimeOperationError::runtime_asset(format!(
+            "failed creating query output dir {}: {error}",
+            destination_query_dir.display()
+        ))
+    })?;
+
+    let mut copied = Vec::new();
+    for kind in RuntimeQueryKind::EE_OWNED {
+        if !language.supported_query_kinds().contains(&kind) {
+            continue;
+        }
+
+        let source_path = source_query_dir.join(kind.file_name());
+        if !source_path.exists() {
+            continue;
+        }
+
+        let destination_path = destination_query_dir.join(kind.file_name());
+        copy_runtime_query_file(&source_path, &destination_path)?;
+        copied.push(destination_path);
+    }
+    Ok(copied)
+}
+
+fn runtime_output_query_dir(output_root: &Path, language: &RuntimeLanguage) -> PathBuf {
+    output_root.join(QUERIES_DIR_NAME).join(runtime_query_dir_name(language.query_language()))
+}
+
+fn bundled_repo_runtime_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("runtime")
+}
+
+fn copy_runtime_query_file(
+    source_path: &Path,
+    destination_path: &Path,
+) -> Result<(), RuntimeOperationError> {
+    fs::copy(source_path, destination_path).map_err(|error| {
+        RuntimeOperationError::runtime_asset(format!(
+            "failed copying query {} to {}: {error}",
+            source_path.display(),
+            destination_path.display()
+        ))
+    })?;
+    Ok(())
 }
 
 fn looks_like_runtime_grammar_source(path: &Path) -> bool {
@@ -3239,6 +3409,35 @@ fn map_query_error(
         .map(|(path, _)| path.clone())
         .or_else(|| ranges.last().map(|(path, _)| path.clone()));
     RuntimeLoaderError::QueryCompile { kind, file, error }
+}
+
+fn validate_query_contract(
+    kind: RuntimeQueryKind,
+    source_paths: &[PathBuf],
+    query: &Query,
+) -> Result<(), RuntimeLoaderError> {
+    match kind {
+        RuntimeQueryKind::Indents => validate_indent_query_contract(source_paths, query),
+        _ => Ok(()),
+    }
+}
+
+fn validate_indent_query_contract(
+    source_paths: &[PathBuf],
+    query: &Query,
+) -> Result<(), RuntimeLoaderError> {
+    for capture in query.capture_names() {
+        if IndentQueryCapture::from_capture_name(capture).is_none() {
+            return Err(RuntimeLoaderError::InvalidQueryCapture {
+                kind: RuntimeQueryKind::Indents,
+                file: source_paths.first().cloned(),
+                capture: capture.to_string(),
+                allowed: IndentQueryCapture::allowed_names(),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 fn resolve_bundled_runtime_root(
@@ -3761,6 +3960,12 @@ static DEFAULT_RUNTIME_LOADER: LazyLock<RwLock<RuntimeLoader>> =
 
 static DEFAULT_RUNTIME_LOADER_OVERRIDES: LazyLock<RwLock<DefaultRuntimeLoaderOverrides>> =
     LazyLock::new(|| RwLock::new(DefaultRuntimeLoaderOverrides::default()));
+
+#[cfg(test)]
+pub(crate) fn runtime_loader_test_guard() -> MutexGuard<'static, ()> {
+    static RUNTIME_LOADER_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    RUNTIME_LOADER_TEST_LOCK.lock().expect("lock runtime loader test guard")
+}
 
 fn default_runtime_loader_overrides() -> DefaultRuntimeLoaderOverrides {
     DEFAULT_RUNTIME_LOADER_OVERRIDES.read().expect("runtime loader overrides poisoned").clone()
@@ -4809,6 +5014,7 @@ mod tests {
 
     #[test]
     fn test_grammar_bootstrap_populates_default_loader_only_in_tests() {
+        let _guard = runtime_loader_test_guard();
         ensure_default_runtime_loader_has_test_grammars();
         with_default_runtime_loader(|loader| {
             assert!(loader.preloaded_grammars.contains_key(&normalize_lookup_key("rust")));
@@ -5002,6 +5208,140 @@ mod tests {
         assert!(semantic.textobjects.is_none());
         assert!(semantic.tags.is_none());
         assert!(loader.compile_query_kind("rust", RuntimeQueryKind::Indents).unwrap().is_none());
+    }
+
+    #[test]
+    fn indent_query_capture_contract_round_trips_names() {
+        assert_eq!(
+            IndentQueryCapture::from_capture_name("indent"),
+            Some(IndentQueryCapture::Indent)
+        );
+        assert_eq!(
+            IndentQueryCapture::from_capture_name("dedent"),
+            Some(IndentQueryCapture::Dedent)
+        );
+        assert_eq!(IndentQueryCapture::from_capture_name("branch"), None);
+        assert_eq!(IndentQueryCapture::allowed_names(), vec!["indent", "dedent"]);
+    }
+
+    #[test]
+    fn compile_indent_query_uses_shared_runtime_loader_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundled_root = temp_dir.path().join("bundle");
+        let query_dir = bundled_root.join("queries").join("rust");
+        fs::create_dir_all(&query_dir).unwrap();
+        let indents_path = query_dir.join("indents.scm");
+        fs::write(&indents_path, "((block) @indent)").unwrap();
+
+        let roots = RuntimeRoots::new(&bundled_root, temp_dir.path().join("user"), None);
+        let mut loader = RuntimeLoader::new(roots, Vec::new()).unwrap();
+        let languages = Languages::new(&[language_definition("rust", &["rs"])]);
+        let mut overrides = RuntimeLanguageOverrides::new();
+        overrides.insert(
+            "rust".to_string(),
+            RuntimeLanguageConfig {
+                supported_query_kinds: Some(BTreeSet::from([RuntimeQueryKind::Indents])),
+                ..runtime_language_override("tree-sitter-rust", "tree_sitter_rust")
+            },
+        );
+        loader.reload_merged_languages(&languages, &overrides, None).unwrap();
+        loader.preload_language(
+            "rust",
+            GrammarHandle::from_loaded(
+                test_grammars::rust(),
+                "__builtin__/rust",
+                "tree_sitter_rust",
+            ),
+        );
+
+        let artifact = loader.resolve_indent_query_source("rust").unwrap().unwrap();
+        assert_eq!(artifact.source_paths, vec![indents_path.clone()]);
+        let compiled = loader.compile_indent_query("rust").unwrap().unwrap();
+        assert_eq!(compiled.kind, RuntimeQueryKind::Indents);
+        assert_eq!(compiled.source_paths, vec![indents_path]);
+    }
+
+    #[test]
+    fn invalid_indent_query_capture_reports_clear_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundled_root = temp_dir.path().join("bundle");
+        let query_dir = bundled_root.join("queries").join("rust");
+        fs::create_dir_all(&query_dir).unwrap();
+        let indents_path = query_dir.join("indents.scm");
+        fs::write(&indents_path, "((block) @branch)").unwrap();
+
+        let roots = RuntimeRoots::new(&bundled_root, temp_dir.path().join("user"), None);
+        let mut loader = RuntimeLoader::new(roots, Vec::new()).unwrap();
+        let languages = Languages::new(&[language_definition("rust", &["rs"])]);
+        let mut overrides = RuntimeLanguageOverrides::new();
+        overrides.insert(
+            "rust".to_string(),
+            RuntimeLanguageConfig {
+                supported_query_kinds: Some(BTreeSet::from([RuntimeQueryKind::Indents])),
+                ..runtime_language_override("tree-sitter-rust", "tree_sitter_rust")
+            },
+        );
+        loader.reload_merged_languages(&languages, &overrides, None).unwrap();
+        loader.preload_language(
+            "rust",
+            GrammarHandle::from_loaded(
+                test_grammars::rust(),
+                "__builtin__/rust",
+                "tree_sitter_rust",
+            ),
+        );
+
+        let error = loader.compile_indent_query("rust").unwrap_err();
+        match error {
+            RuntimeLoaderError::InvalidQueryCapture { kind, file, capture, allowed } => {
+                assert_eq!(kind, RuntimeQueryKind::Indents);
+                assert_eq!(file.as_deref(), Some(indents_path.as_path()));
+                assert_eq!(capture, "branch");
+                assert_eq!(allowed, vec!["indent", "dedent"]);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bundled_runtime_indent_queries_compile_for_rust_json_and_python() {
+        let temp_dir = TempDir::new().unwrap();
+        let bundled_root = temp_dir.path().join("bundle");
+        let repo_runtime =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("runtime");
+
+        for (language, file_types, grammar, symbol) in [
+            ("rust", vec!["rs"], test_grammars::rust(), "tree_sitter_rust"),
+            ("json", vec!["json"], test_grammars::json(), "tree_sitter_json"),
+            ("python", vec!["py"], test_grammars::python(), "tree_sitter_python"),
+        ] {
+            let source = repo_runtime.join("queries").join(language).join("indents.scm");
+            assert!(source.exists(), "missing bundled indent query {}", source.display());
+            let query_dir = bundled_root.join("queries").join(language);
+            fs::create_dir_all(&query_dir).unwrap();
+            fs::copy(&source, query_dir.join("indents.scm")).unwrap();
+
+            let roots = RuntimeRoots::new(&bundled_root, temp_dir.path().join("user"), None);
+            let mut loader = RuntimeLoader::new(roots, Vec::new()).unwrap();
+            let languages = Languages::new(&[language_definition(language, &file_types)]);
+            let mut overrides = RuntimeLanguageOverrides::new();
+            overrides.insert(
+                language.to_string(),
+                RuntimeLanguageConfig {
+                    supported_query_kinds: Some(BTreeSet::from([RuntimeQueryKind::Indents])),
+                    ..runtime_language_override(&format!("tree-sitter-{language}"), symbol)
+                },
+            );
+            loader.reload_merged_languages(&languages, &overrides, None).unwrap();
+            loader.preload_language(
+                language,
+                GrammarHandle::from_loaded(grammar, format!("__builtin__/{language}"), symbol),
+            );
+
+            let compiled = loader.compile_indent_query(language).unwrap().unwrap();
+            assert_eq!(compiled.kind, RuntimeQueryKind::Indents);
+            assert!(!compiled.source_text.trim().is_empty(), "compiled query empty for {language}");
+        }
     }
 
     #[test]
@@ -5422,6 +5762,13 @@ mod tests {
                 .iter()
                 .any(|path| path.ends_with(Path::new("rust").join("highlights.scm")))
         );
+        assert!(
+            built[0]
+                .query_paths
+                .iter()
+                .any(|path| path.ends_with(Path::new("rust").join("indents.scm")))
+        );
+        assert!(output_root.join("queries").join("rust").join("indents.scm").exists());
     }
 
     #[test]

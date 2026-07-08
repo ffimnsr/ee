@@ -826,14 +826,83 @@ fn node_text<'a>(node: Node<'_>, source: &'a str) -> &'a str {
 mod tests {
     use super::{
         SyntaxNavigationAction, SyntaxNavigationTarget, SyntaxSelectionAction,
-        SyntaxSelectionError, apply_syntax_navigation, apply_syntax_navigation_in_window,
-        apply_syntax_selection, apply_syntax_selection_in_window, node_to_region,
+        SyntaxSelectionError, apply_syntax_navigation as raw_apply_syntax_navigation,
+        apply_syntax_navigation_in_window as raw_apply_syntax_navigation_in_window,
+        apply_syntax_selection as raw_apply_syntax_selection,
+        apply_syntax_selection_in_window as raw_apply_syntax_selection_in_window, node_to_region,
     };
     use crate::selection::{SelRegion, Selection};
     use crate::tree_sitter_support::ts_language_for_name;
     use std::path::Path;
     use tree_sitter::Parser;
     use xi_rope::Rope;
+
+    fn runtime_loader_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::runtime_loader::runtime_loader_test_guard()
+    }
+
+    fn apply_syntax_navigation(
+        text: &Rope,
+        current: &Selection,
+        language_name: &str,
+        file_path: Option<&Path>,
+        action: SyntaxNavigationAction,
+    ) -> Result<Selection, SyntaxSelectionError> {
+        let _guard = runtime_loader_test_guard();
+        raw_apply_syntax_navigation(text, current, language_name, file_path, action)
+    }
+
+    fn apply_syntax_navigation_in_window(
+        source: &str,
+        base_offset: usize,
+        current: &Selection,
+        language_name: &str,
+        file_path: Option<&Path>,
+        action: SyntaxNavigationAction,
+    ) -> Result<Selection, SyntaxSelectionError> {
+        let _guard = runtime_loader_test_guard();
+        raw_apply_syntax_navigation_in_window(
+            source,
+            base_offset,
+            current,
+            language_name,
+            file_path,
+            action,
+        )
+    }
+
+    fn apply_syntax_selection(
+        text: &Rope,
+        current: &Selection,
+        history: &mut Vec<Selection>,
+        language_name: &str,
+        file_path: Option<&Path>,
+        action: SyntaxSelectionAction,
+    ) -> Result<Selection, SyntaxSelectionError> {
+        let _guard = runtime_loader_test_guard();
+        raw_apply_syntax_selection(text, current, history, language_name, file_path, action)
+    }
+
+    fn apply_syntax_selection_in_window(
+        source: &str,
+        base_offset: usize,
+        current: &Selection,
+        history: &mut Vec<Selection>,
+        language_name: &str,
+        file_path: Option<&Path>,
+        action: SyntaxSelectionAction,
+    ) -> Result<Selection, SyntaxSelectionError> {
+        let _guard = runtime_loader_test_guard();
+        raw_apply_syntax_selection_in_window(
+            source,
+            base_offset,
+            current,
+            history,
+            language_name,
+            file_path,
+            action,
+        )
+    }
 
     fn select_range(start: usize, end: usize) -> Selection {
         Selection::new_simple(SelRegion::new(start, end))

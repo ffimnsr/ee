@@ -39,9 +39,10 @@ use crate::WeakXiCore;
 use crate::client::Client;
 use crate::config::{BufferItems, Table};
 use crate::edit_ops;
-use crate::edit_types::{EventDomain, SpecialEvent};
+use crate::edit_types::{BufferEvent, EventDomain, SpecialEvent};
 use crate::editor::{EditType, Editor};
 use crate::file::FileInfo;
+use crate::indent::SyntaxIndentContext;
 use crate::lang_features;
 use crate::line_offset::{LineOffset, LogicalLines};
 use crate::object::{self, SyntaxNavigationAction, SyntaxSelectionAction};
@@ -518,7 +519,26 @@ impl<'a> EventContext<'a> {
                     self.client.alert(reason);
                     return None;
                 }
-                self.with_editor(|ed, view, k_ring, conf| ed.do_edit(view, k_ring, conf, cmd));
+                match cmd {
+                    BufferEvent::InsertNewline => {
+                        let mode = self.editor.borrow().document_mode();
+                        let language = self.language.clone();
+                        let file_path = self.info.map(|info| info.path.clone());
+                        self.with_editor(|ed, view, _, conf| {
+                            let syntax_context = SyntaxIndentContext::new(
+                                language.as_ref(),
+                                file_path.as_deref(),
+                                mode,
+                            );
+                            ed.do_insert_newline_with_context(view, conf, Some(&syntax_context));
+                        });
+                    }
+                    other => {
+                        self.with_editor(|ed, view, k_ring, conf| {
+                            ed.do_edit(view, k_ring, conf, other)
+                        });
+                    }
+                }
                 None
             }
             E::Special(cmd) => self.do_special(cmd),
@@ -3667,6 +3687,7 @@ mod tests {
 
     #[test]
     fn language_changed_invalidates_view_for_syntax_refresh() {
+        let _guard = crate::runtime_loader::runtime_loader_test_guard();
         let harness = ContextHarness::new("let x = 1;\n");
         harness.take_notifications();
 
@@ -5790,6 +5811,7 @@ mod tests {
 
     #[test]
     fn vlf_syntax_selection_uses_visible_range_parse() {
+        let _guard = crate::runtime_loader::runtime_loader_test_guard();
         let source = b"fn main() { foo(bar); }\n";
         let (harness, _f) = vlf_harness(source);
         harness.take_notifications();
@@ -5831,6 +5853,7 @@ mod tests {
 
     #[test]
     fn vlf_syntax_navigation_stays_bounded_to_visible_range() {
+        let _guard = crate::runtime_loader::runtime_loader_test_guard();
         let (harness, _f) = vlf_harness(b"fn alpha() {}\nfn beta() {}\n");
         harness.take_notifications();
         let mut ctx = harness.make_context();
@@ -5869,6 +5892,7 @@ mod tests {
 
     #[test]
     fn vlf_syntax_navigation_uses_visible_range_parse() {
+        let _guard = crate::runtime_loader::runtime_loader_test_guard();
         let (harness, _f) = vlf_harness(b"fn alpha() {}\nfn beta() {}\n");
         harness.take_notifications();
         let mut ctx = harness.make_context();
@@ -5893,6 +5917,7 @@ mod tests {
 
     #[test]
     fn vlf_syntax_commands_reuse_visible_parse_cache() {
+        let _guard = crate::runtime_loader::runtime_loader_test_guard();
         let (harness, _f) = vlf_harness(b"fn alpha() { beta(gamma); }\nfn delta() {}\n");
         harness.take_notifications();
         let mut ctx = harness.make_context();

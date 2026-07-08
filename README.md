@@ -71,6 +71,8 @@ ee <path/to/file>
 
 This repository includes a Unix installer at `install.sh` that downloads and installs a release binary from GitHub.
 
+Installer also installs bundled tree-sitter runtime assets into XDG data dir and bundled plugins into XDG config plugin dir by default.
+
 #### Install with scpr
 
 ```sh
@@ -96,6 +98,14 @@ curl -fsSL -o install.sh https://raw.githubusercontent.com/ffimnsr/ee/main/insta
 sh install.sh
 ```
 
+Default install targets:
+
+- binary: `~/.local/bin/ee`
+- tree-sitter runtime: `~/.local/share/ee`
+- bundled plugins: `~/.config/ee/plugins`
+
+Override paths with `--bin-dir`, `--runtime-dir`, and `--plugin-dir`.
+
 The installer supports `bash`, `zsh`, and `fish` completions and installs the binary into `~/.local/bin` by default.
 
 On Linux and macOS the installer also places bundled runtime assets under `~/.local/share/ee`, which matches the release runtime layout resolved relative to `~/.local/bin/ee`.
@@ -119,6 +129,7 @@ Bundled runtime is treated as read-only. Bundled and user/workspace overlays all
 
 - `grammars/` for compiled parser libraries
 - `queries/<language>/` for `.scm` query files
+- bundled `indents.scm` assets currently ship for `rust`, `json`, and `python`
 
 Query overlays merge deterministically in bundled, then user, then workspace order for each language and query kind.
 
@@ -261,6 +272,8 @@ EE_RUNTIME_DIR="$PWD/target/runtime-package" cargo run -p ee-cli -- path/to/file
 ```
 
 `scripts/build-runtime.sh` drives `ee do runtime fetch` and `ee do runtime build` against the merged ee language configuration, fetches grammar crate sources into a staging directory, then writes a runtime tree containing `grammars/` and `queries/`.
+
+That packaged query tree includes upstream standard queries plus ee-owned bundled runtime queries such as `runtime/queries/rust/indents.scm`, `runtime/queries/json/indents.scm`, and `runtime/queries/python/indents.scm`. `scripts/install-tree-sitter-runtime.sh` installs same built query assets because it delegates to `scripts/build-runtime.sh`.
 
 New runtime languages should be described in runtime language metadata with a grammar crate name and exact crate version. Runtime fetch now resolves those crates through a temporary cargo manifest, so adding a language no longer requires editing workspace `Cargo.toml` just to stage grammar sources.
 

@@ -23,6 +23,7 @@ use xi_rope::{Cursor, DeltaBuilder, Interval, LinesMetric, Rope, RopeDelta};
 
 use crate::backspace::offset_for_delete_backwards;
 use crate::config::BufferItems;
+use crate::indent::{IndentOutcome, SyntaxIndentContext, syntax_indent_outcome};
 use crate::line_offset::{LineOffset, LogicalLines};
 use crate::linewrap::Lines;
 use crate::movement::{Movement, region_movement};
@@ -394,6 +395,15 @@ fn base_ends_with_newline(base: &Rope) -> bool {
 }
 
 pub fn insert_newline(base: &Rope, regions: &[SelRegion], config: &BufferItems) -> RopeDelta {
+    insert_newline_with_context(base, regions, config, None)
+}
+
+pub(crate) fn insert_newline_with_context(
+    base: &Rope,
+    regions: &[SelRegion],
+    config: &BufferItems,
+    syntax_context: Option<&SyntaxIndentContext<'_>>,
+) -> RopeDelta {
     if !config.auto_indent {
         return insert(base, regions, &config.line_ending);
     }
@@ -403,7 +413,7 @@ pub fn insert_newline(base: &Rope, regions: &[SelRegion], config: &BufferItems) 
         let mut insert_text =
             String::with_capacity(config.line_ending.len() + (config.tab_size.max(1) * 2));
         insert_text.push_str(&config.line_ending);
-        insert_text.push_str(&newline_indent_for_region(base, region, config));
+        insert_text.push_str(&newline_indent_for_region(base, region, config, syntax_context));
 
         let iv = Interval::new(region.min(), region.max());
         builder.replace(iv, Rope::from(insert_text));
@@ -412,8 +422,19 @@ pub fn insert_newline(base: &Rope, regions: &[SelRegion], config: &BufferItems) 
     builder.build()
 }
 
-fn newline_indent_for_region(base: &Rope, region: &SelRegion, config: &BufferItems) -> String {
+fn newline_indent_for_region(
+    base: &Rope,
+    region: &SelRegion,
+    config: &BufferItems,
+    syntax_context: Option<&SyntaxIndentContext<'_>>,
+) -> String {
     let mut indent = carried_indent_for_region(base, region);
+    if let Some(context) = syntax_context {
+        if let Some(outcome) = syntax_indent_outcome(base, region, context) {
+            apply_indent_outcome(&mut indent, config, outcome);
+            return indent;
+        }
+    }
     if config.smart_indent {
         apply_smart_indent_heuristic(base, region, config, &mut indent);
     }
@@ -435,6 +456,14 @@ fn carried_indent_for_region(base: &Rope, region: &SelRegion) -> String {
         content[..carry_end].to_owned()
     } else {
         content[..indent_end].to_owned()
+    }
+}
+
+fn apply_indent_outcome(indent: &mut String, config: &BufferItems, outcome: IndentOutcome) {
+    match outcome {
+        IndentOutcome::Inherit => {}
+        IndentOutcome::IndentOneLevel => indent.push_str(get_tab_text(config, None)),
+        IndentOutcome::DedentOneLevel => trim_one_indent_level(indent, config),
     }
 }
 
@@ -1357,10 +1386,20 @@ fn n_spaces(n: usize) -> &'static str {
 mod tests {
     use super::{
         align_it, align_selections, delete_backward, expand_tabs_in_lines, insert_newline,
-        reflow_lines, reverse_selection_contents, rotate_selection_contents, sort_lines, transpose,
+        insert_newline_with_context, reflow_lines, reverse_selection_contents,
+        rotate_selection_contents, sort_lines, transpose,
     };
     use crate::config::BufferItems;
+    use crate::indent::SyntaxIndentContext;
+    use crate::runtime_loader::{
+        RuntimeLanguageConfig, RuntimeLanguageOverrides,
+        configure_default_runtime_loader_overrides,
+        ensure_default_runtime_loader_has_test_grammars, with_default_runtime_loader_mut,
+    };
     use crate::selection::SelRegion;
+    use crate::text_store::DocumentMode;
+    use std::collections::BTreeSet;
+    use std::sync::MutexGuard;
     use xi_rope::Rope;
 
     #[test]
@@ -1391,6 +1430,66 @@ mod tests {
         let delta = transpose(&text, &regions);
 
         assert_eq!(String::from(delta.apply(&text)), "1\nё");
+    }
+
+    fn runtime_loader_test_guard() -> MutexGuard<'static, ()> {
+        crate::runtime_loader::runtime_loader_test_guard()
+    }
+
+    struct RuntimeLoaderOverrideGuard;
+
+    impl RuntimeLoaderOverrideGuard {
+        fn install(languages: &[&str]) -> Self {
+            let mut overrides = RuntimeLanguageOverrides::new();
+            for language in languages {
+                overrides.insert(
+                    (*language).to_string(),
+                    RuntimeLanguageConfig {
+                        supported_query_kinds: Some(BTreeSet::from([
+                            crate::runtime_loader::RuntimeQueryKind::Indents,
+                        ])),
+                        ..RuntimeLanguageConfig::default()
+                    },
+                );
+            }
+            configure_default_runtime_loader_overrides(
+                overrides,
+                RuntimeLanguageOverrides::new(),
+                false,
+            )
+            .expect("configure runtime loader overrides");
+            ensure_default_runtime_loader_has_test_grammars();
+            Self
+        }
+    }
+
+    impl Drop for RuntimeLoaderOverrideGuard {
+        fn drop(&mut self) {
+            let _ = configure_default_runtime_loader_overrides(
+                RuntimeLanguageOverrides::new(),
+                RuntimeLanguageOverrides::new(),
+                false,
+            );
+            ensure_default_runtime_loader_has_test_grammars();
+            with_default_runtime_loader_mut(|loader| {
+                for language in ["rust", "json", "python"] {
+                    loader.invalidate_language(language);
+                }
+            });
+        }
+    }
+
+    fn install_indent_query(language: &str, query: &str) {
+        with_default_runtime_loader_mut(|loader| {
+            loader.invalidate_language(language);
+            loader.record_query_artifact(
+                language,
+                crate::runtime_loader::RuntimeQueryKind::Indents,
+                query.to_string(),
+                Vec::new(),
+                Vec::new(),
+            );
+        });
     }
 
     fn test_config() -> BufferItems {
@@ -1568,6 +1667,198 @@ mod tests {
         let delta = insert_newline(&text, &[SelRegion::new(3, text.len() - 1)], &config);
 
         assert_eq!(String::from(delta.apply(&text)), "if \n}");
+    }
+
+    #[test]
+    fn insert_newline_with_syntax_context_uses_indent_query_outcome() {
+        let _guard = runtime_loader_test_guard();
+        let _override_guard = RuntimeLoaderOverrideGuard::install(&["rust"]);
+        install_indent_query("rust", "(_) @indent");
+
+        let text: Rope = "fn main() {}".into();
+        let config = test_config();
+        let context = SyntaxIndentContext::new("rust", None, DocumentMode::Normal);
+        let anchor = "fn main() {".len();
+
+        let delta = insert_newline_with_context(
+            &text,
+            &[SelRegion::caret(anchor)],
+            &config,
+            Some(&context),
+        );
+
+        assert_eq!(String::from(delta.apply(&text)), "fn main() {\n\t}");
+    }
+
+    #[test]
+    fn insert_newline_with_syntax_context_falls_back_to_heuristic_when_query_missing() {
+        let _guard = runtime_loader_test_guard();
+        let _override_guard = RuntimeLoaderOverrideGuard::install(&["rust"]);
+
+        let text: Rope = "if ready {".into();
+        let config = test_config();
+        let context = SyntaxIndentContext::new("rust", None, DocumentMode::Normal);
+
+        let delta = insert_newline_with_context(
+            &text,
+            &[SelRegion::caret(text.len())],
+            &config,
+            Some(&context),
+        );
+
+        assert_eq!(String::from(delta.apply(&text)), "if ready {\n\t");
+    }
+
+    #[test]
+    fn insert_newline_with_syntax_context_fails_closed_when_mode_disallows_whole_doc_ops() {
+        let _guard = runtime_loader_test_guard();
+        let _override_guard = RuntimeLoaderOverrideGuard::install(&["rust"]);
+        install_indent_query("rust", "(_) @indent");
+
+        let text: Rope = "fn main() {}".into();
+        let config = test_config();
+        let context = SyntaxIndentContext::new("rust", None, DocumentMode::ConstrainedNormal);
+        let anchor = "fn main() {".len();
+
+        let delta = insert_newline_with_context(
+            &text,
+            &[SelRegion::caret(anchor)],
+            &config,
+            Some(&context),
+        );
+
+        assert_eq!(String::from(delta.apply(&text)), "fn main() {\n\t}");
+    }
+
+    #[test]
+    fn insert_newline_plain_text_buffer_uses_baseline_auto_indent_only() {
+        let text: Rope = "    note".into();
+        let config = test_config();
+        let context = SyntaxIndentContext::new("Plain Text", None, DocumentMode::Normal);
+
+        let delta = insert_newline_with_context(
+            &text,
+            &[SelRegion::caret(text.len())],
+            &config,
+            Some(&context),
+        );
+
+        assert_eq!(String::from(delta.apply(&text)), "    note\n    ");
+    }
+
+    #[test]
+    fn insert_newline_json_buffer_supports_syntax_indent_query() {
+        let _guard = runtime_loader_test_guard();
+        let _override_guard = RuntimeLoaderOverrideGuard::install(&["json"]);
+        install_indent_query("json", "(_) @indent");
+
+        let text: Rope = "{}".into();
+        let config = test_config();
+        let context = SyntaxIndentContext::new("json", None, DocumentMode::Normal);
+
+        let delta =
+            insert_newline_with_context(&text, &[SelRegion::caret(1)], &config, Some(&context));
+
+        assert_eq!(String::from(delta.apply(&text)), "{\n\t}");
+    }
+
+    #[test]
+    fn insert_newline_python_buffer_supports_syntax_indent_query_when_ready() {
+        let _guard = runtime_loader_test_guard();
+        let _override_guard = RuntimeLoaderOverrideGuard::install(&["python"]);
+        install_indent_query("python", "(_) @indent");
+
+        let text: Rope = "if ok:\n    pass\n".into();
+        let config = test_config();
+        let context = SyntaxIndentContext::new("python", None, DocumentMode::Normal);
+        let anchor = "if ok:".len();
+
+        let delta = insert_newline_with_context(
+            &text,
+            &[SelRegion::caret(anchor)],
+            &config,
+            Some(&context),
+        );
+
+        assert_eq!(String::from(delta.apply(&text)), "if ok:\n\t\n    pass\n");
+    }
+
+    #[test]
+    fn insert_newline_with_syntax_context_falls_back_when_parser_missing() {
+        let text: Rope = "if ready {".into();
+        let config = test_config();
+        let context =
+            SyntaxIndentContext::new("totally-unknown-language", None, DocumentMode::Normal);
+
+        let delta = insert_newline_with_context(
+            &text,
+            &[SelRegion::caret(text.len())],
+            &config,
+            Some(&context),
+        );
+
+        assert_eq!(String::from(delta.apply(&text)), "if ready {\n\t");
+    }
+
+    #[test]
+    fn insert_newline_with_syntax_context_falls_back_when_indent_query_malformed() {
+        let _guard = runtime_loader_test_guard();
+        let _override_guard = RuntimeLoaderOverrideGuard::install(&["rust"]);
+        install_indent_query("rust", "(");
+
+        let text: Rope = "if ready {".into();
+        let config = test_config();
+        let context = SyntaxIndentContext::new("rust", None, DocumentMode::Normal);
+
+        let delta = insert_newline_with_context(
+            &text,
+            &[SelRegion::caret(text.len())],
+            &config,
+            Some(&context),
+        );
+
+        assert_eq!(String::from(delta.apply(&text)), "if ready {\n\t");
+    }
+
+    #[test]
+    fn insert_newline_with_syntax_context_respects_disabled_smart_indent_on_query_miss() {
+        let _guard = runtime_loader_test_guard();
+        let _override_guard = RuntimeLoaderOverrideGuard::install(&["rust"]);
+
+        let text: Rope = "if ready {".into();
+        let mut config = test_config();
+        config.smart_indent = false;
+        let context = SyntaxIndentContext::new("rust", None, DocumentMode::Normal);
+
+        let delta = insert_newline_with_context(
+            &text,
+            &[SelRegion::caret(text.len())],
+            &config,
+            Some(&context),
+        );
+
+        assert_eq!(String::from(delta.apply(&text)), "if ready {\n");
+    }
+
+    #[test]
+    fn insert_newline_smart_indent_multicursor_remains_deterministic() {
+        let text: Rope = "{\n[".into();
+        let config = test_config();
+        let regions = [SelRegion::caret(1), SelRegion::caret(text.len())];
+
+        let delta = insert_newline(&text, &regions, &config);
+
+        assert_eq!(String::from(delta.apply(&text)), "{\n\t\n[\n\t");
+    }
+
+    #[test]
+    fn insert_newline_smart_indent_selection_replacement_remains_deterministic() {
+        let text: Rope = "{alpha}".into();
+        let config = test_config();
+
+        let delta = insert_newline(&text, &[SelRegion::new(1, 6)], &config);
+
+        assert_eq!(String::from(delta.apply(&text)), "{\n\t}");
     }
 
     #[test]
