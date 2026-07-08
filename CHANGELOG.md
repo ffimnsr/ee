@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.1 - 2026-07-08
+
+### Features
+
+- update fuzz runner version (`66b7cb71`)
+- add config set, get and show (`5db963dd`)
+- update fuzz release bump version (`cfde588f`)
+- update release.sh and slight rebump of version (`b39c6ee8`)
+
+
 ## 0.10.0 - 2026-07-08
 
 ### Features
