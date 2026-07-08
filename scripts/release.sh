@@ -3,6 +3,7 @@
 set -euo pipefail
 
 readonly RELEASE_MANIFEST="crates/ee-cli/Cargo.toml"
+readonly FUZZ_MANIFEST="fuzz/Cargo.toml"
 readonly REMOTE_NAME="origin"
 readonly CHANGELOG_FILE="CHANGELOG.md"
 
@@ -19,7 +20,8 @@ Bump all workspace crate versions, refresh Cargo.lock, run release quality gates
 create release commit, create v-prefixed git tag, and optionally push commit/tag.
 
 Release version source of truth: crates/ee-cli/Cargo.toml
-Updated manifests: all workspace package Cargo.toml files and workspace dependencies in Cargo.toml
+Updated manifests: all workspace package Cargo.toml files, workspace dependencies in Cargo.toml,
+and local crate version pins in fuzz/Cargo.toml
 
 Options:
   --major      Increment major version and reset minor/patch to zero.
@@ -323,28 +325,50 @@ update_workspace_manifest_versions() {
   done
 }
 
-update_root_workspace_dependency_versions() {
-  local version="$1"
+update_local_path_dependency_versions() {
+  local manifest="$1"
+  local version="$2"
+  local path_prefix="$3"
   local tmp
 
   tmp="$(mktemp)"
 
-  awk -v version="$version" '
-    BEGIN { in_table = 0 }
-    /^\[workspace\.dependencies\]$/ { in_table = 1 }
-    /^\[/ && $0 != "[workspace.dependencies]" && in_table { in_table = 0 }
+  awk -v version="$version" -v path_prefix="$path_prefix" '
     {
-      if (in_table && /path[[:space:]]*=.*"crates\// && /version[[:space:]]*=/) {
-        sub(/version[[:space:]]*=[[:space:]]*"[^"]*"/, "version = \"" version "\"")
+      if ($0 ~ /path[[:space:]]*=/ && $0 ~ /version[[:space:]]*=/) {
+        path_match = match($0, /path[[:space:]]*=[[:space:]]*"[^"]+"/)
+        if (path_match) {
+          path_value = substr($0, RSTART, RLENGTH)
+          gsub(/^[^\"]*\"/, "", path_value)
+          gsub(/\"$/, "", path_value)
+          if (index(path_value, path_prefix) == 1) {
+            sub(/version[[:space:]]*=[[:space:]]*"[^"]*"/, "version = \"" version "\"")
+          }
+        }
       }
       print
     }
-  ' Cargo.toml >"$tmp" || {
+  ' "$manifest" >"$tmp" || {
     rm -f "$tmp"
-    die "failed to update workspace dependency versions in Cargo.toml"
+    die "failed to update local path dependency versions in $manifest"
   }
 
-  mv "$tmp" Cargo.toml
+  mv "$tmp" "$manifest"
+}
+
+update_root_workspace_dependency_versions() {
+  local version="$1"
+
+  update_local_path_dependency_versions Cargo.toml "$version" "crates/"
+}
+
+update_fuzz_manifest_versions() {
+  local version="$1"
+
+  [[ -f "$FUZZ_MANIFEST" ]] || return 0
+
+  update_manifest_version "$FUZZ_MANIFEST" "$version"
+  update_local_path_dependency_versions "$FUZZ_MANIFEST" "$version" "../crates/"
 }
 
 stage_workspace_manifests() {
@@ -466,6 +490,7 @@ main() {
 
   update_workspace_manifest_versions "$version"
   update_root_workspace_dependency_versions "$version"
+  update_fuzz_manifest_versions "$version"
   update_changelog "$version" "$release_date" "$previous_tag"
 
   cargo generate-lockfile
@@ -477,6 +502,7 @@ main() {
   cargo test --workspace
 
   git add Cargo.lock Cargo.toml "$CHANGELOG_FILE"
+  [[ -f "$FUZZ_MANIFEST" ]] && git add "$FUZZ_MANIFEST"
   stage_workspace_manifests
   git commit -m "release: $tag_name"
 
