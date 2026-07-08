@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.0 - 2026-07-08
+
+### Features
+
+- add auto indent and smart indent fallback (`53097f68`)
+- fix the error cause by parallel runs race cond (`0d824935`)
+- add privilege call for save error (`359b44cf`)
+
+
+### Tests
+
+- update test and fuzz failures (`cccc8f7c`)
+
+
 ## 0.8.10 - 2026-06-27
 
 ### Features
