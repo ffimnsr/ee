@@ -344,6 +344,11 @@ fn line_content(text: &Rope, ln: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::MutexGuard;
+
+    fn runtime_loader_test_guard() -> MutexGuard<'static, ()> {
+        crate::runtime_loader::runtime_loader_test_guard()
+    }
 
     fn rope(s: &str) -> Rope {
         Rope::from(s)
@@ -387,6 +392,7 @@ mod tests {
 
     #[test]
     fn test_language_supports_reindent_uses_registry_metadata() {
+        let _guard = runtime_loader_test_guard();
         assert!(!language_supports_reindent("Bash"));
         assert!(!language_supports_reindent("CSS"));
         assert!(!language_supports_reindent("JSON"));
@@ -401,6 +407,7 @@ mod tests {
 
     #[test]
     fn test_reindent_rust_uses_tree_sitter_levels() {
+        let _guard = runtime_loader_test_guard();
         let text = rope("fn main() {\nlet value = 1;\n}\n");
         let delta = reindent(&text, &[(0usize, 2usize)], "rust", "    ").unwrap();
         let result = apply_delta(text, delta);
@@ -409,6 +416,7 @@ mod tests {
 
     #[test]
     fn test_reindent_python_dedents_else_clause() {
+        let _guard = runtime_loader_test_guard();
         let text = rope("if ready:\nprint('yes')\nelse:\nprint('no')\n");
         let delta = reindent(&text, &[(0usize, 3usize)], "Python", "    ").unwrap();
         let result = apply_delta(text, delta);
@@ -417,6 +425,7 @@ mod tests {
 
     #[test]
     fn test_reindent_typescript_uses_tree_sitter_levels() {
+        let _guard = runtime_loader_test_guard();
         let text = rope("function demo() {\nconsole.log(1);\n}\n");
         let delta = reindent(&text, &[(0usize, 2usize)], "TypeScript", "    ").unwrap();
         let result = apply_delta(text, delta);
@@ -425,6 +434,7 @@ mod tests {
 
     #[test]
     fn test_reindent_c_like_language_uses_tree_sitter_levels() {
+        let _guard = runtime_loader_test_guard();
         let text = rope("int main() {\nreturn 0;\n}\n");
         let delta = reindent(&text, &[(0usize, 2usize)], "C", "    ").unwrap();
         let result = apply_delta(text, delta);
@@ -433,6 +443,7 @@ mod tests {
 
     #[test]
     fn test_reindent_returns_none_for_explicitly_unsupported_language() {
+        let _guard = runtime_loader_test_guard();
         let text = rope("<div>\n<span>hi</span>\n</div>\n");
         assert!(reindent(&text, &[(0usize, 2usize)], "HTML", "    ").is_none());
     }

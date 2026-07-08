@@ -5,7 +5,7 @@ use xi_core_lib::config::BufferItems;
 use xi_core_lib::edit_ops::{delete_backward, transpose};
 use xi_core_lib::line_offset::LogicalLines;
 use xi_core_lib::linewrap::fuzz_rewrap_mono;
-use xi_core_lib::movement::{Movement, region_movement};
+use xi_core_lib::movement::{region_movement, Movement};
 use xi_core_lib::selection::{SelRegion, Selection};
 use xi_core_lib::word_boundaries::WordCursor;
 use xi_rope::compare::{ne_idx, ne_idx_fallback, ne_idx_rev, ne_idx_rev_fallback};
@@ -131,7 +131,11 @@ fn clamp_offset(text: &Rope, raw: u16) -> usize {
 fn clamp_interval(text: &Rope, start: u16, end: u16) -> (usize, usize) {
     let start = clamp_offset(text, start);
     let end = clamp_offset(text, end);
-    if start <= end { (start, end) } else { (end, start) }
+    if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    }
 }
 
 fn clamp_offset_backwards(text: &Rope, raw: u16) -> usize {
@@ -186,6 +190,7 @@ fn make_config(input: &CoreTextInput) -> BufferItems {
         font_face: String::new(),
         font_size: 12.0,
         auto_indent: false,
+        smart_indent: false,
         scroll_past_end: false,
         wrap_width: usize::from(input.wrap_cols),
         word_wrap: input.wrap_cols != 0,
@@ -315,7 +320,7 @@ pub fn run_core_text_input(input: CoreTextInput) {
 
 #[cfg(test)]
 mod tests {
-    use super::{RopeInput, clamp_interval, new_engine, run_rope_input};
+    use super::{clamp_interval, new_engine, run_rope_input, RopeInput};
     use xi_rope::delta::Delta;
     use xi_rope::{Interval, Rope, RopeInfo};
 
