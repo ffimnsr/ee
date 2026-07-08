@@ -91,10 +91,26 @@ pub fn file_path_to_uri(path: &Path) -> Result<Uri, Error> {
 
 /// Get contents changes of a document modeled according to Language Server Protocol
 /// given the RopeDelta
+fn position_of_offset_in_document(text: &str, offset: usize) -> Result<Position, PluginLibError> {
+    if offset > text.len() || !text.is_char_boundary(offset) {
+        return Err(PluginLibError::BadRequest);
+    }
+
+    let prefix = text.get(..offset).ok_or(PluginLibError::BadRequest)?;
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count();
+    let line_start = prefix.rfind('\n').map(|idx| idx + 1).unwrap_or(0);
+    let character = count_utf16(text.get(line_start..offset).ok_or(PluginLibError::BadRequest)?);
+
+    Ok(Position {
+        line: u32::try_from(line).map_err(|_| PluginLibError::BadRequest)?,
+        character: u32::try_from(character).map_err(|_| PluginLibError::BadRequest)?,
+    })
+}
+
 fn document_content_changes_from_delta<FP>(
     delta: Option<&RopeDelta>,
     mut position_of_offset: FP,
-    document_text: String,
+    document_text: &str,
 ) -> Result<Vec<TextDocumentContentChangeEvent>, PluginLibError>
 where
     FP: FnMut(usize) -> Result<Position, PluginLibError>,
@@ -111,9 +127,7 @@ where
                     start: position_of_offset(start)?,
                     end: position_of_offset(end)?,
                 }),
-                range_length: Some(
-                    u32::try_from(end - start).map_err(|_| PluginLibError::BadRequest)?,
-                ),
+                range_length: None,
                 text,
             }]);
         } else if delta.is_simple_delete() {
@@ -127,9 +141,7 @@ where
 
             return Ok(vec![TextDocumentContentChangeEvent {
                 range: Some(Range { start: position_of_offset(start)?, end: end_position }),
-                range_length: Some(
-                    u32::try_from(end - start).map_err(|_| PluginLibError::BadRequest)?,
-                ),
+                range_length: None,
                 text: String::new(),
             }]);
         }
@@ -138,7 +150,7 @@ where
     Ok(vec![TextDocumentContentChangeEvent {
         range: None,
         range_length: None,
-        text: document_text,
+        text: document_text.to_string(),
     }])
 }
 
@@ -149,8 +161,8 @@ pub fn get_document_content_changes<C: Cache>(
     let document_text = view.get_document()?;
     document_content_changes_from_delta(
         delta,
-        |offset| get_position_of_offset(view, offset),
-        document_text,
+        |offset| position_of_offset_in_document(&document_text, offset),
+        &document_text,
     )
 }
 
@@ -645,7 +657,7 @@ mod tests {
                     _ => Position::new(0, offset as u32),
                 })
             },
-            String::from("hello, world"),
+            "hello, world",
         )
         .expect("insert changes should succeed");
 
@@ -702,14 +714,34 @@ mod tests {
                     _ => Position::new(0, offset as u32),
                 })
             },
-            String::from("helloworld"),
+            "helloworld",
         )
         .expect("delete changes should succeed");
 
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].text, "");
         assert_eq!(changes[0].range, Some(Range::new(Position::new(0, 5), Position::new(0, 6))));
-        assert_eq!(changes[0].range_length, Some(1));
+        assert_eq!(changes[0].range_length, None);
+    }
+
+    #[test]
+    fn incremental_sync_uses_document_text_for_utf16_positions() {
+        let base = Rope::from("😀a");
+        let mut builder = DeltaBuilder::new(base.len());
+        builder.replace(Interval::new(4, 4), Rope::from("!"));
+        let delta = builder.build();
+
+        let changes = document_content_changes_from_delta(
+            Some(&delta),
+            |offset| position_of_offset_in_document("😀!a", offset),
+            "😀!a",
+        )
+        .expect("utf16 position conversion should succeed from document text");
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].range, Some(Range::new(Position::new(0, 2), Position::new(0, 2))));
+        assert_eq!(changes[0].range_length, None);
+        assert_eq!(changes[0].text, "!");
     }
 
     #[test]
@@ -722,7 +754,7 @@ mod tests {
         let changes = document_content_changes_from_delta(
             Some(&delta),
             |_offset| Ok(Position::new(0, 0)),
-            String::from("hi world"),
+            "hi world",
         )
         .expect("fallback changes should succeed");
 
@@ -736,7 +768,7 @@ mod tests {
         let changes = document_content_changes_from_delta(
             None,
             |_offset| Ok(Position::new(0, 0)),
-            String::from("full text"),
+            "full text",
         )
         .expect("full document fallback should succeed");
 

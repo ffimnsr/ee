@@ -6742,6 +6742,20 @@ fn window_paths(app: &App) -> Vec<PathBuf> {
         .collect()
 }
 
+fn render_screen_rows(app: &App, width: u16, height: u16) -> Vec<String> {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..height)
+        .map(|y| (0..width).map(|x| buffer.cell((x, y)).unwrap().symbol()).collect::<String>())
+        .collect()
+}
+
+fn count_rendered_occurrences(rows: &[String], needle: &str) -> usize {
+    rows.iter().map(|row| row.matches(needle).count()).sum()
+}
+
 // ── Insert-entry variants ─────────────────────────────────────────────────────
 
 #[test]
@@ -6780,6 +6794,122 @@ fn open_hsplit_and_new_aliases_work() {
 
     let _ = fs::remove_file(&first);
     let _ = fs::remove_file(&second);
+}
+
+#[test]
+fn same_file_vsplit_reuses_buffer_and_keeps_content() {
+    let path = unique_temp_path("ee-cli-same-file-vsplit");
+    fs::write(&path, "FIRST-SPLIT-LINE\nSECOND-SPLIT-LINE\nTHIRD-SPLIT-LINE\n").unwrap();
+
+    let mut app = App::from_path(Some(path.clone())).unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "initial split file",
+        Duration::from_secs(2),
+        |backend| backend.get_line(1).is_some(),
+    );
+    app.backend.cursor_line = 1;
+    app.backend.cursor_col = 0;
+    app.viewport.top_line = 1;
+
+    run_ex(&mut app, &format!("vs {}", path.display()));
+
+    let windows = app.tabs.focused_windows().windows();
+    assert_eq!(windows.len(), 2);
+    assert_eq!(app.tabs.focused_windows().split_dir, crate::window::SplitDir::Vertical);
+    assert_eq!(windows[0].buffer_id, windows[1].buffer_id);
+    assert_eq!(
+        app.backend.all_bufs().iter().filter(|buf| buf.path.as_ref() == Some(&path)).count(),
+        1
+    );
+
+    let rows = render_screen_rows(&app, 80, 8);
+    assert!(
+        count_rendered_occurrences(&rows, "SECOND-SPLIT-LINE") >= 2,
+        "render should show same file in both vertical panes: {rows:?}"
+    );
+
+    app.backend.cursor_line = 0;
+    app.backend.cursor_col = 0;
+    app.viewport.top_line = 0;
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE)));
+    app.backend.pump().unwrap();
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    assert_eq!(app.backend.get_line(0), Some("XFIRST-SPLIT-LINE"));
+
+    run_ex(&mut app, "jump_view_left");
+    assert_eq!(app.backend.active().path.as_ref(), Some(&path));
+    assert_eq!(app.backend.get_line(0), Some("XFIRST-SPLIT-LINE"));
+
+    let rows = render_screen_rows(&app, 80, 8);
+    assert!(
+        count_rendered_occurrences(&rows, "XFIRST-SPLIT-LINE") >= 1,
+        "edited shared buffer should stay visible in peer vertical pane: {rows:?}"
+    );
+
+    run_ex(&mut app, "wclose");
+    assert_eq!(app.tabs.focused_windows().windows().len(), 1);
+    assert_eq!(app.backend.active().path.as_ref(), Some(&path));
+    assert_eq!(app.backend.get_line(0), Some("XFIRST-SPLIT-LINE"));
+
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn same_file_hsplit_reuses_buffer_and_keeps_content() {
+    let path = unique_temp_path("ee-cli-same-file-hsplit");
+    fs::write(&path, "FIRST-HSPLIT-LINE\nSECOND-HSPLIT-LINE\nTHIRD-HSPLIT-LINE\n").unwrap();
+
+    let mut app = App::from_path(Some(path.clone())).unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "initial split file",
+        Duration::from_secs(2),
+        |backend| backend.get_line(0).is_some(),
+    );
+
+    run_ex(&mut app, &format!("split {}", path.display()));
+
+    let windows = app.tabs.focused_windows().windows();
+    assert_eq!(windows.len(), 2);
+    assert_eq!(app.tabs.focused_windows().split_dir, crate::window::SplitDir::Horizontal);
+    assert_eq!(windows[0].buffer_id, windows[1].buffer_id);
+    assert_eq!(
+        app.backend.all_bufs().iter().filter(|buf| buf.path.as_ref() == Some(&path)).count(),
+        1
+    );
+
+    let rows = render_screen_rows(&app, 80, 10);
+    assert!(
+        count_rendered_occurrences(&rows, "FIRST-HSPLIT-LINE") >= 2,
+        "render should show same file in both horizontal panes: {rows:?}"
+    );
+
+    run_ex(&mut app, "jump_view_up");
+    assert_eq!(app.backend.active().path.as_ref(), Some(&path));
+
+    app.backend.cursor_line = 0;
+    app.backend.cursor_col = 0;
+    app.viewport.top_line = 0;
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE)));
+    app.backend.pump().unwrap();
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    assert_eq!(app.backend.get_line(0), Some("YFIRST-HSPLIT-LINE"));
+
+    let rows = render_screen_rows(&app, 80, 10);
+    assert!(
+        count_rendered_occurrences(&rows, "YFIRST-HSPLIT-LINE") >= 2,
+        "edit should stay visible in both horizontal panes: {rows:?}"
+    );
+
+    run_ex(&mut app, "wclose");
+    assert_eq!(app.tabs.focused_windows().windows().len(), 1);
+    assert_eq!(app.backend.active().path.as_ref(), Some(&path));
+    assert_eq!(app.backend.get_line(0), Some("YFIRST-HSPLIT-LINE"));
+
+    let _ = fs::remove_file(&path);
 }
 
 #[test]

@@ -1117,19 +1117,31 @@ impl App {
         self.open_picker(PickerState::new_buffers(entries));
     }
 
-    fn open_path_in_current_view(&mut self, path: PathBuf) -> Result<(), String> {
-        let existing_id = self
-            .backend
+    fn existing_buffer_id_for_path(&self, path: &Path) -> Option<BufferId> {
+        let requested = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        self.backend
             .all_bufs()
             .iter()
-            .find(|buffer| buffer.path.as_ref().is_some_and(|buffer_path| *buffer_path == path))
-            .map(|buffer| buffer.id);
-        let buf_id = match existing_id {
-            Some(id) => id,
+            .find(|buffer| {
+                buffer.path.as_ref().is_some_and(|buffer_path| {
+                    std::fs::canonicalize(buffer_path).unwrap_or_else(|_| buffer_path.clone())
+                        == requested
+                })
+            })
+            .map(|buffer| buffer.id)
+    }
+
+    fn open_or_reuse_buffer(&mut self, path: PathBuf) -> Result<BufferId, String> {
+        match self.existing_buffer_id_for_path(&path) {
+            Some(id) => Ok(id),
             None => {
-                self.backend.open_buffer(Some(path)).map_err(|err| format!("open failed: {err}"))?
+                self.backend.open_buffer(Some(path)).map_err(|err| format!("open failed: {err}"))
             }
-        };
+        }
+    }
+
+    fn open_path_in_current_view(&mut self, path: PathBuf) -> Result<(), String> {
+        let buf_id = self.open_or_reuse_buffer(path)?;
         self.backend.switch_to_id(buf_id).map_err(|err| format!("open failed: {err}"))?;
         self.tabs.focused_windows_mut().set_focused_buffer(buf_id);
         self.viewport = Viewport::default();
@@ -2517,11 +2529,11 @@ impl App {
             }
             "sp" | "split" | "hs" | "hsplit" => {
                 let path = parts.next().map(PathBuf::from);
-                let buf_id = if let Some(p) = path {
-                    match self.backend.open_buffer(Some(p)) {
+                let buf_id = if let Some(path) = path {
+                    match self.open_or_reuse_buffer(path) {
                         Ok(id) => id,
                         Err(err) => {
-                            self.backend.status_message = Some(format!("open failed: {err}"));
+                            self.backend.status_message = Some(err);
                             self.enter_normal_mode();
                             return;
                         }
@@ -2539,11 +2551,11 @@ impl App {
             }
             "vs" | "vsplit" => {
                 let path = parts.next().map(PathBuf::from);
-                let buf_id = if let Some(p) = path {
-                    match self.backend.open_buffer(Some(p)) {
+                let buf_id = if let Some(path) = path {
+                    match self.open_or_reuse_buffer(path) {
                         Ok(id) => id,
                         Err(err) => {
-                            self.backend.status_message = Some(format!("open failed: {err}"));
+                            self.backend.status_message = Some(err);
                             self.enter_normal_mode();
                             return;
                         }

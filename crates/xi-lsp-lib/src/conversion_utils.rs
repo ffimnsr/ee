@@ -97,9 +97,10 @@ pub(crate) fn offset_of_position<C: Cache>(
     Ok(cur_len_utf8 + line_offset?)
 }
 
-pub(crate) fn offset_of_position_in_document(
+fn offset_of_position_in_document_impl(
     text: &str,
     position: Position,
+    clamp: bool,
 ) -> Result<usize, LanguageResponseError> {
     let target_line = usize::try_from(position.line)
         .map_err(|_| LanguageResponseError::Transport(String::from("line index overflow")))?;
@@ -111,15 +112,28 @@ pub(crate) fn offset_of_position_in_document(
 
     for _ in 0..target_line {
         let Some(line_text) = lines.next() else {
-            return Err(LanguageResponseError::Transport(format!(
-                "line {} out of bounds for diagnostics document",
-                position.line
-            )));
+            return if clamp {
+                Ok(text.len())
+            } else {
+                Err(LanguageResponseError::Transport(format!(
+                    "line {} out of bounds for diagnostics document",
+                    position.line
+                )))
+            };
         };
         offset += line_text.len();
     }
 
-    let line_text = lines.next().unwrap_or("");
+    let Some(line_text) = lines.next() else {
+        return if clamp {
+            Ok(text.len())
+        } else {
+            Err(LanguageResponseError::Transport(format!(
+                "line {} out of bounds for diagnostics document",
+                position.line
+            )))
+        };
+    };
     let line_without_newline = line_text.strip_suffix('\n').unwrap_or(line_text);
 
     let mut utf16_units = 0usize;
@@ -133,13 +147,31 @@ pub(crate) fn offset_of_position_in_document(
     }
 
     if utf16_units < target_character {
-        return Err(LanguageResponseError::Transport(format!(
-            "character {} out of bounds for diagnostics line {}",
-            position.character, position.line
-        )));
+        return if clamp {
+            Ok(offset + line_without_newline.len())
+        } else {
+            Err(LanguageResponseError::Transport(format!(
+                "character {} out of bounds for diagnostics line {}",
+                position.character, position.line
+            )))
+        };
     }
 
     Ok(offset + utf8_units)
+}
+
+pub(crate) fn offset_of_position_in_document(
+    text: &str,
+    position: Position,
+) -> Result<usize, LanguageResponseError> {
+    offset_of_position_in_document_impl(text, position, false)
+}
+
+fn offset_of_position_in_document_clamped(
+    text: &str,
+    position: Position,
+) -> Result<usize, LanguageResponseError> {
+    offset_of_position_in_document_impl(text, position, true)
 }
 
 fn byte_column_of_position_in_document(
@@ -478,11 +510,11 @@ pub(crate) fn core_diagnostic_from_lsp_document(
     text: &str,
     diagnostic: Diagnostic,
 ) -> Result<CoreDiagnostic, LanguageResponseError> {
+    let start = offset_of_position_in_document_clamped(text, diagnostic.range.start)?;
+    let end = offset_of_position_in_document_clamped(text, diagnostic.range.end)?;
+
     Ok(CoreDiagnostic {
-        range: CoreRange {
-            start: offset_of_position_in_document(text, diagnostic.range.start)?,
-            end: offset_of_position_in_document(text, diagnostic.range.end)?,
-        },
+        range: CoreRange { start: start.min(end), end: start.max(end) },
         severity: core_diagnostic_severity_from_lsp(diagnostic.severity),
         message: diagnostic.message,
         source: diagnostic.source,
@@ -597,6 +629,22 @@ mod tests {
         assert_eq!(targets[0].path, "/tmp/example.rs");
         assert_eq!(targets[0].line, 0);
         assert_eq!(targets[0].column, 8);
+    }
+
+    #[test]
+    fn diagnostic_positions_clamp_to_document_bounds() {
+        let diagnostic = Diagnostic {
+            range: Range::new(Position::new(1, 2), Position::new(9, 20)),
+            severity: Some(DiagnosticSeverity::WARNING),
+            message: String::from("yaml issue"),
+            ..Diagnostic::default()
+        };
+
+        let converted = core_diagnostic_from_lsp_document("a\n\n", diagnostic)
+            .expect("out-of-bounds diagnostics should clamp instead of fail");
+
+        assert_eq!(converted.range.start, 2);
+        assert_eq!(converted.range.end, 3);
     }
 
     #[test]

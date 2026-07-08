@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use jsonrpc_lite::Params;
 use log::{debug, error, trace};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
 use xi_plugin_lib::{ChunkCache, CoreProxy, Plugin, View};
@@ -92,6 +92,19 @@ impl LspPlugin {
             inactive_views: HashMap::new(),
             route_views: HashMap::new(),
         }
+    }
+
+    fn parse_plugin_config_update(
+        &self,
+        changes: &ConfigTable,
+    ) -> Result<Config, serde_json::Error> {
+        let mut merged = match serde_json::to_value(&self.config) {
+            Ok(Value::Object(config)) => config,
+            Ok(_) => Map::new(),
+            Err(_) => Map::new(),
+        };
+        merge_json_object(&mut merged, changes);
+        serde_json::from_value(Value::Object(merged))
     }
 
     fn apply_plugin_config(&mut self, next_config: Config) {
@@ -628,7 +641,7 @@ impl Plugin for LspPlugin {
     }
 
     fn plugin_config_changed(&mut self, changes: &ConfigTable) {
-        let next_config = match serde_json::from_value::<Config>(Value::Object(changes.clone())) {
+        let next_config = match self.parse_plugin_config_update(changes) {
             Ok(config) => config,
             Err(err) => {
                 error!("failed to parse lsp plugin config update: {}", err);
@@ -1915,6 +1928,19 @@ impl LspPlugin {
     }
 }
 
+fn merge_json_object(target: &mut Map<String, Value>, update: &ConfigTable) {
+    for (key, value) in update {
+        match (target.get_mut(key), value) {
+            (Some(Value::Object(target_map)), Value::Object(update_map)) => {
+                merge_json_object(target_map, update_map);
+            }
+            _ => {
+                target.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1990,6 +2016,41 @@ mod tests {
         assert_eq!(
             plugin.changed_language_ids(&next),
             HashSet::from([String::from("rust"), String::from("json"), String::from("gleam")])
+        );
+    }
+
+    #[test]
+    fn parse_plugin_config_update_merges_partial_changes() {
+        let mut plugin = LspPlugin::new(Config {
+            language_config: HashMap::from([(
+                String::from("rust"),
+                language_config("rust-analyzer", &["rs"], false, Some("Cargo.toml")),
+            )]),
+            disabled_language_config: HashMap::new(),
+            language_servers: HashMap::from([(String::from("rust"), vec![String::from("rust")])]),
+        });
+
+        let next = plugin
+            .parse_plugin_config_update(&serde_json::Map::from_iter([(
+                String::from("language_servers"),
+                json!({ "rust": ["rust", "clippy"] }),
+            )]))
+            .expect("partial config update should merge with current config");
+
+        assert_eq!(
+            next.language_config["rust"].start_command,
+            plugin.config.language_config["rust"].start_command
+        );
+        assert_eq!(
+            next.language_servers.get("rust"),
+            Some(&vec![String::from("rust"), String::from("clippy")])
+        );
+
+        plugin.apply_plugin_config(next);
+
+        assert_eq!(
+            plugin.config.language_servers.get("rust"),
+            Some(&vec![String::from("rust"), String::from("clippy")])
         );
     }
 

@@ -191,7 +191,11 @@ Real next jump likely needs architectural change: first render from decoded pref
   - [ ] Support insert/replace/delete against unloaded regions without loading entire file into memory
   - [ ] Keep cursor/selection mapping correct when edits shift later offsets
   - [ ] Save only touched spans plus required surrounding context, then verify on-disk patch result
-- [ ] vsplit and hsplit problems on working with same file showing empty buffer on the other half
+- [x] Fix split views for same file opening empty peer buffer
+  - [x] Repro: open file, run `vsplit` or `hsplit`, and show same file in both panes; second pane must render existing buffer content instead of blank view
+  - [x] Both panes must stay attached to same underlying document state so edits in one pane appear in other without reopening file
+  - [x] Switching focus, resizing splits, or closing one pane must not clear or detach remaining pane buffer
+  - [x] Add regression coverage for same-file split behavior in both vertical and horizontal splits
 
 - [ ] Backlog goals beyond current scope.
   - [ ] Revisit trusted-only native grammar loading if runtime grammar execution moves to a sandboxed or wasmtime format / non-native format.

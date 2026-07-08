@@ -85,17 +85,19 @@ impl WindowLayout {
         active_viewport: Viewport,
     ) -> (WindowId, Viewport) {
         // Save the current active viewport into the focused window.
+        let focused_buffer_id = self.windows[self.focused].buffer_id;
         self.windows[self.focused].saved_viewport = active_viewport;
         self.split_dir = dir;
 
         let id = self.next_id;
         self.next_id += 1;
-        let win = Window { id, buffer_id, saved_viewport: Viewport::default() };
+        let initial_viewport =
+            if focused_buffer_id == buffer_id { active_viewport } else { Viewport::default() };
+        let win = Window { id, buffer_id, saved_viewport: initial_viewport };
         self.windows.insert(self.focused + 1, win);
         self.focused += 1;
 
-        // New window starts with a blank viewport.
-        (id, Viewport::default())
+        (id, initial_viewport)
     }
 
     /// Close the focused window.  Fails (returns `None`) if it would leave
