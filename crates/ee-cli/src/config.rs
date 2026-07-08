@@ -23,7 +23,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 use globset::GlobBuilder;
 use schemars::{JsonSchema, schema_for};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use xi_core_lib::config::Table as XiConfigTable;
 use xi_core_lib::runtime_loader::{
@@ -92,6 +92,8 @@ pub(crate) struct EditorSettings {
     pub charset: String,
     pub trim_trailing_whitespace: bool,
     pub insert_final_newline: bool,
+    pub auto_indent: bool,
+    pub smart_indent: bool,
     // ── Display options ───────────────────────────────────────────────────
     /// How line numbers are displayed in the gutter.
     pub number_style: NumberStyle,
@@ -125,6 +127,8 @@ impl Default for EditorSettings {
             charset: "utf-8".to_owned(),
             trim_trailing_whitespace: false,
             insert_final_newline: false,
+            auto_indent: true,
+            smart_indent: true,
             number_style: NumberStyle::Absolute,
             color_column: None,
             show_visible_whitespace: false,
@@ -658,8 +662,8 @@ impl EditorSettings {
         table.insert("use_tab_stops".into(), Value::Bool(true));
         table.insert("font_face".into(), Value::String(String::from("Noto Mono")));
         table.insert("font_size".into(), Value::from(14.0_f32));
-        table.insert("auto_indent".into(), Value::Bool(true));
-        table.insert("smart_indent".into(), Value::Bool(true));
+        table.insert("auto_indent".into(), Value::Bool(self.auto_indent));
+        table.insert("smart_indent".into(), Value::Bool(self.smart_indent));
         table.insert("scroll_past_end".into(), Value::Bool(false));
         table.insert("wrap_width".into(), Value::from(0));
         table.insert("word_wrap".into(), Value::Bool(self.wrap_lines));
@@ -716,7 +720,7 @@ fn diff_xi_config_tables(base: &XiConfigTable, updated: &XiConfigTable) -> XiCon
 // ── .ee.toml raw shape ────────────────────────────────────────────────────────
 
 /// Raw `.ee.toml` shape; all fields optional so partial files work.
-#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct EeToml {
     pub root: Option<bool>,
@@ -732,6 +736,8 @@ pub(crate) struct EeToml {
     pub charset: Option<String>,
     pub trim_trailing_whitespace: Option<bool>,
     pub insert_final_newline: Option<bool>,
+    pub auto_indent: Option<bool>,
+    pub smart_indent: Option<bool>,
     // ── Display options ───────────────────────────────────────────────────
     /// `"absolute"`, `"relative"`, or `"relative_absolute"`.
     pub number_style: Option<String>,
@@ -751,14 +757,14 @@ pub(crate) struct EeToml {
     pub keymap: Option<KeymapToml>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LspToml {
     #[serde(default)]
     pub servers: BTreeMap<String, LspServerToml>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LspServerToml {
     pub language_name: Option<String>,
@@ -790,6 +796,12 @@ impl ConfigLayerKind {
             Self::Ancestor => "ancestor",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigScope {
+    Global,
+    Local,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -923,7 +935,7 @@ struct ConfigDiscovery {
     root_stop_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct KeymapToml {
     pub inherit_defaults: Option<bool>,
@@ -936,7 +948,7 @@ pub(crate) struct KeymapToml {
     pub sequence_bindings: Vec<KeySequenceBindingToml>,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct KeyBindingTargetToml {
     pub mode: String,
@@ -944,7 +956,7 @@ pub(crate) struct KeyBindingTargetToml {
     pub prefix: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct KeyBindingEntryToml {
     pub mode: String,
@@ -953,7 +965,7 @@ pub(crate) struct KeyBindingEntryToml {
     pub action: String,
 }
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct KeySequenceBindingToml {
     pub mode: String,
@@ -996,6 +1008,12 @@ impl EditorSettings {
         }
         if let Some(v) = patch.insert_final_newline {
             self.insert_final_newline = v;
+        }
+        if let Some(v) = patch.auto_indent {
+            self.auto_indent = v;
+        }
+        if let Some(v) = patch.smart_indent {
+            self.smart_indent = v;
         }
         if let Some(s) = &patch.number_style {
             match s.to_lowercase().as_str() {
@@ -1257,6 +1275,286 @@ fn runtime_languages_with_env(
     runtime_languages.finalize()
 }
 
+fn config_path_for_scope_with_env(
+    scope: ConfigScope,
+    env: &ConfigEnvironment,
+) -> Result<PathBuf, String> {
+    match scope {
+        ConfigScope::Global => env
+            .xdg_user_config_path()
+            .ok_or_else(|| String::from("cannot resolve global config path")),
+        ConfigScope::Local => Ok(env.cwd.join(".ee.toml")),
+    }
+}
+
+fn runtime_languages_to_toml(
+    runtime_languages: RuntimeLanguageSettings,
+) -> BTreeMap<String, RuntimeLanguageConfig> {
+    let mut merged = runtime_languages.user_overrides;
+    for (language_id, patch) in runtime_languages.workspace_overrides {
+        merge_runtime_language_patch(
+            merged.entry(language_id.clone()).or_default(),
+            &patch,
+            &language_id,
+        );
+    }
+    merged
+}
+
+fn lsp_settings_to_toml(lsp: &LspSettings) -> Option<LspToml> {
+    if lsp.servers.is_empty() {
+        return None;
+    }
+    Some(LspToml {
+        servers: lsp
+            .servers
+            .iter()
+            .map(|(id, server)| {
+                (
+                    id.clone(),
+                    LspServerToml {
+                        language_name: Some(server.language_name.clone()),
+                        command: Some(server.command.clone()),
+                        args: Some(server.args.clone()),
+                        extensions: Some(server.extensions.clone()),
+                        supports_single_file: Some(server.supports_single_file),
+                        workspace_identifier: server.workspace_identifier.clone(),
+                        enabled: Some(true),
+                        env: server.env.clone(),
+                        initialization_options: server.initialization_options.clone(),
+                    },
+                )
+            })
+            .collect(),
+    })
+}
+
+fn keymap_settings_to_toml(keymap: &crate::keymap::KeymapSettings) -> Option<KeymapToml> {
+    let mut unbind = Vec::new();
+    let mut bindings = Vec::new();
+    for operation in &keymap.operations {
+        match operation {
+            crate::keymap::KeymapOperation::Unbind(binding) => unbind.push(KeyBindingTargetToml {
+                mode: crate::keymap::format_binding_mode(binding.mode).to_string(),
+                key: crate::keymap::format_key_press(crate::keymap::KeyPress {
+                    key: binding.key,
+                    modifiers: binding.modifiers,
+                }),
+                prefix: binding.prefix.map(|prefix| prefix.to_string()),
+            }),
+            crate::keymap::KeymapOperation::Bind { binding, action } => {
+                bindings.push(KeyBindingEntryToml {
+                    mode: crate::keymap::format_binding_mode(binding.mode).to_string(),
+                    key: crate::keymap::format_key_press(crate::keymap::KeyPress {
+                        key: binding.key,
+                        modifiers: binding.modifiers,
+                    }),
+                    prefix: binding.prefix.map(|prefix| prefix.to_string()),
+                    action: crate::keymap::format_action_spec(action),
+                })
+            }
+        }
+    }
+    let sequence_bindings = keymap
+        .sequence_bindings
+        .iter()
+        .map(|binding| KeySequenceBindingToml {
+            mode: crate::keymap::format_binding_mode(binding.mode).to_string(),
+            keys: binding.sequence.iter().copied().map(crate::keymap::format_key_press).collect(),
+            action: crate::keymap::format_action_spec(&binding.action),
+            description: Some(binding.description.clone()),
+        })
+        .collect::<Vec<_>>();
+    let keymap = KeymapToml {
+        inherit_defaults: Some(keymap.inherit_defaults),
+        sequence_timeout_ms: Some(keymap.sequence_timeout_ms),
+        unbind,
+        bindings,
+        sequence_bindings,
+    };
+    Some(keymap)
+}
+
+fn resolved_config_with_env(file_path: Option<&Path>, env: &ConfigEnvironment) -> EeToml {
+    let settings = load_config_with_env(file_path, env);
+    let runtime_languages = runtime_languages_to_toml(runtime_languages_with_env(file_path, env));
+    EeToml {
+        root: None,
+        indent_style: Some(match settings.indent_style {
+            IndentStyle::Spaces => String::from("spaces"),
+            IndentStyle::Tabs => String::from("tabs"),
+        }),
+        indent_size: Some(settings.indent_size),
+        tab_width: Some(settings.tab_width),
+        end_of_line: Some(match settings.end_of_line {
+            EndOfLine::Lf => String::from("lf"),
+            EndOfLine::CrLf => String::from("crlf"),
+            EndOfLine::Cr => String::from("cr"),
+        }),
+        charset: Some(settings.charset),
+        trim_trailing_whitespace: Some(settings.trim_trailing_whitespace),
+        insert_final_newline: Some(settings.insert_final_newline),
+        auto_indent: Some(settings.auto_indent),
+        smart_indent: Some(settings.smart_indent),
+        number_style: Some(match settings.number_style {
+            NumberStyle::Absolute => String::from("absolute"),
+            NumberStyle::Relative => String::from("relative"),
+            NumberStyle::RelativeAbsolute => String::from("relative_absolute"),
+        }),
+        color_column: settings.color_column,
+        show_visible_whitespace: Some(settings.show_visible_whitespace),
+        scroll_offset: Some(settings.scroll_offset),
+        wrap_lines: Some(settings.wrap_lines),
+        sign_column: Some(settings.sign_column),
+        cursor_line: Some(settings.cursor_line),
+        statusline_format: Some(match settings.statusline_format {
+            StatuslineFormat::Default => String::from("default"),
+            StatuslineFormat::Minimal => String::from("minimal"),
+        }),
+        lsp: lsp_settings_to_toml(&settings.lsp),
+        languages: runtime_languages,
+        keymap: keymap_settings_to_toml(&settings.keymap),
+    }
+}
+
+pub(crate) fn merged_config_document(file_path: Option<&Path>) -> Result<String, String> {
+    let document = resolved_config_with_env(file_path, &ConfigEnvironment::from_process());
+    toml::to_string_pretty(&document)
+        .map(|mut text| {
+            text.push('\n');
+            text
+        })
+        .map_err(|err| format!("cannot render merged config: {err}"))
+}
+
+fn parse_config_document(path: &Path) -> Result<toml::Value, String> {
+    match fs::read_to_string(path) {
+        Ok(contents) => toml::from_str::<toml::Value>(&contents)
+            .map_err(|err| format!("Config parse error in {}: {err}", path.display())),
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            Ok(toml::Value::Table(toml::map::Map::new()))
+        }
+        Err(err) => Err(format!("Cannot read {}: {err}", path.display())),
+    }
+}
+
+fn get_value_at_path<'a>(value: &'a toml::Value, key: &str) -> Option<&'a toml::Value> {
+    if key.trim().is_empty() {
+        return Some(value);
+    }
+    let mut current = value;
+    for part in key.split('.') {
+        let table = current.as_table()?;
+        current = table.get(part)?;
+    }
+    Some(current)
+}
+
+fn ensure_table(
+    value: &mut toml::Value,
+) -> Result<&mut toml::map::Map<String, toml::Value>, String> {
+    match value {
+        toml::Value::Table(table) => Ok(table),
+        _ => Err(String::from("config root must be table")),
+    }
+}
+
+fn set_value_at_path(root: &mut toml::Value, key: &str, value: toml::Value) -> Result<(), String> {
+    let mut parts = key.split('.').peekable();
+    if parts.peek().is_none() {
+        return Err(String::from("config key must not be empty"));
+    }
+    let mut current = ensure_table(root)?;
+    while let Some(part) = parts.next() {
+        if parts.peek().is_none() {
+            current.insert(part.to_string(), value);
+            return Ok(());
+        }
+        let entry = current
+            .entry(part.to_string())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        current = match entry {
+            toml::Value::Table(table) => table,
+            _ => return Err(format!("config key `{part}` already exists and is not table")),
+        };
+    }
+    Ok(())
+}
+
+fn validate_config_contents(path: &Path, contents: &str) -> Result<(), String> {
+    let parsed = toml::from_str::<EeToml>(contents)
+        .map_err(|err| format!("Config parse error in {}: {err}", path.display()))?;
+
+    if parsed.languages.is_empty() {
+        return Ok(());
+    }
+
+    let is_workspace_layer = path.file_name().is_some_and(|name| name == ".ee.toml");
+    let mut user_overrides = RuntimeLanguageOverrides::new();
+    let mut workspace_overrides = RuntimeLanguageOverrides::new();
+    if is_workspace_layer {
+        workspace_overrides = parsed.languages;
+    } else {
+        user_overrides = parsed.languages;
+    }
+
+    validate_runtime_language_overrides(&user_overrides, &workspace_overrides, is_workspace_layer)
+        .map_err(|err| format!("Config validation error in {}: {err}", path.display()))
+}
+
+fn get_config_value_with_env(
+    scope: ConfigScope,
+    key: &str,
+    env: &ConfigEnvironment,
+) -> Result<Option<String>, String> {
+    let path = config_path_for_scope_with_env(scope, env)?;
+    let document = parse_config_document(&path)?;
+    get_value_at_path(&document, key)
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("config key `{key}` not found in {}", path.display()))
+        .map(Some)
+}
+
+pub(crate) fn get_config_value(scope: ConfigScope, key: &str) -> Result<Option<String>, String> {
+    get_config_value_with_env(scope, key, &ConfigEnvironment::from_process())
+}
+
+fn parse_set_value(raw: &str) -> toml::Value {
+    let wrapped = format!("value = {raw}");
+    toml::from_str::<toml::Value>(&wrapped)
+        .ok()
+        .and_then(|value| value.get("value").cloned())
+        .unwrap_or_else(|| toml::Value::String(raw.to_string()))
+}
+
+fn set_config_value_with_env(
+    scope: ConfigScope,
+    key: &str,
+    raw_value: &str,
+    env: &ConfigEnvironment,
+) -> Result<PathBuf, String> {
+    let path = config_path_for_scope_with_env(scope, env)?;
+    let mut document = parse_config_document(&path)?;
+    set_value_at_path(&mut document, key, parse_set_value(raw_value))?;
+    let text = toml::to_string_pretty(&document)
+        .map_err(|err| format!("cannot serialize config {}: {err}", path.display()))?;
+    validate_config_contents(&path, &text)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Cannot create {}: {err}", parent.display()))?;
+    }
+    fs::write(&path, text).map_err(|err| format!("Cannot write {}: {err}", path.display()))?;
+    Ok(path)
+}
+
+pub(crate) fn set_config_value(
+    scope: ConfigScope,
+    key: &str,
+    raw_value: &str,
+) -> Result<PathBuf, String> {
+    set_config_value_with_env(scope, key, raw_value, &ConfigEnvironment::from_process())
+}
+
 pub(crate) fn configure_runtime_loader_for_file(
     file_path: Option<&Path>,
     workspace_trusted: bool,
@@ -1388,24 +1686,7 @@ fn config_search_report_with_env(
 pub(crate) fn validate_config_file(path: &Path) -> Result<(), String> {
     let contents = std::fs::read_to_string(path)
         .map_err(|err| format!("Cannot read {}: {err}", path.display()))?;
-    let parsed = toml::from_str::<EeToml>(&contents)
-        .map_err(|err| format!("Config parse error in {}: {err}", path.display()))?;
-
-    if parsed.languages.is_empty() {
-        return Ok(());
-    }
-
-    let is_workspace_layer = path.file_name().is_some_and(|name| name == ".ee.toml");
-    let mut user_overrides = RuntimeLanguageOverrides::new();
-    let mut workspace_overrides = RuntimeLanguageOverrides::new();
-    if is_workspace_layer {
-        workspace_overrides = parsed.languages;
-    } else {
-        user_overrides = parsed.languages;
-    }
-
-    validate_runtime_language_overrides(&user_overrides, &workspace_overrides, is_workspace_layer)
-        .map_err(|err| format!("Config validation error in {}: {err}", path.display()))
+    validate_config_contents(path, &contents)
 }
 
 pub(crate) fn config_schema_json() -> Result<String, String> {
@@ -2684,5 +2965,91 @@ description = "find files"
         assert_eq!(settings.keymap.sequence_timeout_ms, 250);
         assert_eq!(settings.keymap.sequence_bindings[0].description, "find files");
         assert_eq!(settings.keymap.sequence_bindings[0].sequence.len(), 3);
+    }
+
+    #[test]
+    fn config_scope_paths_use_xdg_for_global_and_cwd_for_local() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+
+        assert_eq!(
+            config_path_for_scope_with_env(ConfigScope::Global, &env).unwrap(),
+            env.config_dir.as_ref().unwrap().join("ee").join("config.toml")
+        );
+        assert_eq!(
+            config_path_for_scope_with_env(ConfigScope::Local, &env).unwrap(),
+            env.cwd.join(".ee.toml")
+        );
+    }
+
+    #[test]
+    fn merged_config_document_shows_effective_merged_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+        std::fs::write(
+            env.config_dir.as_ref().unwrap().join("ee").join("config.toml"),
+            "wrap_lines = true\n",
+        )
+        .unwrap();
+        std::fs::write(project.join(".ee.toml"), "indent_size = 2\n").unwrap();
+        let file = project.join("main.rs");
+
+        let text = toml::to_string_pretty(&resolved_config_with_env(Some(&file), &env)).unwrap();
+
+        assert!(text.contains("wrap_lines = true"));
+        assert!(text.contains("indent_size = 2"));
+        assert!(text.contains("auto_indent = true"));
+        assert!(text.contains("smart_indent = true"));
+        assert!(text.contains("statusline_format = \"default\""));
+    }
+
+    #[test]
+    fn xi_config_table_uses_configured_auto_and_smart_indent() {
+        let raw: EeToml = toml::from_str("auto_indent = false\nsmart_indent = false\n").unwrap();
+        let mut settings = EditorSettings::default();
+        settings.merge_toml(&raw);
+
+        let table = settings.to_xi_config_table();
+
+        assert_eq!(table.get("auto_indent").and_then(Value::as_bool), Some(false));
+        assert_eq!(table.get("smart_indent").and_then(Value::as_bool), Some(false));
+    }
+
+    #[test]
+    fn set_config_value_creates_global_file_and_get_reads_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+
+        let written =
+            set_config_value_with_env(ConfigScope::Global, "wrap_lines", "true", &env).unwrap();
+        let value =
+            get_config_value_with_env(ConfigScope::Global, "wrap_lines", &env).unwrap().unwrap();
+
+        assert_eq!(written, temp.path().join("xdg").join("ee").join("config.toml"));
+        assert_eq!(value, "true");
+    }
+
+    #[test]
+    fn set_config_value_writes_local_nested_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+
+        let written = set_config_value_with_env(
+            ConfigScope::Local,
+            "lsp.servers.rust.command",
+            "rust-analyzer",
+            &env,
+        )
+        .unwrap();
+        let contents = std::fs::read_to_string(&written).unwrap();
+
+        assert_eq!(written, env.cwd.join(".ee.toml"));
+        assert!(contents.contains("[lsp.servers.rust]"));
+        assert!(contents.contains("command = \"rust-analyzer\""));
     }
 }

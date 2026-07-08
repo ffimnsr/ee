@@ -354,6 +354,43 @@ fn cli_utility_commands_live_under_do() {
         Some(crate::Commands::Do { command: crate::DoCommands::Doctor })
     ));
 
+    let cli = crate::Cli::try_parse_from(["ee", "do", "config", "show"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Config { command: crate::ConfigCommands::Show }
+        })
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "config", "get", "--global", "wrap_lines"])
+        .unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Config { command: crate::ConfigCommands::Get { .. } }
+        })
+    ));
+
+    let cli = crate::Cli::try_parse_from([
+        "ee",
+        "do",
+        "config",
+        "set",
+        "--local",
+        "lsp.servers.rust.command",
+        "rust-analyzer",
+    ])
+    .unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Config { command: crate::ConfigCommands::Set { .. } }
+        })
+    ));
+
     let cli = crate::Cli::try_parse_from(["ee", "do", "plugins", "list"]).unwrap();
 
     assert!(matches!(
@@ -4001,6 +4038,23 @@ fn parse_action_spec_accepts_requested_find_aliases() {
         crate::keymap::parse_action_spec("till_prev_char").unwrap(),
         Action::PendingCharFind { forward: false, inclusive: false }
     );
+}
+
+#[test]
+fn keymap_action_formatter_roundtrips_representative_actions() {
+    let actions = [
+        Action::RequestHover,
+        Action::PrefillCommandLine("rename "),
+        Action::DeleteSelection { yank: false, enter_insert: true },
+        Action::PendingCharFind { forward: false, inclusive: true },
+        Action::SearchWordUnderCursor { forward: true },
+    ];
+
+    for action in actions {
+        let spec = crate::keymap::format_action_spec(&action);
+        let reparsed = crate::keymap::parse_action_spec(&spec).unwrap();
+        assert_eq!(reparsed, action, "roundtrip failed for {spec}");
+    }
 }
 
 #[test]

@@ -1332,6 +1332,289 @@ pub(crate) fn parse_action_spec(spec: &str) -> Result<Action, String> {
     Ok(action)
 }
 
+pub(crate) fn format_binding_mode(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Normal => "normal",
+        Mode::Insert => "insert",
+        Mode::Visual => "visual",
+        Mode::VisualLine => "visual_line",
+        Mode::VisualBlock => "visual_block",
+        Mode::OperatorPending => "operator_pending",
+        Mode::CommandLine => "command_line",
+        Mode::Search => "search",
+        Mode::Picker => "picker",
+        Mode::Quickfix => "quickfix",
+        Mode::LocationList => "location_list",
+        Mode::SubstituteConfirm => "substitute_confirm",
+        Mode::PrivilegeConfirm => "privilege_confirm",
+    }
+}
+
+pub(crate) fn format_action_spec(action: &Action) -> String {
+    match action {
+        Action::NoOp => String::from("no_op"),
+        Action::Quit => String::from("quit"),
+        Action::EnterMode(mode) => format!("enter_mode:{}", format_mode_spec(*mode)),
+        Action::EnterCommandMode => String::from("enter_command_mode"),
+        Action::Edit(method) => format!("edit:{method}"),
+        Action::CollapseAndEnterNormal => String::from("collapse_and_enter_normal"),
+        Action::ExecuteCommand => String::from("execute_command"),
+        Action::PrefillCommandLine(prefix) => match *prefix {
+            "pipe " => String::from("shell_pipe"),
+            "pipe_to " => String::from("shell_pipe_to"),
+            "shell_insert_output " => String::from("shell_insert_output"),
+            "shell_append_output " => String::from("shell_append_output"),
+            "shell_keep_pipe " => String::from("shell_keep_pipe"),
+            "rename " => String::from("rename_symbol"),
+            other => format!("edit:{other}"),
+        },
+        Action::DeleteBackward => String::from("delete_backward"),
+        Action::CommandBackspace => String::from("command_backspace"),
+        Action::SearchBackspace => String::from("search_backspace"),
+        Action::EnterSearch => String::from("enter_search"),
+        Action::EnterSearchBackward => String::from("enter_search_backward"),
+        Action::ExecuteSearch => String::from("execute_search"),
+        Action::CompleteCommandLine => String::from("complete_command_line"),
+        Action::FindNext => String::from("find_next"),
+        Action::FindPrevious => String::from("find_previous"),
+        Action::RequestCompletion => String::from("completion"),
+        Action::RequestHover => String::from("request_hover"),
+        Action::RequestDeclaration => String::from("goto_declaration"),
+        Action::RequestDefinition => String::from("goto_definition"),
+        Action::RequestTypeDefinition => String::from("goto_type_definition"),
+        Action::RequestReferences => String::from("goto_reference"),
+        Action::RequestImplementation => String::from("goto_implementation"),
+        Action::RequestDocumentSymbols => String::from("request_document_symbols"),
+        Action::RequestWorkspaceSymbols => String::from("request_workspace_symbols"),
+        Action::RequestCodeActions => String::from("code_action"),
+        Action::SwiftMotion => String::from("swift_motion"),
+        Action::GlobalSearch => String::from("global_search"),
+        Action::CommandPalette => String::from("command_palette"),
+        Action::FilePicker => String::from("file_picker"),
+        Action::FilePickerInCurrentDirectory => String::from("file_picker_in_current_directory"),
+        Action::FileExplorer => String::from("file_explorer"),
+        Action::FileExplorerInCurrentBufferDirectory => {
+            String::from("file_explorer_in_current_buffer_directory")
+        }
+        Action::FileExplorerInCurrentDirectory => {
+            String::from("file_explorer_in_current_directory")
+        }
+        Action::BufferPicker => String::from("buffer_picker"),
+        Action::JumpListPicker => String::from("jumplist_picker"),
+        Action::ChangedFilePicker => String::from("changed_file_picker"),
+        Action::DiagnosticsPicker => String::from("diagnostics_picker"),
+        Action::WorkspaceDiagnosticsPicker => String::from("workspace_diagnostics_picker"),
+        Action::LastPicker => String::from("last_picker"),
+        Action::PickerClose => String::from("picker_close"),
+        Action::PickerConfirm => String::from("picker_confirm"),
+        Action::PickerMoveUp => String::from("picker_move_up"),
+        Action::PickerMoveDown => String::from("picker_move_down"),
+        Action::PickerBackspace => String::from("picker_backspace"),
+        Action::QuickfixClose => String::from("quickfix_close"),
+        Action::QuickfixConfirm => String::from("quickfix_confirm"),
+        Action::QuickfixMoveUp => String::from("quickfix_move_up"),
+        Action::QuickfixMoveDown => String::from("quickfix_move_down"),
+        Action::LocationListClose => String::from("location_list_close"),
+        Action::LocationListConfirm => String::from("location_list_confirm"),
+        Action::LocationListMoveUp => String::from("location_list_move_up"),
+        Action::LocationListMoveDown => String::from("location_list_move_down"),
+        Action::SubstituteConfirmApply => String::from("substitute_confirm_apply"),
+        Action::SubstituteConfirmSkip => String::from("substitute_confirm_skip"),
+        Action::SubstituteConfirmApplyAll => String::from("substitute_confirm_apply_all"),
+        Action::SubstituteConfirmCancel => String::from("substitute_confirm_cancel"),
+        Action::RegisterPrefix => String::from("register_prefix"),
+        Action::InsertRegister => String::from("insert_register"),
+        Action::MarkSetPrefix => String::from("mark_set_prefix"),
+        Action::MarkJumpPrefix { line_start } => {
+            format!("mark_jump_prefix:{}", if *line_start { "line" } else { "exact" })
+        }
+        Action::MacroRecordToggle => String::from("macro_record_toggle"),
+        Action::MacroReplayPrefix => String::from("macro_replay_prefix"),
+        Action::WindowCommandPrefix => String::from("window_command_prefix"),
+        Action::SetPrefix(prefix) => format!("set_prefix:{prefix}"),
+        Action::PendingCharFind { forward, inclusive } => format!(
+            "pending_char_find:{}:{}",
+            if *forward { "forward" } else { "backward" },
+            if *inclusive { "inclusive" } else { "exclusive" }
+        ),
+        Action::MoveWordStart { forward, long_word } => format!(
+            "move_word_start:{}:{}",
+            if *forward { "forward" } else { "backward" },
+            if *long_word { "long_word" } else { "word" }
+        ),
+        Action::MoveWordEnd { long_word } => {
+            format!("move_word_end:{}", if *long_word { "long_word" } else { "word" })
+        }
+        Action::GotoFirstNonWhitespace => String::from("goto_first_nonwhitespace"),
+        Action::GotoLine => String::from("goto_line"),
+        Action::GotoColumn => String::from("goto_column"),
+        Action::GotoFileStart => String::from("goto_file_start"),
+        Action::GotoLastLine => String::from("goto_last_line"),
+        Action::GotoFile => String::from("goto_file"),
+        Action::GotoWindowTop => String::from("goto_window_top"),
+        Action::GotoWindowCenter => String::from("goto_window_center"),
+        Action::GotoWindowBottom => String::from("goto_window_bottom"),
+        Action::GotoLastAccessedFile => String::from("goto_last_accessed_file"),
+        Action::GotoLastModifiedFile => String::from("goto_last_modified_file"),
+        Action::SaveSelection => String::from("save_selection"),
+        Action::RepeatLastMotion => String::from("repeat_last_motion"),
+        Action::PageCursorHalfUp => String::from("page_cursor_half_up"),
+        Action::PageCursorHalfDown => String::from("page_cursor_half_down"),
+        Action::Replace => String::from("replace"),
+        Action::ReplaceWithYanked => String::from("replace_with_yanked"),
+        Action::SwitchCase => String::from("switch_case"),
+        Action::SwitchToLowercase => String::from("switch_to_lowercase"),
+        Action::SwitchToUppercase => String::from("switch_to_uppercase"),
+        Action::YankSelection => String::from("yank"),
+        Action::YankToClipboard => String::from("yank_to_clipboard"),
+        Action::YankToPrimaryClipboard => String::from("yank_to_primary_clipboard"),
+        Action::YankMainSelectionToClipboard => String::from("yank_main_selection_to_clipboard"),
+        Action::YankMainSelectionToPrimaryClipboard => {
+            String::from("yank_main_selection_to_primary_clipboard")
+        }
+        Action::IndentSelection => String::from("indent"),
+        Action::UnindentSelection => String::from("unindent"),
+        Action::FormatSelections => String::from("format_selections"),
+        Action::ExtendLineBelow => String::from("extend_line_below"),
+        Action::ExtendToLineBounds => String::from("extend_to_line_bounds"),
+        Action::ShrinkToLineBounds => String::from("shrink_to_line_bounds"),
+        Action::JoinSelections => String::from("join_selections"),
+        Action::JoinSelectionsSpace => String::from("join_selections_space"),
+        Action::KeepSelections => String::from("keep_selections"),
+        Action::RemoveSelections => String::from("remove_selections"),
+        Action::ExpandSelection => String::from("expand_selection"),
+        Action::ShrinkSelection => String::from("shrink_selection"),
+        Action::SelectPrevSibling => String::from("select_prev_sibling"),
+        Action::SelectNextSibling => String::from("select_next_sibling"),
+        Action::SelectAllSiblings => String::from("select_all_siblings"),
+        Action::SelectAllChildren => String::from("select_all_children"),
+        Action::MoveParentNodeStart => String::from("move_parent_node_start"),
+        Action::MoveParentNodeEnd => String::from("move_parent_node_end"),
+        Action::DeleteSelection { yank, enter_insert } => match (*yank, *enter_insert) {
+            (true, false) => String::from("delete_selection"),
+            (false, false) => String::from("delete_selection_noyank"),
+            (true, true) => String::from("change_selection"),
+            (false, true) => String::from("change_selection_noyank"),
+        },
+        Action::MatchingPair => String::from("matching_pair"),
+        Action::SetOperator(operator) => {
+            format!("set_operator:{}", format_operator_spec(*operator))
+        }
+        Action::AppendAfterCursor => String::from("append_after_cursor"),
+        Action::AppendAtEndOfLine => String::from("append_at_end_of_line"),
+        Action::InsertAtLineStart => String::from("insert_at_line_start"),
+        Action::OpenLineBelow => String::from("open_line_below"),
+        Action::OpenLineAbove => String::from("open_line_above"),
+        Action::SubstituteChar => String::from("substitute_char"),
+        Action::SubstituteLine => String::from("substitute_line"),
+        Action::DeleteWordBackward => String::from("delete_word_backward"),
+        Action::DeleteToLineStart => String::from("delete_to_line_start"),
+        Action::AddNewlineBelow => String::from("add_newline_below"),
+        Action::AddNewlineAbove => String::from("add_newline_above"),
+        Action::DeleteCurrentLine => String::from("kill_line"),
+        Action::IndentLine => String::from("indent_line"),
+        Action::OutdentLine => String::from("outdent_line"),
+        Action::Undo => String::from("undo"),
+        Action::Redo => String::from("redo"),
+        Action::RepeatLastChange => String::from("repeat_last_change"),
+        Action::PasteAfter => String::from("paste_after"),
+        Action::PasteBefore => String::from("paste_before"),
+        Action::PasteClipboardAfter => String::from("paste_clipboard_after"),
+        Action::PasteClipboardBefore => String::from("paste_clipboard_before"),
+        Action::PastePrimaryClipboardAfter => String::from("paste_primary_clipboard_after"),
+        Action::PastePrimaryClipboardBefore => String::from("paste_primary_clipboard_before"),
+        Action::ReplaceSelectionsWithClipboard => String::from("replace_selections_with_clipboard"),
+        Action::ReplaceSelectionsWithPrimaryClipboard => {
+            String::from("replace_selections_with_primary_clipboard")
+        }
+        Action::EnterVisualLine => String::from("enter_visual_line"),
+        Action::EnterVisualBlock => String::from("enter_visual_block"),
+        Action::SwapVisualAnchor => String::from("swap_visual_anchor"),
+        Action::RestoreLastVisual => String::from("restore_last_visual"),
+        Action::VisualBlockInsert => String::from("visual_block_insert"),
+        Action::VisualBlockAppend => String::from("visual_block_append"),
+        Action::JumpListOlder => String::from("jump_list_older"),
+        Action::JumpListNewer => String::from("jump_list_newer"),
+        Action::ChangeListOlder => String::from("change_list_older"),
+        Action::ChangeListNewer => String::from("change_list_newer"),
+        Action::TabNext => String::from("tab_next"),
+        Action::TabPrev => String::from("tab_prev"),
+        Action::RotateView => String::from("rotate_view"),
+        Action::RotateViewReverse => String::from("rotate_view_reverse"),
+        Action::TransposeView => String::from("transpose_view"),
+        Action::WindowClose => String::from("wclose"),
+        Action::WindowOnly => String::from("wonly"),
+        Action::JumpViewLeft => String::from("jump_view_left"),
+        Action::JumpViewDown => String::from("jump_view_down"),
+        Action::JumpViewUp => String::from("jump_view_up"),
+        Action::JumpViewRight => String::from("jump_view_right"),
+        Action::SwapViewLeft => String::from("swap_view_left"),
+        Action::SwapViewDown => String::from("swap_view_down"),
+        Action::SwapViewUp => String::from("swap_view_up"),
+        Action::SwapViewRight => String::from("swap_view_right"),
+        Action::CommandHistoryOlder => String::from("command_history_older"),
+        Action::CommandHistoryNewer => String::from("command_history_newer"),
+        Action::QfNext => String::from("qf_next"),
+        Action::QfPrev => String::from("qf_prev"),
+        Action::LocNext => String::from("loc_next"),
+        Action::LocPrev => String::from("loc_prev"),
+        Action::GitNextHunk => String::from("git_next_hunk"),
+        Action::GitPrevHunk => String::from("git_prev_hunk"),
+        Action::GitFirstHunk => String::from("git_first_hunk"),
+        Action::GitLastHunk => String::from("git_last_hunk"),
+        Action::GitBlame => String::from("git_blame"),
+        Action::GitDiff => String::from("git_diff"),
+        Action::FoldToggle => String::from("fold_toggle"),
+        Action::FoldOpen => String::from("fold_open"),
+        Action::FoldClose => String::from("fold_close"),
+        Action::FoldOpenAll => String::from("fold_open_all"),
+        Action::FoldCloseAll => String::from("fold_close_all"),
+        Action::CommitUndoCheckpoint => String::from("commit_undo_checkpoint"),
+        Action::SearchWordUnderCursor { forward } => {
+            format!("search_word_under_cursor:{}", if *forward { "forward" } else { "backward" })
+        }
+        Action::SearchSelection { detect_word_boundaries } => {
+            String::from(if *detect_word_boundaries {
+                "search_selection_detect_word_boundaries"
+            } else {
+                "search_selection"
+            })
+        }
+        Action::FindAll => String::from("find_all"),
+    }
+}
+
+fn format_mode_spec(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Normal => "normal",
+        Mode::Insert => "insert",
+        Mode::Visual => "visual",
+        Mode::VisualLine => "visual_line",
+        Mode::VisualBlock => "visual_block",
+        Mode::OperatorPending => "operator_pending",
+        Mode::CommandLine => "command_line",
+        Mode::Search => "search",
+        Mode::Picker
+        | Mode::Quickfix
+        | Mode::LocationList
+        | Mode::SubstituteConfirm
+        | Mode::PrivilegeConfirm => "normal",
+    }
+}
+
+fn format_operator_spec(operator: Operator) -> &'static str {
+    match operator {
+        Operator::Delete => "delete",
+        Operator::Change => "change",
+        Operator::Yank => "yank",
+        Operator::Indent => "indent",
+        Operator::Outdent => "outdent",
+        Operator::Uppercase => "uppercase",
+        Operator::Lowercase => "lowercase",
+        Operator::CaseToggle => "case_toggle",
+    }
+}
+
 fn parse_mode_spec(spec: &str) -> Option<Mode> {
     match spec.trim().to_ascii_lowercase().as_str() {
         "normal" => Some(Mode::Normal),

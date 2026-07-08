@@ -61,6 +61,18 @@
         "null"
       ]
     },
+    "auto_indent": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "smart_indent": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
     "number_style": {
       "description": "`\"absolute\"`, `\"relative\"`, or `\"relative_absolute\"`.",
       "type": [
@@ -154,7 +166,8 @@
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/LspServerToml"
-          }
+          },
+          "default": {}
         }
       },
       "additionalProperties": false
@@ -569,19 +582,22 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/KeyBindingTargetToml"
-          }
+          },
+          "default": []
         },
         "bindings": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/KeyBindingEntryToml"
-          }
+          },
+          "default": []
         },
         "sequence_bindings": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/KeySequenceBindingToml"
-          }
+          },
+          "default": []
         }
       },
       "additionalProperties": false

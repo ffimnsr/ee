@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -146,6 +146,11 @@ enum Commands {
 enum DoCommands {
     /// Check for problems and show config search precedence
     Doctor,
+    /// Inspect and edit ee config files
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
     /// List installed plugins from configured plugin directories
     Plugins {
         #[command(subcommand)]
@@ -212,6 +217,45 @@ enum PluginCommands {
     /// List installed plugins discovered from bundled and user plugin directories
     #[command(visible_alias = "ls")]
     List,
+}
+
+#[derive(Debug, Args)]
+#[group(required = true, multiple = false)]
+struct ConfigScopeArgs {
+    /// Use user XDG config at ~/.config/ee/config.toml
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    global: bool,
+    /// Use config in current directory at ./.ee.toml
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    local: bool,
+}
+
+impl ConfigScopeArgs {
+    fn scope(&self) -> config::ConfigScope {
+        if self.global { config::ConfigScope::Global } else { config::ConfigScope::Local }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommands {
+    /// Show fully merged effective config for current directory
+    Show,
+    /// Read one key from chosen config file
+    Get {
+        #[command(flatten)]
+        scope: ConfigScopeArgs,
+        /// Dotted config key path, e.g. lsp.servers.rust.command
+        key: String,
+    },
+    /// Set one key in chosen config file
+    Set {
+        #[command(flatten)]
+        scope: ConfigScopeArgs,
+        /// Dotted config key path, e.g. wrap_lines or lsp.servers.rust.command
+        key: String,
+        /// TOML value literal. Bare words become strings.
+        value: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -452,6 +496,40 @@ fn configured_plugin_paths() -> Vec<PathBuf> {
         .flatten()
         .filter(|path| path.exists())
         .collect()
+}
+
+fn cmd_config_show() {
+    match config::merged_config_document(None) {
+        Ok(text) => print!("{text}"),
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_config_get(scope: config::ConfigScope, key: &str) {
+    match config::get_config_value(scope, key) {
+        Ok(Some(value)) => println!("{value}"),
+        Ok(None) => {
+            eprintln!("config key `{key}` not found");
+            std::process::exit(1);
+        }
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_config_set(scope: config::ConfigScope, key: &str, value: &str) {
+    match config::set_config_value(scope, key, value) {
+        Ok(path) => println!("set {key} in {}", path.display()),
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn cmd_plugins_list() {
@@ -1232,11 +1310,25 @@ fn build_startup_app(launch: StartupLaunch) -> io::Result<(App, Vec<PathBuf>)> {
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
 
+    // Apply --working-dir before any file or utility command resolution.
+    if let Some(ref dir) = cli.working_dir {
+        std::env::set_current_dir(dir).map_err(|e| {
+            io::Error::new(e.kind(), format!("cannot change directory to {dir:?}: {e}"))
+        })?;
+    }
+
     // Handle subcommands that don't launch the editor.
     match cli.command {
         Some(Commands::Do { command }) => {
             match command {
                 DoCommands::Doctor => cmd_doctor(cli.config.as_ref()),
+                DoCommands::Config { command } => match command {
+                    ConfigCommands::Show => cmd_config_show(),
+                    ConfigCommands::Get { scope, key } => cmd_config_get(scope.scope(), &key),
+                    ConfigCommands::Set { scope, key, value } => {
+                        cmd_config_set(scope.scope(), &key, &value)
+                    }
+                },
                 DoCommands::Plugins { command } => match command {
                     PluginCommands::List => cmd_plugins_list(),
                 },
@@ -1303,13 +1395,6 @@ fn main() -> io::Result<()> {
             return Ok(());
         }
         None => {}
-    }
-
-    // Apply --working-dir before opening files.
-    if let Some(ref dir) = cli.working_dir {
-        std::env::set_current_dir(dir).map_err(|e| {
-            io::Error::new(e.kind(), format!("cannot change directory to {dir:?}: {e}"))
-        })?;
     }
 
     install_panic_hook();

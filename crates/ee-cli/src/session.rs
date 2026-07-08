@@ -96,7 +96,10 @@ impl SessionState {
     }
 
     pub(crate) fn initial_path(&self) -> Option<PathBuf> {
-        self.buffers.first().map(|buffer| buffer.path.clone())
+        self.buffers
+            .iter()
+            .find(|buffer| is_session_restorable_path(&buffer.path))
+            .map(|buffer| buffer.path.clone())
     }
 
     pub(crate) fn capture(app: &App) -> Self {
@@ -104,6 +107,9 @@ impl SessionState {
         let mut buffers = Vec::new();
         for buf in app.backend.all_bufs() {
             let Some(path) = buf.path.as_deref().map(normalize_path) else { continue };
+            if !is_session_restorable_path(&path) {
+                continue;
+            }
             let idx = buffers.len();
             buffers.push(SessionBuffer {
                 path,
@@ -168,17 +174,23 @@ impl SessionState {
 
     pub(crate) fn restore(&self, app: &mut App) -> io::Result<()> {
         let mut restored_buffers = Vec::with_capacity(self.buffers.len());
-        for (idx, buffer) in self.buffers.iter().enumerate() {
-            let buffer_id = if idx == 0
+        let mut reused_initial_buffer = false;
+        for buffer in self.buffers.iter() {
+            if !is_session_restorable_path(&buffer.path) {
+                restored_buffers.push(None);
+                continue;
+            }
+            let buffer_id = if !reused_initial_buffer
                 && app.backend.buf_count() == 1
                 && app.backend.active().path.as_ref() == Some(&buffer.path)
             {
+                reused_initial_buffer = true;
                 app.backend.active().id
             } else {
                 app.backend.open_buffer(Some(buffer.path.clone()))?
             };
             app.backend.restore_cursor(buffer_id, buffer.cursor_line, buffer.cursor_col)?;
-            restored_buffers.push(buffer_id);
+            restored_buffers.push(Some(buffer_id));
         }
 
         let mut restored_tabs = Vec::new();
@@ -188,7 +200,9 @@ impl SessionState {
             let mut focused_window = None;
             let mut windows = Vec::new();
             for (window_idx, window) in tab.windows.iter().enumerate() {
-                let Some(&buffer_id) = restored_buffers.get(window.buffer) else { continue };
+                let Some(Some(buffer_id)) = restored_buffers.get(window.buffer).copied() else {
+                    continue;
+                };
                 if window_idx == tab.focused_window {
                     focused_window = Some(windows.len());
                 }
@@ -225,7 +239,7 @@ impl SessionState {
             app.viewport = focused_viewport;
             let active_buffer = app.tabs.focused_windows().focused_window().buffer_id;
             app.backend.switch_to_id(active_buffer)?;
-        } else if let Some(&first_buffer) = restored_buffers.first() {
+        } else if let Some(first_buffer) = restored_buffers.iter().flatten().copied().next() {
             app.backend.switch_to_id(first_buffer)?;
             app.viewport = Viewport::default();
         }
@@ -296,6 +310,11 @@ fn normalize_path(path: &Path) -> PathBuf {
     })
 }
 
+fn is_session_restorable_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else { return true };
+    !matches!(name, "ee.log" | "editor.log" | "xi-lsp-plugin.log")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +374,71 @@ mod tests {
         assert_eq!(restored.backend.all_bufs()[1].cursor_line, 8);
         assert_eq!(restored.backend.all_bufs()[1].cursor_col, 1);
         assert_eq!(restored.tabs.focused_windows().split_dir, SplitDir::Horizontal);
+    }
+
+    #[test]
+    fn session_capture_skips_log_buffers() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("main.rs");
+        let log = dir.path().join("xi-lsp-plugin.log");
+        fs::write(&source, "fn main() {}\n").unwrap();
+        fs::write(&log, "plugin\n").unwrap();
+
+        let mut app = App::from_path(Some(source.clone())).unwrap();
+        let log_id = app.backend.open_buffer(Some(log.clone())).unwrap();
+        app.backend.switch_to_id(log_id).unwrap();
+        app.tabs.focused_windows_mut().set_focused_buffer(log_id);
+
+        let state = SessionState::capture(&app);
+
+        assert_eq!(state.buffers.len(), 1);
+        assert_eq!(state.buffers[0].path, normalize_path(&source));
+        assert_eq!(state.initial_path(), Some(normalize_path(&source)));
+    }
+
+    #[test]
+    fn restore_skips_log_buffers_from_saved_session() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("main.rs");
+        let log = dir.path().join("xi-lsp-plugin.log");
+        fs::write(&source, "fn main() {}\n").unwrap();
+        fs::write(&log, "plugin\n").unwrap();
+
+        let state = SessionState {
+            version: SESSION_VERSION,
+            buffers: vec![
+                SessionBuffer { path: normalize_path(&log), cursor_line: 2, cursor_col: 3 },
+                SessionBuffer { path: normalize_path(&source), cursor_line: 4, cursor_col: 5 },
+            ],
+            tabs: vec![SessionTab {
+                windows: vec![
+                    SessionWindow {
+                        buffer: 0,
+                        saved_viewport: SessionViewport { top_line: 1, left_col: 0, target_col: 0 },
+                    },
+                    SessionWindow {
+                        buffer: 1,
+                        saved_viewport: SessionViewport { top_line: 6, left_col: 0, target_col: 0 },
+                    },
+                ],
+                focused_window: 0,
+                split_dir: SessionSplitDir::Horizontal,
+                active_viewport: SessionViewport { top_line: 6, left_col: 0, target_col: 0 },
+            }],
+            focused_tab: 0,
+            marks: Vec::new(),
+            jump_list: Vec::new(),
+            jump_list_idx: 0,
+            command_history: Vec::new(),
+        };
+
+        let mut restored = App::from_path(state.initial_path()).unwrap();
+        state.restore(&mut restored).unwrap();
+
+        assert_eq!(restored.backend.all_bufs().len(), 1);
+        assert_eq!(restored.backend.active().path.as_ref(), Some(&normalize_path(&source)));
+        assert_eq!(restored.tabs.tab_count(), 1);
+        assert_eq!(restored.tabs.focused_windows().windows().len(), 1);
     }
 
     #[test]
