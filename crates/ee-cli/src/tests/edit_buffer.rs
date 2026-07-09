@@ -19,7 +19,17 @@ fn insert_mode_writes_to_scratch_buffer() {
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)));
-    app.backend.pump().unwrap();
+
+    wait_until_with_backend(
+        &mut app.backend,
+        "scratch insert",
+        Duration::from_secs(1),
+        |backend| {
+            backend.lines == vec![String::from("ab")]
+                && backend.cursor_line == 0
+                && backend.cursor_col == 2
+        },
+    );
 
     assert_eq!(app.backend.lines, vec!["ab"]);
     assert_eq!((app.backend.cursor_line, app.backend.cursor_col), (0, 2));
@@ -50,13 +60,29 @@ fn enter_splits_line_and_backspace_joins_it() {
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)));
-    app.backend.pump().unwrap();
+
+    wait_until_with_backend(
+        &mut app.backend,
+        "enter split line",
+        Duration::from_secs(1),
+        |backend| backend.lines == vec![String::from("a"), String::from("b")],
+    );
 
     assert_eq!(app.backend.lines, vec!["a", "b"]);
 
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
-    app.backend.pump().unwrap();
+
+    wait_until_with_backend(
+        &mut app.backend,
+        "backspace join line",
+        Duration::from_secs(1),
+        |backend| {
+            backend.lines == vec![String::from("a")]
+                && backend.cursor_line == 0
+                && backend.cursor_col == 1
+        },
+    );
 
     assert_eq!(app.backend.lines, vec!["a"]);
     assert_eq!((app.backend.cursor_line, app.backend.cursor_col), (0, 1));
@@ -105,8 +131,14 @@ fn ctrl_m_key_is_treated_as_enter() {
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
     for _ in 0..5 {
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL)));
-        app.backend.pump().unwrap();
     }
+
+    wait_until_with_backend(
+        &mut app.backend,
+        "ctrl-m enter normalization",
+        Duration::from_secs(1),
+        |backend| backend.cursor_line == 5 && backend.cursor_col == 0 && backend.lines.len() == 6,
+    );
 
     assert_eq!(app.backend.cursor_line, 5);
     assert_eq!(app.backend.cursor_col, 0);
@@ -714,10 +746,26 @@ fn substitute_range_uses_backend_authoritative_path() {
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
     }
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "seed substitute buffer",
+        Duration::from_secs(1),
+        |backend| {
+            backend.lines
+                == vec![String::from("alpha"), String::from("beta"), String::from("alpha")]
+        },
+    );
 
     app.execute_substitute(1, 2, "a", "A", "");
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "substitute range apply",
+        Duration::from_secs(1),
+        |backend| {
+            backend.lines
+                == vec![String::from("alpha"), String::from("betA"), String::from("Alpha")]
+        },
+    );
 
     assert_eq!(app.backend.lines, vec!["alpha", "betA", "Alpha"]);
 }
@@ -731,11 +779,27 @@ fn substitute_confirm_uses_backend_preview_and_apply() {
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
     }
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "seed substitute confirm buffer",
+        Duration::from_secs(1),
+        |backend| {
+            backend.lines
+                == vec![String::from("alpha"), String::from("beta"), String::from("alpha")]
+        },
+    );
 
     app.execute_substitute(0, 2, "a", "A", "c");
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)));
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "substitute confirm apply",
+        Duration::from_secs(1),
+        |backend| {
+            backend.lines
+                == vec![String::from("Alpha"), String::from("beta"), String::from("alpha")]
+        },
+    );
 
     assert_eq!(app.backend.lines, vec!["Alpha", "beta", "alpha"]);
 }

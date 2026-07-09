@@ -104,7 +104,21 @@ impl LspPlugin {
             Err(_) => Map::new(),
         };
         merge_json_object(&mut merged, changes);
-        serde_json::from_value(Value::Object(merged))
+
+        match serde_json::from_value(Value::Object(merged)) {
+            Ok(config) => Ok(config),
+            Err(_err)
+                if changes.keys().all(|key| {
+                    !matches!(
+                        key.as_str(),
+                        "language_config" | "disabled_language_config" | "language_servers"
+                    )
+                }) =>
+            {
+                Ok(self.config.clone())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     fn apply_plugin_config(&mut self, next_config: Config) {
@@ -319,6 +333,19 @@ impl LspPlugin {
     }
 
     fn language_match_for_path(&self, path: &Path) -> Option<LanguageMatch> {
+        if let Some(filename) = path.file_name().and_then(|name| name.to_str()) {
+            for (lang, config) in &self.config.language_config {
+                if config.filenames.iter().any(|candidate| candidate == filename) {
+                    return Some(LanguageMatch::Enabled(lang.clone()));
+                }
+            }
+            for (lang, config) in &self.config.disabled_language_config {
+                if config.filenames.iter().any(|candidate| candidate == filename) {
+                    return Some(LanguageMatch::Disabled(lang.clone()));
+                }
+            }
+        }
+
         path.extension().and_then(|extension| extension.to_str()).and_then(|extension_str| {
             for (lang, config) in &self.config.language_config {
                 if config.extensions.iter().any(|candidate| candidate == extension_str) {
@@ -396,7 +423,51 @@ impl LspPlugin {
     }
 
     fn spawn_failure_status(language_id: &str, command: &str) -> (String, String) {
-        (format!("lsp:{language_id}:status"), format!("lsp:{language_id}:spawn failed: {command}"))
+        let hint = Self::spawn_failure_hint(command);
+        (
+            format!("lsp:{language_id}:status"),
+            format!("lsp:{language_id}:spawn failed: {command}; hint: {hint}"),
+        )
+    }
+
+    fn spawn_failure_hint(command: &str) -> String {
+        match command {
+            "bash-language-server" => String::from("npm install -g bash-language-server"),
+            "clangd" => String::from("install clangd and ensure it is in PATH"),
+            "elixir-ls" => String::from("install elixir-ls and ensure it is in PATH"),
+            "gleam" => String::from("install gleam and ensure it is in PATH"),
+            "gopls" => String::from("go install golang.org/x/tools/gopls@latest"),
+            "intelephense" => String::from("npm install -g intelephense"),
+            "jdtls" => String::from("install jdtls and ensure it is in PATH"),
+            "jedi-language-server" => String::from("pip install jedi-language-server"),
+            "kotlin-language-server" => {
+                String::from("install kotlin-language-server and ensure it is in PATH")
+            }
+            "lua-language-server" => {
+                String::from("install lua-language-server and ensure it is in PATH")
+            }
+            "marksman" => String::from("install marksman and ensure it is in PATH"),
+            "metals" => String::from("install metals and ensure it is in PATH"),
+            "nil" => String::from("install nil and ensure it is in PATH"),
+            "ocamllsp" => String::from("install ocaml-lsp-server and ensure `ocamllsp` is in PATH"),
+            "ruby-lsp" => String::from("install ruby-lsp and ensure it is in PATH"),
+            "rust-analyzer" => String::from("install rust-analyzer and ensure it is in PATH"),
+            "sourcekit-lsp" => String::from("install sourcekit-lsp and ensure it is in PATH"),
+            "svelteserver" => String::from("npm install -g svelte-language-server"),
+            "taplo" => String::from("install taplo-cli and ensure `taplo` is in PATH"),
+            "typescript-language-server" => {
+                String::from("npm install -g typescript typescript-language-server")
+            }
+            "vscode-css-language-server"
+            | "vscode-html-language-server"
+            | "vscode-json-languageserver" => {
+                String::from("npm install -g vscode-langservers-extracted")
+            }
+            "vue-language-server" => String::from("npm install -g @vue/language-server"),
+            "yaml-language-server" => String::from("npm install -g yaml-language-server"),
+            "zls" => String::from("install zls and ensure it is in PATH"),
+            _ => format!("install {command} and ensure it is in PATH"),
+        }
     }
 
     fn add_disabled_status(&self, view_id: ViewId, language_id: &str) -> String {
@@ -447,7 +518,8 @@ impl LspPlugin {
     }
 
     fn log_spawn_failure(language_id: &str, command: &str, err: &Error) {
-        error!("lsp:{language_id}: spawn failed for command {command}: {err}");
+        let hint = Self::spawn_failure_hint(command);
+        error!("lsp:{language_id}: spawn failed for command {command}: {err}; hint: {hint}");
     }
 }
 
@@ -1953,6 +2025,7 @@ mod tests {
     fn language_config(
         command: &str,
         extensions: &[&str],
+        filenames: &[&str],
         supports_single_file: bool,
         workspace_identifier: Option<&str>,
     ) -> LanguageConfig {
@@ -1961,6 +2034,7 @@ mod tests {
             start_command: String::from(command),
             start_arguments: Vec::new(),
             extensions: extensions.iter().map(|ext| (*ext).to_owned()).collect(),
+            filenames: filenames.iter().map(|filename| (*filename).to_owned()).collect(),
             supports_single_file,
             workspace_identifier: workspace_identifier.map(str::to_owned),
             env: BTreeMap::new(),
@@ -1974,11 +2048,11 @@ mod tests {
             language_config: HashMap::from([
                 (
                     String::from("rust"),
-                    language_config("rust-analyzer", &["rs"], false, Some("Cargo.toml")),
+                    language_config("rust-analyzer", &["rs"], &[], false, Some("Cargo.toml")),
                 ),
                 (
                     String::from("json"),
-                    language_config("vscode-json-languageserver", &["json"], true, None),
+                    language_config("vscode-json-languageserver", &["json"], &[], true, None),
                 ),
             ]),
             disabled_language_config: HashMap::new(),
@@ -1993,14 +2067,14 @@ mod tests {
                     String::from("rust"),
                     LanguageConfig {
                         env: BTreeMap::from([(String::from("RUST_LOG"), String::from("debug"))]),
-                        ..language_config("rust-analyzer", &["rs"], false, Some("Cargo.toml"))
+                        ..language_config("rust-analyzer", &["rs"], &[], false, Some("Cargo.toml"))
                     },
                 ),
                 (
                     String::from("gleam"),
                     LanguageConfig {
                         initialization_options: Some(json!({ "feature": true })),
-                        ..language_config("gleam", &["gleam"], true, None)
+                        ..language_config("gleam", &["gleam"], &[], true, None)
                     },
                 ),
             ]),
@@ -2024,7 +2098,7 @@ mod tests {
         let mut plugin = LspPlugin::new(Config {
             language_config: HashMap::from([(
                 String::from("rust"),
-                language_config("rust-analyzer", &["rs"], false, Some("Cargo.toml")),
+                language_config("rust-analyzer", &["rs"], &[], false, Some("Cargo.toml")),
             )]),
             disabled_language_config: HashMap::new(),
             language_servers: HashMap::from([(String::from("rust"), vec![String::from("rust")])]),
@@ -2055,12 +2129,29 @@ mod tests {
     }
 
     #[test]
+    fn parse_plugin_config_update_ignores_non_lsp_tables() {
+        let plugin = LspPlugin::new(Config::bundled());
+
+        let next = plugin
+            .parse_plugin_config_update(&serde_json::Map::from_iter([
+                (String::from("tab_size"), json!(2)),
+                (String::from("translate_tabs_to_spaces"), json!(true)),
+            ]))
+            .expect("non-lsp config table should keep current config");
+
+        assert_eq!(next, plugin.config);
+    }
+
+    #[test]
     fn path_matching_reports_disabled_server() {
         let plugin = LspPlugin::new(Config {
             language_config: HashMap::new(),
             disabled_language_config: HashMap::from([(
                 String::from("typescript"),
-                DisabledLanguageConfig { extensions: vec![String::from("ts")] },
+                DisabledLanguageConfig {
+                    extensions: vec![String::from("ts")],
+                    filenames: Vec::new(),
+                },
             )]),
             language_servers: HashMap::new(),
         });
@@ -2072,11 +2163,54 @@ mod tests {
     }
 
     #[test]
+    fn path_matching_uses_exact_filename_before_extension() {
+        let plugin = LspPlugin::new(Config {
+            language_config: HashMap::from([
+                (
+                    String::from("dockerfile"),
+                    language_config("docker-langserver", &[], &["Dockerfile"], true, None),
+                ),
+                (
+                    String::from("shell"),
+                    language_config("bash-language-server", &["Dockerfile"], &[], true, None),
+                ),
+            ]),
+            disabled_language_config: HashMap::new(),
+            language_servers: HashMap::new(),
+        });
+
+        assert_eq!(
+            plugin.language_match_for_path(std::path::Path::new("Dockerfile")),
+            Some(LanguageMatch::Enabled(String::from("dockerfile")))
+        );
+    }
+
+    #[test]
+    fn path_matching_reports_disabled_filename_server() {
+        let plugin = LspPlugin::new(Config {
+            language_config: HashMap::new(),
+            disabled_language_config: HashMap::from([(
+                String::from("just"),
+                DisabledLanguageConfig {
+                    extensions: Vec::new(),
+                    filenames: vec![String::from("Justfile")],
+                },
+            )]),
+            language_servers: HashMap::new(),
+        });
+
+        assert_eq!(
+            plugin.language_match_for_path(std::path::Path::new("Justfile")),
+            Some(LanguageMatch::Disabled(String::from("just")))
+        );
+    }
+
+    #[test]
     fn unsupported_single_file_server_has_no_key_without_workspace_root() {
         let plugin = LspPlugin::new(Config {
             language_config: HashMap::from([(
                 String::from("gleam"),
-                language_config("gleam", &["gleam"], false, Some("gleam.toml")),
+                language_config("gleam", &["gleam"], &[], false, Some("gleam.toml")),
             )]),
             disabled_language_config: HashMap::new(),
             language_servers: HashMap::new(),
@@ -2086,11 +2220,14 @@ mod tests {
     }
 
     #[test]
-    fn spawn_failure_status_names_language_and_command_only() {
+    fn spawn_failure_status_includes_install_hint_without_leaking_secrets() {
         let (key, value) = LspPlugin::spawn_failure_status("gleam", "gleam");
 
         assert_eq!(key, "lsp:gleam:status");
-        assert_eq!(value, "lsp:gleam:spawn failed: gleam");
+        assert_eq!(
+            value,
+            "lsp:gleam:spawn failed: gleam; hint: install gleam and ensure it is in PATH"
+        );
         assert!(!value.contains("initialization_options"));
         assert!(!value.contains("XI_LSP_SECRET"));
     }
@@ -2099,10 +2236,10 @@ mod tests {
     fn language_matches_use_explicit_language_attachments_before_extensions() {
         let plugin = LspPlugin::new(Config {
             language_config: HashMap::from([
-                (String::from("eslint"), language_config("eslint", &["js"], true, None)),
+                (String::from("eslint"), language_config("eslint", &["js"], &[], true, None)),
                 (
                     String::from("typescript"),
-                    language_config("typescript-language-server", &["ts"], true, None),
+                    language_config("typescript-language-server", &["ts"], &[], true, None),
                 ),
             ]),
             disabled_language_config: HashMap::new(),

@@ -10,9 +10,10 @@ use crate::syntax::Languages;
 use super::errors::RuntimeLoaderError;
 use super::grammar::{
     cargo_fetch_locked, cargo_fetch_runtime_crates, compile_runtime_grammar,
-    copy_bundled_ee_owned_queries_to_runtime, copy_standard_queries_to_runtime,
-    dedupe_grammar_crate_specs, fetch_git_grammar_source, grammar_fetch_plan_for_language,
-    locate_grammar_crate_source, resolve_staged_grammar_build_dir, validate_built_grammar_symbol,
+    copy_bundled_ee_owned_queries_to_runtime, copy_bundled_standard_queries_to_runtime,
+    copy_standard_queries_to_runtime, dedupe_grammar_crate_specs, fetch_git_grammar_source,
+    grammar_fetch_plan_for_language, locate_grammar_crate_source, resolve_staged_grammar_build_dir,
+    validate_built_grammar_symbol,
 };
 use super::helpers::{
     canonicalize_or_original, default_symbol_name, grammar_handle_is_fresh, normalize_lookup_key,
@@ -450,6 +451,16 @@ impl RuntimeLoader {
                             language.canonical_id()
                         ))
                     })?;
+            query_paths.extend(
+                copy_bundled_standard_queries_to_runtime(output_root, &language).map_err(
+                    |error| {
+                        RuntimeOperationError::runtime_asset(format!(
+                            "failed copying bundled standard queries for `{}`: {error}",
+                            language.canonical_id()
+                        ))
+                    },
+                )?,
+            );
             query_paths.extend(
                 copy_bundled_ee_owned_queries_to_runtime(output_root, &language).map_err(
                     |error| {

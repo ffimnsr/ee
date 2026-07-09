@@ -153,6 +153,7 @@ pub(crate) struct LspSettings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DisabledLspServerSettings {
     pub extensions: Vec<String>,
+    pub filenames: Vec<String>,
 }
 
 impl Default for LspSettings {
@@ -175,6 +176,7 @@ impl LspSettings {
                             command: server.start_command,
                             args: server.start_arguments,
                             extensions: server.extensions,
+                            filenames: server.filenames,
                             supports_single_file: server.supports_single_file,
                             workspace_identifier: server.workspace_identifier,
                             env: server.env,
@@ -187,7 +189,13 @@ impl LspSettings {
                 .disabled_language_config
                 .into_iter()
                 .map(|(id, server)| {
-                    (id, DisabledLspServerSettings { extensions: server.extensions })
+                    (
+                        id,
+                        DisabledLspServerSettings {
+                            extensions: server.extensions,
+                            filenames: server.filenames,
+                        },
+                    )
                 })
                 .collect(),
             language_servers: config.language_servers.into_iter().collect(),
@@ -207,6 +215,7 @@ impl LspSettings {
                             start_command: server.command.clone(),
                             start_arguments: server.args.clone(),
                             extensions: server.extensions.clone(),
+                            filenames: server.filenames.clone(),
                             supports_single_file: server.supports_single_file,
                             workspace_identifier: server.workspace_identifier.clone(),
                             env: server.env.clone(),
@@ -221,7 +230,10 @@ impl LspSettings {
                 .map(|(id, server)| {
                     (
                         id.clone(),
-                        PluginDisabledLanguageConfig { extensions: server.extensions.clone() },
+                        PluginDisabledLanguageConfig {
+                            extensions: server.extensions.clone(),
+                            filenames: server.filenames.clone(),
+                        },
                     )
                 })
                 .collect(),
@@ -247,6 +259,7 @@ pub(crate) struct LspServerSettings {
     pub command: String,
     pub args: Vec<String>,
     pub extensions: Vec<String>,
+    pub filenames: Vec<String>,
     pub supports_single_file: bool,
     pub workspace_identifier: Option<String>,
     pub env: BTreeMap<String, String>,
@@ -280,6 +293,7 @@ impl LspSettingsBuilder {
                             command: Some(server.command.clone()),
                             args: Some(server.args.clone()),
                             extensions: Some(server.extensions.clone()),
+                            filenames: Some(server.filenames.clone()),
                             supports_single_file: Some(server.supports_single_file),
                             workspace_identifier: server.workspace_identifier.clone(),
                             enabled: Some(true),
@@ -308,6 +322,9 @@ impl LspSettingsBuilder {
             }
             if let Some(extensions) = &server_patch.extensions {
                 server.extensions = Some(extensions.clone());
+            }
+            if let Some(filenames) = &server_patch.filenames {
+                server.filenames = Some(filenames.clone());
             }
             if let Some(supports_single_file) = server_patch.supports_single_file {
                 server.supports_single_file = Some(supports_single_file);
@@ -360,7 +377,12 @@ impl LspSettingsBuilder {
                     .as_ref()
                     .map(|extensions| normalize_lsp_extensions(&id, extensions))
                     .unwrap_or_default();
-                disabled_servers.insert(id, DisabledLspServerSettings { extensions });
+                let filenames = server
+                    .filenames
+                    .as_ref()
+                    .map(|filenames| normalize_lsp_filenames(&id, filenames))
+                    .unwrap_or_default();
+                disabled_servers.insert(id, DisabledLspServerSettings { extensions, filenames });
                 continue;
             }
 
@@ -386,10 +408,16 @@ impl LspSettingsBuilder {
                 .as_ref()
                 .map(|extensions| normalize_lsp_extensions(&id, extensions))
                 .unwrap_or_default();
+            let filenames = server
+                .filenames
+                .as_ref()
+                .map(|filenames| normalize_lsp_filenames(&id, filenames))
+                .unwrap_or_default();
 
-            if extensions.is_empty() && !referenced_server_ids.contains(&id) {
+            if extensions.is_empty() && filenames.is_empty() && !referenced_server_ids.contains(&id)
+            {
                 eprintln!(
-                    "ee: warning: lsp server config for {} has no routing metadata; add [languages.<id>].lsp or legacy extensions",
+                    "ee: warning: lsp server config for {} has no routing metadata; add [languages.<id>].lsp, extensions, or filenames",
                     id
                 );
             }
@@ -401,6 +429,7 @@ impl LspSettingsBuilder {
                     command: server.command.expect("validated above"),
                     args: server.args.unwrap_or_default(),
                     extensions,
+                    filenames,
                     supports_single_file: server.supports_single_file.unwrap_or(true),
                     workspace_identifier: server.workspace_identifier,
                     env: server.env,
@@ -475,6 +504,30 @@ fn normalize_lsp_extensions(server_id: &str, extensions: &[String]) -> Vec<Strin
         .collect()
 }
 
+fn normalize_lsp_filenames(server_id: &str, filenames: &[String]) -> Vec<String> {
+    filenames
+        .iter()
+        .filter_map(|filename| {
+            let normalized = filename.trim().to_owned();
+            if normalized.is_empty() {
+                eprintln!(
+                    "ee: warning: invalid lsp server config for {}: empty filename ignored",
+                    server_id
+                );
+                None
+            } else if normalized.contains(std::path::MAIN_SEPARATOR) || normalized.contains('/') || normalized.contains('\\') {
+                eprintln!(
+                    "ee: warning: invalid lsp server config for {}: filename {} must not include path separators",
+                    server_id, normalized
+                );
+                None
+            } else {
+                Some(normalized)
+            }
+        })
+        .collect()
+}
+
 fn resolve_lsp_extension_ownership(
     servers: &mut BTreeMap<String, LspServerSettings>,
     disabled_servers: &mut BTreeMap<String, DisabledLspServerSettings>,
@@ -502,17 +555,47 @@ fn resolve_lsp_extension_ownership(
         }
     }
 
+    let mut owner_by_filename = BTreeMap::<String, String>::new();
+    let mut ids = servers.keys().chain(disabled_servers.keys()).cloned().collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+
+    for id in ids {
+        let filenames = servers
+            .get(&id)
+            .map(|server| &server.filenames)
+            .or_else(|| disabled_servers.get(&id).map(|server| &server.filenames));
+        if let Some(filenames) = filenames {
+            for filename in filenames {
+                if let Some(previous) = owner_by_filename.insert(filename.clone(), id.clone()) {
+                    eprintln!(
+                        "ee: warning: lsp filename {} moved from {} to {}",
+                        filename, previous, id
+                    );
+                }
+            }
+        }
+    }
+
     for (id, server) in servers.iter_mut() {
         server.extensions.retain(|extension| owner_by_extension.get(extension) == Some(id));
+        server.filenames.retain(|filename| owner_by_filename.get(filename) == Some(id));
     }
-    servers
-        .retain(|id, server| !server.extensions.is_empty() || referenced_server_ids.contains(id));
+    servers.retain(|id, server| {
+        !server.extensions.is_empty()
+            || !server.filenames.is_empty()
+            || referenced_server_ids.contains(id)
+    });
 
     for (id, server) in disabled_servers.iter_mut() {
         server.extensions.retain(|extension| owner_by_extension.get(extension) == Some(id));
+        server.filenames.retain(|filename| owner_by_filename.get(filename) == Some(id));
     }
-    disabled_servers
-        .retain(|id, server| !server.extensions.is_empty() || referenced_server_ids.contains(id));
+    disabled_servers.retain(|id, server| {
+        !server.extensions.is_empty()
+            || !server.filenames.is_empty()
+            || referenced_server_ids.contains(id)
+    });
 }
 
 #[derive(Debug, Clone, Default)]
@@ -521,6 +604,7 @@ struct LspServerSettingsBuilder {
     command: Option<String>,
     args: Option<Vec<String>>,
     extensions: Option<Vec<String>>,
+    filenames: Option<Vec<String>>,
     supports_single_file: Option<bool>,
     workspace_identifier: Option<String>,
     enabled: Option<bool>,
@@ -771,6 +855,7 @@ pub(crate) struct LspServerToml {
     pub command: Option<String>,
     pub args: Option<Vec<String>>,
     pub extensions: Option<Vec<String>>,
+    pub filenames: Option<Vec<String>>,
     pub supports_single_file: Option<bool>,
     pub workspace_identifier: Option<String>,
     pub enabled: Option<bool>,
@@ -1317,6 +1402,7 @@ fn lsp_settings_to_toml(lsp: &LspSettings) -> Option<LspToml> {
                         command: Some(server.command.clone()),
                         args: Some(server.args.clone()),
                         extensions: Some(server.extensions.clone()),
+                        filenames: Some(server.filenames.clone()),
                         supports_single_file: Some(server.supports_single_file),
                         workspace_identifier: server.workspace_identifier.clone(),
                         enabled: Some(true),
@@ -2455,8 +2541,12 @@ tab_width = 4
                 .get("typescript")
                 .map(|server| server.extensions.as_slice()),
             Some(
-                &[String::from("ts"), String::from("js"), String::from("jsx"), String::from("tsx")]
-                    [..]
+                &[
+                    String::from("ts"),
+                    String::from("tsx"),
+                    String::from("mts"),
+                    String::from("cts")
+                ][..]
             )
         );
         assert_eq!(
@@ -2504,32 +2594,70 @@ tab_width = 4
     }
 
     #[test]
+    fn lsp_config_normalizes_filenames_and_rejects_invalid_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(".ee.toml"),
+            "[lsp.servers.dockerfile]\nlanguage_name = \"Dockerfile\"\ncommand = \"docker-langserver\"\nfilenames = [\" Dockerfile \", \"\", \"nested/Dockerfile\", \"nested\\\\Dockerfile\", \"Containerfile\"]\n",
+        )
+        .unwrap();
+
+        let settings = load_config_with_env(Some(&project.join("Dockerfile")), &env);
+        let dockerfile = settings.lsp.servers.get("dockerfile").unwrap();
+
+        assert_eq!(dockerfile.filenames, vec!["Dockerfile", "Containerfile"]);
+    }
+
+    #[test]
+    fn lsp_config_duplicate_filenames_later_server_wins() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(".ee.toml"),
+            "[lsp.servers.alpha]\nlanguage_name = \"Alpha\"\ncommand = \"alpha\"\nfilenames = [\"Sharedfile\", \"Alphafile\"]\n\n[lsp.servers.beta]\nlanguage_name = \"Beta\"\ncommand = \"beta\"\nfilenames = [\"Sharedfile\", \"Betafile\"]\n",
+        )
+        .unwrap();
+
+        let settings = load_config_with_env(Some(&project.join("Sharedfile")), &env);
+        let alpha = settings.lsp.servers.get("alpha").unwrap();
+        let beta = settings.lsp.servers.get("beta").unwrap();
+
+        assert_eq!(alpha.filenames, vec!["Alphafile"]);
+        assert_eq!(beta.filenames, vec!["Sharedfile", "Betafile"]);
+    }
+
+    #[test]
     fn lsp_config_table_includes_disabled_matching_metadata() {
         let temp = tempfile::tempdir().unwrap();
         let env = test_env(temp.path());
         let project = env.cwd.join("project");
         std::fs::create_dir_all(&project).unwrap();
-        std::fs::write(project.join(".ee.toml"), "[lsp.servers.typescript]\nenabled = false\n")
+        std::fs::write(project.join(".ee.toml"), "[lsp.servers.dockerfile]\nenabled = false\n")
             .unwrap();
 
-        let settings = load_config_with_env(Some(&project.join("main.ts")), &env);
+        let settings = load_config_with_env(Some(&project.join("Dockerfile")), &env);
         let table = settings.lsp.to_config_table();
 
         assert_eq!(
             table
                 .get("disabled_language_config")
                 .and_then(Value::as_object)
-                .and_then(|servers| servers.get("typescript"))
-                .and_then(|server| server.get("extensions"))
+                .and_then(|servers| servers.get("dockerfile"))
+                .and_then(|server| server.get("filenames"))
                 .and_then(Value::as_array)
                 .map(Vec::len),
-            Some(4)
+            Some(2)
         );
         assert_eq!(
             table
                 .get("language_servers")
                 .and_then(Value::as_object)
-                .and_then(|languages| languages.get("typescript"))
+                .and_then(|languages| languages.get("dockerfile"))
                 .and_then(Value::as_array)
                 .map(Vec::len),
             Some(1)
@@ -2700,8 +2828,8 @@ rev = "abc123"
         std::fs::write(
             &path,
             r#"
-[languages.yaml]
-lsp = ["yaml"]
+[languages.newlang]
+lsp = ["newlang"]
 "#,
         )
         .unwrap();
@@ -2709,7 +2837,7 @@ lsp = ["yaml"]
         let error = validate_config_file(&path).unwrap_err();
 
         assert!(error.contains("Config validation error"));
-        assert!(error.contains("runtime language `yaml` is missing non-empty file_types"));
+        assert!(error.contains("runtime language `newlang` is missing non-empty file_types"));
     }
 
     #[test]
@@ -2835,6 +2963,10 @@ workspace_identifier = "gleam.toml"
 [lsp.servers.rust]
 command = "rust-analyzer"
 extensions = ["rs"]
+
+[lsp.servers.dockerfile]
+command = "docker-langserver"
+filenames = ["Dockerfile", "Containerfile"]
 "#;
         let raw: EeToml = toml::from_str(toml).unwrap();
 
@@ -2853,6 +2985,13 @@ extensions = ["rs"]
         assert_eq!(rust.command.as_deref(), Some("rust-analyzer"));
         assert_eq!(rust.extensions, Some(vec!["rs".to_owned()]));
         assert_eq!(rust.language_name, None);
+
+        let dockerfile = raw.lsp.as_ref().unwrap().servers.get("dockerfile").unwrap();
+        assert_eq!(dockerfile.command.as_deref(), Some("docker-langserver"));
+        assert_eq!(
+            dockerfile.filenames,
+            Some(vec!["Dockerfile".to_owned(), "Containerfile".to_owned()])
+        );
     }
 
     #[test]
@@ -2888,6 +3027,7 @@ bogus = true
         let toml = r#"
 [lsp.servers.typescript]
 enabled = false
+filenames = ["tsconfig.json"]
 "#;
         let raw: EeToml = toml::from_str(toml).unwrap();
 
@@ -2895,6 +3035,7 @@ enabled = false
         assert_eq!(server.enabled, Some(false));
         assert_eq!(server.command, None);
         assert_eq!(server.extensions, None);
+        assert_eq!(server.filenames, Some(vec!["tsconfig.json".to_owned()]));
     }
 
     #[test]

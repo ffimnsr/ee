@@ -616,6 +616,43 @@ pub fn copy_standard_queries_to_runtime(
     Ok(copied)
 }
 
+pub fn copy_bundled_standard_queries_to_runtime(
+    output_root: &Path,
+    language: &RuntimeLanguage,
+) -> Result<Vec<PathBuf>, RuntimeOperationError> {
+    let source_query_dir = bundled_repo_runtime_root()
+        .join(QUERIES_DIR_NAME)
+        .join(runtime_query_dir_name(language.query_language()));
+    if !source_query_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let destination_query_dir = runtime_output_query_dir(output_root, language);
+    fs::create_dir_all(&destination_query_dir).map_err(|error| {
+        RuntimeOperationError::runtime_asset(format!(
+            "failed creating query output dir {}: {error}",
+            destination_query_dir.display()
+        ))
+    })?;
+
+    let mut copied = Vec::new();
+    for kind in RuntimeQueryKind::STANDARD {
+        if !language.supported_query_kinds().contains(&kind) {
+            continue;
+        }
+
+        let source_path = source_query_dir.join(kind.file_name());
+        if !source_path.exists() {
+            continue;
+        }
+
+        let destination_path = destination_query_dir.join(kind.file_name());
+        copy_runtime_query_file(&source_path, &destination_path)?;
+        copied.push(destination_path);
+    }
+    Ok(copied)
+}
+
 pub fn copy_bundled_ee_owned_queries_to_runtime(
     output_root: &Path,
     language: &RuntimeLanguage,

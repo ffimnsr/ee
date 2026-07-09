@@ -982,7 +982,7 @@ impl LanguageServerClient {
                     _ => warn!("Unexpected type"),
                 }
             }
-            _ => warn!("Unknown Notification from RLS: {} ", method),
+            _ => warn!("Unknown language server notification: {} ", method),
         }
     }
 }

@@ -370,6 +370,7 @@ fn install_panic_hook() {
             DisableMouseCapture,
             LeaveAlternateScreen
         );
+        let _ = logs::append_editor_log_line(&format!("panic: {info}"));
         original(info);
     }));
 }
@@ -1406,6 +1407,7 @@ fn main() -> io::Result<()> {
     }
 
     install_panic_hook();
+    let _ = logs::append_editor_log_line("ee startup");
 
     // Atomic flag set by SIGTERM and SIGINT handlers so the main loop can
     // exit cleanly instead of being killed mid-draw.
@@ -1454,6 +1456,7 @@ fn run(app: &mut App, shutdown: Arc<AtomicBool>) -> io::Result<()> {
 
     if let Err(err) = session::SessionState::save(app) {
         eprintln!("ee: warning: failed to save session: {err}");
+        let _ = logs::append_editor_log_line(&format!("warning: failed to save session: {err}"));
     }
 
     disable_raw_mode()?;
@@ -1465,6 +1468,11 @@ fn run(app: &mut App, shutdown: Arc<AtomicBool>) -> io::Result<()> {
     )?;
     terminal.show_cursor()?;
 
+    if let Err(err) = &result {
+        let _ = logs::append_editor_log_line(&format!("io error: {err}"));
+    } else {
+        let _ = logs::append_editor_log_line("ee shutdown");
+    }
     result
 }
 

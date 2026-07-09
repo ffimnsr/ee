@@ -29,3 +29,4 @@ tree-sitter-ruby.workspace = true
 tree-sitter-rust.workspace = true
 tree-sitter-scala.workspace = true
 tree-sitter-typescript.workspace = true
+tree-sitter-yaml.workspace = true

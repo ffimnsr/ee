@@ -405,7 +405,12 @@ fn insert_register_action_inserts_named_register_contents_in_insert_mode() {
     assert_eq!(app.pending_input_label().as_deref(), Some("insert register | press register name"));
 
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "insert register into scratch buffer",
+        Duration::from_secs(1),
+        |backend| backend.lines == vec![String::from("alpha")],
+    );
 
     assert_eq!(app.backend.lines, vec![String::from("alpha")]);
     assert!(!app.input_state.awaiting_register);
@@ -682,17 +687,63 @@ fn renormalize_command_uses_backend_edit() {
 fn dedup_commands_remove_duplicate_lines() {
     let mut app = App::from_path(None).unwrap();
     insert_text(&mut app, "a\nb\na\nb\nc");
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "seed dedup whole buffer",
+        Duration::from_secs(1),
+        |backend| {
+            backend.lines
+                == vec![
+                    String::from("a"),
+                    String::from("b"),
+                    String::from("a"),
+                    String::from("b"),
+                    String::from("c"),
+                ]
+        },
+    );
 
     run_ex(&mut app, "dedup");
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "dedup whole buffer",
+        Duration::from_secs(1),
+        |backend| backend.lines == vec![String::from("a"), String::from("b"), String::from("c")],
+    );
     assert_eq!(app.backend.lines, vec![String::from("a"), String::from("b"), String::from("c")]);
 
     let mut selected = App::from_path(None).unwrap();
     insert_text(&mut selected, "keep\nx\nx\ny\nx");
-    selected.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut selected.backend,
+        "seed dedup line range",
+        Duration::from_secs(1),
+        |backend| {
+            backend.lines
+                == vec![
+                    String::from("keep"),
+                    String::from("x"),
+                    String::from("x"),
+                    String::from("y"),
+                    String::from("x"),
+                ]
+        },
+    );
     run_ex(&mut selected, "2,4uniq");
-    selected.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut selected.backend,
+        "dedup line range",
+        Duration::from_secs(1),
+        |backend| {
+            backend.lines
+                == vec![
+                    String::from("keep"),
+                    String::from("x"),
+                    String::from("y"),
+                    String::from("x"),
+                ]
+        },
+    );
     assert_eq!(
         selected.backend.lines,
         vec![String::from("keep"), String::from("x"), String::from("y"), String::from("x"),]
@@ -713,11 +764,33 @@ fn diffget_restores_current_git_hunk_from_head() {
     app.backend.set_selections(&[SelectionRange { start: 4, end: 7 }]).unwrap();
     let _ = app.backend.send_edit("delete_forward", json!([]));
     let _ = app.backend.send_edit("insert", json!({ "chars": "TWO" }));
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "seed diff hunk",
+        Duration::from_secs(1),
+        |backend| {
+            backend.lines.starts_with(&[
+                String::from("one"),
+                String::from("TWO"),
+                String::from("three"),
+            ])
+        },
+    );
     app.backend.cursor_line = 1;
 
     run_ex(&mut app, "diffget");
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "diffget restore hunk",
+        Duration::from_secs(1),
+        |backend| {
+            backend.lines.starts_with(&[
+                String::from("one"),
+                String::from("two"),
+                String::from("three"),
+            ])
+        },
+    );
 
     assert!(app.backend.lines.starts_with(&[
         String::from("one"),

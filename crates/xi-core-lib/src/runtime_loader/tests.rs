@@ -687,6 +687,89 @@ fn runtime_loader_uses_priority_to_break_file_type_tie() {
 }
 
 #[test]
+fn builtin_yaml_runtime_language_detects_yaml_files() {
+    let loader = default_runtime_loader();
+
+    assert_eq!(
+        loader.language_for_path(Path::new("tasks.yaml")).map(RuntimeLanguage::canonical_id),
+        Some("yaml")
+    );
+    assert_eq!(
+        loader.language_for_path(Path::new("tasks.yml")).map(RuntimeLanguage::canonical_id),
+        Some("yaml")
+    );
+}
+
+#[test]
+fn bundled_yaml_highlights_query_compiles() {
+    let temp_dir = TempDir::new().unwrap();
+    let bundled_root = temp_dir.path().join("bundle");
+    let query_dir = bundled_root.join(QUERIES_DIR_NAME).join("yaml");
+    fs::create_dir_all(&query_dir).unwrap();
+    fs::write(
+        query_dir.join("highlights.scm"),
+        include_str!("../../../../runtime/queries/yaml/highlights.scm"),
+    )
+    .unwrap();
+
+    let roots = RuntimeRoots::new(&bundled_root, temp_dir.path().join("user"), None);
+    let mut loader = RuntimeLoader::new(roots, Vec::new()).unwrap();
+    let languages = Languages::new(&[language_definition("yaml", &["yaml", "yml"])]);
+    let mut overrides = RuntimeLanguageOverrides::new();
+    overrides.insert(
+        "yaml".to_string(),
+        RuntimeLanguageConfig {
+            supported_query_kinds: Some(BTreeSet::from([RuntimeQueryKind::Highlights])),
+            ..runtime_language_override("tree-sitter-yaml", "tree_sitter_yaml")
+        },
+    );
+    loader.reload_merged_languages(&languages, &overrides, None).unwrap();
+    loader.preload_language(
+        "yaml",
+        GrammarHandle::from_loaded(test_grammars::yaml(), "__builtin__/yaml", "tree_sitter_yaml"),
+    );
+
+    let compiled =
+        loader.compile_query_kind("yaml", RuntimeQueryKind::Highlights).unwrap().unwrap();
+    assert!(compiled.source_text.contains("@variable.other.member"));
+}
+
+#[test]
+fn bundled_yaml_injections_query_compiles() {
+    let temp_dir = TempDir::new().unwrap();
+    let bundled_root = temp_dir.path().join("bundle");
+    let query_dir = bundled_root.join(QUERIES_DIR_NAME).join("yaml");
+    fs::create_dir_all(&query_dir).unwrap();
+    fs::write(
+        query_dir.join("injections.scm"),
+        include_str!("../../../../runtime/queries/yaml/injections.scm"),
+    )
+    .unwrap();
+
+    let roots = RuntimeRoots::new(&bundled_root, temp_dir.path().join("user"), None);
+    let mut loader = RuntimeLoader::new(roots, Vec::new()).unwrap();
+    let languages = Languages::new(&[language_definition("yaml", &["yaml", "yml"])]);
+    let mut overrides = RuntimeLanguageOverrides::new();
+    overrides.insert(
+        "yaml".to_string(),
+        RuntimeLanguageConfig {
+            supported_query_kinds: Some(BTreeSet::from([RuntimeQueryKind::Injections])),
+            ..runtime_language_override("tree-sitter-yaml", "tree_sitter_yaml")
+        },
+    );
+    loader.reload_merged_languages(&languages, &overrides, None).unwrap();
+    loader.preload_language(
+        "yaml",
+        GrammarHandle::from_loaded(test_grammars::yaml(), "__builtin__/yaml", "tree_sitter_yaml"),
+    );
+
+    let compiled =
+        loader.compile_query_kind("yaml", RuntimeQueryKind::Injections).unwrap().unwrap();
+    assert!(compiled.source_text.contains("injection.content"));
+    assert!(compiled.source_text.contains("injection.language"));
+}
+
+#[test]
 fn runtime_loader_detects_shebang_glob_then_file_type() {
     let languages = Languages::new(&[
         language_definition("rust", &["rs"]),

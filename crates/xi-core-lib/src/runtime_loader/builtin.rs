@@ -59,6 +59,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         builtin_language_definition("rust", &["rs"]),
         builtin_language_definition("scala", &["sc", "scala"]),
         builtin_language_definition("typescript", &["cts", "mts", "ts", "tsx"]),
+        builtin_language_definition("yaml", &["yaml", "yml"]),
     ];
     let standard_and_ee = RuntimeQueryKind::STANDARD
         .into_iter()
@@ -344,7 +345,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
                 "tsx".to_string(),
                 "typescriptreact".to_string(),
             ]),
-            supported_query_kinds: Some(standard_and_ee),
+            supported_query_kinds: Some(standard_and_ee.clone()),
             grammar: Some(RuntimeGrammarConfig {
                 library: Some("tree-sitter-typescript".to_string()),
                 symbol: Some("tree_sitter_typescript".to_string()),
@@ -361,6 +362,24 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
             }),
             ..RuntimeLanguageConfig::default()
         },
+    );
+    builtin_language!(
+        "yaml",
+        "tree-sitter-yaml",
+        "0.7.2",
+        "tree_sitter_yaml",
+        ["yaml", "yml"],
+        metadata!(
+            LineCommentStyle::Token("#"),
+            BlockCommentStyle::Unsupported,
+            IndentationStrategy::Unsupported,
+            &[
+                SemanticTargetKind::Function,
+                SemanticTargetKind::Class,
+                SemanticTargetKind::Parameter,
+                SemanticTargetKind::Test,
+            ]
+        )
     );
 
     (Languages::new(&definitions), overrides)
@@ -518,6 +537,7 @@ fn preload_builtin_test_grammars(loader: &mut RuntimeLoader) {
     preload_test_language!("rust", test_grammars::rust(), "tree_sitter_rust");
     preload_test_language!("scala", test_grammars::scala(), "tree_sitter_scala");
     preload_test_language!("typescript", test_grammars::typescript(), "tree_sitter_typescript");
+    preload_test_language!("yaml", test_grammars::yaml(), "tree_sitter_yaml");
 }
 
 // ---------------------------------------------------------------------------
@@ -526,7 +546,10 @@ fn preload_builtin_test_grammars(loader: &mut RuntimeLoader) {
 #[cfg(test)]
 pub(crate) fn runtime_loader_test_guard() -> MutexGuard<'static, ()> {
     static RUNTIME_LOADER_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-    RUNTIME_LOADER_TEST_LOCK.lock().expect("lock runtime loader test guard")
+    match RUNTIME_LOADER_TEST_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 #[allow(dead_code)]

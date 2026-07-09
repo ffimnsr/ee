@@ -153,27 +153,38 @@ impl Highlighter {
         } else if scope.starts_with("constant.numeric")
             || scope.starts_with("constant.language")
             || scope.starts_with("constant.character")
+            || scope.starts_with("constant.builtin")
+            || scope == "number"
+            || scope == "constant"
         {
             theme::FG_NUMBER
         } else if scope.starts_with("keyword")
             || scope.starts_with("storage")
             || scope == "support.macro"
+            || scope == "operator"
         {
             theme::FG_KEYWORD
         } else if scope.starts_with("entity.name.function")
             || scope.starts_with("support.function")
             || scope.starts_with("meta.function")
+            || scope == "function"
+            || scope.starts_with("function.")
         {
             theme::FG_FUNCTION
         } else if scope.starts_with("entity.name.type")
             || scope.starts_with("support.type")
             || scope.starts_with("storage.type")
             || scope.starts_with("entity.name.namespace")
+            || scope == "type"
+            || scope.starts_with("type.")
         {
             theme::FG_TYPE
-        } else if scope.starts_with("variable") {
+        } else if scope.starts_with("variable") || scope.starts_with("property") {
             theme::FG_VARIABLE
-        } else if scope.starts_with("entity.name.tag") || scope.starts_with("keyword.operator") {
+        } else if scope.starts_with("entity.name.tag")
+            || scope.starts_with("keyword.operator")
+            || scope == "tag"
+        {
             theme::FG_TAG_OPERATOR
         } else if scope.starts_with("punctuation") {
             theme::FG_PUNCTUATION

@@ -356,16 +356,27 @@ fn chunk_syntax_spans_with_depth(
         return per_segment;
     }
 
-    let mut state = VisibleSyntaxWalk {
-        text: chunk_text,
+    let highlighted = apply_highlight_query_spans(
+        language_name,
+        chunk_text,
         segments,
-        per_segment: &mut per_segment,
-        started: started_at,
+        &tree,
+        &mut per_segment,
         limits,
-        matches: 0,
-        captures: 0,
-    };
-    state.walk(tree.root_node());
+        started_at,
+    );
+    if !highlighted {
+        let mut state = VisibleSyntaxWalk {
+            text: chunk_text,
+            segments,
+            per_segment: &mut per_segment,
+            started: started_at,
+            limits,
+            matches: 0,
+            captures: 0,
+        };
+        state.walk(tree.root_node());
+    }
     if injection_depth < MAX_VISIBLE_INJECTION_DEPTH {
         apply_injection_spans(
             language_name,
@@ -396,6 +407,82 @@ struct InjectionSegmentMapping {
     parent_segment_start: usize,
     parent_range: Range<usize>,
     child_segment: Range<usize>,
+}
+
+fn apply_highlight_query_spans(
+    language_name: &str,
+    chunk_text: &str,
+    segments: &[Range<usize>],
+    tree: &Tree,
+    per_segment: &mut [Vec<VisibleSyntaxSpan>],
+    limits: VisibleSyntaxLimits,
+    started_at: Instant,
+) -> bool {
+    if started_at.elapsed() >= limits.timeout {
+        return false;
+    }
+
+    with_default_runtime_loader_mut(|loader| {
+        let Ok(highlights) =
+            loader.compile_query_kind_transient(language_name, RuntimeQueryKind::Highlights)
+        else {
+            return false;
+        };
+        let Some(highlights) = highlights else {
+            return false;
+        };
+
+        let bytes = chunk_text.as_bytes();
+        let capture_names = highlights.query.capture_names();
+        let mut cursor = QueryCursor::new();
+        let mut captures = cursor.captures(&highlights.query, tree.root_node(), bytes);
+        let scan_started = Instant::now();
+        let mut match_count = 0usize;
+        let mut capture_count = 0usize;
+        let mut emitted = false;
+
+        while scan_started.elapsed() < limits.timeout
+            && match_count < limits.max_matches
+            && capture_count < limits.max_captures
+        {
+            captures.advance();
+            let Some((query_match, capture_index)) = captures.get() else {
+                break;
+            };
+            match_count += 1;
+            let capture = &query_match.captures[*capture_index];
+            let Some(scope) = capture_names.get(capture.index as usize) else {
+                continue;
+            };
+            if scope.starts_with("injection.") || scope.starts_with("local.") {
+                continue;
+            }
+            let start = capture.node.start_byte().min(chunk_text.len());
+            let end = capture.node.end_byte().min(chunk_text.len());
+            if end <= start {
+                continue;
+            }
+
+            for (segment_idx, segment) in segments.iter().enumerate() {
+                if capture_count >= limits.max_captures {
+                    break;
+                }
+                let span_start = start.max(segment.start).saturating_sub(segment.start);
+                let span_end = end.min(segment.end).saturating_sub(segment.start);
+                if span_end > span_start {
+                    per_segment[segment_idx].push(VisibleSyntaxSpan {
+                        start_byte: span_start,
+                        end_byte: span_end,
+                        scope: scope.to_string(),
+                    });
+                    capture_count += 1;
+                    emitted = true;
+                }
+            }
+        }
+
+        emitted
+    })
 }
 
 fn apply_injection_spans(
@@ -537,7 +624,8 @@ fn resolve_injection_language(
         .iter()
         .find(|property| property.key.as_ref() == "injection.language")
         .and_then(|property| property.value.as_deref())
-        .map(str::to_string)
+        .map(normalize_injection_language_identifier)
+        .filter(|value| !value.is_empty())
         .or_else(|| {
             language_capture
                 .and_then(|capture| query_match.nodes_for_capture_index(capture).next())
@@ -677,15 +765,71 @@ fn scope_for_node(node: Node<'_>, text: &str) -> Option<&'static str> {
 }
 
 fn compact_visible_spans(spans: &mut Vec<VisibleSyntaxSpan>) {
-    spans.sort_by_key(|span| (span.start_byte, span.end_byte));
-    let mut compacted: Vec<VisibleSyntaxSpan> = Vec::with_capacity(spans.len());
-    for span in spans.drain(..) {
-        if compacted.last().is_some_and(|last| span.start_byte < last.end_byte) {
+    if spans.is_empty() {
+        return;
+    }
+
+    let source = spans.clone();
+    let mut boundaries =
+        source.iter().flat_map(|span| [span.start_byte, span.end_byte]).collect::<Vec<_>>();
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let mut compacted: Vec<VisibleSyntaxSpan> = Vec::new();
+    for window in boundaries.windows(2) {
+        let [start, end] = [window[0], window[1]];
+        if end <= start {
             continue;
         }
-        compacted.push(span);
+
+        let best = source
+            .iter()
+            .filter(|span| span.start_byte <= start && span.end_byte >= end)
+            .max_by_key(|span| (scope_priority(&span.scope), span.end_byte - span.start_byte));
+        let Some(best) = best else {
+            continue;
+        };
+
+        if let Some(last) = compacted.last_mut()
+            && last.end_byte == start
+            && last.scope == best.scope
+        {
+            last.end_byte = end;
+            continue;
+        }
+
+        compacted.push(VisibleSyntaxSpan {
+            start_byte: start,
+            end_byte: end,
+            scope: best.scope.clone(),
+        });
     }
+
     *spans = compacted;
+}
+
+fn scope_priority(scope: &str) -> u8 {
+    if scope.starts_with("punctuation") {
+        7
+    } else if scope.starts_with("variable") || scope.starts_with("property") {
+        6
+    } else if scope.starts_with("function")
+        || scope.starts_with("type")
+        || scope.starts_with("keyword")
+        || scope.starts_with("constant")
+        || scope.starts_with("number")
+        || scope.starts_with("boolean")
+        || scope.starts_with("attribute")
+        || scope.starts_with("label")
+    {
+        5
+    } else if scope.starts_with("string") {
+        4
+    } else if scope.starts_with("comment") {
+        3
+    } else {
+        1
+    }
 }
 
 #[allow(dead_code)]
@@ -1095,7 +1239,6 @@ fn resolve_runtime_language_name(
 mod tests {
     use super::*;
     use crate::runtime_loader::{RuntimeLanguageConfig, RuntimeLanguageOverrides};
-    use std::collections::BTreeSet;
     use std::sync::MutexGuard;
 
     fn parse_rust(src: &str) -> Tree {
@@ -1112,6 +1255,11 @@ mod tests {
 
     fn runtime_loader_test_guard() -> MutexGuard<'static, ()> {
         crate::runtime_loader::runtime_loader_test_guard()
+    }
+
+    fn line_span_text<'a>(src: &'a str, line_index: usize, span: &VisibleSyntaxSpan) -> &'a str {
+        let line_start = src.lines().take(line_index).map(|line| line.len() + 1).sum::<usize>();
+        &src[(line_start + span.start_byte)..(line_start + span.end_byte)]
     }
 
     struct RuntimeLoaderOverrideGuard;
@@ -1288,9 +1436,119 @@ mod tests {
         let spans = visible_syntax_spans("rust", src, test_visible_syntax_limits());
 
         assert_eq!(spans.len(), 4);
-        assert!(spans[0].iter().any(|span| span.scope == "keyword.control"));
-        assert!(spans[1].iter().any(|span| span.scope == "constant.numeric.decimal"));
+        assert!(spans[0].iter().any(|span| span.scope.starts_with("keyword")));
+        assert!(spans[1].iter().any(|span| span.scope.starts_with("constant")));
         assert!(spans.iter().flatten().all(|span| span.end_byte > span.start_byte));
+    }
+
+    #[test]
+    fn visible_syntax_spans_highlight_yaml_mapping_keys() {
+        let _guard = runtime_loader_test_guard();
+        let src = "tasks:\n  format: cargo fmt\n";
+        let spans = visible_syntax_spans("yaml", src, test_visible_syntax_limits());
+
+        assert!(spans[0].iter().any(|span| {
+            (span.scope.starts_with("variable") || span.scope.starts_with("property"))
+                && &src[span.start_byte..span.end_byte] == "tasks"
+        }));
+        assert!(spans[1].iter().any(|span| {
+            (span.scope.starts_with("variable") || span.scope.starts_with("property"))
+                && &src[(src.find('\n').unwrap() + 1 + span.start_byte)
+                    ..(src.find('\n').unwrap() + 1 + span.end_byte)]
+                    == "format"
+        }));
+    }
+
+    #[test]
+    fn visible_syntax_spans_keep_yaml_block_scalar_punctuation() {
+        let _guard = runtime_loader_test_guard();
+        let src = "logs:\n  commands:\n    - |\n      set -eu\n";
+        let spans = visible_syntax_spans("yaml", src, test_visible_syntax_limits());
+
+        assert!(spans[2].iter().any(|span| {
+            span.scope.starts_with("punctuation")
+                && &src[(src.lines().take(2).map(|line| line.len() + 1).sum::<usize>()
+                    + span.start_byte)
+                    ..(src.lines().take(2).map(|line| line.len() + 1).sum::<usize>()
+                        + span.end_byte)]
+                    == "-"
+        }));
+        assert!(spans[2].iter().any(|span| {
+            (span.scope.starts_with("punctuation") || span.scope.starts_with("operator"))
+                && &src[(src.lines().take(2).map(|line| line.len() + 1).sum::<usize>()
+                    + span.start_byte)
+                    ..(src.lines().take(2).map(|line| line.len() + 1).sum::<usize>()
+                        + span.end_byte)]
+                    == "|"
+        }));
+        assert!(spans[3].iter().any(|span| {
+            span.scope.starts_with("function") && line_span_text(src, 3, span) == "set"
+        }));
+        assert!(spans[3].iter().any(|span| {
+            span.scope.starts_with("constant") && line_span_text(src, 3, span) == "-eu"
+        }));
+    }
+
+    #[test]
+    fn visible_syntax_spans_keep_yaml_keys_after_block_scalar() {
+        let _guard = runtime_loader_test_guard();
+        let src = "logs:\n  commands:\n    - |\n      set -eu\n      echo hi\n  description: Open discovered editor and plugin logs in ee.\nconfig-nearest:\n  commands:\n    - echo hi\n";
+        let spans = visible_syntax_spans("yaml", src, test_visible_syntax_limits());
+
+        let description_line = src.lines().take(5).map(|line| line.len() + 1).sum::<usize>();
+        let config_line = src.lines().take(6).map(|line| line.len() + 1).sum::<usize>();
+
+        assert!(spans[5].iter().any(|span| {
+            (span.scope.starts_with("variable") || span.scope.starts_with("property"))
+                && &src[(description_line + span.start_byte)..(description_line + span.end_byte)]
+                    == "description"
+        }));
+        assert!(spans[6].iter().any(|span| {
+            (span.scope.starts_with("variable") || span.scope.starts_with("property"))
+                && &src[(config_line + span.start_byte)..(config_line + span.end_byte)]
+                    == "config-nearest"
+        }));
+    }
+
+    #[test]
+    fn visible_syntax_spans_inject_bash_into_yaml_commands_block_scalars() {
+        let _guard = runtime_loader_test_guard();
+        crate::runtime_loader::ensure_default_runtime_loader_has_test_grammars();
+        crate::runtime_loader::with_default_runtime_loader_mut(|loader| {
+            loader.invalidate_language("yaml");
+            loader.record_query_artifact(
+                "yaml",
+                crate::runtime_loader::RuntimeQueryKind::Injections,
+                include_str!("../../../runtime/queries/yaml/injections.scm").to_string(),
+                Vec::new(),
+                Vec::new(),
+            );
+        });
+
+        let src = "logs:\n  commands:\n    - |\n      for candidate in \\\n        \"$PWD/editor.log\"\n      do\n        if [ -n \"$candidate\" ]; then\n          break\n        fi\n      done\n  description: Open logs\n";
+        let spans = visible_syntax_spans("yaml", src, test_visible_syntax_limits());
+
+        let for_line = src.lines().take(3).map(|line| line.len() + 1).sum::<usize>();
+        let if_line = src.lines().take(6).map(|line| line.len() + 1).sum::<usize>();
+        let description_line = src.lines().take(10).map(|line| line.len() + 1).sum::<usize>();
+
+        assert!(spans[3].iter().any(|span| {
+            span.scope.starts_with("keyword")
+                && &src[(for_line + span.start_byte)..(for_line + span.end_byte)] == "for"
+        }));
+        assert!(spans[6].iter().any(|span| {
+            span.scope.starts_with("keyword")
+                && &src[(if_line + span.start_byte)..(if_line + span.end_byte)] == "if"
+        }));
+        assert!(spans[10].iter().any(|span| {
+            (span.scope.starts_with("variable") || span.scope.starts_with("property"))
+                && &src[(description_line + span.start_byte)..(description_line + span.end_byte)]
+                    == "description"
+        }));
+
+        crate::runtime_loader::with_default_runtime_loader_mut(|loader| {
+            loader.invalidate_language("yaml");
+        });
     }
 
     #[test]
@@ -1298,30 +1556,31 @@ mod tests {
         let _guard = runtime_loader_test_guard();
         crate::runtime_loader::ensure_default_runtime_loader_has_test_grammars();
         crate::runtime_loader::with_default_runtime_loader_mut(|loader| {
-            loader.invalidate_language("rust");
+            loader.invalidate_language("yaml");
             loader.record_query_artifact(
-                "rust",
+                "yaml",
                 crate::runtime_loader::RuntimeQueryKind::Injections,
-                String::from(
-                    "((string_content) @injection.content (#set! injection.language \"Rust\"))",
-                ),
+                include_str!("../../../runtime/queries/yaml/injections.scm").to_string(),
                 Vec::new(),
                 Vec::new(),
             );
         });
 
-        let src = "let query = \"fn main() {}\";\n";
-        let spans = visible_syntax_spans("rust", src, test_visible_syntax_limits());
+        let src = "logs:\n  commands:\n    - |\n      for candidate in \"$PWD/editor.log\"\n      do\n        break\n      done\n";
+        let spans = visible_syntax_spans("yaml", src, test_visible_syntax_limits());
 
-        assert!(spans[0].iter().any(|span| {
-            span.scope == "keyword.control" && span.start_byte >= 13 && span.end_byte <= 15
-        }));
+        assert!(
+            spans[3]
+                .iter()
+                .any(|span| span.scope.starts_with("keyword")
+                    && line_span_text(src, 3, span) == "for")
+        );
 
         crate::runtime_loader::with_default_runtime_loader_mut(|loader| {
             assert!(
                 loader
                     .cached_query_artifact(
-                        "rust",
+                        "yaml",
                         crate::runtime_loader::RuntimeQueryKind::Highlights
                     )
                     .is_none()
@@ -1329,17 +1588,17 @@ mod tests {
             assert!(
                 loader
                     .cached_query_artifact(
-                        "rust",
+                        "yaml",
                         crate::runtime_loader::RuntimeQueryKind::Injections
                     )
                     .is_some()
             );
             assert!(
                 loader
-                    .cached_query_artifact("rust", crate::runtime_loader::RuntimeQueryKind::Locals)
+                    .cached_query_artifact("yaml", crate::runtime_loader::RuntimeQueryKind::Locals)
                     .is_none()
             );
-            loader.invalidate_language("rust");
+            loader.invalidate_language("yaml");
         });
     }
 
@@ -1351,7 +1610,7 @@ mod tests {
             "fn main() {\n    let answer = 42;\n}\n",
             test_visible_syntax_limits(),
         );
-        assert!(spans.iter().flatten().any(|span| span.scope == "keyword.control"));
+        assert!(spans.iter().flatten().any(|span| span.scope.starts_with("keyword")));
 
         crate::runtime_loader::with_default_runtime_loader_mut(|loader| {
             assert!(
@@ -1389,7 +1648,6 @@ mod tests {
             RuntimeLanguageConfig {
                 injection_regex: Some(String::from("^javascript$")),
                 match_priority: Some(5),
-                supported_query_kinds: Some(BTreeSet::from([RuntimeQueryKind::Injections])),
                 ..RuntimeLanguageConfig::default()
             },
         );
@@ -1398,33 +1656,17 @@ mod tests {
             RuntimeLanguageConfig {
                 injection_regex: Some(String::from("^javascript$")),
                 match_priority: Some(10),
-                supported_query_kinds: Some(BTreeSet::from([RuntimeQueryKind::Injections])),
                 ..RuntimeLanguageConfig::default()
             },
         );
 
         let _guard = RuntimeLoaderOverrideGuard::install(overrides);
-        crate::runtime_loader::with_default_runtime_loader_mut(|loader| {
-            loader.invalidate_language("rust");
-            loader.invalidate_language("javascript");
-            loader.invalidate_language("typescript");
-            loader.record_query_artifact(
-                "rust",
-                crate::runtime_loader::RuntimeQueryKind::Injections,
-                String::from(
-                    "((string_content) @injection.content (#set! injection.language \"javascript\"))",
-                ),
-                Vec::new(),
-                Vec::new(),
-            );
+        crate::runtime_loader::with_default_runtime_loader(|loader| {
+            let matched =
+                loader.match_injection_language("javascript").expect("javascript injection match");
+            assert_eq!(matched.canonical_id, "typescript");
+            assert_eq!(matched.display_name, "typescript");
         });
-
-        let src = "let query = \"let value: string = 1;\";\n";
-        let spans = visible_syntax_spans("rust", src, test_visible_syntax_limits());
-
-        assert!(spans[0].iter().any(|span| {
-            span.scope == "entity.name.type" && span.start_byte >= 24 && span.end_byte <= 30
-        }));
     }
 
     #[test]

@@ -26,3 +26,4 @@ language_fn!(ruby, tree_sitter_ruby::LANGUAGE);
 language_fn!(rust, tree_sitter_rust::LANGUAGE);
 language_fn!(scala, tree_sitter_scala::LANGUAGE);
 language_fn!(typescript, tree_sitter_typescript::LANGUAGE_TYPESCRIPT);
+language_fn!(yaml, tree_sitter_yaml::LANGUAGE);

@@ -205,6 +205,15 @@
             "type": "string"
           }
         },
+        "filenames": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
         "supports_single_file": {
           "type": [
             "boolean",

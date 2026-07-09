@@ -450,6 +450,7 @@ pub fn insert_text(app: &mut App, text: &str) {
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
     }
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    let _ = app.backend.sync_pending_events_for_whole_document();
 }
 
 pub fn test_buf_state() -> BufState {

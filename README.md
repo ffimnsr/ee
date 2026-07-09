@@ -151,11 +151,16 @@ env = { GLEAM_LOG = "info" }
 
 [lsp.servers.rust]
 command = "rust-analyzer"
-args = []
+args = ["--stdio"]
 workspace_identifier = "Cargo.toml"
 
 [lsp.servers.typescript]
 enabled = false
+
+[lsp.servers.dockerfile]
+command = "docker-langserver"
+args = ["--stdio"]
+filenames = ["Dockerfile", "Containerfile"]
 
 [lsp.servers.json]
 initialization_options = { provideFormatter = true }
@@ -171,7 +176,7 @@ lsp = ["typescript", "eslint"]
 
 Config precedence, from lowest to highest, is `/etc/ee/config.toml`, `$XDG_CONFIG_HOME/ee/config.toml`, legacy `~/.ee.toml` only when XDG config is missing, then ancestor `.ee.toml` files from outermost to innermost. `root = true` stops discovery above that config file. Later layers replace scalar fields, replace arrays, shallow-merge `env`, replace `initialization_options`, and `enabled = false` disables that server id.
 
-Routing now resolves runtime language id first, then maps `[languages.<id>].lsp` attachments to candidate servers. Legacy extension matching remains as fallback when a language has no explicit `lsp` attachment list. Multiple attached servers are allowed. First attached server is primary for interactive pull-style features such as completion, hover, go-to-definition, references, symbols, formatting, and rename. All attached servers still receive document lifecycle sync and can publish diagnostics. Missing executables, disabled attached servers, and workspace-root-only servers opened outside a matching root fail closed with status items instead of blocking editing.
+Routing now resolves runtime language id first, then maps `[languages.<id>].lsp` attachments to candidate servers. Exact `filenames` matches such as `Dockerfile`, `Containerfile`, `Justfile`, or `CMakeLists.txt` win before extension fallback. Legacy extension matching remains as fallback when a language has no explicit `lsp` attachment list. Multiple attached servers are allowed. First attached server is primary for interactive pull-style features such as completion, hover, go-to-definition, references, symbols, formatting, and rename. All attached servers still receive document lifecycle sync and can publish diagnostics. Missing executables, disabled attached servers, and workspace-root-only servers opened outside a matching root fail closed with status items instead of blocking editing.
 
 ### Runtime language config
 

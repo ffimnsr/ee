@@ -1818,16 +1818,19 @@ fn render_picker(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         ])
         .split(inner);
 
-    let header = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(12), Constraint::Length(16)])
-        .split(sections[0]);
-
     let selected_position = if picker.filtered.is_empty() {
         "0/0".to_owned()
     } else {
         format!("{}/{}", picker.selected + 1, picker.filtered.len())
     };
+    let matches_label = format!(" {}  matches ", selected_position);
+    let header = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Min(12),
+            Constraint::Length(matches_label.chars().count() as u16),
+        ])
+        .split(sections[0]);
     let header_line = Line::from(vec![
         Span::styled(
             picker_kind_badge(picker.kind),

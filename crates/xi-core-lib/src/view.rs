@@ -53,7 +53,7 @@ const FIND_BATCH_SIZE: usize = 500000;
 /// Bounded context for normal/constrained backend syntax rendering.
 const BACKEND_SYNTAX_CONTEXT_LINES: usize = 32;
 /// Normal/constrained buffers can spend more than VLF's tight visible-range budget.
-const BACKEND_SYNTAX_TIMEOUT: Duration = Duration::from_millis(25);
+const BACKEND_SYNTAX_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// A view to a buffer. It is the buffer plus additional information
 /// like line breaks and selection state.
@@ -1053,13 +1053,23 @@ impl View {
             return vec![Vec::new(); line_count];
         }
 
-        let context_start_line = start_line.saturating_sub(BACKEND_SYNTAX_CONTEXT_LINES);
-        let context_line_count = line_count + start_line.saturating_sub(context_start_line);
-        let context_lines = self
-            .lines
-            .iter_lines(text, context_start_line)
-            .take(context_line_count)
-            .collect::<Vec<VisualLine>>();
+        let parse_from_document_start = language_name.eq_ignore_ascii_case("yaml");
+        let context_start_line = if parse_from_document_start {
+            0
+        } else {
+            start_line.saturating_sub(BACKEND_SYNTAX_CONTEXT_LINES)
+        };
+        let context_lines = if parse_from_document_start {
+            self.lines.iter_lines(text, context_start_line).collect::<Vec<VisualLine>>()
+        } else {
+            let context_line_count = line_count
+                + start_line.saturating_sub(context_start_line)
+                + BACKEND_SYNTAX_CONTEXT_LINES;
+            self.lines
+                .iter_lines(text, context_start_line)
+                .take(context_line_count)
+                .collect::<Vec<VisualLine>>()
+        };
 
         if context_lines.is_empty() {
             return vec![Vec::new(); line_count];
@@ -2142,6 +2152,40 @@ mod tests {
         });
 
         assert!(syntax_refresh, "backend render should emit syntax-bearing line updates");
+    }
+
+    #[test]
+    fn backend_syntax_spans_keep_yaml_keys_after_block_scalar_with_forward_context() {
+        let mut view = View::new(1.into(), BufferId::new(2));
+        let editor = crate::editor::Editor::with_text(include_str!("../../../tasks.yaml"));
+        view.debug_force_rewrap_cols(editor.get_buffer(), 120);
+        let start_line = 61;
+        let line_count = 25;
+
+        let spans = view.backend_syntax_spans_for_segment(
+            editor.get_buffer(),
+            start_line,
+            line_count,
+            "yaml",
+            true,
+        );
+
+        let description = 83 - start_line;
+        let config_nearest = 84 - start_line;
+        assert!(
+            spans[description].iter().any(
+                |span| span.scope.starts_with("variable") || span.scope.starts_with("property")
+            )
+        );
+        assert!(
+            spans[config_nearest].iter().any(
+                |span| span.scope.starts_with("variable") || span.scope.starts_with("property")
+            )
+        );
+        assert!(spans[5].iter().any(|span| span.scope.starts_with("keyword")
+            || span.scope.starts_with("string")
+            || span.scope.starts_with("function")
+            || span.scope.starts_with("property")));
     }
 
     #[test]

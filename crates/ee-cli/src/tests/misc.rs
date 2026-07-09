@@ -59,9 +59,15 @@ fn logs_command_opens_log_picker_modal() {
     let _cwd_lock = cwd_test_lock().lock().unwrap();
     let _cwd_guard = CurrentDirGuard::capture();
     let temp = tempfile::tempdir().unwrap();
+    let state_home = temp.path().join("state-home");
+    let editor_log = temp.path().join("ee.log");
+    let plugin_log = temp.path().join("xi-lsp-plugin.log");
+    let _state_guard = EnvVarGuard::set("XDG_STATE_HOME", &state_home);
+    let _editor_log_guard = EnvVarGuard::set("EE_EDITOR_LOG", &editor_log);
+    let _plugin_log_guard = EnvVarGuard::set("EE_PLUGIN_LOG", &plugin_log);
     env::set_current_dir(temp.path()).unwrap();
-    fs::write(temp.path().join("ee.log"), "editor\n").unwrap();
-    fs::write(temp.path().join("xi-lsp-plugin.log"), "plugin\n").unwrap();
+    fs::write(&editor_log, "editor\n").unwrap();
+    fs::write(&plugin_log, "plugin\n").unwrap();
 
     let mut app = App::from_path(None).unwrap();
 
@@ -71,6 +77,20 @@ fn logs_command_opens_log_picker_modal() {
     assert_eq!(picker.kind, PickerKind::Locations);
     assert_eq!(picker.title, "Logs");
     assert_eq!(picker.visible_count(), 2);
+}
+
+#[test]
+fn append_editor_log_line_creates_discoverable_editor_log() {
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    let temp = tempfile::tempdir().unwrap();
+    let state_home = temp.path().join("state-home");
+    env::set_current_dir(temp.path()).unwrap();
+    let _state_guard = EnvVarGuard::set("XDG_STATE_HOME", &state_home);
+
+    let path = crate::logs::append_editor_log_line("test startup").unwrap();
+    assert!(path.is_file());
+    assert!(crate::logs::discover_log_paths().iter().any(|candidate| candidate.path == path));
 }
 
 #[test]
@@ -557,11 +577,33 @@ fn diffget_restores_current_git_hunk_from_head() {
     app.backend.set_selections(&[SelectionRange { start: 4, end: 7 }]).unwrap();
     let _ = app.backend.send_edit("delete_forward", json!([]));
     let _ = app.backend.send_edit("insert", json!({ "chars": "TWO" }));
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "seed diff hunk",
+        Duration::from_secs(1),
+        |backend| {
+            backend.lines.starts_with(&[
+                String::from("one"),
+                String::from("TWO"),
+                String::from("three"),
+            ])
+        },
+    );
     app.backend.cursor_line = 1;
 
     run_ex(&mut app, "diffget");
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "diffget restore hunk",
+        Duration::from_secs(1),
+        |backend| {
+            backend.lines.starts_with(&[
+                String::from("one"),
+                String::from("two"),
+                String::from("three"),
+            ])
+        },
+    );
 
     assert!(app.backend.lines.starts_with(&[
         String::from("one"),
