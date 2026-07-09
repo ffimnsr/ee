@@ -490,7 +490,12 @@ fn terminal_command_opens_named_transcript_buffer() {
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
     }
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "terminal transcript body",
+        Duration::from_secs(2),
+        |backend| backend.lines.iter().any(|line| line.contains("hello-from-shell")),
+    );
 
     assert_eq!(app.backend.buf_count(), 2);
     assert!(app.backend.title().starts_with("term: "));
