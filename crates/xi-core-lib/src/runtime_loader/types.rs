@@ -500,6 +500,14 @@ pub struct RuntimeHealthReport {
     pub runtime_roots: RuntimeRoots,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeLanguageQuerySummary {
+    pub language_name: String,
+    pub display_name: String,
+    pub grammar_status: RuntimeGrammarHealth,
+    pub query_reports: Vec<RuntimeQueryHealthReport>,
+}
+
 // ---------------------------------------------------------------------------
 // RuntimeOperationError
 // ---------------------------------------------------------------------------

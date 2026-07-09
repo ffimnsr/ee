@@ -8,8 +8,9 @@ use super::helpers::{canonicalize_or_original, current_source_mtimes};
 use super::loader::RuntimeLoader;
 use super::types::{
     CompiledQueryArtifact, IndentQueryCapture, QueryArtifactCacheEntry, RuntimeGrammarHealth,
-    RuntimeHealthReport, RuntimeLanguageDetectionSource, RuntimeLanguageMatch, RuntimeQueryHealth,
-    RuntimeQueryHealthReport, RuntimeQueryKind, SemanticQuerySet, SyntaxQuerySet,
+    RuntimeHealthReport, RuntimeLanguageDetectionSource, RuntimeLanguageMatch,
+    RuntimeLanguageQuerySummary, RuntimeQueryHealth, RuntimeQueryHealthReport, RuntimeQueryKind,
+    SemanticQuerySet, SyntaxQuerySet,
 };
 
 pub fn map_query_error(
@@ -465,5 +466,75 @@ impl RuntimeLoader {
         }
 
         report
+    }
+
+    /// Report query health for every registered language.
+    pub fn language_query_diagnostics(&mut self) -> Vec<RuntimeLanguageQuerySummary> {
+        let language_names: Vec<String> =
+            self.languages().map(|l| l.canonical_id().to_string()).collect();
+
+        let mut results = Vec::with_capacity(language_names.len());
+        for name in language_names {
+            // Clone language before mutating self below
+            let Some(language) = self.language_for_name(&name).cloned() else {
+                continue;
+            };
+
+            let grammar_status = match self.load_language_for_name(&name) {
+                Ok(_) => RuntimeGrammarHealth::Loaded,
+                Err(RuntimeLoaderError::MissingGrammar { .. }) => RuntimeGrammarHealth::Missing,
+                Err(error) => RuntimeGrammarHealth::Error(error.to_string()),
+            };
+
+            let mut query_reports = Vec::new();
+            for kind in RuntimeQueryKind::STANDARD.into_iter().chain(RuntimeQueryKind::EE_OWNED) {
+                if !language.supported_query_kinds().contains(&kind) {
+                    query_reports.push(RuntimeQueryHealthReport {
+                        kind,
+                        status: RuntimeQueryHealth::Unsupported,
+                        source_paths: Vec::new(),
+                    });
+                    continue;
+                }
+
+                match self.resolve_query_source(&name, kind).map(|artifact| artifact.cloned()) {
+                    Ok(Some(artifact)) => {
+                        let status = match self.compile_query_kind(&name, kind) {
+                            Ok(Some(_)) => RuntimeQueryHealth::Loaded,
+                            Ok(None) => RuntimeQueryHealth::Missing,
+                            Err(error) => RuntimeQueryHealth::Error(error.to_string()),
+                        };
+                        query_reports.push(RuntimeQueryHealthReport {
+                            kind,
+                            status,
+                            source_paths: artifact.source_paths,
+                        });
+                    }
+                    Ok(None) => {
+                        query_reports.push(RuntimeQueryHealthReport {
+                            kind,
+                            status: RuntimeQueryHealth::Missing,
+                            source_paths: self.query_source_paths(&language, kind),
+                        });
+                    }
+                    Err(error) => {
+                        query_reports.push(RuntimeQueryHealthReport {
+                            kind,
+                            status: RuntimeQueryHealth::Error(error.to_string()),
+                            source_paths: Vec::new(),
+                        });
+                    }
+                }
+            }
+
+            results.push(RuntimeLanguageQuerySummary {
+                language_name: language.canonical_id().to_string(),
+                display_name: language.display_name().to_string(),
+                grammar_status,
+                query_reports,
+            });
+        }
+
+        results
     }
 }

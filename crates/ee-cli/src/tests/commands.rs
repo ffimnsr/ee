@@ -307,6 +307,13 @@ fn discover_log_paths_lists_editor_and_plugin_candidates_for_doctor() {
 }
 
 #[test]
+fn doctor_report_adds_blank_line_before_log_files() {
+    let report = crate::doctor_report(Some(&PathBuf::from("custom.toml")));
+
+    assert!(report.contains("[not found]\n\n  log files\n"));
+}
+
+#[test]
 fn file_line_check_reuses_streaming_vlf_counter() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("sample.txt");

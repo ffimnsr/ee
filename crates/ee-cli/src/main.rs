@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io::{self, Read, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -377,18 +378,19 @@ fn install_panic_hook() {
 
 // ── Subcommand handlers ───────────────────────────────────────────────────────
 
-fn cmd_doctor(config_path: Option<&PathBuf>) {
-    println!("ee do doctor");
-    println!("─────────");
+fn doctor_report(config_path: Option<&PathBuf>) -> String {
+    let mut report = String::new();
+    writeln!(&mut report, "ee do doctor").unwrap();
+    writeln!(&mut report, "─────────").unwrap();
 
     if let Some(explicit) = config_path {
         let status = if explicit.exists() { "found" } else { "not found" };
-        println!("  --config {explicit:?}  [{status}]");
+        writeln!(&mut report, "  --config {explicit:?}  [{status}]").unwrap();
     } else {
-        let report = config::config_search_report(None);
-        println!("  anchor {:?}", report.anchor);
-        println!("  layers (low -> high)");
-        for layer in report.layers {
+        let search_report = config::config_search_report(None);
+        writeln!(&mut report, "  anchor {:?}", search_report.anchor).unwrap();
+        writeln!(&mut report, "  layers (low -> high)").unwrap();
+        for layer in search_report.layers {
             let status = if layer.loaded {
                 "loaded"
             } else if layer.exists {
@@ -396,28 +398,92 @@ fn cmd_doctor(config_path: Option<&PathBuf>) {
             } else {
                 "not found"
             };
-            print!("  {:?}  [{}] [{}]", layer.path, layer.kind.label(), status);
+            write!(&mut report, "  {:?}  [{}] [{}]", layer.path, layer.kind.label(), status)
+                .unwrap();
             if let Some(root) = layer.root {
-                print!(" [root={root}]");
+                write!(&mut report, " [root={root}]").unwrap();
             }
             if let Some(note) = layer.note {
-                print!(" {note}");
+                write!(&mut report, " {note}").unwrap();
             }
-            println!();
+            writeln!(&mut report).unwrap();
         }
-        if !report.editorconfig_applies {
-            println!("  .editorconfig  [file-specific] [not evaluated without file path]");
+        if !search_report.editorconfig_applies {
+            writeln!(
+                &mut report,
+                "  .editorconfig  [file-specific] [not evaluated without file path]"
+            )
+            .unwrap();
         }
     }
 
-    println!("  log files");
+    writeln!(&mut report).unwrap();
+    writeln!(&mut report, "  log files").unwrap();
     for candidate in logs::discover_log_paths() {
         let status = if candidate.path.is_file() { "found" } else { "not found" };
-        println!("  {:?}  [{}] [{}]", candidate.path, candidate.label, status);
+        writeln!(&mut report, "  {:?}  [{}] [{}]", candidate.path, candidate.label, status)
+            .unwrap();
     }
 
+    report
+}
+
+fn cmd_doctor(config_path: Option<&PathBuf>) {
+    print!("{}", doctor_report(config_path));
+    println!();
+    print_language_query_diagnostics();
     println!();
     println!("No problems detected.");
+}
+
+fn print_language_query_diagnostics() {
+    let diagnostics = with_default_runtime_loader_mut(|loader| loader.language_query_diagnostics());
+    if diagnostics.is_empty() {
+        return;
+    }
+
+    println!("  tree-sitter languages");
+    for lang in &diagnostics {
+        let grammar_tag = grammar_health_tag(&lang.grammar_status);
+        print!("    {:<12} [grammar: {grammar_tag}]", lang.display_name);
+        for qr in &lang.query_reports {
+            let tag = query_health_tag(&qr.status);
+            let kind = query_kind_label(qr.kind);
+            print!("  {kind}: {tag}");
+        }
+        println!();
+    }
+}
+
+fn grammar_health_tag(status: &RuntimeGrammarHealth) -> &'static str {
+    match status {
+        RuntimeGrammarHealth::Loaded => "ok",
+        RuntimeGrammarHealth::Missing => "missing",
+        RuntimeGrammarHealth::Unresolved => "unresolved",
+        RuntimeGrammarHealth::Error(_) => "err",
+    }
+}
+
+fn query_health_tag(status: &RuntimeQueryHealth) -> &'static str {
+    match status {
+        RuntimeQueryHealth::Loaded => "ok",
+        RuntimeQueryHealth::Missing => "-",
+        RuntimeQueryHealth::Unsupported => "unsupported",
+        RuntimeQueryHealth::Error(_) => "err",
+    }
+}
+
+fn query_kind_label(kind: RuntimeQueryKind) -> &'static str {
+    match kind {
+        RuntimeQueryKind::Highlights => "highlights",
+        RuntimeQueryKind::Injections => "injections",
+        RuntimeQueryKind::Locals => "locals",
+        RuntimeQueryKind::Tags => "tags",
+        RuntimeQueryKind::Textobjects => "textobjects",
+        RuntimeQueryKind::Indents => "indents",
+        RuntimeQueryKind::Folds => "folds",
+        RuntimeQueryKind::Rainbows => "rainbows",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -661,19 +727,6 @@ fn read_runtime_probe(path: &Path) -> io::Result<(Option<String>, Option<String>
     let sample = String::from_utf8_lossy(&bytes).into_owned();
     let first_line = sample.lines().next().map(str::to_string);
     Ok((first_line, (!sample.is_empty()).then_some(sample)))
-}
-
-fn query_kind_label(kind: RuntimeQueryKind) -> &'static str {
-    match kind {
-        RuntimeQueryKind::Highlights => "highlights",
-        RuntimeQueryKind::Injections => "injections",
-        RuntimeQueryKind::Locals => "locals",
-        RuntimeQueryKind::Tags => "tags",
-        RuntimeQueryKind::Textobjects => "textobjects",
-        RuntimeQueryKind::Indents => "indents",
-        RuntimeQueryKind::Folds => "folds",
-        RuntimeQueryKind::Rainbows => "rainbows",
-    }
 }
 
 fn detection_source_label(source: RuntimeLanguageDetectionSource) -> &'static str {
