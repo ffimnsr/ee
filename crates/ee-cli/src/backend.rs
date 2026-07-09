@@ -1369,10 +1369,12 @@ pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendE
             Some(BackendEvent::Alert(msg))
         }
         "plugin_started" => {
-            Some(BackendEvent::Alert(format_plugin_state_notification("started", &params)?))
+            let _ = format_plugin_state_notification("started", &params)?;
+            None
         }
         "plugin_stopped" => {
-            Some(BackendEvent::Alert(format_plugin_state_notification("stopped", &params)?))
+            let _ = format_plugin_state_notification("stopped", &params)?;
+            None
         }
         "plugin_terminated" => {
             Some(BackendEvent::Alert(format_plugin_terminated_notification(&params)?))

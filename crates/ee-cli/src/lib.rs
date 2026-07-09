@@ -8,6 +8,7 @@ mod folds;
 mod git;
 mod highlight;
 mod keymap;
+mod logs;
 pub mod perf;
 mod picker;
 mod quickfix;

@@ -33,6 +33,7 @@ mod folds;
 mod git;
 mod highlight;
 mod keymap;
+mod logs;
 mod picker;
 mod quickfix;
 mod registers;
@@ -406,6 +407,12 @@ fn cmd_doctor(config_path: Option<&PathBuf>) {
         if !report.editorconfig_applies {
             println!("  .editorconfig  [file-specific] [not evaluated without file path]");
         }
+    }
+
+    println!("  log files");
+    for candidate in logs::discover_log_paths() {
+        let status = if candidate.path.is_file() { "found" } else { "not found" };
+        println!("  {:?}  [{}] [{}]", candidate.path, candidate.label, status);
     }
 
     println!();

@@ -280,6 +280,33 @@ fn cli_allows_utility_names_as_file_paths() {
 }
 
 #[test]
+fn discover_log_paths_lists_editor_and_plugin_candidates_for_doctor() {
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    let temp = tempfile::tempdir().unwrap();
+    let state_home = temp.path().join("state-home");
+    let editor_override = temp.path().join("custom-editor.log");
+    let plugin_override = temp.path().join("custom-plugin.log");
+    env::set_current_dir(temp.path()).unwrap();
+    let _editor_guard = EnvVarGuard::set("EE_EDITOR_LOG", &editor_override);
+    let _plugin_guard = EnvVarGuard::set("EE_PLUGIN_LOG", &plugin_override);
+    let _state_guard = EnvVarGuard::set("XDG_STATE_HOME", &state_home);
+
+    let paths = crate::logs::discover_log_paths()
+        .into_iter()
+        .map(|candidate| (candidate.label, candidate.path))
+        .collect::<Vec<_>>();
+
+    assert!(paths.contains(&("editor", editor_override.clone())));
+    assert!(paths.contains(&("plugin", plugin_override.clone())));
+    assert!(paths.contains(&("editor", temp.path().join("ee.log"))));
+    assert!(paths.contains(&("editor", temp.path().join("editor.log"))));
+    assert!(paths.contains(&("plugin", temp.path().join("xi-lsp-plugin.log"))));
+    assert!(paths.contains(&("editor", state_home.join("ee").join("editor.log"))));
+    assert!(paths.contains(&("plugin", state_home.join("ee").join("xi-lsp-plugin.log"))));
+}
+
+#[test]
 fn file_line_check_reuses_streaming_vlf_counter() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("sample.txt");

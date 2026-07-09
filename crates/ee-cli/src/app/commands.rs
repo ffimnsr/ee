@@ -2850,57 +2850,19 @@ impl App {
     }
 
     fn log_picker_items(&self) -> Vec<crate::picker::PickerItem> {
-        fn push_log_item(
-            items: &mut Vec<crate::picker::PickerItem>,
-            seen: &mut std::collections::HashSet<PathBuf>,
-            label: &str,
-            path: PathBuf,
-        ) {
-            if !path.is_file() || !seen.insert(path.clone()) {
-                return;
-            }
-            items.push(crate::picker::PickerItem {
-                label: label.to_owned(),
-                detail: Some(path.display().to_string()),
-                path: Some(path),
+        crate::logs::discover_log_paths()
+            .into_iter()
+            .filter(|candidate| candidate.path.is_file())
+            .map(|candidate| crate::picker::PickerItem {
+                label: candidate.label.to_owned(),
+                detail: Some(candidate.path.display().to_string()),
+                path: Some(candidate.path),
                 buf_id: None,
                 line: None,
                 col: None,
                 choice_index: None,
-            });
-        }
-
-        let mut items = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let state_dir = std::env::var_os("XDG_STATE_HOME")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .or_else(dirs::state_dir)
-            .map(|dir| dir.join("ee"));
-
-        if let Some(path) =
-            std::env::var_os("EE_EDITOR_LOG").filter(|value| !value.is_empty()).map(PathBuf::from)
-        {
-            push_log_item(&mut items, &mut seen, "editor", path);
-        }
-        push_log_item(&mut items, &mut seen, "editor", cwd.join("ee.log"));
-        push_log_item(&mut items, &mut seen, "editor", cwd.join("editor.log"));
-        if let Some(state_dir) = state_dir.as_ref() {
-            push_log_item(&mut items, &mut seen, "editor", state_dir.join("editor.log"));
-        }
-
-        if let Some(path) =
-            std::env::var_os("EE_PLUGIN_LOG").filter(|value| !value.is_empty()).map(PathBuf::from)
-        {
-            push_log_item(&mut items, &mut seen, "plugin", path);
-        }
-        push_log_item(&mut items, &mut seen, "plugin", cwd.join("xi-lsp-plugin.log"));
-        if let Some(state_dir) = state_dir.as_ref() {
-            push_log_item(&mut items, &mut seen, "plugin", state_dir.join("xi-lsp-plugin.log"));
-        }
-
-        items
+            })
+            .collect()
     }
 
     fn open_logs_picker(&mut self) {

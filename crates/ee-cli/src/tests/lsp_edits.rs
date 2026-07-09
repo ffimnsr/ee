@@ -579,6 +579,21 @@ fn pending_hover_notification_opens_popup() {
 }
 
 #[test]
+fn plugin_started_and_stopped_notifications_are_not_shown_in_status_line() {
+    let started = json!({
+        "view_id": "view-id-1",
+        "plugin": "xi-lsp-plugin"
+    });
+    let stopped = json!({
+        "view_id": "view-id-1",
+        "plugin": "xi-lsp-plugin"
+    });
+
+    assert!(parse_notification("plugin_started", started).is_none());
+    assert!(parse_notification("plugin_stopped", stopped).is_none());
+}
+
+#[test]
 fn plugin_terminated_notification_updates_status_message() {
     let params = json!({
         "view_id": "view-id-1",
