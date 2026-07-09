@@ -230,7 +230,7 @@ fn shell_command(command: &str, cwd: &Path) -> Command {
     let mut child = {
         let shell = shell_program_from_env(env::var("SHELL").ok().as_deref());
         let mut command_builder = Command::new(shell);
-        command_builder.arg("-lc").arg(command);
+        command_builder.arg("-c").arg(command);
         command_builder
     };
 
@@ -342,6 +342,17 @@ mod tests {
         let shell = shell_program_from_env(Some("/definitely/missing/ee-shell"));
 
         assert_eq!(shell, "sh");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn shell_command_uses_non_login_shell_flag() {
+        let cwd = std::env::current_dir().unwrap();
+        let child = shell_command("printf 'ok'", &cwd);
+        let args =
+            child.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+
+        assert_eq!(args, vec![String::from("-c"), String::from("printf 'ok'")]);
     }
 
     #[test]
