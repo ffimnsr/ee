@@ -327,14 +327,51 @@ pub fn resolve_bundled_runtime_root(
     fallback_dir.join("runtime")
 }
 
+fn source_tree_runtime_root_from_manifest() -> Option<PathBuf> {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .map(|dir| dir.join(super::types::RUNTIME_DIR_NAME))
+        .find(|path| path.exists())
+}
+
+pub(crate) fn resolve_existing_bundled_runtime_root(
+    env_override: Option<&Path>,
+    exe_path: Option<&Path>,
+    fallback_dir: &Path,
+    source_tree_root: Option<&Path>,
+    windows_layout: bool,
+) -> PathBuf {
+    if let Some(path) = env_override {
+        return path.to_path_buf();
+    }
+
+    let release_layout = resolve_bundled_runtime_root(None, exe_path, fallback_dir, windows_layout);
+    if exe_path.is_some() && release_layout.exists() {
+        return release_layout;
+    }
+
+    if let Some(path) = source_tree_root.filter(|path| path.exists()) {
+        return path.to_path_buf();
+    }
+
+    let fallback_runtime = fallback_dir.join(super::types::RUNTIME_DIR_NAME);
+    if fallback_runtime.exists() {
+        return fallback_runtime;
+    }
+
+    release_layout
+}
+
 pub fn bundled_runtime_root_from_env() -> PathBuf {
     let env_override = env::var_os("EE_RUNTIME_DIR").map(PathBuf::from);
     let exe_path = env::current_exe().ok();
     let fallback_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    resolve_bundled_runtime_root(
+    let source_tree_root = source_tree_runtime_root_from_manifest();
+    resolve_existing_bundled_runtime_root(
         env_override.as_deref(),
         exe_path.as_deref(),
         &fallback_dir,
+        source_tree_root.as_deref(),
         cfg!(windows),
     )
 }

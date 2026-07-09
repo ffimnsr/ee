@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +47,42 @@ pub(crate) fn append_editor_log_line(message: &str) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+fn existing_path_identity(path: &Path) -> PathBuf {
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return canonical;
+    }
+
+    if let (Some(parent), Some(name)) = (path.parent(), path.file_name())
+        && let Ok(canonical_parent) = fs::canonicalize(parent)
+    {
+        return canonical_parent.join(name);
+    }
+
+    path.to_path_buf()
+}
+
+fn env_log_override(key: &str) -> Option<PathBuf> {
+    std::env::var_os(key).filter(|value| !value.is_empty()).map(PathBuf::from)
+}
+
+fn logical_cwd_for_logs() -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd_identity = existing_path_identity(&cwd);
+
+    for key in ["EE_EDITOR_LOG", "EE_PLUGIN_LOG"] {
+        let Some(parent) =
+            env_log_override(key).and_then(|path| path.parent().map(Path::to_path_buf))
+        else {
+            continue;
+        };
+        if existing_path_identity(&parent) == cwd_identity {
+            return parent;
+        }
+    }
+
+    cwd
+}
+
 pub(crate) fn discover_log_paths() -> Vec<LogPathCandidate> {
     fn push_log_path(
         items: &mut Vec<LogPathCandidate>,
@@ -54,19 +90,18 @@ pub(crate) fn discover_log_paths() -> Vec<LogPathCandidate> {
         label: &'static str,
         path: PathBuf,
     ) {
-        if seen.insert(path.clone()) {
+        let key = existing_path_identity(&path);
+        if seen.insert(key) {
             items.push(LogPathCandidate { label, path });
         }
     }
 
     let mut items = Vec::new();
     let mut seen = HashSet::new();
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = logical_cwd_for_logs();
     let state_dir = state_dir();
 
-    if let Some(path) =
-        std::env::var_os("EE_EDITOR_LOG").filter(|value| !value.is_empty()).map(PathBuf::from)
-    {
+    if let Some(path) = env_log_override("EE_EDITOR_LOG") {
         push_log_path(&mut items, &mut seen, "editor", path);
     }
     push_log_path(&mut items, &mut seen, "editor", cwd.join("ee.log"));
@@ -75,9 +110,7 @@ pub(crate) fn discover_log_paths() -> Vec<LogPathCandidate> {
         push_log_path(&mut items, &mut seen, "editor", state_dir.join("editor.log"));
     }
 
-    if let Some(path) =
-        std::env::var_os("EE_PLUGIN_LOG").filter(|value| !value.is_empty()).map(PathBuf::from)
-    {
+    if let Some(path) = env_log_override("EE_PLUGIN_LOG") {
         push_log_path(&mut items, &mut seen, "plugin", path);
     }
     push_log_path(&mut items, &mut seen, "plugin", cwd.join("xi-lsp-plugin.log"));

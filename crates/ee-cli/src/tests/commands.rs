@@ -306,6 +306,40 @@ fn discover_log_paths_lists_editor_and_plugin_candidates_for_doctor() {
     assert!(paths.contains(&("plugin", state_home.join("ee").join("xi-lsp-plugin.log"))));
 }
 
+#[cfg(unix)]
+#[test]
+fn discover_log_paths_prefers_logical_cwd_paths_when_overrides_live_in_cwd() {
+    use std::os::unix::fs::symlink;
+
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    let temp = tempfile::tempdir().unwrap();
+    let real_cwd = temp.path().join("real-cwd");
+    let alias_cwd = temp.path().join("alias-cwd");
+    let state_home = temp.path().join("state-home");
+    fs::create_dir_all(&real_cwd).unwrap();
+    symlink(&real_cwd, &alias_cwd).unwrap();
+    env::set_current_dir(&alias_cwd).unwrap();
+
+    let editor_override = alias_cwd.join("custom-editor.log");
+    let plugin_override = alias_cwd.join("custom-plugin.log");
+    let _editor_guard = EnvVarGuard::set("EE_EDITOR_LOG", &editor_override);
+    let _plugin_guard = EnvVarGuard::set("EE_PLUGIN_LOG", &plugin_override);
+    let _state_guard = EnvVarGuard::set("XDG_STATE_HOME", &state_home);
+
+    let paths = crate::logs::discover_log_paths()
+        .into_iter()
+        .map(|candidate| (candidate.label, candidate.path))
+        .collect::<Vec<_>>();
+
+    assert!(paths.contains(&("editor", alias_cwd.join("ee.log"))));
+    assert!(!paths.contains(&("editor", real_cwd.join("ee.log"))));
+    assert_eq!(
+        paths.iter().filter(|(label, path)| *label == "editor" && path.ends_with("ee.log")).count(),
+        1
+    );
+}
+
 #[test]
 fn doctor_report_adds_blank_line_before_log_files() {
     let report = crate::doctor_report(Some(&PathBuf::from("custom.toml")));
