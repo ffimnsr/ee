@@ -653,6 +653,71 @@ pub fn copy_bundled_standard_queries_to_runtime(
     Ok(copied)
 }
 
+pub fn copy_all_bundled_runtime_queries_to_runtime(
+    output_root: &Path,
+) -> Result<Vec<PathBuf>, RuntimeOperationError> {
+    let bundled_queries_root = bundled_repo_runtime_root().join(QUERIES_DIR_NAME);
+    if !bundled_queries_root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut copied = Vec::new();
+    for entry in fs::read_dir(&bundled_queries_root).map_err(|error| {
+        RuntimeOperationError::runtime_asset(format!(
+            "failed reading bundled query root {}: {error}",
+            bundled_queries_root.display()
+        ))
+    })? {
+        let entry = entry.map_err(|error| {
+            RuntimeOperationError::runtime_asset(format!(
+                "failed reading bundled query entry under {}: {error}",
+                bundled_queries_root.display()
+            ))
+        })?;
+        let source_query_dir = entry.path();
+        if !source_query_dir.is_dir() {
+            continue;
+        }
+
+        let Some(language_dir_name) = source_query_dir.file_name() else {
+            continue;
+        };
+        let destination_query_dir = output_root.join(QUERIES_DIR_NAME).join(language_dir_name);
+        fs::create_dir_all(&destination_query_dir).map_err(|error| {
+            RuntimeOperationError::runtime_asset(format!(
+                "failed creating query output dir {}: {error}",
+                destination_query_dir.display()
+            ))
+        })?;
+
+        for query_entry in fs::read_dir(&source_query_dir).map_err(|error| {
+            RuntimeOperationError::runtime_asset(format!(
+                "failed reading bundled query dir {}: {error}",
+                source_query_dir.display()
+            ))
+        })? {
+            let query_entry = query_entry.map_err(|error| {
+                RuntimeOperationError::runtime_asset(format!(
+                    "failed reading bundled query entry under {}: {error}",
+                    source_query_dir.display()
+                ))
+            })?;
+            let source_path = query_entry.path();
+            if !source_path.is_file() {
+                continue;
+            }
+            let Some(file_name) = source_path.file_name() else {
+                continue;
+            };
+            let destination_path = destination_query_dir.join(file_name);
+            copy_runtime_query_file(&source_path, &destination_path)?;
+            copied.push(destination_path);
+        }
+    }
+
+    Ok(copied)
+}
+
 pub fn copy_bundled_ee_owned_queries_to_runtime(
     output_root: &Path,
     language: &RuntimeLanguage,

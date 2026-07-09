@@ -402,7 +402,7 @@ impl LanguageServerClient {
         on_init: CB,
     ) -> Result<(), LspError>
     where
-        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
+        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, jsonrpc_lite::Error>),
     {
         #[derive(serde::Serialize)]
         #[serde(rename_all = "camelCase")]
@@ -570,7 +570,7 @@ impl LanguageServerClient {
         on_result: CB,
     ) -> Result<u64, LspError>
     where
-        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
+        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, jsonrpc_lite::Error>),
     {
         let Some(state) = self.opened_documents.get(&view_id) else {
             return Err(LspError::Protocol(format!("missing open document for view {view_id}")));
@@ -599,7 +599,7 @@ impl LanguageServerClient {
         on_result: CB,
     ) -> Result<u64, LspError>
     where
-        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
+        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, jsonrpc_lite::Error>),
     {
         let Some(state) = self.opened_documents.get(&view_id) else {
             return Err(LspError::Protocol(format!("missing open document for view {view_id}")));
@@ -629,7 +629,7 @@ impl LanguageServerClient {
         on_result: CB,
     ) -> Result<u64, LspError>
     where
-        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
+        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, jsonrpc_lite::Error>),
     {
         let Some(state) = self.opened_documents.get(&view_id) else {
             return Err(LspError::Protocol(format!("missing open document for view {view_id}")));
@@ -658,7 +658,7 @@ impl LanguageServerClient {
         on_result: CB,
     ) -> Result<u64, LspError>
     where
-        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
+        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, jsonrpc_lite::Error>),
     {
         let Some(state) = self.opened_documents.get(&view_id) else {
             return Err(LspError::Protocol(format!("missing open document for view {view_id}")));
@@ -687,7 +687,7 @@ impl LanguageServerClient {
         on_result: CB,
     ) -> Result<u64, LspError>
     where
-        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
+        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, jsonrpc_lite::Error>),
     {
         let Some(state) = self.opened_documents.get(&view_id) else {
             return Err(LspError::Protocol(format!("missing open document for view {view_id}")));
@@ -716,7 +716,7 @@ impl LanguageServerClient {
         on_result: CB,
     ) -> Result<u64, LspError>
     where
-        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
+        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, jsonrpc_lite::Error>),
     {
         let Some(state) = self.opened_documents.get(&view_id) else {
             return Err(LspError::Protocol(format!("missing open document for view {view_id}")));
@@ -746,7 +746,7 @@ impl LanguageServerClient {
         on_result: CB,
     ) -> Result<u64, LspError>
     where
-        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
+        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, jsonrpc_lite::Error>),
     {
         let Some(state) = self.opened_documents.get(&view_id) else {
             return Err(LspError::Protocol(format!("missing open document for view {view_id}")));
@@ -775,7 +775,7 @@ impl LanguageServerClient {
         on_result: CB,
     ) -> Result<u64, LspError>
     where
-        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
+        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, jsonrpc_lite::Error>),
     {
         let Some(state) = self.opened_documents.get(&view_id) else {
             return Err(LspError::Protocol(format!("missing open document for view {view_id}")));
@@ -812,7 +812,7 @@ impl LanguageServerClient {
         on_result: CB,
     ) -> Result<u64, LspError>
     where
-        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
+        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, jsonrpc_lite::Error>),
     {
         let Some(state) = self.opened_documents.get(&view_id) else {
             return Err(LspError::Protocol(format!("missing open document for view {view_id}")));
@@ -845,7 +845,7 @@ impl LanguageServerClient {
         on_result: CB,
     ) -> Result<u64, LspError>
     where
-        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
+        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, jsonrpc_lite::Error>),
     {
         let Some(state) = self.opened_documents.get(&view_id) else {
             return Err(LspError::Protocol(format!("missing open document for view {view_id}")));
@@ -892,7 +892,7 @@ impl LanguageServerClient {
         on_result: CB,
     ) -> Result<u64, LspError>
     where
-        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
+        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, jsonrpc_lite::Error>),
     {
         let Some(state) = self.opened_documents.get(&view_id) else {
             return Err(LspError::Protocol(format!("missing open document for view {view_id}")));
@@ -918,7 +918,7 @@ impl LanguageServerClient {
         on_result: CB,
     ) -> Result<u64, LspError>
     where
-        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, Error>),
+        CB: 'static + Send + FnOnce(&mut LanguageServerClient, Result<Value, jsonrpc_lite::Error>),
     {
         if !self.is_initialized {
             return Err(LspError::Protocol(format!(

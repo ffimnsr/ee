@@ -770,6 +770,29 @@ fn bundled_yaml_injections_query_compiles() {
 }
 
 #[test]
+fn bundled_builtin_highlights_queries_compile() {
+    let _guard = runtime_loader_test_guard();
+    ensure_default_runtime_loader_has_test_grammars();
+
+    for language in [
+        "bash", "c", "csharp", "css", "elixir", "go", "haskell", "html", "java", "json", "php",
+        "python", "ruby", "rust", "scala", "yaml",
+    ] {
+        with_default_runtime_loader_mut(|loader| {
+            loader.invalidate_language(language);
+            let compiled = loader
+                .compile_query_kind(language, RuntimeQueryKind::Highlights)
+                .unwrap_or_else(|error| panic!("failed compiling {language} highlights: {error}"))
+                .unwrap_or_else(|| panic!("missing bundled highlights query for {language}"));
+            assert!(
+                !compiled.source_text.trim().is_empty(),
+                "expected non-empty bundled highlights for {language}",
+            );
+        });
+    }
+}
+
+#[test]
 fn runtime_loader_detects_shebang_glob_then_file_type() {
     let languages = Languages::new(&[
         language_definition("rust", &["rs"]),
@@ -1686,6 +1709,8 @@ fn runtime_loader_builds_runtime_assets_from_fetched_sources() {
             .any(|path| path.ends_with(Path::new("rust").join("indents.scm")))
     );
     assert!(output_root.join("queries").join("rust").join("indents.scm").exists());
+    assert!(output_root.join("queries").join("toml").join("highlights.scm").exists());
+    assert!(output_root.join("queries").join("graphql").join("highlights.scm").exists());
 }
 
 #[test]
