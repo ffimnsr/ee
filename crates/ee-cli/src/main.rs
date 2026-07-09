@@ -121,6 +121,10 @@ struct Cli {
     #[arg(value_name = "FILE")]
     files: Vec<PathBuf>,
 
+    /// Restore previously saved session state when no file args are passed
+    #[arg(long)]
+    restore_session: bool,
+
     /// Load a specific config file instead of layered defaults
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
@@ -1268,13 +1272,10 @@ fn cmd_file_tail(path: &Path, lines: usize) {
     }
 }
 
-fn resolve_startup_launch(
-    files: &[PathBuf],
-    saved_session: Option<&session::SessionState>,
-) -> io::Result<StartupLaunch> {
+fn resolve_startup_launch(files: &[PathBuf]) -> io::Result<StartupLaunch> {
     let Some(first) = files.first().cloned() else {
         return Ok(StartupLaunch {
-            initial_path: saved_session.and_then(session::SessionState::initial_path),
+            initial_path: None,
             additional_paths: Vec::new(),
             picker_root: None,
         });
@@ -1407,7 +1408,7 @@ fn main() -> io::Result<()> {
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown))
         .map_err(io::Error::other)?;
 
-    let saved_session = if cli.files.is_empty() {
+    let saved_session = if cli.restore_session && cli.files.is_empty() {
         match session::SessionState::load() {
             Ok(state) => state,
             Err(err) => {
@@ -1418,7 +1419,7 @@ fn main() -> io::Result<()> {
     } else {
         None
     };
-    let launch = resolve_startup_launch(&cli.files, saved_session.as_ref())?;
+    let launch = resolve_startup_launch(&cli.files)?;
     let (mut app, additional_paths) = build_startup_app(launch)?;
 
     if let Some(state) = saved_session.as_ref()

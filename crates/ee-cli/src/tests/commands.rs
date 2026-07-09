@@ -21,6 +21,15 @@ use crate::picker::PickerKind;
 use crate::tests::helpers::*;
 
 #[test]
+fn cli_restore_session_flag_parses() {
+    let cli = crate::Cli::try_parse_from(["ee", "--restore-session"]).unwrap();
+
+    assert!(cli.restore_session);
+    assert!(cli.files.is_empty());
+    assert!(cli.command.is_none());
+}
+
+#[test]
 fn cli_utility_commands_live_under_do() {
     let cli = crate::Cli::try_parse_from(["ee", "do", "doctor"]).unwrap();
 
@@ -654,6 +663,16 @@ fn edit_config_command_opens_nearest_workspace_config() {
 }
 
 #[test]
+fn resolve_startup_launch_without_files_opens_no_file() {
+    let launch = crate::resolve_startup_launch(&[]).unwrap();
+    let (app, additional) = crate::build_startup_app(launch).unwrap();
+
+    assert!(additional.is_empty());
+    assert!(app.backend.active().path.is_none());
+    assert!(app.picker.is_none());
+}
+
+#[test]
 fn resolve_startup_launch_for_dot_opens_picker_in_current_directory() {
     let _cwd_lock = cwd_test_lock().lock().unwrap();
     let _cwd_guard = CurrentDirGuard::capture();
@@ -661,7 +680,7 @@ fn resolve_startup_launch_for_dot_opens_picker_in_current_directory() {
     fs::write(temp.path().join("sample.rs"), "fn main() {}\n").unwrap();
     env::set_current_dir(temp.path()).unwrap();
 
-    let launch = crate::resolve_startup_launch(&[PathBuf::from(".")], None).unwrap();
+    let launch = crate::resolve_startup_launch(&[PathBuf::from(".")]).unwrap();
     let (app, additional) = crate::build_startup_app(launch).unwrap();
 
     assert!(additional.is_empty());
@@ -688,7 +707,7 @@ fn resolve_startup_launch_for_directory_path_opens_picker_from_that_directory() 
     fs::write(nested.join("inside.rs"), "fn inside() {}\n").unwrap();
     env::set_current_dir(temp.path()).unwrap();
 
-    let launch = crate::resolve_startup_launch(std::slice::from_ref(&nested), None).unwrap();
+    let launch = crate::resolve_startup_launch(std::slice::from_ref(&nested)).unwrap();
     let (app, additional) = crate::build_startup_app(launch).unwrap();
 
     assert!(additional.is_empty());

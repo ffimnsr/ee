@@ -95,6 +95,7 @@ impl SessionState {
         fs::write(path, raw)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn initial_path(&self) -> Option<PathBuf> {
         self.buffers
             .iter()
