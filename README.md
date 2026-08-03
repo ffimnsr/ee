@@ -176,6 +176,36 @@ lsp = ["typescript", "eslint"]
 
 Config precedence, from lowest to highest, is `/etc/ee/config.toml`, `$XDG_CONFIG_HOME/ee/config.toml`, legacy `~/.ee.toml` only when XDG config is missing, then ancestor `.ee.toml` files from outermost to innermost. `root = true` stops discovery above that config file. Later layers replace scalar fields, replace arrays, shallow-merge `env`, replace `initialization_options`, and `enabled = false` disables that server id.
 
+### Agents mode
+
+Agents mode is an optional ACP v1 agent chat plus MCP integration. It is disabled at compile time and runtime by default: the `agents` cargo feature must be enabled at build time, and `agents.enabled = true` must be set in config. Agent and MCP subprocesses start lazily only after the mode is enabled and the agents pane opens or an agents command runs. Agent file writes route through existing buffer/edit/save semantics, and agent terminal executions and file writes require an approval path before execution.
+
+ACP v1 wire types come from the official [`agent-client-protocol`](https://crates.io/crates/agent-client-protocol) SDK, re-exported through `crates/ee-agent-protocol` (the only crate allowed to own ACP wire structs). `ee-agent-protocol` adds strict v1-only version negotiation, absolute-path and 1-based-line validation, session-update ordering checks, unknown-capability capture for diagnostics, and a typed method registry; unsupported protocol versions, relative paths, and unknown elicitation modes fail closed with JSON-RPC `invalid params` errors.
+
+Agent subprocesses are defined under `[agents.servers.<id>]`; `command` is required, `args`, `env`, and `cwd` are optional. MCP servers are shared configuration under `[mcp.servers.<id>]` with a required `transport` of `"stdio"` (requires `command`) or `"streamable_http"` (requires an `http(s)` `url`; optional `headers` and `timeout_ms`, default 30 000). Server ids must be non-empty and unique across `agents.servers` and `mcp.servers`.
+
+```toml
+[agents]
+enabled = true
+default_agent = "helper"
+
+[agents.servers.helper]
+command = "ee-helper"
+args = ["serve"]
+
+[mcp.servers.filesystem]
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem"]
+
+[mcp.servers.remote]
+transport = "streamable_http"
+url = "https://example.com/mcp"
+timeout_ms = 5000
+```
+
+Agents ex commands are lowercase snake_case only: `:agents`, `:agents_close`, `:agents_stop`, `:agents_new`, and `:agents_clear`. CamelCase aliases are rejected.
+
 Routing now resolves runtime language id first, then maps `[languages.<id>].lsp` attachments to candidate servers. Exact `filenames` matches such as `Dockerfile`, `Containerfile`, `Justfile`, or `CMakeLists.txt` win before extension fallback. Legacy extension matching remains as fallback when a language has no explicit `lsp` attachment list. Multiple attached servers are allowed. First attached server is primary for interactive pull-style features such as completion, hover, go-to-definition, references, symbols, formatting, and rename. All attached servers still receive document lifecycle sync and can publish diagnostics. Missing executables, disabled attached servers, and workspace-root-only servers opened outside a matching root fail closed with status items instead of blocking editing.
 
 ### Runtime language config

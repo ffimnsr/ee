@@ -835,6 +835,7 @@ fn mode_hint_description(mode: Mode) -> &'static str {
         Mode::LocationList => "location list",
         Mode::SubstituteConfirm => "substitute confirm",
         Mode::PrivilegeConfirm => "privileged save confirm",
+        Mode::Agent => "agents pane",
     }
 }
 
@@ -1347,6 +1348,7 @@ pub(crate) fn format_binding_mode(mode: Mode) -> &'static str {
         Mode::LocationList => "location_list",
         Mode::SubstituteConfirm => "substitute_confirm",
         Mode::PrivilegeConfirm => "privilege_confirm",
+        Mode::Agent => "agent",
     }
 }
 
@@ -1598,7 +1600,8 @@ fn format_mode_spec(mode: Mode) -> &'static str {
         | Mode::Quickfix
         | Mode::LocationList
         | Mode::SubstituteConfirm
-        | Mode::PrivilegeConfirm => "normal",
+        | Mode::PrivilegeConfirm
+        | Mode::Agent => "normal",
     }
 }
 

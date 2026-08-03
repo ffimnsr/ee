@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "session/load",
+  "params": {
+    "sessionId": "sess_789xyz",
+    "cwd": "/home/user/project",
+    "additionalDirectories": [
+      "/home/user/shared-lib",
+      "/home/user/product-docs"
+    ],
+    "mcpServers": []
+  }
+}

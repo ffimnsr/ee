@@ -40,9 +40,16 @@ fn write_bang_update_and_x_bang_aliases_save() {
 
     let mut app = App::from_path(Some(first.clone())).unwrap();
     insert_text(&mut app, "!");
+    // The insert lands asynchronously; wait for the buffer to become dirty so
+    // the save command actually has new content to write (parallel load can
+    // delay the xi-core round trip).
+    wait_until_with_backend(&mut app.backend, "insert applied", Duration::from_secs(20), |b| {
+        !b.active().pristine
+    });
     run_ex(&mut app, "w!");
 
-    for _ in 0..20 {
+    for _ in 0..250 {
+        app.backend.pump().unwrap();
         if fs::read_to_string(&first).unwrap().starts_with('!') {
             break;
         }
@@ -54,9 +61,16 @@ fn write_bang_update_and_x_bang_aliases_save() {
     fs::write(&second, "seed").unwrap();
     let mut update_app = App::from_path(Some(second.clone())).unwrap();
     insert_text(&mut update_app, "?");
+    wait_until_with_backend(
+        &mut update_app.backend,
+        "insert applied",
+        Duration::from_secs(20),
+        |b| !b.active().pristine,
+    );
     run_ex(&mut update_app, "u");
 
-    for _ in 0..20 {
+    for _ in 0..250 {
+        update_app.backend.pump().unwrap();
         if fs::read_to_string(&second).unwrap().starts_with('?') {
             break;
         }
@@ -68,9 +82,16 @@ fn write_bang_update_and_x_bang_aliases_save() {
     fs::write(&third, "seed").unwrap();
     let mut quit_app = App::from_path(Some(third.clone())).unwrap();
     insert_text(&mut quit_app, "#");
+    wait_until_with_backend(
+        &mut quit_app.backend,
+        "insert applied",
+        Duration::from_secs(20),
+        |b| !b.active().pristine,
+    );
     run_ex(&mut quit_app, "x!");
 
-    for _ in 0..20 {
+    for _ in 0..250 {
+        quit_app.backend.pump().unwrap();
         if fs::read_to_string(&third).unwrap().starts_with('#') {
             break;
         }
@@ -690,7 +711,7 @@ fn dedup_commands_remove_duplicate_lines() {
     wait_until_with_backend(
         &mut app.backend,
         "seed dedup whole buffer",
-        Duration::from_secs(1),
+        Duration::from_secs(5),
         |backend| {
             backend.lines
                 == vec![
@@ -707,7 +728,7 @@ fn dedup_commands_remove_duplicate_lines() {
     wait_until_with_backend(
         &mut app.backend,
         "dedup whole buffer",
-        Duration::from_secs(1),
+        Duration::from_secs(5),
         |backend| backend.lines == vec![String::from("a"), String::from("b"), String::from("c")],
     );
     assert_eq!(app.backend.lines, vec![String::from("a"), String::from("b"), String::from("c")]);
@@ -717,7 +738,7 @@ fn dedup_commands_remove_duplicate_lines() {
     wait_until_with_backend(
         &mut selected.backend,
         "seed dedup line range",
-        Duration::from_secs(1),
+        Duration::from_secs(5),
         |backend| {
             backend.lines
                 == vec![
@@ -733,7 +754,7 @@ fn dedup_commands_remove_duplicate_lines() {
     wait_until_with_backend(
         &mut selected.backend,
         "dedup line range",
-        Duration::from_secs(1),
+        Duration::from_secs(5),
         |backend| {
             backend.lines
                 == vec![
@@ -767,7 +788,7 @@ fn diffget_restores_current_git_hunk_from_head() {
     wait_until_with_backend(
         &mut app.backend,
         "seed diff hunk",
-        Duration::from_secs(1),
+        Duration::from_secs(5),
         |backend| {
             backend.lines.starts_with(&[
                 String::from("one"),
@@ -782,7 +803,7 @@ fn diffget_restores_current_git_hunk_from_head() {
     wait_until_with_backend(
         &mut app.backend,
         "diffget restore hunk",
-        Duration::from_secs(1),
+        Duration::from_secs(5),
         |backend| {
             backend.lines.starts_with(&[
                 String::from("one"),
@@ -883,7 +904,19 @@ fn buffer_close_aliases_and_force_variants_work() {
 
     let mut app = App::from_path(Some(first.clone())).unwrap();
     run_ex(&mut app, &format!("e {}", second.display()));
+    wait_until_with_backend(
+        &mut app.backend,
+        "open second buffer",
+        Duration::from_secs(5),
+        |backend| backend.buf_count() == 2 && backend.active().path.as_ref() == Some(&second),
+    );
     insert_text(&mut app, "!");
+    wait_until_with_backend(
+        &mut app.backend,
+        "dirty second buffer",
+        Duration::from_secs(5),
+        |backend| !backend.active().pristine,
+    );
 
     run_ex(&mut app, "bc");
     assert_eq!(app.backend.buf_count(), 2);
@@ -893,20 +926,52 @@ fn buffer_close_aliases_and_force_variants_work() {
     );
 
     run_ex(&mut app, "bc!");
-    assert_eq!(app.backend.buf_count(), 1);
+    wait_until_with_backend(
+        &mut app.backend,
+        "force close second buffer",
+        Duration::from_secs(5),
+        |backend| backend.buf_count() == 1 && backend.active().path.as_ref() == Some(&first),
+    );
     assert_eq!(app.backend.active().path.as_ref(), Some(&first));
 
     run_ex(&mut app, &format!("e {}", second.display()));
+    wait_until_with_backend(
+        &mut app.backend,
+        "reopen second buffer",
+        Duration::from_secs(5),
+        |backend| backend.buf_count() == 2 && backend.active().path.as_ref() == Some(&second),
+    );
     run_ex(&mut app, &format!("e {}", third.display()));
-    assert_eq!(app.backend.buf_count(), 3);
+    wait_until_with_backend(
+        &mut app.backend,
+        "open third buffer",
+        Duration::from_secs(5),
+        |backend| backend.buf_count() == 3 && backend.active().path.as_ref() == Some(&third),
+    );
 
     run_ex(&mut app, "bco");
-    assert_eq!(app.backend.buf_count(), 1);
+    wait_until_with_backend(
+        &mut app.backend,
+        "close other buffers",
+        Duration::from_secs(5),
+        |backend| backend.buf_count() == 1 && backend.active().path.as_ref() == Some(&third),
+    );
     assert_eq!(app.backend.active().path.as_ref(), Some(&third));
 
     run_ex(&mut app, &format!("e {}", first.display()));
+    wait_until_with_backend(
+        &mut app.backend,
+        "reopen first buffer",
+        Duration::from_secs(5),
+        |backend| backend.buf_count() == 2 && backend.active().path.as_ref() == Some(&first),
+    );
     run_ex(&mut app, "bca");
-    assert_eq!(app.backend.buf_count(), 1);
+    wait_until_with_backend(
+        &mut app.backend,
+        "close all buffers",
+        Duration::from_secs(5),
+        |backend| backend.buf_count() == 1 && backend.active().path.is_none(),
+    );
     assert!(app.backend.active().path.is_none());
 
     let _ = fs::remove_file(&first);

@@ -246,9 +246,25 @@ impl RuntimeLoader {
                 None => None,
             }
         };
-        artifact
-            .map(|artifact| self.compile_query_artifact(language_name, kind, artifact))
-            .transpose()
+        let Some(artifact) = artifact else {
+            return Ok(None);
+        };
+        // The transient variant is used on every render; reuse the compiled
+        // cache when the sources are unchanged instead of recompiling the
+        // same query text repeatedly.
+        let cache_key = (canonical_id.clone(), kind);
+        if let Some(cached) = self.compiled_query_cache.get(&cache_key) {
+            if cached.newest_mtime == artifact.newest_mtime
+                && cached.source_mtimes == artifact.source_mtimes
+                && cached.source_paths == artifact.source_paths
+                && cached.source_text == artifact.source_text
+            {
+                return Ok(Some(Arc::clone(cached)));
+            }
+        }
+        let compiled = self.compile_query_artifact(language_name, kind, artifact)?;
+        self.compiled_query_cache.insert(cache_key, Arc::clone(&compiled));
+        Ok(Some(compiled))
     }
 
     fn compile_query_artifact(

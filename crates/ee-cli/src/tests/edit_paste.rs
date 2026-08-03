@@ -58,7 +58,12 @@ fn clipboard_paste_commands_use_expected_clipboard_register() {
 fn clipboard_yank_and_replace_commands_use_test_clipboards() {
     let mut app = App::from_path(None).unwrap();
     insert_text(&mut app, "alpha beta");
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "seed clipboard buffer",
+        std::time::Duration::from_secs(5),
+        |backend| backend.lines == vec![String::from("alpha beta")],
+    );
 
     app.backend.set_selections(&[SelectionRange { start: 0, end: 5 }]).unwrap();
     run_ex(&mut app, "yank_to_clipboard");
@@ -78,13 +83,23 @@ fn clipboard_yank_and_replace_commands_use_test_clipboards() {
     set_test_clipboard(ClipboardSelection::Clipboard, "CLIP");
     app.backend.set_selections(&[SelectionRange { start: 0, end: 5 }]).unwrap();
     run_ex(&mut app, "replace_selections_with_clipboard");
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "replace selections with clipboard",
+        std::time::Duration::from_secs(5),
+        |backend| backend.lines == vec![String::from("CLIP beta")],
+    );
     assert_eq!(app.backend.lines, vec![String::from("CLIP beta")]);
 
     set_test_clipboard(ClipboardSelection::Primary, "PRIM");
     app.backend.set_selections(&[SelectionRange { start: 5, end: 9 }]).unwrap();
     run_ex(&mut app, "replace_selections_with_primary_clipboard");
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "replace selections with primary clipboard",
+        std::time::Duration::from_secs(5),
+        |backend| backend.lines == vec![String::from("CLIP PRIM")],
+    );
     assert_eq!(app.backend.lines, vec![String::from("CLIP PRIM")]);
 }
 

@@ -613,14 +613,24 @@ impl RuntimeLoader {
             for inherited_language in inherited {
                 let parent_canonical = self
                     .language_for_name(&inherited_language)
-                    .map(|language| language.canonical_id().to_string())
-                    .ok_or_else(|| RuntimeLoaderError::UnknownInheritedLanguage {
-                        kind,
-                        language: inherited_language.clone(),
-                    })?;
-                if let Some((parent_source, parent_paths, parent_ranges)) =
-                    self.resolve_query_source_uncached(&parent_canonical, kind, stack)?
-                {
+                    .map(|language| language.canonical_id().to_string());
+                // `_typescript`/`_javascript` style bases normalize to the
+                // language itself (aliases strip leading underscores);
+                // inheriting from yourself is a no-op.
+                if parent_canonical.as_deref() == Some(language.canonical_id()) {
+                    continue;
+                }
+                let parent_source = match parent_canonical {
+                    Some(parent_canonical) => {
+                        self.resolve_query_source_uncached(&parent_canonical, kind, stack)?
+                    }
+                    // Unknown language: the bundled runtime also targets
+                    // shared query directories (e.g. `ecma` for the JS/TS
+                    // family); read the directory directly and skip when it
+                    // has no file for this kind.
+                    None => self.resolve_query_dir_source(&inherited_language, kind)?,
+                };
+                if let Some((parent_source, parent_paths, parent_ranges)) = parent_source {
                     let offset = source.len();
                     source.push_str(&parent_source);
                     paths.extend(parent_paths);
@@ -643,6 +653,50 @@ impl RuntimeLoader {
 
         stack.pop();
 
+        if paths.is_empty() { Ok(None) } else { Ok(Some((source, paths, ranges))) }
+    }
+
+    /// Reads `<runtime>/queries/<dir>/<kind>` across the bundled, user, and
+    /// workspace roots for inheritance targets that are query directories
+    /// rather than languages (e.g. `ecma` shared by the JS/TS family).
+    ///
+    /// Returns `Ok(None)` when no root ships a file for this kind; missing
+    /// directories are not errors because the query dir is shared and each
+    /// kind is optional.
+    fn resolve_query_dir_source(
+        &self,
+        query_dir: &str,
+        kind: RuntimeQueryKind,
+    ) -> Result<Option<ResolvedQuerySource>, RuntimeLoaderError> {
+        let mut source = String::new();
+        let mut paths = Vec::new();
+        let mut ranges = Vec::new();
+        for root in [
+            self.runtime_roots.root_for(RuntimeConfigSource::Bundled),
+            self.runtime_roots.root_for(RuntimeConfigSource::User),
+            self.workspace_runtime_root(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = root
+                .join(QUERIES_DIR_NAME)
+                .join(runtime_query_dir_name(query_dir))
+                .join(kind.file_name());
+            if !path.exists() {
+                continue;
+            }
+            let content = fs::read_to_string(&path)
+                .map_err(|error| RuntimeLoaderError::QueryIo { kind, path: path.clone(), error })?;
+            let start = source.len();
+            source.push_str(&content);
+            if !content.ends_with('\n') {
+                source.push('\n');
+            }
+            let end = source.len();
+            paths.push(path.clone());
+            ranges.push((path, start..end));
+        }
         if paths.is_empty() { Ok(None) } else { Ok(Some((source, paths, ranges))) }
     }
 

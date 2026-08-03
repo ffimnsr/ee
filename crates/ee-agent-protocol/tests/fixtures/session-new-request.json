@@ -1,0 +1,16 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "session/new",
+  "params": {
+    "cwd": "/home/user/project",
+    "mcpServers": [
+      {
+        "name": "filesystem",
+        "command": "/path/to/mcp-server",
+        "args": ["--stdio"],
+        "env": []
+      }
+    ]
+  }
+}

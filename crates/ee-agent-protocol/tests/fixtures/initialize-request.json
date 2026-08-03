@@ -1,0 +1,19 @@
+{
+  "jsonrpc": "2.0",
+  "id": 0,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": 1,
+    "clientCapabilities": {
+      "fs": {
+        "readTextFile": true,
+        "writeTextFile": true
+      },
+      "terminal": true
+    },
+    "clientInfo": {
+      "name": "ee",
+      "version": "0.10.1"
+    }
+  }
+}

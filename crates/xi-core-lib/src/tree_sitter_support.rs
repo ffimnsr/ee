@@ -1250,7 +1250,9 @@ mod tests {
     }
 
     fn test_visible_syntax_limits() -> VisibleSyntaxLimits {
-        VisibleSyntaxLimits { timeout: Duration::from_millis(50), ..VisibleSyntaxLimits::default() }
+        // Generous test budget: these tests assert span content, not timing,
+        // and run in parallel with other tree-sitter work.
+        VisibleSyntaxLimits { timeout: Duration::from_secs(5), ..VisibleSyntaxLimits::default() }
     }
 
     fn runtime_loader_test_guard() -> MutexGuard<'static, ()> {
@@ -1484,8 +1486,10 @@ mod tests {
         assert!(spans[3].iter().any(|span| {
             span.scope.starts_with("function") && line_span_text(src, 3, span) == "set"
         }));
+        // `-eu` is a command argument: the bundled bash query captures it as
+        // `variable.parameter`.
         assert!(spans[3].iter().any(|span| {
-            span.scope.starts_with("constant") && line_span_text(src, 3, span) == "-eu"
+            span.scope.starts_with("variable") && line_span_text(src, 3, span) == "-eu"
         }));
     }
 

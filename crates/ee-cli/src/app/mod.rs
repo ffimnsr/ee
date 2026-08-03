@@ -23,6 +23,13 @@ use crate::registers::{BlockInsert, LastChange, RegisterName, RegisterStore};
 use crate::text::{byte_col_to_display_col, previous_char_boundary};
 use crate::window::{SplitDir, TabManager, ViewDirection};
 
+#[cfg(feature = "agents")]
+mod agent_bridge;
+#[cfg(feature = "agents")]
+mod agent_pane;
+mod agents;
+#[cfg(feature = "agents")]
+pub(crate) mod agents_mcp;
 mod commands;
 mod parsing;
 mod state;
@@ -41,6 +48,19 @@ pub(crate) use parsing::{
 pub(crate) use state::{
     App, HoverPopup, Mode, Operator, PendingCharFind, PrivilegedSavePending, RepeatableMotion,
     SubstitutePending, SwiftMotionState, SwiftMotionTarget, Viewport,
+};
+
+// Served to the bin's `tests/` modules; the lib test build compiles this
+// module tree without those modules, so the lint fires there.
+#[cfg(all(feature = "agents", test))]
+#[allow(unused_imports)]
+pub(crate) use agent_bridge::ActionLogEntry;
+
+#[cfg(feature = "agents")]
+pub(crate) use agent_pane::{
+    AGENTS_CHANNEL_COL_WIDTH, AGENTS_NICK_COL_WIDTH, AGENTS_PANE_BOTTOM_HEIGHT,
+    AGENTS_PANE_RIGHT_WIDTH, AgentPaneLayout, AgentThreadUi, MessageRenderKind, ThreadUiState,
+    TranscriptItem, wrap_text,
 };
 
 const SWIFT_MOTION_LABELS: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
@@ -122,6 +142,13 @@ impl App {
         }
         if self.mode == Mode::PrivilegeConfirm {
             self.handle_privileged_save_confirm_key(key);
+            return;
+        }
+
+        // Focused agents pane owns all keys (feature `agents`).
+        #[cfg(feature = "agents")]
+        if self.agents_focused() {
+            self.handle_agent_key(key);
             return;
         }
 
@@ -1211,6 +1238,8 @@ impl App {
             Mode::Picker | Mode::Quickfix | Mode::LocationList => {}
             // SubstituteConfirm/PrivilegeConfirm only accept dedicated keys.
             Mode::SubstituteConfirm | Mode::PrivilegeConfirm => {}
+            // Agents pane keys are intercepted before `handle_default`.
+            Mode::Agent => {}
         }
     }
 
@@ -1224,6 +1253,21 @@ impl App {
     }
 
     pub(crate) fn handle_mouse_event_in_area(&mut self, m: MouseEvent, area: Rect) {
+        #[cfg(feature = "agents")]
+        if let Some(pane) = crate::ui::agents_pane_rect_for(area, self)
+            && pane.contains(ratatui::layout::Position { x: m.column, y: m.row })
+        {
+            match m.kind {
+                MouseEventKind::ScrollUp => {
+                    self.agents_scroll(-1);
+                }
+                MouseEventKind::ScrollDown => {
+                    self.agents_scroll(1);
+                }
+                _ => {}
+            }
+            return;
+        }
         match m.kind {
             MouseEventKind::ScrollUp => {
                 let _ = self.backend.send_edit("scroll_up", json!([]));
@@ -1323,6 +1367,11 @@ impl App {
                     return;
                 }
                 let _ = self.backend.send_edit("paste", json!({ "chars": text }));
+            }
+            #[cfg(feature = "agents")]
+            Mode::Agent => {
+                // Paste into the agents composer draft.
+                self.agents_append_draft(&text);
             }
             _ => {}
         }

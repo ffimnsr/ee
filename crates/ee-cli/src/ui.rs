@@ -18,10 +18,48 @@ use crate::theme::ui as theme;
 struct RootAreas {
     tab_bar_area: Option<Rect>,
     editor_area: Rect,
+    agents_area: Option<Rect>,
     qf_area: Option<Rect>,
     key_hint_area: Option<Rect>,
     status_area: Rect,
     prompt_area: Rect,
+}
+
+/// Returns the rect the agents pane occupies inside `root_area`, or `None`
+/// when the pane is closed.  The pane always steals from the editor area;
+/// other root rows (status, prompt, qf) are untouched.
+#[cfg(feature = "agents")]
+fn agents_pane_rect(root_area: Rect, app: &App) -> Option<Rect> {
+    use crate::app::AgentPaneLayout;
+    match app.agents_layout() {
+        AgentPaneLayout::Closed => None,
+        AgentPaneLayout::Right => {
+            let width = crate::app::AGENTS_PANE_RIGHT_WIDTH.min(root_area.width.saturating_sub(20));
+            Some(Rect {
+                x: root_area.right() - width,
+                y: root_area.y,
+                width,
+                height: root_area.height,
+            })
+        }
+        AgentPaneLayout::Bottom => {
+            let height =
+                crate::app::AGENTS_PANE_BOTTOM_HEIGHT.min(root_area.height.saturating_sub(6));
+            Some(Rect {
+                x: root_area.x,
+                y: root_area.bottom() - height,
+                width: root_area.width,
+                height,
+            })
+        }
+        AgentPaneLayout::Full => Some(root_area),
+    }
+}
+
+/// The pane rect within a full terminal `area` (mouse hit-testing).
+#[allow(dead_code)]
+pub(crate) fn agents_pane_rect_for(area: Rect, app: &App) -> Option<Rect> {
+    split_root_areas(area, app).agents_area
 }
 
 fn split_root_areas(area: Rect, app: &App) -> RootAreas {
@@ -80,6 +118,38 @@ fn split_root_areas(area: Rect, app: &App) -> RootAreas {
     };
     let editor_area = rows[index];
     index += 1;
+    // The agents pane (feature `agents`) steals part of the editor area;
+    // when closed the editor layout is untouched.
+    #[cfg(feature = "agents")]
+    let (editor_area, agents_area) = {
+        use crate::app::AgentPaneLayout;
+        if let Some(pane) = agents_pane_rect(editor_area, app) {
+            match app.agents_layout() {
+                AgentPaneLayout::Right => {
+                    let columns = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Min(1), Constraint::Length(pane.width)])
+                        .split(editor_area);
+                    (columns[0], Some(pane))
+                }
+                AgentPaneLayout::Bottom => {
+                    let rows = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([Constraint::Min(1), Constraint::Length(pane.height)])
+                        .split(editor_area);
+                    (rows[0], Some(pane))
+                }
+                AgentPaneLayout::Full => {
+                    (Rect { x: editor_area.x, y: editor_area.y, width: 0, height: 0 }, Some(pane))
+                }
+                AgentPaneLayout::Closed => (editor_area, None),
+            }
+        } else {
+            (editor_area, None)
+        }
+    };
+    #[cfg(not(feature = "agents"))]
+    let (editor_area, agents_area) = (editor_area, None);
     let qf_area = if qf_panel_visible {
         let area = Some(rows[index]);
         index += 1;
@@ -98,7 +168,15 @@ fn split_root_areas(area: Rect, app: &App) -> RootAreas {
     index += 1;
     let prompt_area = rows[index];
 
-    RootAreas { tab_bar_area, editor_area, qf_area, key_hint_area, status_area, prompt_area }
+    RootAreas {
+        tab_bar_area,
+        editor_area,
+        agents_area,
+        qf_area,
+        key_hint_area,
+        status_area,
+        prompt_area,
+    }
 }
 
 /// Return the visible editor row count for the current app state and terminal
@@ -189,10 +267,17 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
         render_gutter(frame, editor[0], buf, vp, app);
         render_buffer(frame, editor[1], buf, vp, app);
 
-        if is_focused {
+        if is_focused && !cursor_hidden_by_agents(app) {
             let cursor = cursor_position_for(buf, vp, app, buffer_area, root.prompt_area);
             frame.set_cursor_position(cursor);
         }
+    }
+
+    // Agents pane (feature `agents`); drawn between the editor and the
+    // status bar so it feels like a split view.
+    #[cfg(feature = "agents")]
+    if let Some(rect) = root.agents_area {
+        render_agents_pane(frame, rect, app);
     }
 
     render_status(frame, root.status_area, app);
@@ -225,7 +310,452 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
     }
 }
 
-// ── Layout helpers ────────────────────────────────────────────────────────────
+// ── Agents pane (feature `agents`) ────────────────────────────────────────────
+
+/// Whether the editor cursor must be hidden because the agents pane owns
+/// focus (the pane places its own cursor in the composer).
+fn cursor_hidden_by_agents(app: &App) -> bool {
+    #[cfg(feature = "agents")]
+    {
+        app.agents_focused()
+    }
+    #[cfg(not(feature = "agents"))]
+    {
+        let _ = app;
+        false
+    }
+}
+
+/// Formats a wall-clock timestamp as `HH:MM` (UTC; display only).
+#[cfg(feature = "agents")]
+fn fmt_hhmm(at: std::time::SystemTime) -> String {
+    let secs = at.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let day_secs = secs % 86_400;
+    format!("{:02}:{:02}", day_secs / 3600, (day_secs / 60) % 60)
+}
+
+/// Renders one transcript item into wrapped lines for the given width.
+#[cfg(feature = "agents")]
+fn transcript_lines(item: &crate::app::TranscriptItem, width: usize) -> Vec<Line<'static>> {
+    use crate::app::{MessageRenderKind, TranscriptItem};
+    let width = width.max(8);
+    let nick_col = crate::app::AGENTS_NICK_COL_WIDTH;
+    let indent = 5 + nick_col + 1; // "[HH:MM] " + nick column + space
+    let text_width = width.saturating_sub(indent).max(4);
+    let mut lines = Vec::new();
+    let dim = Style::default().fg(theme::FG_DIM);
+    match item {
+        TranscriptItem::Message { nick, text, kind, at, .. } => {
+            let style = match kind {
+                MessageRenderKind::User => Style::default().fg(theme::FG_KEY),
+                MessageRenderKind::Assistant => Style::default().fg(theme::FG_TEXT),
+                MessageRenderKind::Thought => {
+                    Style::default().fg(theme::FG_DIM).add_modifier(Modifier::ITALIC)
+                }
+            };
+            let time = fmt_hhmm(*at);
+            let nick_display = pad_or_trim(nick, nick_col);
+            let wrapped = crate::app::wrap_text(text, text_width);
+            for (index, segment) in wrapped.iter().enumerate() {
+                if index == 0 {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("[{time}]"), dim),
+                        Span::raw(" "),
+                        Span::styled(nick_display.clone(), style),
+                        Span::styled(" ", dim),
+                        Span::styled(segment.clone(), style),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::raw(" ".repeat(indent)),
+                        Span::styled(segment.clone(), style),
+                    ]));
+                }
+            }
+        }
+        TranscriptItem::ToolCall { title, status, detail, at, .. } => {
+            let time = fmt_hhmm(*at);
+            lines.push(Line::from(vec![
+                Span::styled(format!("[{time}]"), dim),
+                Span::styled(" * ", Style::default().fg(theme::FG_WARNING)),
+                Span::styled(format!("{title} [{status}]"), Style::default().fg(theme::FG_WARNING)),
+            ]));
+            for segment in crate::app::wrap_text(detail, text_width) {
+                lines.push(Line::from(vec![
+                    Span::raw(" ".repeat(indent)),
+                    Span::styled(segment, dim),
+                ]));
+            }
+        }
+        TranscriptItem::Plan { entries, at } => {
+            let time = fmt_hhmm(*at);
+            lines.push(Line::from(vec![
+                Span::styled(format!("[{time}]"), dim),
+                Span::styled(" plan:", Style::default().fg(theme::FG_KEY)),
+            ]));
+            for (content, marker) in entries {
+                lines.push(Line::from(vec![
+                    Span::raw(" ".repeat(indent)),
+                    Span::styled(format!("[{marker}] "), Style::default().fg(theme::FG_KEY)),
+                    Span::styled(content.clone(), Style::default().fg(theme::FG_TEXT)),
+                ]));
+            }
+        }
+        TranscriptItem::Permission { title, options, at } => {
+            let time = fmt_hhmm(*at);
+            lines.push(Line::from(vec![
+                Span::styled(format!("[{time}]"), dim),
+                Span::styled(" permission: ", Style::default().fg(theme::FG_WARNING)),
+                Span::styled(title.clone(), Style::default().fg(theme::FG_TEXT)),
+            ]));
+            for option in options {
+                lines.push(Line::from(vec![
+                    Span::raw(" ".repeat(indent)),
+                    Span::styled("· ", Style::default().fg(theme::FG_WARNING)),
+                    Span::styled(option.clone(), Style::default().fg(theme::FG_TEXT)),
+                ]));
+            }
+        }
+        TranscriptItem::Elicitation { message, url, at } => {
+            let time = fmt_hhmm(*at);
+            lines.push(Line::from(vec![
+                Span::styled(format!("[{time}]"), dim),
+                Span::styled(" elicitation: ", Style::default().fg(theme::FG_KEY)),
+                Span::styled(message.clone(), Style::default().fg(theme::FG_TEXT)),
+            ]));
+            if let Some(url) = url {
+                for segment in crate::app::wrap_text(url, text_width) {
+                    lines.push(Line::from(vec![
+                        Span::raw(" ".repeat(indent)),
+                        Span::styled(segment, Style::default().fg(theme::FG_INFO)),
+                    ]));
+                }
+            }
+        }
+        TranscriptItem::Approval { title, detail, options, at } => {
+            let time = fmt_hhmm(*at);
+            lines.push(Line::from(vec![
+                Span::styled(format!("[{time}]"), dim),
+                Span::styled(" approval: ", Style::default().fg(theme::FG_WARNING)),
+                Span::styled(title.clone(), Style::default().fg(theme::FG_TEXT)),
+            ]));
+            for segment in crate::app::wrap_text(detail, text_width) {
+                lines.push(Line::from(vec![
+                    Span::raw(" ".repeat(indent)),
+                    Span::styled(segment, Style::default().fg(theme::FG_TEXT)),
+                ]));
+            }
+            for option in options {
+                lines.push(Line::from(vec![
+                    Span::raw(" ".repeat(indent)),
+                    Span::styled("· ", Style::default().fg(theme::FG_WARNING)),
+                    Span::styled(option.clone(), Style::default().fg(theme::FG_TEXT)),
+                ]));
+            }
+        }
+        TranscriptItem::System(text) => {
+            lines
+                .push(Line::from(vec![Span::styled("-!- ", dim), Span::styled(text.clone(), dim)]));
+        }
+        TranscriptItem::Stderr(text) => {
+            lines.push(Line::from(vec![
+                Span::styled("-!- [stderr] ", Style::default().fg(theme::FG_WARNING)),
+                Span::styled(text.clone(), dim),
+            ]));
+        }
+    }
+    lines
+}
+
+/// Renders the irssi-style agents pane: channel list, transcript scrollback,
+/// status footer, and composer line.
+#[cfg(feature = "agents")]
+fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
+    use crate::app::ThreadUiState;
+
+    let style = Style::default().fg(theme::FG_TEXT).bg(theme::BG_CHROME);
+    let pane = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::FG_DIM))
+        .title(" agents ")
+        .style(style);
+    let inner = pane.inner(area);
+    frame.render_widget(pane, area);
+
+    // Disabled-state message (defensive; commands never open the pane while
+    // agents are disabled).
+    if !app.config.agents.enabled {
+        let message = "agents mode disabled (set `agents.enabled = true` to enable)";
+        let mut lines = Vec::new();
+        for segment in crate::app::wrap_text(message, inner.width.saturating_sub(4) as usize) {
+            lines.push(Line::from(Span::styled(segment, Style::default().fg(theme::FG_WARNING))));
+        }
+        let paragraph = Paragraph::new(lines).alignment(Alignment::Center);
+        frame.render_widget(paragraph, inner);
+        return;
+    }
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(crate::app::AGENTS_CHANNEL_COL_WIDTH), Constraint::Min(1)])
+        .split(inner);
+    let channel_area = columns[0];
+    let main_area = columns[1];
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
+        .split(main_area);
+    let transcript_area = rows[0];
+    let footer_area = rows[1];
+    let composer_area = rows[2];
+
+    // Channel/thread list (IRC window list).
+    let mut channel_lines = Vec::new();
+    if app.agents.threads.is_empty() {
+        channel_lines.push(Line::from(Span::styled("(none)", theme_style(theme::FG_DIM))));
+    }
+    for (index, thread) in app.agents.threads.iter().enumerate() {
+        let active = app.agents.active_thread == Some(index);
+        let unread =
+            if thread.unread > 0 { format!(" ({})", thread.unread) } else { String::new() };
+        let text = format!("{}{}{}", thread.state.marker(), thread.display_name, unread);
+        let style = if active {
+            Style::default().fg(theme::FG_INVERTED).bg(theme::FG_KEY).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::FG_TEXT)
+        };
+        channel_lines.push(Line::from(Span::styled(text, style)));
+    }
+    // MCP server health entries (Phase 6): state marker + server id.
+    if !app.agents.mcp.servers.is_empty() {
+        channel_lines.push(Line::from(""));
+        for (id, server) in &app.agents.mcp.servers {
+            let marker = mcp_state_marker(server.state);
+            let style = match server.state {
+                ee_mcp::McpServerState::Ready => theme_style(theme::FG_INFO),
+                ee_mcp::McpServerState::Failed => theme_style(theme::FG_WARNING),
+                ee_mcp::McpServerState::Starting | ee_mcp::McpServerState::Refreshing => {
+                    theme_style(theme::FG_KEY)
+                }
+                ee_mcp::McpServerState::Disabled => theme_style(theme::FG_DIM),
+            };
+            channel_lines.push(Line::from(vec![
+                Span::styled(marker, style),
+                Span::styled(id.clone(), style),
+            ]));
+        }
+    }
+    frame.render_widget(Paragraph::new(channel_lines).scroll((0, 0)), channel_area);
+
+    // Transcript scrollback.
+    let Some(active_index) = app.agents.active_thread else {
+        let message = "-!- no agent session (run :agents)";
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(message, theme_style(theme::FG_DIM)))),
+            transcript_area,
+        );
+        return;
+    };
+    let thread = &app.agents.threads[active_index];
+
+    let mut lines = Vec::new();
+    for item in &thread.transcript {
+        lines.extend(transcript_lines(item, main_area.width.saturating_sub(2) as usize));
+    }
+    let visible_height = transcript_area.height as usize;
+    let top = if thread.stick_to_bottom {
+        lines.len().saturating_sub(visible_height)
+    } else {
+        thread.scroll.min(lines.len().saturating_sub(visible_height))
+    };
+    let window: Vec<Line<'static>> = lines.into_iter().skip(top).take(visible_height).collect();
+    let paragraph = Paragraph::new(window).scroll((0, 0));
+    frame.render_widget(paragraph, transcript_area);
+
+    // Footer: nick, state, usage, unread, stop reason.
+    let state_label = match thread.state {
+        ThreadUiState::Starting => "starting",
+        ThreadUiState::Ready => "ready",
+        ThreadUiState::Running => "running",
+        ThreadUiState::Closed => "closed",
+        ThreadUiState::Failed => "failed",
+    };
+    let footer_text = format!(
+        "{} [{}]{} | unread:{} {}",
+        thread.nick,
+        state_label,
+        thread.usage.as_deref().map(|u| format!(" | {u}")).unwrap_or_default(),
+        thread.unread,
+        thread.stop_reason.as_deref().unwrap_or(""),
+    );
+    let footer_style = if thread.state == ThreadUiState::Running {
+        Style::default().fg(theme::FG_WARNING)
+    } else {
+        theme_style(theme::FG_DIM)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(footer_text, footer_style))),
+        footer_area,
+    );
+
+    // Composer line: prompt, permission choice, elicitation widget, or draft.
+    let composer = agents_composer_line(app, thread);
+    let cursor_col = composer
+        .iter()
+        .map(|span| span.width())
+        .sum::<usize>()
+        .min(composer_area.width.saturating_sub(1) as usize);
+    frame.render_widget(Paragraph::new(Line::from(composer)), composer_area);
+    if app.agents_focused() {
+        frame.set_cursor_position(Position {
+            x: composer_area.x.saturating_add(cursor_col as u16),
+            y: composer_area.y,
+        });
+    }
+}
+
+/// Builds the composer line: permission choice, elicitation widget, or the
+/// prompt draft.
+#[cfg(feature = "agents")]
+fn agents_composer_line(app: &App, thread: &crate::app::AgentThreadUi) -> Vec<Span<'static>> {
+    if let Some(approval) = app.agents.approvals.front() {
+        let count = approval.options.len();
+        let selected = approval.selected.min(count.saturating_sub(1));
+        let label = approval
+            .options
+            .get(selected)
+            .cloned()
+            .map(|(label, _)| label)
+            .unwrap_or_else(|| String::from("(none)"));
+        return vec![
+            Span::styled("> ", Style::default().fg(theme::FG_KEY)),
+            Span::styled(
+                format!("[{}/{}] ", selected + 1, count),
+                Style::default().fg(theme::FG_WARNING),
+            ),
+            Span::styled(
+                format!("{} — {}", approval.title, approval.detail),
+                Style::default().fg(theme::FG_TEXT),
+            ),
+            Span::styled(" ", Style::default().fg(theme::FG_DIM)),
+            Span::styled(label, Style::default().fg(theme::FG_WARNING)),
+            Span::styled(" (Enter confirm, ←/→ change, Esc deny)", theme_style(theme::FG_DIM)),
+        ];
+    }
+    if let Some(permission) = &app.agents.permission {
+        let count = permission.options.len();
+        let selected = permission.selected.min(count.saturating_sub(1));
+        let option = permission
+            .options
+            .get(selected)
+            .map(|option| option.name.clone())
+            .unwrap_or_else(|| String::from("(none)"));
+        return vec![
+            Span::styled("> ", Style::default().fg(theme::FG_KEY)),
+            Span::styled(
+                format!("[{}/{}] ", selected + 1, count),
+                Style::default().fg(theme::FG_WARNING),
+            ),
+            Span::styled(option, Style::default().fg(theme::FG_TEXT)),
+            Span::styled(" (Enter confirm, ←/→ change, Esc back)", theme_style(theme::FG_DIM)),
+        ];
+    }
+    if let Some(elicitation) = &app.agents.elicitation {
+        let mut spans = vec![Span::styled("> ", Style::default().fg(theme::FG_KEY))];
+        if let Some(url) = &elicitation.url {
+            let choice = if elicitation.selected_choice == 0 { "accept/open" } else { "decline" };
+            spans.push(Span::styled(
+                format!("url: {url} [{}] (←/→ change, Enter confirm, Esc decline)", choice),
+                Style::default().fg(theme::FG_INFO),
+            ));
+            return spans;
+        }
+        let Some(field) = elicitation.fields.get(elicitation.selected_field) else {
+            spans.push(Span::styled(
+                "no fields (Enter confirm, Esc decline)",
+                theme_style(theme::FG_DIM),
+            ));
+            return spans;
+        };
+        let marker = if field.unsupported.is_some() { "!" } else { ">" };
+        let value = field.display_value();
+        spans.push(Span::styled(
+            format!("{marker} {}: {}", field.label(), value),
+            Style::default().fg(theme::FG_TEXT),
+        ));
+        spans.push(Span::styled(
+            " (↑/↓ field, ←/→ value, Enter confirm, Esc decline)",
+            theme_style(theme::FG_DIM),
+        ));
+        return spans;
+    }
+    // MCP browse picker (Phase 6): selection list + insert hint.
+    if let Some(browse) = &app.agents.mcp.browse {
+        let mut spans = vec![Span::styled("> ", Style::default().fg(theme::FG_KEY))];
+        if browse.loading {
+            spans.push(Span::styled(
+                format!("mcp {} browse…", browse.kind.label()),
+                theme_style(theme::FG_DIM),
+            ));
+            return spans;
+        }
+        if let Some(error) = &browse.error {
+            spans.push(Span::styled(
+                format!("mcp {} browse error: {error}", browse.kind.label()),
+                theme_style(theme::FG_WARNING),
+            ));
+            return spans;
+        }
+        let Some(item) = browse.items.get(browse.selected) else {
+            spans.push(Span::styled(
+                format!("mcp {}: (empty) — Esc close", browse.kind.label()),
+                theme_style(theme::FG_DIM),
+            ));
+            return spans;
+        };
+        let total = browse.items.len();
+        let mut label = format!(
+            "mcp {} [{}/{}] {}",
+            browse.kind.label(),
+            browse.selected + 1,
+            total,
+            item.label
+        );
+        if let Some(detail) = &item.detail {
+            label.push_str(&format!(" — {detail}"));
+        }
+        spans.push(Span::styled(label, Style::default().fg(theme::FG_TEXT)));
+        spans
+            .push(Span::styled(" (↑/↓ move, Enter insert, Esc close)", theme_style(theme::FG_DIM)));
+        return spans;
+    }
+    let draft = &thread.draft;
+    vec![
+        Span::styled("> ", Style::default().fg(theme::FG_KEY)),
+        Span::styled(draft.clone(), Style::default().fg(theme::FG_TEXT)),
+        Span::styled("█", Style::default().fg(theme::FG_KEY)),
+    ]
+}
+
+/// Styled span helper used by the agents pane.
+#[cfg(feature = "agents")]
+fn theme_style(color: Color) -> Style {
+    Style::default().fg(color)
+}
+
+/// IRC-like state marker for one MCP server connection.
+#[cfg(feature = "agents")]
+fn mcp_state_marker(state: ee_mcp::McpServerState) -> &'static str {
+    match state {
+        ee_mcp::McpServerState::Disabled => "- ",
+        ee_mcp::McpServerState::Starting => "+ ",
+        ee_mcp::McpServerState::Ready => "* ",
+        ee_mcp::McpServerState::Failed => "! ",
+        ee_mcp::McpServerState::Refreshing => "~ ",
+    }
+}
+
+// ── Status bar ───────────────────────────────────────────────────────────────
 
 /// Compute the gutter column width based on display settings and line count.
 fn gutter_width(app: &App, line_count: usize) -> u16 {
@@ -1466,6 +1996,12 @@ fn render_prompt(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             Some(msg) => msg.to_owned(),
             None => "permission denied — retry with elevated save? [y]es [n]o".to_owned(),
         }),
+        #[cfg(feature = "agents")]
+        Mode::Agent => Line::from(
+            "agents | type prompt · Enter send · Esc stop/back · PgUp/PgDn scroll · Ctrl-N/P thread",
+        ),
+        #[cfg(not(feature = "agents"))]
+        Mode::Agent => Line::from("agents pane (compiled without agents feature)"),
         Mode::OperatorPending => Line::from(
             match app.input_state.pending_operator {
                 Some(crate::app::Operator::Delete) => "-- DELETE (motion / text-obj) --",

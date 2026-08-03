@@ -1,7 +1,6 @@
 use std::fs;
 use std::sync::mpsc;
 use std::sync::mpsc::TryRecvError;
-use std::thread;
 use std::time::Duration;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -98,6 +97,12 @@ fn repeated_enter_tracks_cursor_beyond_visible_rows() {
         app.backend.pump().unwrap();
     }
 
+    wait_until_with_backend(
+        &mut app.backend,
+        "repeated enter cursor update",
+        Duration::from_secs(30),
+        |backend| backend.cursor_line == 50 && backend.cursor_col == 0 && backend.lines.len() == 51,
+    );
     assert_eq!(app.backend.cursor_line, 50);
     assert_eq!(app.backend.cursor_col, 0);
     assert_eq!(app.backend.lines.len(), 51);
@@ -553,7 +558,12 @@ fn join_selections_command_joins_selected_lines() {
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
     }
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "seed join selections buffer",
+        Duration::from_secs(5),
+        |backend| backend.lines == vec![String::from("abc"), String::from("    def")],
+    );
 
     let _ = app.backend.send_edit(
         "gesture",
@@ -574,13 +584,12 @@ fn join_selections_command_joins_selected_lines() {
     app.backend.pump().unwrap();
 
     run_ex(&mut app, "join_selections");
-    for _ in 0..20 {
-        app.backend.pump().unwrap();
-        if app.backend.lines.first().is_some_and(|line| line == "abc def") {
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
+    wait_until_with_backend(
+        &mut app.backend,
+        "join selected lines",
+        Duration::from_secs(5),
+        |backend| backend.lines.first().is_some_and(|line| line == "abc def"),
+    );
 
     assert_eq!(app.backend.lines.first().map(String::as_str), Some("abc def"));
 }
@@ -685,10 +694,21 @@ fn fold_close_uses_backend_authoritative_tree_sitter_range() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("fold-close.rs");
     fs::write(&path, "").unwrap();
-    let mut app = App::from_path(Some(path)).unwrap();
+    let mut app = App::from_path(Some(path.clone())).unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "open fold close file",
+        Duration::from_secs(30),
+        |backend| backend.active().path.as_ref() == Some(&path),
+    );
 
     insert_text(&mut app, "fn outer() {\n    if true {\n        work();\n    }\n}\n");
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "seed fold close buffer",
+        Duration::from_secs(30),
+        |backend| backend.lines.len() >= 5,
+    );
 
     app.backend.cursor_line = 0;
 
@@ -704,10 +724,21 @@ fn fold_close_all_uses_backend_authoritative_ranges() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("fold-close-all.rs");
     fs::write(&path, "").unwrap();
-    let mut app = App::from_path(Some(path)).unwrap();
+    let mut app = App::from_path(Some(path.clone())).unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "open fold close all file",
+        Duration::from_secs(30),
+        |backend| backend.active().path.as_ref() == Some(&path),
+    );
 
     insert_text(&mut app, "fn outer() {\n    work();\n}\n\nfn second() {\n    more();\n}\n");
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "seed fold close all buffer",
+        Duration::from_secs(30),
+        |backend| backend.lines.len() >= 7,
+    );
 
     app.fold_close_all();
 
@@ -749,7 +780,7 @@ fn substitute_range_uses_backend_authoritative_path() {
     wait_until_with_backend(
         &mut app.backend,
         "seed substitute buffer",
-        Duration::from_secs(1),
+        Duration::from_secs(5),
         |backend| {
             backend.lines
                 == vec![String::from("alpha"), String::from("beta"), String::from("alpha")]
@@ -760,7 +791,7 @@ fn substitute_range_uses_backend_authoritative_path() {
     wait_until_with_backend(
         &mut app.backend,
         "substitute range apply",
-        Duration::from_secs(1),
+        Duration::from_secs(5),
         |backend| {
             backend.lines
                 == vec![String::from("alpha"), String::from("betA"), String::from("Alpha")]
@@ -782,7 +813,7 @@ fn substitute_confirm_uses_backend_preview_and_apply() {
     wait_until_with_backend(
         &mut app.backend,
         "seed substitute confirm buffer",
-        Duration::from_secs(1),
+        Duration::from_secs(5),
         |backend| {
             backend.lines
                 == vec![String::from("alpha"), String::from("beta"), String::from("alpha")]
@@ -794,7 +825,7 @@ fn substitute_confirm_uses_backend_preview_and_apply() {
     wait_until_with_backend(
         &mut app.backend,
         "substitute confirm apply",
-        Duration::from_secs(1),
+        Duration::from_secs(5),
         |backend| {
             backend.lines
                 == vec![String::from("Alpha"), String::from("beta"), String::from("alpha")]

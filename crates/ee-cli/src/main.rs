@@ -137,6 +137,11 @@ struct Cli {
 
     #[command(subcommand)]
     command: Option<Commands>,
+
+    /// Internal: run as the ee MCP proxy subprocess (spawned by ACP agents
+    /// from the forwarded `mcpServers` config; never invoked by users).
+    #[arg(long, hide = true)]
+    mcp_proxy: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1379,6 +1384,21 @@ fn main() -> io::Result<()> {
         })?;
     }
 
+    // Hidden proxy mode: `ee --mcp-proxy` speaks MCP 2026-07-28 over stdio
+    // on behalf of the editor's proxy listener (agents feature).  The socket
+    // path and token arrive through the environment set by the forwarded
+    // `mcpServers` config.
+    #[cfg(feature = "agents")]
+    if cli.mcp_proxy {
+        let socket = std::env::var("EE_MCP_PROXY_SOCKET").map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "EE_MCP_PROXY_SOCKET is not set")
+        })?;
+        let token = std::env::var("EE_MCP_PROXY_TOKEN").map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "EE_MCP_PROXY_TOKEN is not set")
+        })?;
+        return app::agents_mcp::run_proxy_stdio(PathBuf::from(socket), token);
+    }
+
     // Handle subcommands that don't launch the editor.
     match cli.command {
         Some(Commands::Do { command }) => {
@@ -1537,6 +1557,9 @@ fn run_app(
     while !app.should_quit && !shutdown.load(Ordering::Relaxed) {
         app.backend.drain_events()?;
         app.handle_pending_ui_actions();
+        // Pump agents host events into the pane state (feature `agents`).
+        #[cfg(feature = "agents")]
+        app.pump_agents();
         app.expire_key_sequence_if_idle();
         // Dispatch pending location results (definition, references, …) to the
         // quickfix list before drawing so the panel opens in the same frame.
@@ -1614,5 +1637,11 @@ fn run_app(
             app.refresh_source_control();
         }
     }
+
+    // Phase 7 shutdown orchestration: cancel agent turns, resolve pending
+    // approvals/elicitations, kill agent terminals, stop MCP servers and
+    // agent subprocesses before the process exits.
+    #[cfg(feature = "agents")]
+    app.shutdown_agents();
     Ok(())
 }

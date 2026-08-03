@@ -727,14 +727,10 @@ impl<W: WriteTransport> RawPeer<W> {
     /// Checks status of the most imminent timer.
     fn check_timers(&self) -> Option<Result<usize, Duration>> {
         let mut timers = self.0.timers.lock().unwrap_or_else(|e| e.into_inner());
-        match timers.peek() {
-            None => return None,
-            Some(t) => {
-                let now = Instant::now();
-                if t.fire_after > now {
-                    return Some(Err(t.fire_after - now));
-                }
-            }
+        let t = timers.peek()?;
+        let now = Instant::now();
+        if t.fire_after > now {
+            return Some(Err(t.fire_after - now));
         }
         Some(Ok(timers.pop().unwrap().token))
     }

@@ -1751,6 +1751,21 @@ mod tests {
         (client, peer)
     }
 
+    /// Pre-compiles the standard queries for `languages` so the timed render
+    /// and span paths never pay cold query-compilation cost inside their
+    /// wall-clock budgets.
+    fn warm_syntax_queries(languages: &[&str]) {
+        use crate::runtime_loader::{RuntimeQueryKind, with_default_runtime_loader_mut};
+        crate::runtime_loader::ensure_default_runtime_loader_has_test_grammars();
+        with_default_runtime_loader_mut(|loader| {
+            for language in languages {
+                for kind in [RuntimeQueryKind::Highlights, RuntimeQueryKind::Injections] {
+                    let _ = loader.compile_query_kind(language, kind);
+                }
+            }
+        });
+    }
+
     #[test]
     fn incremental_find_update() {
         let mut view = View::new(1.into(), BufferId::new(2));
@@ -2132,6 +2147,8 @@ mod tests {
 
     #[test]
     fn render_if_dirty_emits_backend_syntax_spans_without_plugin_update() {
+        let _guard = crate::runtime_loader::runtime_loader_test_guard();
+        warm_syntax_queries(&["rust"]);
         let mut view = View::new(1.into(), BufferId::new(2));
         let editor = crate::editor::Editor::with_text("let x = 1;\n");
         let (client, peer) = recording_client();
@@ -2156,6 +2173,8 @@ mod tests {
 
     #[test]
     fn backend_syntax_spans_keep_yaml_keys_after_block_scalar_with_forward_context() {
+        let _guard = crate::runtime_loader::runtime_loader_test_guard();
+        warm_syntax_queries(&["yaml", "bash"]);
         let mut view = View::new(1.into(), BufferId::new(2));
         let editor = crate::editor::Editor::with_text(include_str!("../../../tasks.yaml"));
         view.debug_force_rewrap_cols(editor.get_buffer(), 120);

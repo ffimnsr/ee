@@ -1,6 +1,12 @@
 // Submodules extracted from the monolithic tests.rs.
 // Each submodule lives in `tests/` and covers a focused test category.
 
+#[cfg(feature = "agents")]
+pub(crate) mod agent_bridge;
+#[cfg(feature = "agents")]
+pub(crate) mod agent_mcp;
+#[cfg(feature = "agents")]
+pub(crate) mod agent_pane;
 pub(crate) mod app;
 pub(crate) mod commands;
 pub(crate) mod edit_buffer;

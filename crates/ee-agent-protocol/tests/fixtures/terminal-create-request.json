@@ -1,0 +1,18 @@
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "terminal/create",
+  "params": {
+    "sessionId": "sess_abc123def456",
+    "command": "npm",
+    "args": ["test", "--coverage"],
+    "env": [
+      {
+        "name": "NODE_ENV",
+        "value": "test"
+      }
+    ],
+    "cwd": "/home/user/project",
+    "outputByteLimit": 1048576
+  }
+}

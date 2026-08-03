@@ -115,6 +115,10 @@ pub(crate) struct EditorSettings {
     pub lsp: LspSettings,
     /// Resolved keymap overrides layered from `.ee.toml` files.
     pub keymap: KeymapSettings,
+    /// Effective agents-mode settings resolved from ee TOML layers.
+    pub agents: AgentsSettings,
+    /// Effective shared MCP server configuration resolved from ee TOML layers.
+    pub mcp: McpSettings,
 }
 
 impl Default for EditorSettings {
@@ -139,6 +143,8 @@ impl Default for EditorSettings {
             statusline_format: StatuslineFormat::Default,
             lsp: LspSettings::default(),
             keymap: KeymapSettings::default(),
+            agents: AgentsSettings::default(),
+            mcp: McpSettings::default(),
         }
     }
 }
@@ -264,6 +270,66 @@ pub(crate) struct LspServerSettings {
     pub workspace_identifier: Option<String>,
     pub env: BTreeMap<String, String>,
     pub initialization_options: Option<Value>,
+}
+
+// ── Agents-mode settings ───────────────────────────────────────────────────────
+
+/// Default request timeout for Streamable HTTP MCP servers, in milliseconds.
+const DEFAULT_MCP_HTTP_TIMEOUT_MS: u64 = 30_000;
+
+/// Resolved agents-mode settings.  Agents mode is disabled by default at
+/// runtime; `enabled` only becomes `true` through an explicit config layer.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct AgentsSettings {
+    pub enabled: bool,
+    pub default_agent: Option<String>,
+    pub servers: BTreeMap<String, AgentServerSettings>,
+}
+
+/// Resolved ACP agent subprocess definition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentServerSettings {
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    pub cwd: Option<PathBuf>,
+}
+
+/// Resolved shared MCP server configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct McpSettings {
+    pub servers: BTreeMap<String, McpServerSettings>,
+    /// Optional ee MCP proxy mode (off by default).
+    pub proxy: McpProxySettings,
+}
+
+/// Resolved ee MCP proxy runtime settings.
+///
+/// The proxy exposes `ee.*` tools (file read/write, terminal create,
+/// diagnostics) as a local MCP server that ACP agents can connect to; every
+/// tool call routes through the same approval and bridge paths as direct ACP
+/// client methods.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct McpProxySettings {
+    /// Whether the proxy is started when agents mode is enabled.
+    pub enabled: bool,
+}
+
+/// Resolved MCP server transport.  Only stdio and Streamable HTTP are
+/// supported; HTTP+SSE and other transports are not implemented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum McpServerSettings {
+    Stdio {
+        command: String,
+        args: Vec<String>,
+        env: BTreeMap<String, String>,
+        cwd: Option<PathBuf>,
+    },
+    StreamableHttp {
+        url: String,
+        headers: BTreeMap<String, String>,
+        timeout_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -839,6 +905,8 @@ pub(crate) struct EeToml {
     #[serde(default)]
     pub languages: BTreeMap<String, RuntimeLanguageConfig>,
     pub keymap: Option<KeymapToml>,
+    pub agents: Option<AgentsToml>,
+    pub mcp: Option<McpToml>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
@@ -862,6 +930,78 @@ pub(crate) struct LspServerToml {
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     pub initialization_options: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AgentsToml {
+    /// Runtime switch for agents mode.  Defaults to `false`; agents mode is
+    /// disabled unless a config layer sets this to `true`.
+    pub enabled: Option<bool>,
+    /// Agent server id used when the user starts a session without choosing
+    /// an explicit agent.
+    pub default_agent: Option<String>,
+    #[serde(default)]
+    pub servers: BTreeMap<String, AgentServerToml>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AgentServerToml {
+    /// Executable invoked to start the ACP agent subprocess.
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Working directory for the agent subprocess; inherits `ee` when unset.
+    pub cwd: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct McpToml {
+    #[serde(default)]
+    pub servers: BTreeMap<String, McpServerToml>,
+    /// ee MCP proxy mode (off by default).
+    #[serde(default)]
+    pub proxy: Option<McpProxyToml>,
+}
+
+/// Raw `[mcp.proxy]` settings.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct McpProxyToml {
+    /// Whether the ee MCP proxy starts with agents mode.
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct McpServerToml {
+    /// Transport discriminator: `"stdio"` or `"streamable_http"`.
+    pub transport: McpTransportToml,
+    // ── stdio transport fields ─────────────────────────────────────────────
+    /// Executable invoked to start the MCP server.
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Working directory for the MCP server; inherits `ee` when unset.
+    pub cwd: Option<PathBuf>,
+    // ── streamable_http transport fields ───────────────────────────────────
+    /// Absolute `http(s)` endpoint URL of the MCP server.
+    pub url: Option<String>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    /// Request timeout in milliseconds; defaults to 30 000.
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum McpTransportToml {
+    Stdio,
+    StreamableHttp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1138,6 +1278,12 @@ impl EditorSettings {
         if let Some(keymap) = &patch.keymap {
             self.merge_keymap_toml(keymap);
         }
+        if let Some(agents) = &patch.agents {
+            self.merge_agents_toml(agents);
+        }
+        if let Some(mcp) = &patch.mcp {
+            self.merge_mcp_toml(mcp);
+        }
     }
 
     fn merge_keymap_toml(&mut self, patch: &KeymapToml) {
@@ -1220,6 +1366,88 @@ impl EditorSettings {
                 action,
                 description,
             });
+        }
+    }
+
+    fn merge_agents_toml(&mut self, patch: &AgentsToml) {
+        if let Some(enabled) = patch.enabled {
+            self.agents.enabled = enabled;
+        }
+        if let Some(default_agent) = &patch.default_agent {
+            self.agents.default_agent = Some(default_agent.clone());
+        }
+        for (id, server) in &patch.servers {
+            match resolve_agent_server(id, server) {
+                Ok(resolved) => {
+                    self.agents.servers.insert(id.clone(), resolved);
+                }
+                Err(err) => eprintln!("ee: warning: invalid agents server `{id}`: {err}"),
+            }
+        }
+    }
+
+    fn merge_mcp_toml(&mut self, patch: &McpToml) {
+        if let Some(proxy) = &patch.proxy
+            && let Some(enabled) = proxy.enabled
+        {
+            self.mcp.proxy.enabled = enabled;
+        }
+        for (id, server) in &patch.servers {
+            match resolve_mcp_server(id, server) {
+                Ok(resolved) => {
+                    self.mcp.servers.insert(id.clone(), resolved);
+                }
+                Err(err) => eprintln!("ee: warning: invalid mcp server `{id}`: {err}"),
+            }
+        }
+    }
+}
+
+fn resolve_agent_server(id: &str, server: &AgentServerToml) -> Result<AgentServerSettings, String> {
+    if id.trim().is_empty() {
+        return Err(String::from("agent server id must not be empty"));
+    }
+    let command = server.command.as_deref().unwrap_or_default().trim();
+    if command.is_empty() {
+        return Err(String::from("agent server command must not be empty"));
+    }
+    Ok(AgentServerSettings {
+        command: command.to_owned(),
+        args: server.args.clone().unwrap_or_default(),
+        env: server.env.clone(),
+        cwd: server.cwd.clone(),
+    })
+}
+
+fn resolve_mcp_server(id: &str, server: &McpServerToml) -> Result<McpServerSettings, String> {
+    if id.trim().is_empty() {
+        return Err(String::from("mcp server id must not be empty"));
+    }
+    match server.transport {
+        McpTransportToml::Stdio => {
+            let command = server.command.as_deref().unwrap_or_default().trim();
+            if command.is_empty() {
+                return Err(String::from("mcp stdio server command must not be empty"));
+            }
+            Ok(McpServerSettings::Stdio {
+                command: command.to_owned(),
+                args: server.args.clone().unwrap_or_default(),
+                env: server.env.clone(),
+                cwd: server.cwd.clone(),
+            })
+        }
+        McpTransportToml::StreamableHttp => {
+            let raw_url = server.url.as_deref().unwrap_or_default();
+            let parsed = url::Url::parse(raw_url)
+                .map_err(|err| format!("invalid mcp url `{raw_url}`: {err}"))?;
+            if !matches!(parsed.scheme(), "http" | "https") {
+                return Err(format!("invalid mcp url `{raw_url}`: scheme must be http or https"));
+            }
+            Ok(McpServerSettings::StreamableHttp {
+                url: parsed.to_string(),
+                headers: server.headers.clone(),
+                timeout_ms: server.timeout_ms.unwrap_or(DEFAULT_MCP_HTTP_TIMEOUT_MS),
+            })
         }
     }
 }
@@ -1415,6 +1643,68 @@ fn lsp_settings_to_toml(lsp: &LspSettings) -> Option<LspToml> {
     })
 }
 
+fn agents_settings_to_toml(agents: &AgentsSettings) -> Option<AgentsToml> {
+    Some(AgentsToml {
+        enabled: Some(agents.enabled),
+        default_agent: agents.default_agent.clone(),
+        servers: agents
+            .servers
+            .iter()
+            .map(|(id, server)| {
+                (
+                    id.clone(),
+                    AgentServerToml {
+                        command: Some(server.command.clone()),
+                        args: Some(server.args.clone()),
+                        env: server.env.clone(),
+                        cwd: server.cwd.clone(),
+                    },
+                )
+            })
+            .collect(),
+    })
+}
+
+fn mcp_settings_to_toml(mcp: &McpSettings) -> Option<McpToml> {
+    if mcp.servers.is_empty() && !mcp.proxy.enabled {
+        return None;
+    }
+    Some(McpToml {
+        servers: mcp
+            .servers
+            .iter()
+            .map(|(id, server)| {
+                let toml = match server {
+                    McpServerSettings::Stdio { command, args, env, cwd } => McpServerToml {
+                        transport: McpTransportToml::Stdio,
+                        command: Some(command.clone()),
+                        args: Some(args.clone()),
+                        env: env.clone(),
+                        cwd: cwd.clone(),
+                        url: None,
+                        headers: BTreeMap::new(),
+                        timeout_ms: None,
+                    },
+                    McpServerSettings::StreamableHttp { url, headers, timeout_ms } => {
+                        McpServerToml {
+                            transport: McpTransportToml::StreamableHttp,
+                            command: None,
+                            args: None,
+                            env: BTreeMap::new(),
+                            cwd: None,
+                            url: Some(url.clone()),
+                            headers: headers.clone(),
+                            timeout_ms: Some(*timeout_ms),
+                        }
+                    }
+                };
+                (id.clone(), toml)
+            })
+            .collect(),
+        proxy: mcp.proxy.enabled.then_some(McpProxyToml { enabled: Some(true) }),
+    })
+}
+
 fn keymap_settings_to_toml(keymap: &crate::keymap::KeymapSettings) -> Option<KeymapToml> {
     let mut unbind = Vec::new();
     let mut bindings = Vec::new();
@@ -1500,6 +1790,8 @@ fn resolved_config_with_env(file_path: Option<&Path>, env: &ConfigEnvironment) -
         lsp: lsp_settings_to_toml(&settings.lsp),
         languages: runtime_languages,
         keymap: keymap_settings_to_toml(&settings.keymap),
+        agents: agents_settings_to_toml(&settings.agents),
+        mcp: mcp_settings_to_toml(&settings.mcp),
     }
 }
 
@@ -1571,6 +1863,9 @@ fn validate_config_contents(path: &Path, contents: &str) -> Result<(), String> {
     let parsed = toml::from_str::<EeToml>(contents)
         .map_err(|err| format!("Config parse error in {}: {err}", path.display()))?;
 
+    validate_agents_mcp_config(&parsed)
+        .map_err(|err| format!("Config validation error in {}: {err}", path.display()))?;
+
     if parsed.languages.is_empty() {
         return Ok(());
     }
@@ -1586,6 +1881,30 @@ fn validate_config_contents(path: &Path, contents: &str) -> Result<(), String> {
 
     validate_runtime_language_overrides(&user_overrides, &workspace_overrides, is_workspace_layer)
         .map_err(|err| format!("Config validation error in {}: {err}", path.display()))
+}
+
+/// Rejects invalid agents/MCP server definitions and ids that collide across
+/// the `agents.servers` and `mcp.servers` namespaces.
+fn validate_agents_mcp_config(parsed: &EeToml) -> Result<(), String> {
+    let mut effective_ids = BTreeSet::new();
+    if let Some(agents) = &parsed.agents {
+        for (id, server) in &agents.servers {
+            resolve_agent_server(id, server)
+                .map_err(|err| format!("agents server `{id}`: {err}"))?;
+            effective_ids.insert(id.clone());
+        }
+    }
+    if let Some(mcp) = &parsed.mcp {
+        for (id, server) in &mcp.servers {
+            resolve_mcp_server(id, server).map_err(|err| format!("mcp server `{id}`: {err}"))?;
+            if !effective_ids.insert(id.clone()) {
+                return Err(format!(
+                    "duplicate effective server id `{id}` in agents.servers and mcp.servers"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn get_config_value_with_env(
@@ -2190,6 +2509,8 @@ tab_width = 4
 
     #[test]
     fn xi_config_tables_split_global_and_file_overrides() {
+        // The process cwd is process-global; lock it while mutating.
+        let _cwd_lock = test_cwd_lock().lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("main.rs");
         let editorconfig = temp.path().join(".editorconfig");
@@ -3192,5 +3513,304 @@ description = "find files"
         assert_eq!(written, env.cwd.join(".ee.toml"));
         assert!(contents.contains("[lsp.servers.rust]"));
         assert!(contents.contains("command = \"rust-analyzer\""));
+    }
+
+    // ── Agents-mode config ──────────────────────────────────────────────────
+
+    #[test]
+    fn agents_settings_disabled_by_default() {
+        let settings = EditorSettings::default();
+
+        assert!(!settings.agents.enabled);
+        assert!(settings.agents.default_agent.is_none());
+        assert!(settings.agents.servers.is_empty());
+        assert!(settings.mcp.servers.is_empty());
+    }
+
+    #[test]
+    fn ee_toml_parses_agents_settings() {
+        let toml = r#"
+[agents]
+enabled = true
+default_agent = "helper"
+
+[agents.servers.helper]
+command = "ee-helper"
+args = ["serve"]
+env = { EE_AGENT_MODE = "1" }
+cwd = "/tmp/agent"
+
+[agents.servers.other]
+command = "other-agent"
+"#;
+        let raw: EeToml = toml::from_str(toml).unwrap();
+        assert_eq!(raw.agents.as_ref().unwrap().enabled, Some(true));
+
+        let mut settings = EditorSettings::default();
+        settings.merge_toml(&raw);
+
+        assert!(settings.agents.enabled);
+        assert_eq!(settings.agents.default_agent.as_deref(), Some("helper"));
+        let helper = settings.agents.servers.get("helper").unwrap();
+        assert_eq!(helper.command, "ee-helper");
+        assert_eq!(helper.args, vec!["serve"]);
+        assert_eq!(helper.env.get("EE_AGENT_MODE").map(String::as_str), Some("1"));
+        assert_eq!(helper.cwd.as_deref(), Some(Path::new("/tmp/agent")));
+        assert_eq!(settings.agents.servers.len(), 2);
+    }
+
+    #[test]
+    fn ee_toml_parses_mcp_servers() {
+        let toml = r#"
+[mcp.servers.filesystem]
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem"]
+
+[mcp.servers.remote]
+transport = "streamable_http"
+url = "https://example.com/mcp"
+headers = { Authorization = "Bearer token" }
+"#;
+        let raw: EeToml = toml::from_str(toml).unwrap();
+
+        let mut settings = EditorSettings::default();
+        settings.merge_toml(&raw);
+
+        let servers = &settings.mcp.servers;
+        match servers.get("filesystem").unwrap() {
+            McpServerSettings::Stdio { command, args, env, cwd } => {
+                assert_eq!(command, "npx");
+                assert_eq!(
+                    args,
+                    &vec!["-y".to_owned(), "@modelcontextprotocol/server-filesystem".to_owned()]
+                );
+                assert!(env.is_empty());
+                assert!(cwd.is_none());
+            }
+            other => panic!("expected stdio transport, got {other:?}"),
+        }
+        match servers.get("remote").unwrap() {
+            McpServerSettings::StreamableHttp { url, headers, timeout_ms } => {
+                assert_eq!(url, "https://example.com/mcp");
+                assert_eq!(headers.get("Authorization").map(String::as_str), Some("Bearer token"));
+                assert_eq!(*timeout_ms, DEFAULT_MCP_HTTP_TIMEOUT_MS);
+            }
+            other => panic!("expected streamable_http transport, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ee_toml_rejects_unknown_agents_and_mcp_fields() {
+        let err = toml::from_str::<EeToml>("[agents]\nbogus = true\n").unwrap_err();
+        assert!(err.to_string().contains("unknown field `bogus`"));
+
+        let err =
+            toml::from_str::<EeToml>("[mcp.servers.foo]\ntransport = \"stdio\"\nbogus = true\n")
+                .unwrap_err();
+        assert!(err.to_string().contains("unknown field `bogus`"));
+    }
+
+    #[test]
+    fn ee_toml_mcp_server_requires_transport() {
+        let err = toml::from_str::<EeToml>("[mcp.servers.foo]\ncommand = \"x\"\n").unwrap_err();
+        assert!(err.to_string().contains("transport"));
+    }
+
+    #[test]
+    fn project_config_enables_agents_while_defaults_stay_disabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        let file = project.join("main.rs");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+
+        // Built-in defaults keep agents disabled even with no config layers.
+        let defaults = load_config_with_env(Some(&file), &env);
+        assert!(!defaults.agents.enabled);
+        assert!(defaults.agents.servers.is_empty());
+
+        // User layer defines an agent server but never enables agents mode.
+        std::fs::write(
+            env.config_dir.as_ref().unwrap().join("ee").join("config.toml"),
+            "[agents.servers.user-agent]\ncommand = \"user-agent\"\n",
+        )
+        .unwrap();
+
+        // Project-local `.ee.toml` enables agents and refines the server.
+        std::fs::write(
+            project.join(".ee.toml"),
+            "[agents]\nenabled = true\ndefault_agent = \"user-agent\"\n\n[agents.servers.user-agent]\ncommand = \"user-agent\"\nargs = [\"--stdio\"]\n",
+        )
+        .unwrap();
+
+        let settings = load_config_with_env(Some(&file), &env);
+        assert!(settings.agents.enabled);
+        assert_eq!(settings.agents.default_agent.as_deref(), Some("user-agent"));
+        let agent = settings.agents.servers.get("user-agent").unwrap();
+        assert_eq!(agent.command, "user-agent");
+        assert_eq!(agent.args, vec!["--stdio"]);
+    }
+
+    #[test]
+    fn validate_config_file_rejects_empty_agent_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".ee.toml");
+        std::fs::write(&path, "[agents.servers.broken]\ncommand = \"\"\n").unwrap();
+
+        let error = validate_config_file(&path).unwrap_err();
+
+        assert!(error.contains("Config validation error"));
+        assert!(error.contains("agents server `broken`"));
+        assert!(error.contains("command must not be empty"));
+    }
+
+    #[test]
+    fn validate_config_file_rejects_invalid_mcp_url() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".ee.toml");
+
+        std::fs::write(
+            &path,
+            "[mcp.servers.remote]\ntransport = \"streamable_http\"\nurl = \"ftp://example.com/mcp\"\n",
+        )
+        .unwrap();
+        let error = validate_config_file(&path).unwrap_err();
+        assert!(error.contains("mcp server `remote`"));
+        assert!(error.contains("scheme must be http or https"));
+
+        std::fs::write(
+            &path,
+            "[mcp.servers.remote]\ntransport = \"streamable_http\"\nurl = \"not a url\"\n",
+        )
+        .unwrap();
+        let error = validate_config_file(&path).unwrap_err();
+        assert!(error.contains("invalid mcp url"));
+    }
+
+    #[test]
+    fn validate_config_file_rejects_empty_server_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".ee.toml");
+
+        std::fs::write(&path, "[agents.servers.\"\"]\ncommand = \"x\"\n").unwrap();
+        let error = validate_config_file(&path).unwrap_err();
+        assert!(error.contains("agent server id must not be empty"));
+
+        std::fs::write(&path, "[mcp.servers.\"\"]\ntransport = \"stdio\"\ncommand = \"x\"\n")
+            .unwrap();
+        let error = validate_config_file(&path).unwrap_err();
+        assert!(error.contains("mcp server id must not be empty"));
+    }
+
+    #[test]
+    fn validate_config_file_rejects_duplicate_effective_server_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(".ee.toml");
+        std::fs::write(
+            &path,
+            "[agents.servers.dup]\ncommand = \"agent\"\n\n[mcp.servers.dup]\ntransport = \"stdio\"\ncommand = \"mcp-server\"\n",
+        )
+        .unwrap();
+
+        let error = validate_config_file(&path).unwrap_err();
+
+        assert!(error.contains("Config validation error"));
+        assert!(error.contains("duplicate effective server id `dup`"));
+    }
+
+    #[test]
+    fn config_schema_includes_agents_and_mcp_fields() {
+        let schema: Value = serde_json::from_str(&config_schema_json().unwrap()).unwrap();
+        let properties = schema.get("properties").and_then(Value::as_object).unwrap();
+        assert!(properties.contains_key("agents"));
+        assert!(properties.contains_key("mcp"));
+
+        let defs = schema.get("$defs").and_then(Value::as_object).unwrap();
+        let agents = defs.get("AgentsToml").unwrap().get("properties").unwrap();
+        assert!(agents.get("enabled").is_some());
+        assert!(agents.get("default_agent").is_some());
+        assert!(agents.get("servers").is_some());
+
+        let mcp = defs.get("McpToml").unwrap().get("properties").unwrap();
+        assert!(mcp.get("servers").is_some());
+        assert!(mcp.get("proxy").is_some());
+        let proxy = defs.get("McpProxyToml").unwrap().get("properties").unwrap();
+        assert!(proxy.get("enabled").is_some());
+    }
+
+    #[test]
+    fn mcp_proxy_disabled_by_default_and_parsed_from_toml() {
+        assert!(!EditorSettings::default().mcp.proxy.enabled);
+
+        let toml = r#"
+[mcp.proxy]
+enabled = true
+"#;
+        let raw: EeToml = toml::from_str(toml).unwrap();
+        let mut settings = EditorSettings::default();
+        settings.merge_toml(&raw);
+        assert!(settings.mcp.proxy.enabled);
+
+        // Serialize back through the full document shape: the resolved
+        // document carries the proxy flag.
+        let document = EeToml {
+            mcp: Some(McpToml {
+                proxy: Some(McpProxyToml { enabled: Some(true) }),
+                servers: BTreeMap::new(),
+            }),
+            ..Default::default()
+        };
+        let text = toml::to_string(&document).unwrap();
+        let roundtrip: EeToml = toml::from_str(&text).unwrap();
+        let mut restored = EditorSettings::default();
+        restored.merge_toml(&roundtrip);
+        assert!(restored.mcp.proxy.enabled);
+    }
+
+    #[test]
+    fn mcp_settings_to_toml_includes_proxy_when_enabled() {
+        let settings = EditorSettings::default();
+        assert!(mcp_settings_to_toml(&settings.mcp).is_none());
+
+        let mut enabled = EditorSettings::default();
+        enabled.mcp.proxy.enabled = true;
+        let toml = mcp_settings_to_toml(&enabled.mcp).expect("proxy present");
+        assert_eq!(toml.proxy.as_ref().and_then(|p| p.enabled), Some(true));
+    }
+
+    #[test]
+    fn merged_config_document_includes_agents_and_mcp() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        let project = env.cwd.join("project");
+        let file = project.join("main.rs");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(".ee.toml"),
+            "[agents]\nenabled = true\ndefault_agent = \"helper\"\n\n[agents.servers.helper]\ncommand = \"helper-agent\"\n\n[mcp.servers.tools]\ntransport = \"stdio\"\ncommand = \"mcp-tools\"\n",
+        )
+        .unwrap();
+
+        let text = toml::to_string_pretty(&resolved_config_with_env(Some(&file), &env)).unwrap();
+
+        assert!(text.contains("enabled = true"));
+        assert!(text.contains("default_agent = \"helper\""));
+        assert!(text.contains("command = \"helper-agent\""));
+        assert!(text.contains("transport = \"stdio\""));
+        assert!(text.contains("command = \"mcp-tools\""));
+    }
+
+    #[test]
+    fn merged_config_document_keeps_agents_disabled_without_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_env(temp.path());
+        std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+
+        let text = toml::to_string_pretty(&resolved_config_with_env(None, &env)).unwrap();
+
+        assert!(text.contains("enabled = false"));
+        assert!(!text.contains("[mcp]"));
     }
 }

@@ -1,0 +1,15 @@
+{
+  "jsonrpc": "2.0",
+  "method": "session/update",
+  "params": {
+    "sessionId": "sess_abc123def456",
+    "update": {
+      "sessionUpdate": "agent_message_chunk",
+      "messageId": "msg_agent_c42b9",
+      "content": {
+        "type": "text",
+        "text": "I'll analyze your code for potential issues. Let me examine it..."
+      }
+    }
+  }
+}

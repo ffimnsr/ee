@@ -35,6 +35,9 @@ pub(crate) enum Mode {
     SubstituteConfirm,
     /// Awaiting confirmation before retrying a failed save with privilege escalation.
     PrivilegeConfirm,
+    /// Focused agents pane input (feature `agents`; unreachable without it).
+    #[cfg_attr(not(feature = "agents"), allow(dead_code))]
+    Agent,
 }
 
 impl Mode {
@@ -53,6 +56,7 @@ impl Mode {
             Mode::LocationList => "LOC",
             Mode::SubstituteConfirm => "SUB",
             Mode::PrivilegeConfirm => "SUD",
+            Mode::Agent => "AGT",
         }
     }
 
@@ -322,6 +326,9 @@ pub(crate) struct App {
     pub(crate) substitute_pending: Option<SubstitutePending>,
     /// Pending privileged save confirmation after permission-denied write.
     pub(crate) privileged_save_pending: Option<PrivilegedSavePending>,
+    /// Agents pane state (feature `agents`); default is closed and inert.
+    #[cfg(feature = "agents")]
+    pub(crate) agents: super::agent_pane::AgentPaneState,
     /// Force next frame to clear and redraw the terminal surface.
     pub(crate) redraw_requested: bool,
     /// Per-session render observability counters.
@@ -417,6 +424,8 @@ impl App {
             swift_motion: None,
             substitute_pending: None,
             privileged_save_pending: None,
+            #[cfg(feature = "agents")]
+            agents: super::agent_pane::AgentPaneState::default(),
             redraw_requested: false,
             render_metrics: crate::render_metrics::RenderMetrics::new(),
         })

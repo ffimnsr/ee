@@ -1,0 +1,29 @@
+[package]
+name = "ee-agent-host"
+version = "0.1.0"
+license = "Apache-2.0"
+authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
+description = "Agent host for ee agents mode: session lifecycle, approvals, and MCP startup."
+categories = ["development-tools"]
+homepage = "https://github.com/ffimnsr/ee"
+repository = "https://github.com/ffimnsr/ee"
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+# In-process fake ACP agent transport used by tests (host and ee-cli).
+test-utils = []
+
+[dependencies]
+ee-agent-protocol.workspace = true
+ee-mcp.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-std", "io-util", "process", "time"] }
+tokio-util = { workspace = true, features = ["compat"] }
+tracing.workspace = true
+
+[dev-dependencies]
+ee-agent-host = { path = ".", features = ["test-utils"] }
+tempfile.workspace = true

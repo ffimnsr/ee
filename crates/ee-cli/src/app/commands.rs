@@ -428,6 +428,15 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     command_spec("dedup", "uniq", "uniq"),
     command_spec("add_selection_above", "add_selection_above", "add_selection_above"),
     command_spec("add_selection_below", "add_selection_below", "add_selection_below"),
+    command_spec("agents", "agents", "agents"),
+    command_spec("agents_clear", "agents_clear", "agents_clear"),
+    command_spec("agents_close", "agents_close", "agents_close"),
+    command_spec("agents_layout", "agents_layout", "agents_layout"),
+    command_spec("agents_mcp", "agents_mcp", "agents_mcp"),
+    command_spec("agents_new", "agents_new", "agents_new"),
+    command_spec("agents_next", "agents_next", "agents_next"),
+    command_spec("agents_prev", "agents_prev", "agents_prev"),
+    command_spec("agents_stop", "agents_stop", "agents_stop"),
     command_spec(
         "change_current_directory",
         "change_current_directory",
@@ -724,6 +733,8 @@ impl App {
             | "location_list_first"
             | "location_list_last"
             | "location_list_select" => "lists",
+            "agents" | "agents_close" | "agents_new" | "agents_stop" | "agents_clear"
+            | "agents_next" | "agents_prev" | "agents_layout" | "agents_mcp" => "agents",
             _ => "editing",
         };
 
@@ -994,6 +1005,22 @@ impl App {
             "location_list_first" => (Cow::Borrowed("jump to first location-list entry"), None),
             "location_list_last" => (Cow::Borrowed("jump to last location-list entry"), None),
             "location_list_select" => (Cow::Borrowed("jump to location-list entry"), Some("[N]")),
+            "agents" => (Cow::Borrowed("open agents pane or report agents-mode status"), None),
+            "agents_close" => {
+                (Cow::Borrowed("close agents pane without killing the session"), None)
+            }
+            "agents_new" => (Cow::Borrowed("start a new agent session"), None),
+            "agents_next" => (Cow::Borrowed("switch to the next agent thread"), None),
+            "agents_prev" => (Cow::Borrowed("switch to the previous agent thread"), None),
+            "agents_stop" => (Cow::Borrowed("stop the active agent session"), None),
+            "agents_clear" => (Cow::Borrowed("clear the active agent session"), None),
+            "agents_layout" => {
+                (Cow::Borrowed("set the agents pane split layout"), Some("right|bottom|full"))
+            }
+            "agents_mcp" => (
+                Cow::Borrowed("browse MCP tools/prompts/resources or show MCP health"),
+                Some("tools|prompts|resources|close"),
+            ),
             "buffers" => (Cow::Borrowed("print open buffers to status line"), None),
             "buffer_close" => (Cow::Borrowed("close current buffer"), None),
             "buffer_close_force" => {
@@ -2745,6 +2772,21 @@ impl App {
                 let _ = self.backend.send_edit("highlight_find", json!({ "visible": false }));
                 self.backend.status_message = Some("search highlight cleared".to_owned());
             }
+            "agents" | "agents_close" | "agents_new" | "agents_stop" | "agents_clear"
+            | "agents_next" | "agents_prev" | "agents_layout" | "agents_mcp" => {
+                if self.dispatch_agents_command(head, tail) {
+                    // The agents pane keeps keyboard focus (or restores its
+                    // previous editor mode); skip the trailing
+                    // `enter_normal_mode` but still clear the command line.
+                    self.command_buffer.clear();
+                    // Commands run from the pane's `:` command line must
+                    // return focus to the pane.
+                    if self.mode == Mode::CommandLine && self.agents_pane_open() {
+                        self.mode = Mode::Agent;
+                    }
+                    return;
+                }
+            }
             other if !other.is_empty() => {
                 self.backend.status_message = Some(format!("unknown command: {other}"));
             }
@@ -3671,6 +3713,51 @@ mod command_registry_tests {
             .collect();
         assert!(unresolved.is_empty(), "general help mentions unknown aliases: {unresolved:?}");
     }
+
+    #[test]
+    fn agents_commands_resolve_lowercase_snake_case_only() {
+        for alias in [
+            "agents",
+            "agents_close",
+            "agents_new",
+            "agents_next",
+            "agents_prev",
+            "agents_stop",
+            "agents_clear",
+            "agents_layout",
+            "agents_mcp",
+        ] {
+            let spec = App::resolve_ex_command(alias)
+                .unwrap_or_else(|| panic!("agents alias `{alias}` missing from registry"));
+            assert_eq!(spec.canonical_id, alias);
+            assert_eq!(spec.dispatch, alias);
+        }
+    }
+
+    #[test]
+    fn camel_case_agent_command_aliases_are_rejected() {
+        for alias in [
+            "Agents",
+            "AgentClose",
+            "AgentStop",
+            "AgentNew",
+            "AgentClear",
+            "AgentNext",
+            "AgentPrev",
+            "AgentLayout",
+            "AgentMcp",
+        ] {
+            assert!(
+                App::resolve_ex_command(alias).is_none(),
+                "CamelCase alias `{alias}` must not resolve"
+            );
+            assert_eq!(
+                App::rewrite_command_alias(alias).as_ref(),
+                alias,
+                "CamelCase alias `{alias}` must not be rewritten"
+            );
+        }
+    }
 }
 
 struct AlignItCommandSpec {
@@ -3860,6 +3947,61 @@ mod tests {
             .filter(|alias| !completable.contains(alias.as_str()))
             .collect();
         assert!(missing.is_empty(), "documented aliases missing from completion: {missing:?}");
+    }
+
+    #[test]
+    fn agents_command_reports_disabled_by_default() {
+        let mut app = App::from_path(None).unwrap();
+        app.command_buffer = String::from("agents");
+        app.execute_command();
+
+        let status = app.backend.status_message.clone().unwrap_or_default();
+        assert!(status.contains("agents mode disabled"), "unexpected status: {status}");
+    }
+
+    #[test]
+    fn agents_stop_is_noop_without_active_session() {
+        let mut app = App::from_path(None).unwrap();
+        app.command_buffer = String::from("agents_stop");
+        app.execute_command();
+
+        let status = app.backend.status_message.clone().unwrap_or_default();
+        assert_eq!(status, "no active agent session");
+    }
+
+    #[cfg(not(feature = "agents"))]
+    #[test]
+    fn agents_command_reports_disabled_without_feature() {
+        let mut app = App::from_path(None).unwrap();
+        app.command_buffer = String::from("agents");
+        app.execute_command();
+
+        let status = app.backend.status_message.clone().unwrap_or_default();
+        assert!(status.contains("compiled without `agents` feature"), "status: {status}");
+    }
+
+    #[cfg(feature = "agents")]
+    #[test]
+    fn agents_command_opens_pane_when_runtime_config_on() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".ee.toml"), "[agents]\nenabled = true\n").unwrap();
+
+        let _cwd_guard = crate::config::test_cwd_lock().lock().unwrap();
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+        let mut app = App::from_path(None).unwrap();
+        std::env::set_current_dir(original).unwrap();
+        drop(_cwd_guard);
+
+        app.command_buffer = String::from("agents");
+        app.execute_command();
+
+        // Phase 3: `:agents` opens the pane and starts the host lazily.
+        assert_eq!(app.agents.layout, crate::app::AgentPaneLayout::Right);
+        assert_eq!(app.mode, Mode::Agent);
+        assert!(app.agents.host.is_some(), "host starts lazily for the pane");
+        let status = app.backend.status_message.clone().unwrap_or_default();
+        assert!(status.contains("agents"), "unexpected status: {status}");
     }
 }
 

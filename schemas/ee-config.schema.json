@@ -155,6 +155,26 @@
           "type": "null"
         }
       ]
+    },
+    "agents": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AgentsToml"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "mcp": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/McpToml"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
   "additionalProperties": false,
@@ -616,6 +636,181 @@
         "keys",
         "action"
       ]
+    },
+    "AgentsToml": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Runtime switch for agents mode.  Defaults to `false`; agents mode is\ndisabled unless a config layer sets this to `true`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "default_agent": {
+          "description": "Agent server id used when the user starts a session without choosing\nan explicit agent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "servers": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/AgentServerToml"
+          },
+          "default": {}
+        }
+      },
+      "additionalProperties": false
+    },
+    "AgentServerToml": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "description": "Executable invoked to start the ACP agent subprocess.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "args": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "cwd": {
+          "description": "Working directory for the agent subprocess; inherits `ee` when unset.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "McpToml": {
+      "type": "object",
+      "properties": {
+        "servers": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/McpServerToml"
+          },
+          "default": {}
+        },
+        "proxy": {
+          "description": "ee MCP proxy mode (off by default).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/McpProxyToml"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "McpServerToml": {
+      "type": "object",
+      "properties": {
+        "transport": {
+          "description": "Transport discriminator: `\"stdio\"` or `\"streamable_http\"`.",
+          "$ref": "#/$defs/McpTransportToml"
+        },
+        "command": {
+          "description": "Executable invoked to start the MCP server.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "args": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "cwd": {
+          "description": "Working directory for the MCP server; inherits `ee` when unset.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "description": "Absolute `http(s)` endpoint URL of the MCP server.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "timeout_ms": {
+          "description": "Request timeout in milliseconds; defaults to 30 000.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "transport"
+      ]
+    },
+    "McpTransportToml": {
+      "type": "string",
+      "enum": [
+        "stdio",
+        "streamable_http"
+      ]
+    },
+    "McpProxyToml": {
+      "description": "Raw `[mcp.proxy]` settings.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Whether the ee MCP proxy starts with agents mode.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

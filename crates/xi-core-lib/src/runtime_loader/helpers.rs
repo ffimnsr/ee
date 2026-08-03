@@ -328,9 +328,15 @@ pub fn resolve_bundled_runtime_root(
 }
 
 fn source_tree_runtime_root_from_manifest() -> Option<PathBuf> {
+    // The checked-in runtime directory is `<repo>/runtime` (same layout as
+    // [`bundled_repo_runtime_root`]).  The candidate must contain the
+    // bundled `queries` directory: a bare ancestor whose *name* happens to
+    // match the runtime dir name (e.g. a repo checked out at
+    // `<parent>/ee` matching `RUNTIME_DIR_NAME`) is not a runtime root.
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
-        .map(|dir| dir.join(super::types::RUNTIME_DIR_NAME))
+        .map(|dir| dir.join("runtime"))
+        .filter(|path| path.join(super::types::QUERIES_DIR_NAME).exists())
         .find(|path| path.exists())
 }
 

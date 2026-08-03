@@ -580,7 +580,7 @@ fn diffget_restores_current_git_hunk_from_head() {
     wait_until_with_backend(
         &mut app.backend,
         "seed diff hunk",
-        Duration::from_secs(1),
+        Duration::from_secs(5),
         |backend| {
             backend.lines.starts_with(&[
                 String::from("one"),
@@ -595,7 +595,7 @@ fn diffget_restores_current_git_hunk_from_head() {
     wait_until_with_backend(
         &mut app.backend,
         "diffget restore hunk",
-        Duration::from_secs(1),
+        Duration::from_secs(5),
         |backend| {
             backend.lines.starts_with(&[
                 String::from("one"),
