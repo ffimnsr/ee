@@ -662,8 +662,9 @@ Goal: optional agents mode provides ACP v1 agent chat plus MCP 2026-07-28 server
 - Rules:
   - First-class path is forwarding user-configured MCP server definitions to ACP agents that can connect directly.
   - ee starts its own MCP clients only for health, discovery, prompt/resource browsing, or proxy mode.
-  - ee MCP proxy is a separate local stdio server process or in-process transport shim, never multiplexed over ACP socket.
+  - First-class ee MCP proxy path should be ACP-native MCP-over-ACP when the official ACP Rust SDK supports the required ACP v1 behavior and `rmcp` version compatibility; stdio proxy remains a fallback only while MCP-over-ACP is unavailable or behind an explicit migration gate.
   - ee MCP proxy should use `rmcp` server APIs and ACP/MCP bridging helpers from `agent-client-protocol-rmcp` where they reduce custom conversion code without hiding approval boundaries.
+  - ACP-native MCP-over-ACP must use explicit `mcp/connect`, `mcp/message`, and `mcp/disconnect` handling, with per-session lifecycle, message-size limits, cancellation, and fail-closed unsupported-version behavior.
   - ACP and MCP tool names remain clearly attributed to avoid misleading approvals.
 
 - [x] Forward MCP configuration to ACP session setup.
@@ -705,6 +706,60 @@ Goal: optional agents mode provides ACP v1 agent chat plus MCP 2026-07-28 server
   - ACP direct MCP config forwarding works without starting ee MCP clients when health UI is disabled.
   - MCP health and prompt/resource browsing start only when agents pane is active.
   - Proxy mode uses same approval and bridge paths as direct ACP client methods.
+
+#### Phase 6b: migrate ee MCP proxy to ACP-native MCP-over-ACP
+
+- Rules:
+  - MCP-over-ACP is enabled only when agents mode is compiled in, `agents.enabled = true`, `mcp.proxy.enabled = true`, and the selected ACP agent advertises support for ACP v1 MCP server entries and `mcp/connect` / `mcp/message` / `mcp/disconnect`.
+  - Keep first-class direct MCP config forwarding for user-configured MCP servers; MCP-over-ACP applies only to the ee-owned proxy server unless explicitly expanded later.
+  - Prefer official `agent-client-protocol-rmcp` adapters over local ACP/MCP conversion code, but only if crate versions are compatible with `agent-client-protocol = 2.x` and the workspace `rmcp` version without pulling duplicate incompatible `rmcp` APIs into public ee types.
+  - If `agent-client-protocol-rmcp` is not compatible with workspace `rmcp`, document the SDK gap in tests and keep the minimal stdio proxy fallback until upstream compatibility exists.
+  - MCP-over-ACP traffic must not bypass existing `ee-agent-host` permission broker, bridge file semantics, terminal limits, redaction, or shutdown orchestration.
+  - Unsupported MCP-over-ACP agents or unsupported SDK behavior fail closed and fall back to no ee proxy unless the user explicitly configures stdio proxy fallback.
+
+- [x] Audit official ACP MCP-over-ACP SDK support.
+  - [x] Add dependency analysis for `agent-client-protocol-rmcp` release compatible with `agent-client-protocol = 2.x` and workspace `rmcp`.
+  - [x] Verify `McpServer::Acp`, `mcp/connect`, `mcp/message`, and `mcp/disconnect` are ACP v1-compatible and not ACP v2-only behavior.
+  - [x] Verify required feature flags such as `unstable_mcp_over_acp` are acceptable for this project before enabling them.
+  - [x] Add compile-time test or documentation test proving no duplicate incompatible `rmcp` major version is exposed through ee public APIs.
+- [x] Add ACP-native MCP server advertisement.
+  - [x] Extend `ee-agent-protocol` wrappers to expose ACP SDK MCP-over-ACP server entries without handrolling wire structs.
+  - [x] Convert enabled ee proxy config into an ACP `McpServer::Acp` session metadata entry named `ee` instead of a stdio `ee --mcp-proxy` entry when MCP-over-ACP is supported.
+  - [x] Keep workspace directories in plain session metadata, not MCP roots.
+  - [x] Add tests proving `session/new` advertises `ee` as ACP-native MCP server when supported.
+  - [x] Add tests proving `session/new` omits ACP-native proxy when runtime config or capability negotiation disables it.
+- [x] Implement ACP MCP-over-ACP connection lifecycle in `ee-agent-host`.
+  - [x] Register handlers for `mcp/connect`, `mcp/message`, and `mcp/disconnect` using official ACP SDK method metadata when available.
+  - [x] Maintain per-agent-session logical MCP connections keyed by MCP connection id and server id.
+  - [x] Reject unknown server ids, duplicate connection ids, messages before connect, and disconnects for unknown connections with JSON-RPC invalid params.
+  - [x] Close all logical MCP connections on turn cancel, session close, agent disconnect, and app shutdown.
+  - [x] Add size caps for MCP-over-ACP frames matching or stricter than existing stdio proxy caps.
+- [x] Bridge ACP-native MCP-over-ACP to the existing ee MCP proxy backend.
+  - [x] Reuse `EeMcpProxy` / `rmcp::ServerHandler` tool definitions for `ee.read_text_file`, `ee.write_text_file`, `ee.terminal_create`, and `ee.diagnostics`.
+  - [x] Route proxy tool calls through existing bridge approval prompts and `ApprovalPolicy`; do not craft approval results directly in ACP handlers.
+  - [x] Preserve absolute-path validation, current-buffer reads, buffer/edit/save writes, terminal env redaction, output caps, and diagnostics redaction.
+  - [x] Ensure MCP-over-ACP `tools/list` returns namespaced `ee.*` tools and never exposes direct user-configured MCP server tools as ee-owned tools.
+- [x] Update optional stdio proxy fallback.
+  - [x] Make current `ee --mcp-proxy` forwarding a fallback path behind a documented config/feature gate when ACP-native MCP-over-ACP is unavailable.
+  - [x] Ensure fallback and MCP-over-ACP modes are mutually exclusive for server id `ee` to avoid duplicate tools.
+  - [x] Add user-visible diagnostics explaining whether ee proxy is ACP-native, stdio fallback, or disabled.
+  - [x] Keep socket token, frame cap, and shutdown tests for fallback while fallback remains supported.
+- [x] Add MCP-over-ACP integration tests.
+  - [x] Fake ACP agent receives ACP-native `ee` MCP server entry and performs `mcp/connect`.
+  - [x] Fake ACP agent sends `tools/list` through `mcp/message` and receives `ee.*` tools.
+  - [x] Fake ACP agent calls `ee.write_text_file` through `mcp/message`; denial leaves buffer/disk unchanged.
+  - [x] Fake ACP agent calls `ee.terminal_create` through `mcp/message`; denial does not spawn terminal.
+  - [x] Oversized `mcp/message` frame fails closed without panic or hung turn.
+  - [x] Disconnect, cancel, agent exit, and app shutdown close logical MCP connections deterministically.
+  - [x] Unsupported MCP-over-ACP method ordering (`mcp/message` before `mcp/connect`, duplicate ids, unknown server) returns invalid params.
+  - [x] Tests prove direct MCP config forwarding still works independently of ee proxy MCP-over-ACP.
+
+- Criteria:
+  - `cargo test --quiet -p ee-agent-host mcp_over_acp --features test-utils` passes.
+  - `cargo test --quiet -p ee-cli agent_mcp --features agents` passes with ACP-native ee proxy coverage.
+  - No local ACP/MCP conversion code exists where `agent-client-protocol-rmcp` supports the required ACP v1 behavior and workspace `rmcp` version.
+  - ee proxy MCP-over-ACP never bypasses approval, buffer/save semantics, terminal limits, redaction, or shutdown cleanup.
+  - Stdio proxy fallback remains tested or is removed completely if ACP-native MCP-over-ACP fully replaces it.
 
 #### Phase 7: harden security, shutdown, persistence, and regression coverage
 

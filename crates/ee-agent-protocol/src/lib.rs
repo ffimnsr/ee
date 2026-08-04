@@ -25,6 +25,7 @@
 //! [`agent-client-protocol`]: https://docs.rs/agent-client-protocol
 
 pub mod capabilities;
+pub mod mcp_over_acp;
 pub mod ordering;
 pub mod registry;
 pub mod validate;
@@ -36,6 +37,11 @@ pub use ordering::*;
 pub use registry::*;
 pub use validate::*;
 pub use version::*;
+
+// The MCP-over-ACP facade (Phase 6b) lives in its own module: its runtime
+// [`McpServer`](mcp_over_acp::McpServer) re-export shares the `McpServer`
+// name with the schema enum re-exported below, so it is never glob-imported.
+pub use mcp_over_acp::{EE_PROXY_SERVER_NAME, ee_proxy_acp_entry};
 
 // ── Re-exports from the official SDK ──────────────────────────────────────────
 

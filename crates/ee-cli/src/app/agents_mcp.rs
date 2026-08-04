@@ -1,4 +1,4 @@
-//! Phase 6: MCP integration for the agents pane.
+//! Phase 6 + 6b: MCP integration for the agents pane.
 //!
 //! Three concerns live here, all behind the `agents` feature:
 //!
@@ -11,8 +11,13 @@
 //!    capability summaries feed the pane, and prompt/resource/tool browsing
 //!    inserts selections into the prompt draft.
 //! 3. **ee MCP proxy** — an optional MCP server surface ([`ee_mcp::EeMcpProxy`])
-//!    exposed to ACP agents as a stdio MCP server (`ee --mcp-proxy`).  Tool
-//!    calls route back into the same approval and bridge paths as direct ACP
+//!    exposed to ACP agents.  ACP-native MCP-over-ACP (Phase 6b) is the
+//!    first-class path: `ee-agent-host` advertises the `ee` server as an ACP
+//!    `McpServer::Acp` entry and serves `mcp/connect` / `mcp/message` /
+//!    `mcp/disconnect` when the agent advertises `mcp_capabilities.acp`.
+//!    The stdio `ee --mcp-proxy` entry (this module's socket listener) is
+//!    the fallback for agents without ACP-native support.  Both modes route
+//!    tool calls through the same approval and bridge paths as direct ACP
 //!    client methods, so approvals never bypass the permission broker.
 //!
 //! Policy: MCP servers start lazily only when the agents pane opens; MCP
@@ -22,6 +27,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::time::SystemTime;
 
@@ -167,6 +173,9 @@ pub(crate) struct McpPaneState {
     pub(crate) pending_browse_tools: Option<std_mpsc::Receiver<Result<Vec<String>, String>>>,
     /// Proxy listener info when proxy mode is active.
     pub(crate) proxy: Option<ProxyInfo>,
+    /// How the ee proxy was exposed to the latest session: `acp-native`,
+    /// `stdio fallback`, or `disabled` (Phase 6b diagnostics).
+    pub(crate) proxy_mode: Option<String>,
     /// Test-only: server id → fake transport factory (see `tests/agent_mcp.rs`).
     #[cfg(test)]
     pub(crate) test_fake_transports:
@@ -466,10 +475,12 @@ impl Drop for McpHostBridge {
 /// Stdio cwd (absent from the ACP v1 `McpServerStdio` shape) travels in the
 /// `_meta` extensibility field.  Header/env values are forwarded verbatim to
 /// the agent (it needs them to connect); they are never logged here.
-pub(crate) fn mcp_forward_entries(
-    settings: &crate::config::McpSettings,
-    proxy: Option<&ProxyInfo>,
-) -> Vec<McpServer> {
+///
+/// The ee proxy entry is *not* built here: `ee-agent-host` appends it to
+/// `session/new` after capability negotiation (ACP-native `McpServer::Acp`
+/// when the agent advertises `mcp_capabilities.acp`, the stdio fallback
+/// entry from [`proxy_stdio_fallback_entry`] otherwise).
+pub(crate) fn mcp_forward_entries(settings: &crate::config::McpSettings) -> Vec<McpServer> {
     let mut entries = Vec::new();
     for (id, server) in &settings.servers {
         match server {
@@ -501,22 +512,28 @@ pub(crate) fn mcp_forward_entries(
             }
         }
     }
-    if let Some(info) = proxy {
-        let command = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ee"));
-        let stdio = McpServerStdio::new("ee", command)
-            .args(vec![String::from("--mcp-proxy")])
-            .env(vec![
-                EnvVariable::new("EE_MCP_PROXY_SOCKET", info.socket_path.display().to_string()),
-                EnvVariable::new("EE_MCP_PROXY_TOKEN", info.token.clone()),
-            ])
-            .meta({
-                let mut meta = serde_json::Map::new();
-                meta.insert(String::from("ee"), serde_json::json!({ "proxy": true }));
-                meta
-            });
-        entries.push(McpServer::Stdio(stdio));
-    }
     entries
+}
+
+/// The stdio `ee --mcp-proxy` fallback entry for the ee proxy.
+///
+/// Used only when the selected agent does not advertise ACP-native
+/// MCP-over-ACP support; `ee-agent-host` swaps it for an `McpServer::Acp`
+/// entry when the agent supports MCP-over-ACP, so the two modes are never
+/// both advertised for server id `ee`.
+pub(crate) fn proxy_stdio_fallback_entry(info: &ProxyInfo) -> McpServerStdio {
+    let command = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ee"));
+    McpServerStdio::new("ee", command)
+        .args(vec![String::from("--mcp-proxy")])
+        .env(vec![
+            EnvVariable::new("EE_MCP_PROXY_SOCKET", info.socket_path.display().to_string()),
+            EnvVariable::new("EE_MCP_PROXY_TOKEN", info.token.clone()),
+        ])
+        .meta({
+            let mut meta = serde_json::Map::new();
+            meta.insert(String::from("ee"), serde_json::json!({ "proxy": true }));
+            meta
+        })
 }
 
 // ── Proxy IPC ────────────────────────────────────────────────────────────────
@@ -1191,10 +1208,16 @@ impl App {
 
     /// Deterministic health lines: per-server state, identity, capabilities.
     pub(crate) fn mcp_health_lines(&self) -> Vec<String> {
-        if self.agents.mcp.servers.is_empty() {
-            return vec![String::from("mcp: no servers started")];
-        }
         let mut lines = Vec::new();
+        if let Some(mode) = &self.agents.mcp.proxy_mode {
+            lines.push(format!("mcp proxy ee: {mode}"));
+        } else if self.config.mcp.proxy.enabled {
+            lines.push(String::from("mcp proxy ee: pending (session not started)"));
+        }
+        if self.agents.mcp.servers.is_empty() {
+            lines.push(String::from("mcp: no servers started"));
+            return lines;
+        }
         for (id, server) in &self.agents.mcp.servers {
             let mut line = format!("mcp {id} [{}]", server.state);
             if let Some(identity) = &server.identity {
@@ -1297,6 +1320,7 @@ impl App {
         }
         self.agents.mcp.servers.clear();
         self.agents.mcp.browse = None;
+        self.agents.mcp.proxy_mode = None;
     }
 }
 
@@ -1348,11 +1372,14 @@ fn raw_server_settings(
 
 /// A per-run proxy socket path under the temp directory.
 fn proxy_socket_path() -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nonce = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
-    std::env::temp_dir().join(format!("ee-mcp-proxy-{}-{nonce}.sock", std::process::id()))
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir()
+        .join(format!("ee-mcp-proxy-{}-{nonce}-{sequence}.sock", std::process::id()))
 }
 
 /// A per-run proxy auth token (never logged).

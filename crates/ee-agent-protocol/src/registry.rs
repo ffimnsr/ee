@@ -83,6 +83,22 @@ pub const TERMINAL_KILL_METHOD_NAME: &str = CLIENT_METHOD_NAMES.terminal_kill;
 pub const ELICITATION_CREATE_METHOD_NAME: &str = CLIENT_METHOD_NAMES.elicitation_create;
 /// Method name for the `elicitation/complete` notification.
 pub const ELICITATION_COMPLETE_NOTIFICATION: &str = CLIENT_METHOD_NAMES.elicitation_complete;
+/// Method name for the `mcp/connect` request (Phase 6b MCP-over-ACP).
+pub const MCP_CONNECT_METHOD_NAME: &str = CLIENT_METHOD_NAMES.mcp_connect;
+/// Method name for the `mcp/message` request/notification (Phase 6b).
+pub const MCP_MESSAGE_METHOD_NAME: &str = CLIENT_METHOD_NAMES.mcp_message;
+/// Method name for the `mcp/disconnect` request (Phase 6b).
+pub const MCP_DISCONNECT_METHOD_NAME: &str = CLIENT_METHOD_NAMES.mcp_disconnect;
+
+/// The agent→client MCP-over-ACP requests this host handles (Phase 6b).
+///
+/// These are *not* part of [`ClientRequest`](crate::ClientRequest) (the
+/// file/terminal/elicitation surface): the host registers them as separate
+/// typed SDK handlers in `ee-agent-host` (see
+/// `ee-agent-host/src/mcp_over_acp.rs`), so they carry no params-validation
+/// entry here.
+pub const MCP_OVER_ACP_REQUEST_METHODS: [&str; 3] =
+    [MCP_CONNECT_METHOD_NAME, MCP_MESSAGE_METHOD_NAME, MCP_DISCONNECT_METHOD_NAME];
 
 fn invalid_params(method: &str, params_type: &str, reason: impl std::fmt::Display) -> Error {
     Error::invalid_params().data(serde_json::json!({
@@ -519,6 +535,10 @@ mod tests {
         assert_eq!(TERMINAL_CREATE_METHOD_NAME, "terminal/create");
         assert_eq!(ELICITATION_CREATE_METHOD_NAME, "elicitation/create");
         assert_eq!(SESSION_UPDATE_NOTIFICATION, "session/update");
+        assert_eq!(MCP_CONNECT_METHOD_NAME, "mcp/connect");
+        assert_eq!(MCP_MESSAGE_METHOD_NAME, "mcp/message");
+        assert_eq!(MCP_DISCONNECT_METHOD_NAME, "mcp/disconnect");
+        assert_eq!(MCP_OVER_ACP_REQUEST_METHODS, ["mcp/connect", "mcp/message", "mcp/disconnect"]);
     }
 
     #[test]

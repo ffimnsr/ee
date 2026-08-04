@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use crate::app::{App, ThreadUiState};
 use crate::tests::helpers::*;
 
-const WAIT: Duration = Duration::from_secs(10);
+const WAIT: Duration = Duration::from_secs(5);
 
 // ── Shared harness (mirrors tests/agent_pane.rs helpers) ─────────────────────
 
@@ -68,12 +68,12 @@ command = "unused"
 
 fn agents_app_in(temp: &tempfile::TempDir, script: FakeAgentScript) -> (App, ScriptedFake) {
     fs::write(temp.path().join(".ee.toml"), AGENTS_TOML).unwrap();
-    let _cwd_guard = crate::config::test_cwd_lock().lock().unwrap();
-    let original = std::env::current_dir().unwrap();
+    let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let _cwd_restore = CurrentDirGuard::capture();
     std::env::set_current_dir(temp.path()).unwrap();
     let mut app = App::from_path(None).unwrap();
-    std::env::set_current_dir(original).unwrap();
-    drop(_cwd_guard);
+    drop(_cwd_restore);
+    drop(_cwd_lock);
     let fake = ScriptedFake::new(script);
     app.agents.test_fake_transports.insert(String::from("fake"), Arc::new(fake.clone()));
     (app, fake)
@@ -333,18 +333,8 @@ fn write_approval_updates_buffer_and_saves_file() {
     wait_until(&mut app, "write approval appears", |app| app.agents.approvals.front().is_some());
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE); // Allow once
 
-    let deadline = Instant::now() + WAIT;
-    let mut response = None;
-    while Instant::now() < deadline {
-        app.pump_agents();
-        let _ = app.backend.drain_events();
-        if let Some(value) = fake.agent().response_with_id(103) {
-            response = Some(value);
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    let response = response.expect("write answered");
+    wait_until(&mut app, "write answered", |_| fake.agent().response_with_id(103).is_some());
+    let response = fake.agent().response_with_id(103).expect("write answered");
     if response.get("result").is_none() {
         panic!("write did not succeed: {response}\napprovals={:?}", app.agents.approvals.len());
     }

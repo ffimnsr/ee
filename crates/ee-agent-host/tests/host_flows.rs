@@ -35,8 +35,11 @@ async fn spawn_host(
 ) -> (FakeAgent, TestHost) {
     let (fake, transport) = FakeAgent::spawn(script);
     let (events_tx, events_rx) = mpsc::unbounded_channel();
-    let options =
-        AgentConnectionOptions { handshake_timeout: TEST_TIMEOUT, request_timeout: TEST_TIMEOUT };
+    let options = AgentConnectionOptions {
+        handshake_timeout: TEST_TIMEOUT,
+        request_timeout: TEST_TIMEOUT,
+        ..Default::default()
+    };
     let connection = AgentConnection::connect_with_transport(
         "fake".into(),
         handler,
@@ -122,7 +125,7 @@ async fn happy_path_streams_updates_and_completes_turn() {
     let connection = ready_connection(&fake, &host).await;
 
     let thread = connection
-        .new_session(vec![PathBuf::from("/work"), PathBuf::from("/extra")], Vec::new())
+        .new_session(vec![PathBuf::from("/work"), PathBuf::from("/extra")], Vec::new(), None)
         .await
         .expect("session/new succeeds");
 
@@ -213,7 +216,8 @@ async fn malformed_json_from_agent_gets_parse_error_response() {
     let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
     let connection = ready_connection(&fake, &host).await;
 
-    let thread = connection.new_session(vec![PathBuf::from("/work")], Vec::new()).await.unwrap();
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
     thread
         .send_prompt(vec![ContentBlock::Text(TextContent::new("hi"))])
         .await
@@ -265,7 +269,8 @@ async fn agent_eof_mid_turn_resolves_prompt_with_typed_error() {
     let script = base_script().wait_for("session/prompt").close();
     let (fake, mut host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
     let connection = ready_connection(&fake, &host).await;
-    let thread = connection.new_session(vec![PathBuf::from("/work")], Vec::new()).await.unwrap();
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
 
     let error =
         thread.send_prompt(vec![ContentBlock::Text(TextContent::new("hi"))]).await.unwrap_err();
@@ -295,7 +300,8 @@ async fn cancel_sends_session_cancel_and_resolves_prompt() {
         .emit(wire::session_update("s1", wire::agent_message_chunk("m1", "thinking...")));
     let (fake, mut host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
     let connection = ready_connection(&fake, &host).await;
-    let thread = connection.new_session(vec![PathBuf::from("/work")], Vec::new()).await.unwrap();
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
 
     let prompt_thread = thread.clone();
     let prompt = tokio::spawn(async move {
@@ -359,7 +365,8 @@ async fn permission_request_flows_through_broker_and_back() {
 
     let (fake, mut host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
     let connection = ready_connection(&fake, &host).await;
-    let thread = connection.new_session(vec![PathBuf::from("/work")], Vec::new()).await.unwrap();
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
 
     let prompt_thread = thread.clone();
     let prompt = tokio::spawn(async move {
@@ -417,7 +424,8 @@ async fn cancel_resolves_pending_permissions_as_cancelled() {
     ));
     let (fake, mut host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
     let connection = ready_connection(&fake, &host).await;
-    let thread = connection.new_session(vec![PathBuf::from("/work")], Vec::new()).await.unwrap();
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
 
     let prompt_thread = thread.clone();
     let prompt = tokio::spawn(async move {
@@ -453,7 +461,8 @@ async fn fs_and_terminal_requests_dispatch_to_handler_with_capability_gate() {
     let handler = RecordingHandler::new(HandlerCapabilities::all());
     let (fake, host) = spawn_host(script, Arc::new(handler.clone())).await;
     let connection = ready_connection(&fake, &host).await;
-    let thread = connection.new_session(vec![PathBuf::from("/work")], Vec::new()).await.unwrap();
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
 
     thread
         .send_prompt(vec![ContentBlock::Text(TextContent::new("go"))])
@@ -484,7 +493,8 @@ async fn unadvertised_capabilities_are_rejected_before_the_handler() {
     let handler = RecordingHandler::new(HandlerCapabilities::none());
     let (fake, host) = spawn_host(script, Arc::new(handler.clone())).await;
     let connection = ready_connection(&fake, &host).await;
-    let thread = connection.new_session(vec![PathBuf::from("/work")], Vec::new()).await.unwrap();
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
     thread
         .send_prompt(vec![ContentBlock::Text(TextContent::new("go"))])
         .await
@@ -562,7 +572,8 @@ async fn set_mode_requires_advertised_modes() {
         .respond(json!({}));
     let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
     let connection = ready_connection(&fake, &host).await;
-    let thread = connection.new_session(vec![PathBuf::from("/work")], Vec::new()).await.unwrap();
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
 
     let modes = thread.advertised_modes().expect("modes advertised");
     assert_eq!(modes.available_modes.len(), 1);
@@ -582,7 +593,8 @@ async fn set_mode_without_advertised_modes_fails_closed() {
     let script = base_script();
     let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
     let connection = ready_connection(&fake, &host).await;
-    let thread = connection.new_session(vec![PathBuf::from("/work")], Vec::new()).await.unwrap();
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
 
     let error = thread.set_mode(SessionModeId::new("ask")).await.unwrap_err();
     assert!(matches!(
@@ -598,7 +610,8 @@ async fn close_kills_connection_and_resolves_pending_work() {
     let script = base_script().wait_for("session/prompt");
     let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
     let connection = ready_connection(&fake, &host).await;
-    let thread = connection.new_session(vec![PathBuf::from("/work")], Vec::new()).await.unwrap();
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
 
     let prompt_thread = thread.clone();
     let prompt = tokio::spawn(async move {
@@ -627,11 +640,13 @@ async fn session_new_without_roots_fails_closed() {
     let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
     let connection = ready_connection(&fake, &host).await;
 
-    let error = connection.new_session(Vec::new(), Vec::new()).await.unwrap_err();
+    let error = connection.new_session(Vec::new(), Vec::new(), None).await.unwrap_err();
     assert!(matches!(error, AgentError::InvalidParams(_)));
 
-    let error =
-        connection.new_session(vec![PathBuf::from("relative")], Vec::new()).await.unwrap_err();
+    let error = connection
+        .new_session(vec![PathBuf::from("relative")], Vec::new(), None)
+        .await
+        .unwrap_err();
     assert!(matches!(error, AgentError::InvalidParams(_)));
     host.close().await;
     fake.join(TEST_TIMEOUT).await;
@@ -653,13 +668,15 @@ async fn request_timeout_produces_typed_error() {
         AgentConnectionOptions {
             handshake_timeout: TEST_TIMEOUT,
             request_timeout: Duration::from_millis(100),
+            ..Default::default()
         },
         transport,
     )
     .expect("connect");
 
     connection.wait_ready().await.expect("handshake ok");
-    let error = connection.new_session(vec![PathBuf::from("/work")], Vec::new()).await.unwrap_err();
+    let error =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap_err();
     assert!(matches!(error, AgentError::RequestTimeout { ref method } if method == "session/new"));
     connection.close().await;
     fake.join(TEST_TIMEOUT).await;

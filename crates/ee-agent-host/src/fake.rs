@@ -14,7 +14,7 @@
 //! the agent side (EOF).  Every line the host sends is recorded by the
 //! transport sink and inspectable via [`FakeAgent::log`].
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -50,6 +50,14 @@ pub enum FakeStep {
     /// Wait until the host sends a response (no `method` key) with `id`;
     /// other lines are skipped.
     WaitForResponse { id: i64 },
+    /// Wait for a host line matching `source`, then extract the value at the
+    /// dotted `path` (array indexes as `[n]`, e.g.
+    /// `params.mcpServers[0].serverId`) into the `into` capture slot.
+    ///
+    /// The matched line is consumed exactly like [`FakeStep::WaitFor`] /
+    /// [`FakeStep::WaitForResponse`]; subsequent [`FakeStep::Emit`] values
+    /// can reference the slot with a `{"$capture": "name"}` placeholder.
+    Capture { source: CaptureSource, path: String, into: String },
     /// Pause the script for `millis` (lets host-side tasks settle).
     Delay { millis: u64 },
     /// Respond to the remembered request with a JSON-RPC result.
@@ -57,12 +65,22 @@ pub enum FakeStep {
     /// Respond to the remembered request with a JSON-RPC error.
     RespondError { code: i64, message: String },
     /// Emit a JSON value as a line to the host (notification or
-    /// agent-to-client request).
+    /// agent-to-client request).  `{"$capture": "name"}` placeholders are
+    /// substituted from previously captured slots.
     Emit(Value),
     /// Emit a raw string line (may be malformed JSON).
     EmitRaw(String),
     /// Close the agent side of the transport (EOF, like a process exit).
     Close,
+}
+
+/// Which host line a [`FakeStep::Capture`] reads from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureSource {
+    /// A host request with this method (like [`FakeStep::WaitFor`]).
+    Request { method: String },
+    /// A host response with this id (like [`FakeStep::WaitForResponse`]).
+    Response { id: i64 },
 }
 
 /// A script of [`FakeStep`]s executed in order.
@@ -88,6 +106,17 @@ impl FakeAgentScript {
     #[must_use]
     pub fn wait_for_response(self, id: i64) -> Self {
         self.step(FakeStep::WaitForResponse { id })
+    }
+
+    /// Appends [`FakeStep::Capture`].
+    #[must_use]
+    pub fn capture(
+        self,
+        source: CaptureSource,
+        path: impl Into<String>,
+        into: impl Into<String>,
+    ) -> Self {
+        self.step(FakeStep::Capture { source, path: path.into(), into: into.into() })
     }
 
     /// Appends [`FakeStep::Delay`].
@@ -242,6 +271,7 @@ async fn driver(
     let mut steps: VecDeque<FakeStep> = script.steps.into_iter().collect();
     let mut to_host = Some(to_host);
     let mut remembered: Option<RequestView> = None;
+    let mut captures: HashMap<String, Value> = HashMap::new();
     let mut line: Option<String> = None;
 
     loop {
@@ -292,6 +322,55 @@ async fn driver(
             continue;
         }
 
+        // 1c. Capture consumes a matching host line and extracts a value.
+        if let Some(current) = &line
+            && let Some(FakeStep::Capture { source, path, into }) = steps.front()
+        {
+            let parsed = serde_json::from_str::<Value>(current).ok();
+            let (matched, extracted) = match source {
+                CaptureSource::Request { method } => match parse_request(current) {
+                    Some(request) if &request.method == method => {
+                        remembered = Some(request);
+                        (true, parsed.as_ref().and_then(|value| extract_path(value, path)))
+                    }
+                    Some(request) => {
+                        log.lock().expect("fake log poisoned").push(format!(
+                            "FAKE: unexpected request {:?} while capturing {:?}",
+                            request.method, method
+                        ));
+                        emit_response(
+                            &to_host,
+                            request.id.as_ref(),
+                            None,
+                            Some(json!({ "code": -32601, "message": "method not found" })),
+                        );
+                        line = None;
+                        continue;
+                    }
+                    None => {
+                        line = None;
+                        continue;
+                    }
+                },
+                CaptureSource::Response { id } => {
+                    let is_match = parsed.as_ref().is_some_and(|value| {
+                        value.get("method").is_none() && value.get("id") == Some(&json!(id))
+                    });
+                    let extracted = parsed.as_ref().and_then(|value| extract_path(value, path));
+                    (is_match, extracted)
+                }
+            };
+            if matched {
+                let extracted = extracted.unwrap_or_else(|| {
+                    panic!("capture path {path:?} not found in host line: {current}")
+                });
+                captures.insert(into.clone(), extracted);
+                steps.pop_front();
+            }
+            line = None;
+            continue;
+        }
+
         // 2. Execute steps that need no host line.
         enum StepKind {
             Emit,
@@ -301,6 +380,7 @@ async fn driver(
             Close,
             WaitFor,
             WaitForResponse,
+            Capture,
             Delay,
             Done,
         }
@@ -312,14 +392,16 @@ async fn driver(
             Some(FakeStep::Close) => StepKind::Close,
             Some(FakeStep::WaitFor { .. }) => StepKind::WaitFor,
             Some(FakeStep::WaitForResponse { .. }) => StepKind::WaitForResponse,
+            Some(FakeStep::Capture { .. }) => StepKind::Capture,
             Some(FakeStep::Delay { .. }) => StepKind::Delay,
             None => StepKind::Done,
         };
         match kind {
             StepKind::Emit => {
-                let Some(FakeStep::Emit(value)) = steps.pop_front() else {
+                let Some(FakeStep::Emit(mut value)) = steps.pop_front() else {
                     unreachable!("kind matched above")
                 };
+                substitute_captures(&mut value, &captures);
                 emit_value(&to_host, &value);
             }
             StepKind::EmitRaw => {
@@ -362,6 +444,13 @@ async fn driver(
             }
             StepKind::WaitForResponse => {
                 // Need a new host line (responses are consumed in phase 1b).
+                line = from_host.next().await;
+                if line.is_none() {
+                    break;
+                }
+            }
+            StepKind::Capture => {
+                // Need a new host line (consumed in phase 1c).
                 line = from_host.next().await;
                 if line.is_none() {
                     break;
@@ -416,6 +505,87 @@ fn emit_response(
         response["error"] = error;
     }
     emit_value(to_host, &response);
+}
+
+/// Extracts the value at a dotted JSON path (array indexes as `[n]`, e.g.
+/// `params.mcpServers[0].serverId`).  Returns `None` when any segment is
+/// missing.
+fn extract_path(value: &Value, path: &str) -> Option<Value> {
+    let mut current = value;
+    let mut rest = path;
+    loop {
+        if rest.is_empty() {
+            return Some(current.clone());
+        }
+        if let Some(after) = rest.strip_prefix('.') {
+            rest = after;
+            continue;
+        }
+        let key_end = rest.find(['.', '[']).unwrap_or(rest.len());
+        let key = &rest[..key_end];
+        current = current.get(key)?;
+        rest = &rest[key_end..];
+        if let Some(after_bracket) = rest.strip_prefix('[') {
+            let close = after_bracket.find(']')?;
+            let index: usize = after_bracket[..close].parse().ok()?;
+            current = current.get(index)?;
+            rest = &after_bracket[close + 1..];
+        }
+    }
+}
+
+/// Replaces `{"$capture": "name"}` placeholders recursively with the value
+/// stored in `captures` (a missing slot fails the test loudly).
+fn substitute_captures(value: &mut Value, captures: &HashMap<String, Value>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(name) = map.get("$capture").and_then(Value::as_str) {
+                let captured = captures
+                    .get(name)
+                    .unwrap_or_else(|| panic!("capture slot {name:?} was never filled"));
+                *value = captured.clone();
+                return;
+            }
+            for item in map.values_mut() {
+                substitute_captures(item, captures);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                substitute_captures(item, captures);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+
+    #[test]
+    fn extract_path_reads_nested_and_indexed_values() {
+        let value = json!({ "params": { "mcpServers": [ { "serverId": "ee-mcp-proxy:fake" } ] } });
+        assert_eq!(
+            extract_path(&value, "params.mcpServers[0].serverId"),
+            Some(json!("ee-mcp-proxy:fake"))
+        );
+        assert_eq!(extract_path(&value, "params.mcpServers[1].serverId"), None);
+        assert_eq!(extract_path(&value, "params.missing"), None);
+        assert_eq!(extract_path(&value, ""), Some(value));
+    }
+
+    #[test]
+    fn substitute_captures_replaces_placeholders_recursively() {
+        let mut captures = HashMap::new();
+        captures.insert(String::from("conn"), json!("c1"));
+        let mut value = json!({
+            "params": { "connectionId": { "$capture": "conn" } },
+            "items": [ { "$capture": "conn" } ],
+        });
+        substitute_captures(&mut value, &captures);
+        assert_eq!(value, json!({ "params": { "connectionId": "c1" }, "items": ["c1"] }));
+    }
 }
 
 /// Convenience builders for common ACP v1 wire values used by tests.
@@ -493,6 +663,56 @@ pub mod wire {
             "id": 102,
             "method": "terminal/create",
             "params": { "sessionId": session_id, "command": command }
+        })
+    }
+
+    /// A `mcp/connect` request line for `server_id` (Phase 6b).
+    #[must_use]
+    pub fn mcp_connect(id: i64, server_id: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "mcp/connect",
+            "params": { "serverId": server_id }
+        })
+    }
+
+    /// An `mcp/message` request line wrapping an inner MCP request
+    /// (`method` + optional named `params`) on `connection_id`.
+    #[must_use]
+    pub fn mcp_message(id: i64, connection_id: &str, method: &str, params: Option<Value>) -> Value {
+        let mut request = serde_json::Map::new();
+        request.insert(String::from("jsonrpc"), json!("2.0"));
+        request.insert(String::from("id"), json!(id));
+        request.insert(String::from("method"), json!("mcp/message"));
+        let mut inner = serde_json::Map::new();
+        inner.insert(String::from("connectionId"), json!(connection_id));
+        inner.insert(String::from("method"), json!(method));
+        if let Some(params) = params {
+            inner.insert(String::from("params"), params);
+        }
+        request.insert(String::from("params"), Value::Object(inner));
+        Value::Object(request)
+    }
+
+    /// An `mcp/message` notification line wrapping an inner MCP notification.
+    #[must_use]
+    pub fn mcp_message_notification(connection_id: &str, method: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "method": "mcp/message",
+            "params": { "connectionId": connection_id, "method": method }
+        })
+    }
+
+    /// An `mcp/disconnect` request line for `connection_id`.
+    #[must_use]
+    pub fn mcp_disconnect(id: i64, connection_id: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "mcp/disconnect",
+            "params": { "connectionId": connection_id }
         })
     }
 }

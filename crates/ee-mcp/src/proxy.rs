@@ -425,7 +425,7 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+    const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
     const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
     /// Minimal client handler: 2026-07-28 only, no extra capabilities.

@@ -602,16 +602,13 @@ fn write_command_saves_file() {
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE)));
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
 
-    for _ in 0..20 {
-        let text = fs::read_to_string(&path).unwrap();
-        if text.starts_with('!') {
-            fs::remove_file(&path).unwrap();
-            return;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-
-    let final_text = fs::read_to_string(&path).unwrap();
+    let final_text = wait_until_file_matches(
+        &mut app.backend,
+        "write command saves file",
+        &path,
+        Duration::from_secs(2),
+        |text| text.starts_with('!'),
+    );
     fs::remove_file(&path).unwrap();
     assert!(final_text.starts_with('!'));
 }

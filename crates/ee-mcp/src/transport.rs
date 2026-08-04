@@ -237,7 +237,7 @@ mod tests {
         let start = tokio::time::Instant::now();
         process.shutdown().await;
         assert!(
-            start.elapsed() < std::time::Duration::from_secs(10),
+            start.elapsed() < std::time::Duration::from_secs(5),
             "shutdown must not hang on a live child"
         );
     }

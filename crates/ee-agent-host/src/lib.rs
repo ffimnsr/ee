@@ -19,6 +19,7 @@ pub mod error;
 pub mod events;
 pub mod inbound;
 pub mod manager;
+pub mod mcp_over_acp;
 pub mod permission;
 pub mod process;
 pub mod redact;
@@ -43,6 +44,7 @@ pub use inbound::{
 #[cfg(feature = "test-utils")]
 pub use manager::FakeTransportFactory;
 pub use manager::{AgentManager, AgentManagerConfig};
+pub use mcp_over_acp::{EeProxyMode, MCP_OVER_ACP_MAX_FRAME_BYTES};
 pub use permission::PermissionBroker;
 pub use process::{AgentProcessConfig, STDERR_MAX_LINE_BYTES, STDERR_MAX_LINES, StderrCapture};
 pub use reducer::{

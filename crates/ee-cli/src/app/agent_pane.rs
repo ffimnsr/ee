@@ -27,8 +27,9 @@ use ee_agent_host::{
 use ee_agent_protocol::{
     ContentBlock, CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction,
     ElicitationAction, ElicitationContentValue, ElicitationMode, ElicitationPropertySchema,
-    ElicitationSchema, McpServer, PermissionOption, PlanEntryStatus, RequestPermissionOutcome,
-    SelectedPermissionOutcome, SessionId, SessionUpdate, TextContent, ToolCallStatus,
+    ElicitationSchema, McpServer, McpServerStdio, PermissionOption, PlanEntryStatus,
+    RequestPermissionOutcome, SelectedPermissionOutcome, SessionId, SessionUpdate, TextContent,
+    ToolCallStatus,
 };
 use tokio::runtime::Builder as TokioBuilder;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -443,6 +444,9 @@ impl ElicitationPrompt {
     /// Maximum number of form fields rendered per elicitation (Phase 7
     /// resource limit); larger schemas fail visibly.
     const MAX_ELICITATION_FIELDS: usize = 24;
+    /// Maximum JSON nesting depth accepted for a form schema. ACP v1 schemas
+    /// are normally shallow; this caps future/extension payloads before UI use.
+    const MAX_ELICITATION_SCHEMA_DEPTH: usize = 12;
 
     /// Builds a prompt from an ACP form-mode request.
     fn from_form(
@@ -455,6 +459,12 @@ impl ElicitationPrompt {
             schema.required.clone().unwrap_or_default().into_iter().collect();
         let mut fields = Vec::new();
         let mut unsupported = Vec::new();
+        if let Ok(value) = serde_json::to_value(schema)
+            && json_depth(&value) > Self::MAX_ELICITATION_SCHEMA_DEPTH
+        {
+            unsupported
+                .push(format!("schema depth exceeds {}", Self::MAX_ELICITATION_SCHEMA_DEPTH));
+        }
         let mut over_cap = false;
         for (name, property) in &schema.properties {
             if fields.len() >= Self::MAX_ELICITATION_FIELDS {
@@ -521,6 +531,18 @@ impl ElicitationPrompt {
             content.insert(field.name.clone(), field.value.to_content()?);
         }
         Some(content)
+    }
+}
+
+fn json_depth(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Array(values) => {
+            1 + values.iter().map(json_depth).max().unwrap_or_default()
+        }
+        serde_json::Value::Object(values) => {
+            1 + values.values().map(json_depth).max().unwrap_or_default()
+        }
+        _ => 1,
     }
 }
 
@@ -642,6 +664,10 @@ enum HostCommand {
         agent_id: String,
         roots: Vec<PathBuf>,
         mcp_servers: Vec<McpServer>,
+        /// Stdio `ee --mcp-proxy` fallback entry (proxy mode on); the host
+        /// swaps it for an ACP-native entry when the agent supports
+        /// MCP-over-ACP (Phase 6b).
+        ee_proxy_stdio_fallback: Option<McpServerStdio>,
         reply: std_mpsc::Sender<Result<AgentThread, String>>,
     },
     SendPrompt {
@@ -672,8 +698,16 @@ fn host_worker(
     runtime.block_on(async move {
         while let Some(command) = rx.recv().await {
             match command {
-                HostCommand::NewSession { agent_id, roots, mcp_servers, reply } => {
-                    let result = manager.new_session(&agent_id, roots, mcp_servers).await;
+                HostCommand::NewSession {
+                    agent_id,
+                    roots,
+                    mcp_servers,
+                    ee_proxy_stdio_fallback,
+                    reply,
+                } => {
+                    let result = manager
+                        .new_session(&agent_id, roots, mcp_servers, ee_proxy_stdio_fallback)
+                        .await;
                     let _ = reply.send(result.map_err(|error| error.to_string()));
                 }
                 HostCommand::SendPrompt { thread, blocks } => {
@@ -723,12 +757,14 @@ impl AgentHostBridge {
         agent_id: String,
         roots: Vec<PathBuf>,
         mcp_servers: Vec<McpServer>,
+        ee_proxy_stdio_fallback: Option<McpServerStdio>,
     ) -> std_mpsc::Receiver<Result<AgentThread, String>> {
         let (reply_tx, reply_rx) = std_mpsc::channel();
         let _ = self.commands.send(HostCommand::NewSession {
             agent_id,
             roots,
             mcp_servers,
+            ee_proxy_stdio_fallback,
             reply: reply_tx,
         });
         reply_rx
@@ -1236,6 +1272,8 @@ impl App {
     /// Registers a fresh session thread from a new-session reply.
     fn register_session_thread(&mut self, agent_id: &str, thread: AgentThread) {
         let session_id = thread.session_id().0.to_string();
+        // Phase 6b user-visible diagnostics: how the ee proxy was exposed.
+        self.agents.mcp.proxy_mode = Some(thread.proxy_mode().to_string());
         let index = self.agents.next_thread_index;
         self.agents.next_thread_index += 1;
         let nick = agent_id.to_string();
@@ -1713,6 +1751,7 @@ impl App {
                 },
             );
         }
+        config.ee_proxy_enabled = self.config.mcp.proxy.enabled;
         #[cfg(test)]
         for (id, factory) in &self.agents.test_fake_transports {
             config.fake_transports.insert(id.clone(), factory.clone());
@@ -1733,11 +1772,11 @@ impl App {
             return;
         };
         let roots = self.agents_workspace_roots();
-        let mcp_servers = super::agents_mcp::mcp_forward_entries(
-            &self.config.mcp,
-            self.agents.mcp.proxy.as_ref(),
-        );
-        let reply = host.request_new_session(agent_id.clone(), roots, mcp_servers);
+        let mcp_servers = super::agents_mcp::mcp_forward_entries(&self.config.mcp);
+        let ee_proxy_stdio_fallback =
+            self.agents.mcp.proxy.as_ref().map(super::agents_mcp::proxy_stdio_fallback_entry);
+        let reply =
+            host.request_new_session(agent_id.clone(), roots, mcp_servers, ee_proxy_stdio_fallback);
         self.agents.pending_session = Some(PendingSession { agent_id, reply });
     }
 

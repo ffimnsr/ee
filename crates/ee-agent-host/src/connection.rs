@@ -25,11 +25,12 @@ use std::time::Duration;
 
 use ee_agent_protocol::{
     Agent as AgentRole, AgentCapabilities, AuthenticateRequest, AuthenticateResponse,
-    CancelNotification, Client as ClientRole, ClientCapabilities, ConnectionTo,
-    CreateElicitationRequest, CreateTerminalRequest, ElicitationCapabilities,
+    CancelNotification, Client as ClientRole, ClientCapabilities, ConnectMcpRequest, ConnectionTo,
+    CreateElicitationRequest, CreateTerminalRequest, DisconnectMcpRequest, ElicitationCapabilities,
     ElicitationFormCapabilities, ElicitationUrlCapabilities, Error as RpcError,
     FileSystemCapabilities, Implementation, InitializeRequest, KillTerminalRequest,
-    LoadSessionRequest, LoadSessionResponse, LogoutRequest, LogoutResponse, NewSessionRequest,
+    LoadSessionRequest, LoadSessionResponse, LogoutRequest, LogoutResponse, McpServer,
+    McpServerAcpId, McpServerStdio, MessageMcpNotification, MessageMcpRequest, NewSessionRequest,
     NewSessionResponse, PromptRequest, PromptResponse, ProtocolVersion, ReadTextFileRequest,
     ReleaseTerminalRequest, RequestPermissionOutcome, RequestPermissionRequest,
     RequestPermissionResponse, SessionId, SessionNotification, SetSessionModeRequest,
@@ -42,6 +43,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use crate::error::AgentError;
 use crate::events::{AgentConnectionState, AgentEvent, ConnectionCloseReason, PermissionRequestId};
 use crate::inbound::{ClientRequest, ClientRequestHandler, HandlerCapabilities};
+use crate::mcp_over_acp::{EeProxyMode, McpOverAcpRegistry};
 use crate::permission::PermissionBroker;
 use crate::process::{AgentProcess, AgentProcessConfig, spawn_stderr_reader};
 use crate::session::{AgentThread, ThreadShared};
@@ -59,6 +61,10 @@ pub struct AgentConnectionOptions {
     /// Timeout for `session/new`, `session/load`, `session/set_mode`,
     /// `authenticate`, and `logout` requests.
     pub request_timeout: Duration,
+    /// Whether the ee MCP proxy is configured (arms ACP-native MCP-over-ACP
+    /// hosting for this connection; the agent still has to advertise
+    /// `mcp_capabilities.acp` before anything is served).
+    pub ee_proxy_enabled: bool,
 }
 
 impl Default for AgentConnectionOptions {
@@ -66,6 +72,7 @@ impl Default for AgentConnectionOptions {
         Self {
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            ee_proxy_enabled: false,
         }
     }
 }
@@ -111,8 +118,10 @@ pub(crate) struct AgentConnectionInner {
     pub events: mpsc::UnboundedSender<AgentEvent>,
     pub handler: Arc<dyn ClientRequestHandler>,
     pub handler_capabilities: HandlerCapabilities,
-    pub process: Mutex<Option<AgentProcess>>,
+    pub process: Arc<Mutex<Option<AgentProcess>>>,
     pub threads: Mutex<HashMap<SessionId, Arc<ThreadShared>>>,
+    /// ACP-native MCP-over-ACP hosting for the ee proxy (Phase 6b).
+    pub mcp: McpOverAcpRegistry,
     shutdown: watch::Sender<bool>,
     closed_once: AtomicBool,
 }
@@ -125,6 +134,16 @@ impl AgentConnectionInner {
             .send(AgentEvent::ConnectionStateChanged { agent_id: self.agent_id.clone(), state });
     }
 
+    /// Whether the agent advertised `mcp_capabilities.acp` (MCP-over-ACP
+    /// support) during `initialize`.
+    pub(crate) fn agent_advertises_acp(&self) -> bool {
+        matches!(
+            &*self.state.borrow(),
+            AgentConnectionState::Ready { agent_capabilities, .. }
+                if agent_capabilities.mcp_capabilities.acp
+        )
+    }
+
     /// Notifies all session threads and the broker that the connection is
     /// gone, so no pending work outlives the process.  Runs at most once.
     pub fn notify_connection_closed(&self, reason: ConnectionCloseReason) {
@@ -132,6 +151,7 @@ impl AgentConnectionInner {
             return;
         }
         self.broker.cancel_all();
+        self.mcp.close_all();
         let threads: Vec<Arc<ThreadShared>> =
             self.threads.lock().expect("threads poisoned").values().cloned().collect();
         for thread in threads {
@@ -223,6 +243,14 @@ impl AgentConnection {
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let handler_capabilities = handler.capabilities();
         let broker = PermissionBroker::new();
+        let process = Arc::new(Mutex::new(process));
+        let mcp = McpOverAcpRegistry::new(
+            options.ee_proxy_enabled,
+            &agent_id,
+            handler.clone(),
+            handler_capabilities,
+            process.clone(),
+        );
 
         let inner = Arc::new(AgentConnectionInner {
             agent_id: agent_id.clone(),
@@ -232,8 +260,9 @@ impl AgentConnection {
             events: events.clone(),
             handler: handler.clone(),
             handler_capabilities,
-            process: Mutex::new(process),
+            process,
             threads: Mutex::new(HashMap::new()),
+            mcp,
             shutdown: shutdown_tx,
             closed_once: AtomicBool::new(false),
         });
@@ -293,7 +322,7 @@ impl AgentConnection {
                 terminate_rx,
                 main_inner.state.subscribe(),
                 options.request_timeout,
-                main_inner.agent_id.clone(),
+                main_inner.clone(),
             ));
 
             tokio::select! {
@@ -428,6 +457,13 @@ impl AgentConnection {
     /// `mcp_servers` are forwarded as ACP `mcpServers` (MCP configuration the
     /// agent may connect to directly); ee never interprets them itself.
     ///
+    /// `ee_proxy_stdio_fallback` carries the stdio `ee --mcp-proxy` entry
+    /// when proxy mode is configured.  When the agent advertised
+    /// `mcp_capabilities.acp` and this connection hosts MCP-over-ACP, the
+    /// entry is replaced by an ACP-native [`McpServer::Acp`] `ee` entry
+    /// instead; the two modes are mutually exclusive for the `ee` server id.
+    /// The resolved mode is available on the returned thread.
+    ///
     /// # Errors
     ///
     /// Fails when the connection is not ready, roots are invalid, or the
@@ -436,6 +472,7 @@ impl AgentConnection {
         &self,
         worktree_roots: Vec<PathBuf>,
         mcp_servers: Vec<ee_agent_protocol::McpServer>,
+        ee_proxy_stdio_fallback: Option<McpServerStdio>,
     ) -> Result<AgentThread, AgentError> {
         self.wait_ready().await?;
         if worktree_roots.is_empty() {
@@ -454,12 +491,41 @@ impl AgentConnection {
         let mut roots = worktree_roots.into_iter();
         let cwd = roots.next().expect("non-empty roots");
         let additional = roots.collect::<Vec<_>>();
-        let request =
+        let mut request =
             NewSessionRequest::new(cwd).additional_directories(additional).mcp_servers(mcp_servers);
+        let proxy_mode =
+            self.append_ee_proxy_entry(&mut request.mcp_servers, ee_proxy_stdio_fallback);
 
         let response =
             self.send_command(|tx| ConnectionCommand::NewSession { request, tx }).await?;
-        Ok(self.spawn_thread(response.session_id, response.modes))
+        Ok(self.spawn_thread(response.session_id, response.modes, proxy_mode))
+    }
+
+    /// Appends the ee proxy advertisement to a session setup request.
+    ///
+    /// Returns the mode actually used: ACP-native `McpServer::Acp` when this
+    /// connection hosts MCP-over-ACP and the agent advertised `acp` support,
+    /// the stdio fallback entry otherwise, or nothing at all.
+    fn append_ee_proxy_entry(
+        &self,
+        mcp_servers: &mut Vec<McpServer>,
+        ee_proxy_stdio_fallback: Option<McpServerStdio>,
+    ) -> EeProxyMode {
+        let Some(fallback) = ee_proxy_stdio_fallback else {
+            return EeProxyMode::Disabled;
+        };
+        match self.inner.mcp.server_id() {
+            Some(server_id)
+                if self.agent_capabilities().is_some_and(|caps| caps.mcp_capabilities.acp) =>
+            {
+                mcp_servers.push(ee_agent_protocol::ee_proxy_acp_entry(server_id.clone()));
+                EeProxyMode::AcpNative
+            }
+            _ => {
+                mcp_servers.push(McpServer::Stdio(fallback));
+                EeProxyMode::StdioFallback
+            }
+        }
     }
 
     /// Loads an existing session; only allowed when the agent advertises
@@ -477,8 +543,10 @@ impl AgentConnection {
         let response =
             self.send_command(|tx| ConnectionCommand::LoadSession { request, tx }).await?;
         // ACP v1 `session/load` responses carry no session id; the requested
-        // id is the thread's identity.
-        Ok(self.spawn_thread(session_id, response.modes))
+        // id is the thread's identity.  Loaded sessions never advertise the
+        // ee proxy (MCP-over-ACP hosting is per fresh session; see
+        // `mcp_over_acp` module docs).
+        Ok(self.spawn_thread(session_id, response.modes, EeProxyMode::Disabled))
     }
 
     /// Sends `authenticate` for one of the advertised auth methods.
@@ -525,9 +593,15 @@ impl AgentConnection {
         &self,
         session_id: SessionId,
         modes: Option<ee_agent_protocol::SessionModeState>,
+        proxy_mode: EeProxyMode,
     ) -> AgentThread {
-        let thread =
-            AgentThread::new(self.agent_id.clone(), session_id.clone(), modes, self.clone());
+        let thread = AgentThread::new(
+            self.agent_id.clone(),
+            session_id.clone(),
+            modes,
+            self.clone(),
+            proxy_mode,
+        );
         self.inner
             .threads
             .lock()
@@ -581,11 +655,19 @@ impl AgentConnection {
         self.inner.broker.cancel_session(session_id)
     }
 
+    /// The advertised ACP server id for the ee proxy, when this connection
+    /// hosts ACP-native MCP-over-ACP (proxy mode configured).
+    #[must_use]
+    pub fn ee_proxy_server_id(&self) -> Option<McpServerAcpId> {
+        self.inner.mcp.server_id().cloned()
+    }
+
     /// Closes the connection: stops the driver, kills the subprocess, and
     /// resolves pending work.
     pub async fn close(&self) {
         let _ = self.inner.commands.send(ConnectionCommand::Close);
         let _ = self.inner.shutdown.send(true);
+        self.inner.mcp.close_all();
         let process = self.inner.process.lock().expect("process poisoned").take();
         if let Some(process) = process {
             process.kill().await;
@@ -593,9 +675,11 @@ impl AgentConnection {
         self.inner.notify_connection_closed(ConnectionCloseReason::Closed);
     }
 
-    /// Deregisters a session thread.
+    /// Deregisters a session thread (closing it also closes every logical
+    /// MCP connection on this agent connection).
     pub(crate) fn deregister_thread(&self, session_id: &SessionId) {
         self.inner.threads.lock().expect("threads poisoned").remove(session_id);
+        self.inner.mcp.close_all();
     }
 }
 
@@ -743,6 +827,49 @@ fn build_client_builder(
             },
             on_receive_request!(),
         )
+        // Phase 6b: ACP-native MCP-over-ACP for the ee proxy.  These use the
+        // official SDK request types (method metadata from
+        // `CLIENT_METHOD_NAMES`); strict ordering/identity rules live in
+        // `crate::mcp_over_acp`.
+        .on_receive_request(
+            {
+                let inner = inner.clone();
+                async move |request: ConnectMcpRequest, responder, cx| {
+                    let _ = cx;
+                    inner.mcp.handle_connect(request, responder, inner.agent_advertises_acp())
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let inner = inner.clone();
+                async move |request: MessageMcpRequest, responder, cx| {
+                    inner.mcp.handle_message(request, responder, &cx, inner.agent_advertises_acp())
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_notification(
+            {
+                let inner = inner.clone();
+                async move |notification: MessageMcpNotification, _cx| {
+                    inner.mcp.handle_notification(notification);
+                    Ok(())
+                }
+            },
+            on_receive_notification!(),
+        )
+        .on_receive_request(
+            {
+                let inner = inner.clone();
+                async move |request: DisconnectMcpRequest, responder, cx| {
+                    let _ = cx;
+                    inner.mcp.handle_disconnect(request, responder)
+                }
+            },
+            on_receive_request!(),
+        )
 }
 
 /// The client-side capabilities advertised during `initialize`, derived from
@@ -779,8 +906,9 @@ async fn driver_loop(
     mut terminate: watch::Receiver<bool>,
     state_rx: watch::Receiver<AgentConnectionState>,
     request_timeout: Duration,
-    agent_id: String,
+    inner: Arc<AgentConnectionInner>,
 ) {
+    let agent_id = inner.agent_id.clone();
     loop {
         tokio::select! {
             _ = terminate.changed() => break,
@@ -850,6 +978,9 @@ async fn driver_loop(
                     }
                     ConnectionCommand::CancelSession { session_id } => {
                         let _ = connection.send_notification(CancelNotification::new(session_id));
+                        // Turn cancel closes every logical MCP connection on
+                        // this connection (Phase 6b lifecycle rule).
+                        inner.mcp.close_all();
                     }
                     ConnectionCommand::Close => break,
                 }

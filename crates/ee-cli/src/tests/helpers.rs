@@ -9,6 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -27,6 +28,11 @@ pub fn cwd_test_lock() -> &'static crate::config::TestCwdLock {
 }
 
 pub fn perf_test_lock() -> &'static Mutex<()> {
+    static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+pub fn tree_sitter_test_lock() -> &'static Mutex<()> {
     static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
 }
@@ -85,13 +91,45 @@ pub fn wait_until_with_backend(
 ) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
-        let _ = backend.drain_events();
+        let _ = backend.pump();
         if condition(backend) {
             return;
         }
         thread::sleep(Duration::from_millis(10));
     }
     panic!("timed out waiting for {label}; status={:?}", backend.status_message.as_deref());
+}
+
+pub fn wait_until_file_matches(
+    backend: &mut BufferManager,
+    label: &str,
+    path: &Path,
+    timeout: Duration,
+    mut condition: impl FnMut(&str) -> bool,
+) -> String {
+    let deadline = Instant::now() + timeout;
+    let mut last_text = String::new();
+    let mut last_error = None;
+    while Instant::now() < deadline {
+        let _ = backend.pump();
+        match fs::read_to_string(path) {
+            Ok(text) => {
+                if condition(&text) {
+                    return text;
+                }
+                last_text = text;
+                last_error = None;
+            }
+            Err(error) => last_error = Some(error.to_string()),
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    panic!(
+        "timed out waiting for {label}; path={}; last_text={last_text:?}; last_error={last_error:?}; status={:?}",
+        path.display(),
+        backend.status_message.as_deref()
+    );
 }
 
 // ── LSP / plugin helpers ──────────────────────────────────────────────────────
@@ -224,8 +262,11 @@ pub fn init_test_git_repo(cwd: &Path) {
 // ── Fixture / temp-path helpers ────────────────────────────────────────────────
 
 pub fn unique_temp_path(prefix: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    env::temp_dir().join(format!("{prefix}-{nanos}.txt"))
+    let pid = std::process::id();
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+    env::temp_dir().join(format!("{prefix}-{pid}-{nanos}-{sequence}.txt"))
 }
 
 pub fn write_exact_size_ascii_fixture(
@@ -444,13 +485,13 @@ pub fn run_ex(app: &mut App, command: &str) {
 }
 
 pub fn insert_text(app: &mut App, text: &str) {
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
-    for ch in text.chars() {
-        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
-    }
-    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
-    let _ = app.backend.sync_pending_events_for_whole_document();
+    app.backend
+        .send_edit("insert", serde_json::json!({ "chars": text }))
+        .expect("insert_text edit should send");
+    app.backend.selections_preview().expect("insert_text edit barrier should succeed");
+    app.backend
+        .sync_pending_events_for_whole_document()
+        .expect("insert_text document sync should succeed");
 }
 
 pub fn test_buf_state() -> BufState {

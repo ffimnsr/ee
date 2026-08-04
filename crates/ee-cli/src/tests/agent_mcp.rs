@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use crate::app::{AgentPaneLayout, App, ThreadUiState};
 use crate::tests::helpers::*;
 
-const WAIT: Duration = Duration::from_secs(10);
+const WAIT: Duration = Duration::from_secs(5);
 
 // ── Fake transport factories ─────────────────────────────────────────────────
 
@@ -105,12 +105,12 @@ fn mcp_app(
         toml.push_str("[mcp.proxy]\nenabled = true\n");
     }
     fs::write(temp.path().join(".ee.toml"), toml).unwrap();
-    let _cwd_guard = crate::config::test_cwd_lock().lock().unwrap();
-    let original = std::env::current_dir().unwrap();
+    let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let _cwd_restore = CurrentDirGuard::capture();
     std::env::set_current_dir(temp.path()).unwrap();
     let mut app = App::from_path(None).unwrap();
-    std::env::set_current_dir(original).unwrap();
-    drop(_cwd_guard);
+    drop(_cwd_restore);
+    drop(_cwd_lock);
     let fake = ScriptedFake::new(agent_script);
     app.agents.test_fake_transports.insert(String::from("fake"), Arc::new(fake.clone()));
     (app, temp, fake)
@@ -580,6 +580,205 @@ fn proxy_terminal_denial_does_not_spawn_terminal() {
     assert!(reply.get("error").is_some(), "proxy must report the denial: {reply}");
 }
 
+// ── ee MCP proxy: ACP-native MCP-over-ACP (Phase 6b) ─────────────────────────
+
+/// Fake agent that advertises `mcp_capabilities.acp` and captures the
+/// host-generated `serverId` from `session/new`.
+fn acp_agent_script() -> FakeAgentScript {
+    FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({
+            "protocolVersion": 1,
+            "agentCapabilities": { "mcpCapabilities": { "acp": true } }
+        }))
+        .capture(
+            ee_agent_host::fake::CaptureSource::Request { method: "session/new".into() },
+            "params.mcpServers[0].serverId",
+            "server_id",
+        )
+        .respond(json!({ "sessionId": "s1" }))
+}
+
+/// Script tail: `mcp/connect` (200), capture the connection id, run the
+/// inner MCP `initialize` (201), then one `tools/call` (202).
+fn acp_connect_script(tool_call: Value) -> FakeAgentScript {
+    acp_agent_script()
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": 200,
+            "method": "mcp/connect",
+            "params": { "serverId": { "$capture": "server_id" } }
+        }))
+        .capture(
+            ee_agent_host::fake::CaptureSource::Response { id: 200 },
+            "result.connectionId",
+            "conn_id",
+        )
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": 201,
+            "method": "mcp/message",
+            "params": {
+                "connectionId": { "$capture": "conn_id" },
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2026-07-28",
+                    "capabilities": {},
+                    "clientInfo": { "name": "fake-agent", "version": "0" }
+                }
+            }
+        }))
+        .wait_for_response(201)
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": 202,
+            "method": "mcp/message",
+            "params": {
+                "connectionId": { "$capture": "conn_id" },
+                "method": "tools/call",
+                "params": tool_call
+            }
+        }))
+}
+
+/// Polls the fake agent's log for the host's response to the request with
+/// `id` (the ACP response to the fake's `mcp/*` request).
+fn fake_response(fake: &FakeAgent, id: i64) -> Value {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if let Some(response) = fake.response_with_id(id) {
+            return response;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for fake response {id}");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn session_new_advertises_acp_native_proxy_when_agent_supports_acp() {
+    let (mut app, _temp, fake) = mcp_app(acp_agent_script(), false, true);
+    open_pane_and_wait_ready(&mut app);
+
+    let session_new = fake.agent().requests_by_method("session/new");
+    let servers = session_new[0]
+        .get("params")
+        .and_then(|params| params.get("mcpServers"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let acp = servers
+        .iter()
+        .find(|entry| entry.get("name").and_then(Value::as_str) == Some("ee"))
+        .expect("ee proxy entry forwarded");
+    assert_eq!(acp.get("type").and_then(Value::as_str), Some("acp"));
+    assert!(acp.get("serverId").is_some(), "acp entry carries the server id: {acp}");
+    // Mutually exclusive with the stdio fallback (no `--mcp-proxy` args).
+    assert!(!servers.iter().any(|entry| {
+        entry
+            .get("args")
+            .and_then(Value::as_array)
+            .is_some_and(|args| args.contains(&json!("--mcp-proxy")))
+    }));
+    // User-visible diagnostics: ACP-native mode.
+    assert!(app.mcp_health_lines().iter().any(|line| line == "mcp proxy ee: acp-native"));
+}
+
+#[test]
+fn session_new_falls_back_to_stdio_proxy_without_acp_capability() {
+    let (mut app, _temp, _fake) = mcp_app(base_agent_script(), false, true);
+    open_pane_and_wait_ready(&mut app);
+
+    // The wire shape is covered by `session_new_forwards_proxy_stdio_entry_...`;
+    // here the diagnostics must name the fallback mode.
+    assert!(app.mcp_health_lines().iter().any(|line| line == "mcp proxy ee: stdio fallback"));
+}
+
+#[test]
+fn session_new_omits_acp_native_proxy_when_proxy_disabled() {
+    let (mut app, _temp, fake) = mcp_app(base_agent_script(), false, false);
+    open_pane_and_wait_ready(&mut app);
+
+    let session_new = fake.agent().requests_by_method("session/new");
+    let servers = session_new[0]
+        .get("params")
+        .and_then(|params| params.get("mcpServers"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        servers.iter().all(|entry| entry.get("name").and_then(Value::as_str) != Some("ee")),
+        "no ee proxy entry when disabled: {servers:?}"
+    );
+    assert!(app.mcp_health_lines().iter().any(|line| line == "mcp: no servers started"));
+}
+
+#[test]
+fn mcp_over_acp_write_denial_leaves_buffer_unchanged() {
+    let target = {
+        // The target path must exist before the script is built (the fake
+        // captures it into the tools/call frame).
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("acp-proxy.txt");
+        fs::write(&target, "original").unwrap();
+        (temp, target.display().to_string())
+    };
+    let (_temp, target_text) = target;
+    let target = std::path::PathBuf::from(&target_text);
+    let script = acp_connect_script(json!({
+        "name": "ee.write_text_file",
+        "arguments": { "path": target_text, "content": "agent-wrote-this" }
+    }));
+    let (mut app, _temp_dir, fake) = mcp_app(script, false, true);
+    open_pane_and_wait_ready(&mut app);
+
+    // The write reaches the same approval prompt as direct ACP methods.
+    wait_until(&mut app, "approval queued", |app| !app.agents.approvals.is_empty());
+    let prompt = app.agents.approvals.front().unwrap();
+    assert!(prompt.title.contains("fs/write_text_file"));
+    assert!(prompt.detail.contains("acp-proxy.txt"));
+    run_ex(&mut app, "agents");
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE); // Deny
+    wait_until(&mut app, "approval resolved", |app| app.agents.approvals.is_empty());
+
+    // The denial surfaces back through `mcp/message` as an isError tool
+    // result; buffer and disk stay unchanged.
+    let reply = fake_response(&fake.agent(), 202);
+    let result = reply.get("result").expect("tool result payload");
+    assert_eq!(result.get("isError"), Some(&json!(true)));
+    let text = result
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|blocks| blocks.first())
+        .and_then(|block| block.get("text"))
+        .and_then(Value::as_str)
+        .expect("denial text");
+    assert!(text.contains("denied"), "denial surfaced to the agent: {text}");
+    assert_eq!(fs::read_to_string(&target).unwrap(), "original");
+}
+
+#[test]
+fn mcp_over_acp_terminal_denial_does_not_spawn_terminal() {
+    let script = acp_connect_script(json!({
+        "name": "ee.terminal_create",
+        "arguments": { "command": "sleep", "args": ["30"] }
+    }));
+    let (mut app, _temp, fake) = mcp_app(script, false, true);
+    open_pane_and_wait_ready(&mut app);
+
+    wait_until(&mut app, "approval queued", |app| !app.agents.approvals.is_empty());
+    let prompt = app.agents.approvals.front().unwrap();
+    assert!(prompt.title.contains("terminal/create"));
+    assert!(prompt.detail.contains("sleep 30"));
+    run_ex(&mut app, "agents");
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE); // Deny
+    wait_until(&mut app, "approval resolved", |app| app.agents.approvals.is_empty());
+
+    let reply = fake_response(&fake.agent(), 202);
+    let result = reply.get("result").expect("tool result payload");
+    assert_eq!(result.get("isError"), Some(&json!(true)));
+    assert_eq!(app.agents.terminals.tracked_count(), 0, "denied terminal must not spawn");
+}
+
 // ── Approval policy (Phase 7) ────────────────────────────────────────────────
 
 #[test]
@@ -711,12 +910,13 @@ fn runtime_disabled_agents_do_not_start_mcp_or_agent_hosts() {
         "[agents.servers.fake]\ncommand = \"unused\"\n\n[mcp.servers.tools]\ntransport = \"stdio\"\ncommand = \"mcp-tools\"\n",
     )
     .unwrap();
-    let _cwd_guard = crate::config::test_cwd_lock().lock().unwrap();
-    let original = std::env::current_dir().unwrap();
+    fs::write(temp.path().join(".ee.toml"), "[agents]\nenabled = false\n").unwrap();
+    let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let _cwd_restore = CurrentDirGuard::capture();
     std::env::set_current_dir(temp.path()).unwrap();
     let mut app = App::from_path(None).unwrap();
-    std::env::set_current_dir(original).unwrap();
-    drop(_cwd_guard);
+    drop(_cwd_restore);
+    drop(_cwd_lock);
 
     run_ex(&mut app, "agents");
     assert!(app.agents.host.is_none(), "agent host must not start");
@@ -744,12 +944,12 @@ fn configured_secret_values_are_collected_for_redaction() {
         "[agents]\nenabled = true\n\n[agents.servers.fake]\ncommand = \"unused\"\nenv = { API_TOKEN = \"super-secret-value\" }\n",
     )
     .unwrap();
-    let _cwd_guard = crate::config::test_cwd_lock().lock().unwrap();
-    let original = std::env::current_dir().unwrap();
+    let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let _cwd_restore = CurrentDirGuard::capture();
     std::env::set_current_dir(temp.path()).unwrap();
     let app = App::from_path(None).unwrap();
-    std::env::set_current_dir(original).unwrap();
-    drop(_cwd_guard);
+    drop(_cwd_restore);
+    drop(_cwd_lock);
 
     let secrets = app.agents_secret_values();
     assert!(secrets.contains(&String::from("super-secret-value")));

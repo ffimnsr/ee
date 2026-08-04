@@ -17,6 +17,7 @@ use tokio::sync::{mpsc, watch};
 use crate::connection::AgentConnection;
 use crate::error::AgentError;
 use crate::events::{AgentEvent, ConnectionCloseReason, PermissionRequestId, ThreadCloseReason};
+use crate::mcp_over_acp::EeProxyMode;
 use crate::reducer::{MessageKind, ReducedMessage, SessionState, apply_update};
 
 /// Shared per-session state; the connection routes `session/update`
@@ -83,6 +84,8 @@ pub struct AgentThread {
     pub(crate) session_id: SessionId,
     pub(crate) connection: AgentConnection,
     pub(crate) shared: Arc<ThreadShared>,
+    /// How the ee MCP proxy was advertised to this session (Phase 6b).
+    proxy_mode: EeProxyMode,
 }
 
 impl std::fmt::Debug for AgentThread {
@@ -102,6 +105,7 @@ impl AgentThread {
         session_id: SessionId,
         modes: Option<SessionModeState>,
         connection: AgentConnection,
+        proxy_mode: EeProxyMode,
     ) -> Self {
         let shared = Arc::new(ThreadShared {
             agent_id: agent_id.clone(),
@@ -112,7 +116,7 @@ impl AgentThread {
             modes: Mutex::new(modes),
             events: connection.inner.events.clone(),
         });
-        Self { agent_id, session_id, connection, shared }
+        Self { agent_id, session_id, connection, shared, proxy_mode }
     }
 
     /// The owning agent id.
@@ -143,6 +147,13 @@ impl AgentThread {
     #[must_use]
     pub fn advertised_modes(&self) -> Option<SessionModeState> {
         self.shared.modes.lock().expect("modes poisoned").clone()
+    }
+
+    /// How the ee MCP proxy was advertised to this session: ACP-native,
+    /// stdio fallback, or disabled (Phase 6b diagnostics).
+    #[must_use]
+    pub fn proxy_mode(&self) -> EeProxyMode {
+        self.proxy_mode
     }
 
     /// Sends `session/prompt` and streams the turn to completion.

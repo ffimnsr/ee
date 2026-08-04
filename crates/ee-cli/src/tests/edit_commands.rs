@@ -2,7 +2,6 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc;
-use std::thread;
 use std::time::Duration;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -43,18 +42,18 @@ fn write_bang_update_and_x_bang_aliases_save() {
     // The insert lands asynchronously; wait for the buffer to become dirty so
     // the save command actually has new content to write (parallel load can
     // delay the xi-core round trip).
-    wait_until_with_backend(&mut app.backend, "insert applied", Duration::from_secs(20), |b| {
+    wait_until_with_backend(&mut app.backend, "insert applied", Duration::from_secs(5), |b| {
         !b.active().pristine
     });
     run_ex(&mut app, "w!");
 
-    for _ in 0..250 {
-        app.backend.pump().unwrap();
-        if fs::read_to_string(&first).unwrap().starts_with('!') {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+    wait_until_file_matches(
+        &mut app.backend,
+        "w! saves current buffer",
+        &first,
+        Duration::from_secs(5),
+        |text| text.starts_with('!'),
+    );
     assert!(fs::read_to_string(&first).unwrap().starts_with('!'));
 
     let second = unique_temp_path("ee-cli-update-bang");
@@ -64,39 +63,36 @@ fn write_bang_update_and_x_bang_aliases_save() {
     wait_until_with_backend(
         &mut update_app.backend,
         "insert applied",
-        Duration::from_secs(20),
+        Duration::from_secs(5),
         |b| !b.active().pristine,
     );
     run_ex(&mut update_app, "u");
 
-    for _ in 0..250 {
-        update_app.backend.pump().unwrap();
-        if fs::read_to_string(&second).unwrap().starts_with('?') {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+    wait_until_file_matches(
+        &mut update_app.backend,
+        "update alias saves dirty buffer",
+        &second,
+        Duration::from_secs(5),
+        |text| text.starts_with('?'),
+    );
     assert!(fs::read_to_string(&second).unwrap().starts_with('?'));
 
     let third = unique_temp_path("ee-cli-x-bang");
     fs::write(&third, "seed").unwrap();
     let mut quit_app = App::from_path(Some(third.clone())).unwrap();
     insert_text(&mut quit_app, "#");
-    wait_until_with_backend(
-        &mut quit_app.backend,
-        "insert applied",
-        Duration::from_secs(20),
-        |b| !b.active().pristine,
-    );
+    wait_until_with_backend(&mut quit_app.backend, "insert applied", Duration::from_secs(5), |b| {
+        !b.active().pristine
+    });
     run_ex(&mut quit_app, "x!");
 
-    for _ in 0..250 {
-        quit_app.backend.pump().unwrap();
-        if fs::read_to_string(&third).unwrap().starts_with('#') {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+    wait_until_file_matches(
+        &mut quit_app.backend,
+        "x! saves before quitting",
+        &third,
+        Duration::from_secs(5),
+        |text| text.starts_with('#'),
+    );
     assert!(fs::read_to_string(&third).unwrap().starts_with('#'));
     assert!(quit_app.should_quit);
 
@@ -118,14 +114,15 @@ fn write_all_and_write_quit_all_aliases_cover_hidden_buffers() {
     insert_text(&mut app, "2");
     run_ex(&mut app, "wa");
 
-    for _ in 0..20 {
-        let first_saved = fs::read_to_string(&first).unwrap().starts_with('1');
-        let second_saved = fs::read_to_string(&second).unwrap().starts_with('2');
-        if first_saved && second_saved {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+    wait_until_with_backend(
+        &mut app.backend,
+        "write_all saves hidden buffers",
+        Duration::from_secs(2),
+        |_| {
+            fs::read_to_string(&first).unwrap().starts_with('1')
+                && fs::read_to_string(&second).unwrap().starts_with('2')
+        },
+    );
     assert!(fs::read_to_string(&first).unwrap().starts_with('1'));
     assert!(fs::read_to_string(&second).unwrap().starts_with('2'));
 
@@ -134,14 +131,15 @@ fn write_all_and_write_quit_all_aliases_cover_hidden_buffers() {
     insert_text(&mut app, "4");
     run_ex(&mut app, "xa");
 
-    for _ in 0..20 {
-        let first_saved = fs::read_to_string(&first).unwrap().starts_with('4');
-        let second_saved = fs::read_to_string(&second).unwrap().starts_with("23");
-        if first_saved && second_saved {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+    wait_until_with_backend(
+        &mut app.backend,
+        "write_quit_all saves hidden buffers",
+        Duration::from_secs(2),
+        |_| {
+            fs::read_to_string(&first).unwrap().starts_with('4')
+                && fs::read_to_string(&second).unwrap().starts_with("23")
+        },
+    );
     assert!(fs::read_to_string(&first).unwrap().starts_with('4'));
     assert!(fs::read_to_string(&second).unwrap().starts_with("23"));
     assert!(app.should_quit);
@@ -208,14 +206,16 @@ fn move_command_moves_dirty_buffer_to_new_path() {
     insert_text(&mut app, "!");
     run_ex(&mut app, &format!("mv {}", target.display()));
 
-    for _ in 0..20 {
-        let moved = !source.exists() && target.exists();
-        let saved = moved && fs::read_to_string(&target).unwrap().starts_with('!');
-        if saved {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+    wait_until_with_backend(
+        &mut app.backend,
+        "move command saves dirty buffer to target",
+        Duration::from_secs(2),
+        |_| {
+            !source.exists()
+                && target.exists()
+                && fs::read_to_string(&target).unwrap().starts_with('!')
+        },
+    );
 
     assert!(!source.exists());
     assert!(target.exists());
@@ -857,30 +857,31 @@ fn reload_and_reload_all_aliases_refresh_from_disk() {
     fs::write(&second, "new-two\n").unwrap();
 
     run_ex(&mut app, "rl");
-    for _ in 0..20 {
-        app.backend.pump().unwrap();
-        if app.backend.lines.first().is_some_and(|line| line == "new-two") {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+    wait_until_with_backend(
+        &mut app.backend,
+        "reload current buffer",
+        Duration::from_secs(2),
+        |backend| backend.lines.first().is_some_and(|line| line == "new-two"),
+    );
     assert_eq!(app.backend.lines.first().map(String::as_str), Some("new-two"));
 
     run_ex(&mut app, "rla");
-    for _ in 0..20 {
-        app.backend.pump().unwrap();
-        let all_loaded = app.backend.all_bufs().iter().all(|buf| match buf.path.as_ref() {
-            Some(path) if path == &first => buf.lines.first().is_some_and(|line| line == "new-one"),
-            Some(path) if path == &second => {
-                buf.lines.first().is_some_and(|line| line == "new-two")
-            }
-            _ => true,
-        });
-        if all_loaded {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
+    wait_until_with_backend(
+        &mut app.backend,
+        "reload all buffers",
+        Duration::from_secs(2),
+        |backend| {
+            backend.all_bufs().iter().all(|buf| match buf.path.as_ref() {
+                Some(path) if path == &first => {
+                    buf.lines.first().is_some_and(|line| line == "new-one")
+                }
+                Some(path) if path == &second => {
+                    buf.lines.first().is_some_and(|line| line == "new-two")
+                }
+                _ => true,
+            })
+        },
+    );
     assert!(app.backend.all_bufs().iter().any(|buf| {
         buf.path.as_ref() == Some(&first) && buf.lines.first().is_some_and(|line| line == "new-one")
     }));

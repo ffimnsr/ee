@@ -91,16 +91,15 @@ fn enter_splits_line_and_backspace_joins_it() {
 fn repeated_enter_tracks_cursor_beyond_visible_rows() {
     let mut app = App::from_path(None).unwrap();
 
-    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
-    for _ in 0..50 {
-        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        app.backend.pump().unwrap();
-    }
+    app.backend
+        .send_edit("insert", json!({ "chars": "\n".repeat(50) }))
+        .expect("repeated enter edit should send");
+    app.backend.selections_preview().expect("repeated enter edit barrier should succeed");
 
     wait_until_with_backend(
         &mut app.backend,
         "repeated enter cursor update",
-        Duration::from_secs(30),
+        Duration::from_secs(5),
         |backend| backend.cursor_line == 50 && backend.cursor_col == 0 && backend.lines.len() == 51,
     );
     assert_eq!(app.backend.cursor_line, 50);
@@ -691,6 +690,7 @@ fn block_text_preview_uses_backend_authoritative_text() {
 
 #[test]
 fn fold_close_uses_backend_authoritative_tree_sitter_range() {
+    let _tree_sitter_guard = tree_sitter_test_lock().lock().unwrap_or_else(|err| err.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("fold-close.rs");
     fs::write(&path, "").unwrap();
@@ -698,7 +698,7 @@ fn fold_close_uses_backend_authoritative_tree_sitter_range() {
     wait_until_with_backend(
         &mut app.backend,
         "open fold close file",
-        Duration::from_secs(30),
+        Duration::from_secs(5),
         |backend| backend.active().path.as_ref() == Some(&path),
     );
 
@@ -706,7 +706,7 @@ fn fold_close_uses_backend_authoritative_tree_sitter_range() {
     wait_until_with_backend(
         &mut app.backend,
         "seed fold close buffer",
-        Duration::from_secs(30),
+        Duration::from_secs(5),
         |backend| backend.lines.len() >= 5,
     );
 
@@ -721,6 +721,7 @@ fn fold_close_uses_backend_authoritative_tree_sitter_range() {
 
 #[test]
 fn fold_close_all_uses_backend_authoritative_ranges() {
+    let _tree_sitter_guard = tree_sitter_test_lock().lock().unwrap_or_else(|err| err.into_inner());
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("fold-close-all.rs");
     fs::write(&path, "").unwrap();
@@ -728,7 +729,7 @@ fn fold_close_all_uses_backend_authoritative_ranges() {
     wait_until_with_backend(
         &mut app.backend,
         "open fold close all file",
-        Duration::from_secs(30),
+        Duration::from_secs(5),
         |backend| backend.active().path.as_ref() == Some(&path),
     );
 
@@ -736,7 +737,7 @@ fn fold_close_all_uses_backend_authoritative_ranges() {
     wait_until_with_backend(
         &mut app.backend,
         "seed fold close all buffer",
-        Duration::from_secs(30),
+        Duration::from_secs(5),
         |backend| backend.lines.len() >= 7,
     );
 

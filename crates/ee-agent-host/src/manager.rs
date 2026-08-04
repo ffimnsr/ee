@@ -38,6 +38,10 @@ pub trait FakeTransportFactory: Send + Sync + 'static {
 pub struct AgentManagerConfig {
     /// Agent id → launch config.
     pub agents: BTreeMap<String, AgentProcessConfig>,
+    /// Whether the ee MCP proxy is configured (arms ACP-native MCP-over-ACP
+    /// hosting on every connection; the agent still has to advertise
+    /// `mcp_capabilities.acp`).
+    pub ee_proxy_enabled: bool,
     /// Test-only: agent id → fake transport factory.  When present for an
     /// agent, the manager connects over the fake transport instead of
     /// spawning a subprocess.
@@ -135,6 +139,20 @@ impl AgentManager {
     /// Fails when the agent is not configured or the subprocess cannot
     /// start.
     pub async fn connection(&self, agent_id: &str) -> Result<AgentConnection, AgentError> {
+        let mut options = self.options;
+        options.ee_proxy_enabled = self.config.ee_proxy_enabled;
+        self.connection_with_options(agent_id, options).await
+    }
+
+    /// Like [`Self::connection`] with explicit options (the config's
+    /// `ee_proxy_enabled` still wins over the caller's options).
+    async fn connection_with_options(
+        &self,
+        agent_id: &str,
+        options: AgentConnectionOptions,
+    ) -> Result<AgentConnection, AgentError> {
+        let mut options = options;
+        options.ee_proxy_enabled = self.config.ee_proxy_enabled;
         if let Some(connection) =
             self.connections.lock().expect("connections poisoned").get(agent_id)
         {
@@ -152,7 +170,7 @@ impl AgentManager {
                 agent_id.to_string(),
                 self.handler.clone(),
                 self.events.clone(),
-                self.options,
+                options,
                 factory.build(),
             )?;
             self.connections
@@ -166,7 +184,7 @@ impl AgentManager {
             config,
             self.handler.clone(),
             self.events.clone(),
-            self.options,
+            options,
         )
         .await?;
         self.connections
@@ -182,6 +200,10 @@ impl AgentManager {
     /// `cwd` and the rest are forwarded as `additionalDirectories`.
     /// `mcp_servers` are forwarded as ACP `session/new` `mcpServers` (the
     /// agent connects to them directly; ee never starts them itself here).
+    /// `ee_proxy_stdio_fallback` carries the stdio `ee --mcp-proxy` entry
+    /// when proxy mode is configured; the host swaps it for an ACP-native
+    /// [`ee_agent_protocol::McpServer::Acp`] entry when the agent supports
+    /// MCP-over-ACP.
     ///
     /// # Errors
     ///
@@ -192,8 +214,12 @@ impl AgentManager {
         agent_id: &str,
         worktree_roots: Vec<PathBuf>,
         mcp_servers: Vec<ee_agent_protocol::McpServer>,
+        ee_proxy_stdio_fallback: Option<ee_agent_protocol::McpServerStdio>,
     ) -> Result<AgentThread, AgentError> {
-        self.connection(agent_id).await?.new_session(worktree_roots, mcp_servers).await
+        self.connection(agent_id)
+            .await?
+            .new_session(worktree_roots, mcp_servers, ee_proxy_stdio_fallback)
+            .await
     }
 
     /// Loads an existing session; only when the agent advertises the
@@ -275,8 +301,10 @@ mod tests {
     #[tokio::test]
     async fn unknown_agent_fails_typed() {
         let manager = manager();
-        let error =
-            manager.new_session("nope", vec![PathBuf::from("/tmp")], Vec::new()).await.unwrap_err();
+        let error = manager
+            .new_session("nope", vec![PathBuf::from("/tmp")], Vec::new(), None)
+            .await
+            .unwrap_err();
         assert!(matches!(error, AgentError::UnknownAgent(_)));
     }
 }

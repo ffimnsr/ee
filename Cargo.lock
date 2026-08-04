@@ -1058,6 +1058,7 @@ dependencies = [
  "ee-agent-protocol",
  "ee-mcp",
  "futures",
+ "rmcp",
  "serde",
  "serde_json",
  "tempfile",

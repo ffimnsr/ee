@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use crate::app::{AgentPaneLayout, App, Mode, ThreadUiState, wrap_text};
 use crate::tests::helpers::*;
 
-const WAIT: Duration = Duration::from_secs(10);
+const WAIT: Duration = Duration::from_secs(5);
 
 // ── Fake transport factory ───────────────────────────────────────────────────
 
@@ -76,12 +76,12 @@ command = "unused"
 fn fake_agents_app(script: FakeAgentScript) -> (App, tempfile::TempDir, ScriptedFake) {
     let temp = tempfile::tempdir().unwrap();
     fs::write(temp.path().join(".ee.toml"), AGENTS_TOML).unwrap();
-    let _cwd_guard = crate::config::test_cwd_lock().lock().unwrap();
-    let original = std::env::current_dir().unwrap();
+    let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let _cwd_restore = CurrentDirGuard::capture();
     std::env::set_current_dir(temp.path()).unwrap();
     let mut app = App::from_path(None).unwrap();
-    std::env::set_current_dir(original).unwrap();
-    drop(_cwd_guard);
+    drop(_cwd_restore);
+    drop(_cwd_lock);
     let fake = ScriptedFake::new(script);
     app.agents.test_fake_transports.insert(String::from("fake"), Arc::new(fake.clone()));
     (app, temp, fake)
@@ -485,6 +485,50 @@ fn elicitation_rejects_unsupported_schema_visibly_and_declines() {
     });
     let response = fake.agent().response_with_id(201).expect("decline response");
     assert!(response.get("error").is_some(), "unsupported forms fail closed: {response}");
+    assert!(app.agents.elicitation.is_none());
+}
+
+#[test]
+fn elicitation_rejects_deep_schema_visibly_and_declines() {
+    let mut nested = json!("leaf");
+    for _ in 0..20 {
+        nested = json!({ "child": nested });
+    }
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(form_elicitation(
+            203,
+            json!({
+                "type": "object",
+                "properties": {
+                    "deep": {
+                        "type": "_future_widget",
+                        "payload": nested
+                    }
+                }
+            }),
+        ))
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "go");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    wait_until(&mut app, "deep elicitation appears", |app| app.agents.elicitation.is_some());
+    let reason = app
+        .agents
+        .elicitation
+        .as_ref()
+        .and_then(|prompt| prompt.unsupported_reason.clone())
+        .expect("unsupported reason must be visible");
+    assert!(reason.contains("schema depth exceeds"), "reason: {reason}");
+
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "deep elicitation declined", |_app| {
+        fake.agent().response_with_id(203).is_some()
+    });
+    assert!(fake.agent().response_with_id(203).expect("response").get("error").is_some());
     assert!(app.agents.elicitation.is_none());
 }
 

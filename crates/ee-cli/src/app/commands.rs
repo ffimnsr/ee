@@ -3898,7 +3898,8 @@ mod tests {
         };
 
         let path = std::env::temp_dir().join(format!(
-            "ee-privileged-save-test-{}",
+            "ee-privileged-save-test-{}-{}",
+            std::process::id(),
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ));
         std::fs::write(&path, "seed\n").unwrap();
@@ -3989,9 +3990,10 @@ mod tests {
         let _cwd_guard = crate::config::test_cwd_lock().lock().unwrap();
         let original = std::env::current_dir().unwrap();
         std::env::set_current_dir(temp.path()).unwrap();
-        let mut app = App::from_path(None).unwrap();
+        let app = App::from_path(None);
         std::env::set_current_dir(original).unwrap();
         drop(_cwd_guard);
+        let mut app = app.unwrap();
 
         app.command_buffer = String::from("agents");
         app.execute_command();
