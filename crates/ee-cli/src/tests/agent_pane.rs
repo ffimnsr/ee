@@ -177,6 +177,25 @@ fn agents_enabled_creates_pane_and_sends_lazy_session_new() {
 }
 
 #[test]
+fn agents_pane_restores_mode_that_opened_command_line() {
+    let (mut app, _temp, _fake) = fake_agents_app(base_script());
+
+    app.mode = Mode::CommandLine;
+    app.command_mode_origin = Some(Mode::Insert);
+    type_text(&mut app, "agents");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "first agent thread ready", |app| {
+        app.agents.threads.len() == 1 && app.agents.threads[0].state == ThreadUiState::Ready
+    });
+    assert_eq!(app.mode, Mode::Agent);
+
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+    assert_eq!(app.mode, Mode::Insert, "focus returns to command-line origin mode");
+    assert_eq!(app.agents.layout, AgentPaneLayout::Right, "Esc changes focus, not pane visibility");
+}
+
+#[test]
 fn pane_startup_is_inert_and_editor_modes_unchanged_while_closed() {
     let (mut app, _temp, _fake) = fake_agents_app(base_script());
 

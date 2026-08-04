@@ -600,10 +600,12 @@ impl App {
                 }
             }
             Action::EnterCommandMode => {
+                self.command_mode_origin = Some(self.mode);
                 self.mode = Mode::CommandLine;
                 self.command_buffer.clear();
             }
             Action::PrefillCommandLine(template) => {
+                self.command_mode_origin = Some(self.mode);
                 self.mode = Mode::CommandLine;
                 self.command_buffer = template.to_owned();
             }

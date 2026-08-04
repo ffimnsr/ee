@@ -218,6 +218,9 @@ pub(crate) struct App {
     pub(crate) backend: BufferManager,
     pub(crate) tabs: TabManager,
     pub(crate) mode: Mode,
+    /// Mode active before entering the ex command line. Agents pane uses this
+    /// to restore focus to the exact editor mode that opened it.
+    pub(crate) command_mode_origin: Option<Mode>,
     pub(crate) command_buffer: String,
     pub(crate) should_quit: bool,
     pub(crate) viewport: Viewport,
@@ -374,6 +377,7 @@ impl App {
             backend,
             tabs: TabManager::new(initial_buf_id),
             mode: Mode::Normal,
+            command_mode_origin: None,
             command_buffer: String::new(),
             should_quit: false,
             viewport: Viewport::default(),

@@ -1724,7 +1724,15 @@ impl App {
         if self.agents_focused() {
             return;
         }
-        self.agents.previous_editor_mode.get_or_insert(Mode::Normal);
+        if self.agents.previous_editor_mode.is_none() {
+            let previous = match self.mode {
+                Mode::CommandLine => self.command_mode_origin.unwrap_or(Mode::Normal),
+                mode => mode,
+            };
+            if previous != Mode::Agent {
+                self.agents.previous_editor_mode = Some(previous);
+            }
+        }
         self.mode = Mode::Agent;
     }
 
@@ -2039,6 +2047,7 @@ impl App {
             KeyCode::Char(':') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 // `:` opens the ex command line from the agents pane, like in
                 // normal mode (so `:agents_stop` etc. work while focused).
+                self.command_mode_origin = Some(self.mode);
                 self.command_buffer.clear();
                 self.mode = Mode::CommandLine;
             }
