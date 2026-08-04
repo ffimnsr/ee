@@ -415,7 +415,7 @@ impl View {
         let first = max(first, 0) as usize;
         let last = max(last, 0) as usize;
         self.first_line = first;
-        self.height = last - first;
+        self.height = last.saturating_sub(first);
     }
 
     pub fn scroll_height(&self) -> usize {
@@ -430,8 +430,8 @@ impl View {
         let line = self.line_of_offset(text, end);
         if line < self.first_line {
             self.first_line = line;
-        } else if self.first_line + self.height <= line {
-            self.first_line = line - (self.height - 1);
+        } else if self.first_line.saturating_add(self.height) <= line {
+            self.first_line = line.saturating_sub(self.height.saturating_sub(1));
         }
         // Primary selection drives cursor-oriented state and scroll targets.
         self.scroll_to = Some(end);
@@ -1839,6 +1839,24 @@ mod tests {
         view.do_find(&text);
         view.do_find_all(&text);
         assert_eq!(view.sel_regions().len(), 2);
+    }
+
+    #[test]
+    fn set_scroll_clamps_inverted_ranges_without_underflow() {
+        let mut view = View::new(1.into(), BufferId::new(2));
+        view.set_scroll(10, 3);
+        assert_eq!(view.first_line, 10);
+        assert_eq!(view.scroll_height(), 0);
+    }
+
+    #[test]
+    fn zero_height_scroll_does_not_underflow_when_selection_moves_cursor() {
+        let mut view = View::new(1.into(), BufferId::new(2));
+        let text = Rope::from("alpha\nbeta\ngamma\n");
+        view.set_scroll(0, 0);
+        view.set_selection(&text, SelRegion::caret(text.len()));
+        assert_eq!(view.scroll_height(), 0);
+        assert_eq!(view.first_line, view.line_of_offset(&text, text.len()));
     }
 
     #[test]

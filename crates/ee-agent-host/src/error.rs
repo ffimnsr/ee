@@ -70,6 +70,7 @@ impl AgentError {
             Self::PermissionDenied { reason } | Self::InvalidParams(reason) => {
                 RpcError::invalid_params().data(serde_json::json!({ "reason": reason }))
             }
+            Self::Cancelled => RpcError::request_cancelled(),
             Self::CapabilityUnsupported { method } => RpcError::method_not_found()
                 .data(serde_json::json!({ "method": method, "reason": "client does not implement this capability" })),
             Self::UnknownPermissionRequest { request_id } => RpcError::invalid_params().data(
@@ -163,6 +164,12 @@ mod tests {
         let converted = AgentError::PermissionDenied { reason: "blocked".into() }.into_rpc();
         assert_eq!(converted.code, ErrorCode::InvalidParams);
         assert_eq!(converted.data, Some(serde_json::json!({ "reason": "blocked" })));
+    }
+
+    #[test]
+    fn into_rpc_maps_cancelled_to_request_cancelled() {
+        let converted = AgentError::Cancelled.into_rpc();
+        assert_eq!(converted.code, ErrorCode::RequestCancelled);
     }
 
     #[test]

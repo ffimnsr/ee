@@ -56,8 +56,6 @@ pub(crate) const BRIDGE_READ_MAX_LINES: usize = 100_000;
 pub(crate) const BRIDGE_READ_MAX_BYTES: usize = 1024 * 1024;
 /// Editor-side hard cap on retained terminal output bytes.
 pub(crate) const BRIDGE_TERMINAL_OUTPUT_CAP: usize = 1024 * 1024;
-/// Hard cap on how long `terminal/wait_for_exit` may poll.
-pub(crate) const BRIDGE_TERMINAL_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// How many bytes each terminal output reader flushes per read.
 const TERMINAL_READER_CHUNK: usize = 4096;
 /// Cap on entries returned by one `ee.list_directory` call.
@@ -84,6 +82,7 @@ const PROXY_RENAME_EDITS_LIMIT: usize = 1000;
 const PROXY_SEARCH_REGEX_MAX_PATTERN_BYTES: usize = 4096;
 /// Max wall time spent in one regex search before fail-closed timeout.
 const PROXY_SEARCH_REGEX_TIMEOUT: Duration = Duration::from_secs(2);
+static NEXT_TERMINAL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 // ── Secret handling ──────────────────────────────────────────────────────────
 
@@ -197,6 +196,8 @@ pub(crate) struct AgentTerminalTrack {
     #[allow(dead_code)]
     pub(crate) terminal_id: String,
     #[allow(dead_code)]
+    pub(crate) owner_session_id: String,
+    #[allow(dead_code)]
     pub(crate) command: String,
     #[allow(dead_code)]
     pub(crate) args: Vec<String>,
@@ -208,11 +209,16 @@ pub(crate) struct AgentTerminalTrack {
     pub(crate) released: bool,
 }
 
+#[derive(Debug, Default)]
+struct AgentTerminalRegistry {
+    active: HashMap<String, AgentTerminalTrack>,
+    released: HashMap<String, AgentTerminalTrack>,
+}
+
 /// Shared registry of agent terminals (UI spawns, worker queries/kills).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AgentTerminals {
-    inner: Arc<Mutex<HashMap<String, AgentTerminalTrack>>>,
-    next_id: Arc<std::sync::atomic::AtomicU64>,
+    inner: Arc<Mutex<AgentTerminalRegistry>>,
 }
 
 impl AgentTerminals {
@@ -241,8 +247,7 @@ impl AgentTerminals {
             .output_byte_limit
             .map(|limit| (limit as usize).min(BRIDGE_TERMINAL_OUTPUT_CAP))
             .unwrap_or(BRIDGE_TERMINAL_OUTPUT_CAP);
-        let terminal_id =
-            format!("term-{}", self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        let terminal_id = self.allocate_terminal_id();
 
         let mut command = Command::new(&request.command);
         command.args(&request.args).envs(sanitized_child_env(&request.env));
@@ -260,6 +265,7 @@ impl AgentTerminals {
 
         let track = AgentTerminalTrack {
             terminal_id: terminal_id.clone(),
+            owner_session_id: request.session_id.0.to_string(),
             command: request.command.clone(),
             args: request.args.clone(),
             cwd: request.cwd.clone(),
@@ -269,10 +275,12 @@ impl AgentTerminals {
             released: false,
         };
         let mut registry = self.inner.lock().expect("terminals poisoned");
-        if registry.contains_key(&terminal_id) {
+        if registry.active.contains_key(&terminal_id)
+            || registry.released.contains_key(&terminal_id)
+        {
             return Err(AgentError::HandlerError("terminal id collision".into()));
         }
-        registry.insert(terminal_id.clone(), track);
+        registry.active.insert(terminal_id.clone(), track);
         Ok(CreateTerminalResponse::new(TerminalId::new(terminal_id)))
     }
 
@@ -286,14 +294,12 @@ impl AgentTerminals {
         request: &TerminalOutputRequest,
     ) -> Result<TerminalOutputResponse, AgentError> {
         let mut registry = self.inner.lock().expect("terminals poisoned");
-        let Some(track) = registry.get_mut(request.terminal_id.0.as_ref()) else {
+        let Some(track) = registry.active.get_mut(request.terminal_id.0.as_ref()) else {
             return Err(AgentError::invalid_params("unknown terminal"));
         };
+        self.validate_owner(track, &request.session_id)?;
         self.refresh_exit(track);
-        let output = track.output.lock().expect("output poisoned");
-        let mut response = TerminalOutputResponse::new(output.as_string(), output.truncated());
-        response.exit_status = track.exit_status.clone();
-        Ok(response)
+        Ok(Self::output_response(track))
     }
 
     /// Waits for the terminal to exit (async polling; cancellable by dropping
@@ -301,25 +307,22 @@ impl AgentTerminals {
     ///
     /// # Errors
     ///
-    /// Fails with `InvalidParams` for unknown terminals and `Io` on timeout.
+    /// Fails with `InvalidParams` for unknown terminals.
     pub(crate) async fn wait_for_exit(
         &self,
         request: &WaitForTerminalExitRequest,
     ) -> Result<WaitForTerminalExitResponse, AgentError> {
-        let deadline = Instant::now() + BRIDGE_TERMINAL_WAIT_TIMEOUT;
         loop {
             {
                 let mut registry = self.inner.lock().expect("terminals poisoned");
-                let Some(track) = registry.get_mut(request.terminal_id.0.as_ref()) else {
+                let Some(track) = registry.active.get_mut(request.terminal_id.0.as_ref()) else {
                     return Err(AgentError::invalid_params("unknown terminal"));
                 };
+                self.validate_owner(track, &request.session_id)?;
                 self.refresh_exit(track);
                 if let Some(exit_status) = track.exit_status.clone() {
                     return Ok(WaitForTerminalExitResponse::new(exit_status));
                 }
-            }
-            if Instant::now() >= deadline {
-                return Err(AgentError::Io("terminal/wait_for_exit timed out".into()));
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -335,16 +338,11 @@ impl AgentTerminals {
         request: &KillTerminalRequest,
     ) -> Result<KillTerminalResponse, AgentError> {
         let mut registry = self.inner.lock().expect("terminals poisoned");
-        let Some(track) = registry.get_mut(request.terminal_id.0.as_ref()) else {
+        let Some(track) = registry.active.get_mut(request.terminal_id.0.as_ref()) else {
             return Err(AgentError::invalid_params("unknown terminal"));
         };
-        if let Some(child) = track.child.as_mut() {
-            let _ = child.kill();
-            if let Ok(status) = child.wait() {
-                track.exit_status = Some(exit_status_of(&status));
-            }
-            track.child = None;
-        }
+        self.validate_owner(track, &request.session_id)?;
+        self.kill_track(track)?;
         Ok(KillTerminalResponse::new())
     }
 
@@ -358,15 +356,66 @@ impl AgentTerminals {
         request: &ReleaseTerminalRequest,
     ) -> Result<ReleaseTerminalResponse, AgentError> {
         let mut registry = self.inner.lock().expect("terminals poisoned");
-        let Some(mut track) = registry.remove(request.terminal_id.0.as_ref()) else {
+        let Some(mut track) = registry.active.remove(request.terminal_id.0.as_ref()) else {
             return Err(AgentError::invalid_params("unknown terminal"));
         };
+        self.validate_owner(&track, &request.session_id)?;
+        self.kill_track(&mut track)?;
         track.released = true;
-        if let Some(mut child) = track.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        registry.released.insert(track.terminal_id.clone(), track);
         Ok(ReleaseTerminalResponse::new())
+    }
+
+    fn allocate_terminal_id(&self) -> String {
+        loop {
+            let tick = NEXT_TERMINAL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128;
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default();
+            let pid = u128::from(std::process::id());
+            let candidate = format!("term-{:032x}", now ^ (pid << 32) ^ tick);
+            let registry = self.inner.lock().expect("terminals poisoned");
+            let taken = registry.active.contains_key(&candidate)
+                || registry.released.contains_key(&candidate);
+            drop(registry);
+            if !taken {
+                return candidate;
+            }
+        }
+    }
+
+    fn validate_owner(
+        &self,
+        track: &AgentTerminalTrack,
+        session_id: &SessionId,
+    ) -> Result<(), AgentError> {
+        if track.owner_session_id == session_id.0.as_ref() {
+            Ok(())
+        } else {
+            Err(AgentError::invalid_params("terminal does not belong to this session"))
+        }
+    }
+
+    fn kill_track(&self, track: &mut AgentTerminalTrack) -> Result<(), AgentError> {
+        if let Some(child) = track.child.as_mut() {
+            child
+                .kill()
+                .map_err(|error| AgentError::Io(format!("terminal kill failed: {error}")))?;
+            let status = child
+                .wait()
+                .map_err(|error| AgentError::Io(format!("terminal wait failed: {error}")))?;
+            track.exit_status = Some(exit_status_of(&status));
+            track.child = None;
+        }
+        Ok(())
+    }
+
+    fn output_response(track: &AgentTerminalTrack) -> TerminalOutputResponse {
+        let output = track.output.lock().expect("output poisoned");
+        let mut response = TerminalOutputResponse::new(output.as_string(), output.truncated());
+        response.exit_status = track.exit_status.clone();
+        response
     }
 
     /// Reaps the child when it exited and caches the exit status.
@@ -380,10 +429,20 @@ impl AgentTerminals {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn display_output(&self, terminal_id: &str) -> Option<TerminalOutputResponse> {
+        let mut registry = self.inner.lock().expect("terminals poisoned");
+        if let Some(track) = registry.active.get_mut(terminal_id) {
+            self.refresh_exit(track);
+            return Some(Self::output_response(track));
+        }
+        registry.released.get(terminal_id).map(Self::output_response)
+    }
+
     /// Kills every tracked terminal and clears the registry (app shutdown).
     pub(crate) fn kill_all(&self) {
         let registry = std::mem::take(&mut *self.inner.lock().expect("terminals poisoned"));
-        for (_, mut track) in registry {
+        for (_, mut track) in registry.active.into_iter().chain(registry.released) {
             if let Some(mut child) = track.child.take() {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -394,7 +453,7 @@ impl AgentTerminals {
     /// Number of tracked terminals (tests and status lines).
     #[cfg(test)]
     pub(crate) fn tracked_count(&self) -> usize {
-        self.inner.lock().expect("terminals poisoned").len()
+        self.inner.lock().expect("terminals poisoned").active.len()
     }
 }
 
@@ -1265,6 +1324,10 @@ impl App {
                     self.bridge_read_file(&request, reply);
                 }
                 BridgeUiMessage::WriteFile { request, reply } => {
+                    if let Err(error) = self.validate_workspace_write_path(&request.path) {
+                        let _ = reply.send(Err(error));
+                        continue;
+                    }
                     let thread = self.session_thread(&request.session_id);
                     self.request_bridge_approval(ApprovalPrompt::write(
                         thread,
@@ -1424,6 +1487,10 @@ impl App {
                 self.bridge_read_file(&request, reply);
             }
             super::agents_mcp::ProxyToolCall::Write(request) => {
+                if let Err(error) = self.validate_workspace_write_path(&request.path) {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
                 self.request_bridge_approval(ApprovalPrompt::write(
                     None,
                     &session_id,
@@ -1475,6 +1542,17 @@ impl App {
             let _ = reply.send(Err(AgentError::invalid_params("path must be absolute")));
             return;
         }
+        if let Err(error) = validate_read_window(request.line, request.limit, None) {
+            let _ = reply.send(Err(error));
+            return;
+        }
+        if !self.path_in_effective_workspace(&request.path) {
+            let _ = reply.send(Err(AgentError::invalid_params(format!(
+                "path outside allowed workspace: {}",
+                request.path.display()
+            ))));
+            return;
+        }
 
         // Open buffer first: the in-memory snapshot is authoritative.
         if let Some(buf) = self
@@ -1506,27 +1584,24 @@ impl App {
             return;
         }
 
-        // Disk fallback: workspace scope only.
-        if !self.path_in_workspace(&request.path) {
-            let _ = reply.send(Err(AgentError::invalid_params(format!(
-                "path outside allowed workspace: {}",
-                request.path.display()
-            ))));
-            return;
-        }
+        // Disk fallback after containment check above.
         match std::fs::read_to_string(&request.path) {
-            Ok(content) => {
-                let content = apply_read_caps(&content, request.line, request.limit);
-                let bytes = content.len();
-                self.agents.action_log.push(ActionLogEntry::Read {
-                    path: request.path.clone(),
-                    bytes,
-                    session_id: request.session_id.0.to_string(),
-                });
-                let _ = reply.send(Ok(ClientRequestResponse::ReadTextFile(
-                    ReadTextFileResponse::new(content),
-                )));
-            }
+            Ok(content) => match read_text_window(&content, request.line, request.limit) {
+                Ok(content) => {
+                    let bytes = content.len();
+                    self.agents.action_log.push(ActionLogEntry::Read {
+                        path: request.path.clone(),
+                        bytes,
+                        session_id: request.session_id.0.to_string(),
+                    });
+                    let _ = reply.send(Ok(ClientRequestResponse::ReadTextFile(
+                        ReadTextFileResponse::new(content),
+                    )));
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                }
+            },
             Err(error) => {
                 let _ = reply.send(Err(AgentError::Io(format!(
                     "cannot read {}: {error}",
@@ -1544,14 +1619,7 @@ impl App {
         request: &ReadTextFileRequest,
     ) -> Result<(String, usize), AgentError> {
         let line_count = buf.line_count();
-        let start =
-            request.line.map(|line| (line.saturating_sub(1)) as usize).unwrap_or(0).min(line_count);
-        if start > line_count {
-            return Err(AgentError::invalid_params(format!(
-                "start line {} is beyond the end of the file ({line_count} lines)",
-                request.line.unwrap_or(1)
-            )));
-        }
+        let start = validate_read_window(request.line, request.limit, Some(line_count))?;
         if buf.is_vlf {
             if request.line.is_none() && request.limit.is_none() {
                 return Err(AgentError::invalid_params(
@@ -1581,23 +1649,10 @@ impl App {
             let bytes = content.len();
             return Ok((content, bytes));
         }
-        if let Some(limit) = request.limit {
-            let count = limit as usize;
-            if count > BRIDGE_READ_MAX_LINES {
-                return Err(AgentError::invalid_params(format!(
-                    "line limit {count} exceeds the {BRIDGE_READ_MAX_LINES} cap"
-                )));
-            }
-            let end = start.saturating_add(count).min(line_count);
-            let lines = buf.line_range_owned(start, end.saturating_sub(1)).unwrap_or_default();
-            let content = lines.join("\n");
-            let bytes = content.len();
-            Ok((content, bytes))
-        } else {
-            let content = apply_read_caps(&buf.whole_text().unwrap_or_default(), None, None);
-            let bytes = content.len();
-            Ok((content, bytes))
-        }
+        let content =
+            read_text_window(&buf.whole_text().unwrap_or_default(), request.line, request.limit)?;
+        let bytes = content.len();
+        Ok((content, bytes))
     }
 
     /// Queues an approval prompt (front of the queue wins) and notifies,
@@ -1967,6 +2022,11 @@ impl App {
         self.canonical_workspace_roots().iter().any(|root| canonical.starts_with(root))
     }
 
+    fn path_in_effective_workspace(&self, path: &Path) -> bool {
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        self.allowed_fs_roots().iter().any(|root| canonical.starts_with(root))
+    }
+
     fn canonical_workspace_roots(&self) -> Vec<PathBuf> {
         let mut roots = BTreeSet::new();
         for root in self.agents_workspace_roots() {
@@ -1991,6 +2051,10 @@ impl App {
             .and_then(|path| std::fs::canonicalize(path).ok())
             .or_else(|| std::fs::canonicalize(&self.working_dir).ok());
         active_file.and_then(|path| roots.into_iter().find(|root| path.starts_with(root)))
+    }
+
+    fn allowed_fs_roots(&self) -> Vec<PathBuf> {
+        self.active_root_path().map_or_else(|| self.canonical_workspace_roots(), |root| vec![root])
     }
 
     fn validate_workspace_write_path(&self, path: &Path) -> Result<(), AgentError> {
@@ -2019,7 +2083,7 @@ impl App {
             };
             canonical_parent.join(name)
         };
-        if self.canonical_workspace_roots().iter().any(|root| candidate.starts_with(root)) {
+        if self.allowed_fs_roots().iter().any(|root| candidate.starts_with(root)) {
             Ok(())
         } else {
             Err(AgentError::invalid_params(format!(
@@ -2041,7 +2105,7 @@ impl App {
         if !path.exists() {
             return Ok(None);
         }
-        if !self.path_in_workspace(path) {
+        if !self.path_in_effective_workspace(path) {
             return Err(AgentError::invalid_params(format!(
                 "path outside allowed workspace: {}",
                 path.display()
@@ -2102,7 +2166,7 @@ impl App {
             let revision = text_revision_id(&content);
             return Ok((content, revision));
         }
-        if !self.path_in_workspace(path) {
+        if !self.path_in_effective_workspace(path) {
             return Err(AgentError::invalid_params(format!(
                 "path outside allowed workspace: {}",
                 path.display()
@@ -2358,14 +2422,9 @@ impl App {
                 AgentError::Io(format!("cannot read {}: {error}", path.display()))
             })?;
             if let Some(line) = line {
-                let lines = split_lines(&content);
-                let start = (line.saturating_sub(1)) as usize;
-                let count = limit
-                    .unwrap_or(u32::try_from(BRIDGE_READ_MAX_LINES).unwrap_or(u32::MAX))
-                    as usize;
-                lines.into_iter().skip(start).take(count).collect::<Vec<_>>().join("\n")
+                read_text_window(&content, Some(line), limit)?
             } else {
-                apply_read_caps(&content, None, limit)
+                read_text_window(&content, None, limit)?
             }
         };
         Ok(serde_json::Value::String(text))
@@ -3385,28 +3444,61 @@ impl App {
     }
 }
 
-/// Applies the unbounded-read caps (line and byte) to `content`.
-fn apply_read_caps(content: &str, line: Option<u32>, limit: Option<u32>) -> String {
-    if line.is_some() && limit.is_none() {
-        return content.to_string();
+fn validate_read_window(
+    line: Option<u32>,
+    limit: Option<u32>,
+    line_count: Option<usize>,
+) -> Result<usize, AgentError> {
+    if matches!(line, Some(0)) {
+        return Err(AgentError::invalid_params("line must be 1-based"));
     }
-    let lines = split_lines(content);
-    let mut effective = lines;
     if let Some(limit) = limit {
-        let count = (limit as usize).min(BRIDGE_READ_MAX_LINES);
-        effective.truncate(count);
-    } else {
-        effective.truncate(BRIDGE_READ_MAX_LINES);
+        let count = limit as usize;
+        if count > BRIDGE_READ_MAX_LINES {
+            return Err(AgentError::invalid_params(format!(
+                "line limit {count} exceeds the {BRIDGE_READ_MAX_LINES} cap"
+            )));
+        }
     }
-    let mut text = effective.join("\n");
-    if text.len() > BRIDGE_READ_MAX_BYTES {
+    let start = line.map(|line| (line - 1) as usize).unwrap_or(0);
+    if let Some(line_count) = line_count
+        && start > line_count
+    {
+        return Err(AgentError::invalid_params(format!(
+            "start line {} is beyond the end of the file ({line_count} lines)",
+            line.unwrap_or(1)
+        )));
+    }
+    Ok(start)
+}
+
+/// Applies ACP read-window semantics and unbounded-read caps to `content`.
+fn read_text_window(
+    content: &str,
+    line: Option<u32>,
+    limit: Option<u32>,
+) -> Result<String, AgentError> {
+    let lines = split_lines(content);
+    let start = validate_read_window(line, limit, Some(lines.len()))?;
+    let selected = if let Some(limit) = limit {
+        let count = limit as usize;
+        lines.into_iter().skip(start).take(count).collect::<Vec<_>>()
+    } else {
+        let mut tail = lines.into_iter().skip(start).collect::<Vec<_>>();
+        if line.is_some() || start == 0 {
+            tail.truncate(BRIDGE_READ_MAX_LINES);
+        }
+        tail
+    };
+    let mut text = selected.join("\n");
+    if limit.is_none() && text.len() > BRIDGE_READ_MAX_BYTES {
         let mut cut = BRIDGE_READ_MAX_BYTES;
         while cut < text.len() && !text.is_char_boundary(cut) {
             cut -= 1;
         }
         text.truncate(cut);
     }
-    text
+    Ok(text)
 }
 
 fn visible_child_paths(dir: &Path) -> BTreeSet<PathBuf> {
@@ -3674,9 +3766,9 @@ mod tests {
     #[test]
     fn read_caps_truncate_unbounded_reads() {
         let content = "x\n".repeat(200_000);
-        let capped = apply_read_caps(&content, None, None);
+        let capped = read_text_window(&content, None, None).expect("unbounded read caps");
         assert!(capped.len() <= BRIDGE_READ_MAX_BYTES);
-        let bounded = apply_read_caps(&content, None, Some(3));
+        let bounded = read_text_window(&content, None, Some(3)).expect("bounded read caps");
         assert_eq!(bounded, "x\nx\nx");
     }
 

@@ -29,6 +29,7 @@ pub(crate) enum PickerKind {
     CodeActions,
     Symbols,
     Locations,
+    AgentThreads,
 }
 
 /// A single entry in a picker list.
@@ -47,7 +48,7 @@ pub(crate) struct PickerItem {
     pub(crate) line: Option<usize>,
     /// 0-based byte column for navigation targets.
     pub(crate) col: Option<usize>,
-    /// 1-based completion or code-action index sent back to the backend.
+    /// Picker-specific selection payload used by confirm handlers.
     pub(crate) choice_index: Option<usize>,
 }
 
@@ -241,6 +242,19 @@ impl PickerState {
         Self {
             kind: PickerKind::Locations,
             title: title.into(),
+            query: String::new(),
+            cwd: PathBuf::from("."),
+            items,
+            filtered,
+            selected: 0,
+        }
+    }
+
+    pub(crate) fn new_agent_threads(items: Vec<PickerItem>) -> Self {
+        let filtered = (0..items.len()).collect();
+        Self {
+            kind: PickerKind::AgentThreads,
+            title: String::from("Agent Sessions"),
             query: String::new(),
             cwd: PathBuf::from("."),
             items,

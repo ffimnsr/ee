@@ -54,13 +54,12 @@ pub(crate) use state::{
 // module tree without those modules, so the lint fires there.
 #[cfg(all(feature = "agents", test))]
 #[allow(unused_imports)]
-pub(crate) use agent_bridge::ActionLogEntry;
+pub(crate) use agent_bridge::{ActionLogEntry, AgentTerminals};
 
 #[cfg(feature = "agents")]
 pub(crate) use agent_pane::{
-    AGENTS_CHANNEL_COL_WIDTH, AGENTS_NICK_COL_WIDTH, AGENTS_PANE_BOTTOM_HEIGHT,
-    AGENTS_PANE_RIGHT_WIDTH, AgentPaneLayout, AgentThreadUi, MessageRenderKind, ThreadUiState,
-    TranscriptItem, wrap_text,
+    AGENTS_NICK_COL_WIDTH, AGENTS_PANE_BOTTOM_HEIGHT, AGENTS_PANE_RIGHT_WIDTH, AgentPaneLayout,
+    AgentThreadUi, MessageRenderKind, ThreadUiState, TranscriptItem, wrap_text,
 };
 
 const SWIFT_MOTION_LABELS: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
@@ -3310,6 +3309,10 @@ impl App {
                 }
             }
             crate::picker::PickerKind::Help => {}
+            crate::picker::PickerKind::AgentThreads => {
+                let Some(index) = item.choice_index else { return };
+                self.focus_thread(index);
+            }
             crate::picker::PickerKind::Symbols => {
                 let Some(path) = item.path else { return };
                 match self.backend.open_buffer(Some(path)) {

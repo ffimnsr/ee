@@ -32,5 +32,6 @@ build
 /.ee.toml
 /gh-run-*-logs/
 
+.env
 
 *.log

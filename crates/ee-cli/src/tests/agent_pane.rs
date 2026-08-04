@@ -13,10 +13,13 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ee_agent_host::FakeTransportFactory;
 use ee_agent_host::fake::{FakeAgent, FakeAgentScript, FakeAgentTransport, wire};
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 use serde_json::{Value, json};
 
-use crate::app::{AgentPaneLayout, App, Mode, ThreadUiState, wrap_text};
+use crate::app::{AgentPaneLayout, App, Mode, ThreadUiState, TranscriptItem, wrap_text};
 use crate::tests::helpers::*;
+use crate::ui::ui;
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -168,7 +171,7 @@ fn agents_enabled_creates_pane_and_sends_lazy_session_new() {
         app.agents.threads.len() == 1 && app.agents.threads[0].state == ThreadUiState::Ready
     });
 
-    assert_eq!(app.agents.layout, AgentPaneLayout::Right);
+    assert_eq!(app.agents.layout, AgentPaneLayout::Full);
     assert_eq!(app.mode, Mode::Agent);
     assert_eq!(app.agents.threads[0].session_id, "s1");
     assert_eq!(app.agents.threads[0].display_name, "1.fake");
@@ -219,7 +222,7 @@ fn agents_pane_restores_mode_that_opened_command_line() {
     press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
 
     assert_eq!(app.mode, Mode::Insert, "focus returns to command-line origin mode");
-    assert_eq!(app.agents.layout, AgentPaneLayout::Right, "Esc changes focus, not pane visibility");
+    assert_eq!(app.agents.layout, AgentPaneLayout::Closed, "Esc closes full-screen agents pane");
 }
 
 #[test]
@@ -242,6 +245,43 @@ fn pane_startup_is_inert_and_editor_modes_unchanged_while_closed() {
 }
 
 // ── Prompt submission ────────────────────────────────────────────────────────
+
+#[test]
+fn enter_without_config_reports_needed_server_and_keeps_draft() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join(".ee.toml"), "[agents]\nenabled = true\n").unwrap();
+    let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let _cwd_restore = CurrentDirGuard::capture();
+    std::env::set_current_dir(temp.path()).unwrap();
+    let mut app = App::from_path(None).unwrap();
+    drop(_cwd_restore);
+    drop(_cwd_lock);
+
+    run_ex(&mut app, "agents");
+    type_text(&mut app, "qwe");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    let status = app.backend.status_message.clone().unwrap_or_default();
+    assert!(status.contains("no agent configured"), "unexpected status: {status}");
+    assert_eq!(app.agents.pending_draft, "qwe");
+    assert!(app.agents.threads.is_empty());
+}
+
+#[test]
+fn draft_typed_before_session_ready_carries_into_first_thread() {
+    let (mut app, _temp, _fake) = fake_agents_app(base_script());
+
+    run_ex(&mut app, "agents");
+    type_text(&mut app, "hello before ready");
+    assert_eq!(app.agents.pending_draft, "hello before ready");
+
+    wait_until(&mut app, "first agent thread ready", |app| {
+        app.agents.threads.len() == 1 && app.agents.threads[0].state == ThreadUiState::Ready
+    });
+
+    assert!(app.agents.pending_draft.is_empty());
+    assert_eq!(app.agents.threads[0].draft, "hello before ready");
+}
 
 #[test]
 fn prompt_submission_appends_optimistic_you_and_sends_acp_prompt() {
@@ -268,6 +308,42 @@ fn prompt_submission_appends_optimistic_you_and_sends_acp_prompt() {
 }
 
 #[test]
+fn separate_user_turns_do_not_concatenate_without_message_ids() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .respond(json!({ "stopReason": "end_turn" }))
+        .wait_for("session/prompt")
+        .respond(json!({ "stopReason": "end_turn" }))
+        .wait_for("session/prompt")
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    for (index, prompt) in ["one", "two", "three"].into_iter().enumerate() {
+        type_text(&mut app, prompt);
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        wait_until(&mut app, "turn completed", |app| {
+            app.agents.threads[0]
+                .system_notices()
+                .iter()
+                .filter(|notice| notice.contains("turn completed"))
+                .count()
+                > index
+        });
+    }
+
+    let pairs = app.agents.threads[0].message_pairs();
+    assert_eq!(
+        pairs,
+        vec![
+            (String::from("you"), String::from("one")),
+            (String::from("you"), String::from("two")),
+            (String::from("you"), String::from("three")),
+        ]
+    );
+}
+
+#[test]
 fn streamed_assistant_chunks_render_in_order_with_thoughts() {
     let script = base_script()
         .wait_for("session/prompt")
@@ -290,13 +366,14 @@ fn streamed_assistant_chunks_render_in_order_with_thoughts() {
     wait_until(&mut app, "chunks merged in order", |app| {
         app.agents.threads[0].message_pairs().len() == 3
     });
+    assert!(app.agents.show_thoughts, "thought streaming must be visible by default");
     let pairs = app.agents.threads[0].message_pairs();
     assert_eq!(
         pairs,
         vec![
             (String::from("you"), String::from("hi")),
             (String::from("fake"), String::from("hello")),
-            (String::from("thought"), String::from("hmm")),
+            (String::from("think"), String::from("hmm")),
         ]
     );
 
@@ -307,6 +384,41 @@ fn streamed_assistant_chunks_render_in_order_with_thoughts() {
     for line in wrap_text("hello", 8) {
         assert!(!line.is_empty());
     }
+}
+
+#[test]
+fn agents_thoughts_command_toggles_visibility_without_dropping_transcript() {
+    let (mut app, _temp, _fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+    assert!(app.agents.show_thoughts);
+
+    run_ex(&mut app, "agents_thoughts off");
+    assert!(!app.agents.show_thoughts);
+    assert_eq!(app.backend.status_message.as_deref(), Some("agent thoughts hidden"));
+
+    app.agents.threads[0].transcript.push(TranscriptItem::Message {
+        nick: String::from("think"),
+        text: String::from("private summary"),
+        kind: crate::app::MessageRenderKind::Thought,
+        message_id: Some(String::from("th-1")),
+        at: std::time::SystemTime::UNIX_EPOCH,
+    });
+    assert_eq!(
+        app.agents.threads[0].message_pairs().len(),
+        1,
+        "toggle must not drop stored thought transcript"
+    );
+
+    run_ex(&mut app, "agents_thoughts toggle");
+    assert!(app.agents.show_thoughts);
+    assert_eq!(app.backend.status_message.as_deref(), Some("agent thoughts visible"));
+
+    run_ex(&mut app, "agents_thoughts maybe");
+    assert_eq!(
+        app.backend.status_message.as_deref(),
+        Some("usage: :agents_thoughts on|off|toggle")
+    );
+    assert!(app.agents.show_thoughts, "invalid input must not change visibility");
 }
 
 #[test]
@@ -518,6 +630,79 @@ fn agents_config_commands_list_and_mutate_advertised_options() {
 // ── Scrollback behavior ──────────────────────────────────────────────────────
 
 #[test]
+fn agents_transcript_bottom_aligns_short_chat() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(wire::session_update("s1", wire::agent_message_chunk("m1", "answer")))
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "question");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "chat lands", |app| app.agents.threads[0].message_pairs().len() >= 2);
+
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rows = terminal.backend().buffer();
+    let rendered: Vec<String> = (0..20)
+        .map(|y| (0..80).map(|x| rows.cell((x, y)).unwrap().symbol()).collect::<String>())
+        .collect();
+
+    let first_transcript_row = rendered
+        .iter()
+        .position(|row| row.contains("session started"))
+        .expect("first transcript row");
+    let user_row = rendered.iter().position(|row| row.contains("question")).expect("user row");
+    let agent_row = rendered.iter().position(|row| row.contains("answer")).expect("agent row");
+    assert!(first_transcript_row >= 10, "short chat should sit near composer, rows={rendered:#?}");
+    assert!(user_row < agent_row, "messages remain chronological");
+}
+
+#[test]
+fn agents_transcript_preserves_agent_markdown_newlines() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(wire::session_update(
+            "s1",
+            wire::agent_message_chunk("m1", "first line\nsecond line"),
+        ))
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "question");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "multiline response lands", |app| {
+        app.agents.threads[0]
+            .message_pairs()
+            .iter()
+            .any(|(_, text)| text == "first line\nsecond line")
+    });
+
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rows = terminal.backend().buffer();
+    let rendered: Vec<String> = (0..20)
+        .map(|y| (0..80).map(|x| rows.cell((x, y)).unwrap().symbol()).collect::<String>())
+        .collect();
+
+    let first_row = rendered.iter().position(|row| row.contains("first line")).expect("first row");
+    let second_row =
+        rendered.iter().position(|row| row.contains("second line")).expect("second row");
+    assert!(first_row < second_row, "newlines must render as separate rows: {rendered:#?}");
+    assert!(
+        rendered.iter().all(|row| !(row.contains("first line") && row.contains("second line"))),
+        "newline collapsed onto one row: {rendered:#?}"
+    );
+    let first_col = rendered[first_row].find("first line").expect("first line column");
+    let second_col = rendered[second_row].find("second line").expect("second line column");
+    assert_eq!(first_col, second_col, "continuation rows must align: {rendered:#?}");
+}
+
+#[test]
 fn scrollback_pins_to_bottom_until_user_scrolls_up() {
     let script = base_script()
         .wait_for("session/prompt")
@@ -607,6 +792,10 @@ fn permission_prompt_selection_resolves_host_request() {
 // ── Elicitation flow ─────────────────────────────────────────────────────────
 
 fn form_elicitation(id: i64, schema: Value) -> Value {
+    form_elicitation_with_message(id, schema, "fill the form")
+}
+
+fn form_elicitation_with_message(id: i64, schema: Value, message: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -615,7 +804,7 @@ fn form_elicitation(id: i64, schema: Value) -> Value {
             "mode": "form",
             "sessionId": "s1",
             "requestedSchema": schema,
-            "message": "fill the form"
+            "message": message
         }
     })
 }
@@ -653,6 +842,8 @@ fn elicitation_widgets_resolve_form_requests() {
 
     wait_until(&mut app, "elicitation prompt appears", |app| app.agents.elicitation.is_some());
     let elicitation = app.agents.elicitation.as_ref().expect("prompt present");
+    assert_eq!(elicitation.agent_label, "1.fake");
+    assert_eq!(elicitation.message, "fill the form");
     assert_eq!(elicitation.fields.len(), 3);
     assert!(elicitation.unsupported_reason.is_none());
     // Schema properties arrive in sorted order (BTreeMap), so locate fields
@@ -738,13 +929,24 @@ fn elicitation_rejects_unsupported_schema_visibly_and_declines() {
         .expect("unsupported reason must be visible");
     assert!(reason.contains("unsupported"), "reason: {reason}");
 
-    // Enter (accept) with an unsupported form declines safely.
+    // Enter (accept) fails locally and keeps prompt open until user declines/cancels.
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "unsupported elicitation stays local", |app| {
+        app.agents.elicitation.is_some()
+            && app
+                .backend
+                .status_message
+                .as_deref()
+                .is_some_and(|status| status.contains("elicitation blocked locally"))
+    });
+    assert!(fake.agent().response_with_id(201).is_none());
+
+    press(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
     wait_until(&mut app, "unsupported elicitation declined", |_app| {
         fake.agent().response_with_id(201).is_some()
     });
     let response = fake.agent().response_with_id(201).expect("decline response");
-    assert!(response.get("error").is_some(), "unsupported forms fail closed: {response}");
+    assert_eq!(response["result"]["action"], "decline");
     assert!(app.agents.elicitation.is_none());
 }
 
@@ -785,15 +987,26 @@ fn elicitation_rejects_deep_schema_visibly_and_declines() {
     assert!(reason.contains("schema depth exceeds"), "reason: {reason}");
 
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-    wait_until(&mut app, "deep elicitation declined", |_app| {
+    wait_until(&mut app, "deep elicitation stays local", |app| {
+        app.agents.elicitation.is_some()
+            && app
+                .backend
+                .status_message
+                .as_deref()
+                .is_some_and(|status| status.contains("elicitation blocked locally"))
+    });
+    assert!(fake.agent().response_with_id(203).is_none());
+
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    wait_until(&mut app, "deep elicitation cancelled", |_app| {
         fake.agent().response_with_id(203).is_some()
     });
-    assert!(fake.agent().response_with_id(203).expect("response").get("error").is_some());
+    assert_eq!(fake.agent().response_with_id(203).expect("response")["result"]["action"], "cancel");
     assert!(app.agents.elicitation.is_none());
 }
 
 #[test]
-fn url_elicitation_shows_full_url_and_choice() {
+fn url_elicitation_shows_full_url_host_and_choice() {
     let script = base_script()
         .wait_for("session/prompt")
         .emit(json!({
@@ -818,17 +1031,37 @@ fn url_elicitation_shows_full_url_and_choice() {
     wait_until(&mut app, "url elicitation appears", |app| {
         app.agents.elicitation.as_ref().is_some_and(|prompt| prompt.url.is_some())
     });
-    let url = app.agents.elicitation.as_ref().and_then(|p| p.url.clone()).expect("url");
+    let prompt = app.agents.elicitation.as_ref().expect("prompt");
+    let url = prompt.url.clone().expect("url");
+    assert_eq!(prompt.url_host.as_deref(), Some("example.com"));
     assert!(url.contains("https://example.com/authorize"), "full url shown: {url}");
+    assert!(app.agents.threads[0].transcript.iter().any(|item| matches!(
+        item,
+        TranscriptItem::Elicitation {
+            agent,
+            message,
+            url: Some(url),
+            url_host: Some(host),
+            ..
+        } if agent == "1.fake"
+            && message == "authorize the agent"
+            && host == "example.com"
+            && url.contains("https://example.com/authorize?client=ee")
+    )));
 
-    // Left/Right cycles accept/decline; Esc declines without opening.
+    // Left/Right cycles accept/decline/cancel; Ctrl-D declines without opening.
     press(&mut app, KeyCode::Left, KeyModifiers::NONE);
-    assert_eq!(app.agents.elicitation.as_ref().expect("prompt").selected_choice, 1);
-    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(app.agents.elicitation.as_ref().expect("prompt").selected_choice, 2);
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+    assert_eq!(app.agents.elicitation.as_ref().expect("prompt").selected_choice, 0);
+    press(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
     wait_until(&mut app, "url elicitation declined", |_| {
         fake.agent().response_with_id(202).is_some()
     });
-    assert!(fake.agent().response_with_id(202).expect("response").get("error").is_some());
+    assert_eq!(
+        fake.agent().response_with_id(202).expect("response")["result"]["action"],
+        "decline"
+    );
 }
 
 #[test]
@@ -910,7 +1143,163 @@ fn stale_url_elicitation_completion_is_ignored_without_clearing_prompt() {
     wait_until(&mut app, "url elicitation declined after stale completion", |_| {
         fake.agent().response_with_id(202).is_some()
     });
-    assert!(fake.agent().response_with_id(202).expect("response").get("error").is_some());
+    assert_eq!(fake.agent().response_with_id(202).expect("response")["result"]["action"], "cancel");
+}
+
+#[test]
+fn secret_like_elicitation_requests_are_blocked_locally() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(form_elicitation_with_message(
+            204,
+            json!({
+                "type": "object",
+                "properties": {
+                    "api_key": { "type": "string", "title": "API key" }
+                },
+                "required": ["api_key"]
+            }),
+            "enter your password",
+        ))
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "go");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    wait_until(&mut app, "secretive elicitation appears", |app| app.agents.elicitation.is_some());
+    let reason = app
+        .agents
+        .elicitation
+        .as_ref()
+        .and_then(|prompt| prompt.unsupported_reason.clone())
+        .expect("blocked reason visible");
+    assert!(reason.contains("secret-like elicitation requests are blocked"), "reason: {reason}");
+
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "blocked elicitation remains local", |app| {
+        app.agents.elicitation.is_some()
+            && app
+                .backend
+                .status_message
+                .as_deref()
+                .is_some_and(|status| status.contains("elicitation blocked locally"))
+    });
+    assert!(fake.agent().response_with_id(204).is_none());
+
+    press(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+    wait_until(&mut app, "blocked elicitation declined", |_| {
+        fake.agent().response_with_id(204).is_some()
+    });
+    assert_eq!(
+        fake.agent().response_with_id(204).expect("response")["result"]["action"],
+        "decline"
+    );
+}
+
+#[test]
+fn elicitation_validation_failure_stays_local_until_user_resolves_it() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(form_elicitation(
+            205,
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "title": "Name" }
+                },
+                "required": ["name"]
+            }),
+        ))
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "go");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    wait_until(&mut app, "required-field elicitation appears", |app| {
+        app.agents.elicitation.is_some()
+    });
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "validation failure stays local", |app| {
+        app.agents.elicitation.is_some()
+            && app
+                .backend
+                .status_message
+                .as_deref()
+                .is_some_and(|status| status.contains("required field missing"))
+    });
+    assert!(fake.agent().response_with_id(205).is_none());
+
+    type_text(&mut app, "ed");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "validation resolved", |_| fake.agent().response_with_id(205).is_some());
+    assert_eq!(fake.agent().response_with_id(205).expect("response")["result"]["action"], "accept");
+    assert_eq!(
+        fake.agent().response_with_id(205).expect("response")["result"]["content"]["name"],
+        "ed"
+    );
+}
+
+#[test]
+fn tool_call_updates_render_kind_content_locations_and_secret_conscious_diagnostics() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(wire::session_update(
+            "s1",
+            json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_1",
+                "title": "Run tests",
+                "kind": "execute",
+                "status": "pending",
+                "rawInput": { "token": "super-secret" }
+            }),
+        ))
+        .emit(wire::session_update(
+            "s1",
+            json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_1",
+                "status": "completed",
+                "content": [
+                    { "type": "content", "content": { "type": "text", "text": "cargo test --quiet" } },
+                    { "type": "diff", "path": "/tmp/src/lib.rs", "newText": "fn main() {}" },
+                    { "type": "terminal", "terminalId": "term-1" }
+                ],
+                "locations": [
+                    { "path": "/tmp/src/lib.rs", "line": 7 },
+                    { "path": "/tmp/tests/lib.rs" }
+                ],
+                "rawOutput": { "password": "nope" }
+            }),
+        ))
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "go");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    wait_until(&mut app, "tool call rendered", |app| {
+        app.agents.threads[0].transcript.iter().any(|item| {
+            matches!(
+                item,
+                TranscriptItem::ToolCall { status, detail, .. }
+                    if status == "completed"
+                        && detail.contains("kind: execute")
+                        && detail.contains("content: cargo test --quiet")
+                        && detail.contains("diff: new file /tmp/src/lib.rs")
+                        && detail.contains("terminal: term-1")
+                        && detail.contains("locations: /tmp/src/lib.rs:7, /tmp/tests/lib.rs")
+                        && detail.contains("diagnostics: raw input/output captured")
+                        && !detail.contains("super-secret")
+                        && !detail.contains("nope")
+            )
+        })
+    });
 }
 
 // ── Stop, close, clear ───────────────────────────────────────────────────────
@@ -983,6 +1372,60 @@ fn agents_clear_wipes_scrollback_only_when_idle() {
 }
 
 // ── Thread switching ─────────────────────────────────────────────────────────
+
+#[test]
+fn agents_threads_opens_picker_and_focuses_selected_session() {
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s2" }));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+    run_ex(&mut app, "agents_new");
+    wait_until(&mut app, "second thread ready", |app| {
+        app.agents.threads.len() == 2 && app.agents.threads[1].state == ThreadUiState::Ready
+    });
+    assert_eq!(app.agents.active_thread, Some(1));
+
+    run_ex(&mut app, "agents_threads");
+    let picker = app.picker.as_ref().expect("agent thread picker should open");
+    assert_eq!(picker.kind, crate::picker::PickerKind::AgentThreads);
+    assert_eq!(picker.title, "Agent Sessions");
+    assert_eq!(picker.visible_count(), 2);
+    assert_eq!(picker.selected, 1, "active thread preselected");
+
+    press(&mut app, KeyCode::Up, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.agents.active_thread, Some(0));
+    assert_eq!(app.mode, Mode::Agent);
+    assert!(app.picker.is_none(), "picker closes after confirm");
+}
+
+#[test]
+fn ctrl_t_opens_agent_thread_picker() {
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s2" }));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+    run_ex(&mut app, "agents_new");
+    wait_until(&mut app, "second thread ready", |app| {
+        app.agents.threads.len() == 2 && app.agents.threads[1].state == ThreadUiState::Ready
+    });
+
+    press(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
+
+    let picker = app.picker.as_ref().expect("ctrl-t should open agent thread picker");
+    assert_eq!(picker.kind, crate::picker::PickerKind::AgentThreads);
+    assert_eq!(picker.selected, 1);
+}
 
 #[test]
 fn thread_switching_preserves_drafts_scroll_unread_and_activity() {

@@ -1,5 +1,5 @@
-//! Irssi-style agents pane: thread/channel list, transcript scrollback,
-//! status footer, and composer input (Phase 3).
+//! Irssi-style agents pane: transcript scrollback, status footer, and
+//! composer input (Phase 3).
 //!
 //! The pane is frontend-owned: all agent state arrives as deterministic
 //! [`AgentEvent`]s from `ee-agent-host` and is rendered from the local
@@ -22,7 +22,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ee_agent_host::events::{AgentConnectionState, PermissionRequestInfo, ThreadCloseReason};
 use ee_agent_host::{
     AgentError, AgentEvent, AgentManager, AgentManagerConfig, AgentThread, ClientRequestResponse,
-    ClientRequestResult, PermissionRequestId,
+    ClientRequestResult, PermissionRequestId, ToolCallState,
 };
 use ee_agent_protocol::{
     AvailableCommand, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
@@ -30,17 +30,17 @@ use ee_agent_protocol::{
     ElicitationPropertySchema, ElicitationSchema, McpServer, McpServerStdio, PermissionOption,
     PlanEntryPriority, PlanEntryStatus, RequestPermissionOutcome, SelectedPermissionOutcome,
     SessionConfigKind, SessionConfigOption, SessionConfigOptionValue, SessionConfigSelectOptions,
-    SessionConfigValueId, SessionId, SessionModeId, SessionUpdate, TextContent, ToolCallStatus,
+    SessionConfigValueId, SessionId, SessionModeId, SessionUpdate, TextContent, ToolCallContent,
+    ToolCallLocation, ToolCallStatus, ToolKind,
 };
 use tokio::runtime::Builder as TokioBuilder;
 use tokio::sync::mpsc as tokio_mpsc;
+use url::Url;
 
 use super::*;
 
 // ── Pane geometry constants ──────────────────────────────────────────────────
 
-/// Width of the IRC channel/thread list column.
-pub(crate) const AGENTS_CHANNEL_COL_WIDTH: u16 = 12;
 /// Width of the right-split agents pane.
 pub(crate) const AGENTS_PANE_RIGHT_WIDTH: u16 = 48;
 /// Height of the bottom-split agents pane.
@@ -106,7 +106,13 @@ pub(crate) enum TranscriptItem {
     /// A permission request shown in the transcript.
     Permission { title: String, options: Vec<String>, at: SystemTime },
     /// An elicitation request shown in the transcript.
-    Elicitation { message: String, url: Option<String>, at: SystemTime },
+    Elicitation {
+        agent: String,
+        message: String,
+        url: Option<String>,
+        url_host: Option<String>,
+        at: SystemTime,
+    },
     /// A bridge approval request (file write / terminal create).
     Approval { title: String, detail: String, options: Vec<String>, at: SystemTime },
     /// `-!-` system notice.
@@ -123,18 +129,6 @@ pub(crate) enum ThreadUiState {
     Running,
     Closed,
     Failed,
-}
-
-impl ThreadUiState {
-    pub(crate) fn marker(self) -> char {
-        match self {
-            Self::Starting => '?',
-            Self::Ready => ' ',
-            Self::Running => '*',
-            Self::Closed => '·',
-            Self::Failed => '!',
-        }
-    }
 }
 
 /// One open agent session thread (IRC channel equivalent).
@@ -256,14 +250,29 @@ impl AgentThreadUi {
             *target = text.to_string();
             return;
         }
-        let merges = self.transcript.iter_mut().rev().find(|item| {
-            matches!(
-                item,
-                TranscriptItem::Message { kind: existing_kind, message_id: existing_id, .. }
-                    if *existing_kind == kind && *existing_id == message_id
-            )
-        });
-        if let Some(TranscriptItem::Message { text: target, .. }) = merges {
+        if let Some(message_id) = message_id.as_ref() {
+            let merges = self.transcript.iter_mut().rev().find(|item| {
+                matches!(
+                    item,
+                    TranscriptItem::Message {
+                        kind: existing_kind,
+                        message_id: Some(existing_id),
+                        ..
+                    } if *existing_kind == kind && existing_id == message_id
+                )
+            });
+            if let Some(TranscriptItem::Message { text: target, .. }) = merges {
+                target.push_str(text);
+                return;
+            }
+        } else if let Some(TranscriptItem::Message {
+            kind: existing_kind,
+            message_id: None,
+            text: target,
+            ..
+        }) = self.transcript.last_mut()
+            && *existing_kind == kind
+        {
             target.push_str(text);
             return;
         }
@@ -441,17 +450,19 @@ pub(crate) enum ElicitationFieldValue {
 #[derive(Debug)]
 pub(crate) struct ElicitationPrompt {
     pub(crate) thread_index: Option<usize>,
+    pub(crate) agent_label: String,
     pub(crate) message: String,
     pub(crate) url: Option<String>,
+    pub(crate) url_host: Option<String>,
     /// URL-mode `elicitationId` used by `elicitation/complete`.
     pub(crate) completion_id: Option<String>,
     pub(crate) fields: Vec<ElicitationFieldUi>,
     pub(crate) selected_field: usize,
-    /// Selected choice for URL elicitations (0 = accept/open, 1 = decline).
+    /// 0 = accept, 1 = decline, 2 = cancel.
     pub(crate) selected_choice: usize,
     /// Response channel; answering resolves the agent's pending request.
     pub(crate) reply: tokio::sync::oneshot::Sender<ClientRequestResult>,
-    /// Visible rejection reason for unsupported schema shapes.
+    /// Visible rejection reason for unsupported schema shapes or unsafe requests.
     pub(crate) unsupported_reason: Option<String>,
 }
 
@@ -466,6 +477,7 @@ impl ElicitationPrompt {
     /// Builds a prompt from an ACP form-mode request.
     fn from_form(
         thread_index: Option<usize>,
+        agent_label: String,
         message: String,
         schema: &ElicitationSchema,
         reply: tokio::sync::oneshot::Sender<ClientRequestResult>,
@@ -493,12 +505,17 @@ impl ElicitationPrompt {
             fields.push(field);
         }
         if over_cap {
-            unsupported.push(format!("too many fields (> {} )", Self::MAX_ELICITATION_FIELDS));
+            unsupported.push(format!("too many fields (> {})", Self::MAX_ELICITATION_FIELDS));
+        }
+        if let Some(reason) = detect_secretive_elicitation_request(&message, &fields) {
+            unsupported.push(reason);
         }
         Self {
             thread_index,
+            agent_label,
             message,
             url: None,
+            url_host: None,
             completion_id: None,
             fields,
             selected_field: 0,
@@ -507,10 +524,7 @@ impl ElicitationPrompt {
             unsupported_reason: if unsupported.is_empty() {
                 None
             } else {
-                Some(format!(
-                    "unsupported form fields (decline to cancel): {}",
-                    unsupported.join(", ")
-                ))
+                Some(unsupported.join(", "))
             },
         }
     }
@@ -518,15 +532,20 @@ impl ElicitationPrompt {
     /// Builds a prompt from an ACP URL-mode request.
     fn from_url(
         thread_index: Option<usize>,
+        agent_label: String,
         message: String,
         completion_id: String,
         url: String,
         reply: tokio::sync::oneshot::Sender<ClientRequestResult>,
     ) -> Self {
+        let url_host =
+            Url::parse(&url).ok().and_then(|parsed| parsed.host_str().map(str::to_string));
         Self {
             thread_index,
+            agent_label,
             message,
             url: Some(url),
+            url_host,
             completion_id: Some(completion_id),
             fields: Vec::new(),
             selected_field: 0,
@@ -537,19 +556,83 @@ impl ElicitationPrompt {
     }
 
     /// Builds the response content map for the current field values.
-    fn content_map(&self) -> Option<BTreeMap<String, ElicitationContentValue>> {
+    fn content_map(&self) -> Result<BTreeMap<String, ElicitationContentValue>, String> {
+        if let Some(reason) = &self.unsupported_reason {
+            return Err(reason.clone());
+        }
         let mut content = BTreeMap::new();
         for field in &self.fields {
             if field.unsupported.is_some() {
-                return None;
+                return Err(format!("unsupported field: {}", field.label()));
             }
             if field.required && field.value.is_empty() {
-                return None;
+                return Err(format!("required field missing: {}", field.label()));
             }
-            content.insert(field.name.clone(), field.value.to_content()?);
+            let value = field
+                .value
+                .to_content()
+                .ok_or_else(|| format!("invalid value for {}", field.label()))?;
+            content.insert(field.name.clone(), value);
         }
-        Some(content)
+        Ok(content)
     }
+
+    fn submit_action(&self, accept: bool) -> ElicitationAction {
+        if !accept {
+            return ElicitationAction::Cancel;
+        }
+        match self.selected_choice {
+            1 => ElicitationAction::Decline,
+            2 => ElicitationAction::Cancel,
+            _ => ElicitationAction::Accept(ElicitationAcceptAction::new()),
+        }
+    }
+}
+
+fn detect_secretive_elicitation_request(
+    message: &str,
+    fields: &[ElicitationFieldUi],
+) -> Option<String> {
+    let mut blocked = Vec::new();
+    for field in fields {
+        let label = field.label();
+        if looks_sensitive_elicitation_text(&field.name) || looks_sensitive_elicitation_text(&label)
+        {
+            blocked.push(label);
+        }
+    }
+    if looks_sensitive_elicitation_text(message) {
+        blocked.push(String::from("request message"));
+    }
+    blocked.sort();
+    blocked.dedup();
+    if blocked.is_empty() {
+        None
+    } else {
+        Some(format!("secret-like elicitation requests are blocked: {}", blocked.join(", ")))
+    }
+}
+
+fn looks_sensitive_elicitation_text(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    ee_agent_host::redact::is_secret_key(&lower)
+        || [
+            "password",
+            "passcode",
+            "secret",
+            "token",
+            "credential",
+            "api key",
+            "apikey",
+            "private key",
+            "access key",
+            "auth code",
+            "authorization code",
+            "otp",
+            "one-time code",
+        ]
+        .into_iter()
+        .any(|needle| lower.contains(needle))
 }
 
 fn json_depth(value: &serde_json::Value) -> usize {
@@ -879,7 +962,11 @@ pub(crate) struct AgentPaneState {
     pub(crate) threads: Vec<AgentThreadUi>,
     pub(crate) active_thread: Option<usize>,
     pub(crate) next_thread_index: usize,
+    /// Whether streamed `agent_thought_chunk` messages are shown in transcript.
+    pub(crate) show_thoughts: bool,
     pub(crate) pending_session: Option<PendingSession>,
+    /// Composer text typed before a session exists or while session startup fails.
+    pub(crate) pending_draft: String,
     pub(crate) pending_cancel: Option<std_mpsc::Receiver<Result<(), String>>>,
     pub(crate) pending_thread_action: Option<std_mpsc::Receiver<Result<String, String>>>,
     pub(crate) permission: Option<PermissionPrompt>,
@@ -916,7 +1003,9 @@ impl Default for AgentPaneState {
             threads: Vec::new(),
             active_thread: None,
             next_thread_index: 0,
+            show_thoughts: true,
             pending_session: None,
+            pending_draft: String::new(),
             pending_cancel: None,
             pending_thread_action: None,
             permission: None,
@@ -1075,6 +1164,7 @@ impl App {
             AgentEvent::TurnCompleted { session_id, stop_reason } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.agents.threads[index].state = ThreadUiState::Ready;
+                    self.agents.threads[index].optimistic_message = None;
                     self.agents.threads[index].stop_reason = Some(format!("{stop_reason:?}"));
                     self.agents.threads[index]
                         .push_system(format!("turn completed (stop: {stop_reason:?})"));
@@ -1084,6 +1174,7 @@ impl App {
             AgentEvent::TurnCancelled { session_id } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.agents.threads[index].state = ThreadUiState::Ready;
+                    self.agents.threads[index].optimistic_message = None;
                     self.agents.threads[index].push_system(String::from("turn cancelled"));
                     self.notify_unread(index);
                 }
@@ -1091,6 +1182,7 @@ impl App {
             AgentEvent::TurnFailed { session_id, error } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.agents.threads[index].state = ThreadUiState::Ready;
+                    self.agents.threads[index].optimistic_message = None;
                     self.agents.threads[index].last_error = Some(error.to_string());
                     self.agents.threads[index].push_system(format!("turn failed: {error}"));
                     self.notify_unread(index);
@@ -1211,35 +1303,17 @@ impl App {
                 let text = content_block_text(&chunk.content);
                 let message_id = chunk.message_id.as_ref().map(|id| id.0.to_string());
                 self.agents.threads[thread_index].push_message(
-                    "thought",
+                    "think",
                     &text,
                     MessageRenderKind::Thought,
                     message_id,
                 );
             }
             SessionUpdate::ToolCall(tool_call) => {
-                self.agents.threads[thread_index].push_tool_call(
-                    &tool_call.tool_call_id.0,
-                    &tool_call.title,
-                    &tool_call_status_label(tool_call.status),
-                    &tool_call_detail(tool_call.raw_input.as_ref()),
-                );
+                self.sync_tool_call_notice(thread_index, tool_call.tool_call_id.0.as_ref());
             }
             SessionUpdate::ToolCallUpdate(update) => {
-                let fields = &update.fields;
-                let title = fields.title.clone().unwrap_or_default();
-                let status = fields.status.map(tool_call_status_label).unwrap_or_default();
-                let detail = fields
-                    .raw_input
-                    .as_ref()
-                    .map(|raw| tool_call_detail(Some(raw)))
-                    .unwrap_or_default();
-                self.agents.threads[thread_index].push_tool_call(
-                    &update.tool_call_id.0,
-                    &title,
-                    &status,
-                    &detail,
-                );
+                self.sync_tool_call_notice(thread_index, update.tool_call_id.0.as_ref());
             }
             SessionUpdate::Plan(plan) => {
                 let entries = plan
@@ -1328,15 +1402,22 @@ impl App {
     ) {
         let thread_index =
             session_id.as_ref().and_then(|id| self.agents.thread_index(id.0.as_ref()));
+        let agent_label = thread_index
+            .and_then(|index| {
+                self.agents.threads.get(index).map(|thread| thread.display_name.clone())
+            })
+            .unwrap_or_else(|| String::from("agent"));
         let prompt = match &request.mode {
             ElicitationMode::Form(mode) => ElicitationPrompt::from_form(
                 thread_index,
+                agent_label.clone(),
                 request.message.clone(),
                 &mode.requested_schema,
                 reply,
             ),
             ElicitationMode::Url(mode) => ElicitationPrompt::from_url(
                 thread_index,
+                agent_label.clone(),
                 request.message.clone(),
                 mode.elicitation_id.0.to_string(),
                 mode.url.clone(),
@@ -1356,11 +1437,15 @@ impl App {
             }
         };
         let url = prompt.url.clone();
+        let url_host = prompt.url_host.clone();
+        let agent = prompt.agent_label.clone();
         let message = prompt.message.clone();
         if let Some(thread_index) = thread_index {
             self.agents.threads[thread_index].transcript.push(TranscriptItem::Elicitation {
+                agent,
                 message: message.clone(),
                 url: url.clone(),
+                url_host,
                 at: SystemTime::now(),
             });
             self.notify_unread(thread_index);
@@ -1417,6 +1502,22 @@ impl App {
         );
     }
 
+    fn sync_tool_call_notice(&mut self, thread_index: usize, tool_call_id: &str) {
+        let Some(thread) = self.agents.threads.get_mut(thread_index) else {
+            return;
+        };
+        let snapshot = thread.host.snapshot();
+        let Some(tool_call) = snapshot.tool_calls.get(tool_call_id) else {
+            return;
+        };
+        thread.push_tool_call(
+            &tool_call.tool_call_id,
+            &tool_call.title,
+            &tool_call_status_label(tool_call.status),
+            &tool_call_detail_from_state(tool_call),
+        );
+    }
+
     /// Registers a fresh session thread from a new-session reply.
     fn register_session_thread(&mut self, agent_id: &str, thread: AgentThread) {
         let session_id = thread.session_id().0.to_string();
@@ -1443,7 +1544,7 @@ impl App {
             host: thread,
             transcript: Vec::new(),
             optimistic_message: None,
-            draft: String::new(),
+            draft: std::mem::take(&mut self.agents.pending_draft),
             scroll: 0,
             stick_to_bottom: true,
             usage: None,
@@ -1613,19 +1714,89 @@ fn content_block_text(block: &ContentBlock) -> String {
 fn tool_call_status_label(status: ToolCallStatus) -> String {
     match status {
         ToolCallStatus::Pending => String::from("pending"),
-        ToolCallStatus::InProgress => String::from("running"),
-        ToolCallStatus::Completed => String::from("done"),
+        ToolCallStatus::InProgress => String::from("in_progress"),
+        ToolCallStatus::Completed => String::from("completed"),
         ToolCallStatus::Failed => String::from("failed"),
         // Non-exhaustive upstream.
         _ => String::from("?"),
     }
 }
 
-fn tool_call_detail(raw: Option<&serde_json::Value>) -> String {
-    match raw {
-        Some(value) => serde_json::to_string(value).unwrap_or_else(|_| String::from("{}")),
-        None => String::new(),
+fn tool_kind_label(kind: ToolKind) -> &'static str {
+    match kind {
+        ToolKind::Read => "read",
+        ToolKind::Edit => "edit",
+        ToolKind::Delete => "delete",
+        ToolKind::Move => "move",
+        ToolKind::Search => "search",
+        ToolKind::Execute => "execute",
+        ToolKind::Think => "think",
+        ToolKind::Fetch => "fetch",
+        ToolKind::SwitchMode => "switch_mode",
+        ToolKind::Other => "other",
+        _ => "other",
     }
+}
+
+fn tool_call_content_summary(content: &ToolCallContent) -> String {
+    match content {
+        ToolCallContent::Content(content) => content_block_text(&content.content),
+        ToolCallContent::Diff(diff) => {
+            let path = diff.path.display();
+            if diff.old_text.is_some() {
+                format!("diff: {path}")
+            } else {
+                format!("diff: new file {path}")
+            }
+        }
+        ToolCallContent::Terminal(terminal) => {
+            format!("terminal: {}", terminal.terminal_id.0)
+        }
+        _ => String::from("content: [unknown]"),
+    }
+}
+
+fn tool_call_location_summary(location: &ToolCallLocation) -> String {
+    match location.line {
+        Some(line) => format!("{}:{line}", location.path.display()),
+        None => location.path.display().to_string(),
+    }
+}
+
+fn tool_call_detail_from_state(tool_call: &ToolCallState) -> String {
+    let mut sections = vec![format!("kind: {}", tool_kind_label(tool_call.kind))];
+
+    if !tool_call.content.is_empty() {
+        let content = tool_call
+            .content
+            .iter()
+            .map(tool_call_content_summary)
+            .filter(|item| !item.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        if !content.is_empty() {
+            sections.push(format!("content: {content}"));
+        }
+    }
+
+    if !tool_call.locations.is_empty() {
+        let locations = tool_call
+            .locations
+            .iter()
+            .map(tool_call_location_summary)
+            .collect::<Vec<_>>()
+            .join(", ");
+        sections.push(format!("locations: {locations}"));
+    }
+
+    match (tool_call.raw_input.is_some(), tool_call.raw_output.is_some()) {
+        (true, true) => sections.push(String::from("diagnostics: raw input/output captured")),
+        (true, false) => sections.push(String::from("diagnostics: raw input captured")),
+        (false, true) => sections.push(String::from("diagnostics: raw output captured")),
+        (false, false) => {}
+    }
+
+    sections.join(" · ")
 }
 
 fn plan_entry_marker(status: PlanEntryStatus) -> char {
@@ -1748,6 +1919,20 @@ fn split_slash_command(draft: &str) -> (Option<String>, String) {
 pub(crate) fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let width = width.max(4);
     let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let paragraph = paragraph.strip_suffix('\r').unwrap_or(paragraph);
+        let mut wrapped = wrap_text_paragraph(paragraph, width);
+        if wrapped.is_empty() {
+            lines.push(String::new());
+        } else {
+            lines.append(&mut wrapped);
+        }
+    }
+    lines
+}
+
+fn wrap_text_paragraph(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
     let mut current = String::new();
     let mut current_width = 0usize;
     for word in text.split_whitespace() {
@@ -1811,6 +1996,10 @@ impl App {
                 self.agents_new_session();
                 true
             }
+            "agents_threads" => {
+                self.open_agents_thread_picker();
+                true
+            }
             "agents_next" => {
                 self.agents_switch_thread(1);
                 true
@@ -1847,6 +2036,10 @@ impl App {
                 self.agents_set_layout(tail);
                 true
             }
+            "agents_thoughts" => {
+                self.agents_set_thought_visibility(tail);
+                true
+            }
             "agents_mcp" => {
                 self.agents_mcp_command(tail);
                 true
@@ -1867,7 +2060,7 @@ impl App {
         }
         let opening = self.agents.layout == AgentPaneLayout::Closed;
         if opening {
-            self.agents.layout = AgentPaneLayout::Right;
+            self.agents.layout = AgentPaneLayout::Full;
         }
         self.enter_agent_focus();
         self.ensure_agents_host();
@@ -1937,7 +2130,7 @@ impl App {
             return;
         }
         if self.agents.layout == AgentPaneLayout::Closed {
-            self.agents.layout = AgentPaneLayout::Right;
+            self.agents.layout = AgentPaneLayout::Full;
         }
         self.enter_agent_focus();
         self.ensure_agents_host();
@@ -1952,7 +2145,7 @@ impl App {
         self.backend.status_message = Some(String::from("starting new agent session…"));
     }
 
-    /// `:agents_next` / `:agents_prev` — switch threads like IRC channels.
+    /// `:agents_next` / `:agents_prev` — switch threads.
     pub(super) fn agents_switch_thread(&mut self, delta: isize) {
         let count = self.agents.threads.len();
         if count == 0 {
@@ -2002,6 +2195,27 @@ impl App {
         self.backend.status_message = Some(format!("agents layout: {layout:?}"));
     }
 
+    /// `:agents_thoughts <on|off|toggle>`.
+    pub(super) fn agents_set_thought_visibility(&mut self, tail: &str) {
+        if !self.config.agents.enabled {
+            self.backend.status_message = Some(self.agents_status_message());
+            return;
+        }
+        let show = match tail.trim() {
+            "" | "toggle" => !self.agents.show_thoughts,
+            "on" => true,
+            "off" => false,
+            _ => {
+                self.backend.status_message =
+                    Some(String::from("usage: :agents_thoughts on|off|toggle"));
+                return;
+            }
+        };
+        self.agents.show_thoughts = show;
+        self.backend.status_message =
+            Some(format!("agent thoughts {}", if show { "visible" } else { "hidden" }));
+    }
+
     /// Phase 7 shutdown orchestration, called before the app exits:
     /// cancels running turns, resolves pending approvals/elicitations as
     /// cancelled, kills agent-owned terminals, and stops MCP servers and
@@ -2033,8 +2247,52 @@ impl App {
         self.agents.approval_policy = super::agent_bridge::ApprovalPolicy::default();
     }
 
+    /// `:agents_threads` — open modal thread picker.
+    pub(super) fn open_agents_thread_picker(&mut self) {
+        if self.agents.threads.is_empty() {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        }
+        let items = self
+            .agents
+            .threads
+            .iter()
+            .enumerate()
+            .map(|(index, thread)| {
+                let state = match thread.state {
+                    ThreadUiState::Starting => "starting",
+                    ThreadUiState::Ready => "ready",
+                    ThreadUiState::Running => "running",
+                    ThreadUiState::Closed => "closed",
+                    ThreadUiState::Failed => "failed",
+                };
+                let unread = if thread.unread > 0 {
+                    format!(" · unread:{}", thread.unread)
+                } else {
+                    String::new()
+                };
+                crate::picker::PickerItem {
+                    label: thread.display_name.clone(),
+                    detail: Some(format!("{state}{unread} · {}", thread.session_id)),
+                    path: None,
+                    buf_id: None,
+                    line: None,
+                    col: None,
+                    choice_index: Some(index),
+                }
+            })
+            .collect();
+        self.open_picker(crate::picker::PickerState::new_agent_threads(items));
+        if let Some(picker) = self.picker.as_mut()
+            && let Some(active) = self.agents.active_thread
+            && let Some(selected) = picker.filtered.iter().position(|index| *index == active)
+        {
+            picker.selected = selected;
+        }
+    }
+
     /// Focuses thread `index`, resetting its unread state.
-    fn focus_thread(&mut self, index: usize) {
+    pub(crate) fn focus_thread(&mut self, index: usize) {
         self.agents.active_thread = Some(index);
         if let Some(thread) = self.agents.threads.get_mut(index) {
             thread.unread = 0;
@@ -2307,6 +2565,7 @@ impl App {
     /// Submits the active thread's draft as a prompt turn.
     fn submit_prompt(&mut self) {
         let Some(active) = self.agents.active_thread_index() else {
+            self.submit_without_session();
             return;
         };
         if self.agents.permission.is_some()
@@ -2338,6 +2597,24 @@ impl App {
         host.send_prompt(thread.host.clone(), blocks);
     }
 
+    fn submit_without_session(&mut self) {
+        self.ensure_agents_host();
+        let Some(agent_id) = self.default_agent_id() else {
+            let message = String::from(
+                "no agent configured; add [agents.servers.<id>] in .ee.toml, then run :agents_new",
+            );
+            self.agents.error = Some(message.clone());
+            self.backend.status_message = Some(message);
+            return;
+        };
+        if self.agents.pending_session.is_none() {
+            self.start_session(agent_id);
+            self.backend.status_message = Some(String::from(
+                "starting agent session; prompt will send after session is ready",
+            ));
+        }
+    }
+
     /// Confirms the selected permission option.
     fn confirm_permission(&mut self) {
         let Some(prompt) = &self.agents.permission else {
@@ -2363,46 +2640,65 @@ impl App {
         self.agents.permission = None;
     }
 
-    /// Submits or declines the pending elicitation.
-    fn confirm_elicitation(&mut self, accept: bool) {
+    /// Resolves pending elicitation with accept, decline, or cancel semantics.
+    fn confirm_elicitation(&mut self, action: ElicitationAction) {
         let Some(prompt) = self.agents.elicitation.take() else {
             return;
         };
         let thread_index = prompt.thread_index;
-        let response = if accept {
-            match prompt.content_map() {
-                Some(content) => {
-                    let action = ElicitationAcceptAction::new().content(content);
+        let response = match action {
+            ElicitationAction::Accept(_) => {
+                if prompt.url.is_some() {
                     Ok(ClientRequestResponse::CreateElicitation(CreateElicitationResponse::new(
-                        ElicitationAction::Accept(action),
+                        ElicitationAction::Accept(ElicitationAcceptAction::new()),
                     )))
-                }
-                None => {
-                    self.agents.error = Some(String::from(
-                        "elicitation form is incomplete or unsupported; declined",
-                    ));
-                    Err(AgentError::invalid_params("elicitation declined by user"))
+                } else {
+                    match prompt.content_map() {
+                        Ok(content) => Ok(ClientRequestResponse::CreateElicitation(
+                            CreateElicitationResponse::new(ElicitationAction::Accept(
+                                ElicitationAcceptAction::new().content(content),
+                            )),
+                        )),
+                        Err(error) => {
+                            let message = format!("elicitation blocked locally: {error}");
+                            self.agents.error = Some(message.clone());
+                            self.backend.status_message = Some(message);
+                            self.agents.elicitation = Some(prompt);
+                            return;
+                        }
+                    }
                 }
             }
-        } else {
-            Err(AgentError::invalid_params("elicitation declined by user"))
+            ElicitationAction::Decline => Ok(ClientRequestResponse::CreateElicitation(
+                CreateElicitationResponse::new(ElicitationAction::Decline),
+            )),
+            ElicitationAction::Cancel => Ok(ClientRequestResponse::CreateElicitation(
+                CreateElicitationResponse::new(ElicitationAction::Cancel),
+            )),
+            _ => Ok(ClientRequestResponse::CreateElicitation(CreateElicitationResponse::new(
+                ElicitationAction::Cancel,
+            ))),
         };
         let _ = prompt.reply.send(response);
         if let Some(thread_index) = thread_index
             && let Some(thread) = self.agents.threads.get_mut(thread_index)
         {
-            thread.push_system(if accept {
-                "elicitation answered"
-            } else {
-                "elicitation declined"
-            });
+            let notice = match action {
+                ElicitationAction::Accept(_) => "elicitation answered",
+                ElicitationAction::Decline => "elicitation declined",
+                ElicitationAction::Cancel => "elicitation cancelled",
+                _ => "elicitation cancelled",
+            };
+            thread.push_system(notice);
         }
     }
 
-    /// Appends text to the active thread's draft.
+    /// Appends text to the active thread's draft, or to the startup draft before a session exists.
     pub(super) fn agents_append_draft(&mut self, text: &str) {
         if let Some(active) = self.agents.active_thread_index() {
             self.agents.threads[active].draft.push_str(text);
+        } else {
+            self.agents.pending_draft.push_str(text);
         }
     }
 
@@ -2485,8 +2781,8 @@ impl App {
             }
         }
 
-        // Elicitation widgets: ↑/↓ move fields, ←/→/Tab change values,
-        // Enter submits, Esc declines.
+        // Elicitation widgets: ↑/↓ move fields, ←/→/Tab change values or URL choice,
+        // Enter submits current choice, Ctrl-D declines, Esc cancels.
         if self.agents.elicitation.is_some() {
             match key.code {
                 KeyCode::Up => {
@@ -2497,23 +2793,31 @@ impl App {
                 }
                 KeyCode::Down | KeyCode::Tab => {
                     if let Some(prompt) = &mut self.agents.elicitation {
-                        let count = prompt.fields.len().max(1);
-                        prompt.selected_field = (prompt.selected_field + 1) % count;
+                        if prompt.url.is_some() {
+                            prompt.selected_choice = (prompt.selected_choice + 1) % 3;
+                        } else {
+                            let count = prompt.fields.len().max(1);
+                            prompt.selected_field = (prompt.selected_field + 1) % count;
+                        }
                     }
                     return;
                 }
                 KeyCode::BackTab => {
                     if let Some(prompt) = &mut self.agents.elicitation {
-                        let count = prompt.fields.len().max(1);
-                        prompt.selected_field = (prompt.selected_field + count - 1) % count;
+                        if prompt.url.is_some() {
+                            prompt.selected_choice = (prompt.selected_choice + 2) % 3;
+                        } else {
+                            let count = prompt.fields.len().max(1);
+                            prompt.selected_field = (prompt.selected_field + count - 1) % count;
+                        }
                     }
                     return;
                 }
                 KeyCode::Left | KeyCode::Right => {
                     if let Some(prompt) = &mut self.agents.elicitation {
                         if prompt.url.is_some() {
-                            // URL elicitation: open/decline choice.
-                            prompt.selected_choice = (prompt.selected_choice + 1) % 2;
+                            let delta = if key.code == KeyCode::Left { 2 } else { 1 };
+                            prompt.selected_choice = (prompt.selected_choice + delta) % 3;
                         } else {
                             prompt.step_elicitation_field(if key.code == KeyCode::Left {
                                 -1
@@ -2525,11 +2829,27 @@ impl App {
                     return;
                 }
                 KeyCode::Enter => {
-                    self.confirm_elicitation(true);
+                    let action = self
+                        .agents
+                        .elicitation
+                        .as_ref()
+                        .map(|prompt| {
+                            if prompt.url.is_some() {
+                                prompt.submit_action(true)
+                            } else {
+                                ElicitationAction::Accept(ElicitationAcceptAction::new())
+                            }
+                        })
+                        .unwrap_or(ElicitationAction::Cancel);
+                    self.confirm_elicitation(action);
                     return;
                 }
                 KeyCode::Esc => {
-                    self.confirm_elicitation(false);
+                    self.confirm_elicitation(ElicitationAction::Cancel);
+                    return;
+                }
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.confirm_elicitation(ElicitationAction::Decline);
                     return;
                 }
                 KeyCode::Char(c) => {
@@ -2557,6 +2877,7 @@ impl App {
                     match c {
                         'n' => self.agents_switch_thread(1),
                         'p' => self.agents_switch_thread(-1),
+                        't' => self.open_agents_thread_picker(),
                         'u' => self.agents_clear_draft(),
                         _ => {}
                     }
@@ -2588,6 +2909,8 @@ impl App {
                     .is_some_and(|thread| thread.state == ThreadUiState::Running);
                 if running {
                     self.agents_stop_turn();
+                } else if self.agents.layout == AgentPaneLayout::Full {
+                    self.close_agents_pane();
                 } else {
                     self.return_to_editor();
                 }
@@ -2649,6 +2972,8 @@ impl App {
     fn agents_clear_draft(&mut self) {
         if let Some(active) = self.agents.active_thread_index() {
             self.agents.threads[active].draft.clear();
+        } else {
+            self.agents.pending_draft.clear();
         }
     }
 
@@ -2656,6 +2981,8 @@ impl App {
         if let Some(active) = self.agents.active_thread_index() {
             let thread = &mut self.agents.threads[active];
             thread.draft.pop();
+        } else {
+            self.agents.pending_draft.pop();
         }
     }
 
@@ -2745,6 +3072,12 @@ mod tests {
         let lines = wrap_text("ab cd", 4);
         assert_eq!(lines, vec!["ab", "cd"]);
         assert!(!wrap_text("x", 4).is_empty());
+    }
+
+    #[test]
+    fn wrap_text_preserves_explicit_newlines() {
+        let lines = wrap_text("alpha beta\ngamma\n\ndelta", 20);
+        assert_eq!(lines, vec!["alpha beta", "gamma", "", "delta"]);
     }
 
     #[test]

@@ -17,7 +17,7 @@
 //! request correlation, and response routing; this module only adapts it to
 //! a tokio subprocess and the host lifecycle.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -25,19 +25,19 @@ use std::time::Duration;
 
 use ee_agent_protocol::{
     Agent as AgentRole, AgentCapabilities, AuthenticateRequest, AuthenticateResponse,
-    BooleanConfigOptionCapabilities, CancelNotification, Client as ClientRole, ClientCapabilities,
-    ClientSessionCapabilities, CloseSessionRequest, CloseSessionResponse,
-    CompleteElicitationNotification, ConnectMcpRequest, ConnectionTo, CreateElicitationRequest,
-    CreateTerminalRequest, DeleteSessionRequest, DeleteSessionResponse, DisconnectMcpRequest,
-    ElicitationCapabilities, ElicitationFormCapabilities, ElicitationUrlCapabilities,
-    Error as RpcError, FileSystemCapabilities, Implementation, InitializeRequest,
-    KillTerminalRequest, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    LoadSessionResponse, LogoutRequest, LogoutResponse, McpServer, McpServerAcpId, McpServerStdio,
-    MessageMcpNotification, MessageMcpRequest, NewSessionRequest, NewSessionResponse,
-    PromptRequest, PromptResponse, ProtocolVersion, ReadTextFileRequest, ReleaseTerminalRequest,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    ResumeSessionRequest, ResumeSessionResponse, SessionConfigOption, SessionConfigOptionValue,
-    SessionConfigOptionsCapabilities, SessionId, SessionNotification,
+    BooleanConfigOptionCapabilities, CancelNotification, CancelRequestNotification,
+    Client as ClientRole, ClientCapabilities, ClientSessionCapabilities, CloseSessionRequest,
+    CloseSessionResponse, CompleteElicitationNotification, ConnectMcpRequest, ConnectionTo,
+    CreateElicitationRequest, CreateTerminalRequest, DeleteSessionRequest, DeleteSessionResponse,
+    DisconnectMcpRequest, ElicitationCapabilities, ElicitationFormCapabilities,
+    ElicitationUrlCapabilities, Error as RpcError, FileSystemCapabilities, Implementation,
+    InitializeRequest, KillTerminalRequest, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, LoadSessionResponse, LogoutRequest, LogoutResponse, McpServer,
+    McpServerAcpId, McpServerStdio, MessageMcpNotification, MessageMcpRequest, NewSessionRequest,
+    NewSessionResponse, PromptRequest, PromptResponse, ProtocolVersion, ReadTextFileRequest,
+    ReleaseTerminalRequest, RequestId, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, ResumeSessionRequest, ResumeSessionResponse, SessionConfigOption,
+    SessionConfigOptionValue, SessionConfigOptionsCapabilities, SessionId, SessionNotification,
     SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
     SetSessionModeResponse, TerminalOutputRequest, WaitForTerminalExitRequest,
     WriteTextFileRequest, on_receive_notification, on_receive_request,
@@ -147,6 +147,9 @@ pub(crate) struct AgentConnectionInner {
     pub threads: Mutex<HashMap<SessionId, Arc<ThreadShared>>>,
     /// ACP-native MCP-over-ACP hosting for the ee proxy (Phase 6b).
     pub mcp: McpOverAcpRegistry,
+    active_url_elicitations: Mutex<HashSet<String>>,
+    completed_url_elicitations: Mutex<HashSet<String>>,
+    pending_client_requests: Mutex<HashMap<String, watch::Sender<bool>>>,
     shutdown: watch::Sender<bool>,
     closed_once: AtomicBool,
 }
@@ -191,6 +194,67 @@ impl AgentConnectionInner {
             .as_mut()
             .and_then(|process| process.child().try_wait().ok().flatten())
     }
+
+    fn register_url_elicitation(&self, elicitation_id: &str) {
+        self.active_url_elicitations
+            .lock()
+            .expect("active url elicitations poisoned")
+            .insert(elicitation_id.to_string());
+    }
+
+    fn finish_url_elicitation(&self, elicitation_id: &str) {
+        self.active_url_elicitations
+            .lock()
+            .expect("active url elicitations poisoned")
+            .remove(elicitation_id);
+        self.completed_url_elicitations
+            .lock()
+            .expect("completed url elicitations poisoned")
+            .insert(elicitation_id.to_string());
+    }
+
+    fn complete_url_elicitation(&self, elicitation_id: &str) -> bool {
+        let removed = self
+            .active_url_elicitations
+            .lock()
+            .expect("active url elicitations poisoned")
+            .remove(elicitation_id);
+        if removed {
+            self.completed_url_elicitations
+                .lock()
+                .expect("completed url elicitations poisoned")
+                .insert(elicitation_id.to_string());
+        }
+        removed
+    }
+
+    fn register_client_request(&self, request_id: &RequestId) -> watch::Receiver<bool> {
+        let key = request_id_key(request_id);
+        let (tx, rx) = watch::channel(false);
+        self.pending_client_requests
+            .lock()
+            .expect("pending client requests poisoned")
+            .insert(key, tx);
+        rx
+    }
+
+    fn cancel_client_request(&self, request_id: &RequestId) -> bool {
+        let key = request_id_key(request_id);
+        self.pending_client_requests
+            .lock()
+            .expect("pending client requests poisoned")
+            .remove(&key)
+            .is_some_and(|tx| tx.send(true).is_ok())
+    }
+
+    fn finish_client_request(&self, request_id: &RequestId) {
+        let key = request_id_key(request_id);
+        self.pending_client_requests.lock().expect("pending client requests poisoned").remove(&key);
+    }
+}
+
+fn request_id_key(request_id: &RequestId) -> String {
+    serde_json::to_string(request_id).unwrap_or_else(|_| format!("{request_id:?}"))
 }
 
 /// A handle to one agent connection (cloneable; the last drop kills the
@@ -288,6 +352,9 @@ impl AgentConnection {
             process,
             threads: Mutex::new(HashMap::new()),
             mcp,
+            active_url_elicitations: Mutex::new(HashSet::new()),
+            completed_url_elicitations: Mutex::new(HashSet::new()),
+            pending_client_requests: Mutex::new(HashMap::new()),
             shutdown: shutdown_tx,
             closed_once: AtomicBool::new(false),
         });
@@ -1017,6 +1084,22 @@ fn build_client_builder(
             },
             on_receive_notification!(),
         )
+        .on_receive_notification(
+            {
+                let inner = inner.clone();
+                async move |notification: CancelRequestNotification, _cx| {
+                    let cancelled = inner.cancel_client_request(&notification.request_id);
+                    tracing::debug!(
+                        agent_id = %inner.agent_id,
+                        request_id = ?notification.request_id,
+                        cancelled,
+                        "received $/cancel_request for client request"
+                    );
+                    Ok(())
+                }
+            },
+            on_receive_notification!(),
+        )
         .on_receive_request(
             {
                 let inner = inner.clone();
@@ -1356,9 +1439,18 @@ fn handle_elicitation_complete(
     notification: CompleteElicitationNotification,
     inner: &AgentConnectionInner,
 ) {
-    let _ = inner
-        .events
-        .send(AgentEvent::ElicitationCompleted { elicitation_id: notification.elicitation_id });
+    let elicitation_id = notification.elicitation_id.0.to_string();
+    if inner.complete_url_elicitation(&elicitation_id) {
+        let _ = inner
+            .events
+            .send(AgentEvent::ElicitationCompleted { elicitation_id: notification.elicitation_id });
+    } else {
+        tracing::debug!(
+            agent_id = %inner.agent_id,
+            elicitation_id,
+            "ignored stale or unknown elicitation completion"
+        );
+    }
 }
 
 fn handle_permission_request(
@@ -1408,28 +1500,62 @@ fn dispatch_client_request(
     // Fail closed: never invoke a handler for a capability we did not
     // advertise during initialize.
     if !inner.handler_capabilities.supports_request(&request) {
-        return responder.respond_with_error(
-            AgentError::CapabilityUnsupported { method: method.clone() }.into_rpc(),
-        );
+        let error = match &request {
+            ClientRequest::CreateElicitation(_) => {
+                AgentError::invalid_params("elicitation mode was not advertised by the client")
+            }
+            _ => AgentError::CapabilityUnsupported { method: method.clone() },
+        };
+        return responder.respond_with_error(error.into_rpc());
+    }
+    if let ClientRequest::CreateElicitation(request) = &request
+        && let ee_agent_protocol::ElicitationMode::Url(mode) = &request.mode
+    {
+        inner.register_url_elicitation(mode.elicitation_id.0.as_ref());
     }
     let _ = inner.events.send(AgentEvent::ClientRequestDispatched {
         session_id: session_id.clone(),
         method: method.clone(),
     });
+    let request_id = responder.id().clone();
     let handler = inner.handler.clone();
+    let cancellation = responder.cancellation();
+    let mut cancel_rx = inner.register_client_request(&request_id);
+    let inner_for_spawn = inner.clone();
     let spawned = cx.spawn(async move {
-        match handler.handle(request).await {
-            Ok(response) => {
-                let value = response.into_value().map_err(|error| {
-                    AgentError::HandlerError(format!(
-                        "handler response serialization failed: {error}"
-                    ))
-                    .into_rpc()
-                })?;
-                responder.respond_with_result(Ok(value))
-            }
-            Err(error) => responder.respond_with_error(error.into_rpc()),
+        let url_elicitation_id = match &request {
+            ClientRequest::CreateElicitation(request) => match &request.mode {
+                ee_agent_protocol::ElicitationMode::Url(mode) => {
+                    Some(mode.elicitation_id.0.to_string())
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let result = tokio::select! {
+            _ = cancellation.cancelled() => responder.respond_with_error(RpcError::request_cancelled()),
+            changed = cancel_rx.changed() => match changed {
+                Ok(()) if *cancel_rx.borrow() => responder.respond_with_error(RpcError::request_cancelled()),
+                Ok(()) | Err(_) => responder.respond_with_error(RpcError::request_cancelled()),
+            },
+            result = handler.handle(request) => match result {
+                Ok(response) => {
+                    let value = response.into_value().map_err(|error| {
+                        AgentError::HandlerError(format!(
+                            "handler response serialization failed: {error}"
+                        ))
+                        .into_rpc()
+                    })?;
+                    responder.respond_with_result(Ok(value))
+                }
+                Err(error) => responder.respond_with_error(error.into_rpc()),
+            },
+        };
+        inner_for_spawn.finish_client_request(&request_id);
+        if let Some(elicitation_id) = url_elicitation_id {
+            inner_for_spawn.finish_url_elicitation(&elicitation_id);
         }
+        result
     });
     if spawned.is_err() {
         // Connection is shutting down; the responder is dropped with the

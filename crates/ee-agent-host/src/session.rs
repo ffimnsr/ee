@@ -376,15 +376,25 @@ fn validate_prompt_blocks(
             ContentBlock::Audio(_) if connection.supports_prompt_audio() => {}
             ContentBlock::Resource(_) if connection.supports_prompt_embedded_context() => {}
             ContentBlock::Image(_) => {
-                return Err(AgentError::CapabilityUnsupported { method: "session/prompt".into() });
+                return Err(AgentError::invalid_params(
+                    "prompt content type image requires agentCapabilities.promptCapabilities.image",
+                ));
             }
             ContentBlock::Audio(_) => {
-                return Err(AgentError::CapabilityUnsupported { method: "session/prompt".into() });
+                return Err(AgentError::invalid_params(
+                    "prompt content type audio requires agentCapabilities.promptCapabilities.audio",
+                ));
             }
             ContentBlock::Resource(_) => {
-                return Err(AgentError::CapabilityUnsupported { method: "session/prompt".into() });
+                return Err(AgentError::invalid_params(
+                    "prompt content type resource requires agentCapabilities.promptCapabilities.embeddedContext",
+                ));
             }
-            _ => return Err(AgentError::CapabilityUnsupported { method: "session/prompt".into() }),
+            _ => {
+                return Err(AgentError::invalid_params(
+                    "prompt contains unsupported content type for session/prompt",
+                ));
+            }
         }
     }
     Ok(())

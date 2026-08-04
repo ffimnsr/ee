@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ee_agent_host::FakeTransportFactory;
-use ee_agent_host::fake::{FakeAgent, FakeAgentScript, FakeAgentTransport, wire};
+use ee_agent_host::fake::{CaptureSource, FakeAgent, FakeAgentScript, FakeAgentTransport, wire};
 use serde_json::{Value, json};
 
 use crate::app::{App, ThreadUiState};
@@ -158,15 +158,6 @@ fn terminal_create(id: i64, session_id: &str, command: &str, args: Value, extra:
     json!({ "jsonrpc": "2.0", "id": id, "method": "terminal/create", "params": params })
 }
 
-fn terminal_request(id: i64, session_id: &str, method: &str, terminal_id: &str) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": method,
-        "params": { "sessionId": session_id, "terminalId": terminal_id }
-    })
-}
-
 // ── fs/read_text_file ────────────────────────────────────────────────────────
 
 #[test]
@@ -244,6 +235,48 @@ fn line_limited_read_uses_one_based_acp_ranges() {
     // The unbounded read returns the whole buffer.
     let whole = fake.agent().response_with_id(101).expect("whole response");
     assert_eq!(whole["result"]["content"], "alpha\nbeta\ngamma");
+}
+
+#[test]
+fn read_rejects_zero_based_line_numbers() {
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("lines.txt");
+    fs::write(&file, "alpha\nbeta\n").unwrap();
+    let path = file.to_string_lossy().to_string();
+    let script = base_script().emit(read_text_file_with_range(104, "s1", &path, 0, 1));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    wait_until(&mut app, "invalid read answered", |_| fake.agent().response_with_id(104).is_some());
+    let response = fake.agent().response_with_id(104).expect("response");
+    assert!(response.get("error").is_some(), "zero-based reads must fail: {response}");
+    assert_eq!(response["error"]["code"], -32602);
+    assert_eq!(response["error"]["data"]["reason"], "line must be 1-based");
+}
+
+#[test]
+fn read_in_non_active_workspace_root_fails_closed() {
+    let temp = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let active_file = temp.path().join("active.txt");
+    let other_file = other.path().join("other.txt");
+    fs::write(&active_file, "active\n").unwrap();
+    fs::write(&other_file, "other\n").unwrap();
+    let other_path = other_file.to_string_lossy().to_string();
+    let script = base_script().emit(wire::read_text_file("s1", &other_path));
+    let (mut app, fake) = agents_app_in(&temp, script);
+    open_buffer_and_wait(&mut app, &other_file);
+    open_buffer_and_wait(&mut app, &active_file);
+    open_pane_and_wait_ready(&mut app);
+
+    wait_until(&mut app, "cross-root read answered", |_| {
+        fake.agent().response_with_id(101).is_some()
+    });
+    let response = fake.agent().response_with_id(101).expect("response");
+    assert!(response.get("error").is_some(), "cross-root reads must fail: {response}");
+    assert_eq!(response["error"]["code"], -32602);
+    let reason = response["error"]["data"]["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("outside allowed workspace"), "reason: {reason}");
 }
 
 #[test]
@@ -338,6 +371,7 @@ fn write_approval_updates_buffer_and_saves_file() {
     if response.get("result").is_none() {
         panic!("write did not succeed: {response}\napprovals={:?}", app.agents.approvals.len());
     }
+    assert_eq!(response["result"], json!({}), "fs/write_text_file must return empty ACP result");
     assert_eq!(fs::read_to_string(&file).unwrap(), "one\ntwo\n", "file saved on disk");
     wait_until(&mut app, "buffer updated", |app| {
         app.backend
@@ -364,6 +398,32 @@ fn write_approval_updates_buffer_and_saves_file() {
         )),
         "write must be logged with a real old fingerprint: {log:?}"
     );
+}
+
+#[test]
+fn write_in_non_active_workspace_root_fails_before_approval() {
+    let temp = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let active_file = temp.path().join("active.txt");
+    let other_file = other.path().join("other.txt");
+    fs::write(&active_file, "active\n").unwrap();
+    fs::write(&other_file, "other\n").unwrap();
+    let other_path = other_file.to_string_lossy().to_string();
+    let script = base_script().emit(write_text_file(103, "s1", &other_path, "blocked\n"));
+    let (mut app, fake) = agents_app_in(&temp, script);
+    open_buffer_and_wait(&mut app, &other_file);
+    open_buffer_and_wait(&mut app, &active_file);
+    open_pane_and_wait_ready(&mut app);
+
+    wait_until(&mut app, "cross-root write answered", |_| {
+        fake.agent().response_with_id(103).is_some()
+    });
+    let response = fake.agent().response_with_id(103).expect("response");
+    assert!(response.get("error").is_some(), "cross-root writes must fail: {response}");
+    assert_eq!(response["error"]["code"], -32602);
+    let reason = response["error"]["data"]["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("outside allowed workspace"), "reason: {reason}");
+    assert!(app.agents.approvals.is_empty(), "invalid writes must fail before approval");
 }
 
 #[test]
@@ -435,9 +495,15 @@ fn terminal_output_is_capped_and_preserves_final_visible_output() {
             json!(["-c", "printf aaaaabbbbb"]),
             json!({ "outputByteLimit": 8 }),
         ))
+        .capture(CaptureSource::Response { id: 102 }, "result.terminalId", "term_id")
         .wait_for_response(102)
         .delay(400)
-        .emit(terminal_request(104, "s1", "terminal/output", "term-0"));
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": 104,
+            "method": "terminal/output",
+            "params": { "sessionId": "s1", "terminalId": { "$capture": "term_id" } }
+        }));
     let (mut app, _temp, fake) = fake_agents_app(script);
     open_pane_and_wait_ready(&mut app);
 
@@ -458,9 +524,20 @@ fn terminal_output_is_capped_and_preserves_final_visible_output() {
 fn terminal_kill_resolves_wait_for_exit() {
     let script = base_script()
         .emit(terminal_create(102, "s1", "sleep", json!(["30"]), json!({})))
+        .capture(CaptureSource::Response { id: 102 }, "result.terminalId", "term_id")
         .wait_for_response(102)
-        .emit(terminal_request(105, "s1", "terminal/wait_for_exit", "term-0"))
-        .emit(terminal_request(106, "s1", "terminal/kill", "term-0"));
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": 105,
+            "method": "terminal/wait_for_exit",
+            "params": { "sessionId": "s1", "terminalId": { "$capture": "term_id" } }
+        }))
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": 106,
+            "method": "terminal/kill",
+            "params": { "sessionId": "s1", "terminalId": { "$capture": "term_id" } }
+        }));
     let (mut app, _temp, fake) = fake_agents_app(script);
     open_pane_and_wait_ready(&mut app);
 
@@ -479,4 +556,59 @@ fn terminal_kill_resolves_wait_for_exit() {
         "wait_for_exit must report the kill signal: {waited}"
     );
     assert_eq!(fake.agent().response_with_id(106).expect("kill response").get("error"), None);
+}
+
+#[test]
+fn terminal_release_invalidates_acp_id_but_keeps_output_displayable() {
+    let script = base_script()
+        .emit(terminal_create(102, "s1", "sh", json!(["-c", "printf hello"]), json!({})))
+        .capture(CaptureSource::Response { id: 102 }, "result.terminalId", "term_id")
+        .wait_for_response(102)
+        .delay(300)
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": 107,
+            "method": "terminal/release",
+            "params": { "sessionId": "s1", "terminalId": { "$capture": "term_id" } }
+        }))
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": 108,
+            "method": "terminal/output",
+            "params": { "sessionId": "s1", "terminalId": { "$capture": "term_id" } }
+        }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    wait_until(&mut app, "terminal approval appears", |app| app.agents.approvals.front().is_some());
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    wait_until(&mut app, "release answered", |_| fake.agent().response_with_id(107).is_some());
+    wait_until(&mut app, "output rejected after release", |_| {
+        fake.agent().response_with_id(108).is_some()
+    });
+    let created = fake.agent().response_with_id(102).expect("create response");
+    let terminal_id = created["result"]["terminalId"].as_str().expect("terminal id");
+    let display =
+        app.agents.terminals.display_output(terminal_id).expect("released display snapshot");
+    assert_eq!(display.output, "hello");
+    let response = fake.agent().response_with_id(108).expect("output response");
+    assert_eq!(response["error"]["code"], -32602, "released ids must be invalid: {response}");
+}
+
+#[test]
+fn terminal_ids_are_session_owned() {
+    let terminals = crate::app::AgentTerminals::default();
+    let request = ee_agent_protocol::CreateTerminalRequest::new("s1", "sh")
+        .args(vec![String::from("-c"), String::from("printf ok")]);
+    let created = terminals.spawn(&request).expect("terminal spawns");
+    let terminal_id = created.terminal_id.0.to_string();
+
+    let denied =
+        terminals.output(&ee_agent_protocol::TerminalOutputRequest::new("s2", terminal_id.clone()));
+    assert!(denied.is_err(), "other sessions must not observe terminal output");
+
+    let owned = terminals.output(&ee_agent_protocol::TerminalOutputRequest::new("s1", terminal_id));
+    assert!(owned.is_ok(), "owner session may observe output");
+    terminals.kill_all();
 }

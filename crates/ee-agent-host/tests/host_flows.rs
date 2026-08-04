@@ -17,12 +17,13 @@ use ee_agent_host::{
     RecordingHandler, ThreadCloseReason,
 };
 use ee_agent_protocol::{
-    ContentBlock, CreateElicitationResponse, CreateTerminalResponse, ElicitationAcceptAction,
-    ElicitationAction, EmbeddedResource, EmbeddedResourceResource, ImageContent,
-    KillTerminalResponse, ProtocolVersion, ReadTextFileResponse, ReleaseTerminalResponse,
-    RequestPermissionOutcome, SelectedPermissionOutcome, SessionConfigId, SessionConfigOptionValue,
-    SessionId, SessionModeId, StopReason, TerminalExitStatus, TerminalId, TerminalOutputResponse,
-    TextContent, TextResourceContents, WaitForTerminalExitResponse, WriteTextFileResponse,
+    AudioContent, ContentBlock, CreateElicitationResponse, CreateTerminalResponse,
+    ElicitationAcceptAction, ElicitationAction, EmbeddedResource, EmbeddedResourceResource,
+    ImageContent, KillTerminalResponse, ProtocolVersion, ReadTextFileResponse,
+    ReleaseTerminalResponse, RequestPermissionOutcome, ResourceLink, SelectedPermissionOutcome,
+    SessionConfigId, SessionConfigOptionValue, SessionId, SessionModeId, StopReason,
+    TerminalExitStatus, TerminalId, TerminalOutputResponse, TextContent, TextResourceContents,
+    WaitForTerminalExitResponse, WriteTextFileResponse,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -173,6 +174,18 @@ fn assert_method_not_found(response: &Value) {
     assert_eq!(response["error"]["code"], -32601, "response: {response}");
 }
 
+fn assert_invalid_params(response: &Value) {
+    assert_eq!(response["error"]["code"], -32602, "response: {response}");
+}
+
+fn cancel_request(id: i64) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "$/cancel_request",
+        "params": { "requestId": id }
+    })
+}
+
 /// initialize + session/new happy-path responses.
 fn base_script() -> FakeAgentScript {
     FakeAgentScript::new()
@@ -200,6 +213,18 @@ async fn initialize_request_for_capabilities(capabilities: HandlerCapabilities) 
     host.close().await;
     fake.join(TEST_TIMEOUT).await;
     initialize
+}
+
+#[tokio::test]
+async fn initialize_does_not_advertise_custom_standard_looking_capabilities() {
+    let initialize = initialize_request_for_capabilities(HandlerCapabilities::all()).await;
+    let capabilities =
+        initialize["params"]["clientCapabilities"].as_object().expect("clientCapabilities object");
+    assert!(
+        !capabilities.contains_key("proxyDiscovery"),
+        "unexpected custom capability: {initialize}"
+    );
+    assert!(!capabilities.contains_key("ee"), "unexpected custom capability: {initialize}");
 }
 
 #[tokio::test]
@@ -340,6 +365,59 @@ async fn malformed_json_from_agent_gets_parse_error_response() {
 }
 
 #[tokio::test]
+async fn unknown_custom_request_returns_method_not_found() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": 104,
+            "method": "_ee/unknown_request",
+            "params": { "trace": "diag-only" }
+        }))
+        .respond(json!({ "stopReason": "end_turn" }));
+
+    let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
+
+    thread
+        .send_prompt(vec![ContentBlock::Text(TextContent::new("hi"))])
+        .await
+        .expect("prompt still completes");
+
+    let response = await_response(&fake, 104).await;
+    assert_method_not_found(&response);
+    host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
+async fn unknown_custom_notification_is_ignored() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "method": "_ee/unknown_notification",
+            "params": { "traceparent": "00-abc-def-01" }
+        }))
+        .respond(json!({ "stopReason": "end_turn" }));
+
+    let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
+
+    let response = thread
+        .send_prompt(vec![ContentBlock::Text(TextContent::new("hi"))])
+        .await
+        .expect("prompt still completes after unknown notification");
+    assert_eq!(response.stop_reason, StopReason::EndTurn);
+    host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
 async fn oversized_agent_message_fails_the_connection_without_panic() {
     // Phase 7 resource limit: a line beyond `MAX_ACP_MESSAGE_BYTES` must
     // fail the connection as a typed transport error, never be parsed.
@@ -433,6 +511,11 @@ async fn cancel_sends_session_cancel_and_resolves_prompt() {
         "expected session/cancel in fake log: {:?}",
         fake.log()
     );
+    assert!(
+        fake.log_contains("\"method\":\"$/cancel_request\""),
+        "expected $/cancel_request in fake log: {:?}",
+        fake.log()
+    );
 
     // Exactly one terminal event for the turn.
     let mut terminal_events = Vec::new();
@@ -448,6 +531,57 @@ async fn cancel_sends_session_cancel_and_resolves_prompt() {
         }
     }
     assert!(matches!(terminal_events[0], AgentEvent::TurnCancelled { .. }));
+    host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
+async fn late_session_updates_after_cancel_still_reduce_until_prompt_response_arrives() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .delay(100)
+        .emit(wire::session_update("s1", wire::agent_message_chunk("m1", "late")));
+    let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
+
+    let prompt_thread = thread.clone();
+    let prompt = tokio::spawn(async move {
+        prompt_thread.send_prompt(vec![ContentBlock::Text(TextContent::new("hi"))]).await
+    });
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while !fake.log_contains("\"method\":\"session/prompt\"") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("prompt request observed");
+
+    thread.cancel().await.expect("cancel succeeds");
+    let error = prompt.await.expect("prompt task").unwrap_err();
+    assert!(matches!(error, AgentError::Cancelled));
+
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        loop {
+            let snapshot = thread.snapshot();
+            if snapshot.messages.iter().any(|message| {
+                message.kind == MessageKind::Assistant
+                    && message.blocks.iter().any(|block| {
+                        matches!(
+                            block,
+                            ContentBlock::Text(text) if text.text == "late"
+                        )
+                    })
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("late update reduced after cancel");
+
     host.close().await;
     fake.join(TEST_TIMEOUT).await;
 }
@@ -729,20 +863,121 @@ async fn unadvertised_elicitation_modes_are_rejected_before_handler_invocation()
     thread.send_prompt(vec![ContentBlock::Text(TextContent::new("go"))]).await.unwrap();
 
     assert!(handler.seen().is_empty());
-    assert_method_not_found(&await_response(&fake, 108).await);
-    assert_method_not_found(&await_response(&fake, 109).await);
+    assert_invalid_params(&await_response(&fake, 108).await);
+    assert_invalid_params(&await_response(&fake, 109).await);
+    host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[derive(Debug, Clone)]
+struct DelayedUrlHandler {
+    seen: Arc<Mutex<Vec<ClientRequest>>>,
+    delay: Duration,
+}
+
+#[derive(Debug, Clone)]
+struct DelayedReadHandler {
+    seen: Arc<Mutex<Vec<ClientRequest>>>,
+    delay: Duration,
+}
+
+impl DelayedUrlHandler {
+    fn new(delay: Duration) -> Self {
+        Self { seen: Arc::new(Mutex::new(Vec::new())), delay }
+    }
+}
+
+impl DelayedReadHandler {
+    fn new(delay: Duration) -> Self {
+        Self { seen: Arc::new(Mutex::new(Vec::new())), delay }
+    }
+}
+
+impl ClientRequestHandler for DelayedUrlHandler {
+    fn capabilities(&self) -> HandlerCapabilities {
+        HandlerCapabilities { elicitation_url: true, ..HandlerCapabilities::none() }
+    }
+
+    fn handle(
+        &self,
+        request: ClientRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ClientRequestResult> + Send + '_>> {
+        Box::pin(async move {
+            self.seen.lock().expect("delayed url handler poisoned").push(request.clone());
+            match request {
+                ClientRequest::CreateElicitation(_) => {
+                    tokio::time::sleep(self.delay).await;
+                    Ok(ClientRequestResponse::CreateElicitation(CreateElicitationResponse::new(
+                        ElicitationAction::Accept(ElicitationAcceptAction::new()),
+                    )))
+                }
+                other => {
+                    Err(AgentError::HandlerError(format!("unhandled request {}", other.method())))
+                }
+            }
+        })
+    }
+}
+
+impl ClientRequestHandler for DelayedReadHandler {
+    fn capabilities(&self) -> HandlerCapabilities {
+        HandlerCapabilities { fs_read: true, ..HandlerCapabilities::none() }
+    }
+
+    fn handle(
+        &self,
+        request: ClientRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ClientRequestResult> + Send + '_>> {
+        Box::pin(async move {
+            self.seen.lock().expect("delayed read handler poisoned").push(request.clone());
+            match request {
+                ClientRequest::ReadTextFile(_) => {
+                    tokio::time::sleep(self.delay).await;
+                    Ok(ClientRequestResponse::ReadTextFile(ReadTextFileResponse::new("late")))
+                }
+                other => {
+                    Err(AgentError::HandlerError(format!("unhandled request {}", other.method())))
+                }
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn incoming_cancel_request_aborts_long_running_client_request() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(wire::read_text_file("s1", "/work/Cargo.toml"))
+        .delay(50)
+        .emit(cancel_request(101))
+        .respond(json!({ "stopReason": "end_turn" }));
+
+    let handler = Arc::new(DelayedReadHandler::new(Duration::from_secs(1)));
+    let (fake, host) = spawn_host(script, handler).await;
+    let connection = ready_connection(&fake, &host).await;
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
+
+    thread.send_prompt(vec![ContentBlock::Text(TextContent::new("go"))]).await.unwrap();
+
+    let response = await_response(&fake, 101).await;
+    assert_eq!(response["error"]["code"], -32800, "response: {response}");
     host.close().await;
     fake.join(TEST_TIMEOUT).await;
 }
 
 #[tokio::test]
-async fn elicitation_complete_notification_emits_event_without_disconnect() {
+async fn url_elicitation_completion_is_connection_scoped_and_idempotent() {
     let script = base_script()
         .wait_for("session/prompt")
+        .emit(wire::elicitation_url("s1", "el-1", "https://example.com/authorize", "authorize"))
         .emit(wire::elicitation_complete("el-1"))
+        .emit(wire::elicitation_complete("el-1"))
+        .emit(wire::elicitation_complete("el-stale"))
         .respond(json!({ "stopReason": "end_turn" }));
 
-    let (fake, mut host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let handler = Arc::new(DelayedUrlHandler::new(Duration::from_millis(100)));
+    let (fake, mut host) = spawn_host(script, handler).await;
     let connection = ready_connection(&fake, &host).await;
     let thread =
         connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
@@ -752,22 +987,25 @@ async fn elicitation_complete_notification_emits_event_without_disconnect() {
         .await
         .expect("turn completes");
 
-    let mut saw_complete = false;
-    for _ in 0..8 {
+    let mut completions = Vec::new();
+    let mut saw_turn_completed = false;
+    while !saw_turn_completed {
         match next_event(&mut host.events).await {
             AgentEvent::ElicitationCompleted { elicitation_id } => {
-                assert_eq!(elicitation_id.0.as_ref(), "el-1");
-                saw_complete = true;
-                break;
+                completions.push(elicitation_id.0.to_string());
             }
-            AgentEvent::TurnCompleted { .. }
-            | AgentEvent::TurnStarted { .. }
+            AgentEvent::TurnCompleted { .. } => {
+                saw_turn_completed = true;
+            }
+            AgentEvent::TurnStarted { .. }
             | AgentEvent::ThreadCreated { .. }
-            | AgentEvent::ConnectionStateChanged { .. } => continue,
-            _ => continue,
+            | AgentEvent::ConnectionStateChanged { .. }
+            | AgentEvent::ClientRequestDispatched { .. }
+            | AgentEvent::SessionUpdate { .. } => {}
+            _ => {}
         }
     }
-    assert!(saw_complete, "elicitation completion event must be observed");
+    assert_eq!(completions, vec![String::from("el-1")]);
     host.close().await;
     fake.join(TEST_TIMEOUT).await;
 }
@@ -1863,18 +2101,74 @@ async fn available_commands_update_replaces_state_wholesale() {
 }
 
 #[tokio::test]
-async fn prompt_rejects_non_text_blocks_when_capabilities_are_omitted() {
+async fn prompt_allows_text_and_resource_links_without_prompt_capabilities() {
+    let script =
+        base_script().wait_for("session/prompt").respond(json!({ "stopReason": "end_turn" }));
+    let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
+
+    let prompt = vec![
+        ContentBlock::Text(TextContent::new("hi")),
+        ContentBlock::ResourceLink(
+            ResourceLink::new("readme", "file:///work/README.md")
+                .title("README")
+                .meta(Some(serde_json::from_value(json!({ "source": "local-test" })).unwrap())),
+        ),
+    ];
+    thread.send_prompt(prompt).await.expect("text and resource link stay allowed");
+
+    let request = &fake.requests_by_method("session/prompt")[0];
+    assert_eq!(request["params"]["prompt"][0]["type"], "text");
+    assert_eq!(request["params"]["prompt"][1]["type"], "resource_link");
+    assert_eq!(request["params"]["prompt"][1]["_meta"]["source"], "local-test");
+
+    host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
+async fn prompt_rejects_unsupported_rich_content_locally_before_session_prompt() {
     let script = base_script();
     let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
     let connection = ready_connection(&fake, &host).await;
     let thread =
         connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
 
-    let image = ContentBlock::Image(ImageContent::new("ZmFrZQ==", "image/png"));
-    let error = thread.send_prompt(vec![image]).await.unwrap_err();
+    let image_error = thread
+        .send_prompt(vec![ContentBlock::Image(ImageContent::new("ZmFrZQ==", "image/png"))])
+        .await
+        .unwrap_err();
     assert!(matches!(
-        error,
-        AgentError::CapabilityUnsupported { ref method } if method == "session/prompt"
+        image_error,
+        AgentError::InvalidParams(ref reason)
+            if reason.contains("promptCapabilities.image")
+    ));
+
+    let audio_error = thread
+        .send_prompt(vec![ContentBlock::Audio(AudioContent::new("ZmFrZQ==", "audio/wav"))])
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        audio_error,
+        AgentError::InvalidParams(ref reason)
+            if reason.contains("promptCapabilities.audio")
+    ));
+
+    let resource_error = thread
+        .send_prompt(vec![ContentBlock::Resource(EmbeddedResource::new(
+            EmbeddedResourceResource::TextResourceContents(TextResourceContents::new(
+                "hello",
+                "file:///work/readme.md",
+            )),
+        ))])
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        resource_error,
+        AgentError::InvalidParams(ref reason)
+            if reason.contains("promptCapabilities.embeddedContext")
     ));
     assert_eq!(fake.requests_by_method("session/prompt").len(), 0);
 
@@ -1883,12 +2177,19 @@ async fn prompt_rejects_non_text_blocks_when_capabilities_are_omitted() {
 }
 
 #[tokio::test]
-async fn prompt_allows_embedded_context_only_when_advertised() {
+async fn prompt_allows_advertised_rich_content_and_preserves_meta() {
     let script = FakeAgentScript::new()
         .wait_for("initialize")
         .respond(json!({
             "protocolVersion": 1,
-            "agentCapabilities": { "promptCapabilities": { "embeddedContext": true } }
+            "agentCapabilities": {
+                "promptCapabilities": {
+                    "image": true,
+                    "audio": true,
+                    "embeddedContext": true,
+                    "_meta": { "diagnosticOnly": true }
+                }
+            }
         }))
         .wait_for("session/new")
         .respond(json!({ "sessionId": "s1" }))
@@ -1899,14 +2200,73 @@ async fn prompt_allows_embedded_context_only_when_advertised() {
     let thread =
         connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
 
-    let resource = ContentBlock::Resource(EmbeddedResource::new(
-        EmbeddedResourceResource::TextResourceContents(TextResourceContents::new(
-            "hello",
-            "file:///work/readme.md",
-        )),
+    let resource = ContentBlock::Resource(
+        EmbeddedResource::new(EmbeddedResourceResource::TextResourceContents(
+            TextResourceContents::new("hello", "file:///work/readme.md")
+                .meta(Some(serde_json::from_value(json!({ "kind": "inline" })).unwrap())),
+        ))
+        .meta(Some(serde_json::from_value(json!({ "scope": "prompt" })).unwrap())),
+    );
+    let prompt = vec![
+        ContentBlock::Image(
+            ImageContent::new("ZmFrZQ==", "image/png")
+                .meta(Some(serde_json::from_value(json!({ "slot": "preview" })).unwrap())),
+        ),
+        ContentBlock::Audio(
+            AudioContent::new("ZmFrZQ==", "audio/wav")
+                .meta(Some(serde_json::from_value(json!({ "slot": "clip" })).unwrap())),
+        ),
+        resource,
+    ];
+    thread.send_prompt(prompt).await.expect("advertised rich content accepted");
+
+    let request = &fake.requests_by_method("session/prompt")[0];
+    assert_eq!(request["params"]["prompt"][0]["_meta"]["slot"], "preview");
+    assert_eq!(request["params"]["prompt"][1]["_meta"]["slot"], "clip");
+    assert_eq!(request["params"]["prompt"][2]["_meta"]["scope"], "prompt");
+    assert_eq!(request["params"]["prompt"][2]["resource"]["_meta"]["kind"], "inline");
+
+    host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
+async fn prompt_capability_meta_stays_diagnostic_only() {
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({
+            "protocolVersion": 1,
+            "agentCapabilities": {
+                "promptCapabilities": {
+                    "_meta": {
+                        "image": true,
+                        "audio": true,
+                        "embeddedContext": true
+                    }
+                }
+            }
+        }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s1" }));
+    let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
+
+    assert!(!connection.supports_prompt_images());
+    assert!(!connection.supports_prompt_audio());
+    assert!(!connection.supports_prompt_embedded_context());
+
+    let error = thread
+        .send_prompt(vec![ContentBlock::Image(ImageContent::new("ZmFrZQ==", "image/png"))])
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        AgentError::InvalidParams(ref reason)
+            if reason.contains("promptCapabilities.image")
     ));
-    thread.send_prompt(vec![resource]).await.expect("embedded context prompt accepted");
-    assert_eq!(fake.requests_by_method("session/prompt").len(), 1);
+    assert_eq!(fake.requests_by_method("session/prompt").len(), 0);
 
     host.close().await;
     fake.join(TEST_TIMEOUT).await;

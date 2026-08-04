@@ -1690,7 +1690,7 @@ impl App {
             return;
         }
         if self.agents.layout == AgentPaneLayout::Closed {
-            self.agents.layout = AgentPaneLayout::Right;
+            self.agents.layout = AgentPaneLayout::Full;
         }
         self.enter_agent_focus();
         self.start_mcp_servers();

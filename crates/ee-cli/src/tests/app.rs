@@ -12,12 +12,23 @@ fn scratch_title_is_default() {
 }
 
 #[test]
-fn ctrl_c_quits() {
+fn ctrl_c_does_not_quit() {
     let mut app = App::from_path(None).unwrap();
 
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
 
-    assert!(app.should_quit);
+    assert!(!app.should_quit);
+}
+
+#[test]
+fn ctrl_c_cancels_to_normal_mode() {
+    let mut app = App::from_path(None).unwrap();
+    app.mode = Mode::Insert;
+
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+
+    assert!(!app.should_quit);
+    assert_eq!(app.mode, Mode::Normal);
 }
 
 #[test]

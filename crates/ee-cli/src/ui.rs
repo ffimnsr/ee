@@ -63,6 +63,20 @@ pub(crate) fn agents_pane_rect_for(area: Rect, app: &App) -> Option<Rect> {
 }
 
 fn split_root_areas(area: Rect, app: &App) -> RootAreas {
+    #[cfg(feature = "agents")]
+    if app.agents_layout() == crate::app::AgentPaneLayout::Full {
+        let zero = Rect { x: area.x, y: area.y, width: 0, height: 0 };
+        return RootAreas {
+            tab_bar_area: None,
+            editor_area: zero,
+            agents_area: Some(area),
+            qf_area: None,
+            key_hint_area: None,
+            status_area: zero,
+            prompt_area: zero,
+        };
+    }
+
     let tab_count = app.tabs.tab_count();
     let key_hint_visible = app.active_key_hint_entries().is_some();
 
@@ -273,15 +287,15 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
         }
     }
 
-    // Agents pane (feature `agents`); drawn between the editor and the
-    // status bar so it feels like a split view.
+    render_status(frame, root.status_area, app);
+    render_prompt(frame, root.prompt_area, app);
+
+    // Agents pane (feature `agents`); full layout intentionally draws last so
+    // it owns the whole terminal like a chat client.
     #[cfg(feature = "agents")]
     if let Some(rect) = root.agents_area {
         render_agents_pane(frame, rect, app);
     }
-
-    render_status(frame, root.status_area, app);
-    render_prompt(frame, root.prompt_area, app);
 
     if let Some(key_hint_area) = root.key_hint_area {
         render_key_hints(frame, key_hint_area, app);
@@ -340,7 +354,7 @@ fn transcript_lines(item: &crate::app::TranscriptItem, width: usize) -> Vec<Line
     use crate::app::{MessageRenderKind, TranscriptItem};
     let width = width.max(8);
     let nick_col = crate::app::AGENTS_NICK_COL_WIDTH;
-    let indent = 5 + nick_col + 1; // "[HH:MM] " + nick column + space
+    let indent = "[HH:MM] ".chars().count() + nick_col + 1;
     let text_width = width.saturating_sub(indent).max(4);
     let mut lines = Vec::new();
     let dim = Style::default().fg(theme::FG_DIM);
@@ -349,9 +363,9 @@ fn transcript_lines(item: &crate::app::TranscriptItem, width: usize) -> Vec<Line
             let style = match kind {
                 MessageRenderKind::User => Style::default().fg(theme::FG_KEY),
                 MessageRenderKind::Assistant => Style::default().fg(theme::FG_TEXT),
-                MessageRenderKind::Thought => {
-                    Style::default().fg(theme::FG_DIM).add_modifier(Modifier::ITALIC)
-                }
+                MessageRenderKind::Thought => Style::default()
+                    .fg(theme::FG_INFO)
+                    .add_modifier(Modifier::ITALIC | Modifier::BOLD),
             };
             let time = fmt_hhmm(*at);
             let nick_display = pad_or_trim(nick, nick_col);
@@ -416,19 +430,32 @@ fn transcript_lines(item: &crate::app::TranscriptItem, width: usize) -> Vec<Line
                 ]));
             }
         }
-        TranscriptItem::Elicitation { message, url, at } => {
+        TranscriptItem::Elicitation { agent, message, url, url_host, at } => {
             let time = fmt_hhmm(*at);
             lines.push(Line::from(vec![
                 Span::styled(format!("[{time}]"), dim),
                 Span::styled(" elicitation: ", Style::default().fg(theme::FG_KEY)),
+                Span::styled(agent.clone(), Style::default().fg(theme::FG_WARNING)),
+                Span::raw(" "),
                 Span::styled(message.clone(), Style::default().fg(theme::FG_TEXT)),
             ]));
+            if let Some(host) = url_host {
+                lines.push(Line::from(vec![
+                    Span::raw(" ".repeat(indent)),
+                    Span::styled("host: ", dim),
+                    Span::styled(host.clone(), Style::default().fg(theme::FG_WARNING)),
+                ]));
+            }
             if let Some(url) = url {
-                for segment in crate::app::wrap_text(url, text_width) {
-                    lines.push(Line::from(vec![
-                        Span::raw(" ".repeat(indent)),
-                        Span::styled(segment, Style::default().fg(theme::FG_INFO)),
-                    ]));
+                for (index, segment) in
+                    crate::app::wrap_text(url, text_width).into_iter().enumerate()
+                {
+                    let mut spans = vec![Span::raw(" ".repeat(indent))];
+                    if index == 0 {
+                        spans.push(Span::styled("url: ", dim));
+                    }
+                    spans.push(Span::styled(segment, Style::default().fg(theme::FG_INFO)));
+                    lines.push(Line::from(spans));
                 }
             }
         }
@@ -467,8 +494,7 @@ fn transcript_lines(item: &crate::app::TranscriptItem, width: usize) -> Vec<Line
     lines
 }
 
-/// Renders the irssi-style agents pane: channel list, transcript scrollback,
-/// status footer, and composer line.
+/// Renders agents pane: transcript scrollback, status footer, and composer line.
 #[cfg(feature = "agents")]
 fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     use crate::app::ThreadUiState;
@@ -495,111 +521,109 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         return;
     }
 
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(crate::app::AGENTS_CHANNEL_COL_WIDTH), Constraint::Min(1)])
-        .split(inner);
-    let channel_area = columns[0];
-    let main_area = columns[1];
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
-        .split(main_area);
+        .split(inner);
     let transcript_area = rows[0];
     let footer_area = rows[1];
     let composer_area = rows[2];
 
-    // Channel/thread list (IRC window list).
-    let mut channel_lines = Vec::new();
-    if app.agents.threads.is_empty() {
-        channel_lines.push(Line::from(Span::styled("(none)", theme_style(theme::FG_DIM))));
-    }
-    for (index, thread) in app.agents.threads.iter().enumerate() {
-        let active = app.agents.active_thread == Some(index);
-        let unread =
-            if thread.unread > 0 { format!(" ({})", thread.unread) } else { String::new() };
-        let text = format!("{}{}{}", thread.state.marker(), thread.display_name, unread);
-        let style = if active {
-            Style::default().fg(theme::FG_INVERTED).bg(theme::FG_KEY).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme::FG_TEXT)
-        };
-        channel_lines.push(Line::from(Span::styled(text, style)));
-    }
-    // MCP server health entries (Phase 6): state marker + server id.
-    if !app.agents.mcp.servers.is_empty() {
-        channel_lines.push(Line::from(""));
-        for (id, server) in &app.agents.mcp.servers {
-            let marker = mcp_state_marker(server.state);
-            let style = match server.state {
-                ee_mcp::McpServerState::Ready => theme_style(theme::FG_INFO),
-                ee_mcp::McpServerState::Failed => theme_style(theme::FG_WARNING),
-                ee_mcp::McpServerState::Starting | ee_mcp::McpServerState::Refreshing => {
-                    theme_style(theme::FG_KEY)
-                }
-                ee_mcp::McpServerState::Disabled => theme_style(theme::FG_DIM),
-            };
-            channel_lines.push(Line::from(vec![
-                Span::styled(marker, style),
-                Span::styled(id.clone(), style),
-            ]));
-        }
-    }
-    frame.render_widget(Paragraph::new(channel_lines).scroll((0, 0)), channel_area);
-
     // Transcript scrollback.
-    let Some(active_index) = app.agents.active_thread else {
-        let message = "-!- no agent session (run :agents)";
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(message, theme_style(theme::FG_DIM)))),
-            transcript_area,
+    let composer = if let Some(active_index) = app.agents.active_thread {
+        let thread = &app.agents.threads[active_index];
+        let mut lines = Vec::new();
+        for item in &thread.transcript {
+            if !app.agents.show_thoughts
+                && matches!(
+                    item,
+                    crate::app::TranscriptItem::Message {
+                        kind: crate::app::MessageRenderKind::Thought,
+                        ..
+                    }
+                )
+            {
+                continue;
+            }
+            lines.extend(transcript_lines(item, transcript_area.width.saturating_sub(1) as usize));
+        }
+        let visible_height = transcript_area.height as usize;
+        let top = if thread.stick_to_bottom {
+            lines.len().saturating_sub(visible_height)
+        } else {
+            thread.scroll.min(lines.len().saturating_sub(visible_height))
+        };
+        let mut window: Vec<Line<'static>> =
+            lines.into_iter().skip(top).take(visible_height).collect();
+        if thread.stick_to_bottom && window.len() < visible_height {
+            let mut bottom_aligned = vec![Line::default(); visible_height - window.len()];
+            bottom_aligned.append(&mut window);
+            window = bottom_aligned;
+        }
+        frame.render_widget(Paragraph::new(window).scroll((0, 0)), transcript_area);
+
+        // Footer: nick, state, usage, unread, stop reason.
+        let state_label = match thread.state {
+            ThreadUiState::Starting => "starting",
+            ThreadUiState::Ready => "ready",
+            ThreadUiState::Running => "running",
+            ThreadUiState::Closed => "closed",
+            ThreadUiState::Failed => "failed",
+        };
+        let footer_text = format!(
+            "{} [{}]{} | session:{} / {} | thoughts:{} | unread:{} | Ctrl-T threads {}",
+            thread.nick,
+            state_label,
+            thread.usage.as_deref().map(|u| format!(" | {u}")).unwrap_or_default(),
+            active_index + 1,
+            app.agents.threads.len(),
+            if app.agents.show_thoughts { "on" } else { "off" },
+            thread.unread,
+            thread.stop_reason.as_deref().unwrap_or(""),
         );
-        return;
-    };
-    let thread = &app.agents.threads[active_index];
-
-    let mut lines = Vec::new();
-    for item in &thread.transcript {
-        lines.extend(transcript_lines(item, main_area.width.saturating_sub(2) as usize));
-    }
-    let visible_height = transcript_area.height as usize;
-    let top = if thread.stick_to_bottom {
-        lines.len().saturating_sub(visible_height)
+        let footer_style = if thread.state == ThreadUiState::Running {
+            Style::default().fg(theme::FG_WARNING)
+        } else {
+            theme_style(theme::FG_DIM)
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(footer_text, footer_style))),
+            footer_area,
+        );
+        agents_composer_line(app, thread)
     } else {
-        thread.scroll.min(lines.len().saturating_sub(visible_height))
+        let mut lines = vec![Line::from(vec![
+            Span::styled("-!- ", theme_style(theme::FG_DIM)),
+            Span::styled("no agent session", theme_style(theme::FG_WARNING)),
+        ])];
+        if app.agents.pending_session.is_some() {
+            lines.push(Line::from(Span::styled(
+                "-!- starting session… type now; draft carries into session",
+                theme_style(theme::FG_DIM),
+            )));
+        } else if let Some(error) = &app.agents.error {
+            lines.push(Line::from(vec![
+                Span::styled("-!- ", theme_style(theme::FG_DIM)),
+                Span::styled(error.clone(), theme_style(theme::FG_WARNING)),
+            ]));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "-!- configure [agents.servers.<id>] in .ee.toml, then press : and run agents_new",
+                theme_style(theme::FG_DIM),
+            )));
+        }
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), transcript_area);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "agents [no session] | Enter starts after config | :agents_new | :agents_threads | Esc close",
+                theme_style(theme::FG_DIM),
+            ))),
+            footer_area,
+        );
+        agents_pending_composer_line(app)
     };
-    let window: Vec<Line<'static>> = lines.into_iter().skip(top).take(visible_height).collect();
-    let paragraph = Paragraph::new(window).scroll((0, 0));
-    frame.render_widget(paragraph, transcript_area);
-
-    // Footer: nick, state, usage, unread, stop reason.
-    let state_label = match thread.state {
-        ThreadUiState::Starting => "starting",
-        ThreadUiState::Ready => "ready",
-        ThreadUiState::Running => "running",
-        ThreadUiState::Closed => "closed",
-        ThreadUiState::Failed => "failed",
-    };
-    let footer_text = format!(
-        "{} [{}]{} | unread:{} {}",
-        thread.nick,
-        state_label,
-        thread.usage.as_deref().map(|u| format!(" | {u}")).unwrap_or_default(),
-        thread.unread,
-        thread.stop_reason.as_deref().unwrap_or(""),
-    );
-    let footer_style = if thread.state == ThreadUiState::Running {
-        Style::default().fg(theme::FG_WARNING)
-    } else {
-        theme_style(theme::FG_DIM)
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(footer_text, footer_style))),
-        footer_area,
-    );
 
     // Composer line: prompt, permission choice, elicitation widget, or draft.
-    let composer = agents_composer_line(app, thread);
     let cursor_col = composer
         .iter()
         .map(|span| span.width())
@@ -663,16 +687,28 @@ fn agents_composer_line(app: &App, thread: &crate::app::AgentThreadUi) -> Vec<Sp
     if let Some(elicitation) = &app.agents.elicitation {
         let mut spans = vec![Span::styled("> ", Style::default().fg(theme::FG_KEY))];
         if let Some(url) = &elicitation.url {
-            let choice = if elicitation.selected_choice == 0 { "accept/open" } else { "decline" };
+            let choice = match elicitation.selected_choice {
+                1 => "decline",
+                2 => "cancel",
+                _ => "accept/open",
+            };
+            if let Some(host) = &elicitation.url_host {
+                spans.push(Span::styled(
+                    format!("host: {host} "),
+                    Style::default().fg(theme::FG_WARNING),
+                ));
+            }
             spans.push(Span::styled(
-                format!("url: {url} [{}] (←/→ change, Enter confirm, Esc decline)", choice),
+                format!(
+                    "url: {url} [{choice}] (←/→ change, Enter confirm, Ctrl-D decline, Esc cancel)"
+                ),
                 Style::default().fg(theme::FG_INFO),
             ));
             return spans;
         }
         let Some(field) = elicitation.fields.get(elicitation.selected_field) else {
             spans.push(Span::styled(
-                "no fields (Enter confirm, Esc decline)",
+                "no fields (Enter accept, Ctrl-D decline, Esc cancel)",
                 theme_style(theme::FG_DIM),
             ));
             return spans;
@@ -680,11 +716,11 @@ fn agents_composer_line(app: &App, thread: &crate::app::AgentThreadUi) -> Vec<Sp
         let marker = if field.unsupported.is_some() { "!" } else { ">" };
         let value = field.display_value();
         spans.push(Span::styled(
-            format!("{marker} {}: {}", field.label(), value),
+            format!("{} — {marker} {}: {}", elicitation.agent_label, field.label(), value),
             Style::default().fg(theme::FG_TEXT),
         ));
         spans.push(Span::styled(
-            " (↑/↓ field, ←/→ value, Enter confirm, Esc decline)",
+            " (↑/↓ field, ←/→ value, Enter accept, Ctrl-D decline, Esc cancel)",
             theme_style(theme::FG_DIM),
         ));
         return spans;
@@ -731,8 +767,18 @@ fn agents_composer_line(app: &App, thread: &crate::app::AgentThreadUi) -> Vec<Sp
     }
     let draft = &thread.draft;
     vec![
-        Span::styled("> ", Style::default().fg(theme::FG_KEY)),
+        Span::styled("prompt> ", Style::default().fg(theme::FG_KEY).add_modifier(Modifier::BOLD)),
         Span::styled(draft.clone(), Style::default().fg(theme::FG_TEXT)),
+        Span::styled("█", Style::default().fg(theme::FG_KEY)),
+    ]
+}
+
+/// Builds the composer line shown while no session exists yet.
+#[cfg(feature = "agents")]
+fn agents_pending_composer_line(app: &App) -> Vec<Span<'static>> {
+    vec![
+        Span::styled("prompt> ", Style::default().fg(theme::FG_KEY).add_modifier(Modifier::BOLD)),
+        Span::styled(app.agents.pending_draft.clone(), Style::default().fg(theme::FG_TEXT)),
         Span::styled("█", Style::default().fg(theme::FG_KEY)),
     ]
 }
@@ -741,18 +787,6 @@ fn agents_composer_line(app: &App, thread: &crate::app::AgentThreadUi) -> Vec<Sp
 #[cfg(feature = "agents")]
 fn theme_style(color: Color) -> Style {
     Style::default().fg(color)
-}
-
-/// IRC-like state marker for one MCP server connection.
-#[cfg(feature = "agents")]
-fn mcp_state_marker(state: ee_mcp::McpServerState) -> &'static str {
-    match state {
-        ee_mcp::McpServerState::Disabled => "- ",
-        ee_mcp::McpServerState::Starting => "+ ",
-        ee_mcp::McpServerState::Ready => "* ",
-        ee_mcp::McpServerState::Failed => "! ",
-        ee_mcp::McpServerState::Refreshing => "~ ",
-    }
 }
 
 // ── Status bar ───────────────────────────────────────────────────────────────
@@ -2247,6 +2281,7 @@ fn picker_kind_badge(kind: PickerKind) -> &'static str {
         PickerKind::CodeActions => " ACTIONS ",
         PickerKind::Symbols => " SYMBOLS ",
         PickerKind::Locations => " LOCATIONS ",
+        PickerKind::AgentThreads => " AGENTS ",
     }
 }
 

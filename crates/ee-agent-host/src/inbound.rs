@@ -45,7 +45,7 @@ pub struct HandlerCapabilities {
     pub elicitation_url: bool,
     /// `clientCapabilities.session.configOptions.boolean`
     pub session_config_boolean: bool,
-    /// Proxy-only ee MCP discovery tools (`ee/*` local bridge methods).
+    /// Proxy-only ee MCP discovery tools (`_ee/*` local bridge methods).
     pub proxy_discovery: bool,
 }
 
@@ -90,30 +90,30 @@ impl HandlerCapabilities {
             | TERMINAL_KILL_METHOD_NAME
             | TERMINAL_RELEASE_METHOD_NAME => self.terminal,
             ELICITATION_CREATE_METHOD_NAME => self.elicitation_form || self.elicitation_url,
-            "ee/workspace_roots"
-            | "ee/list_directory"
-            | "ee/list_directory_all"
-            | "ee/search_files"
-            | "ee/search_files_all"
-            | "ee/search_text"
-            | "ee/search_text_regex"
-            | "ee/search_text_in_files"
-            | "ee/replace_text"
-            | "ee/apply_patch"
-            | "ee/create_text_file"
-            | "ee/overwrite_text_file"
-            | "ee/read_buffer"
-            | "ee/read_buffer_lines"
-            | "ee/open_buffers"
-            | "ee/get_diagnostics"
-            | "ee/get_file_diagnostics"
-            | "ee/document_symbols"
-            | "ee/references"
-            | "ee/list_code_actions"
-            | "ee/apply_code_action"
-            | "ee/format_file"
-            | "ee/preview_rename_symbol"
-            | "ee/rename_symbol" => self.proxy_discovery,
+            "_ee/workspace_roots"
+            | "_ee/list_directory"
+            | "_ee/list_directory_all"
+            | "_ee/search_files"
+            | "_ee/search_files_all"
+            | "_ee/search_text"
+            | "_ee/search_text_regex"
+            | "_ee/search_text_in_files"
+            | "_ee/replace_text"
+            | "_ee/apply_patch"
+            | "_ee/create_text_file"
+            | "_ee/overwrite_text_file"
+            | "_ee/read_buffer"
+            | "_ee/read_buffer_lines"
+            | "_ee/open_buffers"
+            | "_ee/get_diagnostics"
+            | "_ee/get_file_diagnostics"
+            | "_ee/document_symbols"
+            | "_ee/references"
+            | "_ee/list_code_actions"
+            | "_ee/apply_code_action"
+            | "_ee/format_file"
+            | "_ee/preview_rename_symbol"
+            | "_ee/rename_symbol" => self.proxy_discovery,
             _ => false,
         }
     }
@@ -180,30 +180,30 @@ impl ClientRequest {
     #[must_use]
     pub fn method(&self) -> &'static str {
         match self {
-            Self::ProxyWorkspaceRoots => "ee/workspace_roots",
-            Self::ProxyListDirectory { .. } => "ee/list_directory",
-            Self::ProxyListDirectoryAll { .. } => "ee/list_directory_all",
-            Self::ProxySearchFiles { .. } => "ee/search_files",
-            Self::ProxySearchFilesAll { .. } => "ee/search_files_all",
-            Self::ProxySearchText { .. } => "ee/search_text",
-            Self::ProxySearchTextRegex { .. } => "ee/search_text_regex",
-            Self::ProxySearchTextInFiles { .. } => "ee/search_text_in_files",
-            Self::ProxyReplaceText { .. } => "ee/replace_text",
-            Self::ProxyApplyPatch { .. } => "ee/apply_patch",
-            Self::ProxyCreateTextFile { .. } => "ee/create_text_file",
-            Self::ProxyOverwriteTextFile { .. } => "ee/overwrite_text_file",
-            Self::ProxyReadBuffer { .. } => "ee/read_buffer",
-            Self::ProxyReadBufferLines { .. } => "ee/read_buffer_lines",
-            Self::ProxyOpenBuffers => "ee/open_buffers",
-            Self::ProxyGetDiagnostics => "ee/get_diagnostics",
-            Self::ProxyGetFileDiagnostics { .. } => "ee/get_file_diagnostics",
-            Self::ProxyDocumentSymbols { .. } => "ee/document_symbols",
-            Self::ProxyReferences { .. } => "ee/references",
-            Self::ProxyListCodeActions { .. } => "ee/list_code_actions",
-            Self::ProxyApplyCodeAction { .. } => "ee/apply_code_action",
-            Self::ProxyFormatFile { .. } => "ee/format_file",
-            Self::ProxyPreviewRenameSymbol { .. } => "ee/preview_rename_symbol",
-            Self::ProxyRenameSymbol { .. } => "ee/rename_symbol",
+            Self::ProxyWorkspaceRoots => "_ee/workspace_roots",
+            Self::ProxyListDirectory { .. } => "_ee/list_directory",
+            Self::ProxyListDirectoryAll { .. } => "_ee/list_directory_all",
+            Self::ProxySearchFiles { .. } => "_ee/search_files",
+            Self::ProxySearchFilesAll { .. } => "_ee/search_files_all",
+            Self::ProxySearchText { .. } => "_ee/search_text",
+            Self::ProxySearchTextRegex { .. } => "_ee/search_text_regex",
+            Self::ProxySearchTextInFiles { .. } => "_ee/search_text_in_files",
+            Self::ProxyReplaceText { .. } => "_ee/replace_text",
+            Self::ProxyApplyPatch { .. } => "_ee/apply_patch",
+            Self::ProxyCreateTextFile { .. } => "_ee/create_text_file",
+            Self::ProxyOverwriteTextFile { .. } => "_ee/overwrite_text_file",
+            Self::ProxyReadBuffer { .. } => "_ee/read_buffer",
+            Self::ProxyReadBufferLines { .. } => "_ee/read_buffer_lines",
+            Self::ProxyOpenBuffers => "_ee/open_buffers",
+            Self::ProxyGetDiagnostics => "_ee/get_diagnostics",
+            Self::ProxyGetFileDiagnostics { .. } => "_ee/get_file_diagnostics",
+            Self::ProxyDocumentSymbols { .. } => "_ee/document_symbols",
+            Self::ProxyReferences { .. } => "_ee/references",
+            Self::ProxyListCodeActions { .. } => "_ee/list_code_actions",
+            Self::ProxyApplyCodeAction { .. } => "_ee/apply_code_action",
+            Self::ProxyFormatFile { .. } => "_ee/format_file",
+            Self::ProxyPreviewRenameSymbol { .. } => "_ee/preview_rename_symbol",
+            Self::ProxyRenameSymbol { .. } => "_ee/rename_symbol",
             Self::ReadTextFile(_) => FS_READ_TEXT_FILE_METHOD_NAME,
             Self::WriteTextFile(_) => FS_WRITE_TEXT_FILE_METHOD_NAME,
             Self::CreateTerminal(_) => TERMINAL_CREATE_METHOD_NAME,
@@ -406,21 +406,21 @@ mod tests {
             "terminal/kill",
             "terminal/release",
             "elicitation/create",
-            "ee/workspace_roots",
-            "ee/list_directory",
-            "ee/list_directory_all",
-            "ee/search_files",
-            "ee/search_files_all",
-            "ee/search_text",
-            "ee/search_text_regex",
-            "ee/search_text_in_files",
-            "ee/replace_text",
-            "ee/apply_patch",
-            "ee/create_text_file",
-            "ee/overwrite_text_file",
-            "ee/read_buffer",
-            "ee/read_buffer_lines",
-            "ee/open_buffers",
+            "_ee/workspace_roots",
+            "_ee/list_directory",
+            "_ee/list_directory_all",
+            "_ee/search_files",
+            "_ee/search_files_all",
+            "_ee/search_text",
+            "_ee/search_text_regex",
+            "_ee/search_text_in_files",
+            "_ee/replace_text",
+            "_ee/apply_patch",
+            "_ee/create_text_file",
+            "_ee/overwrite_text_file",
+            "_ee/read_buffer",
+            "_ee/read_buffer_lines",
+            "_ee/open_buffers",
         ] {
             assert!(caps.supports(method), "{method} should be supported");
         }
@@ -464,11 +464,11 @@ mod tests {
         assert_eq!(read.session_id(), Some(&session));
 
         let proxy = ClientRequest::ProxySearchFiles { pattern: String::from("src/*.rs") };
-        assert_eq!(proxy.method(), "ee/search_files");
+        assert_eq!(proxy.method(), "_ee/search_files");
         assert_eq!(proxy.session_id(), None);
 
         let proxy_regex = ClientRequest::ProxySearchTextRegex { pattern: String::from("main") };
-        assert_eq!(proxy_regex.method(), "ee/search_text_regex");
+        assert_eq!(proxy_regex.method(), "_ee/search_text_regex");
         assert_eq!(proxy_regex.session_id(), None);
 
         let replace = ClientRequest::ProxyReplaceText {
@@ -476,7 +476,7 @@ mod tests {
             old_text: String::from("old"),
             new_text: String::from("new"),
         };
-        assert_eq!(replace.method(), "ee/replace_text");
+        assert_eq!(replace.method(), "_ee/replace_text");
         assert_eq!(replace.session_id(), None);
 
         let terminal =

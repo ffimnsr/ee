@@ -1803,8 +1803,9 @@ fn build_vim_bindings() -> HashMap<BindingKey, Action> {
         };
     }
 
-    for &mode in &[Normal, Insert, Visual, CommandLine, Search] {
-        bind!(mode, KeyCode::Char('c'), ctrl, None, Quit);
+    bind!(Normal, KeyCode::Char('c'), ctrl, None, NoOp);
+    for &mode in &[Insert, Visual, CommandLine, Search] {
+        bind!(mode, KeyCode::Char('c'), ctrl, None, EnterMode(Normal));
     }
 
     bind!(Picker, KeyCode::Esc, none, None, PickerClose);

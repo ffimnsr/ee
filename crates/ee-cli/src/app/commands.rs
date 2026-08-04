@@ -435,10 +435,12 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     command_spec("agents_config_set", "agents_config_set", "agents_config_set"),
     command_spec("agents_config_toggle", "agents_config_toggle", "agents_config_toggle"),
     command_spec("agents_layout", "agents_layout", "agents_layout"),
+    command_spec("agents_thoughts", "agents_thoughts", "agents_thoughts"),
     command_spec("agents_mcp", "agents_mcp", "agents_mcp"),
     command_spec("agents_mode_next", "agents_mode_next", "agents_mode_next"),
     command_spec("agents_mode_prev", "agents_mode_prev", "agents_mode_prev"),
     command_spec("agents_new", "agents_new", "agents_new"),
+    command_spec("agents_threads", "agents_threads", "agents_threads"),
     command_spec("agents_next", "agents_next", "agents_next"),
     command_spec("agents_prev", "agents_prev", "agents_prev"),
     command_spec("agents_stop", "agents_stop", "agents_stop"),
@@ -745,10 +747,12 @@ impl App {
             | "agents_config_set"
             | "agents_config_toggle"
             | "agents_layout"
+            | "agents_thoughts"
             | "agents_mcp"
             | "agents_mode_next"
             | "agents_mode_prev"
             | "agents_new"
+            | "agents_threads"
             | "agents_next"
             | "agents_prev"
             | "agents_stop" => "agents",
@@ -1040,6 +1044,10 @@ impl App {
             "agents_layout" => {
                 (Cow::Borrowed("set the agents pane split layout"), Some("right|bottom|full"))
             }
+            "agents_thoughts" => (
+                Cow::Borrowed("show, hide, or toggle streamed agent thought messages"),
+                Some("on|off|toggle"),
+            ),
             "agents_mcp" => (
                 Cow::Borrowed("browse MCP tools/prompts/resources or show MCP health"),
                 Some("tools|prompts|resources|close"),
@@ -1047,6 +1055,7 @@ impl App {
             "agents_mode_next" => (Cow::Borrowed("switch to next advertised agent mode"), None),
             "agents_mode_prev" => (Cow::Borrowed("switch to previous advertised agent mode"), None),
             "agents_new" => (Cow::Borrowed("start a new agent session"), None),
+            "agents_threads" => (Cow::Borrowed("open picker for agent sessions"), None),
             "agents_next" => (Cow::Borrowed("switch to the next agent thread"), None),
             "agents_prev" => (Cow::Borrowed("switch to the previous agent thread"), None),
             "agents_stop" => (Cow::Borrowed("stop the active agent session"), None),
@@ -2809,10 +2818,12 @@ impl App {
             | "agents_config_set"
             | "agents_config_toggle"
             | "agents_layout"
+            | "agents_thoughts"
             | "agents_mcp"
             | "agents_mode_next"
             | "agents_mode_prev"
             | "agents_new"
+            | "agents_threads"
             | "agents_next"
             | "agents_prev"
             | "agents_stop" => {
@@ -3766,6 +3777,7 @@ mod command_registry_tests {
             "agents_config_set",
             "agents_config_toggle",
             "agents_layout",
+            "agents_thoughts",
             "agents_mcp",
             "agents_mode_next",
             "agents_mode_prev",
@@ -4053,7 +4065,7 @@ mod tests {
         app.execute_command();
 
         // Phase 3: `:agents` opens the pane and starts the host lazily.
-        assert_eq!(app.agents.layout, crate::app::AgentPaneLayout::Right);
+        assert_eq!(app.agents.layout, crate::app::AgentPaneLayout::Full);
         assert_eq!(app.mode, Mode::Agent);
         assert!(app.agents.host.is_some(), "host starts lazily for the pane");
         let status = app.backend.status_message.clone().unwrap_or_default();

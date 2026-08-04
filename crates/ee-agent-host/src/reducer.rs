@@ -336,8 +336,9 @@ fn cap_tool_calls(state: &mut SessionState) {
 mod tests {
     use super::*;
     use ee_agent_protocol::{
-        ContentBlock, ContentChunk, Plan, PlanEntryPriority, PlanEntryStatus, SessionId,
-        SessionNotification, TextContent, ToolCallId,
+        Content, ContentBlock, ContentChunk, Diff, Plan, PlanEntryPriority, PlanEntryStatus,
+        SessionId, SessionNotification, Terminal, TerminalId, TextContent, ToolCallId,
+        ToolCallLocation, ToolCallUpdateFields,
     };
 
     fn chunk(kind: MessageKind, text: &str, message_id: Option<&str>) -> SessionUpdate {
@@ -394,21 +395,48 @@ mod tests {
         let mut state = SessionState::default();
         let mut order = SessionUpdateOrder::new();
 
-        let tool_call = ToolCall::new(ToolCallId::new("call_1"), "Run tests");
+        let tool_call = ToolCall::new(ToolCallId::new("call_1"), "Run tests")
+            .kind(ToolKind::Execute)
+            .status(ToolCallStatus::InProgress)
+            .content(vec![ToolCallContent::Content(Content::new(ContentBlock::Text(
+                TextContent::new("running cargo test"),
+            )))])
+            .locations(vec![ToolCallLocation::new("src/main.rs").line(11u32)])
+            .raw_input(serde_json::json!({ "secret": "input-token" }));
         apply(&mut state, &mut order, SessionUpdate::ToolCall(tool_call));
         assert_eq!(state.tool_calls["call_1"].title, "Run tests");
-        assert_eq!(state.tool_calls["call_1"].status, ToolCallStatus::default());
+        assert_eq!(state.tool_calls["call_1"].kind, ToolKind::Execute);
+        assert_eq!(state.tool_calls["call_1"].status, ToolCallStatus::InProgress);
+        assert_eq!(state.tool_calls["call_1"].locations.len(), 1);
+        assert_eq!(
+            state.tool_calls["call_1"].raw_input,
+            Some(serde_json::json!({ "secret": "input-token" }))
+        );
 
         let update = ToolCallUpdate::new(
             ToolCallId::new("call_1"),
-            ee_agent_protocol::ToolCallUpdateFields::new()
+            ToolCallUpdateFields::new()
                 .status(ToolCallStatus::Completed)
-                .title("Run tests (updated)"),
+                .title("Run tests (updated)")
+                .content(vec![
+                    ToolCallContent::Diff(Diff::new("src/lib.rs", "new")),
+                    ToolCallContent::Terminal(Terminal::new(TerminalId::new("term-1"))),
+                ])
+                .locations(vec![
+                    ToolCallLocation::new("src/lib.rs").line(22u32),
+                    ToolCallLocation::new("tests/tool.rs"),
+                ])
+                .raw_output(serde_json::json!({ "secret": "output-token" })),
         );
         apply(&mut state, &mut order, SessionUpdate::ToolCallUpdate(update));
         let merged = &state.tool_calls["call_1"];
+        assert_eq!(merged.kind, ToolKind::Execute);
         assert_eq!(merged.status, ToolCallStatus::Completed);
         assert_eq!(merged.title, "Run tests (updated)");
+        assert_eq!(merged.content.len(), 2);
+        assert_eq!(merged.locations.len(), 2);
+        assert_eq!(merged.raw_input, Some(serde_json::json!({ "secret": "input-token" })));
+        assert_eq!(merged.raw_output, Some(serde_json::json!({ "secret": "output-token" })));
     }
 
     #[test]

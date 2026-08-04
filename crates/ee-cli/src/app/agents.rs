@@ -17,10 +17,9 @@ impl App {
             let _ = tail;
             let message = match head {
                 "agents" => self.agents_status_message(),
-                "agents_stop" | "agents_new" | "agents_clear" | "agents_close" | "agents_next"
-                | "agents_prev" | "agents_layout" | "agents_mcp" => {
-                    String::from("no active agent session")
-                }
+                "agents_stop" | "agents_new" | "agents_threads" | "agents_clear"
+                | "agents_close" | "agents_next" | "agents_prev" | "agents_layout"
+                | "agents_thoughts" | "agents_mcp" => String::from("no active agent session"),
                 _ => format!("unknown agents command: {head}"),
             };
             self.backend.status_message = Some(message);
@@ -48,4 +47,8 @@ impl App {
     pub(crate) fn agents_pane_open(&self) -> bool {
         false
     }
+
+    /// Feature-off stub: thread focus is unreachable without `agents`.
+    #[cfg(not(feature = "agents"))]
+    pub(crate) fn focus_thread(&mut self, _index: usize) {}
 }
