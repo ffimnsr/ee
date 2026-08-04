@@ -9,8 +9,8 @@
 //! events carry only the wire `PermissionOption` values the agent sent.
 
 use ee_agent_protocol::{
-    AgentCapabilities, AuthMethod, Implementation, PermissionOption, RequestPermissionOutcome,
-    SessionId, SessionUpdate, StopReason, ToolCallUpdate,
+    AgentCapabilities, AuthMethod, ElicitationId, Implementation, PermissionOption,
+    RequestPermissionOutcome, SessionId, SessionUpdate, StopReason, ToolCallUpdate,
 };
 
 use crate::error::AgentError;
@@ -102,6 +102,11 @@ pub enum AgentEvent {
         request_id: PermissionRequestId,
         outcome: RequestPermissionOutcome,
     },
+    /// An out-of-band URL elicitation finished.
+    ///
+    /// The UI may use this to clear pending URL prompts or mark transcript
+    /// state complete. Unknown/stale ids stay diagnostics-only.
+    ElicitationCompleted { elicitation_id: ElicitationId },
     /// An agent-to-client file/terminal/elicitation request was dispatched
     /// to the registered handler.
     ClientRequestDispatched { session_id: Option<SessionId>, method: String },

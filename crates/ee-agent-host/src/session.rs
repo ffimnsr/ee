@@ -9,8 +9,10 @@
 use std::sync::{Arc, Mutex};
 
 use ee_agent_protocol::{
-    ContentBlock, PromptResponse, RequestPermissionOutcome, SessionId, SessionModeId,
-    SessionModeState, SessionUpdate,
+    ContentBlock, PromptResponse, RequestPermissionOutcome, SessionConfigId, SessionConfigKind,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigOptionValue,
+    SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionModeId, SessionModeState,
+    SessionUpdate,
 };
 use tokio::sync::{mpsc, watch};
 
@@ -104,13 +106,23 @@ impl AgentThread {
         agent_id: String,
         session_id: SessionId,
         modes: Option<SessionModeState>,
+        config_options: Option<Vec<SessionConfigOption>>,
         connection: AgentConnection,
         proxy_mode: EeProxyMode,
     ) -> Self {
+        let mut state = SessionState::default();
+        if let Some(config_options) = config_options {
+            state.set_config_options(config_options);
+        }
+        if state.current_mode.is_none()
+            && let Some(modes) = modes.as_ref()
+        {
+            state.current_mode = Some(modes.current_mode_id.clone());
+        }
         let shared = Arc::new(ThreadShared {
             agent_id: agent_id.clone(),
             session_id: session_id.clone(),
-            state: Mutex::new(SessionState::default()),
+            state: Mutex::new(state),
             order: Mutex::new(ee_agent_protocol::SessionUpdateOrder::new()),
             turn: Mutex::new(None),
             modes: Mutex::new(modes),
@@ -149,6 +161,26 @@ impl AgentThread {
         self.shared.modes.lock().expect("modes poisoned").clone()
     }
 
+    /// The current session config options in agent-provided order.
+    #[must_use]
+    pub fn config_options(&self) -> Vec<SessionConfigOption> {
+        self.snapshot().config_options
+    }
+
+    /// Replaces initial config options after `session/load` replay pre-registration.
+    pub(crate) fn set_initial_config_options(
+        &self,
+        config_options: Option<Vec<SessionConfigOption>>,
+    ) {
+        if let Some(config_options) = config_options {
+            self.shared
+                .state
+                .lock()
+                .expect("session state poisoned")
+                .set_config_options(config_options);
+        }
+    }
+
     /// How the ee MCP proxy was advertised to this session: ACP-native,
     /// stdio fallback, or disabled (Phase 6b diagnostics).
     #[must_use]
@@ -170,6 +202,7 @@ impl AgentThread {
         &self,
         prompt: Vec<ContentBlock>,
     ) -> Result<PromptResponse, AgentError> {
+        validate_prompt_blocks(&self.connection, &prompt)?;
         {
             let mut state = self.shared.state.lock().expect("session state poisoned");
             state.messages.push(ReducedMessage {
@@ -245,6 +278,16 @@ impl AgentThread {
     ///
     /// Fails when the agent advertised no modes or rejected the request.
     pub async fn set_mode(&self, mode_id: SessionModeId) -> Result<(), AgentError> {
+        if let Some(mode_config) = self.mode_config_option() {
+            return self
+                .set_config_option(
+                    mode_config.id.clone(),
+                    SessionConfigOptionValue::value_id(SessionConfigValueId::new(
+                        mode_id.0.as_ref(),
+                    )),
+                )
+                .await;
+        }
         let modes = self.shared.modes.lock().expect("modes poisoned").clone();
         let Some(modes) = modes else {
             return Err(AgentError::CapabilityUnsupported { method: "session/set_mode".into() });
@@ -255,6 +298,31 @@ impl AgentThread {
             )));
         }
         self.connection.set_mode(self.session_id.clone(), mode_id).await?;
+        Ok(())
+    }
+
+    /// Sets one session config option through `session/set_config_option`.
+    pub async fn set_config_option(
+        &self,
+        config_id: SessionConfigId,
+        value: SessionConfigOptionValue,
+    ) -> Result<(), AgentError> {
+        let config =
+            self.config_options().into_iter().find(|config| config.id == config_id).ok_or_else(
+                || {
+                    AgentError::invalid_params(format!(
+                        "config option {config_id:?} was not advertised by the agent"
+                    ))
+                },
+            )?;
+        validate_config_option_value(&self.connection, &config, &value)?;
+        let response =
+            self.connection.set_config_option(self.session_id.clone(), config_id, value).await?;
+        self.shared
+            .state
+            .lock()
+            .expect("session state poisoned")
+            .set_config_options(response.config_options);
         Ok(())
     }
 
@@ -286,6 +354,95 @@ impl AgentThread {
     fn finish_turn(&self) {
         let mut turn = self.shared.turn.lock().expect("turn state poisoned");
         *turn = None;
+    }
+
+    fn mode_config_option(&self) -> Option<SessionConfigOption> {
+        self.config_options().into_iter().find(is_mode_config_option)
+    }
+}
+
+fn is_mode_config_option(option: &SessionConfigOption) -> bool {
+    matches!(option.category, Some(SessionConfigOptionCategory::Mode))
+}
+
+fn validate_prompt_blocks(
+    connection: &AgentConnection,
+    prompt: &[ContentBlock],
+) -> Result<(), AgentError> {
+    for block in prompt {
+        match block {
+            ContentBlock::Text(_) | ContentBlock::ResourceLink(_) => {}
+            ContentBlock::Image(_) if connection.supports_prompt_images() => {}
+            ContentBlock::Audio(_) if connection.supports_prompt_audio() => {}
+            ContentBlock::Resource(_) if connection.supports_prompt_embedded_context() => {}
+            ContentBlock::Image(_) => {
+                return Err(AgentError::CapabilityUnsupported { method: "session/prompt".into() });
+            }
+            ContentBlock::Audio(_) => {
+                return Err(AgentError::CapabilityUnsupported { method: "session/prompt".into() });
+            }
+            ContentBlock::Resource(_) => {
+                return Err(AgentError::CapabilityUnsupported { method: "session/prompt".into() });
+            }
+            _ => return Err(AgentError::CapabilityUnsupported { method: "session/prompt".into() }),
+        }
+    }
+    Ok(())
+}
+
+fn validate_config_option_value(
+    connection: &AgentConnection,
+    option: &SessionConfigOption,
+    value: &SessionConfigOptionValue,
+) -> Result<(), AgentError> {
+    match (&option.kind, value) {
+        (SessionConfigKind::Select(select), SessionConfigOptionValue::ValueId { value }) => {
+            if select_option_exists(&select.options, value) {
+                Ok(())
+            } else {
+                Err(AgentError::invalid_params(format!(
+                    "config option {:?} does not advertise value {:?}",
+                    option.id, value
+                )))
+            }
+        }
+        (SessionConfigKind::Boolean(_), SessionConfigOptionValue::Boolean { .. }) => {
+            if connection.supports_boolean_session_config_options() {
+                Ok(())
+            } else {
+                Err(AgentError::CapabilityUnsupported {
+                    method: "session/set_config_option".into(),
+                })
+            }
+        }
+        (SessionConfigKind::Select(_), _) => Err(AgentError::invalid_params(format!(
+            "config option {:?} expects a select value id",
+            option.id
+        ))),
+        (SessionConfigKind::Boolean(_), _) => Err(AgentError::invalid_params(format!(
+            "config option {:?} expects a boolean value",
+            option.id
+        ))),
+        _ => Err(AgentError::invalid_params(format!(
+            "config option {:?} has unsupported kind for local validation",
+            option.id
+        ))),
+    }
+}
+
+fn select_option_exists(
+    options: &SessionConfigSelectOptions,
+    value: &SessionConfigValueId,
+) -> bool {
+    match options {
+        SessionConfigSelectOptions::Ungrouped(options) => {
+            options.iter().any(|option| &option.value == value)
+        }
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter())
+            .any(|option| &option.value == value),
+        _ => false,
     }
 }
 

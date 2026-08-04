@@ -431,8 +431,13 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     command_spec("agents", "agents", "agents"),
     command_spec("agents_clear", "agents_clear", "agents_clear"),
     command_spec("agents_close", "agents_close", "agents_close"),
+    command_spec("agents_config", "agents_config", "agents_config"),
+    command_spec("agents_config_set", "agents_config_set", "agents_config_set"),
+    command_spec("agents_config_toggle", "agents_config_toggle", "agents_config_toggle"),
     command_spec("agents_layout", "agents_layout", "agents_layout"),
     command_spec("agents_mcp", "agents_mcp", "agents_mcp"),
+    command_spec("agents_mode_next", "agents_mode_next", "agents_mode_next"),
+    command_spec("agents_mode_prev", "agents_mode_prev", "agents_mode_prev"),
     command_spec("agents_new", "agents_new", "agents_new"),
     command_spec("agents_next", "agents_next", "agents_next"),
     command_spec("agents_prev", "agents_prev", "agents_prev"),
@@ -733,8 +738,20 @@ impl App {
             | "location_list_first"
             | "location_list_last"
             | "location_list_select" => "lists",
-            "agents" | "agents_close" | "agents_new" | "agents_stop" | "agents_clear"
-            | "agents_next" | "agents_prev" | "agents_layout" | "agents_mcp" => "agents",
+            "agents"
+            | "agents_clear"
+            | "agents_close"
+            | "agents_config"
+            | "agents_config_set"
+            | "agents_config_toggle"
+            | "agents_layout"
+            | "agents_mcp"
+            | "agents_mode_next"
+            | "agents_mode_prev"
+            | "agents_new"
+            | "agents_next"
+            | "agents_prev"
+            | "agents_stop" => "agents",
             _ => "editing",
         };
 
@@ -1009,11 +1026,17 @@ impl App {
             "agents_close" => {
                 (Cow::Borrowed("close agents pane without killing the session"), None)
             }
-            "agents_new" => (Cow::Borrowed("start a new agent session"), None),
-            "agents_next" => (Cow::Borrowed("switch to the next agent thread"), None),
-            "agents_prev" => (Cow::Borrowed("switch to the previous agent thread"), None),
-            "agents_stop" => (Cow::Borrowed("stop the active agent session"), None),
-            "agents_clear" => (Cow::Borrowed("clear the active agent session"), None),
+            "agents_config" => {
+                (Cow::Borrowed("list advertised agent session config options"), None)
+            }
+            "agents_config_set" => (
+                Cow::Borrowed("set advertised agent session config option"),
+                Some("<config_id> <value>"),
+            ),
+            "agents_config_toggle" => (
+                Cow::Borrowed("toggle advertised boolean agent session config option"),
+                Some("<config_id>"),
+            ),
             "agents_layout" => {
                 (Cow::Borrowed("set the agents pane split layout"), Some("right|bottom|full"))
             }
@@ -1021,6 +1044,13 @@ impl App {
                 Cow::Borrowed("browse MCP tools/prompts/resources or show MCP health"),
                 Some("tools|prompts|resources|close"),
             ),
+            "agents_mode_next" => (Cow::Borrowed("switch to next advertised agent mode"), None),
+            "agents_mode_prev" => (Cow::Borrowed("switch to previous advertised agent mode"), None),
+            "agents_new" => (Cow::Borrowed("start a new agent session"), None),
+            "agents_next" => (Cow::Borrowed("switch to the next agent thread"), None),
+            "agents_prev" => (Cow::Borrowed("switch to the previous agent thread"), None),
+            "agents_stop" => (Cow::Borrowed("stop the active agent session"), None),
+            "agents_clear" => (Cow::Borrowed("clear the active agent session"), None),
             "buffers" => (Cow::Borrowed("print open buffers to status line"), None),
             "buffer_close" => (Cow::Borrowed("close current buffer"), None),
             "buffer_close_force" => {
@@ -2772,8 +2802,20 @@ impl App {
                 let _ = self.backend.send_edit("highlight_find", json!({ "visible": false }));
                 self.backend.status_message = Some("search highlight cleared".to_owned());
             }
-            "agents" | "agents_close" | "agents_new" | "agents_stop" | "agents_clear"
-            | "agents_next" | "agents_prev" | "agents_layout" | "agents_mcp" => {
+            "agents"
+            | "agents_clear"
+            | "agents_close"
+            | "agents_config"
+            | "agents_config_set"
+            | "agents_config_toggle"
+            | "agents_layout"
+            | "agents_mcp"
+            | "agents_mode_next"
+            | "agents_mode_prev"
+            | "agents_new"
+            | "agents_next"
+            | "agents_prev"
+            | "agents_stop" => {
                 if self.dispatch_agents_command(head, tail) {
                     // The agents pane keeps keyboard focus (or restores its
                     // previous editor mode); skip the trailing
@@ -3718,14 +3760,19 @@ mod command_registry_tests {
     fn agents_commands_resolve_lowercase_snake_case_only() {
         for alias in [
             "agents",
+            "agents_clear",
             "agents_close",
+            "agents_config",
+            "agents_config_set",
+            "agents_config_toggle",
+            "agents_layout",
+            "agents_mcp",
+            "agents_mode_next",
+            "agents_mode_prev",
             "agents_new",
             "agents_next",
             "agents_prev",
             "agents_stop",
-            "agents_clear",
-            "agents_layout",
-            "agents_mcp",
         ] {
             let spec = App::resolve_ex_command(alias)
                 .unwrap_or_else(|| panic!("agents alias `{alias}` missing from registry"));
@@ -3952,7 +3999,14 @@ mod tests {
 
     #[test]
     fn agents_command_reports_disabled_by_default() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".ee.toml"), "[agents]\nenabled = false\n").unwrap();
+        let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+        let cwd_restore = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
         let mut app = App::from_path(None).unwrap();
+        std::env::set_current_dir(cwd_restore).unwrap();
+        drop(_cwd_lock);
         app.command_buffer = String::from("agents");
         app.execute_command();
 

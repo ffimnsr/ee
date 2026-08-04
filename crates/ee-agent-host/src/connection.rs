@@ -25,15 +25,20 @@ use std::time::Duration;
 
 use ee_agent_protocol::{
     Agent as AgentRole, AgentCapabilities, AuthenticateRequest, AuthenticateResponse,
-    CancelNotification, Client as ClientRole, ClientCapabilities, ConnectMcpRequest, ConnectionTo,
-    CreateElicitationRequest, CreateTerminalRequest, DisconnectMcpRequest, ElicitationCapabilities,
-    ElicitationFormCapabilities, ElicitationUrlCapabilities, Error as RpcError,
-    FileSystemCapabilities, Implementation, InitializeRequest, KillTerminalRequest,
-    LoadSessionRequest, LoadSessionResponse, LogoutRequest, LogoutResponse, McpServer,
-    McpServerAcpId, McpServerStdio, MessageMcpNotification, MessageMcpRequest, NewSessionRequest,
-    NewSessionResponse, PromptRequest, PromptResponse, ProtocolVersion, ReadTextFileRequest,
-    ReleaseTerminalRequest, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SessionId, SessionNotification, SetSessionModeRequest,
+    BooleanConfigOptionCapabilities, CancelNotification, Client as ClientRole, ClientCapabilities,
+    ClientSessionCapabilities, CloseSessionRequest, CloseSessionResponse,
+    CompleteElicitationNotification, ConnectMcpRequest, ConnectionTo, CreateElicitationRequest,
+    CreateTerminalRequest, DeleteSessionRequest, DeleteSessionResponse, DisconnectMcpRequest,
+    ElicitationCapabilities, ElicitationFormCapabilities, ElicitationUrlCapabilities,
+    Error as RpcError, FileSystemCapabilities, Implementation, InitializeRequest,
+    KillTerminalRequest, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
+    LoadSessionResponse, LogoutRequest, LogoutResponse, McpServer, McpServerAcpId, McpServerStdio,
+    MessageMcpNotification, MessageMcpRequest, NewSessionRequest, NewSessionResponse,
+    PromptRequest, PromptResponse, ProtocolVersion, ReadTextFileRequest, ReleaseTerminalRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    ResumeSessionRequest, ResumeSessionResponse, SessionConfigOption, SessionConfigOptionValue,
+    SessionConfigOptionsCapabilities, SessionId, SessionNotification,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, SetSessionModeRequest,
     SetSessionModeResponse, TerminalOutputRequest, WaitForTerminalExitRequest,
     WriteTextFileRequest, on_receive_notification, on_receive_request,
 };
@@ -87,9 +92,29 @@ pub(crate) enum ConnectionCommand {
         request: LoadSessionRequest,
         tx: oneshot::Sender<Result<LoadSessionResponse, AgentError>>,
     },
+    ListSessions {
+        request: ListSessionsRequest,
+        tx: oneshot::Sender<Result<ListSessionsResponse, AgentError>>,
+    },
+    DeleteSession {
+        request: DeleteSessionRequest,
+        tx: oneshot::Sender<Result<DeleteSessionResponse, AgentError>>,
+    },
+    ResumeSession {
+        request: ResumeSessionRequest,
+        tx: oneshot::Sender<Result<ResumeSessionResponse, AgentError>>,
+    },
+    CloseSession {
+        request: CloseSessionRequest,
+        tx: oneshot::Sender<Result<CloseSessionResponse, AgentError>>,
+    },
     SetMode {
         request: SetSessionModeRequest,
         tx: oneshot::Sender<Result<SetSessionModeResponse, AgentError>>,
+    },
+    SetConfigOption {
+        request: SetSessionConfigOptionRequest,
+        tx: oneshot::Sender<Result<SetSessionConfigOptionResponse, AgentError>>,
     },
     Authenticate {
         request: AuthenticateRequest,
@@ -275,7 +300,7 @@ impl AgentConnection {
         let main_inner = inner.clone();
         let main_fn = async move |connection: ConnectionTo<AgentRole>| -> Result<(), RpcError> {
             let initialize = InitializeRequest::new(ProtocolVersion::V1)
-                .client_info(Implementation::new("ee", env!("CARGO_PKG_VERSION")))
+                .client_info(Implementation::new("ee", env!("CARGO_PKG_VERSION")).title("ee"))
                 .client_capabilities(client_capabilities(&main_inner.handler_capabilities));
             let handshake = async { connection.send_request(initialize).block_task().await };
             match tokio::time::timeout(options.handshake_timeout, handshake).await {
@@ -407,6 +432,74 @@ impl AgentConnection {
         self.agent_capabilities().is_some_and(|capabilities| capabilities.load_session)
     }
 
+    /// Whether the agent advertises `session/list`.
+    #[must_use]
+    pub fn supports_session_list(&self) -> bool {
+        self.agent_capabilities()
+            .is_some_and(|capabilities| capabilities.session_capabilities.list.is_some())
+    }
+
+    /// Whether the agent advertises `session/delete`.
+    #[must_use]
+    pub fn supports_session_delete(&self) -> bool {
+        self.agent_capabilities()
+            .is_some_and(|capabilities| capabilities.session_capabilities.delete.is_some())
+    }
+
+    /// Whether the agent advertises `session/resume`.
+    #[must_use]
+    pub fn supports_session_resume(&self) -> bool {
+        self.agent_capabilities()
+            .is_some_and(|capabilities| capabilities.session_capabilities.resume.is_some())
+    }
+
+    /// Whether the agent advertises `session/close`.
+    #[must_use]
+    pub fn supports_session_close(&self) -> bool {
+        self.agent_capabilities()
+            .is_some_and(|capabilities| capabilities.session_capabilities.close.is_some())
+    }
+
+    /// Whether the agent advertises `additionalDirectories` on supported
+    /// session lifecycle methods.
+    #[must_use]
+    pub fn supports_additional_directories(&self) -> bool {
+        self.agent_capabilities().is_some_and(|capabilities| {
+            capabilities.session_capabilities.additional_directories.is_some()
+        })
+    }
+
+    /// Whether this client advertised boolean session config option support.
+    #[must_use]
+    pub fn supports_boolean_session_config_options(&self) -> bool {
+        self.inner.handler_capabilities.session_config_boolean
+    }
+
+    /// Whether the agent advertises prompt image support.
+    #[must_use]
+    pub fn supports_prompt_images(&self) -> bool {
+        self.agent_capabilities().is_some_and(|capabilities| capabilities.prompt_capabilities.image)
+    }
+
+    /// Whether the agent advertises prompt audio support.
+    #[must_use]
+    pub fn supports_prompt_audio(&self) -> bool {
+        self.agent_capabilities().is_some_and(|capabilities| capabilities.prompt_capabilities.audio)
+    }
+
+    /// Whether the agent advertises embedded prompt context support.
+    #[must_use]
+    pub fn supports_prompt_embedded_context(&self) -> bool {
+        self.agent_capabilities()
+            .is_some_and(|capabilities| capabilities.prompt_capabilities.embedded_context)
+    }
+
+    /// Whether the agent advertises `logout` support.
+    #[must_use]
+    pub fn supports_logout(&self) -> bool {
+        self.agent_capabilities().is_some_and(|capabilities| capabilities.auth.logout.is_some())
+    }
+
     /// Retained stderr diagnostics for the debug pane.
     #[must_use]
     pub fn stderr_diagnostics(&self) -> Vec<String> {
@@ -498,7 +591,12 @@ impl AgentConnection {
 
         let response =
             self.send_command(|tx| ConnectionCommand::NewSession { request, tx }).await?;
-        Ok(self.spawn_thread(response.session_id, response.modes, proxy_mode))
+        Ok(self.spawn_thread(
+            response.session_id,
+            response.modes,
+            response.config_options,
+            proxy_mode,
+        ))
     }
 
     /// Appends the ee proxy advertisement to a session setup request.
@@ -531,22 +629,185 @@ impl AgentConnection {
     /// Loads an existing session; only allowed when the agent advertises
     /// the `load_session` capability.
     ///
+    /// `cwd` and every `additional_directories` entry must be absolute.
+    /// `additionalDirectories` is forwarded only when the agent advertises
+    /// `sessionCapabilities.additionalDirectories`.
+    ///
     /// # Errors
     ///
-    /// Fails when the capability is missing or the agent rejects the load.
-    pub async fn load_session(&self, session_id: SessionId) -> Result<AgentThread, AgentError> {
+    /// Fails when the capability is missing, roots are invalid, or the agent
+    /// rejects the load.
+    pub async fn load_session(
+        &self,
+        session_id: SessionId,
+        cwd: PathBuf,
+        additional_directories: Vec<PathBuf>,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<AgentThread, AgentError> {
         self.wait_ready().await?;
         if !self.supports_load_session() {
             return Err(AgentError::CapabilityUnsupported { method: "session/load".into() });
         }
-        let request = LoadSessionRequest::new(session_id.clone(), PathBuf::new());
+        if !cwd.is_absolute() {
+            return Err(AgentError::invalid_params(format!(
+                "session/load cwd must be absolute, got {}",
+                cwd.display()
+            )));
+        }
+        for directory in &additional_directories {
+            if !directory.is_absolute() {
+                return Err(AgentError::invalid_params(format!(
+                    "additional directory must be absolute, got {}",
+                    directory.display()
+                )));
+            }
+        }
+        let request = LoadSessionRequest::new(session_id.clone(), cwd)
+            .mcp_servers(mcp_servers)
+            .additional_directories(if self.supports_additional_directories() {
+                additional_directories
+            } else {
+                Vec::new()
+            });
+        // Register the thread before awaiting the load response so streamed
+        // `session/update` notifications can be reduced immediately; ACP does
+        // not replay history after `session/load` completes.
+        let thread = AgentThread::new(
+            self.agent_id.clone(),
+            session_id.clone(),
+            None,
+            None,
+            self.clone(),
+            EeProxyMode::Disabled,
+        );
+        self.inner
+            .threads
+            .lock()
+            .expect("threads poisoned")
+            .insert(session_id.clone(), thread.shared.clone());
         let response =
-            self.send_command(|tx| ConnectionCommand::LoadSession { request, tx }).await?;
-        // ACP v1 `session/load` responses carry no session id; the requested
-        // id is the thread's identity.  Loaded sessions never advertise the
-        // ee proxy (MCP-over-ACP hosting is per fresh session; see
-        // `mcp_over_acp` module docs).
-        Ok(self.spawn_thread(session_id, response.modes, EeProxyMode::Disabled))
+            match self.send_command(|tx| ConnectionCommand::LoadSession { request, tx }).await {
+                Ok(response) => response,
+                Err(error) => {
+                    self.deregister_thread(&session_id);
+                    return Err(error);
+                }
+            };
+        *thread.shared.modes.lock().expect("modes poisoned") = response.modes;
+        thread.set_initial_config_options(response.config_options);
+        let _ = self
+            .inner
+            .events
+            .send(AgentEvent::ThreadCreated { agent_id: self.agent_id.clone(), session_id });
+        Ok(thread)
+    }
+
+    /// Lists existing sessions; only allowed when the agent advertises
+    /// `sessionCapabilities.list`.
+    ///
+    /// `cwd`, when provided, must be absolute. `cursor` stays opaque and is
+    /// forwarded unchanged.
+    pub async fn list_sessions(
+        &self,
+        cwd: Option<PathBuf>,
+        cursor: Option<String>,
+    ) -> Result<ListSessionsResponse, AgentError> {
+        self.wait_ready().await?;
+        if !self.supports_session_list() {
+            return Err(AgentError::CapabilityUnsupported { method: "session/list".into() });
+        }
+        if let Some(cwd) = cwd.as_ref()
+            && !cwd.is_absolute()
+        {
+            return Err(AgentError::invalid_params(format!(
+                "session/list cwd must be absolute, got {}",
+                cwd.display()
+            )));
+        }
+        let request = ListSessionsRequest::new().cwd(cwd).cursor(cursor);
+        self.send_command(|tx| ConnectionCommand::ListSessions { request, tx }).await
+    }
+
+    /// Deletes one existing session; only allowed when the agent advertises
+    /// `sessionCapabilities.delete`.
+    pub async fn delete_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<DeleteSessionResponse, AgentError> {
+        self.wait_ready().await?;
+        if !self.supports_session_delete() {
+            return Err(AgentError::CapabilityUnsupported { method: "session/delete".into() });
+        }
+        let request = DeleteSessionRequest::new(session_id);
+        self.send_command(|tx| ConnectionCommand::DeleteSession { request, tx }).await
+    }
+
+    /// Resumes an existing session; only allowed when the agent advertises
+    /// `sessionCapabilities.resume`.
+    ///
+    /// `cwd` and every `additional_directories` entry must be absolute.
+    /// Non-empty `additional_directories` also require the
+    /// `sessionCapabilities.additionalDirectories` capability.
+    pub async fn resume_session(
+        &self,
+        session_id: SessionId,
+        cwd: PathBuf,
+        additional_directories: Vec<PathBuf>,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<AgentThread, AgentError> {
+        self.wait_ready().await?;
+        if !self.supports_session_resume() {
+            return Err(AgentError::CapabilityUnsupported { method: "session/resume".into() });
+        }
+        if !cwd.is_absolute() {
+            return Err(AgentError::invalid_params(format!(
+                "session/resume cwd must be absolute, got {}",
+                cwd.display()
+            )));
+        }
+        if !additional_directories.is_empty() && !self.supports_additional_directories() {
+            return Err(AgentError::CapabilityUnsupported { method: "session/resume".into() });
+        }
+        for directory in &additional_directories {
+            if !directory.is_absolute() {
+                return Err(AgentError::invalid_params(format!(
+                    "additional directory must be absolute, got {}",
+                    directory.display()
+                )));
+            }
+        }
+        let request = ResumeSessionRequest::new(session_id.clone(), cwd)
+            .additional_directories(additional_directories)
+            .mcp_servers(mcp_servers);
+        let response =
+            self.send_command(|tx| ConnectionCommand::ResumeSession { request, tx }).await?;
+        Ok(self.spawn_thread(
+            session_id,
+            response.modes,
+            response.config_options,
+            EeProxyMode::Disabled,
+        ))
+    }
+
+    /// Closes one active session; only allowed when the agent advertises
+    /// `sessionCapabilities.close`.
+    ///
+    /// Local pending work is cancelled and the thread state is released after
+    /// the agent acknowledges the close.
+    pub async fn close_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<CloseSessionResponse, AgentError> {
+        self.wait_ready().await?;
+        if !self.supports_session_close() {
+            return Err(AgentError::CapabilityUnsupported { method: "session/close".into() });
+        }
+        self.prepare_local_thread_for_close(&session_id);
+        let request = CloseSessionRequest::new(session_id.clone());
+        let response =
+            self.send_command(|tx| ConnectionCommand::CloseSession { request, tx }).await?;
+        self.close_local_thread(&session_id);
+        Ok(response)
     }
 
     /// Sends `authenticate` for one of the advertised auth methods.
@@ -564,13 +825,16 @@ impl AgentConnection {
         self.send_command(|tx| ConnectionCommand::Authenticate { request, tx }).await
     }
 
-    /// Sends `logout`; only meaningful when the agent advertised auth.
+    /// Sends `logout`; only allowed when the agent advertised `auth.logout`.
     ///
     /// # Errors
     ///
-    /// Fails when the connection is not ready or the agent rejects logout.
+    /// Fails when the capability is missing or the agent rejects logout.
     pub async fn logout(&self) -> Result<LogoutResponse, AgentError> {
         self.wait_ready().await?;
+        if !self.supports_logout() {
+            return Err(AgentError::CapabilityUnsupported { method: "logout".into() });
+        }
         let request = LogoutRequest::new();
         self.send_command(|tx| ConnectionCommand::Logout { request, tx }).await
     }
@@ -593,12 +857,14 @@ impl AgentConnection {
         &self,
         session_id: SessionId,
         modes: Option<ee_agent_protocol::SessionModeState>,
+        config_options: Option<Vec<SessionConfigOption>>,
         proxy_mode: EeProxyMode,
     ) -> AgentThread {
         let thread = AgentThread::new(
             self.agent_id.clone(),
             session_id.clone(),
             modes,
+            config_options,
             self.clone(),
             proxy_mode,
         );
@@ -638,6 +904,17 @@ impl AgentConnection {
     ) -> Result<SetSessionModeResponse, AgentError> {
         let request = SetSessionModeRequest::new(session_id, mode_id);
         self.send_command(|tx| ConnectionCommand::SetMode { request, tx }).await
+    }
+
+    /// Sends `session/set_config_option` for a session (used by [`AgentThread`]).
+    pub(crate) async fn set_config_option(
+        &self,
+        session_id: SessionId,
+        config_id: ee_agent_protocol::SessionConfigId,
+        value: SessionConfigOptionValue,
+    ) -> Result<SetSessionConfigOptionResponse, AgentError> {
+        let request = SetSessionConfigOptionRequest::new(session_id, config_id, value);
+        self.send_command(|tx| ConnectionCommand::SetConfigOption { request, tx }).await
     }
 
     /// Resolves a pending permission request; returns `false` for stale or
@@ -681,6 +958,30 @@ impl AgentConnection {
         self.inner.threads.lock().expect("threads poisoned").remove(session_id);
         self.inner.mcp.close_all();
     }
+
+    fn prepare_local_thread_for_close(&self, session_id: &SessionId) {
+        let thread = self.inner.threads.lock().expect("threads poisoned").get(session_id).cloned();
+        if let Some(thread) = thread
+            && let Some(cancel) = thread.turn.lock().expect("turn state poisoned").take()
+        {
+            let _ = cancel.send(true);
+        }
+        self.cancel_session_permissions(session_id);
+    }
+
+    fn close_local_thread(&self, session_id: &SessionId) {
+        let thread = self.inner.threads.lock().expect("threads poisoned").remove(session_id);
+        let Some(_thread) = thread else {
+            self.inner.mcp.close_all();
+            return;
+        };
+        self.inner.mcp.close_all();
+        let _ = self.inner.events.send(AgentEvent::ThreadClosed {
+            agent_id: self.agent_id.clone(),
+            session_id: session_id.clone(),
+            reason: crate::events::ThreadCloseReason::HostClosed,
+        });
+    }
 }
 
 /// Builds the SDK client with typed handlers for every agent-to-client
@@ -701,6 +1002,16 @@ fn build_client_builder(
                 let inner = inner.clone();
                 async move |notification: SessionNotification, _cx| {
                     handle_session_notification(notification, &inner);
+                    Ok(())
+                }
+            },
+            on_receive_notification!(),
+        )
+        .on_receive_notification(
+            {
+                let inner = inner.clone();
+                async move |notification: CompleteElicitationNotification, _cx| {
+                    handle_elicitation_complete(notification, &inner);
                     Ok(())
                 }
             },
@@ -884,6 +1195,11 @@ fn client_capabilities(handler_capabilities: &HandlerCapabilities) -> ClientCapa
     if handler_capabilities.terminal {
         capabilities = capabilities.terminal(true);
     }
+    if handler_capabilities.session_config_boolean {
+        capabilities = capabilities.session(ClientSessionCapabilities::new().config_options(
+            SessionConfigOptionsCapabilities::new().boolean(BooleanConfigOptionCapabilities::new()),
+        ));
+    }
     if handler_capabilities.elicitation_form || handler_capabilities.elicitation_url {
         let mut elicitation = ElicitationCapabilities::new();
         if handler_capabilities.elicitation_form {
@@ -923,8 +1239,28 @@ async fn driver_loop(
                         let result = request_with_timeout(&connection, request, request_timeout, "session/load").await;
                         let _ = tx.send(result);
                     }
+                    ConnectionCommand::ListSessions { request, tx } => {
+                        let result = request_with_timeout(&connection, request, request_timeout, "session/list").await;
+                        let _ = tx.send(result);
+                    }
+                    ConnectionCommand::DeleteSession { request, tx } => {
+                        let result = request_with_timeout(&connection, request, request_timeout, "session/delete").await;
+                        let _ = tx.send(result);
+                    }
+                    ConnectionCommand::ResumeSession { request, tx } => {
+                        let result = request_with_timeout(&connection, request, request_timeout, "session/resume").await;
+                        let _ = tx.send(result);
+                    }
+                    ConnectionCommand::CloseSession { request, tx } => {
+                        let result = request_with_timeout(&connection, request, request_timeout, "session/close").await;
+                        let _ = tx.send(result);
+                    }
                     ConnectionCommand::SetMode { request, tx } => {
                         let result = request_with_timeout(&connection, request, request_timeout, "session/set_mode").await;
+                        let _ = tx.send(result);
+                    }
+                    ConnectionCommand::SetConfigOption { request, tx } => {
+                        let result = request_with_timeout(&connection, request, request_timeout, "session/set_config_option").await;
                         let _ = tx.send(result);
                     }
                     ConnectionCommand::Authenticate { request, tx } => {
@@ -1016,6 +1352,15 @@ fn handle_session_notification(notification: SessionNotification, inner: &AgentC
     thread.apply_update(notification.update);
 }
 
+fn handle_elicitation_complete(
+    notification: CompleteElicitationNotification,
+    inner: &AgentConnectionInner,
+) {
+    let _ = inner
+        .events
+        .send(AgentEvent::ElicitationCompleted { elicitation_id: notification.elicitation_id });
+}
+
 fn handle_permission_request(
     request: RequestPermissionRequest,
     responder: ee_agent_protocol::Responder<RequestPermissionResponse>,
@@ -1062,7 +1407,7 @@ fn dispatch_client_request(
     let session_id = request.session_id().cloned();
     // Fail closed: never invoke a handler for a capability we did not
     // advertise during initialize.
-    if !inner.handler_capabilities.supports(&method) {
+    if !inner.handler_capabilities.supports_request(&request) {
         return responder.respond_with_error(
             AgentError::CapabilityUnsupported { method: method.clone() }.into_rpc(),
         );

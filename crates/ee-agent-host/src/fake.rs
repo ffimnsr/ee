@@ -655,6 +655,17 @@ pub mod wire {
         })
     }
 
+    /// A `fs/write_text_file` request line.
+    #[must_use]
+    pub fn write_text_file(session_id: &str, path: &str, content: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 103,
+            "method": "fs/write_text_file",
+            "params": { "sessionId": session_id, "path": path, "content": content }
+        })
+    }
+
     /// A `terminal/create` request line.
     #[must_use]
     pub fn terminal_create(session_id: &str, command: &str) -> Value {
@@ -663,6 +674,122 @@ pub mod wire {
             "id": 102,
             "method": "terminal/create",
             "params": { "sessionId": session_id, "command": command }
+        })
+    }
+
+    /// A `terminal/output` request line.
+    #[must_use]
+    pub fn terminal_output(session_id: &str, terminal_id: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 104,
+            "method": "terminal/output",
+            "params": { "sessionId": session_id, "terminalId": terminal_id }
+        })
+    }
+
+    /// A `terminal/wait_for_exit` request line.
+    #[must_use]
+    pub fn terminal_wait_for_exit(session_id: &str, terminal_id: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 105,
+            "method": "terminal/wait_for_exit",
+            "params": { "sessionId": session_id, "terminalId": terminal_id }
+        })
+    }
+
+    /// A `terminal/kill` request line.
+    #[must_use]
+    pub fn terminal_kill(session_id: &str, terminal_id: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 106,
+            "method": "terminal/kill",
+            "params": { "sessionId": session_id, "terminalId": terminal_id }
+        })
+    }
+
+    /// A `terminal/release` request line.
+    #[must_use]
+    pub fn terminal_release(session_id: &str, terminal_id: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 107,
+            "method": "terminal/release",
+            "params": { "sessionId": session_id, "terminalId": terminal_id }
+        })
+    }
+
+    /// An `elicitation/create` form-mode request line.
+    #[must_use]
+    pub fn elicitation_form(session_id: &str, schema: Value, message: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 108,
+            "method": "elicitation/create",
+            "params": {
+                "mode": "form",
+                "sessionId": session_id,
+                "requestedSchema": schema,
+                "message": message,
+            }
+        })
+    }
+
+    /// An `elicitation/create` url-mode request line.
+    #[must_use]
+    pub fn elicitation_url(
+        session_id: &str,
+        elicitation_id: &str,
+        url: &str,
+        message: &str,
+    ) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 109,
+            "method": "elicitation/create",
+            "params": {
+                "mode": "url",
+                "sessionId": session_id,
+                "elicitationId": elicitation_id,
+                "url": url,
+                "message": message,
+            }
+        })
+    }
+
+    /// An `elicitation/complete` notification line.
+    #[must_use]
+    pub fn elicitation_complete(elicitation_id: &str) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "method": "elicitation/complete",
+            "params": { "elicitationId": elicitation_id }
+        })
+    }
+
+    /// A `session/set_config_option` request line.
+    #[must_use]
+    pub fn session_set_config_option(
+        id: i64,
+        session_id: &str,
+        config_id: &str,
+        value: Value,
+    ) -> Value {
+        let mut params = serde_json::Map::new();
+        params.insert(String::from("sessionId"), json!(session_id));
+        params.insert(String::from("configId"), json!(config_id));
+        if let Some(object) = value.as_object() {
+            for (key, value) in object {
+                params.insert(key.clone(), value.clone());
+            }
+        }
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "session/set_config_option",
+            "params": Value::Object(params)
         })
     }
 
@@ -727,6 +854,30 @@ mod tests {
         let reparsed: Value = serde_json::from_str(&value.to_string()).unwrap();
         assert_eq!(reparsed["method"], "session/update");
         assert_eq!(reparsed["params"]["update"]["sessionUpdate"], "agent_message_chunk");
+    }
+
+    #[test]
+    fn wire_helpers_use_exact_acp_v1_method_names() {
+        assert_eq!(wire::read_text_file("s1", "/tmp/a")["method"], "fs/read_text_file");
+        assert_eq!(wire::write_text_file("s1", "/tmp/a", "x")["method"], "fs/write_text_file");
+        assert_eq!(wire::terminal_create("s1", "echo")["method"], "terminal/create");
+        assert_eq!(wire::terminal_output("s1", "t1")["method"], "terminal/output");
+        assert_eq!(wire::terminal_wait_for_exit("s1", "t1")["method"], "terminal/wait_for_exit");
+        assert_eq!(wire::terminal_kill("s1", "t1")["method"], "terminal/kill");
+        assert_eq!(wire::terminal_release("s1", "t1")["method"], "terminal/release");
+        assert_eq!(
+            wire::elicitation_form("s1", json!({"type": "object"}), "fill")["method"],
+            "elicitation/create"
+        );
+        assert_eq!(
+            wire::elicitation_url("s1", "el-1", "https://example.com", "open")["method"],
+            "elicitation/create"
+        );
+        assert_eq!(wire::elicitation_complete("el-1")["method"], "elicitation/complete");
+        assert_eq!(
+            wire::session_set_config_option(110, "s1", "mode", json!({"value": "ask"}))["method"],
+            "session/set_config_option"
+        );
     }
 
     #[test]

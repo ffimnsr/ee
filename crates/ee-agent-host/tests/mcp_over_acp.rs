@@ -54,6 +54,43 @@ impl ClientRequestHandler for ScriptedHandler {
         Box::pin(async move {
             self.seen.lock().expect("handler log poisoned").push(request.clone());
             match request {
+                ClientRequest::ProxyWorkspaceRoots => {
+                    Ok(ClientRequestResponse::ProxyValue(json!({
+                        "roots": ["/work", "/extra"],
+                        "activeRoot": "/work",
+                        "activeFile": "/work/src/main.rs",
+                        "additionalDirectories": ["/extra"],
+                    })))
+                }
+                ClientRequest::ProxyListDirectory { path } => {
+                    Ok(ClientRequestResponse::ProxyValue(json!({
+                        "entries": [{ "path": format!("{path}/src"), "kind": "directory", "size": 4096 }],
+                        "truncated": false,
+                    })))
+                }
+                ClientRequest::ProxySearchFiles { pattern } => {
+                    Ok(ClientRequestResponse::ProxyValue(json!({
+                        "matches": [format!("/work/{pattern}")],
+                        "truncated": false,
+                    })))
+                }
+                ClientRequest::ProxySearchText { query } => {
+                    Ok(ClientRequestResponse::ProxyValue(json!({
+                        "matches": [{ "path": "/work/src/main.rs", "line": 3, "context": format!("hit {query}") }],
+                        "truncated": false,
+                    })))
+                }
+                ClientRequest::ProxyOpenBuffers => Ok(ClientRequestResponse::ProxyValue(json!({
+                    "buffers": [{
+                        "path": "/work/src/main.rs",
+                        "dirty": true,
+                        "revisionId": "rev-1",
+                        "cursorSummary": "line 3, column 7",
+                        "selectionSummary": "cursor at offset 42",
+                        "languageId": "rust",
+                        "active": true
+                    }]
+                }))),
                 ClientRequest::ReadTextFile(_) => Ok(ClientRequestResponse::ReadTextFile(
                     ReadTextFileResponse::new("file contents"),
                 )),
@@ -331,6 +368,52 @@ async fn mcp_over_acp_direct_mcp_config_forwarding_works_independently() {
 // ── connect / message / disconnect lifecycle ─────────────────────────────────
 
 #[tokio::test]
+async fn mcp_over_acp_workspace_roots_tool_round_trips_through_the_handler() {
+    let script = connect_and_init_script()
+        .emit(emit_message(202, "tools/call", Some(json!({ "name": "ee.workspace_roots" }))))
+        .wait_for_response(202);
+    let handler = Arc::new(ScriptedHandler::default());
+    let (fake, host) = spawn_host(script, handler.clone()).await;
+    let connection = ready_connection(&fake, &host).await;
+    connection
+        .new_session(vec![PathBuf::from("/work")], Vec::new(), Some(stdio_fallback()))
+        .await
+        .expect("session starts");
+
+    let response = await_response(&fake, 202).await;
+    assert_eq!(response["result"]["structuredContent"]["roots"], json!(["/work", "/extra"]));
+    assert!(
+        handler.seen().iter().any(|request| matches!(request, ClientRequest::ProxyWorkspaceRoots))
+    );
+
+    host.connection.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
+async fn mcp_over_acp_open_buffers_tool_round_trips_through_the_handler() {
+    let script = connect_and_init_script()
+        .emit(emit_message(202, "tools/call", Some(json!({ "name": "ee.open_buffers" }))))
+        .wait_for_response(202);
+    let handler = Arc::new(ScriptedHandler::default());
+    let (fake, host) = spawn_host(script, handler.clone()).await;
+    let connection = ready_connection(&fake, &host).await;
+    connection
+        .new_session(vec![PathBuf::from("/work")], Vec::new(), Some(stdio_fallback()))
+        .await
+        .expect("session starts");
+
+    let response = await_response(&fake, 202).await;
+    assert_eq!(response["result"]["structuredContent"]["buffers"][0]["languageId"], json!("rust"));
+    assert!(
+        handler.seen().iter().any(|request| matches!(request, ClientRequest::ProxyOpenBuffers))
+    );
+
+    host.connection.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
 async fn mcp_over_acp_connect_and_tools_list_round_trip() {
     let script = connect_and_init_script()
         .emit(emit_message(202, "tools/list", None))
@@ -352,7 +435,36 @@ async fn mcp_over_acp_connect_and_tools_list_round_trip() {
         tools.iter().filter_map(|tool| tool.get("name").and_then(Value::as_str)).collect();
     assert_eq!(
         names,
-        vec!["ee.read_text_file", "ee.write_text_file", "ee.terminal_create", "ee.diagnostics",]
+        vec![
+            "ee.workspace_roots",
+            "ee.list_directory",
+            "ee.list_directory_all",
+            "ee.search_files",
+            "ee.search_files_all",
+            "ee.search_text",
+            "ee.search_text_regex",
+            "ee.search_text_in_files",
+            "ee.replace_text",
+            "ee.apply_patch",
+            "ee.create_text_file",
+            "ee.overwrite_text_file",
+            "ee.read_buffer",
+            "ee.read_buffer_lines",
+            "ee.open_buffers",
+            "ee.get_diagnostics",
+            "ee.get_file_diagnostics",
+            "ee.document_symbols",
+            "ee.references",
+            "ee.list_code_actions",
+            "ee.apply_code_action",
+            "ee.format_file",
+            "ee.preview_rename_symbol",
+            "ee.rename_symbol",
+            "ee.read_text_file",
+            "ee.write_text_file",
+            "ee.terminal_create",
+            "ee.diagnostics",
+        ]
     );
     host.connection.close().await;
     fake.join(TEST_TIMEOUT).await;

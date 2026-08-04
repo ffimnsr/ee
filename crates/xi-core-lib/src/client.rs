@@ -315,6 +315,17 @@ impl Client {
         )
     }
 
+    pub fn agent_tool_result(&self, view_id: ViewId, kind: &str, payload: serde_json::Value) {
+        self.0.send_rpc_notification(
+            "agent_tool_result",
+            &json!({
+                "view_id": view_id,
+                "kind": kind,
+                "payload": payload,
+            }),
+        )
+    }
+
     /// Notify the client about the document mode for a view.
     ///
     /// Called once on initial open so the frontend can switch to sparse

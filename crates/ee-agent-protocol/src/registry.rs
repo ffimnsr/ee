@@ -26,15 +26,18 @@
 
 use agent_client_protocol::schema::v1::{
     AGENT_METHOD_NAMES, AuthenticateRequest, AuthenticateResponse, CLIENT_METHOD_NAMES,
-    CancelNotification, CompleteElicitationNotification, CreateElicitationRequest,
-    CreateElicitationResponse, CreateTerminalRequest, CreateTerminalResponse, ElicitationMode,
+    CancelNotification, CloseSessionRequest, CloseSessionResponse, CompleteElicitationNotification,
+    CreateElicitationRequest, CreateElicitationResponse, CreateTerminalRequest,
+    CreateTerminalResponse, DeleteSessionRequest, DeleteSessionResponse, ElicitationMode,
     InitializeRequest, InitializeResponse, KillTerminalRequest, KillTerminalResponse,
-    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest,
-    PromptResponse, ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest,
-    ReleaseTerminalResponse, RequestPermissionRequest, RequestPermissionResponse,
-    SessionNotification, SetSessionModeRequest, SetSessionModeResponse, TerminalOutputRequest,
-    TerminalOutputResponse, WaitForTerminalExitRequest, WaitForTerminalExitResponse,
-    WriteTextFileRequest, WriteTextFileResponse,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
+    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ReadTextFileRequest,
+    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    ResumeSessionResponse, SessionNotification, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, SetSessionModeRequest, SetSessionModeResponse,
+    TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest,
+    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
 };
 use serde_json::Value;
 
@@ -53,8 +56,19 @@ pub const LOGOUT_METHOD_NAME: &str = AGENT_METHOD_NAMES.logout;
 pub const SESSION_NEW_METHOD_NAME: &str = AGENT_METHOD_NAMES.session_new;
 /// Method name for the `session/load` request.
 pub const SESSION_LOAD_METHOD_NAME: &str = AGENT_METHOD_NAMES.session_load;
+/// Method name for the `session/list` request.
+pub const SESSION_LIST_METHOD_NAME: &str = AGENT_METHOD_NAMES.session_list;
+/// Method name for the `session/delete` request.
+pub const SESSION_DELETE_METHOD_NAME: &str = AGENT_METHOD_NAMES.session_delete;
+/// Method name for the `session/resume` request.
+pub const SESSION_RESUME_METHOD_NAME: &str = AGENT_METHOD_NAMES.session_resume;
+/// Method name for the `session/close` request.
+pub const SESSION_CLOSE_METHOD_NAME: &str = AGENT_METHOD_NAMES.session_close;
 /// Method name for the `session/set_mode` request.
 pub const SESSION_SET_MODE_METHOD_NAME: &str = AGENT_METHOD_NAMES.session_set_mode;
+/// Method name for the `session/set_config_option` request.
+pub const SESSION_SET_CONFIG_OPTION_METHOD_NAME: &str =
+    AGENT_METHOD_NAMES.session_set_config_option;
 /// Method name for the `session/prompt` request.
 pub const SESSION_PROMPT_METHOD_NAME: &str = AGENT_METHOD_NAMES.session_prompt;
 /// Method name for the `session/cancel` notification.
@@ -121,19 +135,29 @@ pub enum ClientRequestMethod {
     Logout,
     SessionNew,
     SessionLoad,
+    SessionList,
+    SessionDelete,
+    SessionResume,
+    SessionClose,
     SessionSetMode,
+    SessionSetConfigOption,
     SessionPrompt,
 }
 
 impl ClientRequestMethod {
     /// All client→agent request methods, in registry order.
-    pub const ALL: [ClientRequestMethod; 7] = [
+    pub const ALL: [ClientRequestMethod; 12] = [
         ClientRequestMethod::Initialize,
         ClientRequestMethod::Authenticate,
         ClientRequestMethod::Logout,
         ClientRequestMethod::SessionNew,
         ClientRequestMethod::SessionLoad,
+        ClientRequestMethod::SessionList,
+        ClientRequestMethod::SessionDelete,
+        ClientRequestMethod::SessionResume,
+        ClientRequestMethod::SessionClose,
         ClientRequestMethod::SessionSetMode,
+        ClientRequestMethod::SessionSetConfigOption,
         ClientRequestMethod::SessionPrompt,
     ];
 
@@ -146,7 +170,12 @@ impl ClientRequestMethod {
             Self::Logout => LOGOUT_METHOD_NAME,
             Self::SessionNew => SESSION_NEW_METHOD_NAME,
             Self::SessionLoad => SESSION_LOAD_METHOD_NAME,
+            Self::SessionList => SESSION_LIST_METHOD_NAME,
+            Self::SessionDelete => SESSION_DELETE_METHOD_NAME,
+            Self::SessionResume => SESSION_RESUME_METHOD_NAME,
+            Self::SessionClose => SESSION_CLOSE_METHOD_NAME,
             Self::SessionSetMode => SESSION_SET_MODE_METHOD_NAME,
+            Self::SessionSetConfigOption => SESSION_SET_CONFIG_OPTION_METHOD_NAME,
             Self::SessionPrompt => SESSION_PROMPT_METHOD_NAME,
         }
     }
@@ -160,7 +189,12 @@ impl ClientRequestMethod {
             Self::Logout => "LogoutRequest",
             Self::SessionNew => "NewSessionRequest",
             Self::SessionLoad => "LoadSessionRequest",
+            Self::SessionList => "ListSessionsRequest",
+            Self::SessionDelete => "DeleteSessionRequest",
+            Self::SessionResume => "ResumeSessionRequest",
+            Self::SessionClose => "CloseSessionRequest",
             Self::SessionSetMode => "SetSessionModeRequest",
+            Self::SessionSetConfigOption => "SetSessionConfigOptionRequest",
             Self::SessionPrompt => "PromptRequest",
         }
     }
@@ -174,7 +208,12 @@ impl ClientRequestMethod {
             Self::Logout => "LogoutResponse",
             Self::SessionNew => "NewSessionResponse",
             Self::SessionLoad => "LoadSessionResponse",
+            Self::SessionList => "ListSessionsResponse",
+            Self::SessionDelete => "DeleteSessionResponse",
+            Self::SessionResume => "ResumeSessionResponse",
+            Self::SessionClose => "CloseSessionResponse",
             Self::SessionSetMode => "SetSessionModeResponse",
+            Self::SessionSetConfigOption => "SetSessionConfigOptionResponse",
             Self::SessionPrompt => "PromptResponse",
         }
     }
@@ -207,8 +246,23 @@ impl ClientRequestMethod {
             Self::SessionLoad => {
                 serde_json::from_value::<LoadSessionRequest>(params.clone()).map(|_| ())
             }
+            Self::SessionList => {
+                serde_json::from_value::<ListSessionsRequest>(params.clone()).map(|_| ())
+            }
+            Self::SessionDelete => {
+                serde_json::from_value::<DeleteSessionRequest>(params.clone()).map(|_| ())
+            }
+            Self::SessionResume => {
+                serde_json::from_value::<ResumeSessionRequest>(params.clone()).map(|_| ())
+            }
+            Self::SessionClose => {
+                serde_json::from_value::<CloseSessionRequest>(params.clone()).map(|_| ())
+            }
             Self::SessionSetMode => {
                 serde_json::from_value::<SetSessionModeRequest>(params.clone()).map(|_| ())
+            }
+            Self::SessionSetConfigOption => {
+                serde_json::from_value::<SetSessionConfigOptionRequest>(params.clone()).map(|_| ())
             }
             Self::SessionPrompt => {
                 serde_json::from_value::<PromptRequest>(params.clone()).map(|_| ())
@@ -471,7 +525,12 @@ type RegistryResultTypes = (
     AuthenticateResponse,
     NewSessionResponse,
     LoadSessionResponse,
+    ListSessionsResponse,
+    DeleteSessionResponse,
+    ResumeSessionResponse,
+    CloseSessionResponse,
     SetSessionModeResponse,
+    SetSessionConfigOptionResponse,
     PromptResponse,
     RequestPermissionResponse,
     ReadTextFileResponse,
@@ -499,7 +558,12 @@ mod tests {
             "logout",
             "session/new",
             "session/load",
+            "session/list",
+            "session/delete",
+            "session/resume",
+            "session/close",
             "session/set_mode",
+            "session/set_config_option",
             "session/prompt",
         ];
         let actual: Vec<_> = ClientRequestMethod::ALL.iter().map(|m| m.name()).collect();
@@ -529,6 +593,11 @@ mod tests {
         // Constants are derived from the SDK; spot-check the derivation
         // itself (a broken SDK rename would surface here and in fixtures).
         assert_eq!(INITIALIZE_METHOD_NAME, "initialize");
+        assert_eq!(SESSION_LIST_METHOD_NAME, "session/list");
+        assert_eq!(SESSION_DELETE_METHOD_NAME, "session/delete");
+        assert_eq!(SESSION_RESUME_METHOD_NAME, "session/resume");
+        assert_eq!(SESSION_CLOSE_METHOD_NAME, "session/close");
+        assert_eq!(SESSION_SET_CONFIG_OPTION_METHOD_NAME, "session/set_config_option");
         assert_eq!(SESSION_PROMPT_METHOD_NAME, "session/prompt");
         assert_eq!(SESSION_CANCEL_NOTIFICATION, "session/cancel");
         assert_eq!(FS_READ_TEXT_FILE_METHOD_NAME, "fs/read_text_file");
@@ -586,6 +655,33 @@ mod tests {
         let session_new = json!({"cwd": "/home/user/project", "mcpServers": []});
         ClientRequestMethod::SessionNew.validate_params(&session_new).unwrap();
 
+        let session_list = json!({"cwd": "/home/user/project", "cursor": "next-1"});
+        ClientRequestMethod::SessionList.validate_params(&session_list).unwrap();
+
+        let session_delete = json!({"sessionId": "sess_1"});
+        ClientRequestMethod::SessionDelete.validate_params(&session_delete).unwrap();
+
+        let session_resume = json!({
+            "sessionId": "sess_1",
+            "cwd": "/home/user/project",
+            "additionalDirectories": ["/home/user/extra"],
+            "mcpServers": [],
+        });
+        ClientRequestMethod::SessionResume.validate_params(&session_resume).unwrap();
+
+        let session_close = json!({"sessionId": "sess_1"});
+        ClientRequestMethod::SessionClose.validate_params(&session_close).unwrap();
+
+        let session_set_config_option = json!({
+            "sessionId": "sess_1",
+            "configId": "model",
+            "type": "select",
+            "value": "gpt-5",
+        });
+        ClientRequestMethod::SessionSetConfigOption
+            .validate_params(&session_set_config_option)
+            .unwrap();
+
         let prompt = json!({
             "sessionId": "sess_1",
             "prompt": [{"type": "text", "text": "hi"}],
@@ -623,6 +719,29 @@ mod tests {
         assert_eq!(err.code, ErrorCode::InvalidParams);
 
         let err = ClientRequestMethod::SessionNew.validate_params(&json!({"cwd": 7})).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+
+        let err = ClientRequestMethod::SessionList.validate_params(&json!({"cwd": 7})).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+
+        let err = ClientRequestMethod::SessionDelete
+            .validate_params(&json!({"sessionId": 7}))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+
+        let err = ClientRequestMethod::SessionResume
+            .validate_params(&json!({"sessionId": "s", "cwd": 7}))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+
+        let err = ClientRequestMethod::SessionClose
+            .validate_params(&json!({"sessionId": 7}))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidParams);
+
+        let err = ClientRequestMethod::SessionSetConfigOption
+            .validate_params(&json!({"sessionId": "s", "configId": 7, "value": "gpt-5"}))
+            .unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidParams);
 
         let err = AgentRequestMethod::FsReadTextFile

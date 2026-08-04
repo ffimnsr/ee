@@ -122,7 +122,14 @@ fn open_pane_and_wait_ready(app: &mut App) {
 
 #[test]
 fn agents_disabled_path_opens_disabled_message_without_host() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join(".ee.toml"), "[agents]\nenabled = false\n").unwrap();
+    let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let _cwd_restore = CurrentDirGuard::capture();
+    std::env::set_current_dir(temp.path()).unwrap();
     let mut app = App::from_path(None).unwrap();
+    drop(_cwd_restore);
+    drop(_cwd_lock);
 
     run_ex(&mut app, "agents");
 
@@ -174,6 +181,26 @@ fn agents_enabled_creates_pane_and_sends_lazy_session_new() {
     run_ex(&mut app, "agents");
     wait_until(&mut app, "session count stays one", |app| app.agents.threads.len() == 1);
     assert_eq!(agent.requests_by_method("session/new").len(), 1);
+}
+
+#[test]
+fn agents_mode_advertises_editor_backed_optional_client_capabilities() {
+    let (mut app, _temp, fake) = fake_agents_app(base_script());
+
+    open_pane_and_wait_ready(&mut app);
+
+    let initialize = fake
+        .agent()
+        .requests_by_method("initialize")
+        .into_iter()
+        .next()
+        .expect("initialize request sent");
+    let client_capabilities = &initialize["params"]["clientCapabilities"];
+    assert_eq!(client_capabilities["fs"]["readTextFile"], true);
+    assert_eq!(client_capabilities["fs"]["writeTextFile"], true);
+    assert_eq!(client_capabilities["terminal"], true);
+    assert_eq!(client_capabilities["elicitation"]["form"], json!({}));
+    assert_eq!(client_capabilities["elicitation"]["url"], json!({}));
 }
 
 #[test]
@@ -282,6 +309,212 @@ fn streamed_assistant_chunks_render_in_order_with_thoughts() {
     }
 }
 
+#[test]
+fn plan_updates_render_priority_status_and_replace_wholesale() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(wire::session_update(
+            "s1",
+            json!({
+                "sessionUpdate": "plan",
+                "entries": [
+                    { "content": "first", "priority": "high", "status": "pending" },
+                    { "content": "second", "priority": "low", "status": "in_progress" }
+                ]
+            }),
+        ))
+        .emit(wire::session_update(
+            "s1",
+            json!({
+                "sessionUpdate": "plan",
+                "entries": [
+                    { "content": "replacement", "priority": "medium", "status": "completed" }
+                ]
+            }),
+        ))
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "go");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    wait_until(&mut app, "plan replacement lands", |app| {
+        app.agents.threads[0].plan_entries() == vec![(String::from("[medium] replacement"), 'x')]
+    });
+}
+
+#[test]
+fn slash_commands_are_discoverable_and_tab_inserts_prompt_text() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(wire::session_update(
+            "s1",
+            json!({
+                "sessionUpdate": "available_commands_update",
+                "availableCommands": [
+                    { "name": "plan", "description": "Create plan", "input": { "hint": "goal" } },
+                    { "name": "edit", "description": "Edit code" }
+                ]
+            }),
+        ))
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "go");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    wait_until(&mut app, "commands arrive", |app| app.agents.threads[0].command_names().len() == 2);
+    assert_eq!(
+        app.agents.threads[0].command_names(),
+        vec![String::from("plan"), String::from("edit")]
+    );
+    assert!(
+        app.agents.threads[0]
+            .system_notices()
+            .iter()
+            .any(|notice| notice.contains("commands: /plan, /edit"))
+    );
+
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(app.agents.threads[0].draft, "/plan ");
+    press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
+    assert_eq!(app.agents.threads[0].draft, "/edit ");
+    type_text(&mut app, "file");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    wait_until(&mut app, "slash prompt sent", |_| {
+        fake.agent().requests_by_method("session/prompt").len() == 2
+    });
+    let prompt = &fake.agent().requests_by_method("session/prompt")[1];
+    assert_eq!(prompt["params"]["prompt"][0]["text"], "/edit file");
+}
+
+#[test]
+fn session_info_updates_display_name() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(wire::session_update(
+            "s1",
+            json!({
+                "sessionUpdate": "session_info_update",
+                "title": "Audit run",
+                "updatedAt": "2026-08-04T12:00:00Z"
+            }),
+        ))
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "go");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    wait_until(&mut app, "thread title updates", |app| {
+        app.agents.threads[0].display_name == "1.Audit run"
+    });
+    assert_eq!(app.agents.threads[0].session_title.as_deref(), Some("Audit run"));
+    assert_eq!(app.agents.threads[0].session_updated_at.as_deref(), Some("2026-08-04T12:00:00Z"));
+}
+
+#[test]
+fn agents_config_commands_list_and_mutate_advertised_options() {
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({
+            "sessionId": "s1",
+            "configOptions": [
+                {
+                    "id": "mode",
+                    "name": "Mode",
+                    "category": "mode",
+                    "type": "select",
+                    "currentValue": "ask",
+                    "options": [
+                        { "value": "ask", "name": "Ask" },
+                        { "value": "plan", "name": "Plan" }
+                    ]
+                },
+                {
+                    "id": "confirmEdits",
+                    "name": "Confirm edits",
+                    "type": "boolean",
+                    "currentValue": false
+                }
+            ]
+        }))
+        .wait_for("session/set_config_option")
+        .respond(json!({
+            "configOptions": [
+                {
+                    "id": "mode",
+                    "name": "Mode",
+                    "category": "mode",
+                    "type": "select",
+                    "currentValue": "ask",
+                    "options": [
+                        { "value": "ask", "name": "Ask" },
+                        { "value": "plan", "name": "Plan" }
+                    ]
+                },
+                {
+                    "id": "confirmEdits",
+                    "name": "Confirm edits",
+                    "type": "boolean",
+                    "currentValue": true
+                }
+            ]
+        }))
+        .wait_for("session/set_config_option")
+        .respond(json!({
+            "configOptions": [
+                {
+                    "id": "mode",
+                    "name": "Mode",
+                    "category": "mode",
+                    "type": "select",
+                    "currentValue": "plan",
+                    "options": [
+                        { "value": "ask", "name": "Ask" },
+                        { "value": "plan", "name": "Plan" }
+                    ]
+                },
+                {
+                    "id": "confirmEdits",
+                    "name": "Confirm edits",
+                    "type": "boolean",
+                    "currentValue": true
+                }
+            ]
+        }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    run_ex(&mut app, "agents_config");
+    let listed = app.backend.status_message.clone().unwrap_or_default();
+    assert!(listed.contains("mode=ask"), "status: {listed}");
+    assert!(listed.contains("confirmEdits=off"), "status: {listed}");
+
+    run_ex(&mut app, "agents_config_toggle confirmEdits");
+    wait_until(&mut app, "boolean config sent", |_| {
+        fake.agent().requests_by_method("session/set_config_option").len() == 1
+    });
+    let toggle = &fake.agent().requests_by_method("session/set_config_option")[0];
+    assert_eq!(toggle["params"]["configId"], "confirmEdits");
+    assert_eq!(toggle["params"]["type"], "boolean");
+    assert_eq!(toggle["params"]["value"], true);
+
+    run_ex(&mut app, "agents_config_set mode plan");
+    wait_until(&mut app, "select config sent", |_| {
+        fake.agent().requests_by_method("session/set_config_option").len() == 2
+    });
+    let set_mode = &fake.agent().requests_by_method("session/set_config_option")[1];
+    assert_eq!(set_mode["params"]["configId"], "mode");
+    assert_eq!(set_mode["params"]["value"], "plan");
+}
+
 // ── Scrollback behavior ──────────────────────────────────────────────────────
 
 #[test]
@@ -384,6 +617,14 @@ fn form_elicitation(id: i64, schema: Value) -> Value {
             "requestedSchema": schema,
             "message": "fill the form"
         }
+    })
+}
+
+fn elicitation_complete(elicitation_id: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": "elicitation/complete",
+        "params": { "elicitationId": elicitation_id }
     })
 }
 
@@ -585,6 +826,88 @@ fn url_elicitation_shows_full_url_and_choice() {
     assert_eq!(app.agents.elicitation.as_ref().expect("prompt").selected_choice, 1);
     press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
     wait_until(&mut app, "url elicitation declined", |_| {
+        fake.agent().response_with_id(202).is_some()
+    });
+    assert!(fake.agent().response_with_id(202).expect("response").get("error").is_some());
+}
+
+#[test]
+fn url_elicitation_completion_clears_prompt_and_marks_complete() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": 202,
+            "method": "elicitation/create",
+            "params": {
+                "mode": "url",
+                "sessionId": "s1",
+                "elicitationId": "el-1",
+                "url": "https://example.com/authorize?client=ee",
+                "message": "authorize the agent"
+            }
+        }))
+        .delay(50)
+        .emit(elicitation_complete("el-1"))
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "go");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    wait_until(&mut app, "url elicitation completion handled", |app| {
+        app.agents.elicitation.is_none() && fake.agent().response_with_id(202).is_some()
+    });
+    let response = fake.agent().response_with_id(202).expect("completion response");
+    assert_eq!(response["result"]["action"], "accept");
+    wait_until(&mut app, "completion notice lands", |app| {
+        app.agents.threads[0]
+            .system_notices()
+            .iter()
+            .any(|notice| notice.contains("elicitation completed: el-1"))
+    });
+}
+
+#[test]
+fn stale_url_elicitation_completion_is_ignored_without_clearing_prompt() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": 202,
+            "method": "elicitation/create",
+            "params": {
+                "mode": "url",
+                "sessionId": "s1",
+                "elicitationId": "el-1",
+                "url": "https://example.com/authorize?client=ee",
+                "message": "authorize the agent"
+            }
+        }))
+        .delay(50)
+        .emit(elicitation_complete("el-stale"))
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "go");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    wait_until(&mut app, "stale completion ignored", |app| {
+        app.agents.elicitation.as_ref().is_some_and(|prompt| prompt.url.is_some())
+            && app.agents.threads[0]
+                .system_notices()
+                .iter()
+                .any(|notice| notice.contains("stale elicitation completion ignored: el-stale"))
+    });
+    assert!(
+        fake.agent().response_with_id(202).is_none(),
+        "stale completion must not answer request"
+    );
+
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    wait_until(&mut app, "url elicitation declined after stale completion", |_| {
         fake.agent().response_with_id(202).is_some()
     });
     assert!(fake.agent().response_with_id(202).expect("response").get("error").is_some());

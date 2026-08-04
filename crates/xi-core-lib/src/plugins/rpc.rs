@@ -401,6 +401,10 @@ pub enum PluginNotification {
         title: String,
         symbols: Vec<SymbolItem>,
     },
+    ShowAgentToolResult {
+        kind: String,
+        payload: Value,
+    },
     UpdateAnnotations {
         start: usize,
         len: usize,

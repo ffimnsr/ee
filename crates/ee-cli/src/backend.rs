@@ -90,6 +90,11 @@ pub(crate) enum BackendEvent {
         view_id: String,
         actions: Vec<CodeActionDescriptor>,
     },
+    AgentToolResult {
+        view_id: String,
+        kind: String,
+        payload: Value,
+    },
     ScrollTo {
         view_id: String,
         line: usize,
@@ -165,6 +170,9 @@ impl BackendEvent {
             Self::CodeActions { view_id, .. } => {
                 Some(BackendEventCoalesceKey::CodeActions(view_id.clone()))
             }
+            Self::AgentToolResult { view_id, kind, .. } => {
+                Some(BackendEventCoalesceKey::AgentToolResult(view_id.clone(), kind.clone()))
+            }
             Self::DocumentMode { view_id, .. } => {
                 Some(BackendEventCoalesceKey::DocumentMode(view_id.clone()))
             }
@@ -186,6 +194,7 @@ enum BackendEventCoalesceKey {
     Diagnostics(String),
     AvailablePlugins(String),
     CodeActions(String),
+    AgentToolResult(String, String),
     DocumentMode(String),
     VlfChunks(String),
     VlfSearchStatus(String, String),
@@ -825,6 +834,7 @@ impl XiClient {
                     format!("code actions: {}", actions.len())
                 });
             }
+            BackendEvent::AgentToolResult { .. } => {}
             BackendEvent::DocumentMode { is_vlf, .. } => {
                 self.is_vlf = is_vlf;
                 if is_vlf {
@@ -1426,6 +1436,12 @@ pub(crate) fn parse_notification(method: &str, params: Value) -> Option<BackendE
                 serde_json::from_value::<Vec<CodeActionDescriptor>>(params.get("actions")?.clone())
                     .ok()?;
             Some(BackendEvent::CodeActions { view_id, actions })
+        }
+        "agent_tool_result" => {
+            let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();
+            let kind = params.get("kind").and_then(Value::as_str)?.to_owned();
+            let payload = params.get("payload")?.clone();
+            Some(BackendEvent::AgentToolResult { view_id, kind, payload })
         }
         "document_mode" => {
             let view_id = params.get("view_id").and_then(Value::as_str)?.to_owned();

@@ -18,9 +18,10 @@
 use std::collections::BTreeMap;
 
 use ee_agent_protocol::{
-    AvailableCommand, ContentBlock, Cost, PlanEntry, SessionConfigOption, SessionInfoUpdate,
-    SessionModeId, SessionUpdate, ToolCall, ToolCallContent, ToolCallLocation, ToolCallStatus,
-    ToolCallUpdate, ToolKind, UsageUpdate,
+    AvailableCommand, ContentBlock, Cost, PlanEntry, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOptions, SessionInfoUpdate, SessionModeId,
+    SessionUpdate, ToolCall, ToolCallContent, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
+    ToolKind, UsageUpdate,
 };
 use ee_agent_protocol::{SessionUpdateOrder, ToolCallUpdateFields};
 
@@ -121,6 +122,16 @@ pub struct SessionState {
 /// Ordering invariants are checked first through the shared
 /// [`SessionUpdateOrder`] tracker; an invalid update fails closed with
 /// [`AgentError::InvalidUpdate`] and leaves the state untouched.
+impl SessionState {
+    /// Replaces config options and refreshes derived mode state when present.
+    pub fn set_config_options(&mut self, config_options: Vec<SessionConfigOption>) {
+        self.config_options = config_options;
+        if let Some(mode_id) = preferred_mode_from_config_options(&self.config_options) {
+            self.current_mode = Some(mode_id);
+        }
+    }
+}
+
 pub fn apply_update(
     state: &mut SessionState,
     order: &mut SessionUpdateOrder,
@@ -172,10 +183,11 @@ pub fn apply_update(
             state.available_commands = commands.available_commands.clone();
         }
         SessionUpdate::CurrentModeUpdate(mode) => {
+            sync_mode_config_option(&mut state.config_options, &mode.current_mode_id);
             state.current_mode = Some(mode.current_mode_id.clone());
         }
         SessionUpdate::ConfigOptionUpdate(options) => {
-            state.config_options = options.config_options.clone();
+            state.set_config_options(options.config_options.clone());
         }
         SessionUpdate::SessionInfoUpdate(info) => {
             state.session_info = Some(info.clone());
@@ -223,6 +235,53 @@ fn append_chunk(
         return;
     }
     state.messages.push(ReducedMessage { kind, message_id: None, blocks: vec![block] });
+}
+
+fn preferred_mode_from_config_options(
+    config_options: &[SessionConfigOption],
+) -> Option<SessionModeId> {
+    config_options.iter().find_map(|option| {
+        if !matches!(option.category, Some(SessionConfigOptionCategory::Mode)) {
+            return None;
+        }
+        match &option.kind {
+            SessionConfigKind::Select(select) => {
+                Some(SessionModeId::new(select.current_value.0.clone()))
+            }
+            _ => None,
+        }
+    })
+}
+
+fn sync_mode_config_option(config_options: &mut [SessionConfigOption], mode_id: &SessionModeId) {
+    for option in config_options {
+        if !matches!(option.category, Some(SessionConfigOptionCategory::Mode)) {
+            continue;
+        }
+        let SessionConfigKind::Select(select) = &mut option.kind else {
+            continue;
+        };
+        let next = ee_agent_protocol::SessionConfigValueId::new(mode_id.0.clone());
+        if select_option_exists(&select.options, &next) {
+            select.current_value = next;
+        }
+    }
+}
+
+fn select_option_exists(
+    options: &SessionConfigSelectOptions,
+    expected: &ee_agent_protocol::SessionConfigValueId,
+) -> bool {
+    match options {
+        SessionConfigSelectOptions::Ungrouped(options) => {
+            options.iter().any(|option| &option.value == expected)
+        }
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter())
+            .any(|option| &option.value == expected),
+        _ => false,
+    }
 }
 
 fn merge_tool_call_update(state: &mut SessionState, update: &ToolCallUpdate) {

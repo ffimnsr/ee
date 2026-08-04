@@ -52,7 +52,14 @@ pub use error::McpError;
 pub use events::{McpEvent, McpServerState};
 pub use handler::{EeClientHandler, ElicitationBroker};
 pub use manager::{McpClientManager, McpSubscription, NamespacedPrimitive};
-pub use proxy::{EeMcpProxy, EeProxyBackend, ProxyToolError};
+pub use proxy::{
+    CodeActionEntry, CodeActionsResult, DiagnosticEntry, DiagnosticsResult, DirectoryEntry,
+    DirectoryEntryAll, DocumentSymbolEntry, DocumentSymbolsResult, EditTextResult, EeMcpProxy,
+    EeProxyBackend, FileMatch, ListDirectoryAllResult, ListDirectoryResult, OpenBufferEntry,
+    OpenBuffersResult, PlannedFileEdit, PlannedTextEdit, ProxyToolError, ReferenceEntry,
+    ReferencesResult, RenamePreviewResult, SearchFilesAllResult, SearchFilesResult,
+    SearchTextResult, TextEdit, TextMatch, TextRange, WorkspaceEditResult, WorkspaceRootsResult,
+};
 pub use registry::{
     NamespacedPrompt, NamespacedResource, NamespacedTool, PrimitiveRegistry, PrimitiveSummary,
     prompt_text,

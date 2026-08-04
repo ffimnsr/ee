@@ -325,6 +325,18 @@ impl CoreProxy {
         );
     }
 
+    pub fn show_agent_tool_result(&self, view_id: ViewId, kind: &str, payload: serde_json::Value) {
+        self.send_rpc_notification(
+            "show_agent_tool_result",
+            json!({
+                "plugin_id": self.plugin_id,
+                "view_id": view_id,
+                "kind": kind,
+                "payload": payload,
+            }),
+        );
+    }
+
     pub fn schedule_idle(&self, view_id: ViewId) {
         let token: usize = view_id.into();
         self.peer.schedule_idle(token);

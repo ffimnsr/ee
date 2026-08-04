@@ -25,11 +25,12 @@ use ee_agent_host::{
     ClientRequestResult, PermissionRequestId,
 };
 use ee_agent_protocol::{
-    ContentBlock, CreateElicitationRequest, CreateElicitationResponse, ElicitationAcceptAction,
-    ElicitationAction, ElicitationContentValue, ElicitationMode, ElicitationPropertySchema,
-    ElicitationSchema, McpServer, McpServerStdio, PermissionOption, PlanEntryStatus,
-    RequestPermissionOutcome, SelectedPermissionOutcome, SessionId, SessionUpdate, TextContent,
-    ToolCallStatus,
+    AvailableCommand, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
+    ElicitationAcceptAction, ElicitationAction, ElicitationContentValue, ElicitationMode,
+    ElicitationPropertySchema, ElicitationSchema, McpServer, McpServerStdio, PermissionOption,
+    PlanEntryPriority, PlanEntryStatus, RequestPermissionOutcome, SelectedPermissionOutcome,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionValue, SessionConfigSelectOptions,
+    SessionConfigValueId, SessionId, SessionModeId, SessionUpdate, TextContent, ToolCallStatus,
 };
 use tokio::runtime::Builder as TokioBuilder;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -169,6 +170,12 @@ pub(crate) struct AgentThreadUi {
     pub(crate) stop_reason: Option<String>,
     /// Last turn error, when any.
     pub(crate) last_error: Option<String>,
+    /// Slash commands currently advertised by the agent.
+    pub(crate) available_commands: Vec<AvailableCommand>,
+    /// Session title from `session_info_update`, when present.
+    pub(crate) session_title: Option<String>,
+    /// Session metadata timestamp from `session_info_update`, when present.
+    pub(crate) session_updated_at: Option<String>,
 }
 
 impl AgentThreadUi {
@@ -222,6 +229,12 @@ impl AgentThreadUi {
             })
             .flatten()
             .collect()
+    }
+
+    /// Slash command names currently advertised by the agent.
+    #[allow(dead_code)]
+    pub(crate) fn command_names(&self) -> Vec<String> {
+        self.available_commands.iter().map(|command| command.name.clone()).collect()
     }
 
     /// Appends a message item, merging chunks that continue the same message.
@@ -430,6 +443,8 @@ pub(crate) struct ElicitationPrompt {
     pub(crate) thread_index: Option<usize>,
     pub(crate) message: String,
     pub(crate) url: Option<String>,
+    /// URL-mode `elicitationId` used by `elicitation/complete`.
+    pub(crate) completion_id: Option<String>,
     pub(crate) fields: Vec<ElicitationFieldUi>,
     pub(crate) selected_field: usize,
     /// Selected choice for URL elicitations (0 = accept/open, 1 = decline).
@@ -484,6 +499,7 @@ impl ElicitationPrompt {
             thread_index,
             message,
             url: None,
+            completion_id: None,
             fields,
             selected_field: 0,
             selected_choice: 0,
@@ -503,6 +519,7 @@ impl ElicitationPrompt {
     fn from_url(
         thread_index: Option<usize>,
         message: String,
+        completion_id: String,
         url: String,
         reply: tokio::sync::oneshot::Sender<ClientRequestResult>,
     ) -> Self {
@@ -510,6 +527,7 @@ impl ElicitationPrompt {
             thread_index,
             message,
             url: Some(url),
+            completion_id: Some(completion_id),
             fields: Vec::new(),
             selected_field: 0,
             selected_choice: 0,
@@ -674,6 +692,17 @@ enum HostCommand {
         thread: AgentThread,
         blocks: Vec<ContentBlock>,
     },
+    SetMode {
+        thread: AgentThread,
+        mode_id: SessionModeId,
+        reply: std_mpsc::Sender<Result<String, String>>,
+    },
+    SetConfigOption {
+        thread: AgentThread,
+        config_id: ee_agent_protocol::SessionConfigId,
+        value: SessionConfigOptionValue,
+        reply: std_mpsc::Sender<Result<String, String>>,
+    },
     Cancel {
         thread: AgentThread,
         reply: std_mpsc::Sender<Result<(), String>>,
@@ -719,6 +748,16 @@ fn host_worker(
                     // (completed/cancelled/failed) arrive through the event
                     // stream; the host's `send_prompt` owns them.
                     std::mem::drop(tokio::spawn(async move { thread.send_prompt(blocks).await }));
+                }
+                HostCommand::SetMode { thread, mode_id, reply } => {
+                    let message = format!("mode set: {}", mode_id.0);
+                    let result = thread.set_mode(mode_id).await.map(|()| message);
+                    let _ = reply.send(result.map_err(|error| error.to_string()));
+                }
+                HostCommand::SetConfigOption { thread, config_id, value, reply } => {
+                    let message = format!("config set: {}", config_id.0);
+                    let result = thread.set_config_option(config_id, value).await.map(|()| message);
+                    let _ = reply.send(result.map_err(|error| error.to_string()));
                 }
                 HostCommand::Cancel { thread, reply } => {
                     let result = thread.cancel().await;
@@ -775,6 +814,34 @@ impl AgentHostBridge {
         let _ = self.commands.send(HostCommand::SendPrompt { thread, blocks });
     }
 
+    /// Enqueues a mode change.
+    fn set_mode(
+        &self,
+        thread: AgentThread,
+        mode_id: SessionModeId,
+    ) -> std_mpsc::Receiver<Result<String, String>> {
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        let _ = self.commands.send(HostCommand::SetMode { thread, mode_id, reply: reply_tx });
+        reply_rx
+    }
+
+    /// Enqueues a session config option change.
+    fn set_config_option(
+        &self,
+        thread: AgentThread,
+        config_id: ee_agent_protocol::SessionConfigId,
+        value: SessionConfigOptionValue,
+    ) -> std_mpsc::Receiver<Result<String, String>> {
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        let _ = self.commands.send(HostCommand::SetConfigOption {
+            thread,
+            config_id,
+            value,
+            reply: reply_tx,
+        });
+        reply_rx
+    }
+
     /// Enqueues a turn cancellation.
     fn cancel(&self, thread: AgentThread) -> std_mpsc::Receiver<Result<(), String>> {
         let (reply_tx, reply_rx) = std_mpsc::channel();
@@ -814,6 +881,7 @@ pub(crate) struct AgentPaneState {
     pub(crate) next_thread_index: usize,
     pub(crate) pending_session: Option<PendingSession>,
     pub(crate) pending_cancel: Option<std_mpsc::Receiver<Result<(), String>>>,
+    pub(crate) pending_thread_action: Option<std_mpsc::Receiver<Result<String, String>>>,
     pub(crate) permission: Option<PermissionPrompt>,
     pub(crate) elicitation: Option<ElicitationPrompt>,
     /// Bridge approval queue (file writes, terminal creates); the front one
@@ -850,6 +918,7 @@ impl Default for AgentPaneState {
             next_thread_index: 0,
             pending_session: None,
             pending_cancel: None,
+            pending_thread_action: None,
             permission: None,
             elicitation: None,
             approvals: VecDeque::new(),
@@ -925,6 +994,7 @@ impl App {
 
         self.pump_session_reply();
         self.pump_cancel_reply();
+        self.pump_thread_action_reply();
         self.pump_bridge_requests();
         self.pump_mcp_events();
         self.pump_mcp_replies();
@@ -946,11 +1016,17 @@ impl App {
                         }
                         AgentConnectionState::Ready { agent_info, .. } => {
                             thread.state = ThreadUiState::Ready;
-                            if let Some(info) = agent_info.as_ref()
-                                && !info.name.is_empty()
-                            {
-                                thread.nick = info.name.clone();
+                            if let Some(info) = agent_info.as_ref() {
+                                let label = info.title.as_deref().unwrap_or(&info.name);
+                                if !label.is_empty() {
+                                    thread.nick = label.to_string();
+                                }
                             }
+                            thread.display_name = thread_display_name(
+                                thread.index,
+                                &thread.agent_id,
+                                thread.session_title.as_deref(),
+                            );
                         }
                         AgentConnectionState::Failed(error) => {
                             thread.state = ThreadUiState::Failed;
@@ -1040,6 +1116,9 @@ impl App {
                 {
                     self.agents.permission = None;
                 }
+            }
+            AgentEvent::ElicitationCompleted { elicitation_id } => {
+                self.handle_elicitation_completed(elicitation_id.0.as_ref());
             }
             AgentEvent::ClientRequestDispatched { session_id, method } => {
                 let notice = format!("client request dispatched: {method}");
@@ -1166,7 +1245,16 @@ impl App {
                 let entries = plan
                     .entries
                     .iter()
-                    .map(|entry| (entry.content.clone(), plan_entry_marker(entry.status.clone())))
+                    .map(|entry| {
+                        (
+                            format!(
+                                "[{}] {}",
+                                plan_entry_priority_label(entry.priority.clone()),
+                                entry.content
+                            ),
+                            plan_entry_marker(entry.status.clone()),
+                        )
+                    })
                     .collect();
                 self.agents.threads[thread_index].replace_plan(entries);
             }
@@ -1178,13 +1266,29 @@ impl App {
                 self.agents.threads[thread_index].usage = Some(text);
             }
             SessionUpdate::CurrentModeUpdate(mode) => {
+                self.sync_thread_snapshot_fields(thread_index);
                 self.agents.threads[thread_index]
                     .push_system(format!("mode: {}", mode.current_mode_id.0));
             }
-            SessionUpdate::AvailableCommandsUpdate(_)
-            | SessionUpdate::ConfigOptionUpdate(_)
-            | SessionUpdate::SessionInfoUpdate(_) => {
-                // Stored in the host snapshot; nothing new to render.
+            SessionUpdate::AvailableCommandsUpdate(commands) => {
+                self.sync_thread_snapshot_fields(thread_index);
+                let listed = commands
+                    .available_commands
+                    .iter()
+                    .map(|command| format!("/{}", command.name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.agents.threads[thread_index].push_system(if listed.is_empty() {
+                    String::from("commands: none")
+                } else {
+                    format!("commands: {listed}")
+                });
+            }
+            SessionUpdate::ConfigOptionUpdate(_) => {
+                self.sync_thread_snapshot_fields(thread_index);
+            }
+            SessionUpdate::SessionInfoUpdate(_) => {
+                self.sync_thread_snapshot_fields(thread_index);
             }
             // Non-exhaustive upstream; unknown updates carry no rendering.
             _ => {}
@@ -1234,6 +1338,7 @@ impl App {
             ElicitationMode::Url(mode) => ElicitationPrompt::from_url(
                 thread_index,
                 request.message.clone(),
+                mode.elicitation_id.0.to_string(),
                 mode.url.clone(),
                 reply,
             ),
@@ -1269,21 +1374,69 @@ impl App {
         self.agents.elicitation = Some(prompt);
     }
 
+    fn push_elicitation_notice(&mut self, thread_index: Option<usize>, text: String) {
+        if let Some(thread_index) = thread_index {
+            if let Some(thread) = self.agents.threads.get_mut(thread_index) {
+                thread.push_system(text);
+                self.notify_unread(thread_index);
+            }
+            return;
+        }
+        if let Some(active) = self.agents.active_thread_index() {
+            self.agents.threads[active].push_system(text);
+        }
+    }
+
+    /// Handles agent `elicitation/complete` notifications.
+    fn handle_elicitation_completed(&mut self, elicitation_id: &str) {
+        let matches_prompt = self
+            .agents
+            .elicitation
+            .as_ref()
+            .is_some_and(|prompt| prompt.completion_id.as_deref() == Some(elicitation_id));
+        if !matches_prompt {
+            let thread_index =
+                self.agents.elicitation.as_ref().and_then(|prompt| prompt.thread_index);
+            self.push_elicitation_notice(
+                thread_index,
+                format!("stale elicitation completion ignored: {elicitation_id}"),
+            );
+            return;
+        }
+
+        let prompt = self.agents.elicitation.take().expect("elicitation prompt matched");
+        let thread_index = prompt.thread_index;
+        let _ = prompt.reply.send(Ok(ClientRequestResponse::CreateElicitation(
+            CreateElicitationResponse::new(ElicitationAction::Accept(
+                ElicitationAcceptAction::new(),
+            )),
+        )));
+        self.push_elicitation_notice(
+            thread_index,
+            format!("elicitation completed: {elicitation_id}"),
+        );
+    }
+
     /// Registers a fresh session thread from a new-session reply.
     fn register_session_thread(&mut self, agent_id: &str, thread: AgentThread) {
         let session_id = thread.session_id().0.to_string();
+        let snapshot = thread.snapshot();
         // Phase 6b user-visible diagnostics: how the ee proxy was exposed.
         self.agents.mcp.proxy_mode = Some(thread.proxy_mode().to_string());
         let index = self.agents.next_thread_index;
         self.agents.next_thread_index += 1;
         let nick = agent_id.to_string();
         let ready = self.agents.created_sessions.contains(&session_id);
+        let session_title =
+            snapshot.session_info.as_ref().and_then(|info| info.title.value().cloned());
+        let session_updated_at =
+            snapshot.session_info.as_ref().and_then(|info| info.updated_at.value().cloned());
         self.agents.threads.push(AgentThreadUi {
             index,
             agent_id: agent_id.to_string(),
             session_id: session_id.clone(),
             nick,
-            display_name: format!("{}.{}", index + 1, agent_id),
+            display_name: thread_display_name(index, agent_id, session_title.as_deref()),
             state: if ready { ThreadUiState::Ready } else { ThreadUiState::Starting },
             unread: 0,
             activity: false,
@@ -1296,6 +1449,9 @@ impl App {
             usage: None,
             stop_reason: None,
             last_error: None,
+            available_commands: snapshot.available_commands,
+            session_title,
+            session_updated_at,
         });
         self.agents.active_thread = Some(self.agents.threads.len() - 1);
         self.agents.error = None;
@@ -1314,6 +1470,34 @@ impl App {
             thread.unread += 1;
             thread.activity = true;
         }
+    }
+
+    fn sync_thread_snapshot_fields(&mut self, thread_index: usize) {
+        let Some(thread) = self.agents.threads.get_mut(thread_index) else {
+            return;
+        };
+        let snapshot = thread.host.snapshot();
+        thread.available_commands = snapshot.available_commands;
+        let title = match snapshot.session_info.as_ref() {
+            Some(info) => match info.title.as_opt_ref() {
+                Some(Some(title)) => Some(title.clone()),
+                Some(None) => None,
+                None => thread.session_title.clone(),
+            },
+            None => thread.session_title.clone(),
+        };
+        let updated_at = match snapshot.session_info.as_ref() {
+            Some(info) => match info.updated_at.as_opt_ref() {
+                Some(Some(updated_at)) => Some(updated_at.clone()),
+                Some(None) => None,
+                None => thread.session_updated_at.clone(),
+            },
+            None => thread.session_updated_at.clone(),
+        };
+        thread.session_title = title;
+        thread.session_updated_at = updated_at;
+        thread.display_name =
+            thread_display_name(thread.index, &thread.agent_id, thread.session_title.as_deref());
     }
 
     /// Polls a pending new-session reply.
@@ -1362,6 +1546,27 @@ impl App {
             Err(std_mpsc::TryRecvError::Empty) => {}
             Err(std_mpsc::TryRecvError::Disconnected) => {
                 self.agents.pending_cancel = None;
+            }
+        }
+    }
+
+    fn pump_thread_action_reply(&mut self) {
+        let result = match &self.agents.pending_thread_action {
+            Some(reply) => reply.try_recv(),
+            None => return,
+        };
+        match result {
+            Ok(Ok(message)) => {
+                self.agents.pending_thread_action = None;
+                self.backend.status_message = Some(message);
+            }
+            Ok(Err(message)) => {
+                self.agents.pending_thread_action = None;
+                self.backend.status_message = Some(message);
+            }
+            Err(std_mpsc::TryRecvError::Empty) => {}
+            Err(std_mpsc::TryRecvError::Disconnected) => {
+                self.agents.pending_thread_action = None;
             }
         }
     }
@@ -1431,6 +1636,109 @@ fn plan_entry_marker(status: PlanEntryStatus) -> char {
         // Non-exhaustive upstream.
         _ => '!',
     }
+}
+
+fn plan_entry_priority_label(priority: PlanEntryPriority) -> &'static str {
+    match priority {
+        PlanEntryPriority::High => "high",
+        PlanEntryPriority::Medium => "medium",
+        PlanEntryPriority::Low => "low",
+        _ => "?",
+    }
+}
+
+fn thread_display_name(index: usize, agent_id: &str, session_title: Option<&str>) -> String {
+    match session_title.filter(|title| !title.trim().is_empty()) {
+        Some(title) => format!("{}.{}", index + 1, title),
+        None => format!("{}.{}", index + 1, agent_id),
+    }
+}
+
+fn is_mode_config_option(option: &SessionConfigOption) -> bool {
+    matches!(option.category, Some(ee_agent_protocol::SessionConfigOptionCategory::Mode))
+}
+
+fn cycle_select_value(
+    options: &SessionConfigSelectOptions,
+    current: &SessionConfigValueId,
+    delta: isize,
+) -> Option<SessionConfigValueId> {
+    let values = match options {
+        SessionConfigSelectOptions::Ungrouped(options) => {
+            options.iter().map(|option| option.value.clone()).collect::<Vec<_>>()
+        }
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter().map(|option| option.value.clone()))
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    if values.is_empty() {
+        return None;
+    }
+    let current_index = values.iter().position(|value| value == current).unwrap_or_default();
+    let next_index = (current_index as isize + delta).rem_euclid(values.len() as isize) as usize;
+    values.get(next_index).cloned()
+}
+
+fn config_option_summary(option: &SessionConfigOption) -> String {
+    match &option.kind {
+        SessionConfigKind::Select(select) => format!("{}={}", option.id.0, select.current_value.0),
+        SessionConfigKind::Boolean(current) => {
+            format!("{}={}", option.id.0, if current.current_value { "on" } else { "off" })
+        }
+        _ => format!("{}=?", option.id.0),
+    }
+}
+
+fn parse_config_option_value(
+    option: &SessionConfigOption,
+    raw_value: &str,
+) -> Result<SessionConfigOptionValue, String> {
+    match &option.kind {
+        SessionConfigKind::Select(select) => {
+            let value = SessionConfigValueId::new(raw_value);
+            let exists = match &select.options {
+                SessionConfigSelectOptions::Ungrouped(options) => {
+                    options.iter().any(|option| option.value == value)
+                }
+                SessionConfigSelectOptions::Grouped(groups) => groups
+                    .iter()
+                    .flat_map(|group| group.options.iter())
+                    .any(|option| option.value == value),
+                _ => false,
+            };
+            if exists {
+                Ok(SessionConfigOptionValue::value_id(value))
+            } else {
+                Err(format!("invalid value for {}: {raw_value}", option.id.0))
+            }
+        }
+        SessionConfigKind::Boolean(_) => parse_bool(raw_value)
+            .map(SessionConfigOptionValue::boolean)
+            .ok_or_else(|| format!("invalid boolean for {}: {raw_value}", option.id.0)),
+        _ => Err(format!("unsupported config option kind: {}", option.id.0)),
+    }
+}
+
+fn parse_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn split_slash_command(draft: &str) -> (Option<String>, String) {
+    let trimmed = draft.trim_start();
+    if !trimmed.starts_with('/') {
+        return (None, String::new());
+    }
+    let without_slash = &trimmed[1..];
+    let mut parts = without_slash.splitn(2, char::is_whitespace);
+    let name = parts.next().filter(|part| !part.is_empty()).map(str::to_string);
+    let rest = parts.next().unwrap_or_default().to_string();
+    (name, rest)
 }
 
 /// Deterministic display-width wrapping used by the transcript renderer.
@@ -1509,6 +1817,26 @@ impl App {
             }
             "agents_prev" => {
                 self.agents_switch_thread(-1);
+                true
+            }
+            "agents_mode_next" => {
+                self.agents_cycle_mode(1);
+                true
+            }
+            "agents_mode_prev" => {
+                self.agents_cycle_mode(-1);
+                true
+            }
+            "agents_config" => {
+                self.agents_list_config_options();
+                true
+            }
+            "agents_config_set" => {
+                self.agents_set_config_option_command(tail);
+                true
+            }
+            "agents_config_toggle" => {
+                self.agents_toggle_config_option_command(tail);
                 true
             }
             "agents_clear" => {
@@ -1803,6 +2131,179 @@ impl App {
         roots
     }
 
+    fn queue_thread_mode_change(&mut self, thread_index: usize, mode_id: SessionModeId) {
+        let Some(host) = &self.agents.host else {
+            self.backend.status_message = Some(String::from("agent host not ready"));
+            return;
+        };
+        let reply = host.set_mode(self.agents.threads[thread_index].host.clone(), mode_id.clone());
+        self.agents.pending_thread_action = Some(reply);
+        self.backend.status_message = Some(format!("setting mode: {}", mode_id.0));
+    }
+
+    fn queue_thread_config_option_change(
+        &mut self,
+        thread_index: usize,
+        config_id: ee_agent_protocol::SessionConfigId,
+        value: SessionConfigOptionValue,
+    ) {
+        let Some(host) = &self.agents.host else {
+            self.backend.status_message = Some(String::from("agent host not ready"));
+            return;
+        };
+        let reply = host.set_config_option(
+            self.agents.threads[thread_index].host.clone(),
+            config_id.clone(),
+            value,
+        );
+        self.agents.pending_thread_action = Some(reply);
+        self.backend.status_message = Some(format!("setting config: {}", config_id.0));
+    }
+
+    fn agents_cycle_mode(&mut self, delta: isize) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let snapshot = self.agents.threads[active].host.snapshot();
+        if let Some(mode_option) =
+            snapshot.config_options.iter().find(|option| is_mode_config_option(option))
+            && let SessionConfigKind::Select(select) = &mode_option.kind
+            && let Some(next) = cycle_select_value(&select.options, &select.current_value, delta)
+        {
+            self.queue_thread_mode_change(active, SessionModeId::new(next.0.clone()));
+            return;
+        }
+        if let Some(modes) = self.agents.threads[active].host.advertised_modes() {
+            if modes.available_modes.is_empty() {
+                self.backend.status_message = Some(String::from("agent advertised no modes"));
+                return;
+            }
+            let current = modes.current_mode_id;
+            let current_index = modes
+                .available_modes
+                .iter()
+                .position(|mode| mode.id == current)
+                .unwrap_or_default();
+            let next_index = (current_index as isize + delta)
+                .rem_euclid(modes.available_modes.len() as isize)
+                as usize;
+            self.queue_thread_mode_change(active, modes.available_modes[next_index].id.clone());
+            return;
+        }
+        self.backend.status_message = Some(String::from("agent session has no advertised modes"));
+    }
+
+    fn agents_list_config_options(&mut self) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let options = self.agents.threads[active].host.config_options();
+        if options.is_empty() {
+            self.backend.status_message =
+                Some(String::from("no session config options advertised"));
+            return;
+        }
+        let summary = options.iter().map(config_option_summary).collect::<Vec<_>>().join(" · ");
+        self.backend.status_message = Some(summary);
+    }
+
+    fn agents_set_config_option_command(&mut self, tail: &str) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let mut parts = tail.trim().splitn(2, char::is_whitespace);
+        let Some(config_id) = parts.next().filter(|part| !part.is_empty()) else {
+            self.backend.status_message =
+                Some(String::from("usage: :agents_config_set <config_id> <value>"));
+            return;
+        };
+        let Some(raw_value) = parts.next().map(str::trim).filter(|part| !part.is_empty()) else {
+            self.backend.status_message =
+                Some(String::from("usage: :agents_config_set <config_id> <value>"));
+            return;
+        };
+        let options = self.agents.threads[active].host.config_options();
+        let Some(option) = options.into_iter().find(|option| option.id.0.as_ref() == config_id)
+        else {
+            self.backend.status_message = Some(format!("unknown config option: {config_id}"));
+            return;
+        };
+        let value = match parse_config_option_value(&option, raw_value) {
+            Ok(value) => value,
+            Err(message) => {
+                self.backend.status_message = Some(message);
+                return;
+            }
+        };
+        self.queue_thread_config_option_change(active, option.id.clone(), value);
+    }
+
+    fn agents_toggle_config_option_command(&mut self, tail: &str) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let config_id = tail.trim();
+        if config_id.is_empty() {
+            self.backend.status_message =
+                Some(String::from("usage: :agents_config_toggle <config_id>"));
+            return;
+        }
+        let options = self.agents.threads[active].host.config_options();
+        let Some(option) = options.into_iter().find(|option| option.id.0.as_ref() == config_id)
+        else {
+            self.backend.status_message = Some(format!("unknown config option: {config_id}"));
+            return;
+        };
+        let SessionConfigKind::Boolean(current) = option.kind else {
+            self.backend.status_message = Some(format!("config option {config_id} is not boolean"));
+            return;
+        };
+        self.queue_thread_config_option_change(
+            active,
+            option.id.clone(),
+            SessionConfigOptionValue::boolean(!current.current_value),
+        );
+    }
+
+    fn cycle_slash_command(&mut self, delta: isize) -> bool {
+        let Some(active) = self.agents.active_thread_index() else {
+            return false;
+        };
+        let thread = &mut self.agents.threads[active];
+        if thread.available_commands.is_empty() {
+            return false;
+        }
+        let draft = thread.draft.clone();
+        let (current_name, rest) = split_slash_command(&draft);
+        let current_index = current_name.and_then(|name| {
+            thread.available_commands.iter().position(|command| command.name == name)
+        });
+        let next_index = match current_index {
+            Some(index) => (index as isize + delta)
+                .rem_euclid(thread.available_commands.len() as isize)
+                as usize,
+            None if draft.trim().is_empty() || draft.starts_with('/') => {
+                if delta >= 0 {
+                    0
+                } else {
+                    thread.available_commands.len() - 1
+                }
+            }
+            None => return false,
+        };
+        let command = &thread.available_commands[next_index];
+        thread.draft = if rest.trim().is_empty() {
+            format!("/{} ", command.name)
+        } else {
+            format!("/{} {}", command.name, rest.trim_start())
+        };
+        true
+    }
+
     /// Submits the active thread's draft as a prompt turn.
     fn submit_prompt(&mut self) {
         let Some(active) = self.agents.active_thread_index() else {
@@ -2069,6 +2570,14 @@ impl App {
                 } else {
                     self.submit_prompt();
                 }
+            }
+            KeyCode::Tab => {
+                if !self.cycle_slash_command(1) {
+                    self.agents_append_draft("\t");
+                }
+            }
+            KeyCode::BackTab => {
+                let _ = self.cycle_slash_command(-1);
             }
             KeyCode::Backspace => self.agents_draft_backspace(),
             KeyCode::Esc => {

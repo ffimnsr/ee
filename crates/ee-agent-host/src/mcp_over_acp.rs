@@ -13,7 +13,7 @@
 //!   method metadata"), enforcing strict ordering and identity rules.
 //! - Inner MCP messages are served by the existing
 //!   [`ee_mcp::EeMcpProxy`] (`rmcp::ServerHandler`) over an in-process
-//!   transport, so the four `ee.*` tool definitions, argument validation,
+//!   transport, so the `ee.*` tool definitions, argument validation,
 //!   absolute-path rules, terminal env redaction, and result mapping are
 //!   reused verbatim.
 //! - Tool execution routes through the same [`ClientRequestHandler`] as
@@ -49,7 +49,12 @@ use ee_agent_protocol::{
     DisconnectMcpResponse, Error as RpcError, JsonRpcResponse, McpConnectionId, McpServerAcpId,
     MessageMcpNotification, MessageMcpRequest, MessageMcpResponse, Responder, SessionId,
 };
-use ee_mcp::{EeMcpProxy, EeProxyBackend, ProxyToolError};
+use ee_mcp::{
+    CodeActionsResult, DiagnosticsResult, DocumentSymbolsResult, EditTextResult, EeMcpProxy,
+    EeProxyBackend, ListDirectoryAllResult, ListDirectoryResult, OpenBuffersResult, ProxyToolError,
+    ReferencesResult, RenamePreviewResult, SearchFilesAllResult, SearchFilesResult,
+    SearchTextResult, TextEdit, WorkspaceEditResult, WorkspaceRootsResult,
+};
 use rmcp::model::{JsonRpcMessage, RequestId, ServerNotification, ServerRequest, ServerResult};
 use rmcp::service::{RoleServer, RxJsonRpcMessage, TxJsonRpcMessage};
 use rmcp::transport::Transport;
@@ -58,7 +63,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::AgentError;
 use crate::inbound::{
-    ClientRequest, ClientRequestHandler, ClientRequestResponse, HandlerCapabilities,
+    ClientRequest, ClientRequestHandler, ClientRequestResponse, HandlerCapabilities, ProxyTextEdit,
 };
 use crate::process::AgentProcess;
 
@@ -170,6 +175,435 @@ impl HostProxyBackend {
 }
 
 impl EeProxyBackend for HostProxyBackend {
+    fn workspace_roots(&self) -> Result<WorkspaceRootsResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxyWorkspaceRoots)? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy workspace_roots returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy workspace_roots returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn list_directory(&self, path: String) -> Result<ListDirectoryResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxyListDirectory { path })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy list_directory returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy list_directory returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn list_directory_all(&self, path: String) -> Result<ListDirectoryAllResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxyListDirectoryAll { path })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy list_directory returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy list_directory returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn search_files(&self, pattern: String) -> Result<SearchFilesResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxySearchFiles { pattern })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy search_files returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy search_files returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn search_files_all(&self, pattern: String) -> Result<SearchFilesAllResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxySearchFilesAll { pattern })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy search_files returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy search_files returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn search_text(&self, query: String) -> Result<SearchTextResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxySearchText { query })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy search_text returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy search_text returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn search_text_regex(&self, pattern: String) -> Result<SearchTextResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxySearchTextRegex { pattern })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy search_text returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy search_text returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn search_text_in_files(
+        &self,
+        query: String,
+        file_glob: String,
+    ) -> Result<SearchTextResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxySearchTextInFiles { query, file_glob })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!(
+                        "proxy search_text_in_files returned invalid payload: {error}"
+                    ),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy search_text_in_files returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn replace_text(
+        &self,
+        path: String,
+        old_text: String,
+        new_text: String,
+    ) -> Result<EditTextResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxyReplaceText { path, old_text, new_text })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy replace_text returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy replace_text returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn apply_patch(
+        &self,
+        path: String,
+        edits: Vec<TextEdit>,
+    ) -> Result<EditTextResult, ProxyToolError> {
+        let edits = edits
+            .into_iter()
+            .map(|edit| ProxyTextEdit { old_text: edit.old_text, new_text: edit.new_text })
+            .collect();
+        match self.call(ClientRequest::ProxyApplyPatch { path, edits })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy apply_patch returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy apply_patch returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn create_text_file(
+        &self,
+        path: String,
+        content: String,
+    ) -> Result<EditTextResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxyCreateTextFile { path, content })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy create_text_file returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy create_text_file returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn overwrite_text_file(
+        &self,
+        path: String,
+        content: String,
+    ) -> Result<EditTextResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxyOverwriteTextFile { path, content })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy overwrite_text_file returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy overwrite_text_file returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn read_buffer(&self, path: String) -> Result<String, ProxyToolError> {
+        match self.call(ClientRequest::ProxyReadBuffer { path })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                value.as_str().map(ToOwned::to_owned).ok_or_else(|| ProxyToolError {
+                    message: String::from("proxy read_buffer returned invalid payload"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy read_buffer returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn read_buffer_lines(
+        &self,
+        path: String,
+        line: u32,
+        limit: u32,
+    ) -> Result<String, ProxyToolError> {
+        match self.call(ClientRequest::ProxyReadBufferLines { path, line, limit })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                value.as_str().map(ToOwned::to_owned).ok_or_else(|| ProxyToolError {
+                    message: String::from("proxy read_buffer_lines returned invalid payload"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy read_buffer_lines returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn open_buffers(&self) -> Result<OpenBuffersResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxyOpenBuffers)? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy open_buffers returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy open_buffers returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn get_diagnostics(&self) -> Result<DiagnosticsResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxyGetDiagnostics)? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy get_diagnostics returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy get_diagnostics returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn get_file_diagnostics(&self, path: String) -> Result<DiagnosticsResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxyGetFileDiagnostics { path })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!(
+                        "proxy get_file_diagnostics returned invalid payload: {error}"
+                    ),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy get_file_diagnostics returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn document_symbols(&self, path: String) -> Result<DocumentSymbolsResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxyDocumentSymbols { path })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy document_symbols returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy document_symbols returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn references(
+        &self,
+        path: String,
+        line: u32,
+        character: u32,
+    ) -> Result<ReferencesResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxyReferences { path, line, character })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy references returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy references returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn list_code_actions(
+        &self,
+        path: String,
+        line: u32,
+        character: u32,
+    ) -> Result<CodeActionsResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxyListCodeActions { path, line, character })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy list_code_actions returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy list_code_actions returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn apply_code_action(
+        &self,
+        path: String,
+        action_id: String,
+    ) -> Result<EditTextResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxyApplyCodeAction { path, action_id })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy apply_code_action returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy apply_code_action returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn format_file(&self, path: String) -> Result<EditTextResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxyFormatFile { path })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy format_file returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy format_file returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn preview_rename_symbol(
+        &self,
+        path: String,
+        line: u32,
+        character: u32,
+        new_name: String,
+    ) -> Result<RenamePreviewResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxyPreviewRenameSymbol {
+            path,
+            line,
+            character,
+            new_name,
+        })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!(
+                        "proxy preview_rename_symbol returned invalid payload: {error}"
+                    ),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from(
+                    "proxy preview_rename_symbol returned an unexpected response",
+                ),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn rename_symbol(
+        &self,
+        path: String,
+        line: u32,
+        character: u32,
+        new_name: String,
+    ) -> Result<WorkspaceEditResult, ProxyToolError> {
+        match self.call(ClientRequest::ProxyRenameSymbol { path, line, character, new_name })? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy rename_symbol returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy rename_symbol returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
     fn read_text_file(
         &self,
         path: String,

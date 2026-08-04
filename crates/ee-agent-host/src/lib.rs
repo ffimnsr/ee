@@ -39,7 +39,7 @@ pub use events::{
 };
 pub use inbound::{
     ClientRequest, ClientRequestHandler, ClientRequestResponse, ClientRequestResult,
-    DenyAllHandler, HandlerCapabilities, RecordingHandler,
+    DenyAllHandler, HandlerCapabilities, ProxyTextEdit, RecordingHandler,
 };
 #[cfg(feature = "test-utils")]
 pub use manager::FakeTransportFactory;

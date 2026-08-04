@@ -227,13 +227,67 @@ impl AgentManager {
     ///
     /// # Errors
     ///
-    /// Fails when the capability is missing or the agent rejects the load.
+    /// Fails when the capability is missing, roots are invalid, or the agent
+    /// rejects the load.
     pub async fn load_session(
         &self,
         agent_id: &str,
         session_id: ee_agent_protocol::SessionId,
+        cwd: PathBuf,
+        additional_directories: Vec<PathBuf>,
+        mcp_servers: Vec<ee_agent_protocol::McpServer>,
     ) -> Result<AgentThread, AgentError> {
-        self.connection(agent_id).await?.load_session(session_id).await
+        self.connection(agent_id)
+            .await?
+            .load_session(session_id, cwd, additional_directories, mcp_servers)
+            .await
+    }
+
+    /// Lists existing sessions on `agent_id`; only when the agent advertises
+    /// `sessionCapabilities.list`.
+    pub async fn list_sessions(
+        &self,
+        agent_id: &str,
+        cwd: Option<PathBuf>,
+        cursor: Option<String>,
+    ) -> Result<ee_agent_protocol::ListSessionsResponse, AgentError> {
+        self.connection(agent_id).await?.list_sessions(cwd, cursor).await
+    }
+
+    /// Deletes one existing session on `agent_id`; only when the agent
+    /// advertises `sessionCapabilities.delete`.
+    pub async fn delete_session(
+        &self,
+        agent_id: &str,
+        session_id: ee_agent_protocol::SessionId,
+    ) -> Result<ee_agent_protocol::DeleteSessionResponse, AgentError> {
+        self.connection(agent_id).await?.delete_session(session_id).await
+    }
+
+    /// Resumes one existing session on `agent_id`; only when the agent
+    /// advertises `sessionCapabilities.resume`.
+    pub async fn resume_session(
+        &self,
+        agent_id: &str,
+        session_id: ee_agent_protocol::SessionId,
+        cwd: PathBuf,
+        additional_directories: Vec<PathBuf>,
+        mcp_servers: Vec<ee_agent_protocol::McpServer>,
+    ) -> Result<AgentThread, AgentError> {
+        self.connection(agent_id)
+            .await?
+            .resume_session(session_id, cwd, additional_directories, mcp_servers)
+            .await
+    }
+
+    /// Closes one active session on `agent_id`; only when the agent
+    /// advertises `sessionCapabilities.close`.
+    pub async fn close_session(
+        &self,
+        agent_id: &str,
+        session_id: ee_agent_protocol::SessionId,
+    ) -> Result<ee_agent_protocol::CloseSessionResponse, AgentError> {
+        self.connection(agent_id).await?.close_session(session_id).await
     }
 
     /// Closes the connection for `agent_id` (kills the subprocess, resolves

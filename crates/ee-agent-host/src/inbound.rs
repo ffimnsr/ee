@@ -43,6 +43,10 @@ pub struct HandlerCapabilities {
     pub elicitation_form: bool,
     /// `elicitation/create` with url mode
     pub elicitation_url: bool,
+    /// `clientCapabilities.session.configOptions.boolean`
+    pub session_config_boolean: bool,
+    /// Proxy-only ee MCP discovery tools (`ee/*` local bridge methods).
+    pub proxy_discovery: bool,
 }
 
 impl HandlerCapabilities {
@@ -55,6 +59,8 @@ impl HandlerCapabilities {
             terminal: false,
             elicitation_form: false,
             elicitation_url: false,
+            session_config_boolean: false,
+            proxy_discovery: false,
         }
     }
 
@@ -67,6 +73,8 @@ impl HandlerCapabilities {
             terminal: true,
             elicitation_form: true,
             elicitation_url: true,
+            session_config_boolean: true,
+            proxy_discovery: true,
         }
     }
 
@@ -81,19 +89,82 @@ impl HandlerCapabilities {
             | TERMINAL_WAIT_FOR_EXIT_METHOD_NAME
             | TERMINAL_KILL_METHOD_NAME
             | TERMINAL_RELEASE_METHOD_NAME => self.terminal,
-            ELICITATION_CREATE_METHOD_NAME => {
-                // Method-level gate is insufficient for elicitation modes; the
-                // handler still validates the mode (see handler contract).
-                self.elicitation_form || self.elicitation_url
-            }
+            ELICITATION_CREATE_METHOD_NAME => self.elicitation_form || self.elicitation_url,
+            "ee/workspace_roots"
+            | "ee/list_directory"
+            | "ee/list_directory_all"
+            | "ee/search_files"
+            | "ee/search_files_all"
+            | "ee/search_text"
+            | "ee/search_text_regex"
+            | "ee/search_text_in_files"
+            | "ee/replace_text"
+            | "ee/apply_patch"
+            | "ee/create_text_file"
+            | "ee/overwrite_text_file"
+            | "ee/read_buffer"
+            | "ee/read_buffer_lines"
+            | "ee/open_buffers"
+            | "ee/get_diagnostics"
+            | "ee/get_file_diagnostics"
+            | "ee/document_symbols"
+            | "ee/references"
+            | "ee/list_code_actions"
+            | "ee/apply_code_action"
+            | "ee/format_file"
+            | "ee/preview_rename_symbol"
+            | "ee/rename_symbol" => self.proxy_discovery,
             _ => false,
+        }
+    }
+
+    /// Whether this capability set covers one fully-typed request.
+    #[must_use]
+    pub fn supports_request(&self, request: &ClientRequest) -> bool {
+        match request {
+            ClientRequest::CreateElicitation(request) => match &request.mode {
+                ee_agent_protocol::ElicitationMode::Form(_) => self.elicitation_form,
+                ee_agent_protocol::ElicitationMode::Url(_) => self.elicitation_url,
+                _ => false,
+            },
+            other => self.supports(other.method()),
         }
     }
 }
 
 /// One agent-to-client request the host forwards to the handler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyTextEdit {
+    pub old_text: String,
+    pub new_text: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientRequest {
+    ProxyWorkspaceRoots,
+    ProxyListDirectory { path: String },
+    ProxyListDirectoryAll { path: String },
+    ProxySearchFiles { pattern: String },
+    ProxySearchFilesAll { pattern: String },
+    ProxySearchText { query: String },
+    ProxySearchTextRegex { pattern: String },
+    ProxySearchTextInFiles { query: String, file_glob: String },
+    ProxyReplaceText { path: String, old_text: String, new_text: String },
+    ProxyApplyPatch { path: String, edits: Vec<ProxyTextEdit> },
+    ProxyCreateTextFile { path: String, content: String },
+    ProxyOverwriteTextFile { path: String, content: String },
+    ProxyReadBuffer { path: String },
+    ProxyReadBufferLines { path: String, line: u32, limit: u32 },
+    ProxyOpenBuffers,
+    ProxyGetDiagnostics,
+    ProxyGetFileDiagnostics { path: String },
+    ProxyDocumentSymbols { path: String },
+    ProxyReferences { path: String, line: u32, character: u32 },
+    ProxyListCodeActions { path: String, line: u32, character: u32 },
+    ProxyApplyCodeAction { path: String, action_id: String },
+    ProxyFormatFile { path: String },
+    ProxyPreviewRenameSymbol { path: String, line: u32, character: u32, new_name: String },
+    ProxyRenameSymbol { path: String, line: u32, character: u32, new_name: String },
     ReadTextFile(ReadTextFileRequest),
     WriteTextFile(WriteTextFileRequest),
     CreateTerminal(CreateTerminalRequest),
@@ -109,6 +180,30 @@ impl ClientRequest {
     #[must_use]
     pub fn method(&self) -> &'static str {
         match self {
+            Self::ProxyWorkspaceRoots => "ee/workspace_roots",
+            Self::ProxyListDirectory { .. } => "ee/list_directory",
+            Self::ProxyListDirectoryAll { .. } => "ee/list_directory_all",
+            Self::ProxySearchFiles { .. } => "ee/search_files",
+            Self::ProxySearchFilesAll { .. } => "ee/search_files_all",
+            Self::ProxySearchText { .. } => "ee/search_text",
+            Self::ProxySearchTextRegex { .. } => "ee/search_text_regex",
+            Self::ProxySearchTextInFiles { .. } => "ee/search_text_in_files",
+            Self::ProxyReplaceText { .. } => "ee/replace_text",
+            Self::ProxyApplyPatch { .. } => "ee/apply_patch",
+            Self::ProxyCreateTextFile { .. } => "ee/create_text_file",
+            Self::ProxyOverwriteTextFile { .. } => "ee/overwrite_text_file",
+            Self::ProxyReadBuffer { .. } => "ee/read_buffer",
+            Self::ProxyReadBufferLines { .. } => "ee/read_buffer_lines",
+            Self::ProxyOpenBuffers => "ee/open_buffers",
+            Self::ProxyGetDiagnostics => "ee/get_diagnostics",
+            Self::ProxyGetFileDiagnostics { .. } => "ee/get_file_diagnostics",
+            Self::ProxyDocumentSymbols { .. } => "ee/document_symbols",
+            Self::ProxyReferences { .. } => "ee/references",
+            Self::ProxyListCodeActions { .. } => "ee/list_code_actions",
+            Self::ProxyApplyCodeAction { .. } => "ee/apply_code_action",
+            Self::ProxyFormatFile { .. } => "ee/format_file",
+            Self::ProxyPreviewRenameSymbol { .. } => "ee/preview_rename_symbol",
+            Self::ProxyRenameSymbol { .. } => "ee/rename_symbol",
             Self::ReadTextFile(_) => FS_READ_TEXT_FILE_METHOD_NAME,
             Self::WriteTextFile(_) => FS_WRITE_TEXT_FILE_METHOD_NAME,
             Self::CreateTerminal(_) => TERMINAL_CREATE_METHOD_NAME,
@@ -126,6 +221,30 @@ impl ClientRequest {
     #[must_use]
     pub fn session_id(&self) -> Option<&ee_agent_protocol::SessionId> {
         match self {
+            Self::ProxyWorkspaceRoots
+            | Self::ProxyListDirectory { .. }
+            | Self::ProxyListDirectoryAll { .. }
+            | Self::ProxySearchFiles { .. }
+            | Self::ProxySearchFilesAll { .. }
+            | Self::ProxySearchText { .. }
+            | Self::ProxySearchTextRegex { .. }
+            | Self::ProxySearchTextInFiles { .. }
+            | Self::ProxyReplaceText { .. }
+            | Self::ProxyApplyPatch { .. }
+            | Self::ProxyCreateTextFile { .. }
+            | Self::ProxyOverwriteTextFile { .. }
+            | Self::ProxyReadBuffer { .. }
+            | Self::ProxyReadBufferLines { .. }
+            | Self::ProxyOpenBuffers
+            | Self::ProxyGetDiagnostics
+            | Self::ProxyGetFileDiagnostics { .. }
+            | Self::ProxyDocumentSymbols { .. }
+            | Self::ProxyReferences { .. }
+            | Self::ProxyListCodeActions { .. }
+            | Self::ProxyApplyCodeAction { .. }
+            | Self::ProxyFormatFile { .. }
+            | Self::ProxyPreviewRenameSymbol { .. }
+            | Self::ProxyRenameSymbol { .. } => None,
             Self::ReadTextFile(request) => Some(&request.session_id),
             Self::WriteTextFile(request) => Some(&request.session_id),
             Self::CreateTerminal(request) => Some(&request.session_id),
@@ -154,6 +273,7 @@ impl ClientRequest {
 /// The typed response for a handled [`ClientRequest`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientRequestResponse {
+    ProxyValue(serde_json::Value),
     ReadTextFile(ReadTextFileResponse),
     WriteTextFile(WriteTextFileResponse),
     CreateTerminal(CreateTerminalResponse),
@@ -169,6 +289,7 @@ impl ClientRequestResponse {
     /// enum tag).
     pub fn into_value(self) -> Result<serde_json::Value, serde_json::Error> {
         match self {
+            Self::ProxyValue(response) => Ok(response),
             Self::ReadTextFile(response) => serde_json::to_value(response),
             Self::WriteTextFile(response) => serde_json::to_value(response),
             Self::CreateTerminal(response) => serde_json::to_value(response),
@@ -271,7 +392,7 @@ impl ClientRequestHandler for RecordingHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ee_agent_protocol::{SessionId, TerminalId};
+    use ee_agent_protocol::{ElicitationSchema, SessionId, TerminalId};
 
     #[test]
     fn capabilities_supports_maps_methods() {
@@ -285,6 +406,21 @@ mod tests {
             "terminal/kill",
             "terminal/release",
             "elicitation/create",
+            "ee/workspace_roots",
+            "ee/list_directory",
+            "ee/list_directory_all",
+            "ee/search_files",
+            "ee/search_files_all",
+            "ee/search_text",
+            "ee/search_text_regex",
+            "ee/search_text_in_files",
+            "ee/replace_text",
+            "ee/apply_patch",
+            "ee/create_text_file",
+            "ee/overwrite_text_file",
+            "ee/read_buffer",
+            "ee/read_buffer_lines",
+            "ee/open_buffers",
         ] {
             assert!(caps.supports(method), "{method} should be supported");
         }
@@ -293,11 +429,55 @@ mod tests {
     }
 
     #[test]
+    fn supports_request_gates_elicitation_modes_independently() {
+        let form_request = ClientRequest::CreateElicitation(CreateElicitationRequest::new(
+            ee_agent_protocol::ElicitationFormMode::new(
+                ee_agent_protocol::ElicitationSessionScope::new("s1"),
+                ElicitationSchema::new(),
+            ),
+            "fill",
+        ));
+        let url_request = ClientRequest::CreateElicitation(CreateElicitationRequest::new(
+            ee_agent_protocol::ElicitationUrlMode::new(
+                ee_agent_protocol::ElicitationSessionScope::new("s1"),
+                "el-1",
+                "https://example.com",
+            ),
+            "open",
+        ));
+
+        let form_only =
+            HandlerCapabilities { elicitation_form: true, ..HandlerCapabilities::none() };
+        assert!(form_only.supports_request(&form_request));
+        assert!(!form_only.supports_request(&url_request));
+
+        let url_only = HandlerCapabilities { elicitation_url: true, ..HandlerCapabilities::none() };
+        assert!(url_only.supports_request(&url_request));
+        assert!(!url_only.supports_request(&form_request));
+    }
+
+    #[test]
     fn request_method_names_match_wire() {
         let session = SessionId::new("s1");
         let read = ClientRequest::ReadTextFile(ReadTextFileRequest::new(session.clone(), "/tmp/x"));
         assert_eq!(read.method(), "fs/read_text_file");
         assert_eq!(read.session_id(), Some(&session));
+
+        let proxy = ClientRequest::ProxySearchFiles { pattern: String::from("src/*.rs") };
+        assert_eq!(proxy.method(), "ee/search_files");
+        assert_eq!(proxy.session_id(), None);
+
+        let proxy_regex = ClientRequest::ProxySearchTextRegex { pattern: String::from("main") };
+        assert_eq!(proxy_regex.method(), "ee/search_text_regex");
+        assert_eq!(proxy_regex.session_id(), None);
+
+        let replace = ClientRequest::ProxyReplaceText {
+            path: String::from("/tmp/x"),
+            old_text: String::from("old"),
+            new_text: String::from("new"),
+        };
+        assert_eq!(replace.method(), "ee/replace_text");
+        assert_eq!(replace.session_id(), None);
 
         let terminal =
             ClientRequest::CreateTerminal(CreateTerminalRequest::new(session.clone(), "echo"));

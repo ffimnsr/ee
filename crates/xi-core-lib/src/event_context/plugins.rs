@@ -80,6 +80,9 @@ impl<'a> EventContext<'a> {
                 self.client.locations(self.view_id, &title, &locations)
             }
             ShowSymbols { title, symbols } => self.client.symbols(self.view_id, &title, &symbols),
+            ShowAgentToolResult { kind, payload } => {
+                self.client.agent_tool_result(self.view_id, &kind, payload)
+            }
         };
         self.after_edit(&plugin.to_string());
         self.render_if_needed();

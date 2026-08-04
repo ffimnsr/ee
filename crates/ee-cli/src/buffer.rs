@@ -695,6 +695,8 @@ pub(crate) struct BufferManager {
     pub(crate) pending_locations: Vec<(String, String, Vec<NavigationTarget>)>,
     /// Symbol results awaiting dispatch to the App-level picker.
     pub(crate) pending_symbols: Vec<(String, String, Vec<SymbolItem>)>,
+    /// Generic LSP agent-tool results awaiting proxy/tool consumers.
+    pub(crate) pending_agent_tool_results: Vec<(String, String, Value)>,
     available_plugins_by_view: HashMap<String, Vec<ClientPluginInfo>>,
     pub(crate) pending_ui_actions: Vec<PendingUiAction>,
     startup_profile: StartupProfile,
@@ -882,6 +884,7 @@ impl BufferManager {
             pending,
             pending_locations: Vec::new(),
             pending_symbols: Vec::new(),
+            pending_agent_tool_results: Vec::new(),
             available_plugins_by_view: HashMap::new(),
             pending_ui_actions: Vec::new(),
             startup_profile: StartupProfile {
@@ -1941,6 +1944,12 @@ impl BufferManager {
                     format!("code actions: {count}")
                 });
             }
+            BackendEvent::AgentToolResult { view_id, kind, payload } => {
+                if self.buffer_index_for_view(&view_id).is_none() {
+                    return Ok(());
+                }
+                self.pending_agent_tool_results.push((view_id, kind, payload));
+            }
             BackendEvent::DocumentMode { view_id, is_vlf } => {
                 let Some(idx) = self.buffer_index_for_view(&view_id) else {
                     return Ok(());
@@ -2527,6 +2536,7 @@ impl BufferManager {
             pending: Arc::new(Mutex::new(HashMap::new())),
             pending_locations: Vec::new(),
             pending_symbols: Vec::new(),
+            pending_agent_tool_results: Vec::new(),
             available_plugins_by_view: HashMap::new(),
             pending_ui_actions: Vec::new(),
             startup_profile: StartupProfile::default(),
@@ -2545,6 +2555,10 @@ impl BufferManager {
 
     pub(crate) fn drain_pending_symbols(&mut self) -> Vec<(String, String, Vec<SymbolItem>)> {
         std::mem::take(&mut self.pending_symbols)
+    }
+
+    pub(crate) fn drain_pending_agent_tool_results(&mut self) -> Vec<(String, String, Value)> {
+        std::mem::take(&mut self.pending_agent_tool_results)
     }
 
     pub(crate) fn available_plugins_for_current_view(&self) -> &[ClientPluginInfo] {
