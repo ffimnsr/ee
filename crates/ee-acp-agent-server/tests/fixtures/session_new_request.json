@@ -1,0 +1,10 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "session/new",
+  "params": {
+    "cwd": "/workspace/project",
+    "additionalDirectories": ["/workspace/shared"],
+    "mcpServers": []
+  }
+}

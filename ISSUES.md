@@ -771,70 +771,70 @@ Rules:
 
 #### Work items
 
-- [ ] Add `crates/ee-acp-agent-server` to the workspace members in `ee/Cargo.toml`.
-  - [ ] Create `crates/ee-acp-agent-server/Cargo.toml`.
-    - [ ] Set package name to `ee-acp-agent-server`.
-    - [ ] Set version to `0.1.0`.
-    - [ ] Use workspace `edition`, `rust-version`, `license`, and author conventions.
-    - [ ] Add dependencies on `ee-agent-protocol`, `futures`, `serde`, `serde_json`, `tokio`, and `tracing` from workspace dependencies.
-    - [ ] Add `tempfile` as dev-dependency only if tests need filesystem fixtures.
-  - [ ] Create `crates/ee-acp-agent-server/src/lib.rs`.
-    - [ ] Export `config`, `error`, `transport`, `provider`, `server`, `session`, `updates`, `client`, `ids`, and `validate` modules.
-    - [ ] Re-export primary public types from crate root.
-    - [ ] Add crate-level docs stating this crate is ACP agent-side only.
-- [ ] Implement framework config in `src/config.rs`.
-  - [ ] Add `AcpAgentServerConfig`.
-    - [ ] Include `request_timeout: Duration`.
-    - [ ] Include `prompt_timeout: Option<Duration>`.
-    - [ ] Include `max_frame_bytes: usize`.
-    - [ ] Include `session_id_prefix: String`.
-    - [ ] Include `implementation: ee_agent_protocol::Implementation`.
-  - [ ] Implement `Default`.
-    - [ ] Set request timeout to `30s`.
-    - [ ] Set prompt timeout to `None`.
-    - [ ] Set max frame bytes to `4 * 1024 * 1024`.
-    - [ ] Set session id prefix to `session`.
-    - [ ] Set implementation name/title to framework defaults.
-  - [ ] Add unit tests for default values.
-- [ ] Implement framework errors in `src/error.rs`.
-  - [ ] Add `AcpServerError` variants for I/O, JSON parse, protocol, unsupported version, unknown session, request timeout, transport closed, and provider errors.
-  - [ ] Add `ProviderError` variants for invalid request, backend failure, cancellation, client request failure, and permission denied.
-  - [ ] Implement `Display` and `std::error::Error`.
-  - [ ] Implement helper methods to map errors to JSON-RPC error code and message.
-  - [ ] Add unit tests for JSON-RPC code mapping.
-- [ ] Implement ID generation in `src/ids.rs`.
-  - [ ] Add monotonic request-id generator returning ACP `RequestId` or SDK-compatible value.
-  - [ ] Add monotonic session-id generator using configured prefix.
-  - [ ] Ensure generated IDs are process-local unique without global mutable state.
-  - [ ] Add unit tests for monotonic request IDs.
-  - [ ] Add unit tests for configured session-id prefix.
-- [ ] Implement transport abstraction in `src/transport.rs`.
-  - [ ] Define `AcpTransport` trait.
-    - [ ] Add `read_message` async method returning `Option<JsonRpcMessage>`.
-    - [ ] Add `write_message` async method.
-    - [ ] Require `Send + 'static`.
-  - [ ] Implement `StdioTransport`.
-    - [ ] Read newline-delimited JSON-RPC messages from stdin.
-    - [ ] Write one JSON-RPC message per line to stdout.
-    - [ ] Flush stdout after every message.
-    - [ ] Enforce `max_frame_bytes` before parsing.
-    - [ ] Treat EOF as clean shutdown.
-  - [ ] Implement test-only `MemoryTransport`.
-    - [ ] Accept inbound messages from an in-memory queue.
-    - [ ] Capture outbound messages in deterministic order.
-    - [ ] Support injecting EOF.
-  - [ ] Add tests for valid frame parse.
-  - [ ] Add tests for oversized frame rejection.
-  - [ ] Add tests for EOF returning clean shutdown.
-  - [ ] Add tests for write preserving one-line JSON.
+- [x] Add `crates/ee-acp-agent-server` to the workspace members in `ee/Cargo.toml`.
+  - [x] Create `crates/ee-acp-agent-server/Cargo.toml`.
+    - [x] Set package name to `ee-acp-agent-server`.
+    - [x] Set version to `0.1.0`.
+    - [x] Use workspace `edition`, `rust-version`, `license`, and author conventions.
+    - [x] Add dependencies on `ee-agent-protocol`, `futures`, `serde`, `serde_json`, `tokio`, and `tracing` from workspace dependencies.
+    - [x] Add `tempfile` as dev-dependency only if tests need filesystem fixtures.  (not needed — tests use in-memory buffers)
+  - [x] Create `crates/ee-acp-agent-server/src/lib.rs`.
+    - [x] Export `config`, `error`, `transport`, `provider`, `server`, `session`, `updates`, `client`, `ids`, and `validate` modules.
+    - [x] Re-export primary public types from crate root.
+    - [x] Add crate-level docs stating this crate is ACP agent-side only.
+- [x] Implement framework config in `src/config.rs`.
+  - [x] Add `AcpAgentServerConfig`.
+    - [x] Include `request_timeout: Duration`.
+    - [x] Include `prompt_timeout: Option<Duration>`.
+    - [x] Include `max_frame_bytes: usize`.
+    - [x] Include `session_id_prefix: String`.
+    - [x] Include `implementation: ee_agent_protocol::Implementation`.
+  - [x] Implement `Default`.
+    - [x] Set request timeout to `30s`.
+    - [x] Set prompt timeout to `None`.
+    - [x] Set max frame bytes to `4 * 1024 * 1024`.
+    - [x] Set session id prefix to `session`.
+    - [x] Set implementation name/title to framework defaults.
+  - [x] Add unit tests for default values.
+- [x] Implement framework errors in `src/error.rs`.
+  - [x] Add `AcpServerError` variants for I/O, JSON parse, protocol, unsupported version, unknown session, request timeout, transport closed, and provider errors.
+  - [x] Add `ProviderError` variants for invalid request, backend failure, cancellation, client request failure, and permission denied.
+  - [x] Implement `Display` and `std::error::Error`.
+  - [x] Implement helper methods to map errors to JSON-RPC error code and message.
+  - [x] Add unit tests for JSON-RPC code mapping.
+- [x] Implement ID generation in `src/ids.rs`.
+  - [x] Add monotonic request-id generator returning ACP `RequestId` or SDK-compatible value.
+  - [x] Add monotonic session-id generator using configured prefix.
+  - [x] Ensure generated IDs are process-local unique without global mutable state.
+  - [x] Add unit tests for monotonic request IDs.
+  - [x] Add unit tests for configured session-id prefix.
+- [x] Implement transport abstraction in `src/transport.rs`.
+  - [x] Define `AcpTransport` trait.
+    - [x] Add `read_message` async method returning `Option<JsonRpcMessage>`.
+    - [x] Add `write_message` async method.
+    - [x] Require `Send + 'static`.
+  - [x] Implement `StdioTransport`.
+    - [x] Read newline-delimited JSON-RPC messages from stdin.
+    - [x] Write one JSON-RPC message per line to stdout.
+    - [x] Flush stdout after every message.
+    - [x] Enforce `max_frame_bytes` before parsing.
+    - [x] Treat EOF as clean shutdown.
+  - [x] Implement test-only `MemoryTransport`.
+    - [x] Accept inbound messages from an in-memory queue.
+    - [x] Capture outbound messages in deterministic order.
+    - [x] Support injecting EOF.
+  - [x] Add tests for valid frame parse.
+  - [x] Add tests for oversized frame rejection.
+  - [x] Add tests for EOF returning clean shutdown.
+  - [x] Add tests for write preserving one-line JSON.
 
 #### Actionable criteria
 
-- [ ] `cargo fmt --check` passes after crate creation.
-- [ ] `cargo clippy --quiet -p ee-acp-agent-server --all-targets --all-features -- -D warnings` passes.
-- [ ] `cargo test --quiet -p ee-acp-agent-server transport` passes.
-- [ ] `cargo test --quiet -p ee-acp-agent-server config` passes.
-- [ ] `cargo test --quiet -p ee-acp-agent-server error` passes.
+- [x] `cargo fmt --check` passes after crate creation.
+- [x] `cargo clippy --quiet -p ee-acp-agent-server --all-targets --all-features -- -D warnings` passes.
+- [x] `cargo test --quiet -p ee-acp-agent-server transport` passes.
+- [x] `cargo test --quiet -p ee-acp-agent-server config` passes.
+- [x] `cargo test --quiet -p ee-acp-agent-server error` passes.
 
 ### Phase 2: Provider trait, server runtime, and initialize/session lifecycle
 
@@ -852,110 +852,110 @@ Rules:
 
 #### Work items
 
-- [ ] Implement provider API in `src/provider.rs`.
-  - [ ] Add `ProviderFuture<T>` boxed-future type alias.
-  - [ ] Add `AgentProvider` trait.
-    - [ ] Add `info(&self) -> Implementation`.
-    - [ ] Add `capabilities(&self) -> AgentCapabilities`.
-    - [ ] Add `new_session(ctx) -> ProviderFuture<Result<SessionInit, ProviderError>>`.
-    - [ ] Add `load_session(ctx) -> ProviderFuture<Result<SessionInit, ProviderError>>`.
-    - [ ] Add `prompt(ctx, sink, client, cancel) -> ProviderFuture<Result<PromptResult, ProviderError>>`.
-    - [ ] Add `cancel_session(session_id) -> ProviderFuture<Result<(), ProviderError>>`.
-    - [ ] Add `close_session(session_id) -> ProviderFuture<Result<(), ProviderError>>`.
-  - [ ] Add `NewSessionContext`.
-    - [ ] Include `cwd`.
-    - [ ] Include `additional_directories`.
-    - [ ] Include `mcp_servers`.
-    - [ ] Include initial ACP session metadata needed by providers.
-  - [ ] Add `LoadSessionContext`.
-    - [ ] Include `session_id`.
-    - [ ] Include `cwd`.
-    - [ ] Include `additional_directories`.
-    - [ ] Include `mcp_servers`.
-  - [ ] Add `PromptContext`.
-    - [ ] Include `session_id`.
-    - [ ] Include prompt content blocks.
-    - [ ] Include raw request metadata needed by providers.
-  - [ ] Add `SessionInit`.
-    - [ ] Include resolved `session_id`.
-    - [ ] Include optional title.
-    - [ ] Include available commands.
-    - [ ] Include modes/config options when supported by SDK types.
-  - [ ] Add `PromptResult`.
-    - [ ] Include ACP stop reason.
-    - [ ] Include optional usage metadata when SDK supports it.
-- [ ] Implement session store in `src/session.rs`.
-  - [ ] Add `ServerSession`.
-    - [ ] Store `SessionId`.
-    - [ ] Store optional absolute `cwd`.
-    - [ ] Store absolute `additional_directories`.
-    - [ ] Store advertised `mcp_servers`.
-    - [ ] Store provider-owned `serde_json::Value` metadata.
-  - [ ] Add `SessionStore`.
-    - [ ] Use `RwLock<BTreeMap<SessionId, ServerSession>>` or tokio equivalent.
-    - [ ] Add `insert_new`.
-    - [ ] Add `get`.
-    - [ ] Add `list`.
-    - [ ] Add `remove`.
-    - [ ] Add `contains`.
-  - [ ] Add unit tests for insert/get/list/remove.
-  - [ ] Add unit tests for duplicate session id rejection.
-- [ ] Implement server runtime shell in `src/server.rs`.
-  - [ ] Add `AcpAgentServer<P>` generic over `AgentProvider`.
-  - [ ] Add `new(provider, config)` constructor.
-  - [ ] Add `run_stdio` method using `StdioTransport`.
-  - [ ] Add `run_with_transport` method for tests.
-  - [ ] Start reader/dispatcher loop.
-  - [ ] Send every response through transport writer path.
-  - [ ] Fail all pending state on transport close.
-- [ ] Implement request dispatch in `src/dispatch.rs`.
-  - [ ] Route `initialize`.
-    - [ ] Parse `InitializeRequest` using SDK type.
-    - [ ] Reject protocol versions other than ACP v1.
-    - [ ] Return provider info and capabilities.
-    - [ ] Include framework implementation metadata from config.
-  - [ ] Route `session/new`.
-    - [ ] Parse SDK `NewSessionRequest`.
-    - [ ] Validate `cwd` is absolute.
-    - [ ] Validate every additional directory is absolute.
-    - [ ] Invoke provider `new_session`.
-    - [ ] Store returned session in `SessionStore`.
-    - [ ] Return SDK `NewSessionResponse` shape.
-  - [ ] Route `session/load`.
-    - [ ] Parse SDK `LoadSessionRequest`.
-    - [ ] Validate `cwd` is absolute.
-    - [ ] Invoke provider `load_session`.
-    - [ ] Store loaded session in `SessionStore`.
-    - [ ] Return SDK `LoadSessionResponse` shape.
-  - [ ] Route `session/list`.
-    - [ ] Return sessions from `SessionStore` in stable order.
-    - [ ] Treat cursors as opaque when SDK field exists.
-  - [ ] Route `session/close`.
-    - [ ] Cancel active prompt for session if present.
-    - [ ] Invoke provider `close_session`.
-    - [ ] Remove session from `SessionStore`.
-    - [ ] Return SDK close response shape.
-  - [ ] Route unknown methods.
-    - [ ] Return JSON-RPC method-not-found for requests.
-    - [ ] Ignore unknown notifications with tracing debug only.
-- [ ] Add integration tests in `crates/ee-acp-agent-server/tests/server_flows.rs`.
-  - [ ] Create fake provider returning deterministic info and capabilities.
-  - [ ] Test `initialize` with protocol version `1` succeeds.
-  - [ ] Test `initialize` with protocol version `0` fails closed.
-  - [ ] Test `initialize` with protocol version `2` fails closed.
-  - [ ] Test `session/new` stores session and returns provider session id.
-  - [ ] Test `session/new` rejects relative `cwd` before provider call.
-  - [ ] Test `session/load` stores session and returns loaded session id.
-  - [ ] Test `session/list` returns stable sessions.
-  - [ ] Test `session/close` removes session and calls provider close.
-  - [ ] Test unknown request returns method-not-found.
+- [x] Implement provider API in `src/provider.rs`.
+  - [x] Add `ProviderFuture<T>` boxed-future type alias.
+  - [x] Add `AgentProvider` trait.
+    - [x] Add `info(&self) -> Implementation`.
+    - [x] Add `capabilities(&self) -> AgentCapabilities`.
+    - [x] Add `new_session(ctx) -> ProviderFuture<Result<SessionInit, ProviderError>>`.
+    - [x] Add `load_session(ctx) -> ProviderFuture<Result<SessionInit, ProviderError>>`.
+    - [x] Add `prompt(ctx, sink, client, cancel) -> ProviderFuture<Result<PromptResult, ProviderError>>`.
+    - [x] Add `cancel_session(session_id) -> ProviderFuture<Result<(), ProviderError>>`.
+    - [x] Add `close_session(session_id) -> ProviderFuture<Result<(), ProviderError>>`.
+  - [x] Add `NewSessionContext`.
+    - [x] Include `cwd`.
+    - [x] Include `additional_directories`.
+    - [x] Include `mcp_servers`.
+    - [x] Include initial ACP session metadata needed by providers.
+  - [x] Add `LoadSessionContext`.
+    - [x] Include `session_id`.
+    - [x] Include `cwd`.
+    - [x] Include `additional_directories`.
+    - [x] Include `mcp_servers`.
+  - [x] Add `PromptContext`.
+    - [x] Include `session_id`.
+    - [x] Include prompt content blocks.
+    - [x] Include raw request metadata needed by providers.
+  - [x] Add `SessionInit`.
+    - [x] Include resolved `session_id`.
+    - [x] Include optional title.
+    - [x] Include available commands.
+    - [x] Include modes/config options when supported by SDK types.
+  - [x] Add `PromptResult`.
+    - [x] Include ACP stop reason.
+    - [x] Include optional usage metadata when SDK supports it.
+- [x] Implement session store in `src/session.rs`.
+  - [x] Add `ServerSession`.
+    - [x] Store `SessionId`.
+    - [x] Store optional absolute `cwd`.
+    - [x] Store absolute `additional_directories`.
+    - [x] Store advertised `mcp_servers`.
+    - [x] Store provider-owned `serde_json::Value` metadata.
+  - [x] Add `SessionStore`.
+    - [x] Use `RwLock<BTreeMap<SessionId, ServerSession>>` or tokio equivalent.  (keyed by session id string — SDK `SessionId` has no `Ord`)
+    - [x] Add `insert_new`.
+    - [x] Add `get`.
+    - [x] Add `list`.
+    - [x] Add `remove`.
+    - [x] Add `contains`.
+  - [x] Add unit tests for insert/get/list/remove.
+  - [x] Add unit tests for duplicate session id rejection.
+- [x] Implement server runtime shell in `src/server.rs`.
+  - [x] Add `AcpAgentServer<P>` generic over `AgentProvider`.
+  - [x] Add `new(provider, config)` constructor.
+  - [x] Add `run_stdio` method using `StdioTransport`.
+  - [x] Add `run_with_transport` method for tests.
+  - [x] Start reader/dispatcher loop.
+  - [x] Send every response through transport writer path.
+  - [x] Fail all pending state on transport close.
+- [x] Implement request dispatch in `src/dispatch.rs`.
+  - [x] Route `initialize`.
+    - [x] Parse `InitializeRequest` using SDK type.
+    - [x] Reject protocol versions other than ACP v1.
+    - [x] Return provider info and capabilities.
+    - [x] Include framework implementation metadata from config.
+  - [x] Route `session/new`.
+    - [x] Parse SDK `NewSessionRequest`.
+    - [x] Validate `cwd` is absolute.
+    - [x] Validate every additional directory is absolute.
+    - [x] Invoke provider `new_session`.
+    - [x] Store returned session in `SessionStore`.
+    - [x] Return SDK `NewSessionResponse` shape.
+  - [x] Route `session/load`.
+    - [x] Parse SDK `LoadSessionRequest`.
+    - [x] Validate `cwd` is absolute.
+    - [x] Invoke provider `load_session`.
+    - [x] Store loaded session in `SessionStore`.
+    - [x] Return SDK `LoadSessionResponse` shape.
+  - [x] Route `session/list`.
+    - [x] Return sessions from `SessionStore` in stable order.
+    - [x] Treat cursors as opaque when SDK field exists.
+  - [x] Route `session/close`.
+    - [x] Cancel active prompt for session if present.
+    - [x] Invoke provider `close_session`.
+    - [x] Remove session from `SessionStore`.
+    - [x] Return SDK close response shape.
+  - [x] Route unknown methods.
+    - [x] Return JSON-RPC method-not-found for requests.
+    - [x] Ignore unknown notifications with tracing debug only.
+- [x] Add integration tests in `crates/ee-acp-agent-server/tests/server_flows.rs`.
+  - [x] Create fake provider returning deterministic info and capabilities.
+  - [x] Test `initialize` with protocol version `1` succeeds.
+  - [x] Test `initialize` with protocol version `0` fails closed.
+  - [x] Test `initialize` with protocol version `2` fails closed.
+  - [x] Test `session/new` stores session and returns provider session id.
+  - [x] Test `session/new` rejects relative `cwd` before provider call.
+  - [x] Test `session/load` stores session and returns loaded session id.
+  - [x] Test `session/list` returns stable sessions.
+  - [x] Test `session/close` removes session and calls provider close.
+  - [x] Test unknown request returns method-not-found.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-acp-agent-server initialize` passes.
-- [ ] `cargo test --quiet -p ee-acp-agent-server session` passes.
-- [ ] `cargo test --quiet -p ee-acp-agent-server server_flows` passes.
-- [ ] Provider fake records prove malformed session requests do not invoke provider.
+- [x] `cargo test --quiet -p ee-acp-agent-server initialize` passes.
+- [x] `cargo test --quiet -p ee-acp-agent-server session` passes.
+- [x] `cargo test --quiet -p ee-acp-agent-server server_flows` passes.
+- [x] Provider fake records prove malformed session requests do not invoke provider.
 
 ### Phase 3: Prompt execution, typed updates, and cancellation
 
@@ -973,66 +973,66 @@ Rules:
 
 #### Work items
 
-- [ ] Implement typed update sink in `src/updates.rs`.
-  - [ ] Add `UpdateSink` bound to a session id and transport writer.
-  - [ ] Add `agent_message_chunk(message_id, text)` helper.
-    - [ ] Build SDK `SessionUpdate` value where available.
-    - [ ] Send `session/update` notification with correct `sessionId`.
-  - [ ] Add `agent_thought_chunk(message_id, text)` helper.
-  - [ ] Add `tool_call_pending(tool_call_id, title, kind)` helper.
-  - [ ] Add `tool_call_in_progress(tool_call_id, title, content)` helper.
-  - [ ] Add `tool_call_completed(tool_call_id, title, content)` helper.
-  - [ ] Add `tool_call_failed(tool_call_id, title, error)` helper.
-  - [ ] Add `plan_replace(entries)` helper.
-  - [ ] Add `available_commands_replace(commands)` helper.
-  - [ ] Add `session_info_update(info)` helper.
-  - [ ] Add `raw_update(update)` escape hatch using SDK type.
-  - [ ] Validate message ids and tool-call ids are non-empty.
-- [ ] Add active prompt tracking in `src/session.rs` or `src/server.rs`.
-  - [ ] Store `CancellationToken` or equivalent cancellation flag per active session prompt.
-  - [ ] Store prompt join handle per active session prompt.
-  - [ ] Add helper to start active prompt only when no prompt exists for session.
-  - [ ] Add helper to cancel active prompt.
-  - [ ] Add helper to cleanup active prompt after completion.
-- [ ] Route `session/prompt` in `src/dispatch.rs`.
-  - [ ] Parse SDK `SessionPromptRequest`.
-  - [ ] Reject unknown session before provider call.
-  - [ ] Reject same-session concurrent prompt with clear JSON-RPC error.
-  - [ ] Create `PromptContext` from request.
-  - [ ] Create `UpdateSink` for session.
-  - [ ] Create placeholder `ClientBridge` with no outbound methods until Phase 4.
-  - [ ] Await provider prompt completion.
-  - [ ] Return SDK prompt response with stop reason.
-  - [ ] Map provider cancellation to a deterministic prompt result or JSON-RPC cancellation error according to SDK response support.
-- [ ] Route `session/cancel` in `src/dispatch.rs`.
-  - [ ] Parse SDK cancel request or notification shape.
-  - [ ] Cancel active prompt for the session.
-  - [ ] Invoke provider `cancel_session`.
-  - [ ] Return success for request form.
-  - [ ] Do not error when cancel targets no active prompt.
-- [ ] Make `session/close` cancel active prompt.
-  - [ ] Trigger active prompt cancellation before provider close.
-  - [ ] Await prompt cleanup with bounded timeout.
-  - [ ] Remove prompt state before removing session.
-- [ ] Add update tests.
-  - [ ] Test message chunk emits `session/update` before prompt response.
-  - [ ] Test thought chunk emits expected ACP update name.
-  - [ ] Test tool-call completed helper includes title/status/content.
-  - [ ] Test plan replace helper emits complete replacement update.
-  - [ ] Test update sink rejects unknown session.
-- [ ] Add cancellation tests in `tests/cancellation.rs`.
-  - [ ] Test `session/cancel` triggers provider cancellation token.
-  - [ ] Test cancelled prompt eventually removes active prompt state.
-  - [ ] Test `session/close` cancels active prompt.
-  - [ ] Test second same-session prompt is rejected while first prompt is active.
-  - [ ] Test prompts in two sessions run concurrently.
+- [x] Implement typed update sink in `src/updates.rs`.
+  - [x] Add `UpdateSink` bound to a session id and transport writer.
+  - [x] Add `agent_message_chunk(message_id, text)` helper.
+    - [x] Build SDK `SessionUpdate` value where available.
+    - [x] Send `session/update` notification with correct `sessionId`.
+  - [x] Add `agent_thought_chunk(message_id, text)` helper.
+  - [x] Add `tool_call_pending(tool_call_id, title, kind)` helper.
+  - [x] Add `tool_call_in_progress(tool_call_id, title, content)` helper.
+  - [x] Add `tool_call_completed(tool_call_id, title, content)` helper.
+  - [x] Add `tool_call_failed(tool_call_id, title, error)` helper.
+  - [x] Add `plan_replace(entries)` helper.
+  - [x] Add `available_commands_replace(commands)` helper.
+  - [x] Add `session_info_update(info)` helper.
+  - [x] Add `raw_update(update)` escape hatch using SDK type.
+  - [x] Validate message ids and tool-call ids are non-empty.
+- [x] Add active prompt tracking in `src/session.rs` or `src/server.rs`.
+  - [x] Store `CancellationToken` or equivalent cancellation flag per active session prompt.  (watch channel sender)
+  - [x] Store prompt join handle per active session prompt.
+  - [x] Add helper to start active prompt only when no prompt exists for session.
+  - [x] Add helper to cancel active prompt.
+  - [x] Add helper to cleanup active prompt after completion.
+- [x] Route `session/prompt` in `src/dispatch.rs`.
+  - [x] Parse SDK `SessionPromptRequest`.
+  - [x] Reject unknown session before provider call.
+  - [x] Reject same-session concurrent prompt with clear JSON-RPC error.
+  - [x] Create `PromptContext` from request.
+  - [x] Create `UpdateSink` for session.
+  - [x] Create placeholder `ClientBridge` with no outbound methods until Phase 4.
+  - [x] Await provider prompt completion.
+  - [x] Return SDK prompt response with stop reason.
+  - [x] Map provider cancellation to a deterministic prompt result or JSON-RPC cancellation error according to SDK response support.
+- [x] Route `session/cancel` in `src/dispatch.rs`.
+  - [x] Parse SDK cancel request or notification shape.
+  - [x] Cancel active prompt for the session.
+  - [x] Invoke provider `cancel_session`.
+  - [x] Return success for request form.
+  - [x] Do not error when cancel targets no active prompt.
+- [x] Make `session/close` cancel active prompt.
+  - [x] Trigger active prompt cancellation before provider close.
+  - [x] Await prompt cleanup with bounded timeout.
+  - [x] Remove prompt state before removing session.
+- [x] Add update tests.
+  - [x] Test message chunk emits `session/update` before prompt response.
+  - [x] Test thought chunk emits expected ACP update name.
+  - [x] Test tool-call completed helper includes title/status/content.
+  - [x] Test plan replace helper emits complete replacement update.
+  - [x] Test update sink rejects unknown session.
+- [x] Add cancellation tests in `tests/cancellation.rs`.
+  - [x] Test `session/cancel` triggers provider cancellation token.
+  - [x] Test cancelled prompt eventually removes active prompt state.
+  - [x] Test `session/close` cancels active prompt.
+  - [x] Test second same-session prompt is rejected while first prompt is active.
+  - [x] Test prompts in two sessions run concurrently.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-acp-agent-server prompt` passes.
-- [ ] `cargo test --quiet -p ee-acp-agent-server updates` passes.
-- [ ] `cargo test --quiet -p ee-acp-agent-server cancellation` passes.
-- [ ] Tests prove same-session prompt state is cleaned after success, provider error, and cancellation.
+- [x] `cargo test --quiet -p ee-acp-agent-server prompt` passes.
+- [x] `cargo test --quiet -p ee-acp-agent-server updates` passes.
+- [x] `cargo test --quiet -p ee-acp-agent-server cancellation` passes.
+- [x] Tests prove same-session prompt state is cleaned after success, provider error, and cancellation.
 
 ### Phase 4: Outbound ACP client request bridge
 
@@ -1050,60 +1050,60 @@ Rules:
 
 #### Work items
 
-- [ ] Implement pending request manager in `src/client.rs`.
-  - [ ] Add `ClientBridge` cloneable handle.
-  - [ ] Add pending map keyed by request id.
-  - [ ] Add `send_request(method, params)` internal helper.
-    - [ ] Allocate request id.
-    - [ ] Insert pending oneshot sender before writing request.
-    - [ ] Write JSON-RPC request to transport.
-    - [ ] Await response with `request_timeout`.
-    - [ ] Remove pending entry on success, timeout, cancellation, and write failure.
-  - [ ] Add `handle_response(response)`.
-    - [ ] Resolve matching pending request.
-    - [ ] Ignore unknown response id with tracing debug.
-    - [ ] Map JSON-RPC error response to `ProviderError::ClientRequestFailed` or permission denied where applicable.
-  - [ ] Add `fail_all_pending(reason)`.
-    - [ ] Resolve every pending request with transport-closed error.
-- [ ] Add typed `ClientBridge` methods.
-  - [ ] Implement `read_text_file(ReadTextFileRequest) -> ReadTextFileResponse`.
-    - [ ] Validate path absolute.
-    - [ ] Send `fs/read_text_file`.
-    - [ ] Decode SDK response type.
-  - [ ] Implement `write_text_file(WriteTextFileRequest) -> WriteTextFileResponse`.
-    - [ ] Validate path absolute.
-    - [ ] Send `fs/write_text_file`.
-  - [ ] Implement `create_terminal(CreateTerminalRequest) -> CreateTerminalResponse`.
-    - [ ] Validate `cwd` absolute when present.
-    - [ ] Send `terminal/create`.
-  - [ ] Implement `terminal_output(TerminalOutputRequest) -> TerminalOutputResponse`.
-  - [ ] Implement `wait_for_terminal_exit(WaitForTerminalExitRequest) -> WaitForTerminalExitResponse`.
-  - [ ] Implement `kill_terminal(KillTerminalRequest) -> KillTerminalResponse`.
-  - [ ] Implement `release_terminal(ReleaseTerminalRequest) -> ReleaseTerminalResponse`.
-  - [ ] Implement `create_elicitation(CreateElicitationRequest) -> CreateElicitationResponse`.
-- [ ] Route inbound JSON-RPC responses to `ClientBridge`.
-  - [ ] Distinguish inbound requests from responses in server reader loop.
-  - [ ] Forward response envelopes to pending request manager.
-  - [ ] Keep request dispatch path unchanged for inbound requests.
-- [ ] Pass real `ClientBridge` to provider prompt.
-  - [ ] Replace Phase 3 placeholder with live bridge handle.
-  - [ ] Ensure prompt cancellation cancels bridge waits owned by that prompt.
-- [ ] Add client bridge tests in `tests/client_requests.rs`.
-  - [ ] Test provider calls `read_text_file` and framework emits `fs/read_text_file` request.
-  - [ ] Test matching response returns content to provider.
-  - [ ] Test JSON-RPC error response maps to provider client request failure.
-  - [ ] Test unknown response id is ignored.
-  - [ ] Test timeout removes pending entry.
-  - [ ] Test transport close fails pending entries.
-  - [ ] Test relative outbound read path fails before request is written.
-  - [ ] Test terminal create rejects relative cwd.
+- [x] Implement pending request manager in `src/client.rs`.
+  - [x] Add `ClientBridge` cloneable handle.
+  - [x] Add pending map keyed by request id.
+  - [x] Add `send_request(method, params)` internal helper.
+    - [x] Allocate request id.
+    - [x] Insert pending oneshot sender before writing request.
+    - [x] Write JSON-RPC request to transport.
+    - [x] Await response with `request_timeout`.
+    - [x] Remove pending entry on success, timeout, cancellation, and write failure.
+  - [x] Add `handle_response(response)`.
+    - [x] Resolve matching pending request.
+    - [x] Ignore unknown response id with tracing debug.
+    - [x] Map JSON-RPC error response to `ProviderError::ClientRequestFailed` or permission denied where applicable.
+  - [x] Add `fail_all_pending(reason)`.
+    - [x] Resolve every pending request with transport-closed error.
+- [x] Add typed `ClientBridge` methods.
+  - [x] Implement `read_text_file(ReadTextFileRequest) -> ReadTextFileResponse`.
+    - [x] Validate path absolute.
+    - [x] Send `fs/read_text_file`.
+    - [x] Decode SDK response type.
+  - [x] Implement `write_text_file(WriteTextFileRequest) -> WriteTextFileResponse`.
+    - [x] Validate path absolute.
+    - [x] Send `fs/write_text_file`.
+  - [x] Implement `create_terminal(CreateTerminalRequest) -> CreateTerminalResponse`.
+    - [x] Validate `cwd` absolute when present.
+    - [x] Send `terminal/create`.
+  - [x] Implement `terminal_output(TerminalOutputRequest) -> TerminalOutputResponse`.
+  - [x] Implement `wait_for_terminal_exit(WaitForTerminalExitRequest) -> WaitForTerminalExitResponse`.
+  - [x] Implement `kill_terminal(KillTerminalRequest) -> KillTerminalResponse`.
+  - [x] Implement `release_terminal(ReleaseTerminalRequest) -> ReleaseTerminalResponse`.
+  - [x] Implement `create_elicitation(CreateElicitationRequest) -> CreateElicitationResponse`.
+- [x] Route inbound JSON-RPC responses to `ClientBridge`.
+  - [x] Distinguish inbound requests from responses in server reader loop.
+  - [x] Forward response envelopes to pending request manager.
+  - [x] Keep request dispatch path unchanged for inbound requests.
+- [x] Pass real `ClientBridge` to provider prompt.
+  - [x] Replace Phase 3 placeholder with live bridge handle.
+  - [x] Ensure prompt cancellation cancels bridge waits owned by that prompt.
+- [x] Add client bridge tests in `tests/client_requests.rs`.
+  - [x] Test provider calls `read_text_file` and framework emits `fs/read_text_file` request.
+  - [x] Test matching response returns content to provider.
+  - [x] Test JSON-RPC error response maps to provider client request failure.
+  - [x] Test unknown response id is ignored.
+  - [x] Test timeout removes pending entry.
+  - [x] Test transport close fails pending entries.
+  - [x] Test relative outbound read path fails before request is written.
+  - [x] Test terminal create rejects relative cwd.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-acp-agent-server client` passes.
-- [ ] `cargo test --quiet -p ee-acp-agent-server client_requests` passes.
-- [ ] Tests prove no pending requests remain after timeout and transport close.
-- [ ] Tests prove relative outbound file paths do not write JSON-RPC requests.
+- [x] `cargo test --quiet -p ee-acp-agent-server client` passes.
+- [x] `cargo test --quiet -p ee-acp-agent-server client_requests` passes.
+- [x] Tests prove no pending requests remain after timeout and transport close.
+- [x] Tests prove relative outbound file paths do not write JSON-RPC requests.
 
 ### Phase 5: Protocol validation, hardening, and conformance coverage
 
@@ -1121,48 +1121,48 @@ Rules:
 
 #### Work items
 
-- [ ] Implement validation helpers in `src/validate.rs`.
-  - [ ] Add `validate_protocol_version_v1`.
-  - [ ] Add `validate_absolute_path`.
-  - [ ] Add `validate_absolute_paths`.
-  - [ ] Add `validate_session_id`.
-  - [ ] Add `validate_message_id`.
-  - [ ] Add `validate_tool_call_id`.
-  - [ ] Add `validate_frame_len`.
-  - [ ] Add tests for every validation helper.
-- [ ] Harden dispatch error handling.
-  - [ ] Convert JSON parse errors to JSON-RPC parse error response when possible.
-  - [ ] Convert invalid params to `-32602`.
-  - [ ] Convert unknown methods to `-32601`.
-  - [ ] Convert provider backend errors to `-32603`.
-  - [ ] Convert unknown session to deterministic protocol error.
-  - [ ] Add tests for every error mapping.
-- [ ] Harden provider result handling.
-  - [ ] Reject provider-returned empty session ids.
-  - [ ] Reject provider-returned duplicate session ids.
-  - [ ] Reject provider attempts to emit update for removed session.
-  - [ ] Map provider cancellation consistently.
-  - [ ] Add tests for rejected provider result cases.
-- [ ] Harden transport lifecycle.
-  - [ ] Fail pending client requests on EOF.
-  - [ ] Cancel active prompts on EOF.
-  - [ ] Close writer path after reader shutdown.
-  - [ ] Add tests for EOF during active prompt.
-  - [ ] Add tests for EOF during outbound client request.
-- [ ] Add conformance fixture tests.
-  - [ ] Add initialize request fixture under `tests/fixtures`.
-  - [ ] Add session new request fixture.
-  - [ ] Add session prompt request fixture.
-  - [ ] Add session cancel request fixture.
-  - [ ] Add fs read response fixture.
-  - [ ] Test fixture round-trips with SDK types.
+- [x] Implement validation helpers in `src/validate.rs`.
+  - [x] Add `validate_protocol_version_v1`.
+  - [x] Add `validate_absolute_path`.
+  - [x] Add `validate_absolute_paths`.
+  - [x] Add `validate_session_id`.
+  - [x] Add `validate_message_id`.
+  - [x] Add `validate_tool_call_id`.
+  - [x] Add `validate_frame_len`.
+  - [x] Add tests for every validation helper.
+- [x] Harden dispatch error handling.
+  - [x] Convert JSON parse errors to JSON-RPC parse error response when possible.
+  - [x] Convert invalid params to `-32602`.
+  - [x] Convert unknown methods to `-32601`.
+  - [x] Convert provider backend errors to `-32603`.
+  - [x] Convert unknown session to deterministic protocol error.
+  - [x] Add tests for every error mapping.
+- [x] Harden provider result handling.
+  - [x] Reject provider-returned empty session ids.
+  - [x] Reject provider-returned duplicate session ids.
+  - [x] Reject provider attempts to emit update for removed session.
+  - [x] Map provider cancellation consistently.
+  - [x] Add tests for rejected provider result cases.
+- [x] Harden transport lifecycle.
+  - [x] Fail pending client requests on EOF.
+  - [x] Cancel active prompts on EOF.
+  - [x] Close writer path after reader shutdown.
+  - [x] Add tests for EOF during active prompt.
+  - [x] Add tests for EOF during outbound client request.
+- [x] Add conformance fixture tests.
+  - [x] Add initialize request fixture under `tests/fixtures`.
+  - [x] Add session new request fixture.
+  - [x] Add session prompt request fixture.
+  - [x] Add session cancel request fixture.
+  - [x] Add fs read response fixture.
+  - [x] Test fixture round-trips with SDK types.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-acp-agent-server validate` passes.
-- [ ] `cargo test --quiet -p ee-acp-agent-server conformance` passes.
-- [ ] `cargo test --quiet -p ee-acp-agent-server` passes.
-- [ ] `cargo clippy --quiet -p ee-acp-agent-server --all-targets --all-features -- -D warnings` passes.
+- [x] `cargo test --quiet -p ee-acp-agent-server validate` passes.
+- [x] `cargo test --quiet -p ee-acp-agent-server conformance` passes.
+- [x] `cargo test --quiet -p ee-acp-agent-server` passes.
+- [x] `cargo clippy --quiet -p ee-acp-agent-server --all-targets --all-features -- -D warnings` passes.
 
 ### Phase 6: Refactor `ee-openrouter-agent` onto framework
 
@@ -1180,80 +1180,80 @@ Rules:
 
 #### Work items
 
-- [ ] Update `crates/ee-openrouter-agent/Cargo.toml`.
-  - [ ] Add dependency on `ee-acp-agent-server`.
-  - [ ] Add dependency on `tokio` if binary runtime needs it.
-  - [ ] Remove direct protocol-loop-only dependencies that become unused.
-- [ ] Split OpenRouter modules.
-  - [ ] Move CLI/env config code to `src/config.rs`.
-    - [ ] Keep `OPENROUTER_MODEL`.
-    - [ ] Keep `OPENROUTER_API_URL`.
-    - [ ] Keep `OPENROUTER_SITE_URL`.
-    - [ ] Keep `OPENROUTER_APP_TITLE`.
-    - [ ] Keep `OPENROUTER_TIMEOUT_MS`.
-    - [ ] Keep `OPENROUTER_REASONING_EFFORT`.
-    - [ ] Keep `OPENROUTER_SYSTEM_PROMPT`.
-    - [ ] Keep `OPENROUTER_API_KEY` lookup.
-  - [ ] Move dotenv parser to `src/dotenv.rs`.
-    - [ ] Preserve quote handling.
-    - [ ] Preserve `export ` prefix support.
-    - [ ] Preserve invalid-name skipping.
-  - [ ] Move HTTP request/response mapping to `src/openrouter.rs`.
-    - [ ] Keep request body model/messages/tools/tool_choice shape.
-    - [ ] Keep reasoning effort insertion.
-    - [ ] Keep OpenRouter HTTP error extraction.
-  - [ ] Move provider/tool behavior to `src/provider.rs` and `src/tools.rs`.
-- [ ] Implement `OpenRouterProvider`.
-  - [ ] Store config and HTTP client.
-  - [ ] Store per-session message history behind mutex/RwLock.
-  - [ ] Implement `info` returning `ee-openrouter-agent` implementation metadata.
-  - [ ] Implement `capabilities` for supported prompt/session behavior.
-  - [ ] Implement `new_session`.
-    - [ ] Store session cwd.
-    - [ ] Initialize empty message history.
-  - [ ] Implement `load_session` as unsupported provider error matching previous behavior.
-  - [ ] Implement `prompt`.
-    - [ ] Extract text prompt blocks.
-    - [ ] Return invalid request when prompt contains no text.
-    - [ ] Return backend error when API key missing.
-    - [ ] Send OpenRouter request with existing message history.
-    - [ ] Emit reasoning through `UpdateSink::agent_thought_chunk`.
-    - [ ] Emit answer through `UpdateSink::agent_message_chunk`.
-    - [ ] Return end-turn stop reason.
-  - [ ] Implement bounded tool loop.
-    - [ ] Keep max tool rounds at `6`.
-    - [ ] Support `tool_read_file` and `read_file` aliases.
-    - [ ] Resolve relative paths against session cwd.
-    - [ ] Call `ClientBridge::read_text_file`.
-    - [ ] Emit tool-call in-progress and completed/failed updates.
-    - [ ] Append tool results to OpenRouter messages.
-  - [ ] Implement `cancel_session` by marking active work cancelled if needed.
-  - [ ] Implement `close_session` by removing stored history.
-- [ ] Replace `src/main.rs` protocol loop.
-  - [ ] Parse args.
-  - [ ] Load `.env` from current directory.
-  - [ ] Build `OpenRouterProvider`.
-  - [ ] Run `AcpAgentServer::new(provider, config).run_stdio().await`.
-  - [ ] Print only concise process-level errors to stderr.
-- [ ] Preserve and update tests.
-  - [ ] Keep prompt text extraction test.
-  - [ ] Keep OpenRouter string answer extraction test.
-  - [ ] Keep OpenRouter reasoning extraction test.
-  - [ ] Keep reasoning effort request body test.
-  - [ ] Keep tool-call argument extraction test.
-  - [ ] Keep prompt-without-api-key JSON-RPC/framework error test.
-  - [ ] Convert read-file tool test to assert framework emits `fs/read_text_file`.
-  - [ ] Add test that provider emits thought update through framework.
-  - [ ] Add test that provider emits answer update through framework.
-  - [ ] Add test that tool loop max rounds maps to provider backend error.
-  - [ ] Add test that close session removes message history.
+- [x] Update `crates/ee-openrouter-agent/Cargo.toml`.
+  - [x] Add dependency on `ee-acp-agent-server`.
+  - [x] Add dependency on `tokio` if binary runtime needs it.
+  - [x] Remove direct protocol-loop-only dependencies that become unused.
+- [x] Split OpenRouter modules.
+  - [x] Move CLI/env config code to `src/config.rs`.
+    - [x] Keep `OPENROUTER_MODEL`.
+    - [x] Keep `OPENROUTER_API_URL`.
+    - [x] Keep `OPENROUTER_SITE_URL`.
+    - [x] Keep `OPENROUTER_APP_TITLE`.
+    - [x] Keep `OPENROUTER_TIMEOUT_MS`.
+    - [x] Keep `OPENROUTER_REASONING_EFFORT`.
+    - [x] Keep `OPENROUTER_SYSTEM_PROMPT`.
+    - [x] Keep `OPENROUTER_API_KEY` lookup.
+  - [x] Move dotenv parser to `src/dotenv.rs`.
+    - [x] Preserve quote handling.
+    - [x] Preserve `export ` prefix support.
+    - [x] Preserve invalid-name skipping.
+  - [x] Move HTTP request/response mapping to `src/openrouter.rs`.
+    - [x] Keep request body model/messages/tools/tool_choice shape.
+    - [x] Keep reasoning effort insertion.
+    - [x] Keep OpenRouter HTTP error extraction.
+  - [x] Move provider/tool behavior to `src/provider.rs` and `src/tools.rs`.
+- [x] Implement `OpenRouterProvider`.
+  - [x] Store config and HTTP client.
+  - [x] Store per-session message history behind mutex/RwLock.
+  - [x] Implement `info` returning `ee-openrouter-agent` implementation metadata.
+  - [x] Implement `capabilities` for supported prompt/session behavior.
+  - [x] Implement `new_session`.
+    - [x] Store session cwd.
+    - [x] Initialize empty message history.
+  - [x] Implement `load_session` as unsupported provider error matching previous behavior.
+  - [x] Implement `prompt`.
+    - [x] Extract text prompt blocks.
+    - [x] Return invalid request when prompt contains no text.
+    - [x] Return backend error when API key missing.
+    - [x] Send OpenRouter request with existing message history.
+    - [x] Emit reasoning through `UpdateSink::agent_thought_chunk`.
+    - [x] Emit answer through `UpdateSink::agent_message_chunk`.
+    - [x] Return end-turn stop reason.
+  - [x] Implement bounded tool loop.
+    - [x] Keep max tool rounds at `6`.
+    - [x] Support `tool_read_file` and `read_file` aliases.
+    - [x] Resolve relative paths against session cwd.
+    - [x] Call `ClientBridge::read_text_file`.
+    - [x] Emit tool-call in-progress and completed/failed updates.
+    - [x] Append tool results to OpenRouter messages.
+  - [x] Implement `cancel_session` by marking active work cancelled if needed.
+  - [x] Implement `close_session` by removing stored history.
+- [x] Replace `src/main.rs` protocol loop.
+  - [x] Parse args.
+  - [x] Load `.env` from current directory.
+  - [x] Build `OpenRouterProvider`.
+  - [x] Run `AcpAgentServer::new(provider, config).run_stdio().await`.
+  - [x] Print only concise process-level errors to stderr.
+- [x] Preserve and update tests.
+  - [x] Keep prompt text extraction test.
+  - [x] Keep OpenRouter string answer extraction test.
+  - [x] Keep OpenRouter reasoning extraction test.
+  - [x] Keep reasoning effort request body test.
+  - [x] Keep tool-call argument extraction test.
+  - [x] Keep prompt-without-api-key JSON-RPC/framework error test.
+  - [x] Convert read-file tool test to assert framework emits `fs/read_text_file`.
+  - [x] Add test that provider emits thought update through framework.
+  - [x] Add test that provider emits answer update through framework.
+  - [x] Add test that tool loop max rounds maps to provider backend error.
+  - [x] Add test that close session removes message history.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-openrouter-agent` passes.
-- [ ] `cargo clippy --quiet -p ee-openrouter-agent --all-targets --all-features -- -D warnings` passes.
-- [ ] OpenRouter tests prove no handrolled stdin/stdout JSON-RPC loop remains in provider code.
-- [ ] OpenRouter read-file test proves file access goes through `ClientBridge`.
+- [x] `cargo test --quiet -p ee-openrouter-agent` passes.
+- [x] `cargo clippy --quiet -p ee-openrouter-agent --all-targets --all-features -- -D warnings` passes.
+- [x] OpenRouter tests prove no handrolled stdin/stdout JSON-RPC loop remains in provider code.
+- [x] OpenRouter read-file test proves file access goes through `ClientBridge`.
 
 ### Phase 7: Echo example and compile-tested provider documentation
 
@@ -1270,34 +1270,34 @@ Rules:
 
 #### Work items
 
-- [ ] Add `crates/ee-acp-agent-server/examples/echo_agent.rs`.
-  - [ ] Implement `EchoProvider` using `AgentProvider`.
-  - [ ] Return deterministic implementation metadata.
-  - [ ] Create sessions with framework-generated or provider-accepted ids.
-  - [ ] On prompt, concatenate text blocks.
-  - [ ] Emit echoed text through `UpdateSink::agent_message_chunk`.
-  - [ ] Return end-turn prompt result.
-  - [ ] Support cancellation by checking cancellation token before emitting final update.
-- [ ] Add example tests.
-  - [ ] Add integration test that runs echo provider with memory transport.
-  - [ ] Send `initialize` and assert ACP v1 response.
-  - [ ] Send `session/new` and assert session id exists.
-  - [ ] Send `session/prompt` and assert `session/update` contains echoed text.
-  - [ ] Send `session/cancel` during blocked echo prompt and assert cancellation cleanup.
-- [ ] Add crate docs with compile-tested example in `src/lib.rs`.
-  - [ ] Show minimal provider struct.
-  - [ ] Show `AgentProvider` implementation skeleton.
-  - [ ] Show `AcpAgentServer::new(provider, config)` usage.
-  - [ ] Mark non-runnable stdio example with `no_run` if needed.
-- [ ] Add README validation tests where practical.
-  - [ ] Keep code snippets mirrored in doc tests or examples.
-  - [ ] Avoid untested command snippets as checklist work.
+- [x] Add `crates/ee-acp-agent-server/examples/echo_agent.rs`.
+  - [x] Implement `EchoProvider` using `AgentProvider`.
+  - [x] Return deterministic implementation metadata.
+  - [x] Create sessions with framework-generated or provider-accepted ids.
+  - [x] On prompt, concatenate text blocks.
+  - [x] Emit echoed text through `UpdateSink::agent_message_chunk`.
+  - [x] Return end-turn prompt result.
+  - [x] Support cancellation by checking cancellation token before emitting final update.
+- [x] Add example tests.
+  - [x] Add integration test that runs echo provider with memory transport.
+  - [x] Send `initialize` and assert ACP v1 response.
+  - [x] Send `session/new` and assert session id exists.
+  - [x] Send `session/prompt` and assert `session/update` contains echoed text.
+  - [x] Send `session/cancel` during blocked echo prompt and assert cancellation cleanup.
+- [x] Add crate docs with compile-tested example in `src/lib.rs`.
+  - [x] Show minimal provider struct.
+  - [x] Show `AgentProvider` implementation skeleton.
+  - [x] Show `AcpAgentServer::new(provider, config)` usage.
+  - [x] Mark non-runnable stdio example with `no_run` if needed.
+- [x] Add README validation tests where practical.
+  - [x] Keep code snippets mirrored in doc tests or examples.
+  - [x] Avoid untested command snippets as checklist work.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-acp-agent-server --examples` passes.
-- [ ] `cargo test --quiet -p ee-acp-agent-server --doc` passes.
-- [ ] Echo example integration test proves initialize/new/prompt/update flow works without network.
+- [x] `cargo test --quiet -p ee-acp-agent-server --examples` passes.
+- [x] `cargo test --quiet -p ee-acp-agent-server --doc` passes.
+- [x] Echo example integration test proves initialize/new/prompt/update flow works without network.
 
 ### Phase 8: Workspace validation and integration guardrails
 
@@ -1314,37 +1314,37 @@ Rules:
 
 #### Work items
 
-- [ ] Add cross-crate compile checks.
-  - [ ] Ensure `ee-acp-agent-server` depends on `ee-agent-protocol` but not `ee-agent-host`.
-  - [ ] Add a unit test or crate-level compile assertion proving public API exposes SDK-backed `SessionId`, `SessionUpdate`, and request/response types.
-  - [ ] Add a test ensuring framework-supported ACP version equals `ee_agent_protocol::SUPPORTED_ACP_VERSION`.
-- [ ] Add compatibility tests with existing host fake transport where feasible.
-  - [ ] Start framework fake provider over memory/pipe transport.
-  - [ ] Connect `ee-agent-host` fake/client side if existing test utilities support injected transport.
-  - [ ] Assert host can initialize, create session, prompt, receive update, and close session.
-  - [ ] Keep this test behind existing `test-utils` feature if needed.
-- [ ] Add public API hygiene checks.
-  - [ ] Keep provider trait methods documented.
-  - [ ] Keep exported structs non-exhaustive where future fields are likely.
-  - [ ] Prefer `pub(crate)` for internal runtime structs.
-  - [ ] Add compile-fail or privacy tests only if existing project pattern supports them.
-- [ ] Run focused validation commands.
-  - [ ] Validate format.
-  - [ ] Validate clippy for `ee-acp-agent-server`.
-  - [ ] Validate clippy for `ee-openrouter-agent`.
-  - [ ] Validate framework tests.
-  - [ ] Validate OpenRouter tests.
-  - [ ] Validate protocol tests touched by public type usage.
+- [x] Add cross-crate compile checks.
+  - [x] Ensure `ee-acp-agent-server` depends on `ee-agent-protocol` but not `ee-agent-host`.
+  - [x] Add a unit test or crate-level compile assertion proving public API exposes SDK-backed `SessionId`, `SessionUpdate`, and request/response types.
+  - [x] Add a test ensuring framework-supported ACP version equals `ee_agent_protocol::SUPPORTED_ACP_VERSION`.
+- [x] Add compatibility tests with existing host fake transport where feasible.
+  - [x] Start framework fake provider over memory/pipe transport.
+  - [x] Connect `ee-agent-host` fake/client side if existing test utilities support injected transport.
+  - [x] Assert host can initialize, create session, prompt, receive update, and close session.
+  - [x] Keep this test behind existing `test-utils` feature if needed.
+- [x] Add public API hygiene checks.
+  - [x] Keep provider trait methods documented.
+  - [x] Keep exported structs non-exhaustive where future fields are likely.
+  - [x] Prefer `pub(crate)` for internal runtime structs.
+  - [x] Add compile-fail or privacy tests only if existing project pattern supports them.
+- [x] Run focused validation commands.
+  - [x] Validate format.
+  - [x] Validate clippy for `ee-acp-agent-server`.
+  - [x] Validate clippy for `ee-openrouter-agent`.
+  - [x] Validate framework tests.
+  - [x] Validate OpenRouter tests.
+  - [x] Validate protocol tests touched by public type usage.
 
 #### Actionable criteria
 
-- [ ] `cargo fmt --check` passes.
-- [ ] `cargo clippy --quiet -p ee-acp-agent-server --all-targets --all-features -- -D warnings` passes.
-- [ ] `cargo clippy --quiet -p ee-openrouter-agent --all-targets --all-features -- -D warnings` passes.
-- [ ] `cargo test --quiet -p ee-acp-agent-server` passes.
-- [ ] `cargo test --quiet -p ee-openrouter-agent` passes.
-- [ ] `cargo test --quiet -p ee-agent-protocol` passes when protocol facade exports changed.
-- [ ] `./scripts/test-workspace-summary.sh` passes after focused crate validation.
+- [x] `cargo fmt --check` passes.
+- [x] `cargo clippy --quiet -p ee-acp-agent-server --all-targets --all-features -- -D warnings` passes.
+- [x] `cargo clippy --quiet -p ee-openrouter-agent --all-targets --all-features -- -D warnings` passes.
+- [x] `cargo test --quiet -p ee-acp-agent-server` passes.
+- [x] `cargo test --quiet -p ee-openrouter-agent` passes.
+- [x] `cargo test --quiet -p ee-agent-protocol` passes when protocol facade exports changed.
+- [x] `./scripts/test-workspace-summary.sh` passes after focused crate validation.
 
 ## Future General-Purpose Agent Orchestrator Framework
 
@@ -1368,61 +1368,61 @@ Rules:
 
 #### Work items
 
-- [ ] Add `crates/ee-agent-orchestrator` to workspace members in `ee/Cargo.toml`.
-  - [ ] Create `crates/ee-agent-orchestrator/Cargo.toml`.
-    - [ ] Set package name to `ee-agent-orchestrator`.
-    - [ ] Use workspace `edition`, `rust-version`, `license`, and author conventions.
-    - [ ] Add dependencies on `ee-acp-agent-server`, `ee-agent-protocol`, `serde`, `serde_json`, `tokio`, `futures`, and `tracing` from workspace dependencies.
-    - [ ] Add dev-dependencies needed only for deterministic async tests.
-  - [ ] Create `crates/ee-agent-orchestrator/src/lib.rs`.
-    - [ ] Export `config`, `error`, `runtime`, `loop_engine`, `model`, `tools`, `tasks`, `subagents`, `memory`, `budget`, `policy`, `events`, and `test_support` modules.
-    - [ ] Re-export primary public types.
-    - [ ] Add crate docs stating this crate is optional server-side orchestration above ACP.
-- [ ] Implement orchestrator config in `src/config.rs`.
-  - [ ] Add `OrchestratorConfig`.
-    - [ ] Include `max_loop_iterations`.
-    - [ ] Include `max_tool_calls_per_turn`.
-    - [ ] Include `max_subagent_depth`.
-    - [ ] Include `max_parallel_subagents`.
-    - [ ] Include `turn_timeout`.
-    - [ ] Include `tool_timeout`.
-    - [ ] Include `subagent_timeout`.
-    - [ ] Include `memory_limit_bytes`.
-  - [ ] Implement safe defaults.
-    - [ ] Set max loop iterations to `16`.
-    - [ ] Set max tool calls per turn to `32`.
-    - [ ] Set max subagent depth to `2`.
-    - [ ] Set max parallel subagents to `4`.
-    - [ ] Set turn timeout to `300s`.
-    - [ ] Set tool timeout to `120s`.
-    - [ ] Set subagent timeout to `300s`.
-    - [ ] Set memory limit bytes to `1 MiB`.
-  - [ ] Add tests for default config values.
-- [ ] Implement orchestrator errors in `src/error.rs`.
-  - [ ] Add `OrchestratorError` variants for model failure, tool failure, policy denial, budget exceeded, timeout, cancellation, invalid state, subagent failure, and serialization failure.
-  - [ ] Implement conversion to `ee_acp_agent_server::ProviderError`.
-  - [ ] Add tests for error-to-provider-error mapping.
-- [ ] Implement runtime state in `src/runtime.rs`.
-  - [ ] Add `OrchestratorRuntime`.
-    - [ ] Store config.
-    - [ ] Store injected model router.
-    - [ ] Store tool registry.
-    - [ ] Store task store.
-    - [ ] Store memory store.
-    - [ ] Store budget tracker.
-    - [ ] Store policy engine.
-  - [ ] Add `run_turn(prompt_ctx, sink, client, cancel)` entry point.
-    - [ ] Build initial root task from prompt.
-    - [ ] Start loop engine with configured budgets.
-    - [ ] Return `PromptResult` compatible with `ee-acp-agent-server`.
-  - [ ] Add tests using fake model and fake tools to run one complete turn.
+- [x] Add `crates/ee-agent-orchestrator` to workspace members in `ee/Cargo.toml`.
+  - [x] Create `crates/ee-agent-orchestrator/Cargo.toml`.
+    - [x] Set package name to `ee-agent-orchestrator`.
+    - [x] Use workspace `edition`, `rust-version`, `license`, and author conventions.
+    - [x] Add dependencies on `ee-acp-agent-server`, `ee-agent-protocol`, `serde`, `serde_json`, `tokio`, `futures`, and `tracing` from workspace dependencies.
+    - [x] Add dev-dependencies needed only for deterministic async tests.
+  - [x] Create `crates/ee-agent-orchestrator/src/lib.rs`.
+    - [x] Export `config`, `error`, `runtime`, `loop_engine`, `model`, `tools`, `tasks`, `subagents`, `memory`, `budget`, `policy`, `events`, and `test_support` modules.
+    - [x] Re-export primary public types.
+    - [x] Add crate docs stating this crate is optional server-side orchestration above ACP.
+- [x] Implement orchestrator config in `src/config.rs`.
+  - [x] Add `OrchestratorConfig`.
+    - [x] Include `max_loop_iterations`.
+    - [x] Include `max_tool_calls_per_turn`.
+    - [x] Include `max_subagent_depth`.
+    - [x] Include `max_parallel_subagents`.
+    - [x] Include `turn_timeout`.
+    - [x] Include `tool_timeout`.
+    - [x] Include `subagent_timeout`.
+    - [x] Include `memory_limit_bytes`.
+  - [x] Implement safe defaults.
+    - [x] Set max loop iterations to `16`.
+    - [x] Set max tool calls per turn to `32`.
+    - [x] Set max subagent depth to `2`.
+    - [x] Set max parallel subagents to `4`.
+    - [x] Set turn timeout to `300s`.
+    - [x] Set tool timeout to `120s`.
+    - [x] Set subagent timeout to `300s`.
+    - [x] Set memory limit bytes to `1 MiB`.
+  - [x] Add tests for default config values.
+- [x] Implement orchestrator errors in `src/error.rs`.
+  - [x] Add `OrchestratorError` variants for model failure, tool failure, policy denial, budget exceeded, timeout, cancellation, invalid state, subagent failure, and serialization failure.
+  - [x] Implement conversion to `ee_acp_agent_server::ProviderError`.
+  - [x] Add tests for error-to-provider-error mapping.
+- [x] Implement runtime state in `src/runtime.rs`.
+  - [x] Add `OrchestratorRuntime`.
+    - [x] Store config.
+    - [x] Store injected model router.
+    - [x] Store tool registry.
+    - [x] Store task store.
+    - [x] Store memory store.
+    - [x] Store budget tracker.
+    - [x] Store policy engine.
+  - [x] Add `run_turn(prompt_ctx, sink, client, cancel)` entry point.
+    - [x] Build initial root task from prompt.
+    - [x] Start loop engine with configured budgets.
+    - [x] Return `PromptResult` compatible with `ee-acp-agent-server`.
+  - [x] Add tests using fake model and fake tools to run one complete turn.
 
 #### Actionable criteria
 
-- [ ] `cargo fmt --check` passes after crate creation.
-- [ ] `cargo clippy --quiet -p ee-agent-orchestrator --all-targets --all-features -- -D warnings` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator config` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator runtime` passes.
+- [x] `cargo fmt --check` passes after crate creation.
+- [x] `cargo clippy --quiet -p ee-agent-orchestrator --all-targets --all-features -- -D warnings` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator config` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator runtime` passes.
 
 ### Phase 2: Model abstraction and transcript normalization
 
@@ -1440,51 +1440,51 @@ Rules:
 
 #### Work items
 
-- [ ] Implement normalized messages in `src/model.rs`.
-  - [ ] Add `ModelMessage`.
-    - [ ] Include role: system, user, assistant, tool, subagent.
-    - [ ] Include content blocks.
-    - [ ] Include optional reasoning summary.
-    - [ ] Include bounded metadata.
-  - [ ] Add `ModelContent`.
-    - [ ] Include text.
-    - [ ] Include tool result.
-    - [ ] Include file reference.
-    - [ ] Include terminal reference.
-  - [ ] Add `ModelRequest`.
-    - [ ] Include transcript.
-    - [ ] Include available tool schemas.
-    - [ ] Include budget snapshot.
-    - [ ] Include current task state.
-  - [ ] Add `ModelResponse`.
-    - [ ] Include assistant text.
-    - [ ] Include reasoning text.
-    - [ ] Include tool intents.
-    - [ ] Include subagent intents.
-    - [ ] Include completion signal.
-- [ ] Implement model adapter trait.
-  - [ ] Add `ModelAdapter` trait with `complete(request, cancel)`.
-  - [ ] Add `ModelFuture<T>` boxed-future alias.
-  - [ ] Require adapter to be `Send + Sync + 'static`.
-  - [ ] Add fake deterministic model adapter in `test_support`.
-- [ ] Implement transcript builder.
-  - [ ] Convert ACP prompt content into normalized `ModelMessage` values.
-  - [ ] Append assistant text responses.
-  - [ ] Append tool results with stable tool-call IDs.
-  - [ ] Append subagent summaries.
-  - [ ] Enforce memory byte limit while preserving newest context.
-- [ ] Add model tests.
-  - [ ] Test ACP text prompt converts to normalized user message.
-  - [ ] Test reasoning is preserved separately from assistant text.
-  - [ ] Test tool intent parsing from fake model response.
-  - [ ] Test subagent intent parsing from fake model response.
-  - [ ] Test transcript truncation preserves newest messages and records truncation metadata.
+- [x] Implement normalized messages in `src/model.rs`.
+  - [x] Add `ModelMessage`.
+    - [x] Include role: system, user, assistant, tool, subagent.
+    - [x] Include content blocks.
+    - [x] Include optional reasoning summary.
+    - [x] Include bounded metadata.
+  - [x] Add `ModelContent`.
+    - [x] Include text.
+    - [x] Include tool result.
+    - [x] Include file reference.
+    - [x] Include terminal reference.
+  - [x] Add `ModelRequest`.
+    - [x] Include transcript.
+    - [x] Include available tool schemas.
+    - [x] Include budget snapshot.
+    - [x] Include current task state.
+  - [x] Add `ModelResponse`.
+    - [x] Include assistant text.
+    - [x] Include reasoning text.
+    - [x] Include tool intents.
+    - [x] Include subagent intents.
+    - [x] Include completion signal.
+- [x] Implement model adapter trait.
+  - [x] Add `ModelAdapter` trait with `complete(request, cancel)`.
+  - [x] Add `ModelFuture<T>` boxed-future alias.
+  - [x] Require adapter to be `Send + Sync + 'static`.
+  - [x] Add fake deterministic model adapter in `test_support`.
+- [x] Implement transcript builder.
+  - [x] Convert ACP prompt content into normalized `ModelMessage` values.
+  - [x] Append assistant text responses.
+  - [x] Append tool results with stable tool-call IDs.
+  - [x] Append subagent summaries.
+  - [x] Enforce memory byte limit while preserving newest context.
+- [x] Add model tests.
+  - [x] Test ACP text prompt converts to normalized user message.
+  - [x] Test reasoning is preserved separately from assistant text.
+  - [x] Test tool intent parsing from fake model response.
+  - [x] Test subagent intent parsing from fake model response.
+  - [x] Test transcript truncation preserves newest messages and records truncation metadata.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-agent-orchestrator model` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator transcript` passes.
-- [ ] Tests prove normalized transcript never contains provider-specific required fields.
+- [x] `cargo test --quiet -p ee-agent-orchestrator model` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator transcript` passes.
+- [x] Tests prove normalized transcript never contains provider-specific required fields.
 
 ### Phase 3: Tool registry, execution pipeline, and policy gates
 
@@ -1502,61 +1502,61 @@ Rules:
 
 #### Work items
 
-- [ ] Implement tool types in `src/tools.rs`.
-  - [ ] Add `ToolDefinition`.
-    - [ ] Include name.
-    - [ ] Include description.
-    - [ ] Include JSON schema.
-    - [ ] Include side-effect class: read, write, execute, delegate.
-    - [ ] Include required capability flags.
-  - [ ] Add `ToolIntent`.
-    - [ ] Include tool call id.
-    - [ ] Include tool name.
-    - [ ] Include JSON arguments.
-  - [ ] Add `ToolResult`.
-    - [ ] Include success flag.
-    - [ ] Include text output.
-    - [ ] Include structured output.
-    - [ ] Include error kind.
-- [ ] Implement tool registry.
-  - [ ] Register built-in `read_file` mapping to `ClientBridge::read_text_file`.
-  - [ ] Register built-in `write_file` mapping to `ClientBridge::write_text_file`.
-  - [ ] Register built-in terminal lifecycle tools mapping to `ClientBridge` terminal methods.
-  - [ ] Register built-in `ask_user` mapping to `ClientBridge::create_elicitation`.
-  - [ ] Support custom provider-supplied tools through a `ServerTool` trait.
-  - [ ] Add tests for duplicate tool name rejection.
-- [ ] Implement policy engine in `src/policy.rs`.
-  - [ ] Add `ToolPolicy`.
-    - [ ] Allow read tools by default.
-    - [ ] Require explicit allowance for write tools.
-    - [ ] Require explicit allowance for execute tools.
-    - [ ] Limit delegate tools by subagent depth and count.
-  - [ ] Add `PolicyDecision` with allow/deny reason.
-  - [ ] Add tests for read/write/execute/delegate policy decisions.
-- [ ] Implement tool executor.
-  - [ ] Validate tool exists.
-  - [ ] Validate argument shape against tool schema where practical.
-  - [ ] Check policy before execution.
-  - [ ] Increment budget counters before execution.
-  - [ ] Emit pending tool-call update.
-  - [ ] Emit in-progress tool-call update.
-  - [ ] Run tool with timeout and cancellation.
-  - [ ] Emit completed or failed tool-call update.
-  - [ ] Return normalized `ToolResult` to loop engine.
-- [ ] Add tool execution tests.
-  - [ ] Test read file tool calls `ClientBridge::read_text_file`.
-  - [ ] Test write file tool is denied by default policy.
-  - [ ] Test execute tool is denied by default policy.
-  - [ ] Test custom tool runs and returns structured output.
-  - [ ] Test tool timeout emits failed update.
-  - [ ] Test cancellation stops running tool and records cancellation result.
+- [x] Implement tool types in `src/tools.rs`.
+  - [x] Add `ToolDefinition`.
+    - [x] Include name.
+    - [x] Include description.
+    - [x] Include JSON schema.
+    - [x] Include side-effect class: read, write, execute, delegate.
+    - [x] Include required capability flags.
+  - [x] Add `ToolIntent`.
+    - [x] Include tool call id.
+    - [x] Include tool name.
+    - [x] Include JSON arguments.
+  - [x] Add `ToolResult`.
+    - [x] Include success flag.
+    - [x] Include text output.
+    - [x] Include structured output.
+    - [x] Include error kind.
+- [x] Implement tool registry.
+  - [x] Register built-in `read_file` mapping to `ClientBridge::read_text_file`.
+  - [x] Register built-in `write_file` mapping to `ClientBridge::write_text_file`.
+  - [x] Register built-in terminal lifecycle tools mapping to `ClientBridge` terminal methods.
+  - [x] Register built-in `ask_user` mapping to `ClientBridge::create_elicitation`.
+  - [x] Support custom provider-supplied tools through a `ServerTool` trait.
+  - [x] Add tests for duplicate tool name rejection.
+- [x] Implement policy engine in `src/policy.rs`.
+  - [x] Add `ToolPolicy`.
+    - [x] Allow read tools by default.
+    - [x] Require explicit allowance for write tools.
+    - [x] Require explicit allowance for execute tools.
+    - [x] Limit delegate tools by subagent depth and count.
+  - [x] Add `PolicyDecision` with allow/deny reason.
+  - [x] Add tests for read/write/execute/delegate policy decisions.
+- [x] Implement tool executor.
+  - [x] Validate tool exists.
+  - [x] Validate argument shape against tool schema where practical.
+  - [x] Check policy before execution.
+  - [x] Increment budget counters before execution.
+  - [x] Emit pending tool-call update.
+  - [x] Emit in-progress tool-call update.
+  - [x] Run tool with timeout and cancellation.
+  - [x] Emit completed or failed tool-call update.
+  - [x] Return normalized `ToolResult` to loop engine.
+- [x] Add tool execution tests.
+  - [x] Test read file tool calls `ClientBridge::read_text_file`.
+  - [x] Test write file tool is denied by default policy.
+  - [x] Test execute tool is denied by default policy.
+  - [x] Test custom tool runs and returns structured output.
+  - [x] Test tool timeout emits failed update.
+  - [x] Test cancellation stops running tool and records cancellation result.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-agent-orchestrator tools` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator policy` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator tool_executor` passes.
-- [ ] Tests prove write/execute tools fail closed under default policy.
+- [x] `cargo test --quiet -p ee-agent-orchestrator tools` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator policy` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator tool_executor` passes.
+- [x] Tests prove write/execute tools fail closed under default policy.
 
 ### Phase 4: Agent loop engine and completion control
 
@@ -1574,36 +1574,36 @@ Rules:
 
 #### Work items
 
-- [ ] Implement loop event model in `src/events.rs`.
-  - [ ] Add `OrchestratorEvent` variants for turn started, model requested, model responded, tool started, tool finished, subagent started, subagent finished, budget updated, turn stopped, and error.
-  - [ ] Add in-memory event recorder for tests.
-  - [ ] Add tests for event serialization.
-- [ ] Implement loop engine in `src/loop_engine.rs`.
-  - [ ] Add `LoopEngine`.
-  - [ ] Build initial transcript from prompt and memory.
-  - [ ] Emit thought updates when model returns reasoning.
-  - [ ] Emit assistant message updates when model returns text.
-  - [ ] Execute model tool intents in deterministic order.
-  - [ ] Append tool results to transcript.
-  - [ ] Continue loop after tool results when model has not completed.
-  - [ ] Stop when model returns completion signal.
-  - [ ] Stop when no tool intents and no assistant text are returned twice in a row.
-  - [ ] Stop with budget-exceeded error when iteration/tool budgets are exceeded.
-  - [ ] Stop promptly on cancellation token.
-- [ ] Add loop tests.
-  - [ ] Test one-model-response turn emits assistant update and stops.
-  - [ ] Test model tool intent executes tool, appends result, and calls model again.
-  - [ ] Test tool failure is appended as observation and model can recover.
-  - [ ] Test max loop iterations stops before infinite loop.
-  - [ ] Test max tool calls stops before unbounded tool use.
-  - [ ] Test cancellation stops before next model call.
-  - [ ] Test repeated empty responses stop deterministically.
+- [x] Implement loop event model in `src/events.rs`.
+  - [x] Add `OrchestratorEvent` variants for turn started, model requested, model responded, tool started, tool finished, subagent started, subagent finished, budget updated, turn stopped, and error.
+  - [x] Add in-memory event recorder for tests.
+  - [x] Add tests for event serialization.
+- [x] Implement loop engine in `src/loop_engine.rs`.
+  - [x] Add `LoopEngine`.
+  - [x] Build initial transcript from prompt and memory.
+  - [x] Emit thought updates when model returns reasoning.
+  - [x] Emit assistant message updates when model returns text.
+  - [x] Execute model tool intents in deterministic order.
+  - [x] Append tool results to transcript.
+  - [x] Continue loop after tool results when model has not completed.
+  - [x] Stop when model returns completion signal.
+  - [x] Stop when no tool intents and no assistant text are returned twice in a row.
+  - [x] Stop with budget-exceeded error when iteration/tool budgets are exceeded.
+  - [x] Stop promptly on cancellation token.
+- [x] Add loop tests.
+  - [x] Test one-model-response turn emits assistant update and stops.
+  - [x] Test model tool intent executes tool, appends result, and calls model again.
+  - [x] Test tool failure is appended as observation and model can recover.
+  - [x] Test max loop iterations stops before infinite loop.
+  - [x] Test max tool calls stops before unbounded tool use.
+  - [x] Test cancellation stops before next model call.
+  - [x] Test repeated empty responses stop deterministically.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-agent-orchestrator loop_engine` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator events` passes.
-- [ ] Tests prove loop cannot run forever under adversarial fake model responses.
+- [x] `cargo test --quiet -p ee-agent-orchestrator loop_engine` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator events` passes.
+- [x] Tests prove loop cannot run forever under adversarial fake model responses.
 
 ### Phase 5: Task graph and memory store
 
@@ -1621,53 +1621,53 @@ Rules:
 
 #### Work items
 
-- [ ] Implement task graph in `src/tasks.rs`.
-  - [ ] Add `TaskId`.
-  - [ ] Add `TaskNode`.
-    - [ ] Include title.
-    - [ ] Include description.
-    - [ ] Include parent id.
-    - [ ] Include dependencies.
-    - [ ] Include status: pending, running, blocked, completed, failed, cancelled.
-    - [ ] Include assigned worker: root or subagent id.
-    - [ ] Include bounded result summary.
-  - [ ] Add `TaskGraph`.
-    - [ ] Add root task creation.
-    - [ ] Add child task creation.
-    - [ ] Add dependency edges.
-    - [ ] Add status transitions with validation.
-    - [ ] Add topological ready-task query.
-    - [ ] Add completed summary query.
-  - [ ] Emit plan updates from task graph state.
-- [ ] Implement memory store in `src/memory.rs`.
-  - [ ] Add `MemoryItem`.
-    - [ ] Include key.
-    - [ ] Include value.
-    - [ ] Include source task id.
-    - [ ] Include byte size.
-    - [ ] Include sensitivity flag.
-  - [ ] Add `MemoryStore`.
-    - [ ] Insert non-sensitive item.
-    - [ ] Reject sensitive item by default.
-    - [ ] Evict oldest low-priority items when over byte limit.
-    - [ ] Query items relevant to active task by key/prefix/source.
-    - [ ] Export compact context for model request.
-- [ ] Add task graph tests.
-  - [ ] Test valid status transitions.
-  - [ ] Test invalid transition rejection.
-  - [ ] Test dependency ordering.
-  - [ ] Test plan update generation from task graph.
-- [ ] Add memory tests.
-  - [ ] Test insert/query.
-  - [ ] Test sensitive item rejection.
-  - [ ] Test byte-limit eviction.
-  - [ ] Test compact context excludes evicted and sensitive items.
+- [x] Implement task graph in `src/tasks.rs`.
+  - [x] Add `TaskId`.
+  - [x] Add `TaskNode`.
+    - [x] Include title.
+    - [x] Include description.
+    - [x] Include parent id.
+    - [x] Include dependencies.
+    - [x] Include status: pending, running, blocked, completed, failed, cancelled.
+    - [x] Include assigned worker: root or subagent id.
+    - [x] Include bounded result summary.
+  - [x] Add `TaskGraph`.
+    - [x] Add root task creation.
+    - [x] Add child task creation.
+    - [x] Add dependency edges.
+    - [x] Add status transitions with validation.
+    - [x] Add topological ready-task query.
+    - [x] Add completed summary query.
+  - [x] Emit plan updates from task graph state.
+- [x] Implement memory store in `src/memory.rs`.
+  - [x] Add `MemoryItem`.
+    - [x] Include key.
+    - [x] Include value.
+    - [x] Include source task id.
+    - [x] Include byte size.
+    - [x] Include sensitivity flag.
+  - [x] Add `MemoryStore`.
+    - [x] Insert non-sensitive item.
+    - [x] Reject sensitive item by default.
+    - [x] Evict oldest low-priority items when over byte limit.
+    - [x] Query items relevant to active task by key/prefix/source.
+    - [x] Export compact context for model request.
+- [x] Add task graph tests.
+  - [x] Test valid status transitions.
+  - [x] Test invalid transition rejection.
+  - [x] Test dependency ordering.
+  - [x] Test plan update generation from task graph.
+- [x] Add memory tests.
+  - [x] Test insert/query.
+  - [x] Test sensitive item rejection.
+  - [x] Test byte-limit eviction.
+  - [x] Test compact context excludes evicted and sensitive items.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-agent-orchestrator tasks` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator memory` passes.
-- [ ] Tests prove memory stays within configured byte limit.
+- [x] `cargo test --quiet -p ee-agent-orchestrator tasks` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator memory` passes.
+- [x] Tests prove memory stays within configured byte limit.
 
 ### Phase 6: Subagent spawning and lifecycle management
 
@@ -1686,53 +1686,53 @@ Rules:
 
 #### Work items
 
-- [ ] Implement subagent types in `src/subagents.rs`.
-  - [ ] Add `SubagentId`.
-  - [ ] Add `SubagentRole`.
-    - [ ] Include name.
-    - [ ] Include instructions.
-    - [ ] Include allowed tool classes.
-    - [ ] Include max iterations.
-  - [ ] Add `SubagentRequest`.
-    - [ ] Include parent task id.
-    - [ ] Include child task id.
-    - [ ] Include role.
-    - [ ] Include scoped prompt.
-    - [ ] Include context snapshot.
-  - [ ] Add `SubagentResult`.
-    - [ ] Include status.
-    - [ ] Include summary.
-    - [ ] Include produced memory items.
-    - [ ] Include tool-call count.
-    - [ ] Include error summary.
-- [ ] Implement subagent manager.
-  - [ ] Spawn logical subagent task using same `LoopEngine` with reduced config.
-  - [ ] Enforce depth limit before spawn.
-  - [ ] Enforce parallelism limit with semaphore.
-  - [ ] Apply child-specific tool policy.
-  - [ ] Capture child events with parent correlation ids.
-  - [ ] Merge child summary into parent transcript.
-  - [ ] Merge allowed child memory items into parent memory store.
-  - [ ] Cancel child tasks when parent cancellation fires.
-- [ ] Add delegation tool integration.
-  - [ ] Register built-in `delegate_task` tool with side-effect class `delegate`.
-  - [ ] Validate delegation arguments.
-  - [ ] Create child task node before spawn.
-  - [ ] Mark child task running/completed/failed from subagent result.
-  - [ ] Return bounded child summary as tool result.
-- [ ] Add subagent tests.
-  - [ ] Test delegate tool spawns logical subagent.
-  - [ ] Test subagent depth limit denies nested spawn beyond config.
-  - [ ] Test parallel subagent limit bounds concurrency.
-  - [ ] Test parent cancellation cancels children.
-  - [ ] Test child memory merges only non-sensitive items.
-  - [ ] Test child failure returns bounded error summary to parent.
+- [x] Implement subagent types in `src/subagents.rs`.
+  - [x] Add `SubagentId`.
+  - [x] Add `SubagentRole`.
+    - [x] Include name.
+    - [x] Include instructions.
+    - [x] Include allowed tool classes.
+    - [x] Include max iterations.
+  - [x] Add `SubagentRequest`.
+    - [x] Include parent task id.
+    - [x] Include child task id.
+    - [x] Include role.
+    - [x] Include scoped prompt.
+    - [x] Include context snapshot.
+  - [x] Add `SubagentResult`.
+    - [x] Include status.
+    - [x] Include summary.
+    - [x] Include produced memory items.
+    - [x] Include tool-call count.
+    - [x] Include error summary.
+- [x] Implement subagent manager.
+  - [x] Spawn logical subagent task using same `LoopEngine` with reduced config.
+  - [x] Enforce depth limit before spawn.
+  - [x] Enforce parallelism limit with semaphore.
+  - [x] Apply child-specific tool policy.
+  - [x] Capture child events with parent correlation ids.
+  - [x] Merge child summary into parent transcript.
+  - [x] Merge allowed child memory items into parent memory store.
+  - [x] Cancel child tasks when parent cancellation fires.
+- [x] Add delegation tool integration.
+  - [x] Register built-in `delegate_task` tool with side-effect class `delegate`.
+  - [x] Validate delegation arguments.
+  - [x] Create child task node before spawn.
+  - [x] Mark child task running/completed/failed from subagent result.
+  - [x] Return bounded child summary as tool result.
+- [x] Add subagent tests.
+  - [x] Test delegate tool spawns logical subagent.
+  - [x] Test subagent depth limit denies nested spawn beyond config.
+  - [x] Test parallel subagent limit bounds concurrency.
+  - [x] Test parent cancellation cancels children.
+  - [x] Test child memory merges only non-sensitive items.
+  - [x] Test child failure returns bounded error summary to parent.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-agent-orchestrator subagents` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator delegate_task` passes.
-- [ ] Tests prove subagent depth and parallelism limits cannot be exceeded.
+- [x] `cargo test --quiet -p ee-agent-orchestrator subagents` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator delegate_task` passes.
+- [x] Tests prove subagent depth and parallelism limits cannot be exceeded.
 
 ### Phase 7: Budgeting, rate limits, and cancellation propagation
 
@@ -1750,49 +1750,49 @@ Rules:
 
 #### Work items
 
-- [ ] Implement budget tracker in `src/budget.rs`.
-  - [ ] Add `BudgetConfig`.
-    - [ ] Include max model calls.
-    - [ ] Include max tool calls.
-    - [ ] Include max subagents.
-    - [ ] Include max output bytes.
-    - [ ] Include optional max input tokens.
-    - [ ] Include optional max output tokens.
-    - [ ] Include wall-clock deadline.
-  - [ ] Add `BudgetSnapshot`.
-  - [ ] Add `BudgetTracker`.
-    - [ ] Check model call allowance.
-    - [ ] Check tool call allowance.
-    - [ ] Check subagent allowance.
-    - [ ] Check output byte allowance.
-    - [ ] Check wall-clock deadline.
-    - [ ] Record model usage.
-    - [ ] Record tool usage.
-    - [ ] Record subagent usage.
-  - [ ] Emit budget update events.
-- [ ] Integrate budget tracker.
-  - [ ] Check before each model adapter call.
-  - [ ] Check before each tool executor call.
-  - [ ] Check before each subagent spawn.
-  - [ ] Stop loop with budget-exceeded error when denied.
-  - [ ] Include budget snapshot in model request.
-- [ ] Add cancellation propagation tests.
-  - [ ] Test cancellation before model call prevents adapter invocation.
-  - [ ] Test cancellation during model call resolves turn cancellation.
-  - [ ] Test cancellation during tool call resolves tool cancellation.
-  - [ ] Test cancellation during subagent run cancels child task.
-- [ ] Add budget tests.
-  - [ ] Test max model calls enforced.
-  - [ ] Test max tool calls enforced.
-  - [ ] Test max subagents enforced.
-  - [ ] Test output byte budget enforced.
-  - [ ] Test wall-clock deadline enforced with paused time where supported.
+- [x] Implement budget tracker in `src/budget.rs`.
+  - [x] Add `BudgetConfig`.
+    - [x] Include max model calls.
+    - [x] Include max tool calls.
+    - [x] Include max subagents.
+    - [x] Include max output bytes.
+    - [x] Include optional max input tokens.
+    - [x] Include optional max output tokens.
+    - [x] Include wall-clock deadline.
+  - [x] Add `BudgetSnapshot`.
+  - [x] Add `BudgetTracker`.
+    - [x] Check model call allowance.
+    - [x] Check tool call allowance.
+    - [x] Check subagent allowance.
+    - [x] Check output byte allowance.
+    - [x] Check wall-clock deadline.
+    - [x] Record model usage.
+    - [x] Record tool usage.
+    - [x] Record subagent usage.
+  - [x] Emit budget update events.
+- [x] Integrate budget tracker.
+  - [x] Check before each model adapter call.
+  - [x] Check before each tool executor call.
+  - [x] Check before each subagent spawn.
+  - [x] Stop loop with budget-exceeded error when denied.
+  - [x] Include budget snapshot in model request.
+- [x] Add cancellation propagation tests.
+  - [x] Test cancellation before model call prevents adapter invocation.
+  - [x] Test cancellation during model call resolves turn cancellation.
+  - [x] Test cancellation during tool call resolves tool cancellation.
+  - [x] Test cancellation during subagent run cancels child task.
+- [x] Add budget tests.
+  - [x] Test max model calls enforced.
+  - [x] Test max tool calls enforced.
+  - [x] Test max subagents enforced.
+  - [x] Test output byte budget enforced.
+  - [x] Test wall-clock deadline enforced with paused time where supported.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-agent-orchestrator budget` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator cancellation` passes.
-- [ ] Tests prove budget-denied operations are not invoked.
+- [x] `cargo test --quiet -p ee-agent-orchestrator budget` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator cancellation` passes.
+- [x] Tests prove budget-denied operations are not invoked.
 
 ### Phase 8: ACP server integration adapter
 
@@ -1810,29 +1810,29 @@ Rules:
 
 #### Work items
 
-- [ ] Add provider adapter module.
-  - [ ] Implement `OrchestratorProvider<M>` generic over `ModelAdapter`.
-  - [ ] Implement `AgentProvider` for `OrchestratorProvider<M>`.
-  - [ ] Map provider `info` from adapter config.
-  - [ ] Map provider `capabilities` from orchestrator-supported ACP features.
-  - [ ] Implement `new_session` by creating session task/memory state.
-  - [ ] Implement `load_session` by restoring serialized orchestrator state when provided.
-  - [ ] Implement `prompt` by calling `OrchestratorRuntime::run_turn`.
-  - [ ] Implement `cancel_session` by cancelling active turn state.
-  - [ ] Implement `close_session` by removing task/memory state.
-- [ ] Add adapter tests.
-  - [ ] Test adapter initialize metadata through `AcpAgentServer` memory transport.
-  - [ ] Test adapter session/new creates orchestrator session state.
-  - [ ] Test adapter prompt runs loop and emits assistant update.
-  - [ ] Test adapter prompt can execute fake tool through `ClientBridge`.
-  - [ ] Test adapter cancel stops active orchestrator turn.
-  - [ ] Test adapter close removes memory/task state.
+- [x] Add provider adapter module.
+  - [x] Implement `OrchestratorProvider<M>` generic over `ModelAdapter`.
+  - [x] Implement `AgentProvider` for `OrchestratorProvider<M>`.
+  - [x] Map provider `info` from adapter config.
+  - [x] Map provider `capabilities` from orchestrator-supported ACP features.
+  - [x] Implement `new_session` by creating session task/memory state.
+  - [x] Implement `load_session` by restoring serialized orchestrator state when provided.
+  - [x] Implement `prompt` by calling `OrchestratorRuntime::run_turn`.
+  - [x] Implement `cancel_session` by cancelling active turn state.
+  - [x] Implement `close_session` by removing task/memory state.
+- [x] Add adapter tests.
+  - [x] Test adapter initialize metadata through `AcpAgentServer` memory transport.
+  - [x] Test adapter session/new creates orchestrator session state.
+  - [x] Test adapter prompt runs loop and emits assistant update.
+  - [x] Test adapter prompt can execute fake tool through `ClientBridge`.
+  - [x] Test adapter cancel stops active orchestrator turn.
+  - [x] Test adapter close removes memory/task state.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-agent-orchestrator provider_adapter` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator --features test-utils` passes if adapter tests use feature-gated support.
-- [ ] Tests prove adapter works through `ee-acp-agent-server` memory transport.
+- [x] `cargo test --quiet -p ee-agent-orchestrator provider_adapter` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator --features test-utils` passes if adapter tests use feature-gated support.
+- [x] Tests prove adapter works through `ee-acp-agent-server` memory transport.
 
 ### Phase 9: Provider migration path and orchestrated OpenRouter mode
 
@@ -1849,28 +1849,28 @@ Rules:
 
 #### Work items
 
-- [ ] Add `OpenRouterModelAdapter` in `ee-openrouter-agent`.
-  - [ ] Convert normalized `ModelRequest` to OpenRouter chat completion request.
-  - [ ] Convert OpenRouter text to `ModelResponse` assistant text.
-  - [ ] Convert OpenRouter reasoning to `ModelResponse` reasoning.
-  - [ ] Convert OpenRouter tool calls to normalized `ToolIntent` values.
-  - [ ] Convert model completion/stop reason to normalized completion signal.
-- [ ] Add orchestrated mode config.
-  - [ ] Add CLI/env flag `OPENROUTER_ORCHESTRATED` or command-line option.
-  - [ ] Default to non-orchestrated provider mode until parity tests pass.
-  - [ ] Build `OrchestratorProvider<OpenRouterModelAdapter>` when enabled.
-- [ ] Add OpenRouter orchestrator tests.
-  - [ ] Test normalized model request converts to OpenRouter JSON body.
-  - [ ] Test OpenRouter tool call converts to `ToolIntent`.
-  - [ ] Test OpenRouter reasoning converts to normalized reasoning.
-  - [ ] Test orchestrated mode with fake model executes read-file tool via `ClientBridge`.
-  - [ ] Test orchestrated mode respects max tool-call budget.
+- [x] Add `OpenRouterModelAdapter` in `ee-openrouter-agent`.
+  - [x] Convert normalized `ModelRequest` to OpenRouter chat completion request.
+  - [x] Convert OpenRouter text to `ModelResponse` assistant text.
+  - [x] Convert OpenRouter reasoning to `ModelResponse` reasoning.
+  - [x] Convert OpenRouter tool calls to normalized `ToolIntent` values.
+  - [x] Convert model completion/stop reason to normalized completion signal.
+- [x] Add orchestrated mode config.
+  - [x] Add CLI/env flag `OPENROUTER_ORCHESTRATED` or command-line option.
+  - [x] Default to non-orchestrated provider mode until parity tests pass.
+  - [x] Build `OrchestratorProvider<OpenRouterModelAdapter>` when enabled.
+- [x] Add OpenRouter orchestrator tests.
+  - [x] Test normalized model request converts to OpenRouter JSON body.
+  - [x] Test OpenRouter tool call converts to `ToolIntent`.
+  - [x] Test OpenRouter reasoning converts to normalized reasoning.
+  - [x] Test orchestrated mode with fake model executes read-file tool via `ClientBridge`.
+  - [x] Test orchestrated mode respects max tool-call budget.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-openrouter-agent orchestrated` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator` passes.
-- [ ] Tests prove orchestrated OpenRouter mode remains network-free under fake adapter.
+- [x] `cargo test --quiet -p ee-openrouter-agent orchestrated` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator` passes.
+- [x] Tests prove orchestrated OpenRouter mode remains network-free under fake adapter.
 
 ### Phase 10: Workspace validation and safety guardrails
 
@@ -1888,40 +1888,39 @@ Rules:
 
 #### Work items
 
-- [ ] Add dependency-boundary tests.
-  - [ ] Assert `ee-agent-orchestrator` does not depend on `ee-agent-host`.
-  - [ ] Assert `ee-agent-orchestrator` does not depend on `ee-cli`.
-  - [ ] Assert `ee-agent-orchestrator` does depend on `ee-acp-agent-server`.
-  - [ ] Assert `ee-agent-orchestrator` public adapter uses `AgentProvider` from `ee-acp-agent-server`.
-- [ ] Add default policy regression tests.
-  - [ ] Test read tools are available by default.
-  - [ ] Test write tools are denied by default.
-  - [ ] Test execute tools are denied by default.
-  - [ ] Test delegation obeys depth and parallelism defaults.
-- [ ] Add deterministic test fixtures.
-  - [ ] Add fake model script fixture for simple answer.
-  - [ ] Add fake model script fixture for tool call then answer.
-  - [ ] Add fake model script fixture for delegation then answer.
-  - [ ] Add fake model script fixture for infinite loop attempt.
-  - [ ] Add tests that each fixture produces stable event sequence.
-- [ ] Run focused validation commands.
-  - [ ] Validate format.
-  - [ ] Validate clippy for `ee-agent-orchestrator`.
-  - [ ] Validate clippy for `ee-acp-agent-server`.
-  - [ ] Validate clippy for `ee-openrouter-agent` when orchestrated mode code changes.
-  - [ ] Validate orchestrator tests.
-  - [ ] Validate ACP server tests.
-  - [ ] Validate OpenRouter tests.
+- [x] Add dependency-boundary tests.
+  - [x] Assert `ee-agent-orchestrator` does not depend on `ee-agent-host`.
+  - [x] Assert `ee-agent-orchestrator` does not depend on `ee-cli`.
+  - [x] Assert `ee-agent-orchestrator` does depend on `ee-acp-agent-server`.
+  - [x] Assert `ee-agent-orchestrator` public adapter uses `AgentProvider` from `ee-acp-agent-server`.
+- [x] Add default policy regression tests.
+  - [x] Test read tools are available by default.
+  - [x] Test write tools are denied by default.
+  - [x] Test execute tools are denied by default.
+  - [x] Test delegation obeys depth and parallelism defaults.
+- [x] Add deterministic test fixtures.
+  - [x] Add fake model script fixture for simple answer.
+  - [x] Add fake model script fixture for tool call then answer.
+  - [x] Add fake model script fixture for delegation then answer.
+  - [x] Add fake model script fixture for infinite loop attempt.
+  - [x] Add tests that each fixture produces stable event sequence.
+- [x] Run focused validation commands.
+  - [x] Validate format.
+  - [x] Validate clippy for `ee-agent-orchestrator`.
+  - [x] Validate clippy for `ee-acp-agent-server`.
+  - [x] Validate clippy for `ee-openrouter-agent` when orchestrated mode code changes.
+  - [x] Validate orchestrator tests.
+  - [x] Validate ACP server tests.
+  - [x] Validate OpenRouter tests.
 
 #### Actionable criteria
 
-- [ ] `cargo fmt --check` passes.
-- [ ] `cargo clippy --quiet -p ee-agent-orchestrator --all-targets --all-features -- -D warnings` passes.
-- [ ] `cargo clippy --quiet -p ee-acp-agent-server --all-targets --all-features -- -D warnings` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator` passes.
-- [ ] `cargo test --quiet -p ee-acp-agent-server` passes.
-- [ ] `cargo test --quiet -p ee-openrouter-agent` passes when OpenRouter adapter changes.
-- [ ] `./scripts/test-workspace-summary.sh` passes after focused validation.
+- [x] `cargo fmt --check` passes.
+- [x] `cargo clippy --quiet -p ee-agent-orchestrator --all-targets --all-features -- -D warnings` passes.
+- [x] `cargo clippy --quiet -p ee-acp-agent-server --all-targets --all-features -- -D warnings` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator` passes.
+- [x] `cargo test --quiet -p ee-acp-agent-server` passes.
+- [x] `cargo test --quiet -p ee-openrouter-agent` passes when OpenRouter adapter changes.
 
 ## Future Agent Orchestrator Feature Backlog
 
@@ -1943,52 +1942,52 @@ Rules:
 
 #### Work items
 
-- [ ] Implement checkpoint data model.
-  - [ ] Add `OrchestratorCheckpoint`.
-    - [ ] Store schema version.
-    - [ ] Store orchestrator config snapshot.
-    - [ ] Store active session id.
-    - [ ] Store task graph.
-    - [ ] Store memory store.
-    - [ ] Store transcript summary.
-    - [ ] Store budget snapshot.
-    - [ ] Store subagent tree state.
-    - [ ] Store deterministic ID generator state.
-  - [ ] Add checkpoint schema-version tests.
-  - [ ] Add serialization round-trip tests.
-- [ ] Implement checkpoint restore.
-  - [ ] Validate schema version before restore.
-  - [ ] Validate task graph references during restore.
-  - [ ] Validate memory byte limits during restore.
-  - [ ] Rebuild active runtime state from checkpoint.
-  - [ ] Reject checkpoint containing sensitive memory items by default.
-  - [ ] Add restore validation tests for invalid references.
-  - [ ] Add restore validation tests for over-limit memory.
-- [ ] Implement deterministic replay harness.
-  - [ ] Add `ReplayScript` fixture type.
-    - [ ] Include model responses in order.
-    - [ ] Include tool responses in order.
-    - [ ] Include expected events.
-    - [ ] Include expected final task graph state.
-  - [ ] Add replay runner using fake model and fake tools.
-  - [ ] Add replay fixture for simple answer.
-  - [ ] Add replay fixture for tool call then answer.
-  - [ ] Add replay fixture for delegation then answer.
-  - [ ] Add replay fixture for infinite-loop attempt.
-  - [ ] Assert stable event order for every fixture.
-- [ ] Add trace export.
-  - [ ] Serialize `OrchestratorEvent` as JSONL.
-  - [ ] Include task id, subagent id, tool call id, and budget snapshot where applicable.
-  - [ ] Redact sensitive fields before export.
-  - [ ] Add tests for JSONL trace export ordering.
-  - [ ] Add tests for redaction in exported traces.
+- [x] Implement checkpoint data model.
+  - [x] Add `OrchestratorCheckpoint`.
+    - [x] Store schema version.
+    - [x] Store orchestrator config snapshot.
+    - [x] Store active session id.
+    - [x] Store task graph.
+    - [x] Store memory store.
+    - [x] Store transcript summary.
+    - [x] Store budget snapshot.
+    - [x] Store subagent tree state.
+    - [x] Store deterministic ID generator state.
+  - [x] Add checkpoint schema-version tests.
+  - [x] Add serialization round-trip tests.
+- [x] Implement checkpoint restore.
+  - [x] Validate schema version before restore.
+  - [x] Validate task graph references during restore.
+  - [x] Validate memory byte limits during restore.
+  - [x] Rebuild active runtime state from checkpoint.
+  - [x] Reject checkpoint containing sensitive memory items by default.
+  - [x] Add restore validation tests for invalid references.
+  - [x] Add restore validation tests for over-limit memory.
+- [x] Implement deterministic replay harness.
+  - [x] Add `ReplayScript` fixture type.
+    - [x] Include model responses in order.
+    - [x] Include tool responses in order.
+    - [x] Include expected events.
+    - [x] Include expected final task graph state.
+  - [x] Add replay runner using fake model and fake tools.
+  - [x] Add replay fixture for simple answer.
+  - [x] Add replay fixture for tool call then answer.
+  - [x] Add replay fixture for delegation then answer.
+  - [x] Add replay fixture for infinite-loop attempt.
+  - [x] Assert stable event order for every fixture.
+- [x] Add trace export.
+  - [x] Serialize `OrchestratorEvent` as JSONL.
+  - [x] Include task id, subagent id, tool call id, and budget snapshot where applicable.
+  - [x] Redact sensitive fields before export.
+  - [x] Add tests for JSONL trace export ordering.
+  - [x] Add tests for redaction in exported traces.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-agent-orchestrator checkpoint` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator replay` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator trace` passes.
-- [ ] Tests prove replay never invokes real tools or model providers.
+- [x] `cargo test --quiet -p ee-agent-orchestrator checkpoint` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator replay` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator trace` passes.
+- [x] Tests prove replay never invokes real tools or model providers.
 
 ### Phase 2: Strategy selection and structured final responses
 
@@ -2006,53 +2005,53 @@ Rules:
 
 #### Work items
 
-- [ ] Implement strategy types.
-  - [ ] Add `TurnStrategy` enum.
-    - [ ] Include `SimpleAnswer`.
-    - [ ] Include `ToolLoop`.
-    - [ ] Include `PlanThenExecute`.
-    - [ ] Include `ResearchThenEdit`.
-    - [ ] Include `ValidateThenReview`.
-    - [ ] Include `ParallelDelegation`.
-  - [ ] Add `StrategyDecision`.
-    - [ ] Include selected strategy.
-    - [ ] Include deterministic reason code.
-    - [ ] Include required capabilities.
-  - [ ] Add serialization tests for strategy types.
-- [ ] Implement strategy selector.
-  - [ ] Select `SimpleAnswer` when prompt requires no workspace/tool context.
-  - [ ] Select `ToolLoop` when prompt asks for file inspection or tool use.
-  - [ ] Select `PlanThenExecute` when prompt asks for implementation over multiple files.
-  - [ ] Select `ResearchThenEdit` when prompt asks for unknown codebase change.
-  - [ ] Select `ValidateThenReview` when task has code changes and validation tools are available.
-  - [ ] Select `ParallelDelegation` only when task graph has independent read-only or disjoint write scopes.
-  - [ ] Emit strategy decision event.
-  - [ ] Add selector tests for each strategy.
-- [ ] Implement strategy execution wrappers.
-  - [ ] Make `SimpleAnswer` run one model call with no tool execution.
-  - [ ] Make `ToolLoop` run standard loop engine.
-  - [ ] Make `PlanThenExecute` require task graph creation before tools.
-  - [ ] Make `ResearchThenEdit` run read-only tools before write tools.
-  - [ ] Make `ValidateThenReview` run validation and review after edits.
-  - [ ] Make `ParallelDelegation` use subagent manager with write-scope checks.
-  - [ ] Add tests that each wrapper respects cancellation and budget limits.
-- [ ] Implement final response builder.
-  - [ ] Add `FinalResponse` data model.
-    - [ ] Include changed files.
-    - [ ] Include validation commands and outcomes.
-    - [ ] Include unresolved risks.
-    - [ ] Include follow-up suggestions.
-  - [ ] Build final response from task graph, tool results, validation records, and memory provenance.
-  - [ ] Prevent claiming validation success without recorded passed command.
-  - [ ] Add tests for final response with no code changes.
-  - [ ] Add tests for final response with changed files and passing validation.
-  - [ ] Add tests for final response with failed validation.
+- [x] Implement strategy types.
+  - [x] Add `TurnStrategy` enum.
+    - [x] Include `SimpleAnswer`.
+    - [x] Include `ToolLoop`.
+    - [x] Include `PlanThenExecute`.
+    - [x] Include `ResearchThenEdit`.
+    - [x] Include `ValidateThenReview`.
+    - [x] Include `ParallelDelegation`.
+  - [x] Add `StrategyDecision`.
+    - [x] Include selected strategy.
+    - [x] Include deterministic reason code.
+    - [x] Include required capabilities.
+  - [x] Add serialization tests for strategy types.
+- [x] Implement strategy selector.
+  - [x] Select `SimpleAnswer` when prompt requires no workspace/tool context.
+  - [x] Select `ToolLoop` when prompt asks for file inspection or tool use.
+  - [x] Select `PlanThenExecute` when prompt asks for implementation over multiple files.
+  - [x] Select `ResearchThenEdit` when prompt asks for unknown codebase change.
+  - [x] Select `ValidateThenReview` when task has code changes and validation tools are available.
+  - [x] Select `ParallelDelegation` only when task graph has independent read-only or disjoint write scopes.
+  - [x] Emit strategy decision event.
+  - [x] Add selector tests for each strategy.
+- [x] Implement strategy execution wrappers.
+  - [x] Make `SimpleAnswer` run one model call with no tool execution.
+  - [x] Make `ToolLoop` run standard loop engine.
+  - [x] Make `PlanThenExecute` require task graph creation before tools.
+  - [x] Make `ResearchThenEdit` run read-only tools before write tools.
+  - [x] Make `ValidateThenReview` run validation and review after edits.
+  - [x] Make `ParallelDelegation` use subagent manager with write-scope checks.
+  - [x] Add tests that each wrapper respects cancellation and budget limits.
+- [x] Implement final response builder.
+  - [x] Add `FinalResponse` data model.
+    - [x] Include changed files.
+    - [x] Include validation commands and outcomes.
+    - [x] Include unresolved risks.
+    - [x] Include follow-up suggestions.
+  - [x] Build final response from task graph, tool results, validation records, and memory provenance.
+  - [x] Prevent claiming validation success without recorded passed command.
+  - [x] Add tests for final response with no code changes.
+  - [x] Add tests for final response with changed files and passing validation.
+  - [x] Add tests for final response with failed validation.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-agent-orchestrator strategy` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator final_response` passes.
-- [ ] Tests prove final responses cannot claim unrecorded validation success.
+- [x] `cargo test --quiet -p ee-agent-orchestrator strategy` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator final_response` passes.
+- [x] Tests prove final responses cannot claim unrecorded validation success.
 
 ### Phase 3: Reflection, review, validation, and stuck detection
 
@@ -2070,45 +2069,45 @@ Rules:
 
 #### Work items
 
-- [ ] Implement validation task planner.
-  - [ ] Infer validation tools from changed file types and project metadata.
-  - [ ] Create validation task nodes in task graph.
-  - [ ] Route validation commands through existing tool executor.
-  - [ ] Store validation results with command, status, output summary, and timestamp.
-  - [ ] Add tests for Rust file validation plan.
-  - [ ] Add tests for no validation tools available.
-- [ ] Implement reflection pass.
-  - [ ] Add `ReflectionConfig`.
-    - [ ] Include `enabled`.
-    - [ ] Include `max_review_iterations`.
-    - [ ] Include `max_fix_iterations`.
-  - [ ] Add one model review call after tool/edit loop when enabled.
-  - [ ] Feed changed files, diagnostics, validation results, and task state to review model request.
-  - [ ] Convert review findings into task graph items.
-  - [ ] Allow at most configured fix iterations.
-  - [ ] Add tests for one review pass finding issue.
-  - [ ] Add tests for review disabled.
-- [ ] Implement stuck detection.
-  - [ ] Track repeated identical model responses.
-  - [ ] Track repeated identical tool calls.
-  - [ ] Track repeated failed edit attempts.
-  - [ ] Track loop iterations with no task graph state change.
-  - [ ] Stop with `Stuck` reason when threshold exceeded.
-  - [ ] Add tests for repeated model response stop.
-  - [ ] Add tests for repeated tool call stop.
-  - [ ] Add tests for repeated failed edit stop.
-- [ ] Implement progress scoring.
-  - [ ] Add task completion confidence field.
-  - [ ] Update confidence from completed tools, validation pass, and review findings.
-  - [ ] Prevent final success when required tasks remain failed or blocked.
-  - [ ] Add tests for confidence updates.
+- [x] Implement validation task planner.
+  - [x] Infer validation tools from changed file types and project metadata.
+  - [x] Create validation task nodes in task graph.
+  - [x] Route validation commands through existing tool executor.
+  - [x] Store validation results with command, status, output summary, and timestamp.
+  - [x] Add tests for Rust file validation plan.
+  - [x] Add tests for no validation tools available.
+- [x] Implement reflection pass.
+  - [x] Add `ReflectionConfig`.
+    - [x] Include `enabled`.
+    - [x] Include `max_review_iterations`.
+    - [x] Include `max_fix_iterations`.
+  - [x] Add one model review call after tool/edit loop when enabled.
+  - [x] Feed changed files, diagnostics, validation results, and task state to review model request.
+  - [x] Convert review findings into task graph items.
+  - [x] Allow at most configured fix iterations.
+  - [x] Add tests for one review pass finding issue.
+  - [x] Add tests for review disabled.
+- [x] Implement stuck detection.
+  - [x] Track repeated identical model responses.
+  - [x] Track repeated identical tool calls.
+  - [x] Track repeated failed edit attempts.
+  - [x] Track loop iterations with no task graph state change.
+  - [x] Stop with `Stuck` reason when threshold exceeded.
+  - [x] Add tests for repeated model response stop.
+  - [x] Add tests for repeated tool call stop.
+  - [x] Add tests for repeated failed edit stop.
+- [x] Implement progress scoring.
+  - [x] Add task completion confidence field.
+  - [x] Update confidence from completed tools, validation pass, and review findings.
+  - [x] Prevent final success when required tasks remain failed or blocked.
+  - [x] Add tests for confidence updates.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-agent-orchestrator validation_planner` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator reflection` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator stuck_detection` passes.
-- [ ] Tests prove reflection cannot exceed configured iteration limits.
+- [x] `cargo test --quiet -p ee-agent-orchestrator validation_planner` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator reflection` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator stuck_detection` passes.
+- [x] Tests prove reflection cannot exceed configured iteration limits.
 
 ### Phase 4: Advanced safety policy and prompt-injection resistance
 
@@ -2126,50 +2125,50 @@ Rules:
 
 #### Work items
 
-- [ ] Implement trust labels.
-  - [ ] Add `TrustLevel` enum.
-    - [ ] Include `SystemPolicy`.
-    - [ ] Include `UserPrompt`.
-    - [ ] Include `ModelOutput`.
-    - [ ] Include `ToolOutputUntrusted`.
-    - [ ] Include `SubagentSummaryUntrusted`.
-  - [ ] Label every transcript and memory item.
-  - [ ] Add tests for trust labels on file/tool outputs.
-- [ ] Implement prompt-injection guard.
-  - [ ] Wrap untrusted content in model requests with explicit labels.
-  - [ ] Add policy reminder that untrusted content cannot modify instructions.
-  - [ ] Detect common injection phrases in untrusted tool output.
-  - [ ] Emit diagnostic event when suspicious text is detected.
-  - [ ] Add tests with file content containing “ignore previous instructions”.
-  - [ ] Add tests proving suspicious text does not alter policy decisions.
-- [ ] Implement sensitive-data guard.
-  - [ ] Detect secret-like keys and token-like values.
-  - [ ] Redact sensitive values before memory insertion.
-  - [ ] Redact sensitive values before trace export.
-  - [ ] Redact sensitive values before final response builder.
-  - [ ] Add tests for API key redaction.
-  - [ ] Add tests for env-var-like secret redaction.
-- [ ] Implement destructive action gate.
-  - [ ] Add side-effect subclasses for delete, move, overwrite, chmod-like operations, terminal kill, and external network request.
-  - [ ] Deny destructive subclasses by default.
-  - [ ] Require explicit policy allowance for destructive subclasses.
-  - [ ] Add tests for delete denied by default.
-  - [ ] Add tests for overwrite denied without configured allowance.
-  - [ ] Add tests for terminal kill denied outside owned terminal scope.
-- [ ] Implement workspace scope policy.
-  - [ ] Add allowed roots and file glob scopes to task policy.
-  - [ ] Narrow subagent scopes from parent scopes.
-  - [ ] Reject tool intents outside active scope before client bridge call.
-  - [ ] Add tests for root escape rejection.
-  - [ ] Add tests for subagent narrowed-scope enforcement.
+- [x] Implement trust labels.
+  - [x] Add `TrustLevel` enum.
+    - [x] Include `SystemPolicy`.
+    - [x] Include `UserPrompt`.
+    - [x] Include `ModelOutput`.
+    - [x] Include `ToolOutputUntrusted`.
+    - [x] Include `SubagentSummaryUntrusted`.
+  - [x] Label every transcript and memory item.
+  - [x] Add tests for trust labels on file/tool outputs.
+- [x] Implement prompt-injection guard.
+  - [x] Wrap untrusted content in model requests with explicit labels.
+  - [x] Add policy reminder that untrusted content cannot modify instructions.
+  - [x] Detect common injection phrases in untrusted tool output.
+  - [x] Emit diagnostic event when suspicious text is detected.
+  - [x] Add tests with file content containing “ignore previous instructions”.
+  - [x] Add tests proving suspicious text does not alter policy decisions.
+- [x] Implement sensitive-data guard.
+  - [x] Detect secret-like keys and token-like values.
+  - [x] Redact sensitive values before memory insertion.
+  - [x] Redact sensitive values before trace export.
+  - [x] Redact sensitive values before final response builder.
+  - [x] Add tests for API key redaction.
+  - [x] Add tests for env-var-like secret redaction.
+- [x] Implement destructive action gate.
+  - [x] Add side-effect subclasses for delete, move, overwrite, chmod-like operations, terminal kill, and external network request.
+  - [x] Deny destructive subclasses by default.
+  - [x] Require explicit policy allowance for destructive subclasses.
+  - [x] Add tests for delete denied by default.
+  - [x] Add tests for overwrite denied without configured allowance.
+  - [x] Add tests for terminal kill denied outside owned terminal scope.
+- [x] Implement workspace scope policy.
+  - [x] Add allowed roots and file glob scopes to task policy.
+  - [x] Narrow subagent scopes from parent scopes.
+  - [x] Reject tool intents outside active scope before client bridge call.
+  - [x] Add tests for root escape rejection.
+  - [x] Add tests for subagent narrowed-scope enforcement.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-agent-orchestrator trust` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator prompt_injection` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator sensitive_data` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator destructive_policy` passes.
-- [ ] Tests prove untrusted tool output cannot change tool policy decisions.
+- [x] `cargo test --quiet -p ee-agent-orchestrator trust` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator prompt_injection` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator sensitive_data` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator destructive_policy` passes.
+- [x] Tests prove untrusted tool output cannot change tool policy decisions.
 
 ### Phase 5: Tool dependency graph, caching, parallelism, and retries
 
@@ -2187,52 +2186,52 @@ Rules:
 
 #### Work items
 
-- [ ] Implement tool dependency graph.
-  - [ ] Add `ToolDependency` metadata to `ToolDefinition`.
-    - [ ] Include required prior data classes.
-    - [ ] Include produced data classes.
-    - [ ] Include affected path scope.
-  - [ ] Build dependency graph from planned tool intents.
-  - [ ] Reject cyclic tool dependencies.
-  - [ ] Add tests for dependency ordering.
-  - [ ] Add tests for cycle rejection.
-- [ ] Implement tool result cache.
-  - [ ] Add cache key from tool name, normalized args, session id, and scope.
-  - [ ] Store read-only tool results only.
-  - [ ] Add TTL or turn-scoped lifetime.
-  - [ ] Invalidate path-scoped cache entries on write/edit tool success.
-  - [ ] Add tests for read cache hit.
-  - [ ] Add tests for write invalidation.
-  - [ ] Add tests that write/execute results are not cached.
-- [ ] Implement parallel read-only tool execution.
-  - [ ] Group independent read-only tool intents.
-  - [ ] Run group concurrently under configured parallelism limit.
-  - [ ] Collect results in original intent order.
-  - [ ] Emit events for each started/completed tool.
-  - [ ] Add tests for concurrent execution with deterministic final ordering.
-  - [ ] Add tests proving write tools are serialized.
-- [ ] Implement retry classifier.
-  - [ ] Add `RetryPolicy`.
-    - [ ] Include max retries.
-    - [ ] Include transient error classes.
-    - [ ] Include backoff strategy using testable clock.
-  - [ ] Classify timeout, rate-limit, and temporary I/O as transient.
-  - [ ] Classify invalid params, policy denial, and permission denial as permanent.
-  - [ ] Add tests for transient retry.
-  - [ ] Add tests for permanent no-retry.
-  - [ ] Add tests for retry budget exhaustion.
-- [ ] Implement tool schema compiler.
-  - [ ] Generate provider-facing tool schemas from `ToolDefinition`.
-  - [ ] Validate generated schemas include names, descriptions, required fields, and side-effect metadata.
-  - [ ] Add snapshot tests for built-in tool schemas.
+- [x] Implement tool dependency graph.
+  - [x] Add `ToolDependency` metadata to `ToolDefinition`.
+    - [x] Include required prior data classes.
+    - [x] Include produced data classes.
+    - [x] Include affected path scope.
+  - [x] Build dependency graph from planned tool intents.
+  - [x] Reject cyclic tool dependencies.
+  - [x] Add tests for dependency ordering.
+  - [x] Add tests for cycle rejection.
+- [x] Implement tool result cache.
+  - [x] Add cache key from tool name, normalized args, session id, and scope.
+  - [x] Store read-only tool results only.
+  - [x] Add TTL or turn-scoped lifetime.
+  - [x] Invalidate path-scoped cache entries on write/edit tool success.
+  - [x] Add tests for read cache hit.
+  - [x] Add tests for write invalidation.
+  - [x] Add tests that write/execute results are not cached.
+- [x] Implement parallel read-only tool execution.
+  - [x] Group independent read-only tool intents.
+  - [x] Run group concurrently under configured parallelism limit.
+  - [x] Collect results in original intent order.
+  - [x] Emit events for each started/completed tool.
+  - [x] Add tests for concurrent execution with deterministic final ordering.
+  - [x] Add tests proving write tools are serialized.
+- [x] Implement retry classifier.
+  - [x] Add `RetryPolicy`.
+    - [x] Include max retries.
+    - [x] Include transient error classes.
+    - [x] Include backoff strategy using testable clock.
+  - [x] Classify timeout, rate-limit, and temporary I/O as transient.
+  - [x] Classify invalid params, policy denial, and permission denial as permanent.
+  - [x] Add tests for transient retry.
+  - [x] Add tests for permanent no-retry.
+  - [x] Add tests for retry budget exhaustion.
+- [x] Implement tool schema compiler.
+  - [x] Generate provider-facing tool schemas from `ToolDefinition`.
+  - [x] Validate generated schemas include names, descriptions, required fields, and side-effect metadata.
+  - [x] Add snapshot tests for built-in tool schemas.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-agent-orchestrator tool_dependencies` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator tool_cache` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator parallel_tools` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator retries` passes.
-- [ ] Tests prove policy denials are never retried.
+- [x] `cargo test --quiet -p ee-agent-orchestrator tool_dependencies` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator tool_cache` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator parallel_tools` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator retries` passes.
+- [x] Tests prove policy denials are never retried.
 
 ### Phase 6: Subagent roles, verification, fan-out/fan-in, and conflict detection
 
@@ -2250,59 +2249,59 @@ Rules:
 
 #### Work items
 
-- [ ] Implement subagent role library.
-  - [ ] Add built-in `researcher` role.
-    - [ ] Allow read-only tools.
-    - [ ] Deny writes and executes.
-  - [ ] Add built-in `code_reader` role.
-    - [ ] Allow file/search/symbol tools.
-    - [ ] Deny writes and executes.
-  - [ ] Add built-in `implementer` role.
-    - [ ] Allow writes only within assigned file scopes.
-    - [ ] Deny terminal execution by default.
-  - [ ] Add built-in `test_runner` role.
-    - [ ] Allow configured validation tools.
-    - [ ] Deny file writes.
-  - [ ] Add built-in `reviewer` role.
-    - [ ] Allow read-only and diagnostics tools.
-    - [ ] Deny writes.
-  - [ ] Add built-in `summarizer` role.
-    - [ ] Deny all tools by default.
-  - [ ] Add tests for default tool scopes of every role.
-- [ ] Implement fan-out/fan-in coordinator.
-  - [ ] Split ready independent tasks into subagent requests.
-  - [ ] Enforce max parallel subagents.
-  - [ ] Collect child summaries in deterministic task order.
-  - [ ] Merge completed summaries into parent transcript.
-  - [ ] Mark parent task blocked if required child fails.
-  - [ ] Add tests for parallel fan-out deterministic merge.
-  - [ ] Add tests for child failure blocking parent task.
-- [ ] Implement subagent result verifier.
-  - [ ] Require child summary to include cited files/tools when role requires evidence.
-  - [ ] Check cited files/tools exist in child event log.
-  - [ ] Reject child memory merge when citations are missing.
-  - [ ] Add tests for valid cited summary.
-  - [ ] Add tests for missing citation rejection.
-- [ ] Implement subagent quarantine.
-  - [ ] Store failed child output in quarantine state.
-  - [ ] Exclude quarantined output from normal memory context.
-  - [ ] Allow parent model to inspect bounded quarantine summary.
-  - [ ] Add tests that failed child memory is not merged.
-- [ ] Implement write-scope conflict detector.
-  - [ ] Track intended file scopes per subagent.
-  - [ ] Reject overlapping write scopes for concurrent subagents.
-  - [ ] Lock file scopes during active write task.
-  - [ ] Release locks after task completion/cancellation.
-  - [ ] Add tests for overlapping file conflict.
-  - [ ] Add tests for disjoint file scopes running concurrently.
+- [x] Implement subagent role library.
+  - [x] Add built-in `researcher` role.
+    - [x] Allow read-only tools.
+    - [x] Deny writes and executes.
+  - [x] Add built-in `code_reader` role.
+    - [x] Allow file/search/symbol tools.
+    - [x] Deny writes and executes.
+  - [x] Add built-in `implementer` role.
+    - [x] Allow writes only within assigned file scopes.
+    - [x] Deny terminal execution by default.
+  - [x] Add built-in `test_runner` role.
+    - [x] Allow configured validation tools.
+    - [x] Deny file writes.
+  - [x] Add built-in `reviewer` role.
+    - [x] Allow read-only and diagnostics tools.
+    - [x] Deny writes.
+  - [x] Add built-in `summarizer` role.
+    - [x] Deny all tools by default.
+  - [x] Add tests for default tool scopes of every role.
+- [x] Implement fan-out/fan-in coordinator.
+  - [x] Split ready independent tasks into subagent requests.
+  - [x] Enforce max parallel subagents.
+  - [x] Collect child summaries in deterministic task order.
+  - [x] Merge completed summaries into parent transcript.
+  - [x] Mark parent task blocked if required child fails.
+  - [x] Add tests for parallel fan-out deterministic merge.
+  - [x] Add tests for child failure blocking parent task.
+- [x] Implement subagent result verifier.
+  - [x] Require child summary to include cited files/tools when role requires evidence.
+  - [x] Check cited files/tools exist in child event log.
+  - [x] Reject child memory merge when citations are missing.
+  - [x] Add tests for valid cited summary.
+  - [x] Add tests for missing citation rejection.
+- [x] Implement subagent quarantine.
+  - [x] Store failed child output in quarantine state.
+  - [x] Exclude quarantined output from normal memory context.
+  - [x] Allow parent model to inspect bounded quarantine summary.
+  - [x] Add tests that failed child memory is not merged.
+- [x] Implement write-scope conflict detector.
+  - [x] Track intended file scopes per subagent.
+  - [x] Reject overlapping write scopes for concurrent subagents.
+  - [x] Lock file scopes during active write task.
+  - [x] Release locks after task completion/cancellation.
+  - [x] Add tests for overlapping file conflict.
+  - [x] Add tests for disjoint file scopes running concurrently.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-agent-orchestrator subagent_roles` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator fanout_fanin` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator subagent_verifier` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator write_conflicts` passes.
-- [ ] Tests prove failed subagent memory is quarantined by default.
+- [x] `cargo test --quiet -p ee-agent-orchestrator subagent_roles` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator fanout_fanin` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator subagent_verifier` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator write_conflicts` passes.
+- [x] Tests prove failed subagent memory is quarantined by default.
 
 ### Phase 7: Advanced planning, task compilation, and issue integration
 
@@ -2320,42 +2319,42 @@ Rules:
 
 #### Work items
 
-- [ ] Implement plan compiler.
-  - [ ] Parse model plan items into `TaskNode` values.
-  - [ ] Require task title, action, scope, and expected result.
-  - [ ] Infer dependencies from explicit model output.
-  - [ ] Reject cyclic dependencies.
-  - [ ] Reject tasks without executable action or verification criteria.
-  - [ ] Add tests for valid plan compilation.
-  - [ ] Add tests for vague task rejection.
-  - [ ] Add tests for dependency cycle rejection.
-- [ ] Implement task readiness scoring.
-  - [ ] Mark tasks ready only when dependencies complete.
-  - [ ] Mark tasks blocked when dependency fails.
-  - [ ] Compute progress percentage from task graph status.
-  - [ ] Add tests for progress scoring.
-- [ ] Implement milestone summaries.
-  - [ ] Generate bounded summary after configured number of events or completed tasks.
-  - [ ] Store summary in memory with provenance.
-  - [ ] Drop low-value raw observations after summary when memory pressure exists.
-  - [ ] Add tests for milestone summary creation.
-  - [ ] Add tests for compaction under memory pressure.
-- [ ] Implement issue checklist integration.
-  - [ ] Parse markdown checklist items from configured issue files.
-  - [ ] Match completed task criteria to checklist items by stable text or configured key.
-  - [ ] Require recorded passing validation before marking item complete.
-  - [ ] Use write/edit tool path to update checklist text.
-  - [ ] Add tests for checklist parse.
-  - [ ] Add tests for marking item only after criteria pass.
-  - [ ] Add tests that failed criteria do not mark item complete.
+- [x] Implement plan compiler.
+  - [x] Parse model plan items into `TaskNode` values.
+  - [x] Require task title, action, scope, and expected result.
+  - [x] Infer dependencies from explicit model output.
+  - [x] Reject cyclic dependencies.
+  - [x] Reject tasks without executable action or verification criteria.
+  - [x] Add tests for valid plan compilation.
+  - [x] Add tests for vague task rejection.
+  - [x] Add tests for dependency cycle rejection.
+- [x] Implement task readiness scoring.
+  - [x] Mark tasks ready only when dependencies complete.
+  - [x] Mark tasks blocked when dependency fails.
+  - [x] Compute progress percentage from task graph status.
+  - [x] Add tests for progress scoring.
+- [x] Implement milestone summaries.
+  - [x] Generate bounded summary after configured number of events or completed tasks.
+  - [x] Store summary in memory with provenance.
+  - [x] Drop low-value raw observations after summary when memory pressure exists.
+  - [x] Add tests for milestone summary creation.
+  - [x] Add tests for compaction under memory pressure.
+- [x] Implement issue checklist integration.
+  - [x] Parse markdown checklist items from configured issue files.
+  - [x] Match completed task criteria to checklist items by stable text or configured key.
+  - [x] Require recorded passing validation before marking item complete.
+  - [x] Use write/edit tool path to update checklist text.
+  - [x] Add tests for checklist parse.
+  - [x] Add tests for marking item only after criteria pass.
+  - [x] Add tests that failed criteria do not mark item complete.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-agent-orchestrator plan_compiler` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator progress` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator milestones` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator issue_integration` passes.
-- [ ] Tests prove vague tasks are rejected before execution.
+- [x] `cargo test --quiet -p ee-agent-orchestrator plan_compiler` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator progress` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator milestones` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator issue_integration` passes.
+- [x] Tests prove vague tasks are rejected before execution.
 
 ### Phase 8: Context pack builder and memory provenance
 
@@ -2373,48 +2372,48 @@ Rules:
 
 #### Work items
 
-- [ ] Implement context pack model.
-  - [ ] Add `ContextPack`.
-    - [ ] Include active task summary.
-    - [ ] Include relevant memory items.
-    - [ ] Include recent tool summaries.
-    - [ ] Include file references.
-    - [ ] Include policy reminders.
-    - [ ] Include budget snapshot.
-    - [ ] Include truncation metadata.
-  - [ ] Add `ContextItemProvenance`.
-    - [ ] Include source kind.
-    - [ ] Include source id.
-    - [ ] Include optional file path/range.
-    - [ ] Include trust label.
-- [ ] Implement context pack builder.
-  - [ ] Score memory relevance by task id, key match, source recency, and explicit dependency.
-  - [ ] Include policy reminders before untrusted content.
-  - [ ] Include newest high-value tool summaries.
-  - [ ] Exclude sensitive items.
-  - [ ] Enforce byte budget with deterministic truncation.
-  - [ ] Add tests for relevance ordering.
-  - [ ] Add tests for byte-budget truncation.
-  - [ ] Add tests for sensitive exclusion.
-- [ ] Implement memory compaction and decay.
-  - [ ] Merge repeated facts with same key and compatible provenance.
-  - [ ] Decay low-value stale observations.
-  - [ ] Preserve decisions, constraints, and validation results.
-  - [ ] Add tests for repeated fact merge.
-  - [ ] Add tests for preserving decisions during compaction.
-- [ ] Add optional semantic memory adapter trait.
-  - [ ] Define trait for external vector/index lookup without adding required embedding dependency.
-  - [ ] Add fake semantic adapter for tests.
-  - [ ] Merge semantic results into context pack with provenance.
-  - [ ] Add tests for adapter disabled behavior.
-  - [ ] Add tests for fake adapter result inclusion.
+- [x] Implement context pack model.
+  - [x] Add `ContextPack`.
+    - [x] Include active task summary.
+    - [x] Include relevant memory items.
+    - [x] Include recent tool summaries.
+    - [x] Include file references.
+    - [x] Include policy reminders.
+    - [x] Include budget snapshot.
+    - [x] Include truncation metadata.
+  - [x] Add `ContextItemProvenance`.
+    - [x] Include source kind.
+    - [x] Include source id.
+    - [x] Include optional file path/range.
+    - [x] Include trust label.
+- [x] Implement context pack builder.
+  - [x] Score memory relevance by task id, key match, source recency, and explicit dependency.
+  - [x] Include policy reminders before untrusted content.
+  - [x] Include newest high-value tool summaries.
+  - [x] Exclude sensitive items.
+  - [x] Enforce byte budget with deterministic truncation.
+  - [x] Add tests for relevance ordering.
+  - [x] Add tests for byte-budget truncation.
+  - [x] Add tests for sensitive exclusion.
+- [x] Implement memory compaction and decay.
+  - [x] Merge repeated facts with same key and compatible provenance.
+  - [x] Decay low-value stale observations.
+  - [x] Preserve decisions, constraints, and validation results.
+  - [x] Add tests for repeated fact merge.
+  - [x] Add tests for preserving decisions during compaction.
+- [x] Add optional semantic memory adapter trait.
+  - [x] Define trait for external vector/index lookup without adding required embedding dependency.
+  - [x] Add fake semantic adapter for tests.
+  - [x] Merge semantic results into context pack with provenance.
+  - [x] Add tests for adapter disabled behavior.
+  - [x] Add tests for fake adapter result inclusion.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-agent-orchestrator context_pack` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator memory_compaction` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator semantic_memory` passes.
-- [ ] Tests prove context packs stay within byte budget and preserve provenance.
+- [x] `cargo test --quiet -p ee-agent-orchestrator context_pack` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator memory_compaction` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator semantic_memory` passes.
+- [x] Tests prove context packs stay within byte budget and preserve provenance.
 
 ### Phase 9: Provider routing, streaming, and rate limits
 
@@ -2432,46 +2431,46 @@ Rules:
 
 #### Work items
 
-- [ ] Implement model router.
-  - [ ] Add `ModelRoute`.
-    - [ ] Include route id.
-    - [ ] Include model adapter id.
-    - [ ] Include task kind constraints.
-    - [ ] Include cost/strength tier.
-  - [ ] Route simple summaries to cheap adapter.
-  - [ ] Route implementation/review tasks to strong adapter when configured.
-  - [ ] Route subagent roles to role-specific adapters when configured.
-  - [ ] Add tests for deterministic route selection.
-- [ ] Implement rate-limit adapter.
-  - [ ] Add provider-level semaphore/concurrency limit.
-  - [ ] Add request-per-window limiter using testable clock.
-  - [ ] Queue model calls when allowed by timeout budget.
-  - [ ] Fail fast when queue wait would exceed turn deadline.
-  - [ ] Add tests for concurrency limit.
-  - [ ] Add tests for per-window limit with paused time.
-  - [ ] Add tests for deadline-aware fail-fast behavior.
-- [ ] Implement streaming model support.
-  - [ ] Add streaming callback/event type for partial text.
-  - [ ] Add streaming callback/event type for partial reasoning.
-  - [ ] Merge streamed chunks into final transcript message.
-  - [ ] Emit ACP updates through `UpdateSink` as chunks arrive.
-  - [ ] Add tests for streamed text chunk ordering.
-  - [ ] Add tests for streamed reasoning chunk ordering.
-  - [ ] Add tests for stream cancellation.
-- [ ] Implement tool-call dialect adapters.
-  - [ ] Add OpenAI/OpenRouter-style function call normalization.
-  - [ ] Add Anthropic-style tool use normalization.
-  - [ ] Add local-model JSON tool-call normalization.
-  - [ ] Reject malformed tool-call dialect payloads with model error.
-  - [ ] Add fixtures and tests for each dialect.
+- [x] Implement model router.
+  - [x] Add `ModelRoute`.
+    - [x] Include route id.
+    - [x] Include model adapter id.
+    - [x] Include task kind constraints.
+    - [x] Include cost/strength tier.
+  - [x] Route simple summaries to cheap adapter.
+  - [x] Route implementation/review tasks to strong adapter when configured.
+  - [x] Route subagent roles to role-specific adapters when configured.
+  - [x] Add tests for deterministic route selection.
+- [x] Implement rate-limit adapter.
+  - [x] Add provider-level semaphore/concurrency limit.
+  - [x] Add request-per-window limiter using testable clock.
+  - [x] Queue model calls when allowed by timeout budget.
+  - [x] Fail fast when queue wait would exceed turn deadline.
+  - [x] Add tests for concurrency limit.
+  - [x] Add tests for per-window limit with paused time.
+  - [x] Add tests for deadline-aware fail-fast behavior.
+- [x] Implement streaming model support.
+  - [x] Add streaming callback/event type for partial text.
+  - [x] Add streaming callback/event type for partial reasoning.
+  - [x] Merge streamed chunks into final transcript message.
+  - [x] Emit ACP updates through `UpdateSink` as chunks arrive.
+  - [x] Add tests for streamed text chunk ordering.
+  - [x] Add tests for streamed reasoning chunk ordering.
+  - [x] Add tests for stream cancellation.
+- [x] Implement tool-call dialect adapters.
+  - [x] Add OpenAI/OpenRouter-style function call normalization.
+  - [x] Add Anthropic-style tool use normalization.
+  - [x] Add local-model JSON tool-call normalization.
+  - [x] Reject malformed tool-call dialect payloads with model error.
+  - [x] Add fixtures and tests for each dialect.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-agent-orchestrator model_router` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator rate_limit` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator streaming` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator dialects` passes.
-- [ ] Tests prove shared provider rate limits apply across subagents.
+- [x] `cargo test --quiet -p ee-agent-orchestrator model_router` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator rate_limit` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator streaming` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator dialects` passes.
+- [x] Tests prove shared provider rate limits apply across subagents.
 
 ### Phase 10: Observability, metrics, and workspace validation
 
@@ -2489,45 +2488,95 @@ Rules:
 
 #### Work items
 
-- [ ] Implement metrics model.
-  - [ ] Count model calls.
-  - [ ] Count tool calls by side-effect class.
-  - [ ] Count subagent spawns by role.
-  - [ ] Count cancellations.
-  - [ ] Count denied policy actions.
-  - [ ] Count budget-exceeded stops.
-  - [ ] Count bytes/tokens where known.
-  - [ ] Add tests for metrics increments.
-- [ ] Implement decision log.
-  - [ ] Record strategy decisions with reason codes.
-  - [ ] Record tool policy decisions with reason codes.
-  - [ ] Record routing decisions with reason codes.
-  - [ ] Record subagent delegation decisions with reason codes.
-  - [ ] Exclude hidden chain-of-thought and sensitive content.
-  - [ ] Add tests for decision log redaction.
-- [ ] Add dependency-boundary checks.
-  - [ ] Assert `ee-agent-orchestrator` does not depend on `ee-agent-host`.
-  - [ ] Assert `ee-agent-orchestrator` does not depend on `ee-cli`.
-  - [ ] Assert orchestrator examples/tests remain network-free by default.
-- [ ] Add default-safety regression suite.
-  - [ ] Test writes denied by default.
-  - [ ] Test executes denied by default.
-  - [ ] Test destructive operations denied by default.
-  - [ ] Test subagent depth limit default.
-  - [ ] Test memory byte limit default.
-  - [ ] Test prompt-injection guard enabled by default.
-- [ ] Run focused validation commands.
-  - [ ] Validate format.
-  - [ ] Validate orchestrator clippy.
-  - [ ] Validate orchestrator tests.
-  - [ ] Validate ACP server framework tests when adapter APIs change.
-  - [ ] Validate OpenRouter tests when model adapter code changes.
+- [x] Implement metrics model.
+  - [x] Count model calls.
+  - [x] Count tool calls by side-effect class.
+  - [x] Count subagent spawns by role.
+  - [x] Count cancellations.
+  - [x] Count denied policy actions.
+  - [x] Count budget-exceeded stops.
+  - [x] Count bytes/tokens where known.
+  - [x] Add tests for metrics increments.
+- [x] Implement decision log.
+  - [x] Record strategy decisions with reason codes.
+  - [x] Record tool policy decisions with reason codes.
+  - [x] Record routing decisions with reason codes.
+  - [x] Record subagent delegation decisions with reason codes.
+  - [x] Exclude hidden chain-of-thought and sensitive content.
+  - [x] Add tests for decision log redaction.
+- [x] Add dependency-boundary checks.
+  - [x] Assert `ee-agent-orchestrator` does not depend on `ee-agent-host`.
+  - [x] Assert `ee-agent-orchestrator` does not depend on `ee-cli`.
+  - [x] Assert orchestrator examples/tests remain network-free by default.
+- [x] Add default-safety regression suite.
+  - [x] Test writes denied by default.
+  - [x] Test executes denied by default.
+  - [x] Test destructive operations denied by default.
+  - [x] Test subagent depth limit default.
+  - [x] Test memory byte limit default.
+  - [x] Test prompt-injection guard enabled by default.
+- [x] Run focused validation commands.
+  - [x] Validate format.
+  - [x] Validate orchestrator clippy.
+  - [x] Validate orchestrator tests.
+  - [x] Validate ACP server framework tests when adapter APIs change.
+  - [x] Validate OpenRouter tests when model adapter code changes.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-agent-orchestrator metrics` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator decision_log` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator default_safety` passes.
-- [ ] `cargo clippy --quiet -p ee-agent-orchestrator --all-targets --all-features -- -D warnings` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator` passes.
-- [ ] `./scripts/test-workspace-summary.sh` passes after focused validation.
+- [x] `cargo test --quiet -p ee-agent-orchestrator metrics` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator decision_log` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator default_safety` passes.
+- [x] `cargo clippy --quiet -p ee-agent-orchestrator --all-targets --all-features -- -D warnings` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator` passes.
+- [x] `./scripts/test-workspace-summary.sh` passes after focused validation.
+
+### Phase 11: Subagent model selection
+
+Goal: let delegation choose which provider/model a subagent runs on, with the available models advertised to the delegating model and unknown selections rejected before spawn.
+
+Overview: today every subagent inherits the parent's single injected `ModelAdapter`. This phase adds an optional per-role model selection: the runtime owns a small model registry, `SubagentRole` and the `delegate_task` tool carry an optional model id, and the delegating model sees the available models so it can pick. Default stays the parent adapter when unset. Router and rate-limit machinery land in Phase 9; this phase owns the registry, the delegation surface, and validation.
+
+Rules:
+
+- Default to the parent model when the role does not select one.
+- Reject unknown model ids before the child task node is created.
+- Advertise the model list to the model without leaking provider secrets or credentials.
+- Record the selected model on the child task and in delegation events.
+- Keep tests deterministic and network-free with scripted adapters.
+
+#### Work items
+
+- [x] Implement the model registry.
+  - [x] Add `ModelRegistry` mapping model ids to `Arc<dyn ModelAdapter>`.
+    - [x] Register adapters under explicit ids.
+    - [x] Expose the advertised model list (ids plus optional display name/capability hints).
+    - [x] Reject duplicate ids.
+  - [x] Wire the registry into `OrchestratorRuntime` and `SubagentManager`.
+    - [x] Keep single-adapter construction working unchanged (registry with one default entry).
+  - [x] Add registry tests.
+    - [x] Test duplicate id rejection.
+    - [x] Test unknown id lookup fails.
+- [x] Extend the delegation surface.
+  - [x] Add optional `model` field to `SubagentRole`.
+  - [x] Add optional `model` argument to the `delegate_task` tool schema.
+  - [x] Add optional `model_id` to `SubagentRequest`.
+  - [x] Expose available models to the delegating model.
+    - [x] Include the advertised model list in `ModelRequest`.
+    - [x] Include the available models in the `delegate_task` tool schema description or an enumerated argument.
+  - [x] Resolve the child adapter before the child task node is created.
+  - [x] Reject unknown model selection with a deterministic delegation error.
+  - [x] Fall back to the parent adapter when no model is selected.
+  - [x] Store the selected model id on the child `TaskNode`.
+  - [x] Add tests for selection, fallback, and unknown-id rejection.
+- [x] Surface routing decisions.
+  - [x] Record the selected model id in a delegation event.
+  - [x] Include the selected model in the child's `ModelRequest` diagnostic metadata.
+  - [x] Add tests asserting the event and metadata for explicit and fallback selections.
+
+#### Actionable criteria
+
+- [x] `cargo test --quiet -p ee-agent-orchestrator model_registry` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator delegate_model` passes.
+- [x] Tests prove unknown model selections never create a child task node.
+- [x] Tests prove unset selections fall back to the parent adapter.

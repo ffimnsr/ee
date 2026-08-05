@@ -1,0 +1,17 @@
+{
+  "context_servers": {
+    "atlas": {
+      "enabled": true,
+      "remote": false,
+      "command": "atlas",
+      "args": [
+        "--repo",
+        "/home/pastel/Projects/ee",
+        "serve",
+        "--direct-stdio",
+      ],
+      "env": {},
+    },
+  },
+  "context_server_timeout": 60,
+}

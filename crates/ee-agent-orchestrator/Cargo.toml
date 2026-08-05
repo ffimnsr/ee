@@ -1,0 +1,33 @@
+[package]
+name = "ee-agent-orchestrator"
+version = "0.1.0"
+license = "Apache-2.0"
+authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
+description = "Optional server-side agent orchestration above ee-acp-agent-server: bounded model-tool loops, tool registry, tasks, memory, budgets, and policy gates."
+categories = ["development-tools"]
+homepage = "https://github.com/ffimnsr/ee"
+repository = "https://github.com/ffimnsr/ee"
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+# Deterministic fakes (scripted model, canned tool) for downstream crates'
+# tests, mirroring `ee-acp-agent-server`'s `test-utils` convention.  Enables
+# the framework's test-only plumbing (in-memory update sink / client bridge)
+# that the replay harness needs.
+test-utils = ["ee-acp-agent-server/test-utils"]
+
+[dependencies]
+ee-acp-agent-server.workspace = true
+ee-agent-protocol.workspace = true
+futures.workspace = true
+globset.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+ee-acp-agent-server = { workspace = true, features = ["test-utils"] }
+ee-agent-orchestrator = { path = ".", features = ["test-utils"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "test-util"] }

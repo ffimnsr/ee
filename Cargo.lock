@@ -1051,9 +1051,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "ee-acp-agent-server"
+version = "0.1.0"
+dependencies = [
+ "ee-acp-agent-server",
+ "ee-agent-protocol",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ee-agent-host"
 version = "0.1.0"
 dependencies = [
+ "ee-acp-agent-server",
  "ee-agent-host",
  "ee-agent-protocol",
  "ee-mcp",
@@ -1064,6 +1078,21 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "ee-agent-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "ee-acp-agent-server",
+ "ee-agent-orchestrator",
+ "ee-agent-protocol",
+ "futures",
+ "globset",
+ "serde",
+ "serde_json",
+ "tokio",
  "tracing",
 ]
 
@@ -1133,10 +1162,13 @@ name = "ee-openrouter-agent"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "ee-acp-agent-server",
+ "ee-agent-orchestrator",
+ "ee-agent-protocol",
  "reqwest 0.12.28",
- "serde",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

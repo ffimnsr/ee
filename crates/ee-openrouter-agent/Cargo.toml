@@ -5,13 +5,20 @@ edition.workspace = true
 rust-version.workspace = true
 license = "Apache-2.0"
 authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
-description = "Minimal ACP stdio agent bridge for OpenRouter chat completions."
+description = "OpenRouter ACP agent provider built on the ee-acp-agent-server framework."
 
 [dependencies]
 clap.workspace = true
+ee-acp-agent-server.workspace = true
+ee-agent-orchestrator.workspace = true
+ee-agent-protocol.workspace = true
 reqwest.workspace = true
-serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 
 [dev-dependencies]
+ee-acp-agent-server = { workspace = true, features = ["test-utils"] }
+ee-agent-protocol.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }

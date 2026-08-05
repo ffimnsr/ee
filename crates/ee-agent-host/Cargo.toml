@@ -26,5 +26,6 @@ tokio-util = { workspace = true, features = ["compat"] }
 tracing.workspace = true
 
 [dev-dependencies]
+ee-acp-agent-server = { workspace = true, features = ["test-utils"] }
 ee-agent-host = { path = ".", features = ["test-utils"] }
 tempfile.workspace = true

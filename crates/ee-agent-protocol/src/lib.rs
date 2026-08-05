@@ -60,6 +60,12 @@ pub use agent_client_protocol::schema::v1::{
     JsonRpcBatch, JsonRpcMessage, Notification, Request, RequestId, Response,
 };
 
+/// Raw JSON-RPC wire envelope (request / notification / response) used at
+/// transport boundaries.  `JsonRpcMessage` above is the typed-message trait;
+/// this is the serializable by-value frame exchanged over transports, with
+/// `RawJsonRpcParams` as its raw params payload.
+pub use agent_client_protocol::{RawJsonRpcMessage, RawJsonRpcParams};
+
 /// High-level SDK entry points (role traits, stdio transport, handlers).
 pub use agent_client_protocol::{
     AcpAgent, Agent, Builder, ByteStreams, Channel, Client, ConnectTo, ConnectionTo,
