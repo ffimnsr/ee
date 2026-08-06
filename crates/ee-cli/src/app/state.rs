@@ -332,6 +332,10 @@ pub(crate) struct App {
     /// Agents pane state (feature `agents`); default is closed and inert.
     #[cfg(feature = "agents")]
     pub(crate) agents: super::agent_pane::AgentPaneState,
+    /// Injectable trust-policy clock (Phase 6): production uses the system
+    /// clock; tests substitute a deterministic fake.
+    #[cfg(feature = "agents")]
+    pub(crate) trust_clock: crate::policy::PolicyClock,
     /// Force next frame to clear and redraw the terminal surface.
     pub(crate) redraw_requested: bool,
     /// Per-session render observability counters.
@@ -430,6 +434,8 @@ impl App {
             privileged_save_pending: None,
             #[cfg(feature = "agents")]
             agents: super::agent_pane::AgentPaneState::default(),
+            #[cfg(feature = "agents")]
+            trust_clock: crate::policy::PolicyClock::default(),
             redraw_requested: false,
             render_metrics: crate::render_metrics::RenderMetrics::new(),
         })

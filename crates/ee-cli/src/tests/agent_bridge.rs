@@ -23,7 +23,7 @@ const WAIT: Duration = Duration::from_secs(5);
 // ── Shared harness (mirrors tests/agent_pane.rs helpers) ─────────────────────
 
 #[derive(Clone)]
-struct ScriptedFake {
+pub(crate) struct ScriptedFake {
     script: FakeAgentScript,
     handle: Arc<Mutex<Option<FakeAgent>>>,
 }
@@ -33,7 +33,7 @@ impl ScriptedFake {
         Self { script, handle: Arc::new(Mutex::new(None)) }
     }
 
-    fn agent(&self) -> FakeAgent {
+    pub(crate) fn agent(&self) -> FakeAgent {
         self.handle
             .lock()
             .expect("fake handle poisoned")
@@ -50,7 +50,7 @@ impl FakeTransportFactory for ScriptedFake {
     }
 }
 
-fn base_script() -> FakeAgentScript {
+pub(crate) fn base_script() -> FakeAgentScript {
     FakeAgentScript::new()
         .wait_for("initialize")
         .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
@@ -66,7 +66,10 @@ enabled = true
 command = "unused"
 "#;
 
-fn agents_app_in(temp: &tempfile::TempDir, script: FakeAgentScript) -> (App, ScriptedFake) {
+pub(crate) fn agents_app_in(
+    temp: &tempfile::TempDir,
+    script: FakeAgentScript,
+) -> (App, ScriptedFake) {
     fs::write(temp.path().join(".ee.toml"), AGENTS_TOML).unwrap();
     let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
     let _cwd_restore = CurrentDirGuard::capture();
@@ -128,7 +131,7 @@ fn open_buffer_and_wait(app: &mut App, path: &std::path::Path) {
 
 // ── Wire helpers ─────────────────────────────────────────────────────────────
 
-fn write_text_file(id: i64, session_id: &str, path: &str, content: &str) -> Value {
+pub(crate) fn write_text_file(id: i64, session_id: &str, path: &str, content: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
@@ -578,6 +581,20 @@ fn terminal_release_invalidates_acp_id_but_keeps_output_displayable() {
     let script = base_script()
         .emit(terminal_create(102, "s1", "sh", json!(["-c", "printf hello"]), json!({})))
         .capture(CaptureSource::Response { id: 102 }, "result.terminalId", "term_id")
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": 105,
+            "method": "terminal/wait_for_exit",
+            "params": { "sessionId": "s1", "terminalId": { "$capture": "term_id" } }
+        }))
+        .wait_for_response(105)
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": 104,
+            "method": "terminal/output",
+            "params": { "sessionId": "s1", "terminalId": { "$capture": "term_id" } }
+        }))
+        .wait_for_response(104)
         .emit(json!({
             "jsonrpc": "2.0",
             "id": 107,

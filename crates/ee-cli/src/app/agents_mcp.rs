@@ -28,6 +28,35 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Which transport delivered a proxy tool call (Phase 3 MCP trust).
+///
+/// Exact MCP rules match the transport identity, so a grant created through
+/// one route never applies to the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProxyRoute {
+    /// Stdio `ee --mcp-proxy` socket fallback.
+    Stdio,
+    /// ACP-native MCP-over-ACP.
+    AcpNative,
+}
+
+impl ProxyRoute {
+    /// Stable transport identity for exact MCP rule matching.
+    pub(crate) fn transport_identity(self) -> &'static str {
+        match self {
+            ProxyRoute::Stdio => "stdio:ee --mcp-proxy",
+            ProxyRoute::AcpNative => "acp:ee",
+        }
+    }
+
+    pub(crate) fn transport_kind(self) -> crate::policy::TransportKind {
+        match self {
+            ProxyRoute::Stdio => crate::policy::TransportKind::McpStdio,
+            ProxyRoute::AcpNative => crate::policy::TransportKind::McpAcp,
+        }
+    }
+}
 use std::sync::mpsc as std_mpsc;
 use std::time::SystemTime;
 
@@ -890,7 +919,10 @@ async fn proxy_call_to_bridge(
         ProxyCall::Diagnostics => ProxyToolCall::Diagnostics,
     };
     let (reply_tx, reply_rx) = oneshot::channel();
-    if bridge_tx.send(BridgeUiMessage::ProxyTool { call, reply: reply_tx }).is_err() {
+    if bridge_tx
+        .send(BridgeUiMessage::ProxyTool { call, route: ProxyRoute::Stdio, reply: reply_tx })
+        .is_err()
+    {
         return ProxyReply::Err {
             error: ProxyErrorBody {
                 message: String::from("editor is shutting down"),
@@ -1395,6 +1427,40 @@ impl ee_mcp::EeProxyBackend for SocketProxyBackend {
         let call = ProxyCall::TerminalCreate { command, args, cwd, env };
         self.call_text(call)
             .map_err(|message| ee_mcp::ProxyToolError { message, is_permission_denied: false })
+    }
+
+    fn terminal_output(
+        &self,
+        _terminal_id: String,
+    ) -> Result<ee_mcp::TerminalOutputResult, ee_mcp::ProxyToolError> {
+        Err(ee_mcp::ProxyToolError {
+            message: String::from("terminal lifecycle tools require ACP-native MCP proxy mode"),
+            is_permission_denied: false,
+        })
+    }
+
+    fn terminal_wait(
+        &self,
+        _terminal_id: String,
+    ) -> Result<ee_mcp::TerminalWaitResult, ee_mcp::ProxyToolError> {
+        Err(ee_mcp::ProxyToolError {
+            message: String::from("terminal lifecycle tools require ACP-native MCP proxy mode"),
+            is_permission_denied: false,
+        })
+    }
+
+    fn terminal_kill(&self, _terminal_id: String) -> Result<(), ee_mcp::ProxyToolError> {
+        Err(ee_mcp::ProxyToolError {
+            message: String::from("terminal lifecycle tools require ACP-native MCP proxy mode"),
+            is_permission_denied: false,
+        })
+    }
+
+    fn terminal_release(&self, _terminal_id: String) -> Result<(), ee_mcp::ProxyToolError> {
+        Err(ee_mcp::ProxyToolError {
+            message: String::from("terminal lifecycle tools require ACP-native MCP proxy mode"),
+            is_permission_denied: false,
+        })
     }
 
     fn diagnostics(&self) -> Vec<String> {

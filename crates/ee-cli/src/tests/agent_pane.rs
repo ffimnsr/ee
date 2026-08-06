@@ -1405,6 +1405,21 @@ fn quit_slash_command_closes_agents_pane_locally() {
 }
 
 #[test]
+fn quit_full_slash_command_exits_editor_locally() {
+    let (mut app, _temp, fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "/quit_full");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    assert!(app.should_quit);
+    assert_eq!(app.agents.layout, AgentPaneLayout::Full);
+    assert_eq!(app.mode, Mode::Agent);
+    assert!(app.agents.threads[0].draft.is_empty());
+    assert!(fake.agent().requests_by_method("session/prompt").is_empty());
+}
+
+#[test]
 fn new_slash_command_starts_and_focuses_thread_locally() {
     let script = FakeAgentScript::new()
         .wait_for("initialize")

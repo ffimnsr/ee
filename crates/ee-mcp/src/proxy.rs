@@ -203,6 +203,44 @@ pub trait EeProxyBackend: Send + Sync + 'static {
         env: Vec<(String, String)>,
     ) -> Result<String, ProxyToolError>;
 
+    /// Returns the bounded retained output for a terminal owned by this proxy session.
+    fn terminal_output(&self, terminal_id: String) -> Result<TerminalOutputResult, ProxyToolError>;
+
+    /// Returns retained chunks after `since_seq` for a terminal owned by this proxy session.
+    fn terminal_output_since(
+        &self,
+        terminal_id: String,
+        since_seq: u64,
+    ) -> Result<TerminalOutputResult, ProxyToolError> {
+        let _ = (terminal_id, since_seq);
+        Err(ProxyToolError {
+            message: String::from("incremental terminal output is unavailable in this proxy mode"),
+            is_permission_denied: false,
+        })
+    }
+
+    /// Waits using the host default timeout for a terminal owned by this proxy session.
+    fn terminal_wait(&self, terminal_id: String) -> Result<TerminalWaitResult, ProxyToolError>;
+
+    /// Waits for at most `timeout_ms` for a terminal owned by this proxy session.
+    fn terminal_wait_long(
+        &self,
+        terminal_id: String,
+        timeout_ms: u64,
+    ) -> Result<TerminalWaitResult, ProxyToolError> {
+        let _ = (terminal_id, timeout_ms);
+        Err(ProxyToolError {
+            message: String::from("long terminal waits are unavailable in this proxy mode"),
+            is_permission_denied: false,
+        })
+    }
+
+    /// Kills a terminal owned by this proxy session.
+    fn terminal_kill(&self, terminal_id: String) -> Result<(), ProxyToolError>;
+
+    /// Releases a terminal owned by this proxy session.
+    fn terminal_release(&self, terminal_id: String) -> Result<(), ProxyToolError>;
+
     /// Recent stderr/diagnostic lines, bounded; never contains secrets.
     fn diagnostics(&self) -> Vec<String>;
 }
@@ -216,6 +254,34 @@ pub struct WorkspaceRootsResult {
     pub active_file: Option<String>,
     #[serde(default)]
     pub additional_directories: Vec<String>,
+}
+
+/// One bounded stdout or stderr chunk returned by `ee_terminal_output`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalOutputChunk {
+    pub sequence: u64,
+    pub stream: String,
+    pub text: String,
+}
+
+/// Bounded output snapshot returned by `ee_terminal_output`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalOutputResult {
+    pub output: String,
+    pub chunks: Vec<TerminalOutputChunk>,
+    pub total_bytes: u64,
+    pub truncated: bool,
+    pub exit_status: Option<serde_json::Value>,
+}
+
+/// Completion state returned by `ee_terminal_wait`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalWaitResult {
+    pub completed: bool,
+    pub exit_status: Option<serde_json::Value>,
 }
 
 /// One entry returned by `ee_list_directory`.
@@ -800,6 +866,72 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
+                "ee_terminal_output",
+                "Return bounded retained output and exit status for one terminal owned by this agent session.",
+                schema(json!({
+                    "type": "object",
+                    "properties": { "terminal_id": { "type": "string" } },
+                    "required": ["terminal_id"],
+                    "additionalProperties": false,
+                })),
+            ),
+            Tool::new(
+                "ee_terminal_output_since",
+                "Return bounded stdout/stderr chunks after since_seq for one terminal owned by this agent session.",
+                schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "terminal_id": { "type": "string" },
+                        "since_seq": { "type": "integer", "minimum": 0 }
+                    },
+                    "required": ["terminal_id", "since_seq"],
+                    "additionalProperties": false,
+                })),
+            ),
+            Tool::new(
+                "ee_terminal_wait",
+                "Wait using the host default timeout for one terminal owned by this agent session.",
+                schema(json!({
+                    "type": "object",
+                    "properties": { "terminal_id": { "type": "string" } },
+                    "required": ["terminal_id"],
+                    "additionalProperties": false,
+                })),
+            ),
+            Tool::new(
+                "ee_terminal_wait_long",
+                "Wait up to bounded timeout_ms for one terminal owned by this agent session.",
+                schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "terminal_id": { "type": "string" },
+                        "timeout_ms": { "type": "integer", "minimum": 1 }
+                    },
+                    "required": ["terminal_id", "timeout_ms"],
+                    "additionalProperties": false,
+                })),
+            ),
+            Tool::new(
+                "ee_terminal_kill",
+                "Terminate one terminal owned by this agent session.",
+                schema(json!({
+                    "type": "object",
+                    "properties": { "terminal_id": { "type": "string" } },
+                    "required": ["terminal_id"],
+                    "additionalProperties": false,
+                })),
+            ),
+            Tool::new(
+                "ee_terminal_release",
+                "Release host resources and retained output for one terminal owned by this agent session.",
+                schema(json!({
+                    "type": "object",
+                    "properties": { "terminal_id": { "type": "string" } },
+                    "required": ["terminal_id"],
+                    "additionalProperties": false,
+                })),
+            ),
+            Tool::new(
                 "ee_diagnostics",
                 "Recent editor diagnostics (stderr lines); never contains secrets.",
                 schema(json!({ "type": "object", "properties": {} })),
@@ -1104,6 +1236,70 @@ impl EeMcpProxy {
                     .map(|id| complete(CallToolResult::success(vec![ContentBlock::text(id)])))
                     .unwrap_or_else(backend_error_result))
             }
+            "ee_terminal_output" => {
+                let arguments = require_arguments(request)?;
+                let terminal_id = require_nonempty_string(arguments, "terminal_id")?;
+                Ok(self
+                    .backend
+                    .terminal_output(terminal_id.to_owned())
+                    .map(|result| complete(CallToolResult::structured(json!(result))))
+                    .unwrap_or_else(backend_error_result))
+            }
+            "ee_terminal_output_since" => {
+                let arguments = require_arguments(request)?;
+                let terminal_id = require_nonempty_string(arguments, "terminal_id")?;
+                let since_seq =
+                    u64::from(optional_u32(arguments, "since_seq")?.ok_or_else(|| {
+                        ErrorData::invalid_params("missing required argument 'since_seq'", None)
+                    })?);
+                Ok(self
+                    .backend
+                    .terminal_output_since(terminal_id.to_owned(), since_seq)
+                    .map(|result| complete(CallToolResult::structured(json!(result))))
+                    .unwrap_or_else(backend_error_result))
+            }
+            "ee_terminal_wait" => {
+                let arguments = require_arguments(request)?;
+                let terminal_id = require_nonempty_string(arguments, "terminal_id")?;
+                Ok(self
+                    .backend
+                    .terminal_wait(terminal_id.to_owned())
+                    .map(|result| complete(CallToolResult::structured(json!(result))))
+                    .unwrap_or_else(backend_error_result))
+            }
+            "ee_terminal_wait_long" => {
+                let arguments = require_arguments(request)?;
+                let terminal_id = require_nonempty_string(arguments, "terminal_id")?;
+                let timeout_ms = u64::from(require_positive_u32(arguments, "timeout_ms")?);
+                Ok(self
+                    .backend
+                    .terminal_wait_long(terminal_id.to_owned(), timeout_ms)
+                    .map(|result| complete(CallToolResult::structured(json!(result))))
+                    .unwrap_or_else(backend_error_result))
+            }
+            "ee_terminal_kill" => {
+                let arguments = require_arguments(request)?;
+                let terminal_id = require_nonempty_string(arguments, "terminal_id")?;
+                Ok(self
+                    .backend
+                    .terminal_kill(terminal_id.to_owned())
+                    .map(|()| {
+                        complete(CallToolResult::structured(json!({ "terminalId": terminal_id })))
+                    })
+                    .unwrap_or_else(backend_error_result))
+            }
+            "ee_terminal_release" => {
+                let arguments = require_arguments(request)?;
+                let terminal_id = require_nonempty_string(arguments, "terminal_id")?;
+                Ok(self
+                    .backend
+                    .terminal_release(terminal_id.to_owned())
+                    .map(|()| {
+                        complete(CallToolResult::structured(json!({ "terminalId": terminal_id })))
+                    })
+                    .unwrap_or_else(backend_error_result))
+            }
+
             "ee_diagnostics" => {
                 let lines = self.backend.diagnostics();
                 Ok(complete(CallToolResult::success(vec![ContentBlock::text(lines.join("\n"))])))
@@ -1819,6 +2015,39 @@ mod tests {
             Ok("term-1".to_owned())
         }
 
+        fn terminal_output(
+            &self,
+            terminal_id: String,
+        ) -> Result<TerminalOutputResult, ProxyToolError> {
+            self.record(format!("terminal_output:{terminal_id}"));
+            Ok(TerminalOutputResult {
+                output: String::from("output"),
+                chunks: vec![TerminalOutputChunk {
+                    sequence: 1,
+                    stream: String::from("stdout"),
+                    text: String::from("output"),
+                }],
+                total_bytes: 6,
+                truncated: false,
+                exit_status: None,
+            })
+        }
+
+        fn terminal_wait(&self, terminal_id: String) -> Result<TerminalWaitResult, ProxyToolError> {
+            self.record(format!("terminal_wait:{terminal_id}"));
+            Ok(TerminalWaitResult { completed: true, exit_status: Some(json!({ "exitCode": 0 })) })
+        }
+
+        fn terminal_kill(&self, terminal_id: String) -> Result<(), ProxyToolError> {
+            self.record(format!("terminal_kill:{terminal_id}"));
+            Ok(())
+        }
+
+        fn terminal_release(&self, terminal_id: String) -> Result<(), ProxyToolError> {
+            self.record(format!("terminal_release:{terminal_id}"));
+            Ok(())
+        }
+
         fn diagnostics(&self) -> Vec<String> {
             vec!["line one".to_owned(), "line two".to_owned()]
         }
@@ -2040,6 +2269,40 @@ mod tests {
             Ok("unused".to_owned())
         }
 
+        fn terminal_output(
+            &self,
+            _terminal_id: String,
+        ) -> Result<TerminalOutputResult, ProxyToolError> {
+            Err(ProxyToolError {
+                message: String::from("no terminal access"),
+                is_permission_denied: true,
+            })
+        }
+
+        fn terminal_wait(
+            &self,
+            _terminal_id: String,
+        ) -> Result<TerminalWaitResult, ProxyToolError> {
+            Err(ProxyToolError {
+                message: String::from("no terminal access"),
+                is_permission_denied: true,
+            })
+        }
+
+        fn terminal_kill(&self, _terminal_id: String) -> Result<(), ProxyToolError> {
+            Err(ProxyToolError {
+                message: String::from("no terminal access"),
+                is_permission_denied: true,
+            })
+        }
+
+        fn terminal_release(&self, _terminal_id: String) -> Result<(), ProxyToolError> {
+            Err(ProxyToolError {
+                message: String::from("no terminal access"),
+                is_permission_denied: true,
+            })
+        }
+
         fn diagnostics(&self) -> Vec<String> {
             Vec::new()
         }
@@ -2129,6 +2392,12 @@ mod tests {
                 "ee_read_text_file",
                 "ee_write_text_file",
                 "ee_terminal_create",
+                "ee_terminal_output",
+                "ee_terminal_output_since",
+                "ee_terminal_wait",
+                "ee_terminal_wait_long",
+                "ee_terminal_kill",
+                "ee_terminal_release",
                 "ee_diagnostics",
             ]
         );
@@ -2514,6 +2783,34 @@ mod tests {
             ]
         );
 
+        shutdown(&client, &server);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_lifecycle_routes_to_backend() {
+        let backend = Arc::new(ScriptedBackend::default());
+        let (client, server) = connect(backend.clone()).await;
+
+        for tool in
+            ["ee_terminal_output", "ee_terminal_wait", "ee_terminal_kill", "ee_terminal_release"]
+        {
+            let params = CallToolRequestParams::new(tool)
+                .with_arguments(arguments(json!({ "terminal_id": "term-1" })));
+            let result = tokio::time::timeout(REQUEST_TIMEOUT, client.call_tool(params))
+                .await
+                .expect("call timed out")
+                .expect("call failed");
+            assert_eq!(result.is_error, Some(false));
+        }
+        assert_eq!(
+            backend.calls(),
+            vec![
+                String::from("terminal_output:term-1"),
+                String::from("terminal_wait:term-1"),
+                String::from("terminal_kill:term-1"),
+                String::from("terminal_release:term-1"),
+            ]
+        );
         shutdown(&client, &server);
     }
 

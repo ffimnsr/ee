@@ -28,6 +28,10 @@ fn ui_render_shows_scrolled_gutter_after_many_enters() {
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         app.backend.pump().unwrap();
     }
+    // Bounded wait: xi-core applies edits asynchronously; under parallel test
+    // load the fixed pump budget can lapse, so wait until the buffer actually
+    // holds all 51 lines (2s deadline, then the assertions below report state).
+    app.backend.pump_until(|state| state.get_line(50).is_some()).expect("buffer reaches 51 lines");
 
     let width = 80;
     let height = 49;

@@ -113,7 +113,8 @@ impl HandlerCapabilities {
             | "_ee/apply_code_action"
             | "_ee/format_file"
             | "_ee/preview_rename_symbol"
-            | "_ee/rename_symbol" => self.proxy_discovery,
+            | "_ee/rename_symbol"
+            | "_ee/terminal_output" => self.proxy_discovery,
             _ => false,
         }
     }
@@ -142,29 +143,93 @@ pub struct ProxyTextEdit {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientRequest {
     ProxyWorkspaceRoots,
-    ProxyListDirectory { path: String },
-    ProxyListDirectoryAll { path: String },
-    ProxySearchFiles { pattern: String },
-    ProxySearchFilesAll { pattern: String },
-    ProxySearchText { query: String },
-    ProxySearchTextRegex { pattern: String },
-    ProxySearchTextInFiles { query: String, file_glob: String },
-    ProxyReplaceText { path: String, old_text: String, new_text: String },
-    ProxyApplyPatch { path: String, edits: Vec<ProxyTextEdit> },
-    ProxyCreateTextFile { path: String, content: String },
-    ProxyOverwriteTextFile { path: String, content: String },
-    ProxyReadBuffer { path: String },
-    ProxyReadBufferLines { path: String, line: u32, limit: u32 },
+    ProxyListDirectory {
+        path: String,
+    },
+    ProxyListDirectoryAll {
+        path: String,
+    },
+    ProxySearchFiles {
+        pattern: String,
+    },
+    ProxySearchFilesAll {
+        pattern: String,
+    },
+    ProxySearchText {
+        query: String,
+    },
+    ProxySearchTextRegex {
+        pattern: String,
+    },
+    ProxySearchTextInFiles {
+        query: String,
+        file_glob: String,
+    },
+    ProxyReplaceText {
+        path: String,
+        old_text: String,
+        new_text: String,
+    },
+    ProxyApplyPatch {
+        path: String,
+        edits: Vec<ProxyTextEdit>,
+    },
+    ProxyCreateTextFile {
+        path: String,
+        content: String,
+    },
+    ProxyOverwriteTextFile {
+        path: String,
+        content: String,
+    },
+    ProxyReadBuffer {
+        path: String,
+    },
+    ProxyReadBufferLines {
+        path: String,
+        line: u32,
+        limit: u32,
+    },
     ProxyOpenBuffers,
     ProxyGetDiagnostics,
-    ProxyGetFileDiagnostics { path: String },
-    ProxyDocumentSymbols { path: String },
-    ProxyReferences { path: String, line: u32, character: u32 },
-    ProxyListCodeActions { path: String, line: u32, character: u32 },
-    ProxyApplyCodeAction { path: String, action_id: String },
-    ProxyFormatFile { path: String },
-    ProxyPreviewRenameSymbol { path: String, line: u32, character: u32, new_name: String },
-    ProxyRenameSymbol { path: String, line: u32, character: u32, new_name: String },
+    ProxyGetFileDiagnostics {
+        path: String,
+    },
+    ProxyDocumentSymbols {
+        path: String,
+    },
+    ProxyReferences {
+        path: String,
+        line: u32,
+        character: u32,
+    },
+    ProxyListCodeActions {
+        path: String,
+        line: u32,
+        character: u32,
+    },
+    ProxyApplyCodeAction {
+        path: String,
+        action_id: String,
+    },
+    ProxyFormatFile {
+        path: String,
+    },
+    ProxyPreviewRenameSymbol {
+        path: String,
+        line: u32,
+        character: u32,
+        new_name: String,
+    },
+    ProxyRenameSymbol {
+        path: String,
+        line: u32,
+        character: u32,
+        new_name: String,
+    },
+    /// Internal MCP proxy request. Unlike ACP `terminal/output`, returns the
+    /// proxy's structured terminal-output schema in `ProxyValue`.
+    ProxyTerminalOutput(TerminalOutputRequest),
     ReadTextFile(ReadTextFileRequest),
     WriteTextFile(WriteTextFileRequest),
     CreateTerminal(CreateTerminalRequest),
@@ -204,6 +269,7 @@ impl ClientRequest {
             Self::ProxyFormatFile { .. } => "_ee/format_file",
             Self::ProxyPreviewRenameSymbol { .. } => "_ee/preview_rename_symbol",
             Self::ProxyRenameSymbol { .. } => "_ee/rename_symbol",
+            Self::ProxyTerminalOutput(_) => "_ee/terminal_output",
             Self::ReadTextFile(_) => FS_READ_TEXT_FILE_METHOD_NAME,
             Self::WriteTextFile(_) => FS_WRITE_TEXT_FILE_METHOD_NAME,
             Self::CreateTerminal(_) => TERMINAL_CREATE_METHOD_NAME,
@@ -245,6 +311,7 @@ impl ClientRequest {
             | Self::ProxyFormatFile { .. }
             | Self::ProxyPreviewRenameSymbol { .. }
             | Self::ProxyRenameSymbol { .. } => None,
+            Self::ProxyTerminalOutput(request) => Some(&request.session_id),
             Self::ReadTextFile(request) => Some(&request.session_id),
             Self::WriteTextFile(request) => Some(&request.session_id),
             Self::CreateTerminal(request) => Some(&request.session_id),
@@ -421,6 +488,7 @@ mod tests {
             "_ee/read_buffer",
             "_ee/read_buffer_lines",
             "_ee/open_buffers",
+            "_ee/terminal_output",
         ] {
             assert!(caps.supports(method), "{method} should be supported");
         }
@@ -483,6 +551,13 @@ mod tests {
             ClientRequest::CreateTerminal(CreateTerminalRequest::new(session.clone(), "echo"));
         assert_eq!(terminal.method(), "terminal/create");
         assert_eq!(terminal.session_id(), Some(&session));
+
+        let proxy_terminal = ClientRequest::ProxyTerminalOutput(TerminalOutputRequest::new(
+            session.clone(),
+            TerminalId::new("t1"),
+        ));
+        assert_eq!(proxy_terminal.method(), "_ee/terminal_output");
+        assert_eq!(proxy_terminal.session_id(), Some(&session));
     }
 
     #[tokio::test]

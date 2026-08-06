@@ -974,6 +974,9 @@ pub(crate) struct AgentPaneState {
     pub(crate) action_log: Vec<super::agent_bridge::ActionLogEntry>,
     /// Session-scoped approval policy (Phase 7).
     pub(crate) approval_policy: super::agent_bridge::ApprovalPolicy,
+    /// Session-local successful-use counters for persistent rules; rows die
+    /// with the session (Phase 2 command trust).
+    pub(crate) usage_ledger: crate::policy::UsageLedger,
     /// Phase 6 MCP state: health registry, browsing, and the proxy listener.
     pub(crate) mcp: super::agents_mcp::McpPaneState,
     /// Secret-like resolved agent env values collected when the host config
@@ -986,6 +989,10 @@ pub(crate) struct AgentPaneState {
     /// instead of the real keychain-backed default.
     #[cfg(test)]
     pub(crate) test_secret_store: Option<crate::secrets::SecretStore>,
+    /// Test-only: host-local trust store base directory (isolates persistent
+    /// grants from real user state).
+    #[cfg(test)]
+    pub(crate) test_trust_store_base: Option<PathBuf>,
 }
 
 impl Default for AgentPaneState {
@@ -1013,12 +1020,15 @@ impl Default for AgentPaneState {
             terminals: super::agent_bridge::AgentTerminals::default(),
             action_log: Vec::new(),
             approval_policy: super::agent_bridge::ApprovalPolicy::default(),
+            usage_ledger: crate::policy::UsageLedger::default(),
             mcp: super::agents_mcp::McpPaneState::default(),
             resolved_secret_values: Vec::new(),
             #[cfg(test)]
             test_fake_transports: BTreeMap::new(),
             #[cfg(test)]
             test_secret_store: None,
+            #[cfg(test)]
+            test_trust_store_base: None,
         }
     }
 }
@@ -1132,8 +1142,10 @@ impl App {
                 }
             }
             AgentEvent::ThreadClosed { session_id, reason, .. } => {
-                // Session-scoped approval policy dies with the session.
+                // Session-scoped approval policy and usage counters die with
+                // the session; persistent host-local rules remain.
                 self.agents.approval_policy.invalidate_session(session_id.0.as_ref());
+                self.agents.usage_ledger.invalidate_session(session_id.0.as_ref());
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     let text = match reason {
                         ThreadCloseReason::HostClosed => String::from("session closed"),
@@ -1951,6 +1963,11 @@ fn is_agents_quit_slash_command(draft: &str) -> bool {
     matches!(name.as_deref(), Some("q" | "quit")) && rest.trim().is_empty()
 }
 
+fn is_agents_quit_full_slash_command(draft: &str) -> bool {
+    let (name, rest) = split_slash_command(draft);
+    matches!(name.as_deref(), Some("quit_full")) && rest.trim().is_empty()
+}
+
 fn is_agents_new_slash_command(draft: &str) -> bool {
     let (name, rest) = split_slash_command(draft);
     matches!(name.as_deref(), Some("new")) && rest.trim().is_empty()
@@ -2293,6 +2310,7 @@ impl App {
         }
         self.agents.threads.clear();
         self.agents.approval_policy = super::agent_bridge::ApprovalPolicy::default();
+        self.agents.usage_ledger = crate::policy::UsageLedger::default();
     }
 
     /// `:agents_threads` — open modal thread picker.
@@ -2698,6 +2716,11 @@ impl App {
         if is_agents_quit_slash_command(&draft) {
             self.agents.threads[active].draft.clear();
             self.close_agents_pane();
+            return;
+        }
+        if is_agents_quit_full_slash_command(&draft) {
+            self.agents.threads[active].draft.clear();
+            self.should_quit = true;
             return;
         }
         if is_agents_new_slash_command(&draft) {

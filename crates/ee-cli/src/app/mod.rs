@@ -54,7 +54,11 @@ pub(crate) use state::{
 // module tree without those modules, so the lint fires there.
 #[cfg(all(feature = "agents", test))]
 #[allow(unused_imports)]
-pub(crate) use agent_bridge::{ActionLogEntry, AgentTerminals};
+pub(crate) use agent_bridge::{
+    ActionLogEntry, AgentTerminals, ApprovalChoice, PERSISTENT_TERMINAL_MAX_USES,
+    PERSISTENT_TERMINAL_OPTION_LABEL, PERSISTENT_WRITE_MAX_USES, PreparedWrite, WriteExpectation,
+    WriteReplyKind,
+};
 
 #[cfg(feature = "agents")]
 pub(crate) use agent_pane::{
@@ -3309,6 +3313,7 @@ impl App {
                 }
             }
             crate::picker::PickerKind::Help => {}
+            #[cfg(feature = "agents")]
             crate::picker::PickerKind::AgentThreads => {
                 let Some(index) = item.choice_index else { return };
                 self.focus_thread(index);

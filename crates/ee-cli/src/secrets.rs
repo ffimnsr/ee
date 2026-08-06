@@ -38,6 +38,10 @@ mod vault;
 
 pub(crate) use host_binding::{HostBinding, VaultMetadata};
 pub(crate) use keychain::{Keychain, VaultKey};
+// `default_vault_path` feeds the agents trust pipeline (phase 4+); the
+// default build has no agents code, so the re-export may go unused.
+#[allow(unused_imports)]
+pub(crate) use vault::default_vault_path;
 
 /// Maximum canonical secret-name length in bytes.
 pub const MAX_SECRET_NAME_BYTES: usize = 128;

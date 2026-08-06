@@ -11,6 +11,7 @@ mod keymap;
 mod logs;
 pub mod perf;
 mod picker;
+mod policy;
 mod quickfix;
 mod registers;
 mod render_metrics;

@@ -463,6 +463,12 @@ async fn mcp_over_acp_connect_and_tools_list_round_trip() {
             "ee_read_text_file",
             "ee_write_text_file",
             "ee_terminal_create",
+            "ee_terminal_output",
+            "ee_terminal_output_since",
+            "ee_terminal_wait",
+            "ee_terminal_wait_long",
+            "ee_terminal_kill",
+            "ee_terminal_release",
             "ee_diagnostics",
         ]
     );

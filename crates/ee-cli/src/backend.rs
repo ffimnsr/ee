@@ -1125,8 +1125,12 @@ impl XiClient {
 
     #[cfg(test)]
     pub(crate) fn pump(&mut self) -> io::Result<()> {
+        // Drain until the backend goes quiet.  The probes are deliberately
+        // generous: parallel test-suite load can delay xi-core round-trips
+        // well past a tight budget, which starves tests of their edit
+        // events (Phase 6: suite stability under load).
         for _ in 0..6 {
-            match recv_with_timeout(&mut self.backend_rx, Duration::from_millis(10)) {
+            match recv_with_timeout(&mut self.backend_rx, Duration::from_millis(50)) {
                 Some(event) => {
                     self.apply_backend_event(event)?;
                     while let Ok(event) = self.backend_rx.try_recv() {

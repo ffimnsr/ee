@@ -30,7 +30,7 @@ const WAIT: Duration = Duration::from_secs(5);
 
 /// Builds one fake ACP agent transport per connection (same as agent_pane).
 #[derive(Clone)]
-struct ScriptedFake {
+pub(crate) struct ScriptedFake {
     script: FakeAgentScript,
     handle: Arc<Mutex<Option<FakeAgent>>>,
 }
@@ -40,7 +40,7 @@ impl ScriptedFake {
         Self { script, handle: Arc::new(Mutex::new(None)) }
     }
 
-    fn agent(&self) -> FakeAgent {
+    pub(crate) fn agent(&self) -> FakeAgent {
         self.handle
             .lock()
             .expect("fake handle poisoned")
@@ -80,7 +80,7 @@ impl FakeMcpTransportFactory for McpScriptedFake {
 
 // ── App builders ─────────────────────────────────────────────────────────────
 
-fn base_agent_script() -> FakeAgentScript {
+pub(crate) fn base_agent_script() -> FakeAgentScript {
     FakeAgentScript::new()
         .wait_for("initialize")
         .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
@@ -89,7 +89,7 @@ fn base_agent_script() -> FakeAgentScript {
 }
 
 /// App with agents enabled, optional `[mcp.servers.tools]`, optional proxy.
-fn mcp_app(
+pub(crate) fn mcp_app(
     agent_script: FakeAgentScript,
     mcp_servers: bool,
     proxy: bool,
@@ -99,7 +99,7 @@ fn mcp_app(
     (app, temp, fake)
 }
 
-fn mcp_app_in(
+pub(crate) fn mcp_app_in(
     temp: &tempfile::TempDir,
     agent_script: FakeAgentScript,
     mcp_servers: bool,
@@ -133,7 +133,7 @@ fn install_mcp_fake(app: &mut App, script: FakeMcpScript) -> McpScriptedFake {
     fake
 }
 
-fn wait_until(app: &mut App, label: &str, mut condition: impl FnMut(&App) -> bool) {
+pub(crate) fn wait_until(app: &mut App, label: &str, mut condition: impl FnMut(&App) -> bool) {
     let deadline = Instant::now() + WAIT;
     while Instant::now() < deadline {
         app.pump_agents();
@@ -164,7 +164,7 @@ fn wait_mcp_ready(app: &mut App, id: &str) {
     });
 }
 
-fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+pub(crate) fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     app.handle_event(Event::Key(KeyEvent::new(code, modifiers)));
 }
 
@@ -174,7 +174,7 @@ fn type_text(app: &mut App, text: &str) {
     }
 }
 
-fn open_pane_and_wait_ready(app: &mut App) {
+pub(crate) fn open_pane_and_wait_ready(app: &mut App) {
     run_ex(app, "agents");
     wait_until(app, "first agent thread ready", |app| {
         app.agents.threads.len() == 1 && app.agents.threads[0].state == ThreadUiState::Ready
@@ -183,7 +183,7 @@ fn open_pane_and_wait_ready(app: &mut App) {
 
 /// Connects a std Unix socket to the editor's proxy listener (waits for the
 /// listener to bind) and performs the token handshake.
-fn connect_proxy(app: &App) -> UnixStream {
+pub(crate) fn connect_proxy(app: &App) -> UnixStream {
     let info = app.agents.mcp.proxy.as_ref().expect("proxy info present");
     let deadline = Instant::now() + WAIT;
     let mut stream = loop {
@@ -202,7 +202,7 @@ fn connect_proxy(app: &App) -> UnixStream {
 
 /// Sends one proxy call frame (non-blocking; the test pumps the UI between
 /// send and recv because approvals are resolved on the UI thread).
-fn proxy_send(stream: &mut UnixStream, id: u64, params: Value) {
+pub(crate) fn proxy_send(stream: &mut UnixStream, id: u64, params: Value) {
     let frame = json!({ "id": id, "params": params });
     stream.write_all(frame.to_string().as_bytes()).unwrap();
     stream.write_all(b"\n").unwrap();
@@ -211,7 +211,7 @@ fn proxy_send(stream: &mut UnixStream, id: u64, params: Value) {
 
 /// Pumps the app for a short fixed window (lets async worker replies land
 /// when no UI condition is observable).
-fn settle(app: &mut App) {
+pub(crate) fn settle(app: &mut App) {
     let deadline = Instant::now() + Duration::from_millis(500);
     while Instant::now() < deadline {
         app.pump_agents();
@@ -221,7 +221,7 @@ fn settle(app: &mut App) {
 }
 
 /// Reads one proxy reply line with a bounded wait.
-fn proxy_recv(stream: &mut UnixStream) -> Value {
+pub(crate) fn proxy_recv(stream: &mut UnixStream) -> Value {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     stream.set_read_timeout(Some(WAIT)).expect("read timeout settable");
     let mut line = String::new();
@@ -1177,7 +1177,7 @@ fn proxy_terminal_denial_does_not_spawn_terminal() {
 
 /// Fake agent that advertises `mcp_capabilities.acp` and captures the
 /// host-generated `serverId` from `session/new`.
-fn acp_agent_script() -> FakeAgentScript {
+pub(crate) fn acp_agent_script() -> FakeAgentScript {
     FakeAgentScript::new()
         .wait_for("initialize")
         .respond(json!({
@@ -1194,7 +1194,7 @@ fn acp_agent_script() -> FakeAgentScript {
 
 /// Script tail: `mcp/connect` (200), capture the connection id, run the
 /// inner MCP `initialize` (201), then one `tools/call` (202).
-fn acp_connect_script(tool_call: Value) -> FakeAgentScript {
+pub(crate) fn acp_connect_script(tool_call: Value) -> FakeAgentScript {
     acp_agent_script()
         .emit(json!({
             "jsonrpc": "2.0",
@@ -1236,7 +1236,7 @@ fn acp_connect_script(tool_call: Value) -> FakeAgentScript {
 
 /// Polls the fake agent's log for the host's response to the request with
 /// `id` (the ACP response to the fake's `mcp/*` request).
-fn fake_response(fake: &FakeAgent, id: i64) -> Value {
+pub(crate) fn fake_response(fake: &FakeAgent, id: i64) -> Value {
     let deadline = Instant::now() + WAIT;
     loop {
         if let Some(response) = fake.response_with_id(id) {

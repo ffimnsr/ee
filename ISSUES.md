@@ -184,40 +184,36 @@ Expose the full ACP terminal lifecycle through MCP so agents can run and observe
 
 #### Tools
 
-- [ ] Add `ee_terminal_output`.
-  - [ ] Accept `terminal_id` only.
-  - [ ] Return recent bounded stdout/stderr chunks with sequence ids and truncation flags.
-- [ ] Add `ee_terminal_output_since` only if incremental polling is needed.
-  - [ ] Accept `terminal_id` and `since_seq` only.
-- [ ] Add `ee_terminal_wait`.
-  - [ ] Accept `terminal_id` only.
-  - [ ] Use host default timeout.
-  - [ ] Return exit status when complete or timeout state when still running.
-- [ ] Add `ee_terminal_wait_long` only if longer waits are needed.
-  - [ ] Accept `terminal_id` and `timeout_ms` only.
-- [ ] Add `ee_terminal_kill`.
-  - [ ] Accept `terminal_id`.
-  - [ ] Terminate only terminals owned by the current agent/session unless policy explicitly allows more.
-- [ ] Add `ee_terminal_release`.
-  - [ ] Accept `terminal_id`.
-  - [ ] Release host resources and close retained output.
-- [ ] Add `ee_run_task`.
-  - [ ] Accept `task_id` only.
-  - [ ] Run configured safe tasks such as format, lint, test, build, or project-specific entries from `tasks.yaml`.
-  - [ ] Avoid shell strings, ad-hoc args, and secret-like environment overrides.
-- [ ] Add dedicated task tools later instead of adding broad `args` to `ee_run_task` when common variants emerge.
+- [x] Add `ee_terminal_output`.
+  - [x] Accept `terminal_id` only.
+  - [x] Return recent bounded stdout/stderr chunks with sequence ids and truncation flags.
+- [x] Add `ee_terminal_output_since` only if incremental polling is needed.
+  - [x] Accept `terminal_id` and `since_seq` only.
+- [x] Add `ee_terminal_wait`.
+  - [x] Accept `terminal_id` only.
+  - [x] Use host default timeout.
+  - [x] Return exit status when complete or timeout state when still running.
+- [x] Add `ee_terminal_wait_long` only if longer waits are needed.
+  - [x] Accept `terminal_id` and `timeout_ms` only.
+- [x] Add `ee_terminal_kill`.
+  - [x] Accept `terminal_id`.
+  - [x] Terminate only terminals owned by the current agent/session unless policy explicitly allows more.
+- [x] Add `ee_terminal_release`.
+  - [x] Accept `terminal_id`.
+  - [x] Release host resources and close retained output.
+
 
 #### Implementation notes
 
-- [ ] Reuse existing ACP-side terminal request types already present in `ee-agent-host`.
-- [ ] Preserve command approval for `terminal_create` and `run_task`.
-- [ ] Add ownership tracking so agents cannot read or kill user terminals by guessing ids.
-- [ ] Keep terminal output redaction and byte caps consistent with current diagnostics redaction.
+- [x] Reuse existing ACP-side terminal request types already present in `ee-agent-host`.
+- [x] Preserve command approval for `terminal_create`.
+- [x] Add ownership tracking so agents cannot read or kill user terminals by guessing ids.
+- [x] Keep terminal output redaction and byte caps consistent with current diagnostics redaction.
 
 #### Exit criteria
 
-- [ ] LLM can start, poll, wait for, kill, and release command executions through structured tools.
-- [ ] Long-running commands cannot hang the host or leak unbounded output.
+- [x] LLM can start, poll, wait for, kill, and release command executions through structured tools.
+- [x] Long-running commands cannot hang the host or leak unbounded output.
 
 ### Phase 5: Git and review context tools
 
@@ -3055,3 +3051,427 @@ Rules:
 - [x] `cargo run --quiet -p ee-cli -- do schema check` passes.
 - [x] End-to-end tests prove a global OpenRouter secret reference reaches agent launch configuration but never any captured user-visible output.
 - [x] End-to-end tests prove keychain failure, host mismatch, vault corruption, missing secret, and workspace reference each fail before child process creation.
+
+## Unified Host-Local Workspace Trust Policy
+
+Goal: reduce repetitive approval prompts with one bounded trust engine while preventing repository content, unknown tools, external paths, sensitive data, destructive operations, and malformed rules from granting authority.
+
+Overview: replace independent command, MCP, and workspace trust implementations with one policy foundation. Rule matching remains operation-specific, but every rule shares host-local persistence, canonical workspace binding, agent scope, session-deny precedence, expiration, budgets, redaction, atomic persistence, explicit trust-store reload, and fail-closed behavior.
+
+Rules:
+
+- This is authoritative trust implementation plan for persistent workspace tool trust.
+- Persistent grants are stored in host-local state, never repository-controlled `ee.toml`, XDG project config, system config, or agent-provided files.
+- Host-local trust store is keyed by canonical workspace identity; copying repository config or trust files to another workspace grants nothing.
+- Project configuration has no trust or capability-request fields in version one; host-local trust store alone controls authority.
+- Every operation begins with validated normalized identity. Missing identity, unknown category, malformed config, invalid path, expired rule, exhausted rule, or tool metadata mismatch returns prompt.
+- Session deny takes precedence over every persistent or session allow.
+- Persistent grants are allow-only. Persistent deny is out of scope; deny once/session remains current in-memory behavior.
+- Delete, rename, chmod, symlink creation, binary writes, secret access, VCS mutation, package install/script execution, publish, non-GET network access, and unknown tools remain prompt-only.
+- Rule evaluator is pure. It does not write files, dispatch tools, consume budgets, mutate UI, or access system clock.
+
+### Phase 1: Establish shared policy contracts and host-local trust store
+
+Goal: provide one secure foundation before adding any persistent trust rule type.
+
+Overview: create common operation, rule-scope, decision, persistence, and lifecycle contracts. Migrate existing session approval policy to use common precedence without changing current once/session behavior.
+
+#### Trust-store schema
+
+Host-local per-workspace store uses versioned TOML. This file is application-owned state, not project configuration:
+
+```toml
+schema_version = 1
+
+[workspace]
+# SHA-256("ee.workspace.v1\\0" + canonical_workspace_root_path_bytes).
+# Store filename uses same digest. Moving workspace requires fresh approval.
+identity = "sha256:…"
+
+[policy]
+workspace_enabled = false
+
+[[command_allow]]
+id = "cmd_…"
+agent = "openrouter"                 # optional
+executable = "git"
+match = "argv_prefix"                # `argv_exact` | `argv_prefix`
+argv = ["status"]
+expires_at = "2026-08-08T12:00:00Z"
+max_uses = 20
+
+[[mcp_allow]]
+id = "mcp_…"
+agent = "openrouter"                 # optional
+server = "ee"
+transport_identity = "stdio:…"
+tool = "ee_read_file"
+tool_schema_version = 1
+arguments_json = "{\"path\":\"src/main.rs\"}"
+expires_at = "2026-08-08T12:00:00Z" # required for write/execute
+max_uses = 20                         # required for write/execute
+
+[[read_path_allow]]
+id = "read_…"
+agent = "openrouter"                 # optional
+path_prefix = "src"
+max_bytes = 262144
+
+[[mcp_read_allow]]
+id = "mcp_read_…"
+agent = "openrouter"                 # optional
+server = "ee"
+transport_identity = "stdio:…"
+tool = "ee_read_file"
+tool_schema_version = 1
+path_prefix = "src"
+max_bytes = 262144
+
+[[profile_allow]]
+id = "profile_…"
+agent = "openrouter"                 # optional
+profile = "git_readonly"
+expires_at = "2026-08-08T12:00:00Z"
+max_uses = 20
+
+[[write_allow]]
+id = "write_…"
+agent = "openrouter"                 # optional
+operation = "create"                 # `create` | `modify`
+path_prefix = "src/generated"
+max_files = 5
+max_total_bytes = 65536
+max_file_bytes = 16384
+expires_at = "2026-08-08T12:00:00Z"
+max_uses = 5
+```
+
+Schema rules:
+
+- `schema_version` is required and currently must equal `1`; unsupported versions load no effective rules and prompt.
+- `workspace.identity` is required and must equal `SHA-256("ee.workspace.v1\\0" + canonical_workspace_root_path_bytes)` recomputed from current workspace; canonical root bytes use platform-native path encoding and are never serialized directly.
+- `id` is generated stable identifier unique across all rule arrays. Conflicting duplicate ids invalidate every conflicting entry; unique valid entries continue loading.
+- Rule array determines typed matcher. Unknown and cross-kind fields are rejected with `deny_unknown_fields`; they are never ignored.
+- Every rule array supports optional `agent`, `expires_at`, and `max_uses`; variant validation decides whether expiry/use are mandatory.
+- Optional `agent` scopes a rule to one configured agent; missing `agent` scopes rule to any configured agent in matching workspace.
+- `argv_exact` may use `argv = []`; `argv_prefix` requires non-empty `argv`.
+- `arguments_json` must parse as JSON object from validated arguments. Loader canonicalizes whitespace and object-key ordering before matching and serialization, but rejects duplicate keys, non-object values, sensitive data, binary attachments, and oversized payloads.
+- `path_prefix` is workspace-relative canonical path segment sequence. Empty, root-wide, absolute, traversal, glob, regex, and protected prefixes are invalid.
+- `expires_at` and finite `max_uses` are mandatory for `command_allow`, MCP `write`/`execute`, `profile_allow`, and `write_allow`; eligible read rules may omit both.
+- Runtime usage counters are session-local and are never written into trust-store TOML.
+- Linux trust directory mode is `0700`; trust document and temporary document modes are `0600`. Broader Unix modes reject loading. Non-Unix platforms must implement equivalent owner-only ACL verification before enabling persistent trust.
+- Store serialization emits canonical key order and never emits raw workspace paths, secrets, environment values, file contents, or MCP argument previews beyond canonical `arguments_json` permitted by validation.
+
+Rules:
+
+- Trust state directory uses platform-local state location, such as `$XDG_STATE_HOME/ee/trust/` on Linux.
+- Store filename derives from `SHA-256("ee.workspace.v1\\0" + canonical_workspace_root_path_bytes)`; raw workspace path never appears in filename or store document.
+- Stored document contains schema version, hashed workspace identity, created metadata, and typed rule arrays.
+- Store loader rejects workspace-identity mismatch, unsupported schema version, malformed entries, unsafe file permissions, or non-regular files.
+- Store writer uses unique sibling temporary file, flush, atomic rename, restrictive permissions, and cleanup on every failure path.
+
+#### Work items
+
+- [x] Define shared trust-domain types in dedicated policy module.
+  - [x] Add `TrustOperation` containing canonical workspace identity, optional agent id, transport, category, and validated operation-specific identity.
+  - [x] Add categories `read`, `write_create`, `write_modify`, `execute`, and `unknown`.
+  - [x] Add `TrustRuleScope` containing workspace identity, optional agent id, optional expiration, and optional maximum-use budget.
+  - [x] Add `TrustDecision::{Allow, Prompt}` with redacted machine-readable reason and optional stable rule id.
+  - [x] Add `TrustRule` tagged enum for command, MCP exact invocation, read path, write path, and curated profile variants.
+- [x] Implement pure shared policy evaluator.
+  - [x] Accept immutable effective rule set, session policy state, injected current time, injected usage snapshot, and normalized operation.
+  - [x] Evaluate session deny before every persistent rule.
+  - [x] Reject malformed, cross-workspace, cross-agent, expired, and exhausted rules before domain matcher execution.
+  - [x] Delegate only operation-specific comparison to typed matchers.
+  - [x] Return prompt when no validated rule matches without mutating usage state.
+- [x] Implement host-local trust-store load and atomic write APIs.
+  - [x] Derive store path using existing canonical path helper and exact `SHA-256("ee.workspace.v1\\0" + canonical_workspace_root_path_bytes)` input contract.
+  - [x] Persist workspace identity inside document and verify it on every load.
+  - [x] Create Linux trust directory with mode `0700` and document/temporary files with mode `0600`; fail closed on broader mode.
+  - [x] Add platform abstraction that enables persistent trust on non-Unix only after owner-only ACL verification succeeds.
+  - [x] Reject symlink, directory, group-writable, world-writable, and non-regular store paths.
+  - [x] Implement append-or-reuse behavior using stable rule id to prevent duplicate grants.
+  - [x] Return typed errors for identity mismatch, permission failure, parse failure, validation failure, write failure, rename failure, and unsupported platform ACL verification.
+  - [x] Deserialize only schema version `1` and serialize every accepted rule back in canonical schema order.
+  - [x] Reject unknown rule fields, cross-kind fields, duplicate rule ids, and invalid enum values rather than silently dropping them.
+- [x] Add trust-store schema compatibility tests.
+  - [x] Assert every documented rule array round-trips through parse, validation, canonical serialization, and reload.
+  - [x] Assert unsupported schema version, missing workspace identity, cross-workspace identity, duplicate id, cross-kind field, invalid match mode, and invalid write operation produce no effective rule.
+  - [x] Assert `argv_exact = []` is accepted while `argv_prefix = []` is rejected.
+  - [x] Assert runtime usage counters do not appear in serialized trust-store document.
+- [x] Adapt existing session approval policy to shared precedence contract.
+  - [x] Preserve allow-once, allow-session, deny-once, and deny-session user-visible behavior.
+  - [x] Expose session deny/allow lookup as injected evaluator input.
+  - [x] Keep session state in memory and clear it on existing session teardown path.
+- [x] Add foundation tests.
+  - [x] Assert every unknown operation prompts.
+  - [x] Assert session deny overrides matching persistent allow.
+  - [x] Assert evaluator performs no filesystem, process, transport, UI, clock, or counter mutation.
+  - [x] Assert copied store document and copied store file fail workspace-identity validation after canonical workspace root changes.
+  - [x] Assert malformed, symlinked, insecure-permission, and cross-workspace stores yield empty effective rules and prompt.
+  - [x] Assert failed write preserves prior store bytes and removes temporary file.
+
+#### Actionable criteria
+
+- `cargo test --quiet -p ee-cli trust_policy_foundation` passes.
+- Automated store tests prove repository content cannot create effective persistent grants.
+- Automated precedence tests prove session deny always overrides every persistent allow variant.
+
+### Phase 2: Add exact structured terminal command trust
+
+Goal: let user permanently approve one bounded terminal command for one host-local workspace without authorizing shell interpretation or arbitrary executable arguments.
+
+Overview: implement command rule matcher as first shared-policy adapter. Terminal requests still use existing process ownership, output redaction, timeout, cancellation, and approval response paths.
+
+Rules:
+
+- Command identity is executable token plus structured argv tokens from `CreateTerminalRequest`; display text is never matched.
+- Persistent execute rule must use either exact argv or non-empty argv prefix; command-only trust is prohibited.
+- Exact empty argv is allowed only for an explicit `args_exact = []` rule created from a no-argument request.
+- Shell wrappers `sh`, `bash`, `zsh`, `fish`, `dash`, `cmd`, `powershell`, and `pwsh` are ineligible.
+- Request cwd must resolve to canonical workspace root; explicit external, relative, traversal, or symlink-escape cwd prompts.
+- Execute rules require finite maximum-use budget and expiration.
+
+#### Work items
+
+- [x] Add command rule and invocation types.
+  - [x] Define `CommandRule` with optional agent id, executable, explicit match mode, argv tokens, workspace scope, expiry, and maximum use.
+  - [x] Define `CommandInvocation` from validated `CreateTerminalRequest` command, args, and canonical cwd.
+  - [x] Reject control characters, empty tokens, invalid Unicode boundaries, shell wrappers, and command-only prefix rules during rule creation and load.
+- [x] Implement pure command matcher.
+  - [x] Match agent scope, canonical workspace identity, executable token, and explicit exact/prefix argv semantics.
+  - [x] Require every prefix rule to contain at least one argument token.
+  - [x] Return rule metadata only; do not spawn terminal or mutate approval state.
+- [x] Integrate command policy into terminal approval path.
+  - [x] Normalize terminal request after current request validation and before approval queue insertion.
+  - [x] Evaluate shared policy with session deny, time, and usage state.
+  - [x] Dispatch existing terminal creation only after allow decision.
+  - [x] On `Allow for 1 hour / 20 uses`, derive narrow rule from full current argv, persist host-local rule, activate rule, then dispatch original request.
+  - [x] On persistence failure, return current permission error and do not spawn terminal.
+- [x] Add command trust tests.
+  - [x] Assert `git status` exact/prefix rule matches only intended structured argv.
+  - [x] Assert `git commit`, `git reset`, `git clean`, `sh -c`, external cwd, relative cwd, traversal, and symlink escape prompt.
+  - [x] Assert command-only `git` rule is rejected.
+  - [x] Assert trusted command preserves output cap, cancellation, timeout, ownership, and no-secret-display behavior.
+  - [x] Assert persistence failure leaves terminal unspawned and usage budget unchanged.
+
+#### Actionable criteria
+
+- `cargo test --quiet -p ee-cli command_trust` passes.
+- Automated terminal tests prove shell and mutable Git operations never bypass approval through command trust.
+- Automated persistence tests prove command grants exist only in host-local workspace trust store.
+
+### Phase 3: Add exact generic MCP invocation trust
+
+Goal: let user permanently approve one validated MCP tool invocation without trusting an entire server, tool, or argument pattern.
+
+Overview: implement MCP rule adapter using server identity, tool identity, schema version, canonical workspace scope, optional agent scope, and canonical exact JSON arguments.
+
+Rules:
+
+- Generic MCP trust never applies to terminal-create; terminal creation uses command trust only.
+- Rule matches exact server id, transport identity, tool name, manifest schema version, and full canonical JSON object arguments.
+- Rule creation runs after server identity, tool schema validation, and side-effect classification.
+- Unknown server, unknown tool, missing manifest, unknown side-effect class, or schema-version mismatch prompts.
+- Rule arguments must be JSON object, bounded in size, free of duplicate object keys, and free of secret-like keys/values or binary attachments.
+- Execute and write MCP rules require finite expiry and use budget.
+
+#### Work items
+
+- [x] Add canonical MCP invocation and rule types.
+  - [x] Define `McpInvocation` with agent id, server id, transport identity, tool name, manifest schema version, side-effect class, canonical workspace identity, and canonical JSON bytes.
+  - [x] Define `McpExactRule` with same matching fields plus common scope.
+  - [x] Canonicalize JSON by recursively sorting object keys while retaining array order.
+  - [x] Parse with duplicate-key detection and reject top-level non-object values.
+- [x] Implement MCP exact matcher.
+  - [x] Match every identity field and canonical argument bytes exactly.
+  - [x] Return no match for changed nested field, changed array order, changed server transport identity, changed schema version, or changed workspace/agent scope.
+  - [x] Keep matcher independent from MCP transport dispatch.
+- [x] Integrate MCP policy into stdio and ACP-native routes.
+  - [x] Build invocation only after existing manifest/schema validation succeeds.
+  - [x] Evaluate shared policy before approval queue insertion.
+  - [x] Offer `Allow for 1 hour / 20 uses` only for eligible validated generic MCP prompt.
+  - [x] Persist exact invocation rule to host-local store before dispatch.
+  - [x] Render only server, tool, side-effect class, and redacted arguments in UI/transcript/status.
+- [x] Add MCP trust tests.
+  - [x] Assert identical invocation through stdio proxy and ACP-native route bypasses prompt after grant.
+  - [x] Assert changed server, transport, tool, schema version, agent, workspace, nested value, or array order prompts.
+  - [x] Assert secret-like, malformed, oversized, binary, duplicate-key, and non-object arguments never offer persistent allow.
+  - [x] Assert terminal-create and unknown-side-effect tools cannot use MCP exact trust.
+
+#### Actionable criteria
+
+- `cargo test --quiet -p ee-mcp` passes.
+- Automated MCP tests prove no server-wide, tool-wide, partial-argument, or cross-transport bypass exists.
+- Automated UI tests prove sensitive MCP arguments cannot be persisted or displayed by trust flow.
+
+### Phase 4: Add workspace-gated read trust and curated validation profiles
+
+Goal: eliminate recurring prompts for bounded source reads and common validation commands after explicit workspace-local user approval.
+
+Overview: add low-risk capability rules on shared engine. Workspace gate enables evaluation only; each read path/tool/profile remains separately constrained.
+
+Rules:
+
+- Workspace gate is stored host-local and defaults disabled.
+- Workspace gate alone never permits an operation.
+- Read rules require canonical in-workspace paths and deny secret-like, credential, private-key, secret-store, external, traversal, and symlink-escape paths.
+- MCP read rules require ee-pinned manifest classification `read`, matching server/tool/schema, and validated bounded argument profile.
+- Curated profile registry is application-owned and versioned; config stores profile ids only.
+- Profiles include only `git status`, `git diff`, `git log`, `git show`, `git branch --show-current`, `cargo fmt --check`, `cargo test --quiet`, and `cargo clippy` with fixed safety flags.
+- Profiles do not include VCS mutation, package install, package scripts, publish, network, or shell commands.
+
+#### Work items
+
+- [x] Add host-local workspace gate and read rule types.
+  - [x] Define explicit workspace gate setting in trust-store document defaulting false.
+  - [x] Define native read rules using canonical workspace-relative path prefixes and bounded read limits.
+  - [x] Define `McpReadRule` using server, transport identity, tool, tool schema version, canonical workspace-relative path prefix, and bounded byte/result limits.
+  - [x] Reject root-wide path prefix, globs, regex, absolute paths, traversal segments, protected paths, and unbounded limits.
+- [x] Add protected-path classifier integration.
+  - [x] Reuse existing secret-redaction and path-security helpers where available.
+  - [x] Classify `.env`, `.env.*`, credentials, SSH material, private-key suffixes, configured secret-store paths, and any existing protected-path classes as ineligible.
+  - [x] Apply classification before trust matching and before UI persistent-option display.
+- [x] Add curated command profile registry and matcher.
+  - [x] Define stable profile ids `git_readonly` and `rust_validate` with fixed structured executable/argv entries.
+  - [x] Bind each entry to workspace cwd, timeout cap, output cap, finite use/expiry requirements, and execute category.
+  - [x] Reject unknown profile ids and prevent profile registry mutation from workspace/project config.
+- [x] Integrate read/profile policy decisions.
+  - [x] Normalize native read, content search, directory list, diagnostics, MCP read, and terminal profile operations before evaluation.
+  - [x] Build MCP read identity only after ee-pinned manifest classification, server transport identity validation, tool schema validation, and bounded argument extraction succeed.
+  - [x] Require workspace gate plus matching read rule/profile id before allow.
+  - [x] Preserve current prompts for unmatched, external, sensitive, oversized, unknown, and invalid requests.
+- [x] Add read/profile tests.
+  - [x] Assert workspace gate without matching rule/profile prompts.
+  - [x] Assert matching source read and approved profile command bypass prompt.
+  - [x] Assert `.env`, private-key-like, secret-store, external, traversal, symlink escape, Git mutation, package install, and shell wrapper prompt.
+  - [x] Assert profile timeout, cancellation, output cap, and terminal ownership behavior remain unchanged.
+
+#### Actionable criteria
+
+- `cargo test --quiet -p ee-cli workspace_read_trust` passes.
+- `cargo test --quiet -p ee-cli command_profiles` passes.
+- Automated tests prove workspace gate cannot authorize a read, command, or MCP operation without its own matching rule.
+
+### Phase 5: Add bounded create/modify write trust
+
+Goal: reduce prompts for narrow routine text edits while keeping destructive or sensitive filesystem operations prompt-only.
+
+Overview: implement write adapter after shared store, canonical paths, expiry, and usage ledger exist. Trust only regular UTF-8 text create/modify operations within strict path and size budgets.
+
+Rules:
+
+- Write rules distinguish `create` and `modify`; one operation never authorizes other.
+- Rule uses canonical workspace-relative directory prefix, maximum file count, maximum aggregate bytes, maximum per-file bytes, finite expiry, and finite use budget.
+- Root-wide, glob, regex, absolute, traversal, protected, and unbounded write rules are invalid.
+- Delete, rename, mode change, symlink, special file, binary, non-UTF-8 content, protected path, and over-budget batch always prompt.
+- Usage increments only after successful trusted write response; failure, cancel, denial, or connection close consumes no budget.
+
+#### Work items
+
+- [x] Define validated write operation and rule types.
+  - [x] Normalize target paths, operation type, proposed file count, and byte deltas before policy evaluation.
+  - [x] Canonicalize target parent and final target path without following an unsafe symlink outside workspace.
+  - [x] Reject ineligible file kinds and protected paths before candidate rule creation.
+  - [x] Validate finite nonzero caps against application safety maxima.
+- [x] Implement write matcher and session-local usage ledger.
+  - [x] Match workspace, agent, operation, canonical directory prefix, and every file/byte constraint.
+  - [x] Inject usage snapshot into evaluator and update ledger only after successful operation response.
+  - [x] Clear ledger through existing session close and connection teardown paths.
+  - [x] Return prompt for exhausted budget without mutating persistent store.
+- [x] Integrate write approval and persistence.
+  - [x] Offer `Allow for 1 hour / 5 uses` only for eligible narrow create/modify requests.
+  - [x] Derive rule narrower than or equal to application safety maxima from approved request.
+  - [x] Persist rule before dispatch and activate it only after durable store success.
+  - [x] Keep all ineligible operations on existing approval UI with no persistent option.
+- [x] Add write trust tests.
+  - [x] Assert matching `src/generated/` text create/modify within budget bypasses prompt.
+  - [x] Assert operation mismatch, external/traversal/symlink escape, protected path, binary, delete, rename, mode change, and over-budget request prompts.
+  - [x] Assert successful trusted operation consumes one use; failed/canceled/denied operation consumes none.
+  - [x] Assert session teardown clears usage ledger.
+
+#### Actionable criteria
+
+- `cargo test --quiet -p ee-cli write_trust` passes.
+- Automated write tests prove destructive, binary, sensitive, and external filesystem operations cannot bypass approval.
+- Automated budget tests prove only successfully dispatched trusted writes consume authority.
+
+### Phase 6: Add expiry, finite-use lifecycle, and unified audit visibility
+
+Goal: prevent forgotten persistent grants from becoming indefinite execute/write authority and make every automatic decision explainable without leaking data.
+
+Overview: complete common scope lifecycle for all rule variants with injected time, session-local counters, expiry-aware UI, and redacted rule audit metadata.
+
+Rules:
+
+- Read rules may be unlimited only when workspace gate and all scope constraints match.
+- Execute and write rules require both expiration and finite maximum use.
+- Expired or exhausted rules remain stored but evaluate as prompt; runtime never renews automatically.
+- Clock is injected; no test uses wall-clock sleep.
+- Audit output includes rule id/category/scope/remaining use only; never raw paths beyond approved display policy, command env, secret values, or MCP arguments.
+
+#### Work items
+
+- [x] Extend common scope validation and store serialization.
+  - [x] Add schema fields for absolute UTC expiration and maximum successful uses.
+  - [x] Reject invalid timestamp, past expiry, zero uses, use cap above safety maximum, unlimited execute/write, and expiration beyond maximum duration.
+  - [x] Assign stable rule id at creation and retain it across reload.
+- [x] Implement injected clock and lifecycle ledger.
+  - [x] Add production clock implementation and deterministic fake clock for tests.
+  - [x] Key usage ledger by workspace identity, session id, and rule id.
+  - [x] Check expiry/use before allow decision and increment only after successful dispatch.
+  - [x] Clear session rows on close and connection loss.
+- [x] Add approval/status integration.
+  - [x] Offer only `Allow for 1 hour / 20 uses` for execute actions and `Allow for 1 hour / 5 uses` for write actions; do not expose an unlimited persistent execute/write choice.
+  - [x] Show redacted expiration and remaining-use metadata in approval and status surfaces.
+  - [x] Emit redacted matched-rule audit event for automatic allow and prompt fallback.
+- [x] Add deterministic lifecycle tests.
+  - [x] Assert virtual clock permits rule before expiry and prompts after expiry.
+  - [x] Assert execute/write grants allow exactly configured successful uses then prompt.
+  - [x] Assert failed, canceled, denied, and disconnected requests do not consume use.
+  - [x] Assert reload preserves valid expiry metadata and ignores invalid persisted scope.
+
+#### Actionable criteria
+
+- `cargo test --quiet -p ee-cli trust_lifecycle` passes.
+- Automated virtual-time tests prove no expiration behavior depends on real time or sleeps.
+- Automated audit tests prove secret-like values never occur in automatic-decision metadata.
+
+### Phase 7: Run cross-transport security and compatibility matrix
+
+Goal: prove unified policy produces identical bounded outcomes through native ACP, MCP stdio proxy, ACP-native MCP-over-ACP, config reload, cancellation, and session lifecycle.
+
+Overview: add deterministic matrix fixtures after all adapters exist. Preserve existing tool validation, ownership, redaction, output caps, cancellation, and error behavior.
+
+Rules:
+
+- Tests use temporary directories, fake agents, fake MCP servers, injected clocks, and explicit task shutdown only.
+- Tests assert approval queue state, fake dispatch records, and structured responses; no fixed sleeps or retry loops.
+- Fixture secret values must be absent from host-local store, repository config, UI, transcript, logs, diagnostics, stdout, stderr, and error output.
+- Schema generation must cover all host-local trust document variants without adding authority-granting project-config fields.
+
+#### Work items
+
+- [x] Add operation-category matrix tests.
+  - [x] Cover workspace gate disabled, gate enabled without rule, matching rule, session deny, scope mismatch, expired rule, exhausted rule, malformed store, and identity mismatch for every eligible category.
+  - [x] Cover terminal command, exact MCP invocation, native read, MCP read, curated profile, create write, and modify write.
+  - [x] Cover prompt-only delete, rename, VCS mutation, package mutation, network mutation, secret access, external path, and unknown tool cases.
+- [x] Add transport and lifecycle matrix tests.
+  - [x] Assert equivalent operation identity yields same decision through direct ACP, stdio MCP proxy, and ACP-native MCP-over-ACP.
+  - [x] Assert cancellation or connection close before approval resolution dispatches no operation, consumes no usage, and writes no rule.
+  - [x] Assert session close clears once/session decisions and runtime budgets while persistent host-local rules remain scope-checked.
+  - [x] Assert explicit trust-store reload applies valid host-local changes and fails closed on corruption; repository config reload never reloads or grants trust.
+- [x] Add compatibility regression coverage.
+  - [x] Assert existing terminal ownership, output truncation, path traversal, symlink escape, secret redaction, stale revision, and permission denial tests remain unchanged.
+  - [x] Assert repository `ee.toml` trust-looking fields cannot grant effective authority.
+  - [x] Assert host-local trust store remains excluded from repository config discovery; generated project schema contains no authority-granting trust fields.
+  - [x] Add targeted package tests to existing CI-compatible suite.
+
+#### Actionable criteria
+
+- `cargo fmt --check` passes.
+- `cargo clippy -p ee-cli --all-targets -- -D warnings` passes.
+- `cargo test --quiet -p ee-cli` passes.
+- `cargo test --quiet -p ee-agent-host` passes.
+- `cargo test --quiet -p ee-mcp` passes.
+- Automated matrix tests prove no repository-controlled configuration, unclassified tool, destructive operation, external path, sensitive value, expired rule, exhausted rule, or scope mismatch bypasses approval.

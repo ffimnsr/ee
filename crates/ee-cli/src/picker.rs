@@ -29,6 +29,7 @@ pub(crate) enum PickerKind {
     CodeActions,
     Symbols,
     Locations,
+    #[cfg(feature = "agents")]
     AgentThreads,
 }
 
@@ -250,6 +251,7 @@ impl PickerState {
         }
     }
 
+    #[cfg(feature = "agents")]
     pub(crate) fn new_agent_threads(items: Vec<PickerItem>) -> Self {
         let filtered = (0..items.len()).collect();
         Self {

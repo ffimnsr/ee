@@ -35,7 +35,12 @@ mod git;
 mod highlight;
 mod keymap;
 mod logs;
+// Host-local workspace trust policy (Phase 1 foundation); CLI surface for
+// persistent grants arrives in later phases, so module items stay unused
+// until then.
 mod picker;
+#[allow(dead_code)]
+mod policy;
 mod quickfix;
 mod registers;
 mod render_metrics;

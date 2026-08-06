@@ -2557,6 +2557,7 @@ impl BufferManager {
         std::mem::take(&mut self.pending_symbols)
     }
 
+    #[cfg(feature = "agents")]
     pub(crate) fn drain_pending_agent_tool_results(&mut self) -> Vec<(String, String, Value)> {
         std::mem::take(&mut self.pending_agent_tool_results)
     }

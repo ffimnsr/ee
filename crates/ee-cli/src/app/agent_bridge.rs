@@ -20,7 +20,7 @@
 //!   inherit no secret-like environment variables, and their output is
 //!   bounded by both the ACP request limit and an editor-side hard cap.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, Stdio};
@@ -48,7 +48,39 @@ use tokio::sync::oneshot;
 
 use super::*;
 
+use super::agents_mcp::ProxyRoute;
+
+use crate::policy::{
+    CommandInvocation, CommandRule, DecisionReason, MAX_WRITE_FILE_BYTES, MAX_WRITE_FILES,
+    MAX_WRITE_TOTAL_BYTES, MatchMode, McpInvocation, McpRule, OperationIdentity, PathPrefix,
+    PolicyInput, TransportKind, TrustCategory, TrustDecision, TrustOperation, TrustOutcome,
+    TrustRule, TrustRuleScope, TrustStore, TrustStoreDocument, TrustStoreError, WorkspaceIdentity,
+    WriteOperationKind, WriteRule, evaluate, generate_command_rule_id, generate_mcp_rule_id,
+    generate_write_rule_id, is_protected_relative_path, match_profile_entry, resolve_command_cwd,
+    validate_command_tokens,
+};
+
 // ── Policy constants ─────────────────────────────────────────────────────────
+
+/// Persistent terminal grant window (`Allow for 1 hour / 20 uses`).
+pub(crate) const PERSISTENT_TERMINAL_DURATION: Duration = Duration::from_secs(60 * 60);
+/// Maximum successful uses of one persistent terminal grant.
+pub(crate) const PERSISTENT_TERMINAL_MAX_USES: u64 = 20;
+/// The persistent terminal approval option label.
+pub(crate) const PERSISTENT_TERMINAL_OPTION_LABEL: &str = "Allow for 1 hour / 20 uses";
+
+/// Persistent write grant window (`Allow for 1 hour / 5 uses`, Phase 5).
+pub(crate) const PERSISTENT_WRITE_DURATION: Duration = Duration::from_secs(60 * 60);
+/// Maximum successful uses of one persistent write grant.
+pub(crate) const PERSISTENT_WRITE_MAX_USES: u64 = 5;
+/// The persistent write approval option label.
+pub(crate) const PERSISTENT_WRITE_OPTION_LABEL: &str = "Allow for 1 hour / 5 uses";
+
+/// Session key and fingerprint used for normalized read evaluations
+/// (Phase 4): reads are prompt-free today and never record session
+/// decisions, so the session state stays empty for these keys.
+const READ_SESSION: &str = "read";
+const READ_FINGERPRINT: &str = "read";
 
 /// Hard cap on lines served by one unbounded `fs/read_text_file`.
 pub(crate) const BRIDGE_READ_MAX_LINES: usize = 100_000;
@@ -131,43 +163,122 @@ fn terminal_command_line(request: &CreateTerminalRequest) -> String {
 
 // ── Bounded output ring buffer ───────────────────────────────────────────────
 
-/// Byte-bounded output buffer: truncates from the front on overflow so the
-/// final visible output is always preserved, at a char boundary.
+/// Origin of one retained terminal-output chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TerminalOutputStream {
+    Stdout,
+    Stderr,
+}
+
+/// One retained terminal-output chunk. Sequence numbers are per terminal and
+/// strictly increase in observed reader-write order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalOutputChunk {
+    pub(crate) sequence: u64,
+    pub(crate) stream: TerminalOutputStream,
+    pub(crate) text: String,
+}
+
+/// Structured terminal-output view for MCP callers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalOutputSnapshot {
+    /// ACP-compatible combined output; structured callers should use `chunks`.
+    pub(crate) combined_output: String,
+    pub(crate) chunks: Vec<TerminalOutputChunk>,
+    pub(crate) total_bytes: u64,
+    pub(crate) truncated: bool,
+    pub(crate) exit_status: Option<TerminalExitStatus>,
+}
+
+#[derive(Debug)]
+struct RetainedOutputChunk {
+    sequence: u64,
+    stream: TerminalOutputStream,
+    bytes: Vec<u8>,
+}
+
+/// Byte-bounded terminal output: preserves stdout/stderr chunk boundaries and
+/// truncates oldest output from the front at UTF-8 character boundaries.
 #[derive(Debug, Default)]
 pub(crate) struct BoundedOutput {
-    bytes: Vec<u8>,
+    chunks: VecDeque<RetainedOutputChunk>,
+    retained_bytes: usize,
     total: u64,
     truncated: bool,
     cap: usize,
+    next_sequence: u64,
 }
 
 impl BoundedOutput {
     /// Creates an empty buffer with `cap` max retained bytes.
     #[must_use]
     pub(crate) fn new(cap: usize) -> Self {
-        Self { bytes: Vec::new(), total: 0, truncated: false, cap }
-    }
-
-    /// Appends one chunk, enforcing the cap.
-    pub(crate) fn push(&mut self, chunk: &[u8]) {
-        self.total += chunk.len() as u64;
-        self.bytes.extend_from_slice(chunk);
-        while self.bytes.len() > self.cap {
-            let mut cut = self.bytes.len() - self.cap;
-            // Advance to a UTF-8 char boundary so the retained output stays
-            // valid string content.
-            while cut < self.bytes.len() && self.bytes[cut] & 0xC0 == 0x80 {
-                cut += 1;
-            }
-            self.bytes.drain(..cut);
-            self.truncated = true;
+        Self {
+            chunks: VecDeque::new(),
+            retained_bytes: 0,
+            total: 0,
+            truncated: false,
+            cap,
+            next_sequence: 1,
         }
     }
 
-    /// Retained output as lossy string.
+    /// Appends one stream-tagged chunk, enforcing the shared byte cap.
+    pub(crate) fn push(&mut self, stream: TerminalOutputStream, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+
+        self.total += chunk.len() as u64;
+        self.chunks.push_back(RetainedOutputChunk {
+            sequence: self.next_sequence,
+            stream,
+            bytes: chunk.to_vec(),
+        });
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.retained_bytes += chunk.len();
+        self.truncate_to_cap();
+    }
+
+    fn truncate_to_cap(&mut self) {
+        while self.retained_bytes > self.cap {
+            let required = self.retained_bytes - self.cap;
+            let front = self.chunks.front_mut().expect("retained output must have a chunk");
+            let mut cut = required.min(front.bytes.len());
+            // Advance to a UTF-8 char boundary so retained combined output
+            // remains valid when the source stream is UTF-8.
+            while cut < front.bytes.len() && front.bytes[cut] & 0xC0 == 0x80 {
+                cut += 1;
+            }
+            front.bytes.drain(..cut);
+            self.retained_bytes -= cut;
+            self.truncated = true;
+            if front.bytes.is_empty() {
+                self.chunks.pop_front();
+            }
+        }
+    }
+
+    /// Retained output as ACP-compatible combined lossy text.
     #[must_use]
     pub(crate) fn as_string(&self) -> String {
-        String::from_utf8_lossy(&self.bytes).into_owned()
+        let mut bytes = Vec::with_capacity(self.retained_bytes);
+        for chunk in &self.chunks {
+            bytes.extend_from_slice(&chunk.bytes);
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[must_use]
+    fn chunks(&self) -> Vec<TerminalOutputChunk> {
+        self.chunks
+            .iter()
+            .map(|chunk| TerminalOutputChunk {
+                sequence: chunk.sequence,
+                stream: chunk.stream,
+                text: String::from_utf8_lossy(&chunk.bytes).into_owned(),
+            })
+            .collect()
     }
 
     /// Whether any bytes were dropped by the cap.
@@ -177,7 +288,6 @@ impl BoundedOutput {
     }
 
     /// Total bytes ever pushed.
-    #[allow(dead_code)]
     #[must_use]
     pub(crate) fn total(&self) -> u64 {
         self.total
@@ -217,6 +327,7 @@ pub(crate) struct AgentTerminalTrack {
     #[allow(dead_code)]
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) output: Arc<Mutex<BoundedOutput>>,
+    output_readers: Vec<thread::JoinHandle<()>>,
     child: Option<Child>,
     pub(crate) exit_status: Option<TerminalExitStatus>,
     pub(crate) released: bool,
@@ -272,8 +383,21 @@ impl AgentTerminals {
             .map_err(|error| AgentError::Io(format!("terminal spawn failed: {error}")))?;
 
         let output = Arc::new(Mutex::new(BoundedOutput::new(cap)));
-        spawn_output_reader(child.stdout.take(), Arc::clone(&output));
-        spawn_output_reader(child.stderr.take(), Arc::clone(&output));
+        let output_readers = [
+            spawn_output_reader(
+                child.stdout.take(),
+                Arc::clone(&output),
+                TerminalOutputStream::Stdout,
+            ),
+            spawn_output_reader(
+                child.stderr.take(),
+                Arc::clone(&output),
+                TerminalOutputStream::Stderr,
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
 
         let track = AgentTerminalTrack {
             terminal_id: terminal_id.clone(),
@@ -282,6 +406,7 @@ impl AgentTerminals {
             args: request.args.clone(),
             cwd: request.cwd.clone(),
             output,
+            output_readers,
             child: Some(child),
             exit_status: None,
             released: false,
@@ -305,13 +430,29 @@ impl AgentTerminals {
         &self,
         request: &TerminalOutputRequest,
     ) -> Result<TerminalOutputResponse, AgentError> {
+        Ok(Self::output_response(self.output_snapshot(request)?))
+    }
+
+    /// Snapshot retained output chunks for a terminal owned by this session.
+    ///
+    /// This is the structured counterpart to ACP's combined-text terminal
+    /// output response. Released terminals intentionally remain unavailable
+    /// through this ownership-checked API.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the terminal id is unknown or belongs to another session.
+    pub(crate) fn output_snapshot(
+        &self,
+        request: &TerminalOutputRequest,
+    ) -> Result<TerminalOutputSnapshot, AgentError> {
         let mut registry = self.inner.lock().expect("terminals poisoned");
         let Some(track) = registry.active.get_mut(request.terminal_id.0.as_ref()) else {
             return Err(AgentError::invalid_params("unknown terminal"));
         };
         self.validate_owner(track, &request.session_id)?;
         self.refresh_exit(track);
-        Ok(Self::output_response(track))
+        Ok(Self::output_snapshot_for_track(track))
     }
 
     /// Waits for the terminal to exit (async polling; cancellable by dropping
@@ -420,17 +561,36 @@ impl AgentTerminals {
             track.exit_status = Some(exit_status_of(&status));
             track.child = None;
         }
+        Self::join_output_readers(track);
         Ok(())
     }
 
-    fn output_response(track: &AgentTerminalTrack) -> TerminalOutputResponse {
-        let output = track.output.lock().expect("output poisoned");
-        let mut response = TerminalOutputResponse::new(output.as_string(), output.truncated());
-        response.exit_status = track.exit_status.clone();
+    fn output_response(snapshot: TerminalOutputSnapshot) -> TerminalOutputResponse {
+        let mut response =
+            TerminalOutputResponse::new(snapshot.combined_output, snapshot.truncated);
+        response.exit_status = snapshot.exit_status;
         response
     }
 
-    /// Reaps the child when it exited and caches the exit status.
+    fn output_snapshot_for_track(track: &AgentTerminalTrack) -> TerminalOutputSnapshot {
+        let output = track.output.lock().expect("output poisoned");
+        TerminalOutputSnapshot {
+            combined_output: output.as_string(),
+            chunks: output.chunks(),
+            total_bytes: output.total(),
+            truncated: output.truncated(),
+            exit_status: track.exit_status.clone(),
+        }
+    }
+
+    fn join_output_readers(track: &mut AgentTerminalTrack) {
+        for reader in track.output_readers.drain(..) {
+            let _ = reader.join();
+        }
+    }
+
+    /// Reaps the child when it exited, waits for output readers to drain, and
+    /// caches the exit status.
     fn refresh_exit(&self, track: &mut AgentTerminalTrack) {
         if track.exit_status.is_none()
             && let Some(child) = track.child.as_mut()
@@ -438,6 +598,7 @@ impl AgentTerminals {
         {
             track.exit_status = Some(exit_status_of(&status));
             track.child = None;
+            Self::join_output_readers(track);
         }
     }
 
@@ -446,9 +607,13 @@ impl AgentTerminals {
         let mut registry = self.inner.lock().expect("terminals poisoned");
         if let Some(track) = registry.active.get_mut(terminal_id) {
             self.refresh_exit(track);
-            return Some(Self::output_response(track));
+            return Some(Self::output_response(Self::output_snapshot_for_track(track)));
         }
-        registry.released.get(terminal_id).map(Self::output_response)
+        registry
+            .released
+            .get(terminal_id)
+            .map(Self::output_snapshot_for_track)
+            .map(Self::output_response)
     }
 
     /// Kills every tracked terminal and clears the registry (app shutdown).
@@ -459,6 +624,7 @@ impl AgentTerminals {
                 let _ = child.kill();
                 let _ = child.wait();
             }
+            Self::join_output_readers(&mut track);
         }
     }
 
@@ -472,22 +638,25 @@ impl AgentTerminals {
 fn spawn_output_reader(
     stream: Option<impl std::io::Read + Send + 'static>,
     output: Arc<Mutex<BoundedOutput>>,
-) {
-    let Some(mut stream) = stream else {
-        return;
-    };
-    std::thread::Builder::new()
-        .name(String::from("ee-agent-terminal-output"))
-        .spawn(move || {
-            let mut buffer = [0u8; TERMINAL_READER_CHUNK];
-            loop {
-                match stream.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => output.lock().expect("output poisoned").push(&buffer[..n]),
+    stream_kind: TerminalOutputStream,
+) -> Option<thread::JoinHandle<()>> {
+    let mut stream = stream?;
+    Some(
+        std::thread::Builder::new()
+            .name(String::from("ee-agent-terminal-output"))
+            .spawn(move || {
+                let mut buffer = [0u8; TERMINAL_READER_CHUNK];
+                loop {
+                    match stream.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            output.lock().expect("output poisoned").push(stream_kind, &buffer[..n])
+                        }
+                    }
                 }
-            }
-        })
-        .expect("spawn terminal output reader");
+            })
+            .expect("spawn terminal output reader"),
+    )
 }
 
 // ── Handler → pane messages ──────────────────────────────────────────────────
@@ -513,9 +682,11 @@ pub(crate) enum BridgeUiMessage {
     },
     /// A tool call from the ee MCP proxy (Phase 6).  Writes and terminal
     /// creates queue the same approval prompts as direct ACP client methods;
-    /// reads and diagnostics are served immediately.
+    /// reads and diagnostics are served immediately.  `route` carries the
+    /// transport that delivered the call (Phase 3 MCP trust).
     ProxyTool {
         call: super::agents_mcp::ProxyToolCall,
+        route: super::agents_mcp::ProxyRoute,
         reply: oneshot::Sender<ClientRequestResult>,
     },
 }
@@ -580,6 +751,7 @@ impl ClientRequestHandler for BridgeUiHandler {
             match request {
                 ClientRequest::ProxyWorkspaceRoots => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::WorkspaceRoots,
                         reply,
                     })
@@ -587,6 +759,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxyListDirectory { path } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::ListDirectory { path },
                         reply,
                     })
@@ -594,6 +767,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxyListDirectoryAll { path } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::ListDirectoryAll { path },
                         reply,
                     })
@@ -601,6 +775,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxySearchFiles { pattern } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::SearchFiles { pattern },
                         reply,
                     })
@@ -608,6 +783,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxySearchFilesAll { pattern } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::SearchFilesAll { pattern },
                         reply,
                     })
@@ -615,6 +791,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxySearchText { query } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::SearchText { query },
                         reply,
                     })
@@ -622,6 +799,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxySearchTextRegex { pattern } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::SearchTextRegex { pattern },
                         reply,
                     })
@@ -629,6 +807,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxySearchTextInFiles { query, file_glob } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::SearchTextInFiles {
                             query,
                             file_glob,
@@ -639,6 +818,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxyReplaceText { path, old_text, new_text } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::ReplaceText {
                             path,
                             old_text,
@@ -650,6 +830,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxyApplyPatch { path, edits } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::ApplyPatch { path, edits },
                         reply,
                     })
@@ -657,6 +838,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxyCreateTextFile { path, content } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::CreateTextFile { path, content },
                         reply,
                     })
@@ -664,6 +846,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxyOverwriteTextFile { path, content } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::OverwriteTextFile { path, content },
                         reply,
                     })
@@ -671,6 +854,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxyReadBuffer { path } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::ReadBuffer { path },
                         reply,
                     })
@@ -678,6 +862,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxyReadBufferLines { path, line, limit } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::ReadBufferLines {
                             path,
                             line,
@@ -689,6 +874,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxyOpenBuffers => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::OpenBuffers,
                         reply,
                     })
@@ -696,6 +882,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxyGetDiagnostics => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::GetDiagnostics,
                         reply,
                     })
@@ -703,6 +890,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxyGetFileDiagnostics { path } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::GetFileDiagnostics { path },
                         reply,
                     })
@@ -710,6 +898,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxyDocumentSymbols { path } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::DocumentSymbols { path },
                         reply,
                     })
@@ -717,6 +906,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxyReferences { path, line, character } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::References {
                             path,
                             line,
@@ -728,6 +918,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxyListCodeActions { path, line, character } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::ListCodeActions {
                             path,
                             line,
@@ -739,6 +930,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxyApplyCodeAction { path, action_id } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::ApplyCodeAction { path, action_id },
                         reply,
                     })
@@ -746,6 +938,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxyFormatFile { path } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::FormatFile { path },
                         reply,
                     })
@@ -753,6 +946,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxyPreviewRenameSymbol { path, line, character, new_name } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::PreviewRenameSymbol {
                             path,
                             line,
@@ -765,6 +959,7 @@ impl ClientRequestHandler for BridgeUiHandler {
                 }
                 ClientRequest::ProxyRenameSymbol { path, line, character, new_name } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::RenameSymbol {
                             path,
                             line,
@@ -799,6 +994,44 @@ impl ClientRequestHandler for BridgeUiHandler {
                 ClientRequest::TerminalOutput(request) => {
                     self.terminals.output(&request).map(ClientRequestResponse::TerminalOutput)
                 }
+                ClientRequest::ProxyTerminalOutput(request) => {
+                    self.terminals.output_snapshot(&request).and_then(|snapshot| {
+                        let chunks = snapshot
+                            .chunks
+                            .into_iter()
+                            .map(|chunk| ee_mcp::TerminalOutputChunk {
+                                sequence: chunk.sequence,
+                                stream: match chunk.stream {
+                                    TerminalOutputStream::Stdout => String::from("stdout"),
+                                    TerminalOutputStream::Stderr => String::from("stderr"),
+                                },
+                                text: chunk.text,
+                            })
+                            .collect();
+                        let exit_status =
+                            snapshot.exit_status.map(serde_json::to_value).transpose().map_err(
+                                |error| {
+                                    AgentError::HandlerError(format!(
+                                        "terminal output exit status serialization failed: {error}"
+                                    ))
+                                },
+                            )?;
+                        Ok(ClientRequestResponse::ProxyValue(
+                            serde_json::to_value(ee_mcp::TerminalOutputResult {
+                                output: snapshot.combined_output,
+                                chunks,
+                                total_bytes: snapshot.total_bytes,
+                                truncated: snapshot.truncated,
+                                exit_status,
+                            })
+                            .map_err(|error| {
+                                AgentError::HandlerError(format!(
+                                    "terminal output serialization failed: {error}"
+                                ))
+                            })?,
+                        ))
+                    })
+                }
                 ClientRequest::WaitForTerminalExit(request) => self
                     .terminals
                     .wait_for_exit(&request)
@@ -831,26 +1064,28 @@ impl ClientRequestHandler for BridgeUiHandler {
 
 /// The operation awaiting an explicit user decision.
 #[derive(Debug, Clone)]
-enum WriteExpectation {
+pub(crate) enum WriteExpectation {
     Blind,
     MustNotExist,
     ExpectRevision(String),
 }
 
-#[derive(Debug, Clone, Copy)]
-enum WriteReplyKind {
+/// How the approved write is answered to the requester.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteReplyKind {
     FsWrite,
     ProxyStructured,
 }
 
-#[derive(Debug, Clone)]
-struct PreparedWrite {
-    path: PathBuf,
-    content: String,
-    tool_call_id: Option<String>,
-    expectation: WriteExpectation,
-    reply_kind: WriteReplyKind,
-    proxy_edit_count: u32,
+/// One prepared text write awaiting approval.
+#[derive(Debug)]
+pub(crate) struct PreparedWrite {
+    pub(crate) path: PathBuf,
+    pub(crate) content: String,
+    pub(crate) tool_call_id: Option<String>,
+    pub(crate) expectation: WriteExpectation,
+    pub(crate) reply_kind: WriteReplyKind,
+    pub(crate) proxy_edit_count: u32,
 }
 
 #[derive(Debug)]
@@ -879,7 +1114,7 @@ enum ApprovalKind {
     },
 }
 
-/// One approval decision the user can pick (Phase 7 policy).
+/// One approval decision the user can pick (Phase 2 policy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ApprovalChoice {
     /// Allow this operation only; identical future operations ask again.
@@ -890,6 +1125,9 @@ pub(crate) enum ApprovalChoice {
     DenyOnce,
     /// Deny this and every identical operation for the rest of the session.
     DenySession,
+    /// Allow this exact command for 1 hour / 20 uses via a host-local
+    /// persistent rule (eligible terminal requests only).
+    AllowPersistent,
 }
 
 impl ApprovalChoice {
@@ -899,63 +1137,31 @@ impl ApprovalChoice {
             ApprovalChoice::AllowSession => "Allow session",
             ApprovalChoice::DenyOnce => "Deny",
             ApprovalChoice::DenySession => "Deny session",
+            ApprovalChoice::AllowPersistent => PERSISTENT_TERMINAL_OPTION_LABEL,
         }
     }
 
     fn allows(self) -> bool {
-        matches!(self, ApprovalChoice::AllowOnce | ApprovalChoice::AllowSession)
+        matches!(
+            self,
+            ApprovalChoice::AllowOnce
+                | ApprovalChoice::AllowSession
+                | ApprovalChoice::AllowPersistent
+        )
     }
 }
 
-/// In-memory approval policy (Phase 7).
+/// Session-scoped approval policy (shared precedence contract, Phase 1
+/// foundation).
 ///
-/// `allow_once` / `deny_once` decisions are not recorded; `allow_session` /
-/// `deny_session` decisions are remembered per session, keyed by action kind
-/// and fingerprint (path for writes, command+args fingerprint for
-/// terminals), and invalidated when the session closes.  Allow-always
-/// persistence is deliberately not implemented: the config writer has no
-/// safe update path for it, so the option does not exist at the schema
-/// level.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct ApprovalPolicy {
-    /// `(session_id, fingerprint)` entries auto-allowed for the session.
-    allowed: std::collections::BTreeSet<(String, String)>,
-    /// `(session_id, fingerprint)` entries auto-denied for the session.
-    denied: std::collections::BTreeSet<(String, String)>,
-}
-
-impl ApprovalPolicy {
-    /// Auto-decision for `(session_id, fingerprint)`, if recorded.
-    fn lookup(&self, session_id: &str, fingerprint: &str) -> Option<ApprovalChoice> {
-        if self.denied.contains(&(session_id.to_string(), fingerprint.to_string())) {
-            return Some(ApprovalChoice::DenySession);
-        }
-        if self.allowed.contains(&(session_id.to_string(), fingerprint.to_string())) {
-            return Some(ApprovalChoice::AllowSession);
-        }
-        None
-    }
-
-    /// Records a session-scoped decision.
-    fn record(&mut self, session_id: &str, fingerprint: &str, choice: ApprovalChoice) {
-        let key = (session_id.to_string(), fingerprint.to_string());
-        match choice {
-            ApprovalChoice::AllowSession => {
-                self.allowed.insert(key);
-            }
-            ApprovalChoice::DenySession => {
-                self.denied.insert(key);
-            }
-            ApprovalChoice::AllowOnce | ApprovalChoice::DenyOnce => {}
-        }
-    }
-
-    /// Drops every recorded decision for `session_id` (session close).
-    pub(crate) fn invalidate_session(&mut self, session_id: &str) {
-        self.allowed.retain(|(session, _)| session != session_id);
-        self.denied.retain(|(session, _)| session != session_id);
-    }
-}
+/// `allow_once` / `deny_once` decisions are resolved by the approval UI
+/// layer and never recorded; `allow_session` / `deny_session` decisions are
+/// remembered per session, keyed by action kind and fingerprint (path for
+/// writes, command+args fingerprint for terminals), and invalidated when the
+/// session closes.  Allow-always persistence is deliberately not
+/// implemented: persistent grants live only in the host-local trust store,
+/// and the option does not exist at the schema level.
+pub(crate) use crate::policy::session::{SessionChoice, SessionPolicy as ApprovalPolicy};
 
 /// Fingerprint for one approval operation: action kind + stable identity.
 fn approval_fingerprint(kind: &ApprovalKind) -> String {
@@ -980,17 +1186,37 @@ fn approval_fingerprint(kind: &ApprovalKind) -> String {
     }
 }
 
+/// Session-scoped counterpart of an approval choice; once-only choices are
+/// never recorded (shared precedence contract, Phase 1 foundation), and
+/// persistent grants are host-local rules, not session decisions.
+fn session_decision(choice: ApprovalChoice) -> Option<SessionChoice> {
+    match choice {
+        ApprovalChoice::AllowOnce | ApprovalChoice::DenyOnce | ApprovalChoice::AllowPersistent => {
+            None
+        }
+        ApprovalChoice::AllowSession => Some(SessionChoice::Allow),
+        ApprovalChoice::DenySession => Some(SessionChoice::Deny),
+    }
+}
+
 /// A pending file-write or terminal-create approval.
 #[derive(Debug)]
 pub(crate) struct ApprovalPrompt {
     pub(crate) thread_index: Option<usize>,
     pub(crate) session_id: String,
+    /// Agent id of the requesting session (rule scoping; `None` for the
+    /// MCP proxy session).
+    agent_id: Option<String>,
     pub(crate) title: String,
     pub(crate) detail: String,
     /// `(label, choice)` option list; the user picks one with Enter.
     pub(crate) options: Vec<(String, ApprovalChoice)>,
     pub(crate) selected: usize,
     kind: ApprovalKind,
+    /// Phase 3: validated generic MCP invocation behind this prompt, when
+    /// the request is an eligible proxy tool call.  Presence gates the
+    /// persistent `Allow for 1 hour / 20 uses` option.
+    mcp: Option<McpInvocation>,
     pub(crate) reply: oneshot::Sender<ClientRequestResult>,
 }
 
@@ -999,6 +1225,7 @@ impl ApprovalPrompt {
         thread_index: Option<usize>,
         session_id: &SessionId,
         request: &WriteTextFileRequest,
+        persistent_label: Option<&'static str>,
         reply: oneshot::Sender<ClientRequestResult>,
     ) -> Self {
         Self::write_with(
@@ -1014,35 +1241,50 @@ impl ApprovalPrompt {
                 reply_kind: WriteReplyKind::FsWrite,
                 proxy_edit_count: 0,
             },
+            None,
+            persistent_label,
             reply,
         )
     }
 
-    fn proxy_write(spec: ProxyWriteSpec, reply: oneshot::Sender<ClientRequestResult>) -> Self {
+    fn proxy_write(
+        spec: ProxyWriteSpec,
+        mcp: Option<McpInvocation>,
+        persistent_label: Option<&'static str>,
+        reply: oneshot::Sender<ClientRequestResult>,
+    ) -> Self {
         Self::write_with(
             None,
             &SessionId::new("proxy"),
             spec.title,
-            spec.detail,
+            mcp.as_ref().map(mcp_approval_detail).unwrap_or(spec.detail),
             spec.prepared,
+            mcp,
+            persistent_label,
             reply,
         )
     }
 
+    /// Internal constructor shared by the write prompt builders; the
+    /// argument count is inherent to the prompt shape.
+    #[allow(clippy::too_many_arguments)]
     fn write_with(
         thread_index: Option<usize>,
         session_id: &SessionId,
         title: String,
         detail: String,
         prepared: PreparedWrite,
+        mcp: Option<McpInvocation>,
+        persistent_label: Option<&'static str>,
         reply: oneshot::Sender<ClientRequestResult>,
     ) -> Self {
         Self {
             thread_index,
             session_id: session_id.0.to_string(),
+            agent_id: None,
             title,
             detail,
-            options: approval_options(),
+            options: approval_options(persistent_label),
             selected: 0,
             kind: ApprovalKind::Write {
                 path: prepared.path,
@@ -1052,6 +1294,7 @@ impl ApprovalPrompt {
                 reply_kind: prepared.reply_kind,
                 proxy_edit_count: prepared.proxy_edit_count,
             },
+            mcp,
             reply,
         }
     }
@@ -1061,25 +1304,31 @@ impl ApprovalPrompt {
         detail: String,
         writes: Vec<PreparedWrite>,
         total_edit_count: u32,
+        mcp: Option<McpInvocation>,
+        persistent_label: Option<&'static str>,
         reply: oneshot::Sender<ClientRequestResult>,
     ) -> Self {
         Self {
             thread_index: None,
             session_id: SessionId::new("proxy").0.to_string(),
+            agent_id: None,
             title,
-            detail,
-            options: approval_options(),
+            detail: mcp.as_ref().map(mcp_approval_detail).unwrap_or(detail),
+            options: approval_options(persistent_label),
             selected: 0,
             kind: ApprovalKind::WriteBatch { writes, total_edit_count },
+            mcp,
             reply,
         }
     }
 
     fn terminal(
         thread_index: Option<usize>,
+        agent_id: Option<String>,
         session_id: &SessionId,
         request: &CreateTerminalRequest,
         reply: oneshot::Sender<ClientRequestResult>,
+        persistent_allowed: bool,
     ) -> Self {
         let command = if request.args.is_empty() {
             request.command.clone()
@@ -1100,20 +1349,26 @@ impl ApprovalPrompt {
         Self {
             thread_index,
             session_id: session_id.0.to_string(),
+            agent_id,
             title: String::from("terminal/create"),
             detail: format!("{command} · cwd: {cwd} · env: {env_text}"),
-            options: approval_options(),
+            options: approval_options(
+                persistent_allowed.then_some(PERSISTENT_TERMINAL_OPTION_LABEL),
+            ),
             selected: 0,
             kind: ApprovalKind::TerminalCreate { request: request.clone() },
+            mcp: None,
             reply,
         }
     }
 }
 
-/// The fixed approval option list.  Allow-always is intentionally absent:
-/// persisting it has no safe config-write path (Phase 7 policy).
-fn approval_options() -> Vec<(String, ApprovalChoice)> {
-    [
+/// The approval option list.  Allow-always (unlimited persistence) is
+/// intentionally absent; the bounded persistent option exists only for
+/// eligible terminal requests (Phase 2 command trust), eligible generic MCP
+/// invocations (Phase 3), and eligible bounded native writes (Phase 5).
+fn approval_options(persistent_label: Option<&'static str>) -> Vec<(String, ApprovalChoice)> {
+    let mut options = [
         ApprovalChoice::AllowOnce,
         ApprovalChoice::AllowSession,
         ApprovalChoice::DenyOnce,
@@ -1121,12 +1376,52 @@ fn approval_options() -> Vec<(String, ApprovalChoice)> {
     ]
     .into_iter()
     .map(|choice| (choice.label().to_string(), choice))
-    .collect()
+    .collect::<Vec<_>>();
+    if let Some(label) = persistent_label {
+        options.push((label.to_string(), ApprovalChoice::AllowPersistent));
+    }
+    options
+}
+
+/// Redacted MCP approval text: server, tool, side-effect class, and bounded
+/// canonical arguments only (Phase 3); never renders secrets, environment
+/// values, or file contents.
+fn mcp_approval_detail(invocation: &McpInvocation) -> String {
+    format!(
+        "server: {} · tool: {} · class: {} · args: {}",
+        invocation.server,
+        invocation.tool,
+        invocation.category.as_str(),
+        redact_arguments_display(&invocation.arguments_json),
+    )
+}
+
+/// Bounded argument display; oversized canonical payloads are truncated.
+fn redact_arguments_display(arguments: &str) -> String {
+    const MAX_DISPLAY_BYTES: usize = 200;
+    if arguments.len() <= MAX_DISPLAY_BYTES {
+        arguments.to_string()
+    } else {
+        format!("{}…", &arguments[..MAX_DISPLAY_BYTES])
+    }
 }
 
 // ── Action log ───────────────────────────────────────────────────────────────
 
-/// One recorded agent file operation (future checkpoint/restore source).
+/// Redacted lifecycle metadata about a matched persistent grant (Phase 6).
+struct TrustGrantStatus {
+    remaining_uses: Option<u64>,
+    expires_at: Option<SystemTime>,
+}
+
+/// UTC RFC3339 display for a grant expiry; no paths or secrets.
+fn format_expiry_utc(time: SystemTime) -> String {
+    let datetime: chrono::DateTime<chrono::Utc> = time.into();
+    datetime.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// One recorded agent file operation (future checkpoint/restore source) or
+/// redacted automatic trust decision (Phase 6 audit).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum ActionLogEntry {
     Read {
@@ -1139,6 +1434,16 @@ pub(crate) enum ActionLogEntry {
         old_fingerprint: u64,
         new_fingerprint: u64,
         tool_call_id: Option<String>,
+        session_id: String,
+    },
+    /// Redacted automatic trust decision: rule id, operation category,
+    /// machine-readable reason, and remaining use budget.  Never carries
+    /// raw paths, command environment, secret values, or MCP arguments.
+    TrustDecision {
+        rule_id: Option<String>,
+        category: TrustCategory,
+        reason: DecisionReason,
+        remaining_uses: Option<u64>,
         session_id: String,
     },
 }
@@ -1333,6 +1638,10 @@ impl App {
         while let Ok(message) = self.agents.bridge_rx.try_recv() {
             match message {
                 BridgeUiMessage::ReadFile { request, reply } => {
+                    // Phase 4: normalize + evaluate before serving; reads
+                    // stay prompt-free, but protected/external reads can
+                    // never match a persistent rule.
+                    let _ = self.native_read_decision(&request.path, request.limit.map(u64::from));
                     self.bridge_read_file(&request, reply);
                 }
                 BridgeUiMessage::WriteFile { request, reply } => {
@@ -1341,27 +1650,42 @@ impl App {
                         continue;
                     }
                     let thread = self.session_thread(&request.session_id);
+                    let persistent_label = self.native_write_persistent_label(
+                        &request.path,
+                        &request.content,
+                        &WriteExpectation::Blind,
+                    );
                     self.request_bridge_approval(ApprovalPrompt::write(
                         thread,
                         &request.session_id,
                         &request,
+                        persistent_label,
                         reply,
                     ));
                 }
                 BridgeUiMessage::TerminalCreate { request, reply } => {
                     let thread = self.session_thread(&request.session_id);
+                    let agent_id = thread
+                        .and_then(|index| self.agents.threads.get(index))
+                        .map(|thread| thread.agent_id.clone());
+                    // Normalize after request validation and before approval
+                    // queue insertion: only validated invocations may offer
+                    // persistent command trust (Phase 2).
+                    let persistent_allowed = self.command_invocation_for_request(&request).is_ok();
                     self.request_bridge_approval(ApprovalPrompt::terminal(
                         thread,
+                        agent_id,
                         &request.session_id,
                         &request,
                         reply,
+                        persistent_allowed,
                     ));
                 }
                 BridgeUiMessage::Elicitation { session_id, request, reply } => {
                     self.present_elicitation(session_id, request, reply);
                 }
-                BridgeUiMessage::ProxyTool { call, reply } => {
-                    self.handle_proxy_tool(call, reply);
+                BridgeUiMessage::ProxyTool { call, route, reply } => {
+                    self.handle_proxy_tool(call, route, reply);
                 }
             }
         }
@@ -1374,6 +1698,7 @@ impl App {
     fn handle_proxy_tool(
         &mut self,
         call: super::agents_mcp::ProxyToolCall,
+        route: super::agents_mcp::ProxyRoute,
         reply: oneshot::Sender<ClientRequestResult>,
     ) {
         let session_id = SessionId::new("proxy");
@@ -1476,10 +1801,10 @@ impl App {
                 );
             }
             super::agents_mcp::ProxyToolCall::ApplyCodeAction { path, action_id } => {
-                self.queue_proxy_apply_code_action(&path, &action_id, reply);
+                self.queue_proxy_apply_code_action(&path, &action_id, route, reply);
             }
             super::agents_mcp::ProxyToolCall::FormatFile { path } => {
-                self.queue_proxy_format_file(&path, reply);
+                self.queue_proxy_format_file(&path, route, reply);
             }
             super::agents_mcp::ProxyToolCall::PreviewRenameSymbol {
                 path,
@@ -1493,9 +1818,12 @@ impl App {
                 );
             }
             super::agents_mcp::ProxyToolCall::RenameSymbol { path, line, character, new_name } => {
-                self.queue_proxy_rename_symbol(&path, line, character, &new_name, reply);
+                self.queue_proxy_rename_symbol(&path, line, character, &new_name, route, reply);
             }
             super::agents_mcp::ProxyToolCall::Read(request) => {
+                // Phase 4: MCP read normalization (stdio route) before the
+                // shared read pipeline.
+                let _ = self.mcp_read_decision(&request, route);
                 self.bridge_read_file(&request, reply);
             }
             super::agents_mcp::ProxyToolCall::Write(request) => {
@@ -1507,15 +1835,23 @@ impl App {
                     None,
                     &session_id,
                     &request,
+                    self.native_write_persistent_label(
+                        &request.path,
+                        &request.content,
+                        &WriteExpectation::Blind,
+                    ),
                     reply,
                 ));
             }
             super::agents_mcp::ProxyToolCall::Terminal(request) => {
+                let persistent_allowed = self.command_invocation_for_request(&request).is_ok();
                 self.request_bridge_approval(ApprovalPrompt::terminal(
+                    None,
                     None,
                     &session_id,
                     &request,
                     reply,
+                    persistent_allowed,
                 ));
             }
             super::agents_mcp::ProxyToolCall::Diagnostics => {
@@ -1668,15 +2004,91 @@ impl App {
     }
 
     /// Queues an approval prompt (front of the queue wins) and notifies,
-    /// unless a recorded session policy already auto-resolves it.
+    /// unless the shared policy (session state first, then persistent
+    /// rules) already resolves it without UI.
     fn request_bridge_approval(&mut self, prompt: ApprovalPrompt) {
         let thread_index = prompt.thread_index;
         let session_id = prompt.session_id.clone();
         let fingerprint = approval_fingerprint(&prompt.kind);
-        if let Some(choice) = self.agents.approval_policy.lookup(&session_id, &fingerprint) {
-            // Session-scoped decision: resolve silently, no UI.
-            self.resolve_approval(prompt, choice);
-            return;
+        let operation = self.trust_operation_for_prompt(&prompt);
+        let mut decision = self.evaluate_operation(&operation, &session_id, &fingerprint);
+        // Phase 4 curated-profile fallback: a terminal request that matches
+        // a fixed registry entry is evaluated as its profile when the exact
+        // command grant did not cover it.  The narrower exact grant always
+        // wins; the profile grant fills the gap.
+        let mut audited_operation = operation;
+        if matches!(decision.outcome, TrustOutcome::Prompt)
+            && matches!(
+                decision.reason,
+                DecisionReason::NoMatchingRule | DecisionReason::WorkspaceDisabled
+            )
+            && let ApprovalKind::TerminalCreate { request } = &prompt.kind
+            && let Some(profile) = self.profile_id_for_request(request)
+        {
+            let profile_operation = TrustOperation {
+                workspace: audited_operation.workspace,
+                agent: audited_operation.agent.clone(),
+                transport: audited_operation.transport,
+                category: TrustCategory::Execute,
+                identity: OperationIdentity::Profile { profile: profile.to_string() },
+            };
+            decision = self.evaluate_operation(&profile_operation, &session_id, &fingerprint);
+            audited_operation = profile_operation;
+        }
+        // Phase 6 audit: every automatic decision (allow or prompt fallback)
+        // records redacted rule/category/reason/remaining-use metadata.
+        self.push_trust_audit(&audited_operation, &decision, &session_id);
+        match &decision {
+            TrustDecision {
+                outcome: TrustOutcome::Allow,
+                reason: DecisionReason::PersistentAllow,
+                rule_id: Some(rule_id),
+            } => {
+                // Persistent rules auto-dispatch terminal creates (phases 2
+                // and 4 profiles), eligible generic MCP invocations (phase
+                // 3), and bounded native writes (phase 5).  Operations
+                // without a matched rule stay on the UI path.
+                self.resolve_persistent_allow(prompt, rule_id.clone());
+                // Redacted grant metadata on the status surfaces once the
+                // dispatch settled: the remaining-use count then reflects
+                // the successful use, and async save alerts cannot clobber
+                // the transcript notice.
+                if let Some(status) =
+                    self.matched_grant_status(&audited_operation, &decision, &session_id)
+                {
+                    let summary = match (status.remaining_uses, status.expires_at) {
+                        (Some(remaining), Some(expires)) => format!(
+                            "trusted by {rule_id} · {remaining} uses left · expires {}",
+                            format_expiry_utc(expires)
+                        ),
+                        (Some(remaining), None) => {
+                            format!("trusted by {rule_id} · {remaining} uses left")
+                        }
+                        _ => format!("trusted by {rule_id}"),
+                    };
+                    if let Some(thread_index) = thread_index
+                        && let Some(thread) = self.agents.threads.get_mut(thread_index)
+                    {
+                        thread.push_system(summary.clone());
+                    }
+                    self.backend.status_message = Some(summary);
+                }
+                return;
+            }
+            TrustDecision { outcome: TrustOutcome::Allow, .. } => {
+                // Session allow: resolve silently, no UI.
+                self.resolve_approval(prompt, ApprovalChoice::AllowSession);
+                return;
+            }
+            TrustDecision {
+                outcome: TrustOutcome::Prompt,
+                reason: DecisionReason::SessionDeny,
+                ..
+            } => {
+                self.resolve_approval(prompt, ApprovalChoice::DenySession);
+                return;
+            }
+            _ => {}
         }
         if let Some(thread) = thread_index
             && let Some(thread) = self.agents.threads.get_mut(thread)
@@ -1696,10 +2108,391 @@ impl App {
         });
     }
 
+    /// Normalizes one pending approval into the shared policy operation
+    /// (Phase 1 foundation).  Session lookups still key on the legacy
+    /// fingerprint; the normalized operation is what persistent rules match.
+    /// Terminal requests carry a validated command invocation; invalid
+    /// requests (shell wrappers, bad cwd) normalize to `Unknown` and can
+    /// never match a persistent rule.
+    fn trust_operation_for_prompt(&self, prompt: &ApprovalPrompt) -> TrustOperation {
+        let workspace = self.primary_workspace_identity();
+        let (category, identity) = match &prompt.kind {
+            ApprovalKind::Write { .. } | ApprovalKind::WriteBatch { .. } => {
+                // Phase 3: eligible proxy tool calls carry a validated MCP
+                // invocation; everything else normalizes as a native write.
+                if let Some(invocation) = &prompt.mcp {
+                    (invocation.category, invocation.to_identity())
+                } else {
+                    match &prompt.kind {
+                        ApprovalKind::Write { path, content, expectation, .. } => self
+                            .native_write_operation(path, content, expectation)
+                            .unwrap_or((TrustCategory::Unknown, OperationIdentity::Unknown)),
+                        ApprovalKind::WriteBatch { writes, .. } => self
+                            .native_write_batch_operation(writes)
+                            .unwrap_or((TrustCategory::Unknown, OperationIdentity::Unknown)),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            ApprovalKind::TerminalCreate { request } => {
+                let identity = self
+                    .command_invocation_for_request(request)
+                    .map(|invocation| OperationIdentity::Command {
+                        executable: invocation.executable,
+                        argv: invocation.argv,
+                    })
+                    .unwrap_or(OperationIdentity::Unknown);
+                (TrustCategory::Execute, identity)
+            }
+        };
+        TrustOperation {
+            workspace,
+            agent: prompt.agent_id.clone(),
+            transport: TransportKind::Acp,
+            category,
+            identity,
+        }
+    }
+
+    /// Validated command invocation for a terminal request: structured
+    /// executable + argv tokens, canonical in-workspace cwd, and the
+    /// canonical workspace identity.  Invalid requests (shell wrappers,
+    /// control characters, empty tokens, external/relative/traversal/
+    /// symlink-escape cwd) return an error and are never eligible for
+    /// persistent trust.
+    fn command_invocation_for_request(
+        &self,
+        request: &CreateTerminalRequest,
+    ) -> Result<CommandInvocation, String> {
+        let primary =
+            std::fs::canonicalize(&self.working_dir).unwrap_or_else(|_| self.working_dir.clone());
+        validate_command_tokens(&request.command, &request.args)?;
+        let raw_cwd = request.cwd.as_deref().unwrap_or(&primary);
+        let canonical_cwd = resolve_command_cwd(raw_cwd, &self.canonical_workspace_roots())?;
+        Ok(CommandInvocation {
+            workspace: WorkspaceIdentity::from_canonical_root_bytes(
+                primary.as_os_str().as_encoded_bytes(),
+            ),
+            executable: request.command.clone(),
+            argv: request.args.clone(),
+            canonical_cwd,
+        })
+    }
+
+    /// The host-local trust store for the primary workspace, or `None` when
+    /// no state directory is available (fail closed: empty effective rules).
+    fn workspace_trust_store(&self) -> Option<TrustStore> {
+        #[cfg(test)]
+        if let Some(base) = self.agents.test_trust_store_base.as_deref() {
+            return TrustStore::at(base, &self.working_dir).ok();
+        }
+        TrustStore::default_for(&self.working_dir).ok()
+    }
+
+    /// Canonical workspace identity for the primary (working-directory)
+    /// root.
+    fn primary_workspace_identity(&self) -> WorkspaceIdentity {
+        let root =
+            std::fs::canonicalize(&self.working_dir).unwrap_or_else(|_| self.working_dir.clone());
+        WorkspaceIdentity::from_canonical_root_bytes(root.as_os_str().as_encoded_bytes())
+    }
+
+    /// Canonical workspace-relative slash-joined path, or `None` when the
+    /// path is outside every canonical workspace root.
+    fn workspace_relative_segments(&self, canonical: &Path) -> Option<String> {
+        let roots = self.canonical_workspace_roots();
+        let root = roots.iter().find(|root| canonical.starts_with(root))?;
+        let relative = canonical.strip_prefix(root).ok()?;
+        if relative.as_os_str().is_empty() {
+            return None;
+        }
+        Some(
+            relative
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/"),
+        )
+    }
+
+    /// Shared policy evaluation for one normalized operation against the
+    /// host-local store, session state, and the usage ledger (Phase 4).
+    /// Time comes from the injected policy clock (Phase 6); the ledger
+    /// snapshot is keyed by workspace identity, session, and rule id.
+    fn evaluate_operation(
+        &self,
+        operation: &TrustOperation,
+        session_id: &str,
+        fingerprint: &str,
+    ) -> TrustDecision {
+        let now = self.trust_clock.now();
+        let effective = self
+            .workspace_trust_store()
+            .map(|store| store.effective_at(now))
+            .unwrap_or_else(|| TrustStoreDocument {
+                workspace: operation.workspace,
+                workspace_enabled: false,
+                rules: Vec::new(),
+            });
+        let usage = self.agents.usage_ledger.snapshot(operation.workspace, session_id);
+        evaluate(&PolicyInput {
+            session_id,
+            fingerprint,
+            operation,
+            session: &self.agents.approval_policy,
+            rules: &effective.rules,
+            now,
+            usage: &usage,
+            workspace_enabled: effective.workspace_enabled,
+        })
+    }
+
+    /// Phase 6 audit: records one redacted automatic-decision event.  The
+    /// entry carries the matched rule id, operation category, machine-
+    /// readable reason, and remaining use budget only — never raw paths,
+    /// command environment, secret values, or MCP arguments.
+    fn push_trust_audit(
+        &mut self,
+        operation: &TrustOperation,
+        decision: &TrustDecision,
+        session_id: &str,
+    ) {
+        let remaining_uses = self
+            .matched_grant_status(operation, decision, session_id)
+            .and_then(|status| status.remaining_uses);
+        self.agents.action_log.push(ActionLogEntry::TrustDecision {
+            rule_id: decision.rule_id.clone(),
+            category: operation.category,
+            reason: decision.reason,
+            remaining_uses,
+            session_id: session_id.to_string(),
+        });
+    }
+
+    /// Redacted metadata about the rule behind a persistent allow: the
+    /// remaining use budget and the absolute expiry (Phase 6 lifecycle).
+    fn matched_grant_status(
+        &self,
+        operation: &TrustOperation,
+        decision: &TrustDecision,
+        session_id: &str,
+    ) -> Option<TrustGrantStatus> {
+        let TrustDecision {
+            outcome: TrustOutcome::Allow,
+            reason: DecisionReason::PersistentAllow,
+            rule_id: Some(rule_id),
+        } = decision
+        else {
+            return None;
+        };
+        let now = self.trust_clock.now();
+        let usage = self.agents.usage_ledger.snapshot(operation.workspace, session_id);
+        let scope = self
+            .workspace_trust_store()?
+            .effective_at(now)
+            .rules
+            .into_iter()
+            .find(|rule| rule.id() == rule_id)?
+            .scope()
+            .clone();
+        Some(TrustGrantStatus {
+            remaining_uses: scope.max_uses.map(|max| max.saturating_sub(usage.used(rule_id))),
+            expires_at: scope.expires_at,
+        })
+    }
+
+    /// Phase 4: the curated profile covering a terminal request, when the
+    /// request matches a fixed registry entry exactly and runs at the
+    /// primary workspace root.
+    fn profile_id_for_request(&self, request: &CreateTerminalRequest) -> Option<&'static str> {
+        let primary =
+            std::fs::canonicalize(&self.working_dir).unwrap_or_else(|_| self.working_dir.clone());
+        let raw_cwd = request.cwd.as_deref().unwrap_or(&primary);
+        let canonical_cwd = resolve_command_cwd(raw_cwd, &self.canonical_workspace_roots()).ok()?;
+        if canonical_cwd != primary {
+            return None;
+        }
+        match_profile_entry(&request.command, &request.args).map(|(id, _)| id)
+    }
+
+    /// Phase 4: normalized evaluation for one native workspace read.  Reads
+    /// stay prompt-free today; the decision feeds the phase 6 audit trail
+    /// and guarantees protected, secret-store, and external reads can never
+    /// match a persistent rule.
+    pub(crate) fn native_read_decision(
+        &mut self,
+        path: &Path,
+        byte_count: Option<u64>,
+    ) -> TrustDecision {
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let relative = self.workspace_relative_segments(&canonical);
+        let eligible = relative.as_deref().is_some_and(|relative| {
+            !is_protected_relative_path(relative) && !self.is_secret_store_path(path)
+        });
+        let operation = if eligible {
+            TrustOperation {
+                workspace: self.primary_workspace_identity(),
+                agent: None,
+                transport: TransportKind::Acp,
+                category: TrustCategory::Read,
+                identity: OperationIdentity::ReadPath {
+                    relative_path: relative.expect("eligible implies relative"),
+                    byte_count,
+                },
+            }
+        } else {
+            TrustOperation {
+                workspace: self.primary_workspace_identity(),
+                agent: None,
+                transport: TransportKind::Acp,
+                category: TrustCategory::Read,
+                identity: OperationIdentity::Unknown,
+            }
+        };
+        let decision = self.evaluate_operation(&operation, READ_SESSION, READ_FINGERPRINT);
+        self.push_trust_audit(&operation, &decision, READ_SESSION);
+        decision
+    }
+
+    /// Phase 4: normalized evaluation for one MCP read invocation (stdio
+    /// route): ee-pinned `read` classification, matching server/transport/
+    /// tool/schema, and a bounded canonical workspace-relative path.
+    pub(crate) fn mcp_read_decision(
+        &mut self,
+        request: &ReadTextFileRequest,
+        route: super::agents_mcp::ProxyRoute,
+    ) -> TrustDecision {
+        let tool = "ee_read_text_file";
+        let canonical =
+            std::fs::canonicalize(&request.path).unwrap_or_else(|_| request.path.clone());
+        let relative = self.workspace_relative_segments(&canonical);
+        let eligible = ee_mcp::classify::side_effect_class(tool) == ee_mcp::SideEffectClass::Read
+            && relative.as_deref().is_some_and(|relative| {
+                !is_protected_relative_path(relative) && !self.is_secret_store_path(&request.path)
+            });
+        let operation = if eligible {
+            TrustOperation {
+                workspace: self.primary_workspace_identity(),
+                agent: None,
+                transport: route.transport_kind(),
+                category: TrustCategory::Read,
+                identity: OperationIdentity::McpRead {
+                    server: String::from("ee"),
+                    transport_identity: route.transport_identity().to_string(),
+                    tool: tool.to_string(),
+                    tool_schema_version: ee_mcp::EE_TOOL_SCHEMA_VERSION,
+                    relative_path: relative.expect("eligible implies relative"),
+                    byte_count: request.limit.map(u64::from),
+                },
+            }
+        } else {
+            TrustOperation {
+                workspace: self.primary_workspace_identity(),
+                agent: None,
+                transport: route.transport_kind(),
+                category: TrustCategory::Read,
+                identity: OperationIdentity::Unknown,
+            }
+        };
+        let decision = self.evaluate_operation(&operation, READ_SESSION, READ_FINGERPRINT);
+        self.push_trust_audit(&operation, &decision, READ_SESSION);
+        decision
+    }
+
+    /// Whether the path is the configured host-local secret-store vault
+    /// (never covered by persistent read trust).
+    fn is_secret_store_path(&self, path: &Path) -> bool {
+        let Ok(vault) = crate::secrets::default_vault_path() else {
+            return false;
+        };
+        let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let canonical_vault = std::fs::canonicalize(&vault).unwrap_or(vault);
+        paths_equivalent(&canonical, &canonical_vault)
+    }
+
     /// Resolves one approval with the chosen policy decision.
     fn resolve_approval(&mut self, prompt: ApprovalPrompt, choice: ApprovalChoice) {
         let fingerprint = approval_fingerprint(&prompt.kind);
-        self.agents.approval_policy.record(&prompt.session_id, &fingerprint, choice);
+        if let Some(decision) = session_decision(choice) {
+            self.agents.approval_policy.record(&prompt.session_id, &fingerprint, decision);
+        }
+        if choice == ApprovalChoice::AllowPersistent {
+            // Persistent grants exist only for eligible terminal requests
+            // (phase 2), eligible generic MCP invocations (phase 3), and
+            // eligible bounded native writes (phase 5); everything else
+            // fails closed.
+            match &prompt.kind {
+                ApprovalKind::TerminalCreate { .. } => match prompt.kind {
+                    ApprovalKind::TerminalCreate { request } => {
+                        let session_id = prompt.session_id.clone();
+                        match self.persist_terminal_rule(&request, prompt.agent_id.as_deref()) {
+                            Ok(rule_id) => self.spawn_trusted_terminal(
+                                &request,
+                                &session_id,
+                                Some(rule_id),
+                                prompt.reply,
+                            ),
+                            Err(error) => {
+                                // Persistence failure: current permission
+                                // error, terminal stays unspawned, budget
+                                // unchanged.
+                                let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
+                                    reason: format!(
+                                        "persistent terminal approval unavailable: {error}"
+                                    ),
+                                }));
+                                if let Some(thread) = prompt.thread_index
+                                    && let Some(thread) = self.agents.threads.get_mut(thread)
+                                {
+                                    thread.push_system("approval denied");
+                                }
+                            }
+                        }
+                    }
+                    _ => unreachable!(),
+                },
+                ApprovalKind::Write { .. } | ApprovalKind::WriteBatch { .. } => {
+                    if prompt.mcp.is_none() {
+                        // Phase 5: bounded native create/modify writes derive
+                        // a host-local rule narrower than the application
+                        // safety maxima; persistence failure denies the write
+                        // and nothing is dispatched.
+                        match self.persist_write_rule(&prompt) {
+                            Ok(rule_id) => self.dispatch_write_prompt(prompt, Some(rule_id)),
+                            Err(error) => {
+                                let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
+                                    reason: format!(
+                                        "persistent write approval unavailable: {error}"
+                                    ),
+                                }));
+                                if let Some(thread) = prompt.thread_index
+                                    && let Some(thread) = self.agents.threads.get_mut(thread)
+                                {
+                                    thread.push_system("approval denied");
+                                }
+                            }
+                        }
+                        return;
+                    }
+                    match self.persist_mcp_rule(&prompt) {
+                        Ok(rule_id) => self.dispatch_write_prompt(prompt, Some(rule_id)),
+                        Err(error) => {
+                            // Persistence failure: current permission error,
+                            // nothing is dispatched, budget unchanged.
+                            let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
+                                reason: format!("persistent MCP approval unavailable: {error}"),
+                            }));
+                            if let Some(thread) = prompt.thread_index
+                                && let Some(thread) = self.agents.threads.get_mut(thread)
+                            {
+                                thread.push_system("approval denied");
+                            }
+                        }
+                    }
+                }
+            }
+            return;
+        }
         let allow = choice.allows();
         if !allow {
             let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
@@ -1731,6 +2524,7 @@ impl App {
                         proxy_edit_count,
                     },
                     &prompt.session_id,
+                    None,
                     prompt.reply,
                 );
             }
@@ -1739,13 +2533,367 @@ impl App {
                     writes,
                     total_edit_count,
                     &prompt.session_id,
+                    None,
                     prompt.reply,
                 );
             }
             ApprovalKind::TerminalCreate { request } => {
-                self.spawn_bridge_terminal(&request, prompt.reply);
+                self.spawn_trusted_terminal(&request, &prompt.session_id, None, prompt.reply);
             }
         }
+    }
+
+    /// Auto-resolves a prompt matched by a persisted host-local rule: the
+    /// operation dispatches through the existing pipeline and the successful
+    /// dispatch consumes one rule use.
+    fn resolve_persistent_allow(&mut self, prompt: ApprovalPrompt, rule_id: String) {
+        let session_id = prompt.session_id.clone();
+        match &prompt.kind {
+            ApprovalKind::TerminalCreate { .. } => match prompt.kind {
+                ApprovalKind::TerminalCreate { request } => {
+                    self.spawn_trusted_terminal(&request, &session_id, Some(rule_id), prompt.reply)
+                }
+                _ => unreachable!(),
+            },
+            ApprovalKind::Write { .. } | ApprovalKind::WriteBatch { .. } => {
+                self.dispatch_write_prompt(prompt, Some(rule_id));
+            }
+        }
+    }
+
+    /// Dispatches an approved write or write batch and consumes the matched
+    /// persistent rule use only after the write succeeds.
+    fn dispatch_write_prompt(&mut self, prompt: ApprovalPrompt, rule_id: Option<String>) {
+        let session_id = prompt.session_id.clone();
+        match prompt.kind {
+            ApprovalKind::Write {
+                path,
+                content,
+                tool_call_id,
+                expectation,
+                reply_kind,
+                proxy_edit_count,
+            } => self.apply_bridge_write(
+                PreparedWrite {
+                    path,
+                    content,
+                    tool_call_id,
+                    expectation,
+                    reply_kind,
+                    proxy_edit_count,
+                },
+                &session_id,
+                rule_id.as_deref(),
+                prompt.reply,
+            ),
+            ApprovalKind::WriteBatch { writes, total_edit_count } => {
+                self.apply_bridge_write_batch(
+                    writes,
+                    total_edit_count,
+                    &session_id,
+                    rule_id.as_deref(),
+                    prompt.reply,
+                );
+            }
+            _ => {
+                let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
+                    reason: String::from("persistent approval not available for this operation"),
+                }));
+            }
+        }
+    }
+
+    /// Derives an exact MCP invocation rule from the validated invocation
+    /// behind the prompt (`Allow for 1 hour / 20 uses`), persists it
+    /// host-locally, and returns the stable rule id.
+    fn persist_mcp_rule(&self, prompt: &ApprovalPrompt) -> Result<String, TrustStoreError> {
+        let invocation = prompt.mcp.as_ref().ok_or_else(|| {
+            TrustStoreError::ValidationFailure("prompt carries no validated MCP invocation".into())
+        })?;
+        let store = self.workspace_trust_store().ok_or(TrustStoreError::StateDirUnavailable)?;
+        let rule_id = generate_mcp_rule_id();
+        let rule = TrustRule::Mcp(McpRule {
+            id: rule_id.clone(),
+            scope: TrustRuleScope {
+                workspace: invocation.workspace,
+                agent: prompt.agent_id.clone(),
+                expires_at: Some(self.trust_clock.now() + PERSISTENT_TERMINAL_DURATION),
+                max_uses: Some(PERSISTENT_TERMINAL_MAX_USES),
+            },
+            server: invocation.server.clone(),
+            transport_identity: invocation.transport_identity.clone(),
+            tool: invocation.tool.clone(),
+            tool_schema_version: invocation.tool_schema_version,
+            arguments_json: invocation.arguments_json.clone(),
+        });
+        store.add_rule(rule)?;
+        Ok(rule_id)
+    }
+
+    // ── Phase 5: native write normalization and bounded write grants ─────
+
+    /// Canonical in-workspace target for a native write: the final target
+    /// resolves through symlinks (an existing symlink escaping the workspace
+    /// normalizes outside and is ineligible), and a not-yet-existing target
+    /// resolves through its canonical parent so a symlinked parent cannot
+    /// smuggle the write outside.  Protected and secret-store targets never
+    /// qualify.
+    fn canonical_native_write_target(&self, path: &Path) -> Option<PathBuf> {
+        let candidate = if path.exists() {
+            std::fs::canonicalize(path).ok()?
+        } else {
+            let parent = std::fs::canonicalize(path.parent()?).ok()?;
+            parent.join(path.file_name()?)
+        };
+        let relative = self.workspace_relative_segments(&candidate)?;
+        if is_protected_relative_path(&relative) || self.is_secret_store_path(&candidate) {
+            return None;
+        }
+        Some(candidate)
+    }
+
+    /// Normalized native write operation: canonical in-workspace target,
+    /// create/modify category from the file-existence expectation, and the
+    /// exact file count and byte deltas of this request.  Ineligible targets
+    /// (external, traversal, symlink escape, protected) normalize to `None`
+    /// and can never match a persistent rule.
+    fn native_write_operation(
+        &self,
+        path: &Path,
+        content: &str,
+        expectation: &WriteExpectation,
+    ) -> Option<(TrustCategory, OperationIdentity)> {
+        let candidate = self.canonical_native_write_target(path)?;
+        let relative_path = self.workspace_relative_segments(&candidate)?;
+        let exists = candidate.is_file();
+        let category = match expectation {
+            WriteExpectation::MustNotExist => TrustCategory::WriteCreate,
+            WriteExpectation::ExpectRevision(_) => TrustCategory::WriteModify,
+            WriteExpectation::Blind if exists => TrustCategory::WriteModify,
+            WriteExpectation::Blind => TrustCategory::WriteCreate,
+        };
+        let bytes = content.len() as u64;
+        Some((
+            category,
+            OperationIdentity::Write {
+                relative_path,
+                file_count: 1,
+                total_bytes: Some(bytes),
+                max_file_bytes: Some(bytes),
+            },
+        ))
+    }
+
+    /// Normalized native write-batch operation: every target must resolve
+    /// canonically in-workspace, share one canonical parent directory, and
+    /// agree on create vs modify; otherwise the batch is unknown and can
+    /// never match a persistent rule.
+    pub(crate) fn native_write_batch_operation(
+        &self,
+        writes: &[PreparedWrite],
+    ) -> Option<(TrustCategory, OperationIdentity)> {
+        if writes.is_empty() {
+            return None;
+        }
+        let mut parent_dir: Option<PathBuf> = None;
+        let mut relative_dir: Option<String> = None;
+        let mut total_bytes = 0u64;
+        let mut max_file_bytes = 0u64;
+        let mut all_existing = true;
+        let mut all_new = true;
+        for write in writes {
+            let candidate = self.canonical_native_write_target(&write.path)?;
+            let dir = candidate.parent()?;
+            match &parent_dir {
+                None => {
+                    parent_dir = Some(dir.to_path_buf());
+                    relative_dir = self.workspace_relative_segments(dir);
+                }
+                Some(known) if known != dir => return None,
+                _ => {}
+            }
+            total_bytes = total_bytes.saturating_add(write.content.len() as u64);
+            max_file_bytes = max_file_bytes.max(write.content.len() as u64);
+            let exists = candidate.is_file();
+            all_existing &= exists;
+            all_new &= !exists;
+        }
+        let category = if all_existing {
+            TrustCategory::WriteModify
+        } else if all_new {
+            TrustCategory::WriteCreate
+        } else {
+            return None;
+        };
+        Some((
+            category,
+            OperationIdentity::Write {
+                relative_path: relative_dir?,
+                file_count: writes.len() as u64,
+                total_bytes: Some(total_bytes),
+                max_file_bytes: Some(max_file_bytes),
+            },
+        ))
+    }
+
+    /// Bounded persistent write rule derivable from one native write
+    /// request: canonical directory prefix, exact request sizes, and the
+    /// create/modify operation kind — all within the application safety
+    /// maxima.  Root-level targets (no directory prefix) and over-maximum
+    /// requests are ineligible.
+    fn native_single_write_rule_shape(
+        &self,
+        path: &Path,
+        content: &str,
+        expectation: &WriteExpectation,
+    ) -> Option<(WriteOperationKind, PathPrefix, u64, u64, u64)> {
+        let (category, identity) = self.native_write_operation(path, content, expectation)?;
+        self.write_rule_shape_from(category, identity, path)
+    }
+
+    pub(crate) fn native_batch_write_rule_shape(
+        &self,
+        writes: &[PreparedWrite],
+    ) -> Option<(WriteOperationKind, PathPrefix, u64, u64, u64)> {
+        let (category, identity) = self.native_write_batch_operation(writes)?;
+        self.write_rule_shape_from(category, identity, &writes.first()?.path)
+    }
+
+    /// Shared shape derivation: directory prefix from the first target and
+    /// request bounds checked against the application safety maxima.
+    fn write_rule_shape_from(
+        &self,
+        category: TrustCategory,
+        identity: OperationIdentity,
+        first_target: &Path,
+    ) -> Option<(WriteOperationKind, PathPrefix, u64, u64, u64)> {
+        let OperationIdentity::Write { file_count, total_bytes, max_file_bytes, .. } = identity
+        else {
+            return None;
+        };
+        let candidate = self.canonical_native_write_target(first_target)?;
+        let dir = self.workspace_relative_segments(candidate.parent()?)?;
+        let prefix = PathPrefix::parse(&dir).ok()?;
+        let operation = match category {
+            TrustCategory::WriteCreate => WriteOperationKind::Create,
+            TrustCategory::WriteModify => WriteOperationKind::Modify,
+            _ => return None,
+        };
+        if file_count == 0 || file_count > MAX_WRITE_FILES {
+            return None;
+        }
+        let total = total_bytes?;
+        let max_file = max_file_bytes?;
+        if total == 0 || total > MAX_WRITE_TOTAL_BYTES || max_file > MAX_WRITE_FILE_BYTES {
+            return None;
+        }
+        Some((operation, prefix, file_count, total, max_file))
+    }
+
+    /// Persistent option label for one eligible native write; `None` keeps
+    /// the prompt on the four-choice UI (protected, external, root-level,
+    /// and over-maximum requests never get a persistent grant).
+    fn native_write_persistent_label(
+        &self,
+        path: &Path,
+        content: &str,
+        expectation: &WriteExpectation,
+    ) -> Option<&'static str> {
+        self.native_single_write_rule_shape(path, content, expectation)
+            .map(|_| PERSISTENT_WRITE_OPTION_LABEL)
+    }
+
+    /// Persists a bounded write rule derived from an approved native write
+    /// request (`Allow for 1 hour / 5 uses`): the canonical directory
+    /// prefix and the exact file/byte bounds of the approved request,
+    /// narrowed to the application safety maxima.  The rule activates
+    /// immediately; later approvals reload the store before evaluation.
+    fn persist_write_rule(&self, prompt: &ApprovalPrompt) -> Result<String, TrustStoreError> {
+        let store = self.workspace_trust_store().ok_or(TrustStoreError::StateDirUnavailable)?;
+        let shape = match &prompt.kind {
+            ApprovalKind::Write { path, content, expectation, .. } => {
+                self.native_single_write_rule_shape(path, content, expectation)
+            }
+            ApprovalKind::WriteBatch { writes, .. } => self.native_batch_write_rule_shape(writes),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            TrustStoreError::ValidationFailure(
+                "write request is not eligible for persistent trust".to_string(),
+            )
+        })?;
+        let (operation, path_prefix, max_files, max_total_bytes, max_file_bytes) = shape;
+        let rule_id = generate_write_rule_id();
+        let rule = TrustRule::Write(WriteRule {
+            id: rule_id.clone(),
+            scope: TrustRuleScope {
+                workspace: self.primary_workspace_identity(),
+                agent: prompt.agent_id.clone(),
+                expires_at: Some(self.trust_clock.now() + PERSISTENT_WRITE_DURATION),
+                max_uses: Some(PERSISTENT_WRITE_MAX_USES),
+            },
+            operation,
+            path_prefix,
+            max_files,
+            max_total_bytes,
+            max_file_bytes,
+        });
+        store.add_rule(rule)?;
+        Ok(rule_id)
+    }
+
+    /// Derives a narrow exact command rule from the full current argv
+    /// (`Allow for 1 hour / 20 uses`), persists it host-locally, and returns
+    /// the stable rule id.  The rule activates immediately: later approvals
+    /// reload the store before evaluation.
+    fn persist_terminal_rule(
+        &self,
+        request: &CreateTerminalRequest,
+        agent_id: Option<&str>,
+    ) -> Result<String, TrustStoreError> {
+        let store = self.workspace_trust_store().ok_or(TrustStoreError::StateDirUnavailable)?;
+        let invocation = self.command_invocation_for_request(request).map_err(|error| {
+            TrustStoreError::ValidationFailure(format!(
+                "terminal request is not eligible for persistent trust: {error}"
+            ))
+        })?;
+        let rule_id = generate_command_rule_id();
+        let rule = TrustRule::Command(CommandRule {
+            id: rule_id.clone(),
+            scope: TrustRuleScope {
+                workspace: invocation.workspace,
+                agent: agent_id.map(String::from),
+                expires_at: Some(self.trust_clock.now() + PERSISTENT_TERMINAL_DURATION),
+                max_uses: Some(PERSISTENT_TERMINAL_MAX_USES),
+            },
+            executable: invocation.executable,
+            match_mode: MatchMode::ArgvExact,
+            argv: invocation.argv,
+        });
+        store.add_rule(rule)?;
+        Ok(rule_id)
+    }
+
+    /// Spawns an approved terminal through the existing pipeline and records
+    /// the matched persistent rule use only after a successful spawn.
+    fn spawn_trusted_terminal(
+        &mut self,
+        request: &CreateTerminalRequest,
+        session_id: &str,
+        rule_id: Option<String>,
+        reply: oneshot::Sender<ClientRequestResult>,
+    ) {
+        let result = self.agents.terminals.spawn(request);
+        if result.is_ok()
+            && let Some(rule_id) = rule_id
+        {
+            self.agents.usage_ledger.record_use(
+                self.primary_workspace_identity(),
+                session_id,
+                &rule_id,
+            );
+        }
+        let _ = reply.send(result.map(ClientRequestResponse::CreateTerminal));
     }
 
     /// Confirms the front approval with the selected option.
@@ -1757,11 +2905,13 @@ impl App {
     }
 
     /// Performs an approved buffer write: open/reuse buffer, diff, edit,
-    /// verify, save — all through existing buffer/save semantics.
+    /// verify, save — all through existing buffer/save semantics.  A matched
+    /// persistent rule consumes one use only after the write succeeds.
     fn apply_bridge_write(
         &mut self,
         prepared: PreparedWrite,
         session_id: &str,
+        rule_id: Option<&str>,
         reply: oneshot::Sender<ClientRequestResult>,
     ) {
         let path = prepared.path.as_path();
@@ -1776,6 +2926,13 @@ impl App {
         }
         match self.write_through_buffer(path, content) {
             Ok(outcome) => {
+                if let Some(rule_id) = rule_id {
+                    self.agents.usage_ledger.record_use(
+                        self.primary_workspace_identity(),
+                        session_id,
+                        rule_id,
+                    );
+                }
                 self.agents.action_log.push(ActionLogEntry::Write {
                     path: path.to_path_buf(),
                     old_fingerprint: fingerprint(&outcome.old_content),
@@ -1815,6 +2972,7 @@ impl App {
         writes: Vec<PreparedWrite>,
         total_edit_count: u32,
         session_id: &str,
+        rule_id: Option<&str>,
         reply: oneshot::Sender<ClientRequestResult>,
     ) {
         for prepared in &writes {
@@ -1855,6 +3013,13 @@ impl App {
                     return;
                 }
             }
+        }
+        if let Some(rule_id) = rule_id {
+            self.agents.usage_ledger.record_use(
+                self.primary_workspace_identity(),
+                session_id,
+                rule_id,
+            );
         }
         let _ =
             reply.send(Ok(ClientRequestResponse::ProxyValue(json!(ee_mcp::WorkspaceEditResult {
@@ -2005,16 +3170,6 @@ impl App {
         self.backend
             .replace_line_range(start, end.saturating_sub(1), new_lines)
             .map_err(|error| AgentError::Io(format!("edit failed: {error}")))
-    }
-
-    /// Spawns an approved terminal and replies with its id.
-    fn spawn_bridge_terminal(
-        &mut self,
-        request: &CreateTerminalRequest,
-        reply: oneshot::Sender<ClientRequestResult>,
-    ) {
-        let result = self.agents.terminals.spawn(request);
-        let _ = reply.send(result.map(ClientRequestResponse::CreateTerminal));
     }
 
     fn buffer_id_for_path(&self, path: &Path) -> Option<crate::buffer::BufferId> {
@@ -2257,6 +3412,41 @@ impl App {
         Ok((content, WriteExpectation::ExpectRevision(revision)))
     }
 
+    /// Validated generic MCP invocation for an eligible proxy tool call
+    /// (Phase 3): server identity `ee`, pinned manifest schema version,
+    /// side-effect classification, canonical exact JSON arguments, and the
+    /// delivering transport.  Returns `None` for tools that never qualify
+    /// (content-bearing writes, terminal-create, read/unknown tools).
+    fn mcp_invocation_for_tool(
+        &self,
+        tool: &str,
+        arguments: serde_json::Value,
+        route: super::agents_mcp::ProxyRoute,
+    ) -> Option<McpInvocation> {
+        if !ee_mcp::classify::exact_trust_eligible(tool) {
+            return None;
+        }
+        let arguments_json =
+            crate::policy::rules::canonicalize_arguments_json(&arguments.to_string()).ok()?;
+        let category = match ee_mcp::classify::side_effect_class(tool) {
+            ee_mcp::SideEffectClass::Read => TrustCategory::Read,
+            ee_mcp::SideEffectClass::Write => TrustCategory::WriteModify,
+            ee_mcp::SideEffectClass::Execute => TrustCategory::Execute,
+            ee_mcp::SideEffectClass::Unknown => TrustCategory::Unknown,
+        };
+        Some(McpInvocation {
+            workspace: self.primary_workspace_identity(),
+            agent: None,
+            transport: route.transport_kind(),
+            transport_identity: route.transport_identity().to_string(),
+            server: String::from("ee"),
+            tool: tool.to_string(),
+            tool_schema_version: ee_mcp::classify::EE_TOOL_SCHEMA_VERSION,
+            category,
+            arguments_json,
+        })
+    }
+
     fn queue_proxy_replace_text(
         &mut self,
         path: &str,
@@ -2267,6 +3457,8 @@ impl App {
         let path = PathBuf::from(path);
         match self.prepare_replace_text(&path, old_text, new_text) {
             Ok((content, expectation)) => {
+                let persistent_label =
+                    self.native_write_persistent_label(&path, &content, &expectation);
                 let spec = ProxyWriteSpec {
                     title: String::from("ee_replace_text"),
                     detail: format!("{} ({} bytes, 1 edit)", path.display(), content.len()),
@@ -2279,7 +3471,12 @@ impl App {
                         proxy_edit_count: 1,
                     },
                 };
-                self.request_bridge_approval(ApprovalPrompt::proxy_write(spec, reply))
+                self.request_bridge_approval(ApprovalPrompt::proxy_write(
+                    spec,
+                    None,
+                    persistent_label,
+                    reply,
+                ))
             }
             Err(error) => {
                 let _ = reply.send(Err(error));
@@ -2304,6 +3501,8 @@ impl App {
                     edit_count,
                     if edit_count == 1 { "" } else { "s" }
                 );
+                let persistent_label =
+                    self.native_write_persistent_label(&path, &content, &expectation);
                 let spec = ProxyWriteSpec {
                     title: String::from("ee_apply_patch"),
                     detail,
@@ -2316,7 +3515,12 @@ impl App {
                         proxy_edit_count: edit_count,
                     },
                 };
-                self.request_bridge_approval(ApprovalPrompt::proxy_write(spec, reply))
+                self.request_bridge_approval(ApprovalPrompt::proxy_write(
+                    spec,
+                    None,
+                    persistent_label,
+                    reply,
+                ))
             }
             Err(error) => {
                 let _ = reply.send(Err(error));
@@ -2344,6 +3548,11 @@ impl App {
             }
             Ok(None) => {
                 let created = content.to_string();
+                let persistent_label = self.native_write_persistent_label(
+                    &path,
+                    &created,
+                    &WriteExpectation::MustNotExist,
+                );
                 let spec = ProxyWriteSpec {
                     title: String::from("ee_create_text_file"),
                     detail: format!("{} ({} bytes, 1 edit)", path.display(), created.len()),
@@ -2356,7 +3565,12 @@ impl App {
                         proxy_edit_count: 1,
                     },
                 };
-                self.request_bridge_approval(ApprovalPrompt::proxy_write(spec, reply))
+                self.request_bridge_approval(ApprovalPrompt::proxy_write(
+                    spec,
+                    None,
+                    persistent_label,
+                    reply,
+                ))
             }
             Err(error) => {
                 let _ = reply.send(Err(error));
@@ -2378,6 +3592,9 @@ impl App {
         match self.current_text_revision(&path) {
             Ok(Some(revision)) => {
                 let updated = content.to_string();
+                let expectation = WriteExpectation::ExpectRevision(revision);
+                let persistent_label =
+                    self.native_write_persistent_label(&path, &updated, &expectation);
                 let spec = ProxyWriteSpec {
                     title: String::from("ee_overwrite_text_file"),
                     detail: format!("{} ({} bytes, 1 edit)", path.display(), updated.len()),
@@ -2385,12 +3602,17 @@ impl App {
                         path,
                         content: updated,
                         tool_call_id: None,
-                        expectation: WriteExpectation::ExpectRevision(revision),
+                        expectation,
                         reply_kind: WriteReplyKind::ProxyStructured,
                         proxy_edit_count: 1,
                     },
                 };
-                self.request_bridge_approval(ApprovalPrompt::proxy_write(spec, reply))
+                self.request_bridge_approval(ApprovalPrompt::proxy_write(
+                    spec,
+                    None,
+                    persistent_label,
+                    reply,
+                ))
             }
             Ok(None) => {
                 let _ = reply.send(Err(AgentError::invalid_params(format!(
@@ -2867,6 +4089,7 @@ impl App {
         &mut self,
         path: &str,
         action_id: &str,
+        route: super::agents_mcp::ProxyRoute,
         reply: oneshot::Sender<ClientRequestResult>,
     ) {
         let Some(cached) = self.agents.mcp.proxy_code_actions.get(action_id).cloned() else {
@@ -2908,7 +4131,17 @@ impl App {
                     detail,
                     prepared,
                 };
-                self.request_bridge_approval(ApprovalPrompt::proxy_write(spec, reply));
+                let mcp = self.mcp_invocation_for_tool(
+                    "ee_apply_code_action",
+                    json!({ "action_id": action_id, "path": path }),
+                    route,
+                );
+                self.request_bridge_approval(ApprovalPrompt::proxy_write(
+                    spec,
+                    mcp,
+                    Some(PERSISTENT_TERMINAL_OPTION_LABEL),
+                    reply,
+                ));
             }
             Err(error) => {
                 let _ = reply.send(Err(error));
@@ -2916,7 +4149,12 @@ impl App {
         }
     }
 
-    fn queue_proxy_format_file(&mut self, path: &str, reply: oneshot::Sender<ClientRequestResult>) {
+    fn queue_proxy_format_file(
+        &mut self,
+        path: &str,
+        route: super::agents_mcp::ProxyRoute,
+        reply: oneshot::Sender<ClientRequestResult>,
+    ) {
         let path_buf = PathBuf::from(path);
         match self.proxy_agent_tool_payload(
             &path_buf,
@@ -2948,7 +4186,17 @@ impl App {
                             detail,
                             prepared,
                         };
-                        self.request_bridge_approval(ApprovalPrompt::proxy_write(spec, reply));
+                        let mcp = self.mcp_invocation_for_tool(
+                            "ee_format_file",
+                            json!({ "path": path }),
+                            route,
+                        );
+                        self.request_bridge_approval(ApprovalPrompt::proxy_write(
+                            spec,
+                            mcp,
+                            Some(PERSISTENT_TERMINAL_OPTION_LABEL),
+                            reply,
+                        ));
                     }
                     Err(error) => {
                         let _ = reply.send(Err(error));
@@ -2970,6 +4218,7 @@ impl App {
         line: u32,
         character: u32,
         new_name: &str,
+        route: super::agents_mcp::ProxyRoute,
         reply: oneshot::Sender<ClientRequestResult>,
     ) {
         let path_buf = PathBuf::from(path);
@@ -3019,11 +4268,18 @@ impl App {
                         total_edits,
                         if total_edits == 1 { "" } else { "s" }
                     );
+                    let mcp = self.mcp_invocation_for_tool(
+                        "ee_rename_symbol",
+                        json!({ "character": character, "line": line, "new_name": new_name, "path": path }),
+                        route,
+                    );
                     self.request_bridge_approval(ApprovalPrompt::proxy_write_batch(
                         String::from("ee_rename_symbol"),
                         detail,
                         writes,
                         total_edits,
+                        mcp,
+                        Some(PERSISTENT_TERMINAL_OPTION_LABEL),
                         reply,
                     ));
                 }
@@ -3742,7 +4998,7 @@ mod tests {
     #[test]
     fn bounded_output_truncates_from_front_at_char_boundary() {
         let mut output = BoundedOutput::new(10);
-        output.push("hello world".as_bytes());
+        output.push(TerminalOutputStream::Stdout, "hello world".as_bytes());
         assert!(output.truncated());
         assert_eq!(output.as_string(), "ello world");
         assert_eq!(output.total(), 11);
@@ -3759,10 +5015,36 @@ mod tests {
     #[test]
     fn bounded_output_keeps_final_visible_output() {
         let mut output = BoundedOutput::new(5);
-        output.push("aaaa".as_bytes());
-        output.push("bbb".as_bytes());
+        output.push(TerminalOutputStream::Stdout, "aaaa".as_bytes());
+        output.push(TerminalOutputStream::Stdout, "bbb".as_bytes());
         assert_eq!(output.as_string(), "aabbb");
         assert!(output.truncated());
+    }
+
+    #[test]
+    fn bounded_output_retains_stream_chunks_with_monotonic_sequence_ids() {
+        let mut output = BoundedOutput::new(5);
+        output.push(TerminalOutputStream::Stdout, b"abcd");
+        output.push(TerminalOutputStream::Stderr, "é!".as_bytes());
+
+        assert_eq!(output.total(), 7);
+        assert!(output.truncated());
+        assert_eq!(output.as_string(), "cdé!");
+        assert_eq!(
+            output.chunks(),
+            vec![
+                TerminalOutputChunk {
+                    sequence: 1,
+                    stream: TerminalOutputStream::Stdout,
+                    text: String::from("cd"),
+                },
+                TerminalOutputChunk {
+                    sequence: 2,
+                    stream: TerminalOutputStream::Stderr,
+                    text: String::from("é!"),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -3798,7 +5080,9 @@ mod tests {
         assert_ne!(fingerprint("same"), fingerprint("other"));
     }
 
-    // ── Approval policy (Phase 7) ───────────────────────────────────────────
+    // ── Approval policy (Phase 1 foundation) ────────────────────────────────
+    // Session state lives in `crate::policy::session`; these tests pin the
+    // once/session precedence contract the shared evaluator consumes.
 
     fn write_kind(path: &str) -> ApprovalKind {
         ApprovalKind::Write {
@@ -3812,33 +5096,32 @@ mod tests {
     }
 
     #[test]
-    fn policy_allow_once_is_not_recorded() {
-        let mut policy = ApprovalPolicy::default();
+    fn once_choices_are_never_recorded() {
+        let policy = ApprovalPolicy::default();
         let fp = approval_fingerprint(&write_kind("/work/a.txt"));
-        policy.record("s1", &fp, ApprovalChoice::AllowOnce);
-        assert!(policy.lookup("s1", &fp).is_none(), "allow-once must not persist");
+        assert_eq!(session_decision(ApprovalChoice::AllowOnce), None);
+        assert_eq!(session_decision(ApprovalChoice::DenyOnce), None);
+        assert!(policy.lookup("s1", &fp).is_none(), "once decisions must not persist");
     }
 
     #[test]
-    fn policy_deny_once_is_not_recorded() {
-        let mut policy = ApprovalPolicy::default();
-        let fp = approval_fingerprint(&write_kind("/work/a.txt"));
-        policy.record("s1", &fp, ApprovalChoice::DenyOnce);
-        assert!(policy.lookup("s1", &fp).is_none(), "deny-once must not persist");
+    fn session_choices_map_to_shared_policy_state() {
+        assert_eq!(session_decision(ApprovalChoice::AllowSession), Some(SessionChoice::Allow));
+        assert_eq!(session_decision(ApprovalChoice::DenySession), Some(SessionChoice::Deny));
     }
 
     #[test]
     fn policy_session_allow_and_deny_are_scoped_and_invalidated() {
         let mut policy = ApprovalPolicy::default();
         let fp = approval_fingerprint(&write_kind("/work/a.txt"));
-        policy.record("s1", &fp, ApprovalChoice::AllowSession);
-        assert_eq!(policy.lookup("s1", &fp), Some(ApprovalChoice::AllowSession));
+        policy.record("s1", &fp, SessionChoice::Allow);
+        assert_eq!(policy.lookup("s1", &fp), Some(SessionChoice::Allow));
         // A different session is unaffected.
         assert!(policy.lookup("s2", &fp).is_none());
 
-        policy.record("s1", &fp, ApprovalChoice::DenySession);
+        policy.record("s1", &fp, SessionChoice::Deny);
         // Deny wins over allow for the same key.
-        assert_eq!(policy.lookup("s1", &fp), Some(ApprovalChoice::DenySession));
+        assert_eq!(policy.lookup("s1", &fp), Some(SessionChoice::Deny));
 
         policy.invalidate_session("s1");
         assert!(policy.lookup("s1", &fp).is_none(), "policy dies with the session");
@@ -3848,9 +5131,9 @@ mod tests {
     fn policy_deny_wins_over_allow_for_same_fingerprint() {
         let mut policy = ApprovalPolicy::default();
         let fp = approval_fingerprint(&write_kind("/work/a.txt"));
-        policy.record("s1", &fp, ApprovalChoice::AllowSession);
-        policy.record("s1", &fp, ApprovalChoice::DenySession);
-        assert_eq!(policy.lookup("s1", &fp), Some(ApprovalChoice::DenySession));
+        policy.record("s1", &fp, SessionChoice::Allow);
+        policy.record("s1", &fp, SessionChoice::Deny);
+        assert_eq!(policy.lookup("s1", &fp), Some(SessionChoice::Deny));
     }
 
     #[test]
@@ -3865,14 +5148,32 @@ mod tests {
     }
 
     #[test]
-    fn approval_options_have_no_always_allow() {
-        // Allow-always persistence has no safe config-write path; the option
-        // must not exist at the schema/option level.
-        for (label, _) in approval_options() {
-            assert!(
-                !label.contains("Always"),
-                "allow-always must stay disabled at the option level: {label}"
-            );
+    fn approval_options_offer_persistent_only_when_eligible() {
+        // Ineligible prompts never get a persistent option; the option list
+        // stays at four choices with no unlimited allow.
+        let base = approval_options(None);
+        assert_eq!(base.len(), 4);
+        for (label, _) in &base {
+            assert!(!label.contains("Always"), "allow-always must stay disabled: {label}");
+            assert!(!label.contains("1 hour"));
         }
+        // Eligible terminal prompts append the bounded persistent option.
+        let persistent = approval_options(Some(PERSISTENT_TERMINAL_OPTION_LABEL));
+        assert_eq!(persistent.len(), 5);
+        assert_eq!(
+            persistent.last().unwrap().0,
+            PERSISTENT_TERMINAL_OPTION_LABEL,
+            "persistent option label"
+        );
+        assert_eq!(persistent.last().unwrap().1, ApprovalChoice::AllowPersistent);
+        assert!(ApprovalChoice::AllowPersistent.allows());
+        // Persistent grants are host-local rules, never session decisions.
+        assert_eq!(session_decision(ApprovalChoice::AllowPersistent), None);
+        // Eligible bounded writes carry the write option label (phase 5).
+        let writes = approval_options(Some(PERSISTENT_WRITE_OPTION_LABEL));
+        assert_eq!(writes.len(), 5);
+        assert_eq!(writes.last().unwrap().0, PERSISTENT_WRITE_OPTION_LABEL);
+        assert_eq!(writes.last().unwrap().1, ApprovalChoice::AllowPersistent);
+        assert_ne!(PERSISTENT_WRITE_OPTION_LABEL, PERSISTENT_TERMINAL_OPTION_LABEL);
     }
 }

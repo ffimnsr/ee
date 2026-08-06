@@ -33,7 +33,11 @@ fn swift_motion_sequence_starts_and_jumps_to_labeled_visible_match() {
     let second_label = state.targets[1].label;
 
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(second_label), KeyModifiers::NONE)));
-    app.backend.pump().unwrap();
+    // Bounded wait: the jump lands through an async cursor request; under
+    // parallel test load the single pump budget can lapse.
+    app.backend
+        .pump_until(|state| state.cursor_line == 2 && state.cursor_col == 0)
+        .expect("swift-motion jump lands");
 
     assert!(app.swift_motion.is_none());
     assert_eq!(app.backend.cursor_line, 2);
@@ -114,8 +118,19 @@ fn swift_motion_dense_matches_narrow_then_jump() {
         }
         app.backend.pump().unwrap();
     }
+    // Bounded wait: xi-core applies edits asynchronously; under parallel test
+    // load the fixed pump budget can lapse, so wait until the dense buffer
+    // is fully materialized (every one of the 27 lines holds "ab").
+    let dense_ready = |state: &crate::buffer::BufState| {
+        (0..27).all(|index| state.get_line(index).is_some_and(|line| line.contains("ab")))
+    };
+    app.backend.pump_until(dense_ready).expect("dense buffer materialized");
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
-    app.backend.pump().unwrap();
+    // Esc re-syncs the buffer; a stale revision snapshot can momentarily
+    // regress the line count, so keep syncing until the dense buffer is
+    // present again before the query runs.
+    app.backend.pump_until(dense_ready).expect("dense buffer survives the mode switch");
+    app.backend.pump_until(dense_ready).expect("dense buffer before the query");
 
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)));
     for ch in "swift_motion".chars() {
@@ -139,7 +154,11 @@ fn swift_motion_dense_matches_narrow_then_jump() {
     assert_eq!(state.targets[1].label, 'b');
 
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)));
-    app.backend.pump().unwrap();
+    // Bounded wait: the jump lands through an async cursor request; under
+    // parallel test load the single pump budget can lapse.
+    app.backend
+        .pump_until(|state| state.cursor_line == 26 && state.cursor_col == 0)
+        .expect("swift-motion jump lands");
 
     assert!(app.swift_motion.is_none());
     assert_eq!(app.backend.cursor_line, 26);

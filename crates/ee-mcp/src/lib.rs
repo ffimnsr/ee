@@ -31,6 +31,7 @@
 //! [`rmcp`]: https://docs.rs/rmcp
 //! [`ClientLifecycleMode::Discover`]: rmcp::service::ClientLifecycleMode
 
+pub mod classify;
 pub mod config;
 pub mod discovery;
 pub mod error;
@@ -43,6 +44,9 @@ pub mod proxy;
 pub mod registry;
 pub mod transport;
 
+pub use classify::{
+    EE_TOOL_SCHEMA_VERSION, SideEffectClass, exact_trust_eligible, side_effect_class,
+};
 pub use config::{
     McpServerConfig, McpServerKind, RawMcpServerSettings, RawStdioSettings,
     RawStreamableHttpSettings, StdioMcpConfig, StreamableHttpConfig,
@@ -58,7 +62,8 @@ pub use proxy::{
     EeProxyBackend, FileMatch, ListDirectoryAllResult, ListDirectoryResult, OpenBufferEntry,
     OpenBuffersResult, PlannedFileEdit, PlannedTextEdit, ProxyToolError, ReferenceEntry,
     ReferencesResult, RenamePreviewResult, SearchFilesAllResult, SearchFilesResult,
-    SearchTextResult, TextEdit, TextMatch, TextRange, WorkspaceEditResult, WorkspaceRootsResult,
+    SearchTextResult, TerminalOutputChunk, TerminalOutputResult, TerminalWaitResult, TextEdit,
+    TextMatch, TextRange, WorkspaceEditResult, WorkspaceRootsResult,
 };
 pub use registry::{
     NamespacedPrompt, NamespacedResource, NamespacedTool, PrimitiveRegistry, PrimitiveSummary,

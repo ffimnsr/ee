@@ -10,7 +10,7 @@ pub(crate) struct LogPathCandidate {
     pub(crate) path: PathBuf,
 }
 
-fn state_dir() -> Option<PathBuf> {
+pub(crate) fn state_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_STATE_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)

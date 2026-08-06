@@ -57,5 +57,6 @@ impl App {
 
     /// Feature-off stub: thread focus is unreachable without `agents`.
     #[cfg(not(feature = "agents"))]
+    #[allow(dead_code)]
     pub(crate) fn focus_thread(&mut self, _index: usize) {}
 }

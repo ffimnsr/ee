@@ -46,14 +46,17 @@ use std::time::Duration;
 
 use ee_agent_protocol::{
     Agent as AgentRole, ConnectMcpRequest, ConnectMcpResponse, ConnectionTo, DisconnectMcpRequest,
-    DisconnectMcpResponse, Error as RpcError, JsonRpcResponse, McpConnectionId, McpServerAcpId,
-    MessageMcpNotification, MessageMcpRequest, MessageMcpResponse, Responder, SessionId,
+    DisconnectMcpResponse, Error as RpcError, JsonRpcResponse, KillTerminalRequest,
+    McpConnectionId, McpServerAcpId, MessageMcpNotification, MessageMcpRequest, MessageMcpResponse,
+    ReleaseTerminalRequest, Responder, SessionId, TerminalId, TerminalOutputRequest,
+    WaitForTerminalExitRequest,
 };
 use ee_mcp::{
     CodeActionsResult, DiagnosticsResult, DocumentSymbolsResult, EditTextResult, EeMcpProxy,
     EeProxyBackend, ListDirectoryAllResult, ListDirectoryResult, OpenBuffersResult, ProxyToolError,
     ReferencesResult, RenamePreviewResult, SearchFilesAllResult, SearchFilesResult,
-    SearchTextResult, TextEdit, WorkspaceEditResult, WorkspaceRootsResult,
+    SearchTextResult, TerminalOutputResult, TerminalWaitResult, TextEdit, WorkspaceEditResult,
+    WorkspaceRootsResult,
 };
 use rmcp::model::{JsonRpcMessage, RequestId, ServerNotification, ServerRequest, ServerResult};
 use rmcp::service::{RoleServer, RxJsonRpcMessage, TxJsonRpcMessage};
@@ -152,7 +155,11 @@ struct HostProxyBackend {
 }
 
 impl HostProxyBackend {
-    fn call(&self, request: ClientRequest) -> Result<ClientRequestResponse, ProxyToolError> {
+    fn call_with_timeout(
+        &self,
+        request: ClientRequest,
+        timeout: Duration,
+    ) -> Result<Option<ClientRequestResponse>, ProxyToolError> {
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         if self.jobs.send(ProxyJob { request, reply: reply_tx }).is_err() {
             return Err(ProxyToolError {
@@ -160,17 +167,27 @@ impl HostProxyBackend {
                 is_permission_denied: false,
             });
         }
-        match reply_rx.recv_timeout(MCP_OVER_ACP_APPROVAL_TIMEOUT) {
-            Ok(Ok(response)) => Ok(response),
+        match reply_rx.recv_timeout(timeout) {
+            Ok(Ok(response)) => Ok(Some(response)),
             Ok(Err(error)) => Err(ProxyToolError {
                 message: error.to_string(),
                 is_permission_denied: matches!(error, AgentError::PermissionDenied { .. }),
             }),
-            Err(_) => Err(ProxyToolError {
-                message: format!("approval timed out after {MCP_OVER_ACP_APPROVAL_TIMEOUT:?}"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(ProxyToolError {
+                message: String::from("agent host reply channel closed"),
                 is_permission_denied: false,
             }),
         }
+    }
+
+    fn call(&self, request: ClientRequest) -> Result<ClientRequestResponse, ProxyToolError> {
+        self.call_with_timeout(request, MCP_OVER_ACP_APPROVAL_TIMEOUT)?.ok_or_else(|| {
+            ProxyToolError {
+                message: format!("approval timed out after {MCP_OVER_ACP_APPROVAL_TIMEOUT:?}"),
+                is_permission_denied: false,
+            }
+        })
     }
 }
 
@@ -658,6 +675,110 @@ impl EeProxyBackend for HostProxyBackend {
             }
             _ => Err(ProxyToolError {
                 message: String::from("proxy terminal create returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn terminal_output(&self, terminal_id: String) -> Result<TerminalOutputResult, ProxyToolError> {
+        let request =
+            TerminalOutputRequest::new(SessionId::new("proxy"), TerminalId::new(terminal_id));
+        match self.call(ClientRequest::ProxyTerminalOutput(request))? {
+            ClientRequestResponse::ProxyValue(value) => {
+                serde_json::from_value(value).map_err(|error| ProxyToolError {
+                    message: format!("proxy terminal output returned invalid payload: {error}"),
+                    is_permission_denied: false,
+                })
+            }
+            _ => Err(ProxyToolError {
+                message: String::from("proxy terminal output returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn terminal_output_since(
+        &self,
+        terminal_id: String,
+        since_seq: u64,
+    ) -> Result<TerminalOutputResult, ProxyToolError> {
+        let mut output = self.terminal_output(terminal_id)?;
+        output.chunks.retain(|chunk| chunk.sequence > since_seq);
+        output.output = output.chunks.iter().map(|chunk| chunk.text.as_str()).collect();
+        Ok(output)
+    }
+
+    fn terminal_wait(&self, terminal_id: String) -> Result<TerminalWaitResult, ProxyToolError> {
+        let request =
+            WaitForTerminalExitRequest::new(SessionId::new("proxy"), TerminalId::new(terminal_id));
+        match self.call_with_timeout(
+            ClientRequest::WaitForTerminalExit(request),
+            MCP_OVER_ACP_APPROVAL_TIMEOUT,
+        )? {
+            Some(ClientRequestResponse::WaitForTerminalExit(response)) => {
+                let exit_status =
+                    serde_json::to_value(response.exit_status).map_err(|error| ProxyToolError {
+                        message: format!(
+                            "proxy terminal wait returned an invalid exit status: {error}"
+                        ),
+                        is_permission_denied: false,
+                    })?;
+                Ok(TerminalWaitResult { completed: true, exit_status: Some(exit_status) })
+            }
+            Some(_) => Err(ProxyToolError {
+                message: String::from("proxy terminal wait returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+            None => Ok(TerminalWaitResult { completed: false, exit_status: None }),
+        }
+    }
+
+    fn terminal_wait_long(
+        &self,
+        terminal_id: String,
+        timeout_ms: u64,
+    ) -> Result<TerminalWaitResult, ProxyToolError> {
+        let timeout = Duration::from_millis(timeout_ms.min(5 * 60 * 1_000));
+        let request =
+            WaitForTerminalExitRequest::new(SessionId::new("proxy"), TerminalId::new(terminal_id));
+        match self.call_with_timeout(ClientRequest::WaitForTerminalExit(request), timeout)? {
+            Some(ClientRequestResponse::WaitForTerminalExit(response)) => {
+                let exit_status =
+                    serde_json::to_value(response.exit_status).map_err(|error| ProxyToolError {
+                        message: format!(
+                            "proxy terminal wait returned an invalid exit status: {error}"
+                        ),
+                        is_permission_denied: false,
+                    })?;
+                Ok(TerminalWaitResult { completed: true, exit_status: Some(exit_status) })
+            }
+            Some(_) => Err(ProxyToolError {
+                message: String::from("proxy terminal wait returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+            None => Ok(TerminalWaitResult { completed: false, exit_status: None }),
+        }
+    }
+
+    fn terminal_kill(&self, terminal_id: String) -> Result<(), ProxyToolError> {
+        let request =
+            KillTerminalRequest::new(SessionId::new("proxy"), TerminalId::new(terminal_id));
+        match self.call(ClientRequest::KillTerminal(request))? {
+            ClientRequestResponse::KillTerminal(_) => Ok(()),
+            _ => Err(ProxyToolError {
+                message: String::from("proxy terminal kill returned an unexpected response"),
+                is_permission_denied: false,
+            }),
+        }
+    }
+
+    fn terminal_release(&self, terminal_id: String) -> Result<(), ProxyToolError> {
+        let request =
+            ReleaseTerminalRequest::new(SessionId::new("proxy"), TerminalId::new(terminal_id));
+        match self.call(ClientRequest::ReleaseTerminal(request))? {
+            ClientRequestResponse::ReleaseTerminal(_) => Ok(()),
+            _ => Err(ProxyToolError {
+                message: String::from("proxy terminal release returned an unexpected response"),
                 is_permission_denied: false,
             }),
         }
@@ -1152,5 +1273,79 @@ mod tests {
             }
             other => panic!("expected request, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn proxy_terminal_output_uses_structured_proxy_response() {
+        let (jobs, mut received) = mpsc::unbounded_channel();
+        let backend = HostProxyBackend { jobs, process: Arc::new(Mutex::new(None)) };
+        let worker = std::thread::spawn(move || {
+            let job = received.blocking_recv().expect("proxy terminal output request");
+            match job.request {
+                ClientRequest::ProxyTerminalOutput(request) => {
+                    assert_eq!(request.session_id.0.as_ref(), "proxy");
+                    assert_eq!(request.terminal_id.0.as_ref(), "term-1");
+                }
+                request => panic!("unexpected request: {request:?}"),
+            }
+            job.reply
+                .send(Ok(ClientRequestResponse::ProxyValue(json!({
+                    "output": "stdout",
+                    "chunks": [],
+                    "totalBytes": 6,
+                    "truncated": false,
+                    "exitStatus": null,
+                }))))
+                .expect("proxy terminal output response");
+        });
+
+        assert_eq!(
+            backend.terminal_output(String::from("term-1")).expect("structured result"),
+            TerminalOutputResult {
+                output: String::from("stdout"),
+                chunks: Vec::new(),
+                total_bytes: 6,
+                truncated: false,
+                exit_status: None,
+            }
+        );
+        worker.join().expect("proxy terminal output worker");
+    }
+
+    #[test]
+    fn proxy_terminal_output_since_filters_chunks_and_reconstructs_output() {
+        let (jobs, mut received) = mpsc::unbounded_channel();
+        let backend = HostProxyBackend { jobs, process: Arc::new(Mutex::new(None)) };
+        let worker = std::thread::spawn(move || {
+            let job = received.blocking_recv().expect("proxy terminal output request");
+            match job.request {
+                ClientRequest::ProxyTerminalOutput(request) => {
+                    assert_eq!(request.terminal_id.0.as_ref(), "term-1");
+                }
+                request => panic!("unexpected request: {request:?}"),
+            }
+            job.reply
+                .send(Ok(ClientRequestResponse::ProxyValue(json!({
+                    "output": "firstsecondthird",
+                    "chunks": [
+                        { "sequence": 1, "stream": "stdout", "text": "first" },
+                        { "sequence": 2, "stream": "stderr", "text": "second" },
+                        { "sequence": 3, "stream": "stdout", "text": "third" },
+                    ],
+                    "totalBytes": 16,
+                    "truncated": false,
+                    "exitStatus": null,
+                }))))
+                .expect("proxy terminal output response");
+        });
+
+        let output =
+            backend.terminal_output_since(String::from("term-1"), 1).expect("filtered result");
+        assert_eq!(output.output, "secondthird");
+        assert_eq!(
+            output.chunks.iter().map(|chunk| chunk.sequence).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        worker.join().expect("proxy terminal output worker");
     }
 }
