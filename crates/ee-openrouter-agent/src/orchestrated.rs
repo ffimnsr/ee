@@ -285,6 +285,9 @@ mod tests {
             system_prompt: String::from("system"),
             reasoning_effort: None,
             orchestrated: true,
+            compact_min_messages: 4,
+            compact_retained_tail: 2,
+            compact_max_input_bytes: 65_536,
         }
     }
 
@@ -568,12 +571,8 @@ mod tests {
             for _ in 0..5_000 {
                 let ready = {
                     let mut pending = self.pending.lock().expect("harness pending poisoned");
-                    while pending.len() < count {
-                        let fresh = self.handle.take_outbound();
-                        if fresh.is_empty() {
-                            break;
-                        }
-                        pending.extend(fresh);
+                    if pending.len() < count {
+                        pending.extend(self.handle.take_outbound());
                     }
                     if pending.len() >= count {
                         Some(pending.drain(..count).collect())
@@ -648,6 +647,7 @@ mod tests {
             )
             .title("OpenRouter"),
             orchestrator: config,
+            ..OrchestratorProviderConfig::default()
         };
         let provider = OrchestratorProvider::with_policy(
             provider_config,
@@ -674,7 +674,42 @@ mod tests {
             }),
         ));
         let result = request_result(handle.next_frames(1).await.remove(0));
-        result["sessionId"].as_str().expect("session id").to_string()
+        let session_id = result["sessionId"].as_str().expect("session id").to_string();
+        // The provider advertises its initial slash commands after the
+        // session/new response; drain the update before the prompt flows.
+        let frame = handle.next_frames(1).await.remove(0);
+        let RawJsonRpcMessage::Notification(update) = &frame else {
+            panic!("expected the available_commands_update, got {frame:?}");
+        };
+        assert_eq!(
+            raw_params_to_value(update.params.clone())["update"]["sessionUpdate"],
+            "available_commands_update"
+        );
+        session_id
+    }
+
+    async fn new_session_with_mcp(handle: &Harness, id: i64, mcp_servers: Value) -> String {
+        handle.send(request(
+            id,
+            "session/new",
+            json!({
+                "cwd": "/work",
+                "additionalDirectories": [],
+                "mcpServers": mcp_servers,
+            }),
+        ));
+        let result = request_result(handle.next_frames(1).await.remove(0));
+        let session_id = result["sessionId"].as_str().expect("session id").to_string();
+        // Same advertisement drain as `new_session`.
+        let frame = handle.next_frames(1).await.remove(0);
+        let RawJsonRpcMessage::Notification(update) = &frame else {
+            panic!("expected the available_commands_update, got {frame:?}");
+        };
+        assert_eq!(
+            raw_params_to_value(update.params.clone())["update"]["sessionUpdate"],
+            "available_commands_update"
+        );
+        session_id
     }
 
     fn prompt_params(session_id: &str, text: &str) -> Value {
@@ -682,6 +717,27 @@ mod tests {
             "sessionId": session_id,
             "prompt": [{ "type": "text", "text": text }],
         })
+    }
+
+    /// Drains the MCP diagnostics thought updates emitted at prompt start
+    /// (Phase 12) until the summary `mcp-diagnostics` message is seen.
+    /// Every frame here is a thought chunk (diagnostics precede the plan
+    /// update), so no push-back is needed.
+    async fn drain_mcp_diagnostics(handle: &Harness) {
+        loop {
+            let frame = handle.next_frames(1).await.remove(0);
+            let RawJsonRpcMessage::Notification(update) = &frame else {
+                panic!("expected an update while draining, got {frame:?}");
+            };
+            let params = raw_params_to_value(update.params.clone());
+            assert_eq!(
+                params["update"]["sessionUpdate"], "agent_thought_chunk",
+                "only thought updates precede the plan"
+            );
+            if params["update"]["messageId"] == "mcp-diagnostics" {
+                return;
+            }
+        }
     }
 
     #[tokio::test]
@@ -711,6 +767,7 @@ mod tests {
 
         handle.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
 
+        drain_mcp_diagnostics(&handle).await;
         let frames = handle.next_frames(4).await;
         let thought_params = raw_params_to_value(match &frames[1] {
             RawJsonRpcMessage::Notification(update) => update.params.clone(),
@@ -739,6 +796,7 @@ mod tests {
         let session_id = new_session(&handle, 1).await;
 
         handle.send(request(2, "session/prompt", prompt_params(&session_id, "wait")));
+        drain_mcp_diagnostics(&handle).await;
         let plan = handle.next_frames(1).await.remove(0);
         assert!(matches!(plan, RawJsonRpcMessage::Notification(_)), "plan update first");
         handle.send(notification("session/cancel", json!({ "sessionId": session_id })));
@@ -764,6 +822,7 @@ mod tests {
 
         handle.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
 
+        drain_mcp_diagnostics(&handle).await;
         let frames = handle.next_frames(4).await;
         let result = request_result(frames[3].clone());
         assert_eq!(result["stopReason"], "end_turn");
@@ -821,6 +880,7 @@ mod tests {
         let session_id = new_session(&handle, 1).await;
 
         handle.send(request(2, "session/prompt", prompt_params(&session_id, "read a file")));
+        drain_mcp_diagnostics(&handle).await;
         // plan, pending tool-call, in-progress tool-call, then the
         // framework-owned fs request.
         let frames = handle.next_frames(4).await;
@@ -884,6 +944,7 @@ mod tests {
         let session_id = new_session(&handle, 1).await;
 
         handle.send(request(2, "session/prompt", prompt_params(&session_id, "run echo")));
+        drain_mcp_diagnostics(&handle).await;
         let frames = handle.next_frames(4).await;
         let RawJsonRpcMessage::Request(terminal_request) = &frames[3] else {
             panic!("fourth frame is terminal/create, got {:?}", frames[3]);
@@ -921,6 +982,7 @@ mod tests {
         let session_id = new_session(&handle, 1).await;
 
         handle.send(request(2, "session/prompt", prompt_params(&session_id, "delegate")));
+        drain_mcp_diagnostics(&handle).await;
         let frames = handle.next_frames(6).await;
         let completed_update = raw_params_to_value(match &frames[3] {
             RawJsonRpcMessage::Notification(update) => update.params.clone(),
@@ -948,6 +1010,7 @@ mod tests {
         let session_id = new_session(&handle, 1).await;
 
         handle.send(request(2, "session/prompt", prompt_params(&session_id, "read files")));
+        drain_mcp_diagnostics(&handle).await;
         // plan, pending, in-progress, fs request for the first tool call.
         let frames = handle.next_frames(4).await;
         let RawJsonRpcMessage::Request(fs_request) = &frames[3] else {
@@ -970,6 +1033,376 @@ mod tests {
             "second tool call denied by budget: {}",
             error.message
         );
+
+        handle.shutdown(task).await;
+    }
+
+    // ── Phase 12: ee MCP proxy through orchestrated OpenRouter ───────────
+
+    fn ee_proxy_acp_mcp_servers() -> Value {
+        json!([{ "type": "acp", "name": "ee", "serverId": "ee-mcp-proxy:test" }])
+    }
+
+    fn ee_tool(name: &str) -> Value {
+        json!({
+            "name": name,
+            "description": format!("{name} tool"),
+            "inputSchema": { "type": "object", "properties": {} },
+        })
+    }
+
+    /// Answers outbound client requests as a fake ACP MCP host while a
+    /// prompt runs; returns when the prompt response frame arrives.
+    struct PromptMcpRunner {
+        inner: std::collections::HashMap<String, Value>,
+        calls: std::collections::HashMap<String, Value>,
+        fail_connect: bool,
+        /// Every inner MCP request logged as `method: params`.
+        mcp_requests: std::sync::Mutex<Vec<String>>,
+        /// Tool-call updates streamed during the prompt (status + content).
+        tool_updates: std::sync::Mutex<Vec<Value>>,
+    }
+
+    impl PromptMcpRunner {
+        fn new() -> Self {
+            Self {
+                inner: std::collections::HashMap::new(),
+                calls: std::collections::HashMap::new(),
+                fail_connect: false,
+                mcp_requests: std::sync::Mutex::new(Vec::new()),
+                tool_updates: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn answer(&mut self, method: &str, result: Value) {
+            self.inner.insert(method.to_string(), result);
+        }
+
+        fn answer_call(&mut self, tool_name: &str, result: Value) {
+            self.calls.insert(tool_name.to_string(), result);
+        }
+
+        fn log(&self) -> Vec<String> {
+            self.mcp_requests.lock().expect("runner log poisoned").clone()
+        }
+
+        /// Tool-call updates streamed during the prompt.
+        fn tool_updates(&self) -> Vec<Value> {
+            self.tool_updates.lock().expect("runner updates poisoned").clone()
+        }
+
+        /// Standard ee proxy discovery answers (connect + discover + list).
+        fn standard_ee_answers(tools: Value) -> Self {
+            let mut runner = Self::new();
+            runner.answer(
+                "server/discover",
+                json!({
+                    "resultType": "complete",
+                    "supportedVersions": ["2026-07-28"],
+                    "capabilities": { "tools": {} },
+                    "ttlMs": 0,
+                    "cacheScope": "private",
+                }),
+            );
+            runner.answer(
+                "tools/list",
+                json!({
+                    "tools": tools,
+                    "resultType": "complete",
+                    "ttlMs": 0,
+                    "cacheScope": "private",
+                }),
+            );
+            runner
+        }
+
+        async fn run(&mut self, handle: &Harness) -> (Vec<String>, String) {
+            let mut thoughts = Vec::new();
+            loop {
+                let frame = handle.next_frames(1).await.remove(0);
+                match frame {
+                    RawJsonRpcMessage::Request(request) => {
+                        let params = raw_params_to_value(request.params.clone());
+                        let method = request.method.to_string();
+                        let response = self.response_for(&method, &params);
+                        handle.send(RawJsonRpcMessage::response(request.id.clone(), Ok(response)));
+                    }
+                    RawJsonRpcMessage::Notification(notification) => {
+                        let params = raw_params_to_value(notification.params.clone());
+                        if params["update"]["sessionUpdate"] == "agent_thought_chunk" {
+                            thoughts.push(
+                                params["update"]["content"]["text"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            );
+                        }
+                        if params["update"]["sessionUpdate"] == "tool_call_update" {
+                            self.tool_updates
+                                .lock()
+                                .expect("runner updates poisoned")
+                                .push(params["update"].clone());
+                        }
+                    }
+                    RawJsonRpcMessage::Response(response) => {
+                        let Response::Result { result, .. } = response else {
+                            panic!("unexpected prompt error response");
+                        };
+                        let stop_reason =
+                            result["stopReason"].as_str().unwrap_or_default().to_string();
+                        return (thoughts, stop_reason);
+                    }
+                }
+            }
+        }
+
+        fn response_for(&mut self, method: &str, params: &Value) -> Value {
+            match method {
+                "mcp/connect" => {
+                    if self.fail_connect {
+                        json!({})
+                    } else {
+                        json!({ "connectionId": "conn-1" })
+                    }
+                }
+                "mcp/disconnect" => json!({}),
+                "mcp/message" => {
+                    let inner_method =
+                        params.get("method").and_then(Value::as_str).unwrap_or_default();
+                    self.mcp_requests
+                        .lock()
+                        .expect("runner log poisoned")
+                        .push(format!("{inner_method}: {params}"));
+                    if inner_method == "tools/call" {
+                        let tool_name = params
+                            .pointer("/params/name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        self.calls.get(tool_name).cloned().unwrap_or_else(|| {
+                            panic!("no canned tools/call response for {tool_name:?}")
+                        })
+                    } else {
+                        self.inner.get(inner_method).cloned().unwrap_or_else(|| {
+                            panic!("no canned inner response for {inner_method:?}")
+                        })
+                    }
+                }
+                other => panic!("unexpected client request {other}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn orchestrated_mode_receives_ee_proxy_tools_and_dispatches_calls() {
+        let script = ScriptedCompletion::new(vec![
+            response_with_tool_args("tc-1", "ee_workspace_roots", json!({})),
+            response_with_text("roots listed"),
+        ]);
+        let adapter =
+            OpenRouterModelAdapter::with_completion(test_config(), scripted_client(script.clone()));
+        let (handle, task) = spawn_server(adapter, OrchestratorConfig::default());
+        let session_id = new_session_with_mcp(&handle, 1, ee_proxy_acp_mcp_servers()).await;
+
+        let mut runner =
+            PromptMcpRunner::standard_ee_answers(json!([ee_tool("ee_workspace_roots")]));
+        runner.answer_call(
+            "ee_workspace_roots",
+            json!({
+                "resultType": "complete",
+                "content": [{ "type": "text", "text": "/work\n/shared" }],
+                "structuredContent": { "roots": ["/work", "/shared"] },
+            }),
+        );
+
+        handle.send(request(
+            2,
+            "session/prompt",
+            prompt_params(&session_id, "list the workspace roots"),
+        ));
+        let (thoughts, stop_reason) = runner.run(&handle).await;
+        assert_eq!(stop_reason, "end_turn");
+        assert!(thoughts.is_empty(), "no diagnostics on the happy path: {thoughts:?}");
+
+        // OpenRouter received `ee_workspace_roots` in its tool schemas.
+        let bodies = script.bodies();
+        assert_eq!(bodies.len(), 2, "tool round plus final answer");
+        let tools = &bodies[0]["tools"];
+        let names: Vec<&str> = tools
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .filter_map(|tool| tool["function"]["name"].as_str())
+            .collect();
+        assert!(names.contains(&"ee_workspace_roots"), "{names:?}");
+        assert!(
+            tools
+                .as_array()
+                .expect("tools array")
+                .iter()
+                .all(|tool| !tool["function"]["name"].as_str().unwrap_or_default().contains('.')),
+            "no provider-rejected characters in model-facing tool names"
+        );
+
+        // The model's call dispatched to MCP tools/call with the original name.
+        let log = runner.log();
+        assert!(
+            log.iter()
+                .any(|line| line.contains("tools/call") && line.contains("ee_workspace_roots")),
+            "{log:?}"
+        );
+
+        // The result came back from the fake ee proxy backend into the model.
+        let messages = bodies[1]["messages"].as_array().expect("messages");
+        let tool_messages: Vec<&Value> =
+            messages.iter().filter(|message| message["role"] == "tool").collect();
+        assert!(!tool_messages.is_empty(), "tool observation reached the model");
+        assert!(
+            tool_messages
+                .iter()
+                .any(|message| message["content"].as_str().unwrap_or_default().contains("/work")),
+            "result came from the fake ee proxy backend"
+        );
+
+        handle.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn orchestrated_mode_policy_blocks_ee_write_tool_before_dispatch() {
+        let script = ScriptedCompletion::new(vec![
+            response_with_tool_args(
+                "tc-1",
+                "ee_overwrite_text_file",
+                json!({ "path": "/work/x.txt", "content": "data" }),
+            ),
+            response_with_text("denied, continuing"),
+        ]);
+        let adapter =
+            OpenRouterModelAdapter::with_completion(test_config(), scripted_client(script));
+        let (handle, task) = spawn_server(adapter, OrchestratorConfig::default());
+        let session_id = new_session_with_mcp(&handle, 1, ee_proxy_acp_mcp_servers()).await;
+
+        let mut runner = PromptMcpRunner::standard_ee_answers(json!([
+            ee_tool("ee_overwrite_text_file"),
+            ee_tool("ee_workspace_roots"),
+        ]));
+
+        handle.send(request(2, "session/prompt", prompt_params(&session_id, "overwrite the file")));
+        let (_thoughts, stop_reason) = runner.run(&handle).await;
+        assert_eq!(stop_reason, "end_turn", "policy denial does not crash the turn");
+
+        // The denial streams as a failed tool-call update with the policy
+        // reason (never a wire call).
+        let updates = runner.tool_updates();
+        assert!(
+            updates.iter().any(|update| {
+                update["status"] == "failed"
+                    && update["toolCallId"] == "tc-1"
+                    && update.to_string().contains("write tools require explicit policy")
+            }),
+            "{updates:?}"
+        );
+
+        // The write tool never reached the MCP wire.
+        let log = runner.log();
+        assert!(
+            log.iter().all(
+                |line| !line.contains("tools/call") || !line.contains("ee_overwrite_text_file")
+            ),
+            "MCP write tools cannot bypass orchestrator policy: {log:?}"
+        );
+
+        handle.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn orchestrated_mode_mcp_secrets_never_reach_model_or_events() {
+        let script = ScriptedCompletion::new(vec![response_with_text("done")]);
+        let adapter =
+            OpenRouterModelAdapter::with_completion(test_config(), scripted_client(script.clone()));
+        let (handle, task) = spawn_server(adapter, OrchestratorConfig::default());
+        // The session advertises a stdio server whose env carries a secret;
+        // the binary does not exist, so discovery fails with a diagnostic
+        // that must not leak the value.
+        let session_id = new_session_with_mcp(
+            &handle,
+            1,
+            json!([
+                { "type": "acp", "name": "ee", "serverId": "ee-mcp-proxy:test" },
+                {
+                    "name": "filesystem",
+                    "command": "/nonexistent/ee-server",
+                    "args": [],
+                    "env": [{ "name": "API_TOKEN", "value": "sekrit-value" }],
+                },
+            ]),
+        )
+        .await;
+
+        let mut runner =
+            PromptMcpRunner::standard_ee_answers(json!([ee_tool("ee_workspace_roots")]));
+        runner.fail_connect = true;
+
+        handle.send(request(
+            2,
+            "session/prompt",
+            prompt_params(&session_id, "what MCP tools do I have"),
+        ));
+        let (thoughts, stop_reason) = runner.run(&handle).await;
+        assert_eq!(stop_reason, "end_turn");
+
+        // Thoughts (diagnostics) never contain the secret.
+        let all_thoughts = thoughts.join("\n");
+        assert!(
+            !all_thoughts.contains("sekrit-value") && !all_thoughts.contains("API_TOKEN"),
+            "secrets leaked into diagnostics: {all_thoughts}"
+        );
+
+        // Model messages and tool schemas never contain the secret.
+        for body in script.bodies() {
+            let serialized = body.to_string();
+            assert!(
+                !serialized.contains("sekrit-value") && !serialized.contains("API_TOKEN"),
+                "secrets leaked into the model request: {serialized}"
+            );
+        }
+
+        handle.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn orchestrated_mode_what_mcp_tools_regression_with_ee_proxy() {
+        // Regression for "what MCP tools do I have": the model's tool list
+        // includes the ee proxy tools, so the answer can list more than the
+        // built-in `read_file`.
+        let script = ScriptedCompletion::new(vec![response_with_text(
+            "You have ee_workspace_roots, ee_search_text, and read_file",
+        )]);
+        let adapter =
+            OpenRouterModelAdapter::with_completion(test_config(), scripted_client(script.clone()));
+        let (handle, task) = spawn_server(adapter, OrchestratorConfig::default());
+        let session_id = new_session_with_mcp(&handle, 1, ee_proxy_acp_mcp_servers()).await;
+
+        let mut runner = PromptMcpRunner::standard_ee_answers(json!([
+            ee_tool("ee_workspace_roots"),
+            ee_tool("ee_search_text"),
+        ]));
+
+        handle.send(request(
+            2,
+            "session/prompt",
+            prompt_params(&session_id, "what MCP tools do I have"),
+        ));
+        let (_thoughts, stop_reason) = runner.run(&handle).await;
+        assert_eq!(stop_reason, "end_turn");
+
+        let bodies = script.bodies();
+        let tools = bodies[0]["tools"].as_array().expect("tools array");
+        let names: Vec<&str> =
+            tools.iter().filter_map(|tool| tool["function"]["name"].as_str()).collect();
+        assert!(names.contains(&"ee_workspace_roots"), "{names:?}");
+        assert!(names.contains(&"ee_search_text"), "{names:?}");
+        assert!(names.contains(&"read_file"), "builtins still present: {names:?}");
+        assert!(tools.len() > 1, "more than one tool available: {names:?}");
 
         handle.shutdown(task).await;
     }

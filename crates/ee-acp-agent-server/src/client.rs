@@ -19,16 +19,18 @@ use std::time::Duration;
 
 use ee_agent_protocol::registry::{
     ELICITATION_CREATE_METHOD_NAME, FS_READ_TEXT_FILE_METHOD_NAME, FS_WRITE_TEXT_FILE_METHOD_NAME,
+    MCP_CONNECT_METHOD_NAME, MCP_DISCONNECT_METHOD_NAME, MCP_MESSAGE_METHOD_NAME,
     TERMINAL_CREATE_METHOD_NAME, TERMINAL_KILL_METHOD_NAME, TERMINAL_OUTPUT_METHOD_NAME,
     TERMINAL_RELEASE_METHOD_NAME, TERMINAL_WAIT_FOR_EXIT_METHOD_NAME,
 };
 use ee_agent_protocol::{
-    CreateElicitationRequest, CreateElicitationResponse, CreateTerminalRequest,
-    CreateTerminalResponse, Error as RpcError, KillTerminalRequest, KillTerminalResponse,
-    RawJsonRpcMessage, ReadTextFileRequest, ReadTextFileResponse, ReleaseTerminalRequest,
-    ReleaseTerminalResponse, RequestId, Response, TerminalOutputRequest, TerminalOutputResponse,
-    WaitForTerminalExitRequest, WaitForTerminalExitResponse, WriteTextFileRequest,
-    WriteTextFileResponse,
+    ConnectMcpRequest, ConnectMcpResponse, CreateElicitationRequest, CreateElicitationResponse,
+    CreateTerminalRequest, CreateTerminalResponse, DisconnectMcpRequest, DisconnectMcpResponse,
+    Error as RpcError, KillTerminalRequest, KillTerminalResponse, MessageMcpNotification,
+    MessageMcpRequest, MessageMcpResponse, RawJsonRpcMessage, ReadTextFileRequest,
+    ReadTextFileResponse, ReleaseTerminalRequest, ReleaseTerminalResponse, RequestId, Response,
+    TerminalOutputRequest, TerminalOutputResponse, WaitForTerminalExitRequest,
+    WaitForTerminalExitResponse, WriteTextFileRequest, WriteTextFileResponse,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -347,6 +349,70 @@ impl ClientBridge {
         self.send_typed(ELICITATION_CREATE_METHOD_NAME, &request).await
     }
 
+    /// Connects to a host-advertised MCP server over ACP (`mcp/connect`).
+    ///
+    /// The returned [`ConnectMcpResponse`] carries the connection id every
+    /// subsequent [`ClientBridge::mcp_message`] / [`ClientBridge::mcp_disconnect`]
+    /// call must use.  Hosts that did not advertise the server fail closed
+    /// with a permission/invalid-params error.
+    pub async fn mcp_connect(
+        &self,
+        request: ConnectMcpRequest,
+    ) -> Result<ConnectMcpResponse, ProviderError> {
+        self.send_typed(MCP_CONNECT_METHOD_NAME, &request).await
+    }
+
+    /// Sends one inner MCP request over an ACP MCP connection
+    /// (`mcp/message`) and awaits the inner MCP response.
+    ///
+    /// The inner response is returned verbatim; MCP protocol failures inside
+    /// the response surface as a failed round trip (fail closed), never as a
+    /// transport crash.
+    pub async fn mcp_message(
+        &self,
+        request: MessageMcpRequest,
+    ) -> Result<MessageMcpResponse, ProviderError> {
+        self.send_typed(MCP_MESSAGE_METHOD_NAME, &request).await
+    }
+
+    /// Sends one inner MCP notification over an ACP MCP connection
+    /// (`mcp/message` notification).  Notifications carry no response.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the frame cannot be built or the outbound path is gone.
+    pub fn mcp_message_notification(
+        &self,
+        notification: MessageMcpNotification,
+    ) -> Result<(), ProviderError> {
+        let params = serde_json::to_value(&notification).map_err(|source| {
+            ProviderError::ClientRequestFailure(format!(
+                "failed to serialize mcp/message notification: {source}"
+            ))
+        })?;
+        let frame = RawJsonRpcMessage::notification(MCP_MESSAGE_METHOD_NAME.to_string(), params)
+            .map_err(|error| {
+                ProviderError::ClientRequestFailure(format!(
+                    "failed to build mcp/message notification: {error}"
+                ))
+            })?;
+        if self.inner.outbound_tx.send(OutboundEvent::ClientRequest { frame }).is_err() {
+            return Err(ProviderError::ClientRequestFailure(
+                "transport closed while sending mcp/message notification".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Closes an ACP MCP connection (`mcp/disconnect`).  Idempotent from the
+    /// client's perspective: unknown connection ids fail closed on the host.
+    pub async fn mcp_disconnect(
+        &self,
+        request: DisconnectMcpRequest,
+    ) -> Result<DisconnectMcpResponse, ProviderError> {
+        self.send_typed(MCP_DISCONNECT_METHOD_NAME, &request).await
+    }
+
     /// Sends a typed request and decodes the typed response.
     async fn send_typed<T: Serialize, R: DeserializeOwned>(
         &self,
@@ -414,6 +480,7 @@ fn validate_absolute_path(path: &std::path::Path, what: &str) -> Result<(), Prov
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ee_agent_protocol::{McpConnectionId, RawJsonRpcParams};
     use serde_json::json;
 
     fn test_bridge(
@@ -548,5 +615,151 @@ mod tests {
             "{error:?}"
         );
         assert!(outbound_rx.try_recv().is_err(), "no request may be queued for a relative path");
+    }
+
+    /// The JSON params of an outbound request/notification frame.
+    fn raw_params(params: &Option<RawJsonRpcParams>) -> Option<serde_json::Value> {
+        match params {
+            None => None,
+            Some(RawJsonRpcParams::Object(map)) => Some(serde_json::Value::Object(map.clone())),
+            Some(RawJsonRpcParams::Array(array)) => Some(serde_json::Value::Array(array.clone())),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mcp_connect_round_trips_through_the_bridge() {
+        let (bridge, mut outbound_rx) = test_bridge(Duration::from_secs(60));
+        let request = ConnectMcpRequest::new("ee-mcp-proxy:test");
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.mcp_connect(request).await }
+        });
+
+        let frame = outbound_rx.recv().await.expect("mcp/connect was sent");
+        let OutboundEvent::ClientRequest { frame } = frame else {
+            panic!("expected a client request frame");
+        };
+        let RawJsonRpcMessage::Request(request) = frame else {
+            panic!("expected a request frame, got {frame:?}");
+        };
+        assert_eq!(request.method.as_ref(), ee_agent_protocol::registry::MCP_CONNECT_METHOD_NAME);
+        let params = raw_params(&request.params).expect("params present");
+        assert_eq!(params["serverId"], "ee-mcp-proxy:test");
+        bridge.handle_response(Response::Result {
+            id: request.id,
+            result: json!({ "connectionId": "conn-1" }),
+        });
+
+        let response = task.await.expect("task joins").expect("connect resolves");
+        assert_eq!(response.connection_id, McpConnectionId::new("conn-1"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mcp_message_round_trips_inner_result_verbatim() {
+        let (bridge, mut outbound_rx) = test_bridge(Duration::from_secs(60));
+        let request = MessageMcpRequest::new("conn-1", "tools/list")
+            .params(serde_json::Map::from_iter([("_meta".to_string(), json!({}))]));
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.mcp_message(request).await }
+        });
+
+        let frame = outbound_rx.recv().await.expect("mcp/message was sent");
+        let OutboundEvent::ClientRequest { frame } = frame else {
+            panic!("expected a client request frame");
+        };
+        let RawJsonRpcMessage::Request(request) = frame else {
+            panic!("expected a request frame, got {frame:?}");
+        };
+        assert_eq!(request.method.as_ref(), ee_agent_protocol::registry::MCP_MESSAGE_METHOD_NAME);
+        let params = raw_params(&request.params).expect("params present");
+        assert_eq!(params["connectionId"], "conn-1");
+        assert_eq!(params["method"], "tools/list");
+        bridge.handle_response(Response::Result {
+            id: request.id,
+            result: json!({ "resultType": "complete", "tools": [] }),
+        });
+
+        let response = task.await.expect("task joins").expect("message resolves");
+        let inner: serde_json::Value =
+            serde_json::from_str(response.0.get()).expect("inner result parses");
+        assert_eq!(inner["resultType"], "complete");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mcp_message_notification_is_a_fire_and_forget_notification() {
+        let (bridge, mut outbound_rx) = test_bridge(Duration::from_secs(60));
+        let notification = MessageMcpNotification::new("conn-1", "notifications/initialized");
+
+        bridge.mcp_message_notification(notification).expect("queues");
+
+        let frame = outbound_rx.recv().await.expect("notification was sent");
+        let OutboundEvent::ClientRequest { frame } = frame else {
+            panic!("expected a client request frame");
+        };
+        let RawJsonRpcMessage::Notification(notification) = frame else {
+            panic!("expected a notification frame, got {frame:?}");
+        };
+        assert_eq!(
+            notification.method.as_ref(),
+            ee_agent_protocol::registry::MCP_MESSAGE_METHOD_NAME
+        );
+        let params = raw_params(&notification.params).expect("params present");
+        assert_eq!(params["connectionId"], "conn-1");
+        assert_eq!(params["method"], "notifications/initialized");
+        assert!(outbound_rx.try_recv().is_err(), "notifications are not answered");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mcp_disconnect_round_trips_through_the_bridge() {
+        let (bridge, mut outbound_rx) = test_bridge(Duration::from_secs(60));
+        let request = DisconnectMcpRequest::new("conn-1");
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.mcp_disconnect(request).await }
+        });
+
+        let frame = outbound_rx.recv().await.expect("mcp/disconnect was sent");
+        let OutboundEvent::ClientRequest { frame } = frame else {
+            panic!("expected a client request frame");
+        };
+        let RawJsonRpcMessage::Request(request) = frame else {
+            panic!("expected a request frame, got {frame:?}");
+        };
+        assert_eq!(
+            request.method.as_ref(),
+            ee_agent_protocol::registry::MCP_DISCONNECT_METHOD_NAME
+        );
+        bridge.handle_response(Response::Result { id: request.id, result: json!({}) });
+
+        task.await.expect("task joins").expect("disconnect resolves");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mcp_request_client_error_maps_to_provider_failure() {
+        let (bridge, mut outbound_rx) = test_bridge(Duration::from_secs(60));
+        let task = tokio::spawn({
+            let bridge = bridge.clone();
+            async move { bridge.mcp_connect(ConnectMcpRequest::new("unknown")).await }
+        });
+
+        let frame = outbound_rx.recv().await.expect("mcp/connect was sent");
+        let OutboundEvent::ClientRequest { frame } = frame else {
+            panic!("expected a client request frame");
+        };
+        let RawJsonRpcMessage::Request(request) = frame else {
+            panic!("expected a request frame");
+        };
+        bridge.handle_response(Response::Error {
+            id: request.id,
+            error: RpcError::invalid_params()
+                .data(serde_json::json!({ "reason": "unknown MCP server id" })),
+        });
+
+        let error = task.await.expect("task joins").expect_err("fails closed");
+        assert!(
+            matches!(error, ProviderError::ClientRequestFailure(ref reason) if reason.contains("Invalid params")),
+            "{error:?}"
+        );
     }
 }

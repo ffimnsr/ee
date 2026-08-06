@@ -1,5 +1,5 @@
 use std::fmt::Write as _;
-use std::io::{self, Read, Stdout, Write};
+use std::io::{self, IsTerminal as _, Read, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,6 +39,11 @@ mod picker;
 mod quickfix;
 mod registers;
 mod render_metrics;
+// Secrets-store contract (ISSUES.md "Host-Bound Encrypted Secrets Store").
+// Phase 1 ships the typed contract only; the CLI surface arrives in phase 4,
+// so module items stay unused until then.
+#[allow(dead_code)]
+mod secrets;
 mod session;
 mod terminal;
 mod text;
@@ -213,6 +218,11 @@ enum DoCommands {
         #[arg(value_enum)]
         shell: Shell,
     },
+    /// Manage the host-bound encrypted secrets store
+    Secrets {
+        #[command(subcommand)]
+        command: SecretsCommands,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -370,6 +380,38 @@ enum SchemaCommands {
         #[arg(long, default_value = "schemas/ee-config.schema.json", value_name = "FILE")]
         schema: PathBuf,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum SecretsCommands {
+    /// Create or replace a stored secret value
+    Set {
+        /// Canonical secret name (ASCII letters, digits, `.`, `_`, `-`)
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Read the secret value from standard input instead of the hidden terminal prompt
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        stdin: bool,
+    },
+    /// Print a stored secret value
+    Get {
+        /// Canonical secret name
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Allow printing the secret value to a terminal (never use on shared displays)
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        force: bool,
+    },
+    /// List stored secret names
+    List,
+    /// Delete a stored secret
+    Delete {
+        /// Canonical secret name
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
+    /// Report safe secrets-store state
+    Status,
 }
 
 // ── Panic hook ────────────────────────────────────────────────────────────────
@@ -734,6 +776,83 @@ fn cmd_schema_check(schema: &Path) {
 fn cmd_completions(shell: Shell) {
     let mut cmd = Cli::command();
     generate(shell, &mut cmd, "ee", &mut io::stdout());
+}
+
+// ── Secrets commands (ISSUES.md "Host-Bound Encrypted Secrets Store", phase 4) ──
+
+fn parse_secret_name(raw: &str) -> secrets::SecretName {
+    match secrets::SecretName::new(raw) {
+        Ok(name) => name,
+        Err(e) => {
+            eprintln!("error: invalid secret name: {e}");
+            std::process::exit(secrets::cli::EXIT_SECRETS_USER_INPUT);
+        }
+    }
+}
+
+fn exit_secrets_error(err: secrets::SecretStoreError) {
+    eprintln!("error: {err}");
+    std::process::exit(secrets::cli::exit_code(&secrets::cli::SecretsCliError::Store(err)));
+}
+
+fn cmd_secrets(command: SecretsCommands) {
+    let result = match command {
+        SecretsCommands::Set { name, stdin } => {
+            let name = parse_secret_name(&name);
+            let store = match secrets::SecretStore::default() {
+                Ok(store) => store,
+                Err(err) => return exit_secrets_error(err),
+            };
+            secrets::cli::run_secrets_set(
+                &store,
+                &name,
+                stdin,
+                &mut io::stdin().lock(),
+                &mut secrets::cli::HiddenTerminalSecretSource,
+                &mut io::stdout(),
+            )
+        }
+        SecretsCommands::Get { name, force } => {
+            let name = parse_secret_name(&name);
+            let store = match secrets::SecretStore::default() {
+                Ok(store) => store,
+                Err(err) => return exit_secrets_error(err),
+            };
+            secrets::cli::run_secrets_get(
+                &store,
+                &name,
+                force,
+                io::stdout().is_terminal(),
+                &mut io::stdout(),
+            )
+        }
+        SecretsCommands::List => {
+            let store = match secrets::SecretStore::default() {
+                Ok(store) => store,
+                Err(err) => return exit_secrets_error(err),
+            };
+            secrets::cli::run_secrets_list(&store, &mut io::stdout())
+        }
+        SecretsCommands::Delete { name } => {
+            let name = parse_secret_name(&name);
+            let store = match secrets::SecretStore::default() {
+                Ok(store) => store,
+                Err(err) => return exit_secrets_error(err),
+            };
+            secrets::cli::run_secrets_delete(&store, &name, &mut io::stdout())
+        }
+        SecretsCommands::Status => {
+            let store = match secrets::SecretStore::default() {
+                Ok(store) => store,
+                Err(err) => return exit_secrets_error(err),
+            };
+            secrets::cli::run_secrets_status(&store, &mut io::stdout())
+        }
+    };
+    if let Err(err) = result {
+        eprintln!("error: {err}");
+        std::process::exit(secrets::cli::exit_code(&err));
+    }
 }
 
 fn read_runtime_probe(path: &Path) -> io::Result<(Option<String>, Option<String>)> {
@@ -1489,6 +1608,7 @@ fn main() -> io::Result<()> {
                     SchemaCommands::Check { schema } => cmd_schema_check(&schema),
                 },
                 DoCommands::Completions { shell } => cmd_completions(shell),
+                DoCommands::Secrets { command } => cmd_secrets(command),
             }
             if !launch_agent_shell {
                 return Ok(());

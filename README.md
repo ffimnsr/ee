@@ -206,6 +206,20 @@ timeout_ms = 5000
 
 Agents ex commands are lowercase snake_case only: `:agents`, `:agents_close`, `:agents_stop`, `:agents_new`, and `:agents_clear`. CamelCase aliases are rejected. In focused Agents composer, exact `/new` starts and focuses a fresh chat thread; exact `/quit` closes pane while keeping its sessions running. Slash commands with arguments remain normal agent prompts.
 
+#### LLM session compaction (`/compact`)
+
+Agents advertise slash commands through ACP `available_commands_update`; the pane lists them (name plus description) and Tab cycles them, using each command's advertised input hint as the draft placeholder. `ee-openrouter-agent` and `ee-agent-orchestrator` advertise `/compact`, and the client sends it as a normal `session/prompt` — there is no client-side compaction special case, and the provider owns every history or memory change.
+
+`/compact` asks the configured model for a continuation summary and shrinks long session context:
+
+- **`ee-openrouter-agent` (simple provider)** replaces its stored history with the summary plus a recent tail. Tunables (all also `--<flag>` CLI options):
+  - `OPENROUTER_COMPACT_MIN_MESSAGES` (default `16`) — stored messages below this make `/compact` a no-op without a model call.
+  - `OPENROUTER_COMPACT_RETAINED_TAIL` (default `8`) — messages kept verbatim at the tail after compaction; tool-call/tool-result pairs stay consistent.
+  - `OPENROUTER_COMPACT_MAX_INPUT_BYTES` (default `65536`) — serialized history bound for the compaction request; oldest messages drop first.
+- **`ee-agent-orchestrator`** runs deterministic memory compaction first (duplicate merging and low-value decay), builds a provenance-rich context from the task graph, memory, validation facts, and budget, then asks the model (no tools) and stores the summary as `summary:session` memory. Its knobs live under the orchestrator `compaction` config (`max_input_bytes`, default `65536`).
+
+Security limits: secret-like values are redacted from compaction requests and status text; protected memory (`decision:`, `constraint:`, `validation:` keys) is never deleted by LLM output; compaction input is byte-bounded; compaction calls never expose tools; and the per-turn timeout and cancellation still apply.
+
 Routing now resolves runtime language id first, then maps `[languages.<id>].lsp` attachments to candidate servers. Exact `filenames` matches such as `Dockerfile`, `Containerfile`, `Justfile`, or `CMakeLists.txt` win before extension fallback. Legacy extension matching remains as fallback when a language has no explicit `lsp` attachment list. Multiple attached servers are allowed. First attached server is primary for interactive pull-style features such as completion, hover, go-to-definition, references, symbols, formatting, and rename. All attached servers still receive document lifecycle sync and can publish diagnostics. Missing executables, disabled attached servers, and workspace-root-only servers opened outside a matching root fail closed with status items instead of blocking editing.
 
 ### Runtime language config

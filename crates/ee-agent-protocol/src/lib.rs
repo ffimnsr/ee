@@ -28,6 +28,7 @@ pub mod capabilities;
 pub mod mcp_over_acp;
 pub mod ordering;
 pub mod registry;
+pub mod slash_command;
 pub mod validate;
 pub mod version;
 
@@ -35,6 +36,7 @@ pub mod version;
 pub use capabilities::*;
 pub use ordering::*;
 pub use registry::*;
+pub use slash_command::*;
 pub use validate::*;
 pub use version::*;
 

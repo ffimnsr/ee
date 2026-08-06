@@ -22,6 +22,8 @@ pub(crate) mod misc;
 pub(crate) mod modes;
 pub(crate) mod notifications;
 pub(crate) mod render;
+pub(crate) mod secrets_command;
+pub(crate) mod secrets_e2e;
 pub(crate) mod swift_motion;
 pub(crate) mod vlf_cache;
 pub(crate) mod vlf_edit;

@@ -19,6 +19,10 @@
 //!
 //! # Module map
 //!
+//! - [`mcp`] — Phase 12 MCP bridge: per-session MCP client manager, ACP-native
+//!   MCP-over-ACP transport over the framework `ClientBridge`, stdio
+//!   transport, provider-compatible tool-name translation, side-effect
+//!   classification, and discovery diagnostics.
 //! - [`config`] — loop, tool, subagent, timeout, and memory knobs.
 //! - [`error`] — [`OrchestratorError`] and its ACP provider mapping.
 //! - [`runtime`] — [`OrchestratorRuntime`]: owns the stores and runs turns.
@@ -130,6 +134,7 @@
 
 pub mod budget;
 pub mod checkpoint;
+pub mod compaction;
 pub mod config;
 pub mod context_pack;
 pub mod decision_log;
@@ -141,6 +146,7 @@ pub mod fanout_fanin;
 pub mod final_response;
 pub mod issue_integration;
 pub mod loop_engine;
+pub mod mcp;
 pub mod memory;
 pub mod memory_compaction;
 pub mod metrics;
@@ -189,6 +195,10 @@ pub use checkpoint::{
     CHECKPOINT_SCHEMA_VERSION, DEFAULT_CHECKPOINT_PROVENANCE, IdGeneratorState,
     OrchestratorCheckpoint, RestoreReport, SubagentTreeState, TranscriptSummary,
 };
+pub use compaction::{
+    CompactTurnReport, CompactionConfig, DEFAULT_COMPACT_MAX_INPUT_BYTES, SESSION_SUMMARY_KEY,
+    build_compaction_context, build_compaction_prompt,
+};
 pub use config::OrchestratorConfig;
 pub use context_pack::{
     ActiveTaskSummary, ContextItemProvenance, ContextMemoryItem, ContextPack, ContextPackBuilder,
@@ -214,6 +224,7 @@ pub use issue_integration::{
     CRITERIA_KEY_MARKER, ChecklistEdit, ChecklistItem, IssueChecklist, IssueChecklistConfig,
     is_configured,
 };
+pub use mcp::{McpToolClassSpec, McpToolPolicy};
 pub use memory::{MemoryItem, MemoryStore};
 pub use memory_compaction::{
     CompactionReport, MemoryCompactionConfig, PROTECTED_MEMORY_PREFIXES, compact_memory,

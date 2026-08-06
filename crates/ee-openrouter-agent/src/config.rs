@@ -15,6 +15,13 @@ pub const DEFAULT_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions
 pub const DEFAULT_MODEL: &str = "deepseek/deepseek-v4-flash-0731";
 /// Default system prompt sent with each session history.
 pub const DEFAULT_SYSTEM_PROMPT: &str = "You are an agent running inside ee editor. Answer concisely and help with software engineering tasks. Use available tools for workspace file reads; never print tool-call syntax as prose.";
+/// Default minimum stored messages before `/compact` triggers a model summary.
+pub const DEFAULT_COMPACT_MIN_MESSAGES: usize = 16;
+/// Default stored messages kept verbatim at the tail after `/compact`.
+pub const DEFAULT_COMPACT_RETAINED_TAIL: usize = 8;
+/// Default maximum serialized bytes of history included in one compaction
+/// request (system prompt and compaction prompt included).
+pub const DEFAULT_COMPACT_MAX_INPUT_BYTES: usize = 64 * 1024;
 
 /// Command-line arguments; every field also reads its `OPENROUTER_*`
 /// environment variable.
@@ -42,6 +49,15 @@ pub struct Args {
     /// System prompt sent with each session history.
     #[arg(long, env = "OPENROUTER_SYSTEM_PROMPT", default_value = DEFAULT_SYSTEM_PROMPT)]
     system_prompt: String,
+    /// Minimum stored messages before `/compact` triggers a model summary.
+    #[arg(long, env = "OPENROUTER_COMPACT_MIN_MESSAGES", default_value_t = DEFAULT_COMPACT_MIN_MESSAGES)]
+    compact_min_messages: usize,
+    /// Stored messages kept verbatim at the tail after `/compact`.
+    #[arg(long, env = "OPENROUTER_COMPACT_RETAINED_TAIL", default_value_t = DEFAULT_COMPACT_RETAINED_TAIL)]
+    compact_retained_tail: usize,
+    /// Maximum serialized bytes of history included in one compaction request.
+    #[arg(long, env = "OPENROUTER_COMPACT_MAX_INPUT_BYTES", default_value_t = DEFAULT_COMPACT_MAX_INPUT_BYTES)]
+    compact_max_input_bytes: usize,
     /// Run in orchestrated mode: ee-agent-orchestrator owns the model–tool
     /// loop and OpenRouter acts as the model adapter instead of the simple
     /// provider mode. Default after parity; opt out for fallback diagnostics.
@@ -81,6 +97,13 @@ pub struct Config {
     /// Whether to run through the orchestrator (model–tool loop owned by
     /// ee-agent-orchestrator) instead of the simple provider mode.
     pub orchestrated: bool,
+    /// Minimum stored messages before `/compact` triggers a model summary.
+    pub compact_min_messages: usize,
+    /// Stored messages kept verbatim at the tail after `/compact`.
+    pub compact_retained_tail: usize,
+    /// Maximum serialized bytes of history included in one compaction
+    /// request (system prompt and compaction prompt included).
+    pub compact_max_input_bytes: usize,
 }
 
 impl Config {
@@ -98,6 +121,9 @@ impl Config {
             system_prompt: args.system_prompt,
             reasoning_effort: args.reasoning_effort,
             orchestrated: args.orchestrated,
+            compact_min_messages: args.compact_min_messages,
+            compact_retained_tail: args.compact_retained_tail,
+            compact_max_input_bytes: args.compact_max_input_bytes,
         }
     }
 
@@ -168,6 +194,9 @@ mod tests {
             reasoning_effort: None,
             system_prompt: String::from("system"),
             orchestrated: true,
+            compact_min_messages: DEFAULT_COMPACT_MIN_MESSAGES,
+            compact_retained_tail: DEFAULT_COMPACT_RETAINED_TAIL,
+            compact_max_input_bytes: DEFAULT_COMPACT_MAX_INPUT_BYTES,
         }
     }
 
@@ -184,6 +213,9 @@ mod tests {
         assert_eq!(config.system_prompt, "system");
         assert!(config.reasoning_effort.is_none());
         assert!(config.orchestrated, "defaults to orchestrated mode");
+        assert_eq!(config.compact_min_messages, DEFAULT_COMPACT_MIN_MESSAGES);
+        assert_eq!(config.compact_retained_tail, DEFAULT_COMPACT_RETAINED_TAIL);
+        assert_eq!(config.compact_max_input_bytes, DEFAULT_COMPACT_MAX_INPUT_BYTES);
         assert!(config.api_key.is_none());
     }
 

@@ -117,3 +117,8 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace --locked
+
+      - name: Run secrets-store regression tests (phases 1-6)
+        run: |
+          cargo test -p ee-cli --locked secrets
+          cargo test -p ee-cli --locked --all-features secrets

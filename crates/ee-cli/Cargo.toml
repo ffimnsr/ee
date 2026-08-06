@@ -31,6 +31,8 @@ agents = [
 ]
 
 [dependencies]
+base64.workspace = true
+chacha20poly1305.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 crossterm.workspace = true
@@ -43,11 +45,15 @@ globset.workspace = true
 grep-regex.workspace = true
 grep-searcher.workspace = true
 ignore.workspace = true
+keyring.workspace = true
+libc.workspace = true
+rand.workspace = true
 ratatui.workspace = true
 regex.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 signal-hook.workspace = true
 similar = "2.7.0"
 tokio = { workspace = true, features = ["net", "io-util"] }
@@ -55,6 +61,8 @@ tokio-util.workspace = true
 toml.workspace = true
 unicode-width = "0.2"
 url.workspace = true
+windows-sys = { workspace = true, features = ["Win32_System_Registry"] }
+zeroize.workspace = true
 xi-lsp-lib.workspace = true
 xi-rpc.workspace = true
 xi-core-lib.workspace = true

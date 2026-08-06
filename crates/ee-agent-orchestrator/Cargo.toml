@@ -14,14 +14,19 @@ rust-version.workspace = true
 # Deterministic fakes (scripted model, canned tool) for downstream crates'
 # tests, mirroring `ee-acp-agent-server`'s `test-utils` convention.  Enables
 # the framework's test-only plumbing (in-memory update sink / client bridge)
-# that the replay harness needs.
-test-utils = ["ee-acp-agent-server/test-utils"]
+# that the replay harness needs, plus the `ee-mcp` in-process fake MCP
+# server used by deterministic MCP bridge tests.
+test-utils = ["ee-acp-agent-server/test-utils", "dep:ee-mcp", "ee-mcp/test-utils"]
 
 [dependencies]
 ee-acp-agent-server.workspace = true
+# Optional: enables the in-process fake MCP server (`ee_mcp::fake`) used by
+# the test-utils transport factory of the MCP session manager.
+ee-mcp = { workspace = true, optional = true }
 ee-agent-protocol.workspace = true
 futures.workspace = true
 globset.workspace = true
+rmcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }

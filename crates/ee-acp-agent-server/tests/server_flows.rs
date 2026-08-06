@@ -9,8 +9,9 @@ mod common;
 use std::path::PathBuf;
 
 use ee_agent_protocol::{
-    InitializeResponse, ListSessionsResponse, LoadSessionResponse, NewSessionResponse,
-    ProtocolVersion, RawJsonRpcMessage, SessionId,
+    AvailableCommand, AvailableCommandInput, InitializeResponse, ListSessionsResponse,
+    LoadSessionResponse, NewSessionResponse, ProtocolVersion, RawJsonRpcMessage, SessionId,
+    UnstructuredCommandInput,
 };
 use serde_json::json;
 
@@ -18,6 +19,100 @@ use common::{
     FakeProvider, PromptBehavior, error_reason, notification, prompt_params, request,
     request_error, request_result, session_new_params, spawn_server,
 };
+
+/// The command list advertised in the fake provider's session inits.
+fn advertised_commands() -> Vec<AvailableCommand> {
+    vec![
+        AvailableCommand::new("compact", "Summarize the session history").input(
+            AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
+                "optional instructions",
+            )),
+        ),
+        AvailableCommand::new("plan", "Create a plan"),
+    ]
+}
+
+/// Asserts the next frame is an `available_commands_update` carrying exactly
+/// the advertised commands for the given session.
+fn expect_available_commands_update(frame: RawJsonRpcMessage, session_id: &str) {
+    let RawJsonRpcMessage::Notification(notification) = frame else {
+        panic!("expected an update notification, got {frame:?}");
+    };
+    assert_eq!(notification.method.as_ref(), "session/update");
+    let params = common::raw_params_to_value(notification.params.clone());
+    assert_eq!(params["sessionId"], session_id);
+    assert_eq!(params["update"]["sessionUpdate"], "available_commands_update");
+    let commands = params["update"]["availableCommands"].as_array().expect("commands array");
+    assert_eq!(commands.len(), 2);
+    assert_eq!(commands[0]["name"], "compact");
+    assert_eq!(commands[0]["description"], "Summarize the session history");
+    assert_eq!(commands[0]["input"]["hint"], "optional instructions");
+    assert_eq!(commands[1]["name"], "plan");
+    assert_eq!(commands[1]["description"], "Create a plan");
+}
+
+// ── available_commands_update advertisement ──────────────────────────────
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_new_emits_available_commands_update_after_response() {
+    let (provider, _log) = FakeProvider::new(&["provider-session-1"]);
+    let provider = provider.with_commands(advertised_commands());
+    let (handle, task) = spawn_server(provider).await;
+
+    handle.send(request(1, "session/new", session_new_params("/work")));
+    let frames = handle.next_frames(2).await;
+
+    // Response first (the session must be registered client-side before the
+    // update references it), then the command advertisement.
+    let response: NewSessionResponse =
+        serde_json::from_value(request_result(frames[0].clone())).expect("parses response");
+    assert_eq!(response.session_id, SessionId::new("provider-session-1"));
+    expect_available_commands_update(frames[1].clone(), "provider-session-1");
+
+    handle.shutdown(task).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_load_emits_available_commands_update_after_response() {
+    let (provider, _log) = FakeProvider::new(&[]);
+    let provider = provider.with_commands(advertised_commands());
+    let (handle, task) = spawn_server(provider).await;
+
+    let params = json!({
+        "sessionId": "loaded-session",
+        "cwd": "/work",
+        "additionalDirectories": [],
+        "mcpServers": [],
+    });
+    handle.send(request(1, "session/load", params));
+    let frames = handle.next_frames(2).await;
+
+    let _response: LoadSessionResponse =
+        serde_json::from_value(request_result(frames[0].clone())).expect("parses response");
+    expect_available_commands_update(frames[1].clone(), "loaded-session");
+
+    handle.shutdown(task).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_new_without_commands_emits_no_available_commands_update() {
+    let (provider, _log) = FakeProvider::new(&["provider-session-1"]);
+    let (handle, task) = spawn_server(provider).await;
+
+    handle.send(request(1, "session/new", session_new_params("/work")));
+    let _ = request_result(handle.next_frame().await);
+
+    // No command advertisement follows: the provider exposed no commands,
+    // and the server keeps serving further requests.
+    handle.send(request(2, "session/list", json!({})));
+    let result = request_result(handle.next_frame().await);
+    let response: ListSessionsResponse =
+        serde_json::from_value(result).expect("parses as ListSessionsResponse");
+    assert_eq!(response.sessions.len(), 1);
+    assert!(handle.outbound().is_empty(), "no update frames queued: {:?}", handle.outbound());
+
+    handle.shutdown(task).await;
+}
 
 // ── initialize ───────────────────────────────────────────────────────────
 

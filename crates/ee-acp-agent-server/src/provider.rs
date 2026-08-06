@@ -14,8 +14,8 @@ use std::future::Future;
 use std::pin::Pin;
 
 use ee_agent_protocol::{
-    AgentCapabilities, ContentBlock, Implementation, McpServer, Meta, SessionConfigOption,
-    SessionId, SessionModeState,
+    AgentCapabilities, AvailableCommand, ContentBlock, Implementation, McpServer, Meta,
+    SessionConfigOption, SessionId, SessionModeState,
 };
 use tokio::sync::watch;
 
@@ -136,9 +136,9 @@ pub struct SessionInit {
     pub session_id: SessionId,
     /// Human-readable session title (surfaced in `session/list`).
     pub title: Option<String>,
-    /// Available command names for this session (the SDK has no wire field
-    /// for these yet; carried for later phases).
-    pub commands: Vec<String>,
+    /// Available commands for this session, advertised through an
+    /// `available_commands_update` after the session is registered.
+    pub commands: Vec<AvailableCommand>,
     /// Initial mode state, when the SDK advertises mode support.
     pub modes: Option<SessionModeState>,
     /// Initial session configuration options, when the SDK advertises them.
@@ -165,9 +165,10 @@ impl SessionInit {
         self
     }
 
-    /// Sets the available command names for this session.
+    /// Sets the available commands for this session (advertised through
+    /// `available_commands_update` after the session is registered).
     #[must_use]
-    pub fn commands(mut self, commands: Vec<String>) -> Self {
+    pub fn commands(mut self, commands: Vec<AvailableCommand>) -> Self {
         self.commands = commands;
         self
     }

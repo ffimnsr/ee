@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::compaction::CompactionConfig;
 use crate::reflection::ReflectionConfig;
 use crate::stuck::StuckConfig;
 
@@ -40,7 +41,9 @@ pub const DEFAULT_MAX_PARALLEL_TOOLS: usize = 4;
 ///
 /// Exhaustive so callers can use field updates off [`Default`]; construct
 /// with [`OrchestratorConfig::default`] and override the knobs needed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `PartialEq` is implemented (no `Eq`: the compaction config holds a
+/// floating-point pressure knob).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrchestratorConfig {
     /// Maximum model-call iterations per turn; the loop stops with a
     /// budget-exceeded error before exceeding this.
@@ -77,6 +80,9 @@ pub struct OrchestratorConfig {
     pub stuck: StuckConfig,
     /// Bounded self-review behavior after tool/edit loops.
     pub reflection: ReflectionConfig,
+    /// LLM compaction knobs (Phase 12): deterministic memory compaction
+    /// settings plus the compaction-context input bound.
+    pub compaction: CompactionConfig,
 }
 
 impl Default for OrchestratorConfig {
@@ -98,6 +104,7 @@ impl Default for OrchestratorConfig {
             max_output_tokens: None,
             stuck: StuckConfig::default(),
             reflection: ReflectionConfig::default(),
+            compaction: CompactionConfig::default(),
         }
     }
 }
@@ -136,6 +143,7 @@ mod tests {
             config.reflection,
             ReflectionConfig { enabled: false, max_review_iterations: 1, max_fix_iterations: 1 }
         );
+        assert_eq!(config.compaction, CompactionConfig::default());
     }
 
     #[test]
@@ -166,6 +174,7 @@ mod tests {
                 max_review_iterations: 2,
                 max_fix_iterations: 1,
             },
+            compaction: CompactionConfig { max_input_bytes: 2048, ..CompactionConfig::default() },
         };
         let json = serde_json::to_string(&config).expect("config serializes");
         let restored: OrchestratorConfig = serde_json::from_str(&json).expect("config parses");
@@ -188,5 +197,6 @@ mod tests {
         assert!(restored.reflection.enabled);
         assert_eq!(restored.reflection.max_review_iterations, 2);
         assert_eq!(restored.reflection.max_fix_iterations, 1);
+        assert_eq!(restored.compaction.max_input_bytes, 2048);
     }
 }

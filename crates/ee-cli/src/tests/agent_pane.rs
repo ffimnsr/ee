@@ -516,11 +516,13 @@ fn slash_commands_are_discoverable_and_tab_inserts_prompt_text() {
         app.agents.threads[0]
             .system_notices()
             .iter()
-            .any(|notice| notice.contains("commands: /plan, /edit"))
+            .any(|notice| notice.contains("commands: /plan — Create plan, /edit — Edit code"))
     );
 
+    // Tab cycles to the first command; the advertised input hint drafts as
+    // the placeholder text the user edits before sending.
     press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-    assert_eq!(app.agents.threads[0].draft, "/plan ");
+    assert_eq!(app.agents.threads[0].draft, "/plan goal");
     press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
     assert_eq!(app.agents.threads[0].draft, "/edit ");
     type_text(&mut app, "file");

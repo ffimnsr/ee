@@ -25,13 +25,13 @@ use ee_agent_host::{
     ClientRequestResult, PermissionRequestId, ToolCallState,
 };
 use ee_agent_protocol::{
-    AvailableCommand, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
-    ElicitationAcceptAction, ElicitationAction, ElicitationContentValue, ElicitationMode,
-    ElicitationPropertySchema, ElicitationSchema, McpServer, McpServerStdio, PermissionOption,
-    PlanEntryPriority, PlanEntryStatus, RequestPermissionOutcome, SelectedPermissionOutcome,
-    SessionConfigKind, SessionConfigOption, SessionConfigOptionValue, SessionConfigSelectOptions,
-    SessionConfigValueId, SessionId, SessionModeId, SessionUpdate, TextContent, ToolCallContent,
-    ToolCallLocation, ToolCallStatus, ToolKind,
+    AvailableCommand, AvailableCommandInput, ContentBlock, CreateElicitationRequest,
+    CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, ElicitationContentValue,
+    ElicitationMode, ElicitationPropertySchema, ElicitationSchema, McpServer, McpServerStdio,
+    PermissionOption, PlanEntryPriority, PlanEntryStatus, RequestPermissionOutcome,
+    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
+    SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionModeId, SessionUpdate,
+    TextContent, ToolCallContent, ToolCallLocation, ToolCallStatus, ToolKind,
 };
 use tokio::runtime::Builder as TokioBuilder;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -976,9 +976,16 @@ pub(crate) struct AgentPaneState {
     pub(crate) approval_policy: super::agent_bridge::ApprovalPolicy,
     /// Phase 6 MCP state: health registry, browsing, and the proxy listener.
     pub(crate) mcp: super::agents_mcp::McpPaneState,
+    /// Secret-like resolved agent env values collected when the host config
+    /// was built (phase 5); feeds stderr/diagnostics redaction.
+    pub(crate) resolved_secret_values: Vec<String>,
     /// Test-only: agent id → fake transport factory (see `tests/agent_pane.rs`).
     #[cfg(test)]
     pub(crate) test_fake_transports: BTreeMap<String, Arc<dyn ee_agent_host::FakeTransportFactory>>,
+    /// Test-only: injected secrets store used at launch-time resolution
+    /// instead of the real keychain-backed default.
+    #[cfg(test)]
+    pub(crate) test_secret_store: Option<crate::secrets::SecretStore>,
 }
 
 impl Default for AgentPaneState {
@@ -1007,8 +1014,11 @@ impl Default for AgentPaneState {
             action_log: Vec::new(),
             approval_policy: super::agent_bridge::ApprovalPolicy::default(),
             mcp: super::agents_mcp::McpPaneState::default(),
+            resolved_secret_values: Vec::new(),
             #[cfg(test)]
             test_fake_transports: BTreeMap::new(),
+            #[cfg(test)]
+            test_secret_store: None,
         }
     }
 }
@@ -1229,12 +1239,18 @@ impl App {
 
     /// Secret-like configured values (agent + MCP env/header values whose
     /// keys look secret-like).  Used to redact stderr and diagnostics.
+    ///
+    /// Agent values are the raw config literals plus the values resolved from
+    /// `secret://` references at launch; references themselves are never
+    /// collected (their resolved values are, once the launch config exists).
     pub(crate) fn agents_secret_values(&self) -> Vec<String> {
         let mut secrets = Vec::new();
         for server in self.config.agents.servers.values() {
             for (name, value) in &server.env {
-                if ee_agent_host::redact::is_secret_key(name) {
-                    secrets.push(value.clone());
+                if ee_agent_host::redact::is_secret_key(name)
+                    && !crate::secrets::is_secret_reference_text(&value.raw)
+                {
+                    secrets.push(value.raw.clone());
                 }
             }
         }
@@ -1256,6 +1272,7 @@ impl App {
                 }
             }
         }
+        secrets.extend(self.agents.resolved_secret_values.iter().cloned());
         secrets.sort();
         secrets.dedup();
         secrets
@@ -1332,12 +1349,7 @@ impl App {
             }
             SessionUpdate::AvailableCommandsUpdate(commands) => {
                 self.sync_thread_snapshot_fields(thread_index);
-                let listed = commands
-                    .available_commands
-                    .iter()
-                    .map(|command| format!("/{}", command.name))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let listed = available_commands_summary(&commands.available_commands);
                 self.agents.threads[thread_index].push_system(if listed.is_empty() {
                     String::from("commands: none")
                 } else {
@@ -1900,6 +1912,40 @@ fn split_slash_command(draft: &str) -> (Option<String>, String) {
     (name, rest)
 }
 
+/// Renders the advertised command list for the transcript notice:
+/// `/name — description` when a description is advertised, `/name` otherwise.
+fn available_commands_summary(commands: &[AvailableCommand]) -> String {
+    commands
+        .iter()
+        .map(|command| {
+            if command.description.is_empty() {
+                format!("/{}", command.name)
+            } else {
+                format!("/{} — {}", command.name, command.description)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Draft text for a cycled command: the trailing input text (whitespace
+/// normalized) when present, otherwise the advertised input hint as a draft
+/// placeholder, otherwise `/name `.
+fn slash_command_draft(command: &AvailableCommand, rest: &str) -> String {
+    if !rest.trim().is_empty() {
+        return format!("/{} {}", command.name, rest.trim_start());
+    }
+    let hint = match command.input.as_ref() {
+        Some(AvailableCommandInput::Unstructured(input)) => input.hint.trim(),
+        _ => "",
+    };
+    if hint.is_empty() {
+        format!("/{} ", command.name)
+    } else {
+        format!("/{} {hint}", command.name)
+    }
+}
+
 fn is_agents_quit_slash_command(draft: &str) -> bool {
     let (name, rest) = split_slash_command(draft);
     matches!(name.as_deref(), Some("q" | "quit")) && rest.trim().is_empty()
@@ -2331,18 +2377,57 @@ impl App {
     }
 
     /// Creates the host bridge on first use (lazy).
+    ///
+    /// Secret references in agent env values are resolved here, immediately
+    /// before `AgentProcessConfig` creation; a server whose references fail
+    /// to resolve is skipped and never spawned.
     fn ensure_agents_host(&mut self) {
         if self.agents.host.is_some() {
             return;
         }
+        let servers: Vec<(String, crate::config::AgentServerSettings)> = self
+            .config
+            .agents
+            .servers
+            .iter()
+            .map(|(id, server)| (id.clone(), server.clone()))
+            .collect();
         let mut config = AgentManagerConfig::default();
-        for (id, server) in &self.config.agents.servers {
+        let mut secret_store: Option<crate::secrets::SecretStore> = None;
+        for (id, server) in servers {
+            let env = if crate::secrets::resolve::agent_env_has_references(&server.env) {
+                if secret_store.is_none() {
+                    secret_store = self.build_agents_secret_store();
+                }
+                let Some(store) = &secret_store else {
+                    eprintln!(
+                        "ee: warning: agent `{id}` launch aborted: secrets store unavailable"
+                    );
+                    continue;
+                };
+                match crate::secrets::resolve::resolve_agent_env(store, &server) {
+                    Ok(env) => env,
+                    Err(err) => {
+                        eprintln!("ee: warning: agent `{id}` launch aborted: {err}");
+                        continue;
+                    }
+                }
+            } else {
+                server.env.iter().map(|(key, value)| (key.clone(), value.raw.clone())).collect()
+            };
+            // Collect secret-like final values for stderr/diagnostics
+            // redaction (phase 5).
+            for (name, value) in &env {
+                if ee_agent_host::redact::is_secret_key(name) {
+                    self.agents.resolved_secret_values.push(value.clone());
+                }
+            }
             config.agents.insert(
                 id.clone(),
                 ee_agent_host::AgentProcessConfig {
                     command: server.command.clone(),
                     args: server.args.clone(),
-                    env: server.env.clone(),
+                    env,
                     cwd: server.cwd.clone(),
                 },
             );
@@ -2360,6 +2445,25 @@ impl App {
             ));
         let manager = AgentManager::new(config, handler, events_tx);
         self.agents.host = Some(AgentHostBridge::new(manager, events_rx));
+    }
+
+    /// Builds the secrets store used for launch-time reference resolution.
+    /// Tests inject a fake store; production uses the real default.
+    fn build_agents_secret_store(&mut self) -> Option<crate::secrets::SecretStore> {
+        #[cfg(test)]
+        {
+            self.agents.test_secret_store.take()
+        }
+        #[cfg(not(test))]
+        {
+            match crate::secrets::SecretStore::default() {
+                Ok(store) => Some(store),
+                Err(err) => {
+                    eprintln!("ee: warning: secrets store unavailable: {err}");
+                    None
+                }
+            }
+        }
     }
 
     /// Requests a new session for `agent_id` (async; reply pumped later).
@@ -2539,6 +2643,21 @@ impl App {
         }
         let draft = thread.draft.clone();
         let (current_name, rest) = split_slash_command(&draft);
+        // A trailing input hint drafted as a placeholder is not user text:
+        // cycling away from it does not carry it into the next command.
+        let rest_is_placeholder = current_name.as_deref().is_some_and(|name| {
+            thread
+                .available_commands
+                .iter()
+                .find(|command| command.name == name)
+                .and_then(|command| command.input.as_ref())
+                .and_then(|input| match input {
+                    AvailableCommandInput::Unstructured(input) => Some(input.hint.trim()),
+                    _ => None,
+                })
+                .is_some_and(|hint| !hint.is_empty() && rest.trim() == hint)
+        });
+        let rest = if rest_is_placeholder { String::new() } else { rest };
         let current_index = current_name.and_then(|name| {
             thread.available_commands.iter().position(|command| command.name == name)
         });
@@ -2556,11 +2675,7 @@ impl App {
             None => return false,
         };
         let command = &thread.available_commands[next_index];
-        thread.draft = if rest.trim().is_empty() {
-            format!("/{} ", command.name)
-        } else {
-            format!("/{} {}", command.name, rest.trim_start())
-        };
+        thread.draft = slash_command_draft(command, &rest);
         true
     }
 
@@ -3103,5 +3218,55 @@ mod tests {
         assert_eq!(AgentPaneLayout::parse("full"), Some(AgentPaneLayout::Full));
         assert_eq!(AgentPaneLayout::parse("left"), None);
         assert_eq!(AgentPaneLayout::parse(""), None);
+    }
+
+    fn compact_command() -> AvailableCommand {
+        AvailableCommand::new("compact", "Summarize the session history").input(
+            AvailableCommandInput::Unstructured(ee_agent_protocol::UnstructuredCommandInput::new(
+                "optional instructions",
+            )),
+        )
+    }
+
+    #[test]
+    fn split_slash_command_parses_only_leading_slashes() {
+        assert_eq!(split_slash_command("hello world"), (None, String::new()));
+        assert_eq!(split_slash_command(""), (None, String::new()));
+        assert_eq!(split_slash_command("/compact"), (Some(String::from("compact")), String::new()));
+        assert_eq!(
+            split_slash_command("/compact focus on auth"),
+            (Some(String::from("compact")), String::from("focus on auth"))
+        );
+        assert_eq!(
+            split_slash_command("/compactness"),
+            (Some(String::from("compactness")), String::new())
+        );
+    }
+
+    #[test]
+    fn available_commands_summary_includes_descriptions() {
+        let commands = vec![compact_command(), AvailableCommand::new("plan", "Create a plan")];
+        let summary = available_commands_summary(&commands);
+        assert!(summary.contains("/compact — Summarize the session history"), "{summary}");
+        assert!(summary.contains("/plan — Create a plan"), "{summary}");
+        assert_eq!(available_commands_summary(&[]), "");
+        assert_eq!(available_commands_summary(&[AvailableCommand::new("bare", "")]), "/bare");
+    }
+
+    #[test]
+    fn slash_command_draft_uses_input_hint_as_placeholder() {
+        // Commands with an unstructured input hint draft the hint text so the
+        // user edits it before sending.
+        assert_eq!(slash_command_draft(&compact_command(), ""), "/compact optional instructions");
+        // Existing trailing text is preserved with whitespace normalized.
+        assert_eq!(
+            slash_command_draft(&compact_command(), "  keep API v2 "),
+            "/compact keep API v2 "
+        );
+        // Commands without an input hint draft a bare `/name `.
+        assert_eq!(
+            slash_command_draft(&AvailableCommand::new("plan", "Create a plan"), ""),
+            "/plan "
+        );
     }
 }

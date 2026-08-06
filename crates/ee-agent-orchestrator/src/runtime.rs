@@ -10,25 +10,30 @@
 use std::sync::{Arc, Mutex};
 
 use ee_acp_agent_server::{ClientBridge, PromptContext, PromptResult, UpdateSink};
-use ee_agent_protocol::ContentBlock;
+use ee_agent_protocol::{COMPACT_COMMAND_NAME, ContentBlock, parse_slash_command};
 use tokio::sync::watch;
 
 use crate::budget::BudgetTracker;
+use crate::compaction::{
+    CompactTurnReport, SESSION_SUMMARY_KEY, build_compaction_context, build_compaction_prompt,
+};
 use crate::config::OrchestratorConfig;
 use crate::error::OrchestratorError;
 use crate::events::{EventRecorder, OrchestratorEvent};
 use crate::final_response::{FinalResponseBuilder, ValidationRecorder, changed_files_from_log};
 use crate::loop_engine::{LoopEngine, LoopOptions, TurnSystemContext};
-use crate::memory::MemoryStore;
-use crate::model::ModelAdapter;
+use crate::memory::{MemoryItem, MemoryStore};
+use crate::memory_compaction::compact_memory;
+use crate::model::{ModelAdapter, ModelMessage, ModelRequest, ModelRole};
 use crate::model_registry::{DEFAULT_MODEL_ID, ModelRegistry};
 use crate::policy::PolicyEngine;
 use crate::progress::ProgressTracker;
+use crate::sensitive_data::SensitiveDataGuard;
 use crate::strategy::{
     StrategicInput, StrategyContext, StrategyExecutor, StrategyRun, StrategySelector, TurnResult,
 };
 use crate::subagents::{DelegateTool, SubagentManager};
-use crate::tasks::{TaskGraph, truncate};
+use crate::tasks::{TaskGraph, TaskId, TaskNode, truncate};
 use crate::tools::{ServerTool, ToolExecutionLogEntry, ToolRegistry};
 
 /// Cap on the root task title derived from the prompt.
@@ -203,6 +208,18 @@ impl OrchestratorRuntime {
         self.tools.lock().expect("tool registry poisoned").register_builtins(session_id)
     }
 
+    /// Removes a previously registered tool (per-prompt MCP tools are
+    /// deregistered at prompt end so they never leak across turns).
+    pub fn remove_tool(&self, name: &str) {
+        self.tools.lock().expect("tool registry poisoned").remove(name);
+    }
+
+    /// Names of the currently registered tools (tests and diagnostics).
+    #[must_use]
+    pub fn tool_names(&self) -> Vec<String> {
+        self.tools.lock().expect("tool registry poisoned").names()
+    }
+
     /// Snapshot of the current memory store state.
     #[must_use]
     pub fn memory(&self) -> MemoryStore {
@@ -281,6 +298,16 @@ impl OrchestratorRuntime {
         events: EventRecorder,
         system_context: Option<String>,
     ) -> Result<PromptResult, OrchestratorError> {
+        // Agent-advertised slash commands arrive as ordinary prompt text;
+        // `/compact` takes the compaction path before any task or tool work.
+        let prompt_text = prompt_text(&ctx);
+        if let Some(command) = parse_slash_command(&prompt_text)
+            && command.name == COMPACT_COMMAND_NAME
+        {
+            return self
+                .run_compact_turn(ctx, sink, cancel, command.instructions, system_context)
+                .await;
+        }
         let (title, description) = task_summary(&ctx);
         let (task, entries) = {
             let mut tasks = self.tasks.lock().expect("task graph poisoned");
@@ -427,6 +454,136 @@ impl OrchestratorRuntime {
         .build();
         Ok(TurnResult { prompt_result, strategy: decision, final_response, reflection })
     }
+
+    /// Runs one `/compact` turn: deterministic memory compaction first, then
+    /// one tool-free model call over a provenance-rich bounded context, then
+    /// the model-derived summary stored as session memory (additive only —
+    /// protected keys are never deleted by LLM output).
+    pub async fn run_compact_turn(
+        &self,
+        _ctx: PromptContext,
+        sink: UpdateSink,
+        cancel: watch::Receiver<bool>,
+        instructions: Option<String>,
+        system_context: Option<String>,
+    ) -> Result<PromptResult, OrchestratorError> {
+        if *cancel.borrow() {
+            return Err(OrchestratorError::Cancellation);
+        }
+        // 1. Deterministic memory compaction (merges duplicates, decays
+        //    low-value observations; protected keys survive by construction).
+        let deterministic = {
+            let mut memory = self.memory.lock().expect("memory store poisoned");
+            compact_memory(&mut memory, &self.config.compaction.memory)
+        };
+        // 2. Provenance-rich, byte-bounded compaction context from the task
+        //    graph, memory, validation facts, and budget state.
+        let (tasks, memory, budget_snapshot) = {
+            let tasks = self.tasks.lock().expect("task graph poisoned");
+            let memory = self.memory.lock().expect("memory store poisoned");
+            let budget = self.budget.lock().expect("budget tracker poisoned");
+            (tasks.clone(), memory.clone(), budget.snapshot())
+        };
+        let context = build_compaction_context(
+            &tasks,
+            &memory,
+            &budget_snapshot,
+            self.config.compaction.max_input_bytes,
+        );
+        // 3. One model call, no tools, bounded by the per-turn timeout and
+        //    observing cancellation before and after.
+        let mut system = build_compaction_prompt(instructions.as_deref());
+        if !context.is_empty() {
+            system.push_str("\n\nSession context:\n");
+            system.push_str(&context);
+        }
+        if let Some(session) = system_context {
+            system.push_str("\n\n");
+            system.push_str(&session);
+        }
+        let user_prompt =
+            instructions.as_deref().filter(|text| !text.trim().is_empty()).map_or_else(
+                || "Compress the session into a continuation summary.".to_string(),
+                str::to_string,
+            );
+        let transcript = vec![
+            ModelMessage::text(ModelRole::System, system),
+            ModelMessage::text(ModelRole::User, user_prompt),
+        ];
+        let task = TaskNode::new(
+            TaskId::new("compact-session"),
+            "compact session",
+            "LLM session compaction summary",
+        );
+        let model = self.models.default_adapter()?;
+        // The compaction model call consumes budget like any other call;
+        // budget exhaustion or token caps fail closed.
+        self.budget.lock().expect("budget tracker poisoned").try_reserve_model_call()?;
+        let request = ModelRequest::new(transcript, Vec::new(), budget_snapshot, task);
+        let response = match tokio::time::timeout(
+            self.config.turn_timeout,
+            model.complete(request, cancel.clone()),
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => return Err(error.into()),
+            Err(_) => {
+                return Err(OrchestratorError::Timeout(
+                    "compaction model call exceeded the turn timeout".into(),
+                ));
+            }
+        };
+        self.budget.lock().expect("budget tracker poisoned").record_model_usage(
+            response.text.len(),
+            response.usage.input_tokens,
+            response.usage.output_tokens,
+        )?;
+        if *cancel.borrow() {
+            return Err(OrchestratorError::Cancellation);
+        }
+        let summary = response.text.trim();
+        if summary.is_empty() {
+            return Err(OrchestratorError::InvalidState(
+                "compaction summary was empty; memory unchanged".into(),
+            ));
+        }
+        // 4. Store the redacted summary as model-derived session memory;
+        //    insertion is additive and never touches protected keys.
+        let guard = SensitiveDataGuard::new();
+        let item = MemoryItem::new(SESSION_SUMMARY_KEY, guard.redact(summary));
+        let summary_bytes = item.byte_size();
+        {
+            let mut memory = self.memory.lock().expect("memory store poisoned");
+            memory.insert(item).map_err(|error| {
+                OrchestratorError::InvalidState(format!(
+                    "failed to store compaction summary: {error}"
+                ))
+            })?;
+        }
+        let retained_context_bytes = context.len();
+        let report = CompactTurnReport {
+            merged_duplicates: deterministic.merged_duplicates,
+            decayed_observations: deterministic.decayed_observations,
+            preserved_protected: deterministic.preserved_protected,
+            summary_bytes,
+            retained_context_bytes,
+        };
+        let _ = sink.agent_message_chunk("compact-report", report.to_status_text());
+        Ok(PromptResult::new(ee_agent_protocol::StopReason::EndTurn))
+    }
+}
+
+/// Concatenates the text content blocks of a prompt.
+fn prompt_text(ctx: &PromptContext) -> String {
+    ctx.prompt
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text(text) => Some(text.text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Derives the bounded root-task title and description from the prompt's
@@ -1078,5 +1235,197 @@ mod tests {
         assert_eq!(model.call_count(), 0);
         // The decision was still recorded before execution was blocked.
         assert!(matches!(events.events()[0], OrchestratorEvent::StrategySelected { .. }));
+    }
+
+    // ── /compact LLM compaction turn ───────────────────────────────────────
+
+    /// A runtime seeded with protected memory facts and a duplicated
+    /// observation, so the deterministic pass has work to report.
+    fn compact_runtime(config: OrchestratorConfig, model: Arc<FakeModel>) -> OrchestratorRuntime {
+        let mut memory = MemoryStore::new(4_096);
+        memory.insert(MemoryItem::new("decision:api", "use v2")).expect("inserts");
+        memory
+            .insert(MemoryItem::from_task("obs:file", "old read", TaskId::new("task-1")))
+            .expect("inserts");
+        memory
+            .insert(MemoryItem::from_task("obs:file", "new read", TaskId::new("task-1")))
+            .expect("inserts");
+        memory.insert(MemoryItem::new("constraint:offline", "no network")).expect("inserts");
+        memory.insert(MemoryItem::new("validation:tests", "all pass")).expect("inserts");
+        let runtime = OrchestratorRuntime::with_state(
+            config,
+            model,
+            crate::policy::PolicyEngine::default(),
+            TaskGraph::new(),
+            memory,
+        );
+        runtime.register_tool(echo_tool()).expect("registers echo");
+        runtime
+    }
+
+    #[tokio::test]
+    async fn compact_turn_preserves_protected_memory_and_invokes_no_tools() {
+        let model =
+            Arc::new(FakeModel::new(vec![ModelResponse::new().text("SUMMARY TEXT").completed()]));
+        let runtime = compact_runtime(OrchestratorConfig::default(), model.clone());
+        let (sink, client, mut rx) = plumbing();
+        let events = EventRecorder::new();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+
+        let result = runtime
+            .run_turn_recording(prompt("/compact"), sink, client, cancel_rx, events.clone())
+            .await
+            .expect("compaction turn succeeds");
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
+
+        // Exactly one model call, no tools, compaction prompt in system.
+        let calls = model.requests();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].tools.is_empty(), "no tools may be exposed during compaction");
+        let crate::model::ModelContent::Text(system) = &calls[0].transcript[0].content[0] else {
+            panic!("expected system text");
+        };
+        assert!(system.contains("Write a compact continuation summary"), "{system}");
+
+        // The summary is stored as model-derived session memory; protected
+        // keys survive; the deterministic pass merged the duplicates.
+        let memory = runtime.memory();
+        assert_eq!(memory.query("summary:session").expect("stored").value, "SUMMARY TEXT");
+        assert_eq!(memory.query("decision:api").expect("kept").value, "use v2");
+        assert_eq!(memory.query("constraint:offline").expect("kept").value, "no network");
+        assert_eq!(memory.query("validation:tests").expect("kept").value, "all pass");
+        assert_eq!(memory.query("obs:file").expect("kept").value, "new read", "merged");
+        assert_eq!(memory.query_prefix("obs:").len(), 1, "duplicates merged");
+
+        // No tools ran, no plan was emitted, and the report message carries
+        // the deterministic counts.
+        let recorded = events.events();
+        assert!(
+            !recorded.iter().any(|event| matches!(event, OrchestratorEvent::ToolStarted { .. })),
+            "no tool lifecycle events: {recorded:?}"
+        );
+        let report = next_update(&mut rx).await;
+        let SessionUpdate::AgentMessageChunk(chunk) = report else {
+            panic!("expected the compaction report message");
+        };
+        let ContentBlock::Text(text) = chunk.content else {
+            panic!("expected text content");
+        };
+        assert!(text.text.contains("Session compacted:"), "{}", text.text);
+        assert!(text.text.contains("merged 1 duplicate facts"), "{}", text.text);
+        assert!(text.text.contains("preserved 3 protected items"), "{}", text.text);
+        assert!(text.text.contains("stored 27 summary bytes"), "{}", text.text);
+    }
+
+    #[tokio::test]
+    async fn compact_turn_context_is_byte_bounded() {
+        let model =
+            Arc::new(FakeModel::new(vec![ModelResponse::new().text("SUMMARY").completed()]));
+        let mut memory = MemoryStore::new(4_096);
+        for index in 0..50 {
+            memory
+                .insert(MemoryItem::new(format!("obs:{index}"), "v".repeat(20)))
+                .expect("inserts");
+        }
+        let config = OrchestratorConfig {
+            compaction: crate::compaction::CompactionConfig {
+                max_input_bytes: 300,
+                ..crate::compaction::CompactionConfig::default()
+            },
+            ..OrchestratorConfig::default()
+        };
+        let runtime = OrchestratorRuntime::with_state(
+            config,
+            model.clone(),
+            crate::policy::PolicyEngine::default(),
+            TaskGraph::new(),
+            memory,
+        );
+        let (sink, client, _rx) = plumbing();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+
+        runtime
+            .run_turn(prompt("/compact"), sink, client, cancel_rx)
+            .await
+            .expect("compaction turn succeeds");
+
+        let calls = model.requests();
+        assert_eq!(calls.len(), 1);
+        let crate::model::ModelContent::Text(system) = &calls[0].transcript[0].content[0] else {
+            panic!("expected system text");
+        };
+        // The compaction context itself is bounded to 300 bytes; the prompt
+        // text is separate, so the system message stays well under 1 KiB.
+        assert!(system.len() < 1_024, "system message bounded: {} bytes", system.len());
+        assert!(system.contains("obs:49"), "newest memory retained: {system}");
+        assert!(!system.contains("obs:0"), "oldest memory dropped for the bound: {system}");
+    }
+
+    #[tokio::test]
+    async fn compact_turn_rejects_empty_summary_without_memory_changes() {
+        let model = Arc::new(FakeModel::new(vec![ModelResponse::new().completed()]));
+        let runtime = compact_runtime(OrchestratorConfig::default(), model.clone());
+        let (sink, client, _rx) = plumbing();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+
+        let error = runtime
+            .run_turn(prompt("/compact"), sink, client, cancel_rx)
+            .await
+            .expect_err("empty summaries reject");
+        assert!(
+            matches!(&error, OrchestratorError::InvalidState(reason)
+                if reason.contains("compaction summary was empty")),
+            "{error}"
+        );
+        let memory = runtime.memory();
+        assert!(memory.query("summary:session").is_none(), "no summary stored");
+        assert!(memory.query("decision:api").is_some(), "protected keys untouched");
+        assert_eq!(model.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn compact_turn_respects_cancellation_before_model_call() {
+        let model =
+            Arc::new(FakeModel::new(vec![ModelResponse::new().text("SUMMARY").completed()]));
+        let runtime = compact_runtime(OrchestratorConfig::default(), model.clone());
+        let (sink, client, _rx) = plumbing();
+        let (_cancel_tx, cancel_rx) = watch::channel(true);
+
+        let error = runtime
+            .run_turn(prompt("/compact"), sink, client, cancel_rx)
+            .await
+            .expect_err("pre-cancelled compaction stops");
+        assert_eq!(error, OrchestratorError::Cancellation);
+        assert_eq!(model.call_count(), 0, "no model call after cancellation");
+        assert!(runtime.memory().query("summary:session").is_none());
+    }
+
+    #[tokio::test]
+    async fn compact_prefix_collision_runs_the_normal_loop() {
+        let model =
+            Arc::new(FakeModel::new(vec![ModelResponse::new().text("normal answer").completed()]));
+        let runtime = compact_runtime(OrchestratorConfig::default(), model.clone());
+        let (sink, client, _rx) = plumbing();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+
+        let result = runtime
+            .run_turn(prompt("/compactness"), sink, client, cancel_rx)
+            .await
+            .expect("prefix collisions are ordinary prompts");
+        assert_eq!(result.stop_reason, StopReason::EndTurn);
+
+        let calls = model.requests();
+        assert_eq!(calls.len(), 1);
+        // The loop prepends a system message with memory facts; the user
+        // message carries the original prompt verbatim.
+        assert_eq!(calls[0].transcript[0].role, ModelRole::System);
+        assert_eq!(calls[0].transcript[1].role, ModelRole::User);
+        assert_eq!(
+            calls[0].transcript[1].content,
+            vec![crate::model::ModelContent::Text("/compactness".into())]
+        );
+        assert!(!calls[0].tools.is_empty(), "normal loop advertises tools");
+        assert_eq!(runtime.tasks().len(), 1, "root task created by the normal loop");
+        assert!(runtime.memory().query("summary:session").is_none());
     }
 }

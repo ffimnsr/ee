@@ -18,10 +18,11 @@ use ee_agent_protocol::registry::{
     SESSION_PROMPT_METHOD_NAME,
 };
 use ee_agent_protocol::{
-    CancelNotification, CloseSessionRequest, CloseSessionResponse, Error as RpcError,
-    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse, PromptRequest,
-    ProtocolVersion, RequestId, SessionId, SessionInfo,
+    AvailableCommand, AvailableCommandsUpdate, CancelNotification, CloseSessionRequest,
+    CloseSessionResponse, Error as RpcError, InitializeRequest, InitializeResponse,
+    ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
+    NewSessionRequest, NewSessionResponse, PromptRequest, ProtocolVersion, RequestId, SessionId,
+    SessionInfo, SessionUpdate,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -161,6 +162,10 @@ impl<P: AgentProvider> RequestDispatcher<P> {
             title: init.title.clone(),
             metadata: Value::Null,
         })?;
+        // Advertise the provider's initial commands after the session is
+        // registered; the update travels the FIFO outbound path, so it
+        // reaches the client right after the response.
+        self.emit_available_commands(&session_id, init.commands)?;
         let response = NewSessionResponse::new(session_id)
             .modes(init.modes)
             .config_options(init.config_options);
@@ -192,6 +197,9 @@ impl<P: AgentProvider> RequestDispatcher<P> {
             title: init.title.clone(),
             metadata: Value::Null,
         })?;
+        // Same command advertisement as `session/new`: restored providers
+        // re-advertise their initial commands for the loaded session.
+        self.emit_available_commands(&init.session_id, init.commands)?;
         let response =
             LoadSessionResponse::new().modes(init.modes).config_options(init.config_options);
         to_value(response)
@@ -332,6 +340,28 @@ impl<P: AgentProvider> RequestDispatcher<P> {
                     "reason": format!("provider returned a duplicate session id: {session_id}"),
                 }))),
         }
+    }
+
+    /// Queues an `available_commands_update` for the session when the
+    /// provider exposed initial commands; empty command lists emit nothing.
+    fn emit_available_commands(
+        &self,
+        session_id: &SessionId,
+        commands: Vec<AvailableCommand>,
+    ) -> Result<(), RpcError> {
+        if commands.is_empty() {
+            return Ok(());
+        }
+        let update = SessionUpdate::AvailableCommandsUpdate(AvailableCommandsUpdate::new(commands));
+        self.outbound_tx
+            .send(OutboundEvent::Update {
+                session_id: session_id.clone(),
+                update: Box::new(update),
+            })
+            .map_err(|_| {
+                RpcError::internal_error()
+                    .data(serde_json::json!({ "reason": "outbound channel closed" }))
+            })
     }
 
     /// Runs a provider call bounded by the configured request timeout.

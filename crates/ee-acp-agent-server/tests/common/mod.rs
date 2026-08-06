@@ -13,9 +13,9 @@ pub use ee_acp_agent_server::{
     PromptResult, ProviderError, ProviderFuture, SessionInit, UpdateSink,
 };
 use ee_agent_protocol::{
-    AgentCapabilities, CreateTerminalRequest, Error as RpcError, Implementation, RawJsonRpcMessage,
-    RawJsonRpcParams, ReadTextFileRequest, RequestId, Response, SessionCapabilities,
-    SessionCloseCapabilities, SessionId, SessionListCapabilities, StopReason,
+    AgentCapabilities, AvailableCommand, CreateTerminalRequest, Error as RpcError, Implementation,
+    RawJsonRpcMessage, RawJsonRpcParams, ReadTextFileRequest, RequestId, Response,
+    SessionCapabilities, SessionCloseCapabilities, SessionId, SessionListCapabilities, StopReason,
 };
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -81,6 +81,8 @@ impl CallLog {
 pub struct FakeProvider {
     pub log: CallLog,
     ids: Arc<Mutex<VecDeque<String>>>,
+    /// Commands advertised in every `SessionInit` (empty by default).
+    commands: Arc<Mutex<Vec<AvailableCommand>>>,
     pub behaviors: Arc<Mutex<HashMap<String, PromptBehavior>>>,
 }
 
@@ -90,9 +92,17 @@ impl FakeProvider {
         let provider = Self {
             log: log.clone(),
             ids: Arc::new(Mutex::new(ids.iter().map(|id| id.to_string()).collect())),
+            commands: Arc::new(Mutex::new(Vec::new())),
             behaviors: Arc::new(Mutex::new(HashMap::new())),
         };
         (provider, log)
+    }
+
+    /// Advertises the given commands in every session init (tests prove the
+    /// framework forwards them as `available_commands_update`).
+    pub fn with_commands(self, commands: Vec<AvailableCommand>) -> Self {
+        *self.commands.lock().expect("fake provider commands poisoned") = commands;
+        self
     }
 
     pub fn next_id(&self) -> String {
@@ -131,9 +141,10 @@ impl AgentProvider for FakeProvider {
         let log = self.log.clone();
         let id = self.next_id();
         let cwd = ctx.cwd.clone();
+        let commands = self.commands.lock().expect("fake provider commands poisoned").clone();
         Box::pin(async move {
             log.record(format!("new_session:{}", cwd.display()));
-            Ok(SessionInit::new(SessionId::new(id)).title("Test Session"))
+            Ok(SessionInit::new(SessionId::new(id)).title("Test Session").commands(commands))
         })
     }
 
@@ -143,9 +154,10 @@ impl AgentProvider for FakeProvider {
     ) -> ProviderFuture<Result<SessionInit, ProviderError>> {
         let log = self.log.clone();
         let session_id = ctx.session_id.clone();
+        let commands = self.commands.lock().expect("fake provider commands poisoned").clone();
         Box::pin(async move {
             log.record(format!("load_session:{session_id}"));
-            Ok(SessionInit::new(session_id))
+            Ok(SessionInit::new(session_id).commands(commands))
         })
     }
 
@@ -277,9 +289,8 @@ impl Harness {
         for _ in 0..5_000 {
             let frames = {
                 let mut pending = self.pending.lock().expect("harness pending poisoned");
-                let want = count.saturating_sub(pending.len());
-                if want > 0 {
-                    pending.extend(self.handle.take_outbound().into_iter().take(want));
+                if pending.len() < count {
+                    pending.extend(self.handle.take_outbound());
                 }
                 if pending.len() >= count { pending.drain(..count).collect() } else { Vec::new() }
             };

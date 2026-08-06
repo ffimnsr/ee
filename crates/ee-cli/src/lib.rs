@@ -14,6 +14,7 @@ mod picker;
 mod quickfix;
 mod registers;
 mod render_metrics;
+mod secrets;
 mod session;
 mod terminal;
 mod text;

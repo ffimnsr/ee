@@ -1546,3 +1546,64 @@ fn configured_secret_values_are_collected_for_redaction() {
     assert_eq!(redacted, "trace: using *** now");
     assert!(!redacted.contains("super-secret-value"));
 }
+
+#[test]
+fn resolved_secret_values_are_collected_for_redaction_only_after_launch() {
+    let temp = tempfile::tempdir().unwrap();
+    // The reference must come from a user config layer (XDG), not the
+    // ancestor workspace layer, or the merge rejects it.
+    let xdg = temp.path().join("xdg");
+    fs::create_dir_all(xdg.join("ee")).unwrap();
+    fs::write(
+        xdg.join("ee").join("config.toml"),
+        "[agents]\nenabled = true\n\n[agents.servers.fake]\ncommand = \"unused\"\nenv = { OPENROUTER_API_KEY = \"secret://openrouter-api-key\" }\n",
+    )
+    .unwrap();
+    let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let _cwd_restore = CurrentDirGuard::capture();
+    std::env::set_current_dir(temp.path()).unwrap();
+    let _xdg_guard = EnvVarGuard::set("XDG_CONFIG_HOME", xdg);
+    let mut app = App::from_path(None).unwrap();
+
+    // Inject a fake secrets store holding the referenced key; the reference
+    // must not resolve before the launch configuration exists.
+    let keychain = crate::secrets::test_support::StoredKeychain::new();
+    let binding = crate::secrets::HostBinding::from_identifier_bytes(b"test-machine-id\n").unwrap();
+    let store = crate::secrets::SecretStore::new(
+        Box::new(keychain),
+        binding,
+        temp.path().join("ee/secrets/v1.json"),
+    );
+    store
+        .set(
+            &crate::secrets::SecretName::new("openrouter-api-key").unwrap(),
+            &zeroize::Zeroizing::new(String::from("sk-resolved-42")),
+        )
+        .unwrap();
+    app.agents.test_secret_store = Some(store);
+
+    let before = app.agents_secret_values();
+    assert!(
+        !before.iter().any(|v| v == "sk-resolved-42"),
+        "secret not resolved before agent launch"
+    );
+
+    // Opening the agents pane builds the launch configuration, which resolves
+    // the reference and records the value for redaction.
+    run_ex(&mut app, "agents");
+    app.pump_agents();
+    drop(_cwd_restore);
+    drop(_cwd_lock);
+
+    let secrets = app.agents_secret_values();
+    assert!(
+        secrets.contains(&String::from("sk-resolved-42")),
+        "resolved value collected at launch"
+    );
+    assert!(!secrets.contains(&String::from("secret://openrouter-api-key")));
+
+    let text = "stderr: token sk-resolved-42 leaked";
+    let redacted = ee_agent_host::redact::redact_secret_values(text, &secrets);
+    assert_eq!(redacted, "stderr: token *** leaked");
+    assert!(!redacted.contains("sk-resolved-42"));
+}

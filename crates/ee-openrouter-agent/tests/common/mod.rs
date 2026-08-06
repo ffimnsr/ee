@@ -180,9 +180,8 @@ impl Harness {
         for _ in 0..5_000 {
             let frames = {
                 let mut pending = self.pending.lock().expect("harness pending poisoned");
-                let want = count.saturating_sub(pending.len());
-                if want > 0 {
-                    pending.extend(self.handle.take_outbound().into_iter().take(want));
+                if pending.len() < count {
+                    pending.extend(self.handle.take_outbound());
                 }
                 if pending.len() >= count { pending.drain(..count).collect() } else { Vec::new() }
             };

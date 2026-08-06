@@ -92,6 +92,14 @@ unicode-segmentation = "1.13.2"
 unicode-width = "0.2"
 url = "2.5.8"
 wasmtime = { version = "44.0.0", default-features = false, features = ["cranelift", "runtime", "std", "wat"] }
+# Secrets store (ISSUES.md "Host-Bound Encrypted Secrets Store", phases 1-6).
+# Phase 1 uses `zeroize`; the rest are declared for phases 2-3 and are added
+# to crate dependencies as the implementation lands.
+base64 = "0.22"
+chacha20poly1305 = "0.10.1"
+keyring = "3.6"
+sha2 = "0.10.9"
+zeroize = "1.8.2"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 ee-acp-agent-server = { package = "ee-acp-agent-server", path = "crates/ee-acp-agent-server", version = "0.1.0" }

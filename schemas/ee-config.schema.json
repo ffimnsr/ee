@@ -665,6 +665,7 @@
       "additionalProperties": false
     },
     "AgentServerToml": {
+      "description": "Raw `[agents.servers.<id>]` definition.",
       "type": "object",
       "properties": {
         "command": {
@@ -684,6 +685,7 @@
           }
         },
         "env": {
+          "description": "Environment variables for the agent subprocess. An exact\n`secret://<name>` value is resolved from the host-bound encrypted\nsecrets store (`ee do secrets`) only when the agent launches, and only\nwhen the value comes from a user config layer (XDG or legacy user\nconfig); system and workspace config layers cannot reference secrets.",
           "type": "object",
           "additionalProperties": {
             "type": "string"

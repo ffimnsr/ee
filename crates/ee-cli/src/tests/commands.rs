@@ -265,6 +265,57 @@ fn cli_utility_commands_live_under_do() {
             }
         })
     ));
+
+    let cli =
+        crate::Cli::try_parse_from(["ee", "do", "secrets", "set", "api-key", "--stdin"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Secrets {
+                command: crate::SecretsCommands::Set { stdin: true, .. }
+            }
+        })
+    ));
+
+    let cli =
+        crate::Cli::try_parse_from(["ee", "do", "secrets", "get", "api-key", "--force"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Secrets {
+                command: crate::SecretsCommands::Get { force: true, .. }
+            }
+        })
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "secrets", "list"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Secrets { command: crate::SecretsCommands::List }
+        })
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "secrets", "delete", "api-key"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Secrets { command: crate::SecretsCommands::Delete { .. } }
+        })
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "secrets", "status"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Secrets { command: crate::SecretsCommands::Status }
+        })
+    ));
 }
 
 #[test]

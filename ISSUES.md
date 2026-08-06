@@ -1986,61 +1986,61 @@ Rules:
 
 #### Work items
 
-- [ ] Advertise ACP MCP support from orchestrated providers.
-  - [ ] Extend `OrchestratorProvider::capabilities()` with `mcp_capabilities.acp` when the provider can host MCP-over-ACP.
-  - [ ] Add ACP server/provider tests proving host chooses `McpServer::Acp` for the ee proxy when capability is advertised.
-  - [ ] Keep fallback behavior for agents/providers that do not advertise ACP MCP.
-- [ ] Capture MCP session configuration.
-  - [ ] Change `OrchestratorProvider::new_session` to read `NewSessionContext.mcp_servers` and `cwd`.
-  - [ ] Store per-session MCP server descriptors in orchestrator runtime state.
-  - [ ] Validate descriptors and redact env/header secrets before any event/log/model exposure.
-  - [ ] Add tests proving `session/new` MCP servers are retained per session and never leak secrets.
-- [ ] Implement MCP client session manager in `ee-agent-orchestrator`.
-  - [ ] Reuse `ee-mcp` / `rmcp` client pieces where they fit without adding `ee-agent-host` or `ee-cli` dependencies.
-  - [ ] Support ACP-native MCP-over-ACP transport by routing through the framework/client bridge path exposed to providers.
-  - [ ] Support stdio fallback only if required for providers without ACP-native support.
-  - [ ] Enforce connect/list/call timeouts and cancellation.
-  - [ ] Close MCP connections on session close/cancel/drop.
-  - [ ] Add fake server tests for connect, initialize, tools/list, tools/call, timeout, and shutdown.
-- [ ] Translate MCP tools into provider-compatible orchestrator tool definitions.
-  - [ ] Convert MCP tool names, descriptions, and input schemas to `ToolDefinition`.
+- [x] Advertise ACP MCP support from orchestrated providers.
+  - [x] Extend `OrchestratorProvider::capabilities()` with `mcp_capabilities.acp` when the provider can host MCP-over-ACP.
+  - [x] Add ACP server/provider tests proving host chooses `McpServer::Acp` for the ee proxy when capability is advertised.
+  - [x] Keep fallback behavior for agents/providers that do not advertise ACP MCP.
+- [x] Capture MCP session configuration.
+  - [x] Change `OrchestratorProvider::new_session` to read `NewSessionContext.mcp_servers` and `cwd`.
+  - [x] Store per-session MCP server descriptors in orchestrator runtime state.
+  - [x] Validate descriptors and redact env/header secrets before any event/log/model exposure.
+  - [x] Add tests proving `session/new` MCP servers are retained per session and never leak secrets.
+- [x] Implement MCP client session manager in `ee-agent-orchestrator`.
+  - [x] Reuse `ee-mcp` / `rmcp` client pieces where they fit without adding `ee-agent-host` or `ee-cli` dependencies.
+  - [x] Support ACP-native MCP-over-ACP transport by routing through the framework/client bridge path exposed to providers.
+  - [x] Support stdio fallback only if required for providers without ACP-native support.
+  - [x] Enforce connect/list/call timeouts and cancellation.
+  - [x] Close MCP connections on session close/cancel/drop.
+  - [x] Add fake server tests for connect, initialize, tools/list, tools/call, timeout, and shutdown.
+- [x] Translate MCP tools into provider-compatible orchestrator tool definitions.
+  - [x] Convert MCP tool names, descriptions, and input schemas to `ToolDefinition`.
   - [x] Rename ee proxy MCP tools from `ee.*` to `ee_*` (for example, `ee.workspace_roots` → `ee_workspace_roots`).
-  - [ ] Keep a reversible dispatch mapping for sanitized external MCP tool names when provider-facing names differ from source names.
-  - [ ] Namespace non-ee server tools with provider-compatible names such as `mcp_<server_id>_<tool_name>` after sanitizing unsupported characters.
-  - [ ] Reject or disambiguate sanitized name collisions fail-closed before advertising tools to the model.
-  - [ ] Infer side-effect class/subclass from original MCP tool names and configured metadata, not only sanitized display names.
-  - [ ] Default unknown external MCP tools to conservative policy requiring approval or deny-by-default until classified.
-  - [ ] Add schema conversion tests, name-sanitization tests, reversible-mapping tests, collision tests, invalid schema rejection tests, and policy classification tests.
-- [ ] Execute MCP tool calls through orchestrator policy pipeline.
-  - [ ] Register MCP-backed tools in `ToolRegistry` after successful `tools/list`.
-  - [ ] Execute model tool intents by calling MCP `tools/call` and normalizing `CallToolResult` into `ToolResult`.
-  - [ ] Map MCP `isError` tool results to failed `ToolResult` without crashing the turn.
-  - [ ] Stream tool-call lifecycle updates through existing `UpdateSink`.
-  - [ ] Respect cancellation before connect/list/call and during long calls.
-  - [ ] Add tests for success, tool error, protocol error, timeout, cancellation, and policy-denied write/execute calls.
-- [ ] Expose ee MCP proxy tools to OpenRouter in default orchestrated mode.
-  - [ ] Add an end-to-end fake OpenRouter test where `session/new` includes ee proxy MCP server and OpenRouter receives `ee_workspace_roots` in tool schemas.
-  - [ ] Add a test where model calls `ee_workspace_roots`, dispatch maps it to MCP `ee_workspace_roots`, and result comes from the fake ee proxy backend.
-  - [ ] Add a test proving no advertised model-facing tool name contains `.`.
-  - [ ] Add a test where model calls an ee write/edit tool and existing approval/policy blocks or routes it correctly.
-  - [ ] Add a regression test for user prompt "what MCP tools do I have" proving response can list more than `tool_read_file` when ee proxy is present.
-- [ ] Update docs and diagnostics.
-  - [ ] Document orchestrated MCP support and fallback modes.
-  - [ ] Add diagnostics when no MCP tools are registered: no servers configured, connect failed, list failed, or policy filtered all tools.
-  - [ ] Surface bounded MCP discovery errors to user without secrets.
+  - [x] Keep a reversible dispatch mapping for sanitized external MCP tool names when provider-facing names differ from source names.
+  - [x] Namespace non-ee server tools with provider-compatible names such as `mcp_<server_id>_<tool_name>` after sanitizing unsupported characters.
+  - [x] Reject or disambiguate sanitized name collisions fail-closed before advertising tools to the model.
+  - [x] Infer side-effect class/subclass from original MCP tool names and configured metadata, not only sanitized display names.
+  - [x] Default unknown external MCP tools to conservative policy requiring approval or deny-by-default until classified.
+  - [x] Add schema conversion tests, name-sanitization tests, reversible-mapping tests, collision tests, invalid schema rejection tests, and policy classification tests.
+- [x] Execute MCP tool calls through orchestrator policy pipeline.
+  - [x] Register MCP-backed tools in `ToolRegistry` after successful `tools/list`.
+  - [x] Execute model tool intents by calling MCP `tools/call` and normalizing `CallToolResult` into `ToolResult`.
+  - [x] Map MCP `isError` tool results to failed `ToolResult` without crashing the turn.
+  - [x] Stream tool-call lifecycle updates through existing `UpdateSink`.
+  - [x] Respect cancellation before connect/list/call and during long calls.
+  - [x] Add tests for success, tool error, protocol error, timeout, cancellation, and policy-denied write/execute calls.
+- [x] Expose ee MCP proxy tools to OpenRouter in default orchestrated mode.
+  - [x] Add an end-to-end fake OpenRouter test where `session/new` includes ee proxy MCP server and OpenRouter receives `ee_workspace_roots` in tool schemas.
+  - [x] Add a test where model calls `ee_workspace_roots`, dispatch maps it to MCP `ee_workspace_roots`, and result comes from the fake ee proxy backend.
+  - [x] Add a test proving no advertised model-facing tool name contains `.`.
+  - [x] Add a test where model calls an ee write/edit tool and existing approval/policy blocks or routes it correctly.
+  - [x] Add a regression test for user prompt "what MCP tools do I have" proving response can list more than `tool_read_file` when ee proxy is present.
+- [x] Update docs and diagnostics.
+  - [x] Document orchestrated MCP support and fallback modes.
+  - [x] Add diagnostics when no MCP tools are registered: no servers configured, connect failed, list failed, or policy filtered all tools.
+  - [x] Surface bounded MCP discovery errors to user without secrets.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-agent-orchestrator mcp` passes.
-- [ ] `cargo test --quiet -p ee-openrouter-agent orchestrated` passes.
-- [ ] `cargo test --quiet -p ee-agent-host mcp_over_acp` passes.
-- [ ] `cargo test --quiet -p ee-mcp` passes if shared MCP client/proxy code changes.
-- [ ] `cargo fmt --check -p ee-agent-orchestrator -p ee-openrouter-agent -p ee-agent-host -p ee-mcp` passes.
-- [ ] `cargo clippy --quiet -p ee-agent-orchestrator -p ee-openrouter-agent -p ee-agent-host -p ee-mcp --all-targets --all-features -- -D warnings` passes.
-- [ ] End-to-end test proves default OpenRouter orchestrated mode receives `ee_workspace_roots` and executes MCP `ee_workspace_roots` through the dispatch path.
-- [ ] Tests prove no model-facing tool schema contains provider-rejected characters such as `.`.
-- [ ] Tests prove MCP write/execute tools cannot bypass orchestrator policy or host approvals.
-- [ ] Tests prove MCP config secrets are redacted from transcripts, schemas, events, logs, and errors.
+- [x] `cargo test --quiet -p ee-agent-orchestrator mcp` passes.
+- [x] `cargo test --quiet -p ee-openrouter-agent orchestrated` passes.
+- [x] `cargo test --quiet -p ee-agent-host mcp_over_acp` passes.
+- [x] `cargo test --quiet -p ee-mcp` passes if shared MCP client/proxy code changes.
+- [x] `cargo fmt --check -p ee-agent-orchestrator -p ee-openrouter-agent -p ee-agent-host -p ee-mcp` passes.
+- [x] `cargo clippy --quiet -p ee-agent-orchestrator -p ee-openrouter-agent -p ee-agent-host -p ee-mcp --all-targets --all-features -- -D warnings` passes.
+- [x] End-to-end test proves default OpenRouter orchestrated mode receives `ee_workspace_roots` and executes MCP `ee_workspace_roots` through the dispatch path.
+- [x] Tests prove no model-facing tool schema contains provider-rejected characters such as `.`.
+- [x] Tests prove MCP write/execute tools cannot bypass orchestrator policy or host approvals.
+- [x] Tests prove MCP config secrets are redacted from transcripts, schemas, events, logs, and errors.
 
 ## Future Agent Orchestrator Feature Backlog
 
@@ -2719,56 +2719,56 @@ Rules:
 
 #### Work items
 
-- [ ] Add shared slash-command parsing.
-  - [ ] Parse `/compact` and `/compact <instructions>` only when the first non-space character is `/`.
-  - [ ] Reject false positives such as `/compactness`.
-  - [ ] Preserve optional instruction text exactly after command whitespace normalization.
-  - [ ] Add parser tests for empty, normal prompt, exact command, command with instructions, and prefix collision cases.
-- [ ] Wire ACP command advertisement.
-  - [ ] Represent advertised commands as typed `AvailableCommand` values, including description and optional input hint.
-  - [ ] Emit `available_commands_update` after `session/new` when a provider exposes initial commands.
-  - [ ] Emit the same command list after `session/load` when restored providers expose initial commands.
-  - [ ] Advertise `/compact` from `ee-openrouter-agent` simple provider.
-  - [ ] Advertise `/compact` from `ee-agent-orchestrator` provider adapter.
-  - [ ] Add ACP server tests proving initial commands reach the client as session updates.
-- [ ] Implement simple OpenRouter history compaction.
-  - [ ] Add compaction config knobs for minimum message count, retained tail messages, and maximum compaction input bytes.
-  - [ ] Build a compaction prompt that asks for user goal, completed work, current state, important files/symbols, decisions/constraints, pending work, validation status, and risks/errors.
-  - [ ] Bound serialized history included in the compaction request.
-  - [ ] Redact secret-like values from the compaction request and from emitted status text.
-  - [ ] Call OpenRouter with no tools for compaction.
-  - [ ] Replace stored history with compacted summary plus a safe recent tail.
-  - [ ] Keep tool-call/tool-result pairs consistent when retaining tail messages.
-  - [ ] Emit a user-visible completion message with before/after message and byte counts.
-  - [ ] Add tests for no-op small history, bounded input, summary replacement, tail retention, empty-summary rejection, and cancellation.
-- [ ] Implement orchestrator compaction command.
-  - [ ] Detect `/compact` before entering the normal model-tool loop.
-  - [ ] Run deterministic `compact_memory` first.
-  - [ ] Build a provenance-rich compaction context from task graph, memory, recent events, validation facts, and budget state.
-  - [ ] Ask the configured model for a compact continuation summary without exposing tools.
-  - [ ] Store the summary as model-derived session memory without deleting protected keys.
-  - [ ] Emit report fields for merged duplicates, decayed observations, preserved protected items, summary bytes, and retained context bytes.
-  - [ ] Add tests proving protected memory survives and normal tools are not invoked.
-- [ ] Add optional TUI polish without changing protocol behavior.
-  - [ ] Show advertised command descriptions in an agents command list or footer hint.
-  - [ ] Use `AvailableCommand.input.hint` as a draft placeholder when cycling slash commands.
-  - [ ] Add pane tests only for display/input behavior, not compaction semantics.
-- [ ] Document compaction behavior.
-  - [ ] Document `/compact` and `/compact <instructions>` usage for OpenRouter agent users.
-  - [ ] Document compaction config environment variables.
-  - [ ] Explain that client sends `/compact` as a normal ACP prompt and provider owns history/memory changes.
-  - [ ] Document security limits: redaction, protected memory preservation, bounded input, and no tool calls.
+- [x] Add shared slash-command parsing.
+  - [x] Parse `/compact` and `/compact <instructions>` only when the first non-space character is `/`.
+  - [x] Reject false positives such as `/compactness`.
+  - [x] Preserve optional instruction text exactly after command whitespace normalization.
+  - [x] Add parser tests for empty, normal prompt, exact command, command with instructions, and prefix collision cases.
+- [x] Wire ACP command advertisement.
+  - [x] Represent advertised commands as typed `AvailableCommand` values, including description and optional input hint.
+  - [x] Emit `available_commands_update` after `session/new` when a provider exposes initial commands.
+  - [x] Emit the same command list after `session/load` when restored providers expose initial commands.
+  - [x] Advertise `/compact` from `ee-openrouter-agent` simple provider.
+  - [x] Advertise `/compact` from `ee-agent-orchestrator` provider adapter.
+  - [x] Add ACP server tests proving initial commands reach the client as session updates.
+- [x] Implement simple OpenRouter history compaction.
+  - [x] Add compaction config knobs for minimum message count, retained tail messages, and maximum compaction input bytes.
+  - [x] Build a compaction prompt that asks for user goal, completed work, current state, important files/symbols, decisions/constraints, pending work, validation status, and risks/errors.
+  - [x] Bound serialized history included in the compaction request.
+  - [x] Redact secret-like values from the compaction request and from emitted status text.
+  - [x] Call OpenRouter with no tools for compaction.
+  - [x] Replace stored history with compacted summary plus a safe recent tail.
+  - [x] Keep tool-call/tool-result pairs consistent when retaining tail messages.
+  - [x] Emit a user-visible completion message with before/after message and byte counts.
+  - [x] Add tests for no-op small history, bounded input, summary replacement, tail retention, empty-summary rejection, and cancellation.
+- [x] Implement orchestrator compaction command.
+  - [x] Detect `/compact` before entering the normal model-tool loop.
+  - [x] Run deterministic `compact_memory` first.
+  - [x] Build a provenance-rich compaction context from task graph, memory, recent events, validation facts, and budget state.
+  - [x] Ask the configured model for a compact continuation summary without exposing tools.
+  - [x] Store the summary as model-derived session memory without deleting protected keys.
+  - [x] Emit report fields for merged duplicates, decayed observations, preserved protected items, summary bytes, and retained context bytes.
+  - [x] Add tests proving protected memory survives and normal tools are not invoked.
+- [x] Add optional TUI polish without changing protocol behavior.
+  - [x] Show advertised command descriptions in an agents command list or footer hint.
+  - [x] Use `AvailableCommand.input.hint` as a draft placeholder when cycling slash commands.
+  - [x] Add pane tests only for display/input behavior, not compaction semantics.
+- [x] Document compaction behavior.
+  - [x] Document `/compact` and `/compact <instructions>` usage for OpenRouter agent users.
+  - [x] Document compaction config environment variables.
+  - [x] Explain that client sends `/compact` as a normal ACP prompt and provider owns history/memory changes.
+  - [x] Document security limits: redaction, protected memory preservation, bounded input, and no tool calls.
 
 #### Actionable criteria
 
-- [ ] `cargo test --quiet -p ee-acp-agent-server available_commands` passes.
-- [ ] `cargo test --quiet -p ee-openrouter-agent compact` passes.
-- [ ] `cargo test --quiet -p ee-agent-orchestrator compact` passes.
-- [ ] `cargo fmt --check -p ee-acp-agent-server -p ee-openrouter-agent -p ee-agent-orchestrator` passes.
-- [ ] `cargo clippy -p ee-acp-agent-server -p ee-openrouter-agent -p ee-agent-orchestrator --all-targets --all-features -- -D warnings` passes.
-- [ ] Tests prove `/compact` reaches providers as normal prompt text and no `ee-cli` compaction special case exists.
-- [ ] Tests prove compaction cannot remove protected decisions, constraints, or validation memory.
-- [ ] Tests prove compaction requests are bounded and network-free under test.
+- [x] `cargo test --quiet -p ee-acp-agent-server available_commands` passes.
+- [x] `cargo test --quiet -p ee-openrouter-agent compact` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator compact` passes.
+- [x] `cargo fmt --check -p ee-acp-agent-server -p ee-openrouter-agent -p ee-agent-orchestrator` passes.
+- [x] `cargo clippy -p ee-acp-agent-server -p ee-openrouter-agent -p ee-agent-orchestrator --all-targets --all-features -- -D warnings` passes.
+- [x] Tests prove `/compact` reaches providers as normal prompt text and no `ee-cli` compaction special case exists.
+- [x] Tests prove compaction cannot remove protected decisions, constraints, or validation memory.
+- [x] Tests prove compaction requests are bounded and network-free under test.
 
 ## Host-Bound Encrypted Secrets Store
 
@@ -2789,32 +2789,32 @@ Rules:
 
 #### Work items
 
-- [ ] Add private `mod secrets;` wiring in `crates/ee-cli/src/main.rs` and create `crates/ee-cli/src/secrets.rs`.
-  - [ ] Define `SecretName`, `SecretReference`, `SecretStore`, `SecretStoreError`, `HostBinding`, and `Keychain` types/traits in that module.
-  - [ ] Keep plaintext-bearing methods crate-private and expose secret values only as `Zeroizing<String>` or equivalent zeroizing buffers.
-  - [ ] Add unit tests proving invalid names fail before any keychain or filesystem operation.
-- [ ] Define one canonical secret-name grammar.
-  - [ ] Accept ASCII letters, ASCII digits, `.`, `_`, and `-`.
-  - [ ] Require first character to be an ASCII letter or digit.
-  - [ ] Enforce a 128-byte maximum name length.
-  - [ ] Reject empty names, whitespace, `/`, `\\`, `:`, control characters, `..`, and names outside the grammar.
-  - [ ] Add table-driven tests for accepted and rejected boundary cases.
-- [ ] Define exact `secret://<name>` parsing and rendering.
-  - [ ] Require scheme lowercase `secret` and exactly one non-empty path segment.
-  - [ ] Reject authority components, query strings, fragments, percent-decoding, leading/trailing whitespace, and embedded secret URIs.
-  - [ ] Render accepted references in canonical `secret://<name>` form.
-  - [ ] Add parser/renderer round-trip and malformed-reference tests.
-- [ ] Add workspace dependency declarations required by implementation.
-  - [ ] Add `chacha20poly1305`, `keyring`, `sha2`, and `zeroize` with versions/features compatible with Rust 1.95.
-  - [ ] Add a terminal secret-input dependency only if `crossterm` cannot provide hidden input safely on every supported platform.
-  - [ ] Add a compile-backed unit test target that constructs the module with test doubles and proves no platform keychain backend is contacted.
+- [x] Add private `mod secrets;` wiring in `crates/ee-cli/src/main.rs` and create `crates/ee-cli/src/secrets.rs`.
+  - [x] Define `SecretName`, `SecretReference`, `SecretStore`, `SecretStoreError`, `HostBinding`, and `Keychain` types/traits in that module.
+  - [x] Keep plaintext-bearing methods crate-private and expose secret values only as `Zeroizing<String>` or equivalent zeroizing buffers.
+  - [x] Add unit tests proving invalid names fail before any keychain or filesystem operation.
+- [x] Define one canonical secret-name grammar.
+  - [x] Accept ASCII letters, ASCII digits, `.`, `_`, and `-`.
+  - [x] Require first character to be an ASCII letter or digit.
+  - [x] Enforce a 128-byte maximum name length.
+  - [x] Reject empty names, whitespace, `/`, `\`, `:`, control characters, `..`, and names outside the grammar.
+  - [x] Add table-driven tests for accepted and rejected boundary cases.
+- [x] Define exact `secret://<name>` parsing and rendering.
+  - [x] Require scheme lowercase `secret` and exactly one non-empty path segment.
+  - [x] Reject authority components, query strings, fragments, percent-decoding, leading/trailing whitespace, and embedded secret URIs.
+  - [x] Render accepted references in canonical `secret://<name>` form.
+  - [x] Add parser/renderer round-trip and malformed-reference tests.
+- [x] Add workspace dependency declarations required by implementation.
+  - [x] Add `chacha20poly1305`, `keyring`, `sha2`, and `zeroize` with versions/features compatible with Rust 1.95.
+  - [x] Add a terminal secret-input dependency only if `crossterm` cannot provide hidden input safely on every supported platform.
+  - [x] Add a compile-backed unit test target that constructs the module with test doubles and proves no platform keychain backend is contacted.
 
 #### Acceptance criteria
 
-- [ ] `cargo test --quiet -p ee-cli secrets::` passes.
-- [ ] Tests prove invalid secret names and malformed references cause zero keychain and filesystem calls.
-- [ ] Tests prove parsed secret references round-trip to one canonical string form.
-- [ ] `cargo clippy -p ee-cli --all-targets --all-features -- -D warnings` passes with new dependencies.
+- [x] `cargo test --quiet -p ee-cli secrets::` passes.
+- [x] Tests prove invalid secret names and malformed references cause zero keychain and filesystem calls.
+- [x] Tests prove parsed secret references round-trip to one canonical string form.
+- [x] `cargo clippy -p ee-cli --all-targets --all-features -- -D warnings` passes with new dependencies.
 
 ### Phase 2: Host binding and OS-secure vault-key lifecycle
 
@@ -2833,29 +2833,29 @@ Rules:
 
 #### Work items
 
-- [ ] Implement `HostBinding::current()` with platform-specific identifier readers and a common digest function.
-  - [ ] Prefix digest input with fixed domain separator `ee-secrets-host-binding-v1`.
-  - [ ] Trim only platform file line endings before hashing; preserve all other identifier bytes.
-  - [ ] Return a typed unavailable error when platform identity cannot be read or is empty.
-  - [ ] Add fake-source tests proving equal canonical identifiers yield equal digests and distinct identifiers yield distinct digests.
-- [ ] Implement a keychain adapter using service name `ee-secrets-v1` and one deterministic account name per current user-store namespace.
-  - [ ] Encode exactly 32 random bytes as stable text for keychain persistence.
-  - [ ] Validate decoded key length before use and classify malformed keychain content as corruption.
-  - [ ] Generate with OS CSPRNG only when keychain lookup reports absent.
-  - [ ] Persist newly generated key before returning it to caller.
-  - [ ] Add fake-keychain tests for load, create-once, malformed key, read failure, and write failure paths.
-- [ ] Bind vault-key use to host digest without leaking either input.
-  - [ ] Require both loaded vault key and current host digest before encrypt/decrypt operations.
-  - [ ] Return `HostBindingMismatch` only after authenticated verification fails against vault metadata.
-  - [ ] Ensure mismatch errors contain vault version and safe remediation text but no fingerprint digest, key, ciphertext, or plaintext.
-  - [ ] Add tests proving a copied vault plus different host digest cannot be opened even when same fake keychain key is present.
+- [x] Implement `HostBinding::current()` with platform-specific identifier readers and a common digest function.
+  - [x] Prefix digest input with fixed domain separator `ee-secrets-host-binding-v1`.
+  - [x] Trim only platform file line endings before hashing; preserve all other identifier bytes.
+  - [x] Return a typed unavailable error when platform identity cannot be read or is empty.
+  - [x] Add fake-source tests proving equal canonical identifiers yield equal digests and distinct identifiers yield distinct digests.
+- [x] Implement a keychain adapter using service name `ee-secrets-v1` and one deterministic account name per current user-store namespace.
+  - [x] Encode exactly 32 random bytes as stable text for keychain persistence.
+  - [x] Validate decoded key length before use and classify malformed keychain content as corruption.
+  - [x] Generate with OS CSPRNG only when keychain lookup reports absent.
+  - [x] Persist newly generated key before returning it to caller.
+  - [x] Add fake-keychain tests for load, create-once, malformed key, read failure, and write failure paths.
+- [x] Bind vault-key use to host digest without leaking either input.
+  - [x] Require both loaded vault key and current host digest before encrypt/decrypt operations.
+  - [x] Return `HostBindingMismatch` only after authenticated verification fails against vault metadata.
+  - [x] Ensure mismatch errors contain vault version and safe remediation text but no fingerprint digest, key, ciphertext, or plaintext.
+  - [x] Add tests proving a copied vault plus different host digest cannot be opened even when same fake keychain key is present.
 
 #### Acceptance criteria
 
-- [ ] `cargo test --quiet -p ee-cli secrets::host_binding` passes.
-- [ ] `cargo test --quiet -p ee-cli secrets::keychain` passes.
-- [ ] Tests prove key generation occurs exactly once for a missing key and never for an existing valid key.
-- [ ] Tests prove different host bindings fail closed without exposing either identifier or key bytes in error strings.
+- [x] `cargo test --quiet -p ee-cli secrets::host_binding` passes.
+- [x] `cargo test --quiet -p ee-cli secrets::keychain` passes.
+- [x] Tests prove key generation occurs exactly once for a missing key and never for an existing valid key.
+- [x] Tests prove different host bindings fail closed without exposing either identifier or key bytes in error strings.
 
 ### Phase 3: Authenticated encrypted vault format and durable persistence
 
@@ -2874,42 +2874,42 @@ Rules:
 
 #### Work items
 
-- [ ] Define strict version-1 vault serialization types.
-  - [ ] Include `version`, `host_binding_digest`, and sorted secret-record collection.
-  - [ ] Include per-record canonical name, nonce, and ciphertext fields.
-  - [ ] Derive only serialization traits required for storage; do not derive `Debug` for types holding plaintext or vault keys.
-  - [ ] Add deserialize tests rejecting unknown fields, duplicate names, future versions, malformed encoded values, and invalid nonce/key sizes.
-- [ ] Implement AEAD encrypt/decrypt functions.
-  - [ ] Generate a new random nonce for each `set` call, including replacement of same name.
-  - [ ] Construct canonical associated-data bytes from version, host digest, and exact canonical name.
-  - [ ] Zeroize temporary plaintext and key copies after each operation.
-  - [ ] Map authentication failure to corruption/mismatch error without revealing whether record existed before verification.
-  - [ ] Add round-trip, nonce-uniqueness, swapped-name, modified-ciphertext, modified-nonce, and modified-host-digest tests.
-- [ ] Implement private data-path resolution and file permission enforcement.
-  - [ ] Resolve only through `dirs::data_dir()` and append `ee/secrets/v1.json`.
-  - [ ] Return a typed error when data directory cannot be resolved.
-  - [ ] Create missing parent directories before first write.
-  - [ ] On Unix, explicitly set parent mode `0700` and file mode `0600` after creation and replacement.
-  - [ ] Add temp-directory tests for path construction, first-write directory creation, and Unix modes under `#[cfg(unix)]`.
-- [ ] Implement atomic vault read-modify-write operations.
-  - [ ] Read and validate full existing vault before mutating any record.
-  - [ ] Sort records by canonical name before serialization for deterministic list output and stable diffs.
-  - [ ] Write complete serialized content to a unique temp file in vault directory.
-  - [ ] Flush temp content, rename only after successful write, and remove failed temp files best-effort.
-  - [ ] Add failure-injection tests proving an interrupted write preserves old readable vault and does not leave a valid partial replacement.
-- [ ] Implement `set`, `get`, `list`, and `delete` store operations.
-  - [ ] Make `set` replace only exact canonical name and retain unrelated records byte-semantically after reserialization.
-  - [ ] Make `get` return `NotFound` for missing name without creating vault/keychain entries.
-  - [ ] Make `list` decrypt no record plaintext and return sorted names only.
-  - [ ] Make `delete` remove only exact name and return `NotFound` without rewriting when absent.
-  - [ ] Add operation tests with multiple records, replacements, absent names, and corruption before mutation.
+- [x] Define strict version-1 vault serialization types.
+  - [x] Include `version`, `host_binding_digest`, and sorted secret-record collection.
+  - [x] Include per-record canonical name, nonce, and ciphertext fields.
+  - [x] Derive only serialization traits required for storage; do not derive `Debug` for types holding plaintext or vault keys.
+  - [x] Add deserialize tests rejecting unknown fields, duplicate names, future versions, malformed encoded values, and invalid nonce/key sizes.
+- [x] Implement AEAD encrypt/decrypt functions.
+  - [x] Generate a new random nonce for each `set` call, including replacement of same name.
+  - [x] Construct canonical associated-data bytes from version, host digest, and exact canonical name.
+  - [x] Zeroize temporary plaintext and key copies after each operation.
+  - [x] Map authentication failure to corruption/mismatch error without revealing whether record existed before verification.
+  - [x] Add round-trip, nonce-uniqueness, swapped-name, modified-ciphertext, modified-nonce, and modified-host-digest tests.
+- [x] Implement private data-path resolution and file permission enforcement.
+  - [x] Resolve only through `dirs::data_dir()` and append `ee/secrets/v1.json`.
+  - [x] Return a typed error when data directory cannot be resolved.
+  - [x] Create missing parent directories before first write.
+  - [x] On Unix, explicitly set parent mode `0700` and file mode `0600` after creation and replacement.
+  - [x] Add temp-directory tests for path construction, first-write directory creation, and Unix modes under `#[cfg(unix)]`.
+- [x] Implement atomic vault read-modify-write operations.
+  - [x] Read and validate full existing vault before mutating any record.
+  - [x] Sort records by canonical name before serialization for deterministic list output and stable diffs.
+  - [x] Write complete serialized content to a unique temp file in vault directory.
+  - [x] Flush temp content, rename only after successful write, and remove failed temp files best-effort.
+  - [x] Add failure-injection tests proving an interrupted write preserves old readable vault and does not leave a valid partial replacement.
+- [x] Implement `set`, `get`, `list`, and `delete` store operations.
+  - [x] Make `set` replace only exact canonical name and retain unrelated records byte-semantically after reserialization.
+  - [x] Make `get` return `NotFound` for missing name without creating vault/keychain entries.
+  - [x] Make `list` decrypt no record plaintext and return sorted names only.
+  - [x] Make `delete` remove only exact name and return `NotFound` without rewriting when absent.
+  - [x] Add operation tests with multiple records, replacements, absent names, and corruption before mutation.
 
 #### Acceptance criteria
 
-- [ ] `cargo test --quiet -p ee-cli secrets::vault` passes.
-- [ ] Tests prove stored vault JSON contains neither plaintext values nor raw host identifiers.
-- [ ] Tests prove tampering with ciphertext, nonce, record name, or host digest prevents decryption.
-- [ ] Tests prove failed writes retain prior decryptable data and Unix vault permissions are owner-only.
+- [x] `cargo test --quiet -p ee-cli secrets::vault` passes.
+- [x] Tests prove stored vault JSON contains neither plaintext values nor raw host identifiers.
+- [x] Tests prove tampering with ciphertext, nonce, record name, or host digest prevents decryption.
+- [x] Tests prove failed writes retain prior decryptable data and Unix vault permissions are owner-only.
 
 ### Phase 4: `ee do secrets` command interface
 
@@ -2928,35 +2928,35 @@ Rules:
 
 #### Work items
 
-- [ ] Add `DoCommands::Secrets` and typed `SecretsCommands` definitions in `crates/ee-cli/src/main.rs`.
-  - [ ] Add `set <name> [--stdin]`, `get <name> [--force]`, `list`, `delete <name>`, and `status` subcommands.
-  - [ ] Mark secret values absent from clap positional/option definitions.
-  - [ ] Add parser tests covering every command, all flags, and invalid flag combinations.
-- [ ] Implement safe secret input for `set`.
-  - [ ] Read hidden input from controlling terminal when `--stdin` is absent.
-  - [ ] Read at most 64 KiB from standard input when `--stdin` is present.
-  - [ ] Remove exactly one final line ending from stdin input and preserve all other bytes.
-  - [ ] Reject empty input after required final-line-ending normalization.
-  - [ ] Add fake-input tests for hidden-terminal selection, stdin selection, oversize rejection, newline handling, and empty value rejection.
-- [ ] Implement command dispatch and output behavior.
-  - [ ] Route `set`, `get`, `list`, `delete`, and `status` through one store-construction path.
-  - [ ] Print only acknowledgement/name for `set` and `delete`.
-  - [ ] Print sorted names one per line for `list`.
-  - [ ] Refuse `get` when stdout is a terminal and `--force` is absent.
-  - [ ] Print exact raw value plus one newline only when `get` is permitted.
-  - [ ] Add captured-stdio tests for stdout/stderr separation and safe error messages.
-- [ ] Implement safe status reporting and exit classification.
-  - [ ] Report vault path, vault presence, record count when readable, keychain availability, and host-binding verification state.
-  - [ ] Distinguish not found, user-input error, unavailable keychain, unavailable host binding, corrupted vault, host mismatch, and I/O failure with stable non-zero exits.
-  - [ ] Add tests asserting each class has deterministic exit status and excludes seeded secret text from output.
+- [x] Add `DoCommands::Secrets` and typed `SecretsCommands` definitions in `crates/ee-cli/src/main.rs`.
+  - [x] Add `set <name> [--stdin]`, `get <name> [--force]`, `list`, `delete <name>`, and `status` subcommands.
+  - [x] Mark secret values absent from clap positional/option definitions.
+  - [x] Add parser tests covering every command, all flags, and invalid flag combinations.
+- [x] Implement safe secret input for `set`.
+  - [x] Read hidden input from controlling terminal when `--stdin` is absent.
+  - [x] Read at most 64 KiB from standard input when `--stdin` is present.
+  - [x] Remove exactly one final line ending from stdin input and preserve all other bytes.
+  - [x] Reject empty input after required final-line-ending normalization.
+  - [x] Add fake-input tests for hidden-terminal selection, stdin selection, oversize rejection, newline handling, and empty value rejection.
+- [x] Implement command dispatch and output behavior.
+  - [x] Route `set`, `get`, `list`, `delete`, and `status` through one store-construction path.
+  - [x] Print only acknowledgement/name for `set` and `delete`.
+  - [x] Print sorted names one per line for `list`.
+  - [x] Refuse `get` when stdout is a terminal and `--force` is absent.
+  - [x] Print exact raw value plus one newline only when `get` is permitted.
+  - [x] Add captured-stdio tests for stdout/stderr separation and safe error messages.
+- [x] Implement safe status reporting and exit classification.
+  - [x] Report vault path, vault presence, record count when readable, keychain availability, and host-binding verification state.
+  - [x] Distinguish not found, user-input error, unavailable keychain, unavailable host binding, corrupted vault, host mismatch, and I/O failure with stable non-zero exits.
+  - [x] Add tests asserting each class has deterministic exit status and excludes seeded secret text from output.
 
 #### Acceptance criteria
 
-- [ ] `cargo test --quiet -p ee-cli cli_utility_commands_live_under_do` passes.
-- [ ] `cargo test --quiet -p ee-cli secrets_command` passes.
-- [ ] Tests prove `set` cannot receive a secret through CLI argument parsing.
-- [ ] Tests prove terminal `get` fails without `--force`, while piped `get` emits only raw value on stdout.
-- [ ] Tests prove all command errors redact seeded secret values.
+- [x] `cargo test --quiet -p ee-cli cli_utility_commands_live_under_do` passes.
+- [x] `cargo test --quiet -p ee-cli secrets_command` passes.
+- [x] Tests prove `set` cannot receive a secret through CLI argument parsing.
+- [x] Tests prove terminal `get` fails without `--force`, while piped `get` emits only raw value on stdout.
+- [x] Tests prove all command errors redact seeded secret values.
 
 ### Phase 5: Trusted global config references and agent launch resolution
 
@@ -2975,40 +2975,40 @@ Rules:
 
 #### Work items
 
-- [ ] Add typed agent-environment value representation that preserves literal versus secret-reference origin.
-  - [ ] Replace raw merge-only representation with an internal value carrying source `ConfigLayerKind` and raw text/reference state.
-  - [ ] Preserve existing shallow merge behavior for ordinary literal environment values.
-  - [ ] Ensure higher-priority non-secret values replace lower-priority values exactly as before.
-  - [ ] Add merge tests for global literal, global secret reference, project literal override, and project secret-reference rejection.
-- [ ] Validate secret references against config provenance during layer merge.
-  - [ ] Parse exact secret URI values using shared `SecretReference` parser.
-  - [ ] Reject malformed `secret://` values in agent env with field path and safe reference text.
-  - [ ] Reject otherwise valid references from system or ancestor layers with field path and source-layer label.
-  - [ ] Leave normal strings containing `secret://` as literals unless entire value matches reference grammar.
-  - [ ] Add config-file tests for global accept, legacy-user accept, system reject, ancestor reject, malformed reject, and literal preservation.
-- [ ] Resolve agent secret references immediately before host configuration assembly.
-  - [ ] Add resolver accepting final `AgentServerSettings` typed values and `SecretStore` dependency.
-  - [ ] Return `BTreeMap<String, String>` only after all required references resolve successfully.
-  - [ ] Resolve into zeroizing temporary buffers and clone only final process-env values required by child spawn API.
-  - [ ] Fail target agent host initialization before spawning a child when any reference resolution fails.
-  - [ ] Add fake-agent-host and fake-secret-store tests proving resolved `OPENROUTER_API_KEY` reaches `AgentProcessConfig.env`.
-- [ ] Preserve redaction coverage for resolved environment values.
-  - [ ] Ensure `App::agents_secret_values()` receives resolved secret-like agent env values after launch configuration is constructed.
-  - [ ] Ensure error/status/stderr paths pass resolved values to existing `ee_agent_host::redact::redact_secret_values` logic.
-  - [ ] Add agent pane tests proving seeded resolved API key is replaced with `***` in stderr and never appears in diagnostics.
-- [ ] Update schema generation source metadata for agent environment secret references.
-  - [ ] Add schema description explaining exact `secret://<name>` syntax and user-global-only resolution boundary.
-  - [ ] Regenerate `schemas/ee-config.schema.json` through existing schema generator.
-  - [ ] Add schema test asserting agent `env` documentation exposes supported reference syntax without declaring new config shape.
+- [x] Add typed agent-environment value representation that preserves literal versus secret-reference origin.
+  - [x] Replace raw merge-only representation with an internal value carrying source `ConfigLayerKind` and raw text/reference state.
+  - [x] Preserve existing shallow merge behavior for ordinary literal environment values.
+  - [x] Ensure higher-priority non-secret values replace lower-priority values exactly as before.
+  - [x] Add merge tests for global literal, global secret reference, project literal override, and project secret-reference rejection.
+- [x] Validate secret references against config provenance during layer merge.
+  - [x] Parse exact secret URI values using shared `SecretReference` parser.
+  - [x] Reject malformed `secret://` values in agent env with field path and safe reference text.
+  - [x] Reject otherwise valid references from system or ancestor layers with field path and source-layer label.
+  - [x] Leave normal strings containing `secret://` as literals unless entire value matches reference grammar.
+  - [x] Add config-file tests for global accept, legacy-user accept, system reject, ancestor reject, malformed reject, and literal preservation.
+- [x] Resolve agent secret references immediately before host configuration assembly.
+  - [x] Add resolver accepting final `AgentServerSettings` typed values and `SecretStore` dependency.
+  - [x] Return `BTreeMap<String, String>` only after all required references resolve successfully.
+  - [x] Resolve into zeroizing temporary buffers and clone only final process-env values required by child spawn API.
+  - [x] Fail target agent host initialization before spawning a child when any reference resolution fails.
+  - [x] Add fake-agent-host and fake-secret-store tests proving resolved `OPENROUTER_API_KEY` reaches `AgentProcessConfig.env`.
+- [x] Preserve redaction coverage for resolved environment values.
+  - [x] Ensure `App::agents_secret_values()` receives resolved secret-like agent env values after launch configuration is constructed.
+  - [x] Ensure error/status/stderr paths pass resolved values to existing `ee_agent_host::redact::redact_secret_values` logic.
+  - [x] Add agent pane tests proving seeded resolved API key is replaced with `***` in stderr and never appears in diagnostics.
+- [x] Update schema generation source metadata for agent environment secret references.
+  - [x] Add schema description explaining exact `secret://<name>` syntax and user-global-only resolution boundary.
+  - [x] Regenerate `schemas/ee-config.schema.json` through existing schema generator.
+  - [x] Add schema test asserting agent `env` documentation exposes supported reference syntax without declaring new config shape.
 
 #### Acceptance criteria
 
-- [ ] `cargo test --quiet -p ee-cli config_schema_includes_agents_and_mcp_fields` passes.
-- [ ] `cargo test --quiet -p ee-cli configured_secret_values_are_collected_for_redaction` passes.
-- [ ] `cargo test --quiet -p ee-cli secret_reference` passes.
-- [ ] Tests prove global `OPENROUTER_API_KEY = "secret://openrouter-api-key"` resolves only at agent launch.
-- [ ] Tests prove ancestor workspace configs cannot resolve, override with, or cause launch of secret references.
-- [ ] Tests prove `config show` and `config get` expose URI reference only, never seeded secret plaintext.
+- [x] `cargo test --quiet -p ee-cli config_schema_includes_agents_and_mcp_fields` passes.
+- [x] `cargo test --quiet -p ee-cli configured_secret_values_are_collected_for_redaction` passes.
+- [x] `cargo test --quiet -p ee-cli secret_reference` passes.
+- [x] Tests prove global `OPENROUTER_API_KEY = "secret://openrouter-api-key"` resolves only at agent launch.
+- [x] Tests prove ancestor workspace configs cannot resolve, override with, or cause launch of secret references.
+- [x] Tests prove `config show` and `config get` expose URI reference only, never seeded secret plaintext.
 
 ### Phase 6: End-to-end regression coverage and repository validation
 
@@ -3026,32 +3026,32 @@ Rules:
 
 #### Work items
 
-- [ ] Add an end-to-end encrypted-secret-to-agent-env fixture.
-  - [ ] Create secret through fake CLI input and fake keychain/host binding.
-  - [ ] Configure global agent env with `OPENROUTER_API_KEY = "secret://openrouter-api-key"`.
-  - [ ] Build lazy agent host configuration without spawning a real process.
-  - [ ] Assert final agent env contains seeded plaintext only within fake process configuration.
-  - [ ] Assert captured config output, status output, agent stderr, and vault JSON omit seeded plaintext.
-- [ ] Add negative end-to-end fixtures.
-  - [ ] Assert missing referenced secret prevents fake process creation.
-  - [ ] Assert copied vault under different fake host binding prevents fake process creation.
-  - [ ] Assert unavailable keychain prevents fake process creation.
-  - [ ] Assert malformed/corrupt vault prevents fake process creation.
-  - [ ] Assert project config reference rejection prevents fake process creation while project literal env remains supported.
-- [ ] Add regression tests for legacy config behavior.
-  - [ ] Assert a literal `OPENROUTER_API_KEY` value remains accepted and reaches launch configuration unchanged.
-  - [ ] Assert an agent without any secret references launches through existing configuration path.
-  - [ ] Assert existing agent secret redaction tests retain behavior for literal secret-like env values.
-- [ ] Run generated-schema and package validation coverage.
-  - [ ] Add test asserting checked-in schema matches generated schema after reference documentation update.
-  - [ ] Add targeted test commands to existing CI-compatible package test set where command tests are organized.
+- [x] Add an end-to-end encrypted-secret-to-agent-env fixture.
+  - [x] Create secret through fake CLI input and fake keychain/host binding.
+  - [x] Configure global agent env with `OPENROUTER_API_KEY = "secret://openrouter-api-key"`.
+  - [x] Build lazy agent host configuration without spawning a real process.
+  - [x] Assert final agent env contains seeded plaintext only within fake process configuration.
+  - [x] Assert captured config output, status output, agent stderr, and vault JSON omit seeded plaintext.
+- [x] Add negative end-to-end fixtures.
+  - [x] Assert missing referenced secret prevents fake process creation.
+  - [x] Assert copied vault under different fake host binding prevents fake process creation.
+  - [x] Assert unavailable keychain prevents fake process creation.
+  - [x] Assert malformed/corrupt vault prevents fake process creation.
+  - [x] Assert project config reference rejection prevents fake process creation while project literal env remains supported.
+- [x] Add regression tests for legacy config behavior.
+  - [x] Assert a literal `OPENROUTER_API_KEY` value remains accepted and reaches launch configuration unchanged.
+  - [x] Assert an agent without any secret references launches through existing configuration path.
+  - [x] Assert existing agent secret redaction tests retain behavior for literal secret-like env values.
+- [x] Run generated-schema and package validation coverage.
+  - [x] Add test asserting checked-in schema matches generated schema after reference documentation update.
+  - [x] Add targeted test commands to existing CI-compatible package test set where command tests are organized.
 
 #### Acceptance criteria
 
-- [ ] `cargo fmt --check` passes.
-- [ ] `cargo clippy -p ee-cli --all-targets --all-features -- -D warnings` passes.
-- [ ] `cargo test --quiet -p ee-cli` passes.
-- [ ] `cargo test --quiet -p ee-agent-host` passes.
-- [ ] `cargo run --quiet -p ee-cli -- do schema check` passes.
-- [ ] End-to-end tests prove a global OpenRouter secret reference reaches agent launch configuration but never any captured user-visible output.
-- [ ] End-to-end tests prove keychain failure, host mismatch, vault corruption, missing secret, and workspace reference each fail before child process creation.
+- [x] `cargo fmt --check` passes.
+- [x] `cargo clippy -p ee-cli --all-targets --all-features -- -D warnings` passes.
+- [x] `cargo test --quiet -p ee-cli` passes.
+- [x] `cargo test --quiet -p ee-agent-host` passes.
+- [x] `cargo run --quiet -p ee-cli -- do schema check` passes.
+- [x] End-to-end tests prove a global OpenRouter secret reference reaches agent launch configuration but never any captured user-visible output.
+- [x] End-to-end tests prove keychain failure, host mismatch, vault corruption, missing secret, and workspace reference each fail before child process creation.

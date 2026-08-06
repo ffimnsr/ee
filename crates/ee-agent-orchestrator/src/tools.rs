@@ -389,6 +389,12 @@ impl ToolRegistry {
         self.tools.get(name).cloned()
     }
 
+    /// Removes a tool by name (per-prompt MCP tools deregister at prompt
+    /// end); returns the removed tool, if any.
+    pub fn remove(&mut self, name: &str) -> Option<Arc<dyn ServerTool>> {
+        self.tools.remove(name)
+    }
+
     /// Definitions of all registered tools, sorted by name for deterministic
     /// model requests.
     #[must_use]
@@ -397,6 +403,14 @@ impl ToolRegistry {
             self.tools.values().map(|tool| tool.definition()).collect();
         definitions.sort_by(|a, b| a.name.cmp(&b.name));
         definitions
+    }
+
+    /// Names of all registered tools, sorted (tests and diagnostics).
+    #[must_use]
+    pub fn names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.tools.keys().cloned().collect();
+        names.sort();
+        names
     }
 
     /// Number of registered tools.

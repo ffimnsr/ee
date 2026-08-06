@@ -98,6 +98,9 @@ mod tests {
             system_prompt: String::from("system"),
             reasoning_effort: None,
             orchestrated,
+            compact_min_messages: 4,
+            compact_retained_tail: 2,
+            compact_max_input_bytes: 65_536,
         }
     }
 

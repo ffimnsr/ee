@@ -286,12 +286,27 @@ pub(crate) struct AgentsSettings {
     pub servers: BTreeMap<String, AgentServerSettings>,
 }
 
+/// One agent environment value with its config-layer provenance (phase 5).
+///
+/// An exact `secret://<name>` value is kept as raw text through parsing,
+/// merging, schema generation, and display; it is resolved from the
+/// host-bound secrets store only at agent launch, and only when the source
+/// layer is user-owned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentEnvValue {
+    /// The config layer this value came from.
+    pub layer: ConfigLayerKind,
+    /// Raw text exactly as written in config: a literal or an exact
+    /// `secret://<name>` reference. Never resolved at merge time.
+    pub raw: String,
+}
+
 /// Resolved ACP agent subprocess definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentServerSettings {
     pub command: String,
     pub args: Vec<String>,
-    pub env: BTreeMap<String, String>,
+    pub env: BTreeMap<String, AgentEnvValue>,
     pub cwd: Option<PathBuf>,
 }
 
@@ -945,12 +960,18 @@ pub(crate) struct AgentsToml {
     pub servers: BTreeMap<String, AgentServerToml>,
 }
 
+/// Raw `[agents.servers.<id>]` definition.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AgentServerToml {
     /// Executable invoked to start the ACP agent subprocess.
     pub command: Option<String>,
     pub args: Option<Vec<String>>,
+    /// Environment variables for the agent subprocess. An exact
+    /// `secret://<name>` value is resolved from the host-bound encrypted
+    /// secrets store (`ee do secrets`) only when the agent launches, and only
+    /// when the value comes from a user config layer (XDG or legacy user
+    /// config); system and workspace config layers cannot reference secrets.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     /// Working directory for the agent subprocess; inherits `ee` when unset.
@@ -1054,7 +1075,7 @@ pub(crate) struct ConfigSearchReport {
 }
 
 #[derive(Debug, Clone)]
-struct ConfigEnvironment {
+pub(crate) struct ConfigEnvironment {
     cwd: PathBuf,
     home_dir: Option<PathBuf>,
     config_dir: Option<PathBuf>,
@@ -1079,11 +1100,11 @@ impl ConfigEnvironment {
         }
     }
 
-    fn xdg_user_config_path(&self) -> Option<PathBuf> {
+    pub(crate) fn xdg_user_config_path(&self) -> Option<PathBuf> {
         self.config_dir.as_ref().map(|dir| dir.join("ee").join("config.toml"))
     }
 
-    fn legacy_user_config_path(&self) -> Option<PathBuf> {
+    pub(crate) fn legacy_user_config_path(&self) -> Option<PathBuf> {
         self.home_dir.as_ref().map(|home| home.join(".ee.toml"))
     }
 
@@ -1203,7 +1224,7 @@ pub(crate) struct KeySequenceBindingToml {
 
 impl EditorSettings {
     /// Apply any set fields from `patch`, leaving unset fields unchanged.
-    fn merge_toml(&mut self, patch: &EeToml) {
+    fn merge_toml(&mut self, patch: &EeToml, kind: ConfigLayerKind) {
         if let Some(s) = &patch.indent_style {
             match s.to_lowercase().as_str() {
                 "spaces" | "space" => self.indent_style = IndentStyle::Spaces,
@@ -1279,7 +1300,7 @@ impl EditorSettings {
             self.merge_keymap_toml(keymap);
         }
         if let Some(agents) = &patch.agents {
-            self.merge_agents_toml(agents);
+            self.merge_agents_toml(agents, kind);
         }
         if let Some(mcp) = &patch.mcp {
             self.merge_mcp_toml(mcp);
@@ -1369,7 +1390,7 @@ impl EditorSettings {
         }
     }
 
-    fn merge_agents_toml(&mut self, patch: &AgentsToml) {
+    fn merge_agents_toml(&mut self, patch: &AgentsToml, kind: ConfigLayerKind) {
         if let Some(enabled) = patch.enabled {
             self.agents.enabled = enabled;
         }
@@ -1377,7 +1398,7 @@ impl EditorSettings {
             self.agents.default_agent = Some(default_agent.clone());
         }
         for (id, server) in &patch.servers {
-            match resolve_agent_server(id, server) {
+            match resolve_agent_server(id, server, kind) {
                 Ok(resolved) => {
                     self.agents.servers.insert(id.clone(), resolved);
                 }
@@ -1403,7 +1424,11 @@ impl EditorSettings {
     }
 }
 
-fn resolve_agent_server(id: &str, server: &AgentServerToml) -> Result<AgentServerSettings, String> {
+fn resolve_agent_server(
+    id: &str,
+    server: &AgentServerToml,
+    kind: ConfigLayerKind,
+) -> Result<AgentServerSettings, String> {
     if id.trim().is_empty() {
         return Err(String::from("agent server id must not be empty"));
     }
@@ -1411,10 +1436,34 @@ fn resolve_agent_server(id: &str, server: &AgentServerToml) -> Result<AgentServe
     if command.is_empty() {
         return Err(String::from("agent server command must not be empty"));
     }
+    let mut env = BTreeMap::new();
+    for (key, value) in &server.env {
+        if crate::secrets::is_secret_reference_text(value) {
+            match crate::secrets::SecretReference::parse(value) {
+                Ok(_reference) => {
+                    if !matches!(kind, ConfigLayerKind::UserXdg | ConfigLayerKind::UserLegacy) {
+                        return Err(format!(
+                            "secret references are only allowed in user config layers, \
+                             but agents.servers.{id}.env.{key} comes from {} config",
+                            kind.label()
+                        ));
+                    }
+                    env.insert(key.clone(), AgentEnvValue { layer: kind, raw: value.clone() });
+                }
+                Err(err) => {
+                    return Err(format!(
+                        "invalid secret reference in agents.servers.{id}.env.{key}: {err}"
+                    ));
+                }
+            }
+        } else {
+            env.insert(key.clone(), AgentEnvValue { layer: kind, raw: value.clone() });
+        }
+    }
     Ok(AgentServerSettings {
         command: command.to_owned(),
         args: server.args.clone().unwrap_or_default(),
-        env: server.env.clone(),
+        env,
         cwd: server.cwd.clone(),
     })
 }
@@ -1554,7 +1603,7 @@ fn load_config_with_env(file_path: Option<&Path>, env: &ConfigEnvironment) -> Ed
 
     for layer in discover_config_layers_with_env(env, file_path).layers {
         if let Some(patch) = parse_ee_toml(&layer.path) {
-            settings.merge_toml(&patch);
+            settings.merge_toml(&patch, layer.kind);
             if let Some(lsp_patch) = &patch.lsp {
                 lsp.merge_toml(lsp_patch);
             }
@@ -1656,7 +1705,13 @@ fn agents_settings_to_toml(agents: &AgentsSettings) -> Option<AgentsToml> {
                     AgentServerToml {
                         command: Some(server.command.clone()),
                         args: Some(server.args.clone()),
-                        env: server.env.clone(),
+                        // Display paths keep the raw text: literals and
+                        // `secret://` references exactly as configured.
+                        env: server
+                            .env
+                            .iter()
+                            .map(|(key, value)| (key.clone(), value.raw.clone()))
+                            .collect(),
                         cwd: server.cwd.clone(),
                     },
                 )
@@ -1751,7 +1806,10 @@ fn keymap_settings_to_toml(keymap: &crate::keymap::KeymapSettings) -> Option<Key
     Some(keymap)
 }
 
-fn resolved_config_with_env(file_path: Option<&Path>, env: &ConfigEnvironment) -> EeToml {
+pub(crate) fn resolved_config_with_env(
+    file_path: Option<&Path>,
+    env: &ConfigEnvironment,
+) -> EeToml {
     let settings = load_config_with_env(file_path, env);
     let runtime_languages = runtime_languages_to_toml(runtime_languages_with_env(file_path, env));
     EeToml {
@@ -1889,7 +1947,10 @@ fn validate_agents_mcp_config(parsed: &EeToml) -> Result<(), String> {
     let mut effective_ids = BTreeSet::new();
     if let Some(agents) = &parsed.agents {
         for (id, server) in &agents.servers {
-            resolve_agent_server(id, server)
+            // Validation checks shape and reference grammar only; layer
+            // provenance is enforced during the merge, not on standalone
+            // files (the file's eventual layer is unknown here).
+            resolve_agent_server(id, server, ConfigLayerKind::UserXdg)
                 .map_err(|err| format!("agents server `{id}`: {err}"))?;
             effective_ids.insert(id.clone());
         }
@@ -2307,6 +2368,43 @@ pub(crate) fn load_config(file_path: Option<&Path>) -> EditorSettings {
     load_config_with_env(file_path, &ConfigEnvironment::from_process())
 }
 
+// ── Test-only config environment helpers (phase 6 e2e fixtures) ───────────────
+
+/// Builds an isolated layered-config environment under `root`: workspace,
+/// home, XDG, and system config paths never touch the developer machine.
+#[cfg(test)]
+pub(crate) fn test_config_environment(root: &Path) -> ConfigEnvironment {
+    ConfigEnvironment {
+        cwd: root.join("workspace"),
+        home_dir: Some(root.join("home")),
+        config_dir: Some(root.join("xdg")),
+        system_config_path: root.join("etc").join("ee").join("config.toml"),
+    }
+}
+
+/// Writes one config layer file inside a test environment.
+#[cfg(test)]
+pub(crate) fn write_config_layer(env: &ConfigEnvironment, kind: ConfigLayerKind, contents: &str) {
+    let path = match kind {
+        ConfigLayerKind::System => env.system_config_path.clone(),
+        ConfigLayerKind::UserXdg => env.xdg_user_config_path().expect("xdg path in test env"),
+        ConfigLayerKind::UserLegacy => {
+            env.legacy_user_config_path().expect("legacy path in test env")
+        }
+        ConfigLayerKind::Ancestor => env.cwd.join(".ee.toml"),
+    };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(path, contents).unwrap();
+}
+
+/// Loads merged settings from an isolated test config environment.
+#[cfg(test)]
+pub(crate) fn load_config_for_test(env: &ConfigEnvironment) -> EditorSettings {
+    load_config_with_env(None, env)
+}
+
 #[cfg(test)]
 thread_local! {
     static TEST_CWD_LOCK_DEPTH: Cell<usize> = const { Cell::new(0) };
@@ -2409,7 +2507,7 @@ tab_width = 4
 "#;
         let raw: EeToml = toml::from_str(toml).unwrap();
         let mut s = EditorSettings::default();
-        s.merge_toml(&raw);
+        s.merge_toml(&raw, ConfigLayerKind::UserXdg);
         assert_eq!(s.indent_style, IndentStyle::Tabs);
         assert_eq!(s.indent_size, 2);
         assert_eq!(s.tab_width, 4);
@@ -2420,7 +2518,7 @@ tab_width = 4
         let toml = r#"trim_trailing_whitespace = true"#;
         let raw: EeToml = toml::from_str(toml).unwrap();
         let mut s = EditorSettings::default();
-        s.merge_toml(&raw);
+        s.merge_toml(&raw, ConfigLayerKind::UserXdg);
         assert_eq!(s.indent_style, IndentStyle::Spaces); // unchanged
         assert!(s.trim_trailing_whitespace);
     }
@@ -2529,15 +2627,6 @@ tab_width = 4
         assert_eq!(overrides.get("translate_tabs_to_spaces").and_then(Value::as_bool), Some(false));
     }
 
-    fn test_env(root: &Path) -> ConfigEnvironment {
-        ConfigEnvironment {
-            cwd: root.join("workspace"),
-            home_dir: Some(root.join("home")),
-            config_dir: Some(root.join("xdg")),
-            system_config_path: root.join("etc").join("ee").join("config.toml"),
-        }
-    }
-
     fn layer_paths(layers: &[ConfigLayer]) -> Vec<PathBuf> {
         layers.iter().map(|layer| layer.path.clone()).collect()
     }
@@ -2545,7 +2634,7 @@ tab_width = 4
     #[test]
     fn xdg_user_config_preferred_over_legacy() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         std::fs::create_dir_all(env.cwd.as_path()).unwrap();
         std::fs::create_dir_all(env.home_dir.as_ref().unwrap()).unwrap();
         std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
@@ -2572,7 +2661,7 @@ tab_width = 4
     #[test]
     fn legacy_user_config_used_when_xdg_missing() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         std::fs::create_dir_all(env.cwd.as_path()).unwrap();
         std::fs::create_dir_all(env.home_dir.as_ref().unwrap()).unwrap();
         std::fs::write(env.home_dir.as_ref().unwrap().join(".ee.toml"), "cursor_line = true\n")
@@ -2637,7 +2726,7 @@ tab_width = 4
     #[test]
     fn ancestor_chain_merges_outer_to_inner() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         let folder = project.join("folder");
         let file = folder.join("main.rs");
@@ -2655,7 +2744,7 @@ tab_width = 4
     #[test]
     fn root_true_in_folder_stops_user_and_system_layers() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         let folder = project.join("folder");
         let file = folder.join("main.rs");
@@ -2684,7 +2773,7 @@ tab_width = 4
     #[test]
     fn root_true_in_project_stops_user_and_system_but_keeps_inner_folder() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         let folder = project.join("folder");
         let file = folder.join("main.rs");
@@ -2712,7 +2801,7 @@ tab_width = 4
     #[test]
     fn root_true_in_user_stops_system_but_keeps_workspace_layers() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         let folder = project.join("folder");
         let file = folder.join("main.rs");
@@ -2740,7 +2829,7 @@ tab_width = 4
     #[test]
     fn lsp_config_merges_system_user_and_project_layers() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         let folder = project.join("folder");
         let file = folder.join("main.rs");
@@ -2777,7 +2866,7 @@ tab_width = 4
     #[test]
     fn lsp_config_replaces_scalars_and_arrays() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         let folder = project.join("folder");
         std::fs::create_dir_all(&folder).unwrap();
@@ -2804,7 +2893,7 @@ tab_width = 4
     #[test]
     fn lsp_config_shallow_merges_env_and_replaces_initialization_options() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         let file = project.join("main.ts");
         std::fs::create_dir_all(&project).unwrap();
@@ -2845,7 +2934,7 @@ tab_width = 4
     #[test]
     fn lsp_config_enabled_false_removes_server() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         let file = project.join("main.ts");
         std::fs::create_dir_all(&project).unwrap();
@@ -2879,7 +2968,7 @@ tab_width = 4
     #[test]
     fn lsp_config_normalizes_extensions_and_rejects_empty_values() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(
@@ -2897,7 +2986,7 @@ tab_width = 4
     #[test]
     fn lsp_config_duplicate_extensions_later_server_wins() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(
@@ -2917,7 +3006,7 @@ tab_width = 4
     #[test]
     fn lsp_config_normalizes_filenames_and_rejects_invalid_values() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(
@@ -2935,7 +3024,7 @@ tab_width = 4
     #[test]
     fn lsp_config_duplicate_filenames_later_server_wins() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(
@@ -2955,7 +3044,7 @@ tab_width = 4
     #[test]
     fn lsp_config_table_includes_disabled_matching_metadata() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(project.join(".ee.toml"), "[lsp.servers.dockerfile]\nenabled = false\n")
@@ -2988,7 +3077,7 @@ tab_width = 4
     #[test]
     fn unified_language_lsp_attachments_allow_extensionless_server_defs() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         let file = project.join("main.ts");
         std::fs::create_dir_all(&project).unwrap();
@@ -3010,7 +3099,7 @@ tab_width = 4
     #[test]
     fn unified_language_lsp_attachments_replace_across_layers() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         let folder = project.join("folder");
         let file = folder.join("main.ts");
@@ -3035,7 +3124,7 @@ tab_width = 4
     #[test]
     fn lsp_config_root_true_stops_project_discovery() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         let folder = project.join("folder");
         let file = folder.join("main.rs");
@@ -3180,7 +3269,7 @@ lsp = ["rust"]
     #[test]
     fn runtime_language_config_uses_same_layer_precedence_as_lsp() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         let folder = project.join("folder");
         let file = folder.join("main.gleam");
@@ -3214,7 +3303,7 @@ lsp = ["rust"]
     #[test]
     fn system_config_is_lowest_priority_external_layer() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         std::fs::create_dir_all(env.cwd.as_path()).unwrap();
         std::fs::create_dir_all(env.system_config_path.parent().unwrap()).unwrap();
         std::fs::write(env.system_config_path.as_path(), "trim_trailing_whitespace = true\n")
@@ -3230,7 +3319,7 @@ lsp = ["rust"]
     #[test]
     fn search_report_marks_legacy_as_fallback_when_xdg_missing() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         std::fs::create_dir_all(env.cwd.as_path()).unwrap();
         std::fs::create_dir_all(env.home_dir.as_ref().unwrap()).unwrap();
         std::fs::write(env.home_dir.as_ref().unwrap().join(".ee.toml"), "cursor_line = true\n")
@@ -3264,7 +3353,7 @@ key = "K"
 "#;
         let raw: EeToml = toml::from_str(toml).unwrap();
         let mut settings = EditorSettings::default();
-        settings.merge_toml(&raw);
+        settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
 
         assert!(!settings.keymap.inherit_defaults);
         assert_eq!(settings.keymap.operations.len(), 2);
@@ -3421,7 +3510,7 @@ description = "find files"
 "#;
         let raw: EeToml = toml::from_str(toml).unwrap();
         let mut settings = EditorSettings::default();
-        settings.merge_toml(&raw);
+        settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
 
         assert_eq!(settings.keymap.sequence_bindings.len(), 1);
         assert_eq!(settings.keymap.sequence_timeout_ms, 250);
@@ -3432,7 +3521,7 @@ description = "find files"
     #[test]
     fn config_scope_paths_use_xdg_for_global_and_cwd_for_local() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
 
         assert_eq!(
             config_path_for_scope_with_env(ConfigScope::Global, &env).unwrap(),
@@ -3447,7 +3536,7 @@ description = "find files"
     #[test]
     fn merged_config_document_shows_effective_merged_values() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
@@ -3472,7 +3561,7 @@ description = "find files"
     fn xi_config_table_uses_configured_auto_and_smart_indent() {
         let raw: EeToml = toml::from_str("auto_indent = false\nsmart_indent = false\n").unwrap();
         let mut settings = EditorSettings::default();
-        settings.merge_toml(&raw);
+        settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
 
         let table = settings.to_xi_config_table();
 
@@ -3483,7 +3572,7 @@ description = "find files"
     #[test]
     fn set_config_value_creates_global_file_and_get_reads_it() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         std::fs::create_dir_all(env.cwd.as_path()).unwrap();
 
         let written =
@@ -3498,7 +3587,7 @@ description = "find files"
     #[test]
     fn set_config_value_writes_local_nested_keys() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         std::fs::create_dir_all(env.cwd.as_path()).unwrap();
 
         let written = set_config_value_with_env(
@@ -3547,16 +3636,219 @@ command = "other-agent"
         assert_eq!(raw.agents.as_ref().unwrap().enabled, Some(true));
 
         let mut settings = EditorSettings::default();
-        settings.merge_toml(&raw);
+        settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
 
         assert!(settings.agents.enabled);
         assert_eq!(settings.agents.default_agent.as_deref(), Some("helper"));
         let helper = settings.agents.servers.get("helper").unwrap();
         assert_eq!(helper.command, "ee-helper");
         assert_eq!(helper.args, vec!["serve"]);
-        assert_eq!(helper.env.get("EE_AGENT_MODE").map(String::as_str), Some("1"));
+        assert_eq!(helper.env.get("EE_AGENT_MODE").map(|v| v.raw.as_str()), Some("1"));
         assert_eq!(helper.cwd.as_deref(), Some(Path::new("/tmp/agent")));
         assert_eq!(settings.agents.servers.len(), 2);
+    }
+
+    // ── Agent env secret references (phase 5) ────────────────────────────────
+
+    const AGENT_REF_TOML: &str = r#"
+[agents]
+enabled = true
+
+[agents.servers.gh]
+command = "agent-bin"
+env = { OPENROUTER_API_KEY = "secret://openrouter-api-key", LANG = "en_US.UTF-8" }
+"#;
+
+    fn load_for(env: &ConfigEnvironment) -> EditorSettings {
+        load_config_with_env(None, env)
+    }
+
+    #[test]
+    fn agent_env_secret_reference_from_xdg_layer_is_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_config_environment(temp.path());
+        std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+        write_config_layer(&env, ConfigLayerKind::UserXdg, AGENT_REF_TOML);
+
+        let settings = load_for(&env);
+        let server = settings.agents.servers.get("gh").expect("server merged");
+        let key = server.env.get("OPENROUTER_API_KEY").expect("env value");
+        assert_eq!(key.raw, "secret://openrouter-api-key", "raw reference preserved");
+        assert_eq!(key.layer, ConfigLayerKind::UserXdg);
+        let literal = server.env.get("LANG").expect("literal");
+        assert_eq!(literal.raw, "en_US.UTF-8");
+        assert_eq!(literal.layer, ConfigLayerKind::UserXdg);
+    }
+
+    #[test]
+    fn agent_env_secret_reference_from_legacy_user_layer_is_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_config_environment(temp.path());
+        std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+        write_config_layer(&env, ConfigLayerKind::UserLegacy, AGENT_REF_TOML);
+
+        let settings = load_for(&env);
+        let key = settings
+            .agents
+            .servers
+            .get("gh")
+            .expect("server merged")
+            .env
+            .get("OPENROUTER_API_KEY")
+            .expect("env value");
+        assert_eq!(key.raw, "secret://openrouter-api-key");
+        assert_eq!(key.layer, ConfigLayerKind::UserLegacy);
+    }
+
+    #[test]
+    fn agent_env_secret_reference_from_system_layer_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_config_environment(temp.path());
+        std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+        write_config_layer(&env, ConfigLayerKind::System, AGENT_REF_TOML);
+
+        let settings = load_for(&env);
+        assert!(
+            !settings.agents.servers.contains_key("gh"),
+            "system-layer secret reference must not merge"
+        );
+    }
+
+    #[test]
+    fn agent_env_secret_reference_from_ancestor_layer_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_config_environment(temp.path());
+        std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+        write_config_layer(&env, ConfigLayerKind::Ancestor, AGENT_REF_TOML);
+
+        let settings = load_for(&env);
+        assert!(
+            !settings.agents.servers.contains_key("gh"),
+            "ancestor-layer secret reference must not merge"
+        );
+    }
+
+    #[test]
+    fn agent_env_project_literal_override_wins_over_global_literal() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_config_environment(temp.path());
+        std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+        write_config_layer(
+            &env,
+            ConfigLayerKind::UserXdg,
+            r#"
+[agents.servers.gh]
+command = "agent-bin"
+env = { OPENROUTER_API_KEY = "global-literal" }
+"#,
+        );
+        write_config_layer(
+            &env,
+            ConfigLayerKind::Ancestor,
+            r#"
+[agents.servers.gh]
+command = "agent-bin"
+env = { OPENROUTER_API_KEY = "project-literal" }
+"#,
+        );
+
+        let settings = load_for(&env);
+        let key = settings
+            .agents
+            .servers
+            .get("gh")
+            .expect("server merged")
+            .env
+            .get("OPENROUTER_API_KEY")
+            .expect("env value");
+        assert_eq!(key.raw, "project-literal", "higher-priority literal replaces global");
+        assert_eq!(key.layer, ConfigLayerKind::Ancestor);
+    }
+
+    #[test]
+    fn rejected_ancestor_reference_keeps_lower_layer_server() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_config_environment(temp.path());
+        std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+        write_config_layer(
+            &env,
+            ConfigLayerKind::UserXdg,
+            r#"
+[agents.servers.gh]
+command = "agent-bin"
+env = { OPENROUTER_API_KEY = "global-literal" }
+"#,
+        );
+        // The ancestor cannot override with, or cause launch of, a reference.
+        write_config_layer(&env, ConfigLayerKind::Ancestor, AGENT_REF_TOML);
+
+        let settings = load_for(&env);
+        let key = settings
+            .agents
+            .servers
+            .get("gh")
+            .expect("lower-layer server survives")
+            .env
+            .get("OPENROUTER_API_KEY")
+            .expect("env value");
+        assert_eq!(key.raw, "global-literal");
+    }
+
+    #[test]
+    fn resolve_agent_server_rejects_malformed_secret_reference_with_field_path() {
+        let server = AgentServerToml {
+            command: Some(String::from("agent-bin")),
+            args: None,
+            env: BTreeMap::from([(
+                String::from("OPENROUTER_API_KEY"),
+                String::from("secret://bad name"),
+            )]),
+            cwd: None,
+        };
+        let err =
+            resolve_agent_server("gh", &server, ConfigLayerKind::UserXdg).expect_err("rejected");
+        assert!(err.contains("agents.servers.gh.env.OPENROUTER_API_KEY"), "field path: {err}");
+        assert!(!err.contains("bad name"), "no raw value echo: {err}");
+    }
+
+    #[test]
+    fn agent_env_secret_reference_substring_stays_literal() {
+        let server = AgentServerToml {
+            command: Some(String::from("agent-bin")),
+            args: None,
+            env: BTreeMap::from([
+                (
+                    String::from("ENDPOINT"),
+                    String::from("https://api.example.com/secret://openrouter-api-key"),
+                ),
+                (String::from("NOTE"), String::from("see secret://docs")),
+            ]),
+            cwd: None,
+        };
+        let resolved =
+            resolve_agent_server("gh", &server, ConfigLayerKind::Ancestor).expect("literals");
+        assert_eq!(
+            resolved.env.get("ENDPOINT").expect("literal").raw,
+            "https://api.example.com/secret://openrouter-api-key"
+        );
+        assert_eq!(resolved.env.get("NOTE").expect("literal").raw, "see secret://docs");
+        // Even from an ancestor layer, substrings are never treated as refs.
+        assert_eq!(resolved.env.get("ENDPOINT").expect("literal").layer, ConfigLayerKind::Ancestor);
+    }
+
+    #[test]
+    fn config_show_preserves_secret_reference_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_config_environment(temp.path());
+        std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+        write_config_layer(&env, ConfigLayerKind::UserXdg, AGENT_REF_TOML);
+
+        let document = toml::to_string_pretty(&resolved_config_with_env(None, &env)).unwrap();
+        assert!(
+            document.contains("secret://openrouter-api-key"),
+            "config show exposes the reference, never the plaintext: {document}"
+        );
+        assert!(!document.contains("sk-live"), "no resolved plaintext in show output");
     }
 
     #[test]
@@ -3575,7 +3867,7 @@ headers = { Authorization = "Bearer token" }
         let raw: EeToml = toml::from_str(toml).unwrap();
 
         let mut settings = EditorSettings::default();
-        settings.merge_toml(&raw);
+        settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
 
         let servers = &settings.mcp.servers;
         match servers.get("filesystem").unwrap() {
@@ -3620,7 +3912,7 @@ headers = { Authorization = "Bearer token" }
     #[test]
     fn project_config_enables_agents_while_defaults_stay_disabled() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         let file = project.join("main.rs");
         std::fs::create_dir_all(&project).unwrap();
@@ -3738,6 +4030,21 @@ headers = { Authorization = "Bearer token" }
         assert!(mcp.get("proxy").is_some());
         let proxy = defs.get("McpProxyToml").unwrap().get("properties").unwrap();
         assert!(proxy.get("enabled").is_some());
+
+        // Agent `env` documentation exposes the `secret://<name>` reference
+        // syntax and its user-global-only resolution boundary (phase 5)
+        // without changing the config shape.
+        let agent_server = defs.get("AgentServerToml").unwrap();
+        let env_schema =
+            agent_server.get("properties").and_then(|p| p.get("env")).expect("env property");
+        let description =
+            env_schema.get("description").and_then(Value::as_str).expect("description");
+        assert!(description.contains("secret://<name>"), "documents reference syntax");
+        assert!(description.contains("user config layer"), "documents user-only boundary");
+        assert!(
+            !env_schema.as_object().unwrap().contains_key("pattern"),
+            "reference syntax does not narrow the config shape"
+        );
     }
 
     #[test]
@@ -3750,7 +4057,7 @@ enabled = true
 "#;
         let raw: EeToml = toml::from_str(toml).unwrap();
         let mut settings = EditorSettings::default();
-        settings.merge_toml(&raw);
+        settings.merge_toml(&raw, ConfigLayerKind::UserXdg);
         assert!(settings.mcp.proxy.enabled);
 
         // Serialize back through the full document shape: the resolved
@@ -3765,7 +4072,7 @@ enabled = true
         let text = toml::to_string(&document).unwrap();
         let roundtrip: EeToml = toml::from_str(&text).unwrap();
         let mut restored = EditorSettings::default();
-        restored.merge_toml(&roundtrip);
+        restored.merge_toml(&roundtrip, ConfigLayerKind::UserXdg);
         assert!(restored.mcp.proxy.enabled);
     }
 
@@ -3783,7 +4090,7 @@ enabled = true
     #[test]
     fn merged_config_document_includes_agents_and_mcp() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         let project = env.cwd.join("project");
         let file = project.join("main.rs");
         std::fs::create_dir_all(&project).unwrap();
@@ -3805,7 +4112,7 @@ enabled = true
     #[test]
     fn merged_config_document_keeps_agents_disabled_without_config() {
         let temp = tempfile::tempdir().unwrap();
-        let env = test_env(temp.path());
+        let env = test_config_environment(temp.path());
         std::fs::create_dir_all(env.cwd.as_path()).unwrap();
 
         let text = toml::to_string_pretty(&resolved_config_with_env(None, &env)).unwrap();
