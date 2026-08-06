@@ -23,7 +23,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -114,6 +114,19 @@ fn sanitized_child_env(request_env: &[EnvVariable]) -> Vec<(String, String)> {
         env.push((variable.name.clone(), variable.value.clone()));
     }
     env
+}
+
+/// Shell command text for an approved terminal request.
+///
+/// The ACP `command` field is agent-authored shell text. Explicit `args` are
+/// appended as shell-quoted literals so an argument cannot alter that command.
+fn terminal_command_line(request: &CreateTerminalRequest) -> String {
+    let mut command = request.command.clone();
+    for arg in &request.args {
+        command.push(' ');
+        command.push_str(&crate::terminal::shell_quote(arg));
+    }
+    command
 }
 
 // ── Bounded output ring buffer ───────────────────────────────────────────────
@@ -249,11 +262,10 @@ impl AgentTerminals {
             .unwrap_or(BRIDGE_TERMINAL_OUTPUT_CAP);
         let terminal_id = self.allocate_terminal_id();
 
-        let mut command = Command::new(&request.command);
-        command.args(&request.args).envs(sanitized_child_env(&request.env));
-        if let Some(cwd) = &request.cwd {
-            command.current_dir(cwd);
-        }
+        let cwd = request.cwd.as_deref().unwrap_or_else(|| Path::new("."));
+        let command_line = terminal_command_line(request);
+        let mut command = crate::terminal::shell_command(&command_line, cwd);
+        command.envs(sanitized_child_env(&request.env));
         command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = command
             .spawn()
@@ -3734,6 +3746,14 @@ mod tests {
         assert!(output.truncated());
         assert_eq!(output.as_string(), "ello world");
         assert_eq!(output.total(), 11);
+    }
+
+    #[test]
+    fn terminal_command_line_preserves_shell_command_and_quotes_explicit_args() {
+        let mut request = CreateTerminalRequest::new(SessionId::new("s1"), "ls -la");
+        request.args = vec![String::from("path with spaces"), String::from("$(not-expanded)")];
+
+        assert_eq!(terminal_command_line(&request), "ls -la 'path with spaces' '$(not-expanded)'");
     }
 
     #[test]

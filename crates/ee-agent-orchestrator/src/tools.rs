@@ -504,10 +504,13 @@ impl ClientBridgeTool {
                     request = request.cwd(PathBuf::from(cwd));
                 }
                 match client.create_terminal(request).await {
-                    Ok(response) => ToolResult::success_structured(
-                        "terminal created",
-                        serde_json::json!({ "terminalId": response.terminal_id.0.as_ref() }),
-                    ),
+                    Ok(response) => {
+                        let terminal_id = response.terminal_id.0.as_ref();
+                        ToolResult::success_structured(
+                            format!("terminal created: {terminal_id}"),
+                            serde_json::json!({ "terminal_id": terminal_id }),
+                        )
+                    }
                     Err(error) => bridge_error(error),
                 }
             }

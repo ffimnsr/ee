@@ -642,11 +642,7 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
 
 #[cfg(feature = "agents")]
 fn render_plan_modal(frame: &mut ratatui::Frame<'_>, area: Rect, entries: &[(String, char)]) {
-    let width = area.width.saturating_sub(4).clamp(24, 72);
-    let height = (entries.len() as u16 + 4).min(area.height.saturating_sub(2)).max(5);
-    let x = area.x + area.width.saturating_sub(width) / 2;
-    let y = area.y + area.height.saturating_sub(height) / 3;
-    let modal = Rect { x, y, width, height };
+    let modal = plan_modal_rect(area, entries.len());
     frame.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
@@ -681,6 +677,15 @@ fn render_plan_modal(frame: &mut ratatui::Frame<'_>, area: Rect, entries: &[(Str
         }
     }
     frame.render_widget(Paragraph::new(lines), inner);
+}
+
+#[cfg(feature = "agents")]
+fn plan_modal_rect(area: Rect, entry_count: usize) -> Rect {
+    let width = area.width.saturating_sub(4).clamp(24, 72);
+    let height = (entry_count as u16 + 4).min(area.height.saturating_sub(2)).max(5);
+    let x = area.x + area.width.saturating_sub(width).saturating_sub(2);
+    let y = area.y + area.height.saturating_sub(height) / 3;
+    Rect { x, y, width, height }
 }
 
 /// Builds the composer line: permission choice, elicitation widget, or the
@@ -2827,6 +2832,16 @@ mod tests {
         );
 
         assert_eq!(pos, Position::new(9, 2));
+    }
+
+    #[cfg(feature = "agents")]
+    #[test]
+    fn plan_modal_floats_at_right_edge() {
+        let area = Rect { x: 10, y: 4, width: 120, height: 40 };
+
+        let modal = plan_modal_rect(area, 2);
+
+        assert_eq!(modal, Rect { x: 56, y: 15, width: 72, height: 6 });
     }
 
     #[test]

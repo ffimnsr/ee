@@ -131,16 +131,24 @@ impl PendingRequests {
 
 /// Maps a client's JSON-RPC error onto the provider-visible error: permission
 /// denials and cancellations keep their meaning; everything else is a
-/// client-request failure carrying the client's message and code.
+/// client-request failure carrying the client's message, safe reason, and code.
 fn client_error_to_provider(error: RpcError) -> ProviderError {
-    match i32::from(error.code) {
-        CODE_PERMISSION_DENIED => ProviderError::PermissionDenied(error.message),
+    let code = i32::from(error.code);
+    let reason = error
+        .data
+        .as_ref()
+        .and_then(|data| data.get("reason"))
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.is_empty());
+    let message = match reason {
+        Some(reason) if reason != error.message => format!("{}: {reason}", error.message),
+        _ => error.message,
+    };
+
+    match code {
+        CODE_PERMISSION_DENIED => ProviderError::PermissionDenied(message),
         CODE_REQUEST_CANCELLED => ProviderError::Cancellation,
-        _ => ProviderError::ClientRequestFailure(format!(
-            "{} (jsonrpc code {})",
-            error.message,
-            i32::from(error.code)
-        )),
+        _ => ProviderError::ClientRequestFailure(format!("{message} (jsonrpc code {code})")),
     }
 }
 
@@ -758,7 +766,7 @@ mod tests {
 
         let error = task.await.expect("task joins").expect_err("fails closed");
         assert!(
-            matches!(error, ProviderError::ClientRequestFailure(ref reason) if reason.contains("Invalid params")),
+            matches!(error, ProviderError::ClientRequestFailure(ref reason) if reason.contains("Invalid params: unknown MCP server id")),
             "{error:?}"
         );
     }

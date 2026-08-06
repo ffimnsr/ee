@@ -218,7 +218,7 @@ fn join_command(base: &str, raw: &str) -> String {
     if raw.is_empty() { base.to_owned() } else { format!("{base} {raw}") }
 }
 
-fn shell_command(command: &str, cwd: &Path) -> Command {
+pub(crate) fn shell_command(command: &str, cwd: &Path) -> Command {
     #[cfg(windows)]
     let mut child = {
         let mut command_builder = Command::new("cmd");
