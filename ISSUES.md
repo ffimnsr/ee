@@ -2769,3 +2769,289 @@ Rules:
 - [ ] Tests prove `/compact` reaches providers as normal prompt text and no `ee-cli` compaction special case exists.
 - [ ] Tests prove compaction cannot remove protected decisions, constraints, or validation memory.
 - [ ] Tests prove compaction requests are bounded and network-free under test.
+
+## Host-Bound Encrypted Secrets Store
+
+### Phase 1: Secret-store contract and dependency boundary
+
+Goal: establish a testable, frontend-local secrets API without adding editor-backend dependencies or exposing plaintext through configuration models.
+
+Overview: add a private `secrets` module to `ee-cli`, keep its public surface limited to typed names, opaque references, and store operations, and inject host/keychain dependencies behind traits so all tests run without real platform secrets or machine identity.
+
+Rules:
+
+- Keep all secret-store code in `crates/ee-cli`; `xi-core-lib` remains config- and frontend-agnostic.
+- Use a random 256-bit vault key stored in OS secure storage; never derive encryption material from a host fingerprint alone.
+- Treat host fingerprint only as authenticated binding data; it is not a cryptographic secret.
+- Never accept a secret value as positional CLI argument, config plaintext expansion, log field, debug output, or error interpolation.
+- Use exact `secret://<name>` references only; do not support interpolation, concatenation, environment expansion, or recursive references.
+- Make tests deterministic and network-free through fake keychain, fingerprint, filesystem, and terminal-input implementations.
+
+#### Work items
+
+- [ ] Add private `mod secrets;` wiring in `crates/ee-cli/src/main.rs` and create `crates/ee-cli/src/secrets.rs`.
+  - [ ] Define `SecretName`, `SecretReference`, `SecretStore`, `SecretStoreError`, `HostBinding`, and `Keychain` types/traits in that module.
+  - [ ] Keep plaintext-bearing methods crate-private and expose secret values only as `Zeroizing<String>` or equivalent zeroizing buffers.
+  - [ ] Add unit tests proving invalid names fail before any keychain or filesystem operation.
+- [ ] Define one canonical secret-name grammar.
+  - [ ] Accept ASCII letters, ASCII digits, `.`, `_`, and `-`.
+  - [ ] Require first character to be an ASCII letter or digit.
+  - [ ] Enforce a 128-byte maximum name length.
+  - [ ] Reject empty names, whitespace, `/`, `\\`, `:`, control characters, `..`, and names outside the grammar.
+  - [ ] Add table-driven tests for accepted and rejected boundary cases.
+- [ ] Define exact `secret://<name>` parsing and rendering.
+  - [ ] Require scheme lowercase `secret` and exactly one non-empty path segment.
+  - [ ] Reject authority components, query strings, fragments, percent-decoding, leading/trailing whitespace, and embedded secret URIs.
+  - [ ] Render accepted references in canonical `secret://<name>` form.
+  - [ ] Add parser/renderer round-trip and malformed-reference tests.
+- [ ] Add workspace dependency declarations required by implementation.
+  - [ ] Add `chacha20poly1305`, `keyring`, `sha2`, and `zeroize` with versions/features compatible with Rust 1.95.
+  - [ ] Add a terminal secret-input dependency only if `crossterm` cannot provide hidden input safely on every supported platform.
+  - [ ] Add a compile-backed unit test target that constructs the module with test doubles and proves no platform keychain backend is contacted.
+
+#### Acceptance criteria
+
+- [ ] `cargo test --quiet -p ee-cli secrets::` passes.
+- [ ] Tests prove invalid secret names and malformed references cause zero keychain and filesystem calls.
+- [ ] Tests prove parsed secret references round-trip to one canonical string form.
+- [ ] `cargo clippy -p ee-cli --all-targets --all-features -- -D warnings` passes with new dependencies.
+
+### Phase 2: Host binding and OS-secure vault-key lifecycle
+
+Goal: bind every vault cryptographically to current host while retaining a non-derivable random encryption key protected by current OS user account.
+
+Overview: derive a versioned SHA-256 host-binding digest from one stable platform machine identifier, load or create a random 32-byte vault key through OS keychain, and fail closed for unavailable keychain, unavailable host identity, or mismatch.
+
+Rules:
+
+- On macOS use platform UUID; on Linux use `/etc/machine-id`; on Windows use `MachineGuid`.
+- Hash canonical binding bytes with domain separation before writing them to disk or using them as associated data.
+- Store only host-binding digest and format version in vault metadata; never store raw machine identifiers.
+- Use one random vault key per current OS-user plus secrets-store namespace, never a deterministic key.
+- Do not add recovery, export, fingerprint override, or host-migration bypass paths in this feature.
+- Map unavailable secure-store or host-binding sources to explicit safe errors without including credential material or raw host IDs.
+
+#### Work items
+
+- [ ] Implement `HostBinding::current()` with platform-specific identifier readers and a common digest function.
+  - [ ] Prefix digest input with fixed domain separator `ee-secrets-host-binding-v1`.
+  - [ ] Trim only platform file line endings before hashing; preserve all other identifier bytes.
+  - [ ] Return a typed unavailable error when platform identity cannot be read or is empty.
+  - [ ] Add fake-source tests proving equal canonical identifiers yield equal digests and distinct identifiers yield distinct digests.
+- [ ] Implement a keychain adapter using service name `ee-secrets-v1` and one deterministic account name per current user-store namespace.
+  - [ ] Encode exactly 32 random bytes as stable text for keychain persistence.
+  - [ ] Validate decoded key length before use and classify malformed keychain content as corruption.
+  - [ ] Generate with OS CSPRNG only when keychain lookup reports absent.
+  - [ ] Persist newly generated key before returning it to caller.
+  - [ ] Add fake-keychain tests for load, create-once, malformed key, read failure, and write failure paths.
+- [ ] Bind vault-key use to host digest without leaking either input.
+  - [ ] Require both loaded vault key and current host digest before encrypt/decrypt operations.
+  - [ ] Return `HostBindingMismatch` only after authenticated verification fails against vault metadata.
+  - [ ] Ensure mismatch errors contain vault version and safe remediation text but no fingerprint digest, key, ciphertext, or plaintext.
+  - [ ] Add tests proving a copied vault plus different host digest cannot be opened even when same fake keychain key is present.
+
+#### Acceptance criteria
+
+- [ ] `cargo test --quiet -p ee-cli secrets::host_binding` passes.
+- [ ] `cargo test --quiet -p ee-cli secrets::keychain` passes.
+- [ ] Tests prove key generation occurs exactly once for a missing key and never for an existing valid key.
+- [ ] Tests prove different host bindings fail closed without exposing either identifier or key bytes in error strings.
+
+### Phase 3: Authenticated encrypted vault format and durable persistence
+
+Goal: store named secrets in versioned, authenticated ciphertext with restrictive permissions and crash-safe replacement semantics.
+
+Overview: persist a single XChaCha20-Poly1305 encrypted vault under user data directory, bind each record to vault version, host digest, and canonical secret name through associated data, and replace the file atomically.
+
+Rules:
+
+- Use XChaCha20-Poly1305 with a fresh 24-byte nonce for every record write.
+- Store ciphertext, nonce, version, and host-binding digest only; never plaintext, encryption key, or raw host identifier.
+- Include record name, vault format version, and host-binding digest in AEAD associated data.
+- Reject unknown future vault versions, duplicate names, malformed base64, invalid nonce lengths, and trailing/unrecognized record fields.
+- Place vault at `dirs::data_dir()/ee/secrets/v1.json`; create parent directories with mode `0700` and vault file mode `0600` on Unix.
+- Write through a same-directory temporary file, flush file and parent directory where platform supports it, then atomically rename.
+
+#### Work items
+
+- [ ] Define strict version-1 vault serialization types.
+  - [ ] Include `version`, `host_binding_digest`, and sorted secret-record collection.
+  - [ ] Include per-record canonical name, nonce, and ciphertext fields.
+  - [ ] Derive only serialization traits required for storage; do not derive `Debug` for types holding plaintext or vault keys.
+  - [ ] Add deserialize tests rejecting unknown fields, duplicate names, future versions, malformed encoded values, and invalid nonce/key sizes.
+- [ ] Implement AEAD encrypt/decrypt functions.
+  - [ ] Generate a new random nonce for each `set` call, including replacement of same name.
+  - [ ] Construct canonical associated-data bytes from version, host digest, and exact canonical name.
+  - [ ] Zeroize temporary plaintext and key copies after each operation.
+  - [ ] Map authentication failure to corruption/mismatch error without revealing whether record existed before verification.
+  - [ ] Add round-trip, nonce-uniqueness, swapped-name, modified-ciphertext, modified-nonce, and modified-host-digest tests.
+- [ ] Implement private data-path resolution and file permission enforcement.
+  - [ ] Resolve only through `dirs::data_dir()` and append `ee/secrets/v1.json`.
+  - [ ] Return a typed error when data directory cannot be resolved.
+  - [ ] Create missing parent directories before first write.
+  - [ ] On Unix, explicitly set parent mode `0700` and file mode `0600` after creation and replacement.
+  - [ ] Add temp-directory tests for path construction, first-write directory creation, and Unix modes under `#[cfg(unix)]`.
+- [ ] Implement atomic vault read-modify-write operations.
+  - [ ] Read and validate full existing vault before mutating any record.
+  - [ ] Sort records by canonical name before serialization for deterministic list output and stable diffs.
+  - [ ] Write complete serialized content to a unique temp file in vault directory.
+  - [ ] Flush temp content, rename only after successful write, and remove failed temp files best-effort.
+  - [ ] Add failure-injection tests proving an interrupted write preserves old readable vault and does not leave a valid partial replacement.
+- [ ] Implement `set`, `get`, `list`, and `delete` store operations.
+  - [ ] Make `set` replace only exact canonical name and retain unrelated records byte-semantically after reserialization.
+  - [ ] Make `get` return `NotFound` for missing name without creating vault/keychain entries.
+  - [ ] Make `list` decrypt no record plaintext and return sorted names only.
+  - [ ] Make `delete` remove only exact name and return `NotFound` without rewriting when absent.
+  - [ ] Add operation tests with multiple records, replacements, absent names, and corruption before mutation.
+
+#### Acceptance criteria
+
+- [ ] `cargo test --quiet -p ee-cli secrets::vault` passes.
+- [ ] Tests prove stored vault JSON contains neither plaintext values nor raw host identifiers.
+- [ ] Tests prove tampering with ciphertext, nonce, record name, or host digest prevents decryption.
+- [ ] Tests prove failed writes retain prior decryptable data and Unix vault permissions are owner-only.
+
+### Phase 4: `ee do secrets` command interface
+
+Goal: provide a safe, scriptable command interface that creates, reads, lists, deletes, and diagnoses encrypted secrets without leaking values through normal terminal use.
+
+Overview: add a `Secrets` branch under existing `DoCommands`, route every subcommand through `SecretStore`, require hidden terminal entry by default, and reserve explicit `--stdin`/`--force` paths for automated workflows.
+
+Rules:
+
+- Keep command surface under `ee do secrets`; do not add top-level commands.
+- Read interactive values with terminal echo disabled; never use command-line value arguments.
+- Permit `--stdin` only as explicit opt-in and cap input at 64 KiB.
+- Emit raw secret from `get` only to non-terminal stdout unless caller passes `--force`.
+- Write diagnostics/errors to stderr and never include secret values, ciphertext, keys, host digest, or raw machine ID.
+- `list` returns names only; `status` returns only safe state/path/count information.
+
+#### Work items
+
+- [ ] Add `DoCommands::Secrets` and typed `SecretsCommands` definitions in `crates/ee-cli/src/main.rs`.
+  - [ ] Add `set <name> [--stdin]`, `get <name> [--force]`, `list`, `delete <name>`, and `status` subcommands.
+  - [ ] Mark secret values absent from clap positional/option definitions.
+  - [ ] Add parser tests covering every command, all flags, and invalid flag combinations.
+- [ ] Implement safe secret input for `set`.
+  - [ ] Read hidden input from controlling terminal when `--stdin` is absent.
+  - [ ] Read at most 64 KiB from standard input when `--stdin` is present.
+  - [ ] Remove exactly one final line ending from stdin input and preserve all other bytes.
+  - [ ] Reject empty input after required final-line-ending normalization.
+  - [ ] Add fake-input tests for hidden-terminal selection, stdin selection, oversize rejection, newline handling, and empty value rejection.
+- [ ] Implement command dispatch and output behavior.
+  - [ ] Route `set`, `get`, `list`, `delete`, and `status` through one store-construction path.
+  - [ ] Print only acknowledgement/name for `set` and `delete`.
+  - [ ] Print sorted names one per line for `list`.
+  - [ ] Refuse `get` when stdout is a terminal and `--force` is absent.
+  - [ ] Print exact raw value plus one newline only when `get` is permitted.
+  - [ ] Add captured-stdio tests for stdout/stderr separation and safe error messages.
+- [ ] Implement safe status reporting and exit classification.
+  - [ ] Report vault path, vault presence, record count when readable, keychain availability, and host-binding verification state.
+  - [ ] Distinguish not found, user-input error, unavailable keychain, unavailable host binding, corrupted vault, host mismatch, and I/O failure with stable non-zero exits.
+  - [ ] Add tests asserting each class has deterministic exit status and excludes seeded secret text from output.
+
+#### Acceptance criteria
+
+- [ ] `cargo test --quiet -p ee-cli cli_utility_commands_live_under_do` passes.
+- [ ] `cargo test --quiet -p ee-cli secrets_command` passes.
+- [ ] Tests prove `set` cannot receive a secret through CLI argument parsing.
+- [ ] Tests prove terminal `get` fails without `--force`, while piped `get` emits only raw value on stdout.
+- [ ] Tests prove all command errors redact seeded secret values.
+
+### Phase 5: Trusted global config references and agent launch resolution
+
+Goal: allow user-global agent configuration to supply a stored API key at launch while preventing workspace configuration from selecting or exfiltrating host secrets.
+
+Overview: preserve config-layer provenance for agent environment values, retain `secret://` text in config inspection output, resolve approved references only immediately before ACP agent process construction, and feed resolved values into existing redaction collection.
+
+Rules:
+
+- Resolve secret references only in user XDG config or legacy user config fallback; reject them from system and ancestor workspace config layers.
+- Keep project `.ee.toml` able to configure non-secret agent settings but unable to reference globally stored secrets.
+- Preserve `secret://<name>` in `ee do config show` and `ee do config get`; never resolve references during display, schema generation, parsing, or validation-only paths.
+- Resolve approved references only at agent process launch, after final config merge and before `AgentProcessConfig` creation.
+- Abort whole target agent launch if any required referenced secret is missing, unreadable, host-mismatched, or corrupt.
+- Initial integration scope is `[agents.servers.<id>.env]`; do not resolve MCP environment values or HTTP headers in this phase.
+
+#### Work items
+
+- [ ] Add typed agent-environment value representation that preserves literal versus secret-reference origin.
+  - [ ] Replace raw merge-only representation with an internal value carrying source `ConfigLayerKind` and raw text/reference state.
+  - [ ] Preserve existing shallow merge behavior for ordinary literal environment values.
+  - [ ] Ensure higher-priority non-secret values replace lower-priority values exactly as before.
+  - [ ] Add merge tests for global literal, global secret reference, project literal override, and project secret-reference rejection.
+- [ ] Validate secret references against config provenance during layer merge.
+  - [ ] Parse exact secret URI values using shared `SecretReference` parser.
+  - [ ] Reject malformed `secret://` values in agent env with field path and safe reference text.
+  - [ ] Reject otherwise valid references from system or ancestor layers with field path and source-layer label.
+  - [ ] Leave normal strings containing `secret://` as literals unless entire value matches reference grammar.
+  - [ ] Add config-file tests for global accept, legacy-user accept, system reject, ancestor reject, malformed reject, and literal preservation.
+- [ ] Resolve agent secret references immediately before host configuration assembly.
+  - [ ] Add resolver accepting final `AgentServerSettings` typed values and `SecretStore` dependency.
+  - [ ] Return `BTreeMap<String, String>` only after all required references resolve successfully.
+  - [ ] Resolve into zeroizing temporary buffers and clone only final process-env values required by child spawn API.
+  - [ ] Fail target agent host initialization before spawning a child when any reference resolution fails.
+  - [ ] Add fake-agent-host and fake-secret-store tests proving resolved `OPENROUTER_API_KEY` reaches `AgentProcessConfig.env`.
+- [ ] Preserve redaction coverage for resolved environment values.
+  - [ ] Ensure `App::agents_secret_values()` receives resolved secret-like agent env values after launch configuration is constructed.
+  - [ ] Ensure error/status/stderr paths pass resolved values to existing `ee_agent_host::redact::redact_secret_values` logic.
+  - [ ] Add agent pane tests proving seeded resolved API key is replaced with `***` in stderr and never appears in diagnostics.
+- [ ] Update schema generation source metadata for agent environment secret references.
+  - [ ] Add schema description explaining exact `secret://<name>` syntax and user-global-only resolution boundary.
+  - [ ] Regenerate `schemas/ee-config.schema.json` through existing schema generator.
+  - [ ] Add schema test asserting agent `env` documentation exposes supported reference syntax without declaring new config shape.
+
+#### Acceptance criteria
+
+- [ ] `cargo test --quiet -p ee-cli config_schema_includes_agents_and_mcp_fields` passes.
+- [ ] `cargo test --quiet -p ee-cli configured_secret_values_are_collected_for_redaction` passes.
+- [ ] `cargo test --quiet -p ee-cli secret_reference` passes.
+- [ ] Tests prove global `OPENROUTER_API_KEY = "secret://openrouter-api-key"` resolves only at agent launch.
+- [ ] Tests prove ancestor workspace configs cannot resolve, override with, or cause launch of secret references.
+- [ ] Tests prove `config show` and `config get` expose URI reference only, never seeded secret plaintext.
+
+### Phase 6: End-to-end regression coverage and repository validation
+
+Goal: lock behavior across CLI, vault, config merging, and agent launch so future refactors cannot weaken confidentiality, host binding, or workspace trust boundaries.
+
+Overview: assemble end-to-end test fixtures from fake host/keychain/input/process layers, exercise OpenRouter API-key configuration through agent launch preparation, and run repository formatting, lint, schema, and package tests.
+
+Rules:
+
+- End-to-end tests must use fakes only; never access developer keychain, machine ID, network, or real OpenRouter endpoint.
+- Seed tests with recognizable secret values and assert none appear in captured stdout, stderr, diagnostics, serialized config, or vault metadata.
+- Test host mismatch and unavailable secure storage as normal expected failure modes.
+- Keep existing plaintext environment configuration behavior unchanged.
+- Do not add documentation-only, manual test, migration, export, or recovery tasks to this phase.
+
+#### Work items
+
+- [ ] Add an end-to-end encrypted-secret-to-agent-env fixture.
+  - [ ] Create secret through fake CLI input and fake keychain/host binding.
+  - [ ] Configure global agent env with `OPENROUTER_API_KEY = "secret://openrouter-api-key"`.
+  - [ ] Build lazy agent host configuration without spawning a real process.
+  - [ ] Assert final agent env contains seeded plaintext only within fake process configuration.
+  - [ ] Assert captured config output, status output, agent stderr, and vault JSON omit seeded plaintext.
+- [ ] Add negative end-to-end fixtures.
+  - [ ] Assert missing referenced secret prevents fake process creation.
+  - [ ] Assert copied vault under different fake host binding prevents fake process creation.
+  - [ ] Assert unavailable keychain prevents fake process creation.
+  - [ ] Assert malformed/corrupt vault prevents fake process creation.
+  - [ ] Assert project config reference rejection prevents fake process creation while project literal env remains supported.
+- [ ] Add regression tests for legacy config behavior.
+  - [ ] Assert a literal `OPENROUTER_API_KEY` value remains accepted and reaches launch configuration unchanged.
+  - [ ] Assert an agent without any secret references launches through existing configuration path.
+  - [ ] Assert existing agent secret redaction tests retain behavior for literal secret-like env values.
+- [ ] Run generated-schema and package validation coverage.
+  - [ ] Add test asserting checked-in schema matches generated schema after reference documentation update.
+  - [ ] Add targeted test commands to existing CI-compatible package test set where command tests are organized.
+
+#### Acceptance criteria
+
+- [ ] `cargo fmt --check` passes.
+- [ ] `cargo clippy -p ee-cli --all-targets --all-features -- -D warnings` passes.
+- [ ] `cargo test --quiet -p ee-cli` passes.
+- [ ] `cargo test --quiet -p ee-agent-host` passes.
+- [ ] `cargo run --quiet -p ee-cli -- do schema check` passes.
+- [ ] End-to-end tests prove a global OpenRouter secret reference reaches agent launch configuration but never any captured user-visible output.
+- [ ] End-to-end tests prove keychain failure, host mismatch, vault corruption, missing secret, and workspace reference each fail before child process creation.

@@ -204,7 +204,7 @@ url = "https://example.com/mcp"
 timeout_ms = 5000
 ```
 
-Agents ex commands are lowercase snake_case only: `:agents`, `:agents_close`, `:agents_stop`, `:agents_new`, and `:agents_clear`. CamelCase aliases are rejected.
+Agents ex commands are lowercase snake_case only: `:agents`, `:agents_close`, `:agents_stop`, `:agents_new`, and `:agents_clear`. CamelCase aliases are rejected. In focused Agents composer, exact `/new` starts and focuses a fresh chat thread; exact `/quit` closes pane while keeping its sessions running. Slash commands with arguments remain normal agent prompts.
 
 Routing now resolves runtime language id first, then maps `[languages.<id>].lsp` attachments to candidate servers. Exact `filenames` matches such as `Dockerfile`, `Containerfile`, `Justfile`, or `CMakeLists.txt` win before extension fallback. Legacy extension matching remains as fallback when a language has no explicit `lsp` attachment list. Multiple attached servers are allowed. First attached server is primary for interactive pull-style features such as completion, hover, go-to-definition, references, symbols, formatting, and rename. All attached servers still receive document lifecycle sync and can publish diagnostics. Missing executables, disabled attached servers, and workspace-root-only servers opened outside a matching root fail closed with status items instead of blocking editing.
 

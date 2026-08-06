@@ -1905,6 +1905,11 @@ fn is_agents_quit_slash_command(draft: &str) -> bool {
     matches!(name.as_deref(), Some("q" | "quit")) && rest.trim().is_empty()
 }
 
+fn is_agents_new_slash_command(draft: &str) -> bool {
+    let (name, rest) = split_slash_command(draft);
+    matches!(name.as_deref(), Some("new")) && rest.trim().is_empty()
+}
+
 /// Deterministic display-width wrapping used by the transcript renderer.
 ///
 /// Breaks at whitespace when possible and hard-breaks overlong words; the
@@ -2120,6 +2125,10 @@ impl App {
     pub(super) fn agents_new_session(&mut self) {
         if !self.config.agents.enabled {
             self.backend.status_message = Some(self.agents_status_message());
+            return;
+        }
+        if self.agents.pending_session.is_some() {
+            self.backend.status_message = Some(String::from("agent session is already starting"));
             return;
         }
         if self.agents.layout == AgentPaneLayout::Closed {
@@ -2574,6 +2583,11 @@ impl App {
         if is_agents_quit_slash_command(&draft) {
             self.agents.threads[active].draft.clear();
             self.close_agents_pane();
+            return;
+        }
+        if is_agents_new_slash_command(&draft) {
+            self.agents.threads[active].draft.clear();
+            self.agents_new_session();
             return;
         }
         let thread = &mut self.agents.threads[active];

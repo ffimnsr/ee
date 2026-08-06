@@ -1403,6 +1403,68 @@ fn quit_slash_command_closes_agents_pane_locally() {
 }
 
 #[test]
+fn new_slash_command_starts_and_focuses_thread_locally() {
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s2" }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "/new");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    wait_until(&mut app, "new slash-command thread ready", |app| {
+        app.agents.threads.len() == 2 && app.agents.threads[1].state == ThreadUiState::Ready
+    });
+    assert_eq!(app.agents.active_thread, Some(1));
+    assert!(app.agents.threads[0].draft.is_empty());
+    assert!(app.agents.threads[1].draft.is_empty());
+    assert_eq!(fake.agent().requests_by_method("session/new").len(), 2);
+    assert!(fake.agent().requests_by_method("session/prompt").is_empty());
+}
+
+#[test]
+fn new_slash_command_with_arguments_is_sent_to_agent() {
+    let script =
+        base_script().wait_for("session/prompt").respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "/new project context");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    wait_until(&mut app, "slash prompt sent", |_| {
+        fake.agent().requests_by_method("session/prompt").len() == 1
+    });
+    let prompt = &fake.agent().requests_by_method("session/prompt")[0];
+    assert_eq!(prompt["params"]["prompt"][0]["text"], "/new project context");
+    assert_eq!(fake.agent().requests_by_method("session/new").len(), 1);
+}
+
+#[test]
+fn new_slash_command_rejects_second_request_while_session_starts() {
+    let script = base_script().wait_for("session/new");
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "/new");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "new session request pending", |_| {
+        fake.agent().requests_by_method("session/new").len() == 2
+    });
+
+    type_text(&mut app, "/new");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    assert_eq!(app.backend.status_message.as_deref(), Some("agent session is already starting"));
+    assert_eq!(fake.agent().requests_by_method("session/new").len(), 2);
+}
+
+#[test]
 fn agents_clear_wipes_scrollback_only_when_idle() {
     let script = base_script().wait_for("session/prompt");
     let (mut app, _temp, _fake) = fake_agents_app(script);
