@@ -11,10 +11,11 @@
 //! the process environment.  `OPENROUTER_API_KEY` is used only for the
 //! Authorization header and is never logged.
 //!
-//! `OPENROUTER_ORCHESTRATED=1` switches the binary into orchestrated mode:
-//! [`orchestrated::OpenRouterModelAdapter`] feeds OpenRouter into
-//! `ee-agent-orchestrator`'s bounded model–tool loop instead of the simple
-//! provider mode.
+//! Orchestrated mode is the default: [`orchestrated::OpenRouterModelAdapter`]
+//! feeds OpenRouter into `ee-agent-orchestrator`'s bounded model–tool loop
+//! instead of the simple provider mode. `OPENROUTER_ORCHESTRATED=0` is a
+//! temporary fallback for diagnostics; ee MCP proxy tool availability depends
+//! on the Phase 12 MCP bridge work.
 
 pub mod config;
 pub mod dotenv;

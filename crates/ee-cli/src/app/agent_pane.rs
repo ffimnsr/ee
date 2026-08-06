@@ -101,8 +101,6 @@ pub(crate) enum TranscriptItem {
     },
     /// IRC-style tool notice (`* title [status]`).
     ToolCall { id: String, title: String, status: String, detail: String, at: SystemTime },
-    /// Plan block (replaced wholesale by `plan` updates).
-    Plan { entries: Vec<(String, char)>, at: SystemTime },
     /// A permission request shown in the transcript.
     Permission { title: String, options: Vec<String>, at: SystemTime },
     /// An elicitation request shown in the transcript.
@@ -162,6 +160,10 @@ pub(crate) struct AgentThreadUi {
     pub(crate) usage: Option<String>,
     /// Stop reason of the last completed turn.
     pub(crate) stop_reason: Option<String>,
+    /// Latest agent plan snapshot, rendered in a modal instead of scrollback.
+    pub(crate) current_plan: Vec<(String, char)>,
+    /// Whether the current plan modal is visible.
+    pub(crate) plan_modal_open: bool,
     /// Last turn error, when any.
     pub(crate) last_error: Option<String>,
     /// Slash commands currently advertised by the agent.
@@ -215,14 +217,7 @@ impl AgentThreadUi {
     /// Plan markers in transcript order (`content`, `marker`).
     #[allow(dead_code)]
     pub(crate) fn plan_entries(&self) -> Vec<(String, char)> {
-        self.transcript
-            .iter()
-            .filter_map(|item| match item {
-                TranscriptItem::Plan { entries, .. } => Some(entries.clone()),
-                _ => None,
-            })
-            .flatten()
-            .collect()
+        self.current_plan.clone()
     }
 
     /// Slash command names currently advertised by the agent.
@@ -319,19 +314,10 @@ impl AgentThreadUi {
         self.trim_transcript();
     }
 
-    /// Replaces the plan block wholesale (ACP plans are complete snapshots).
+    /// Replaces the plan snapshot wholesale (ACP plans are complete snapshots).
     fn replace_plan(&mut self, entries: Vec<(String, char)>) {
-        let target = self
-            .transcript
-            .iter_mut()
-            .rev()
-            .find(|item| matches!(item, TranscriptItem::Plan { .. }));
-        if let Some(item) = target {
-            *item = TranscriptItem::Plan { entries, at: SystemTime::now() };
-            return;
-        }
-        self.transcript.push(TranscriptItem::Plan { entries, at: SystemTime::now() });
-        self.trim_transcript();
+        self.current_plan = entries;
+        self.plan_modal_open = !self.current_plan.is_empty();
     }
 
     /// Appends a system notice.
@@ -499,8 +485,8 @@ impl ElicitationPrompt {
                 break;
             }
             let field = ElicitationFieldUi::from_property(name, property, &required);
-            if field.unsupported.is_some() {
-                unsupported.push(field.label());
+            if let Some(reason) = &field.unsupported {
+                unsupported.push(format!("unsupported field {}: {reason}", field.label()));
             }
             fields.push(field);
         }
@@ -1549,6 +1535,8 @@ impl App {
             stick_to_bottom: true,
             usage: None,
             stop_reason: None,
+            current_plan: Vec::new(),
+            plan_modal_open: false,
             last_error: None,
             available_commands: snapshot.available_commands,
             session_title,
@@ -1910,6 +1898,11 @@ fn split_slash_command(draft: &str) -> (Option<String>, String) {
     let name = parts.next().filter(|part| !part.is_empty()).map(str::to_string);
     let rest = parts.next().unwrap_or_default().to_string();
     (name, rest)
+}
+
+fn is_agents_quit_slash_command(draft: &str) -> bool {
+    let (name, rest) = split_slash_command(draft);
+    matches!(name.as_deref(), Some("q" | "quit")) && rest.trim().is_empty()
 }
 
 /// Deterministic display-width wrapping used by the transcript renderer.
@@ -2578,6 +2571,11 @@ impl App {
         if draft.trim().is_empty() {
             return;
         }
+        if is_agents_quit_slash_command(&draft) {
+            self.agents.threads[active].draft.clear();
+            self.close_agents_pane();
+            return;
+        }
         let thread = &mut self.agents.threads[active];
         if thread.state == ThreadUiState::Running {
             self.agents.error = Some(String::from("a turn is already running"));
@@ -2728,31 +2726,25 @@ impl App {
             }
         }
 
-        // Permission selection: ←/→/Tab move, Enter confirms.
-        if self.agents.permission.is_some() {
-            match key.code {
-                KeyCode::Left | KeyCode::Tab | KeyCode::BackTab => {
-                    self.move_permission_selection(-1);
-                    return;
-                }
-                KeyCode::Right => {
-                    self.move_permission_selection(1);
-                    return;
-                }
-                KeyCode::Enter => {
-                    self.confirm_permission();
-                    return;
-                }
-                KeyCode::Esc => {
-                    self.return_to_editor();
-                    return;
-                }
-                _ => {}
+        // Plan modal: Esc closes the overlay without modifying transcript.
+        if self
+            .agents
+            .active_thread_index()
+            .and_then(|index| self.agents.threads.get(index))
+            .is_some_and(|thread| thread.plan_modal_open)
+            && key.code == KeyCode::Esc
+        {
+            if let Some(index) = self.agents.active_thread_index()
+                && let Some(thread) = self.agents.threads.get_mut(index)
+            {
+                thread.plan_modal_open = false;
+                self.backend.status_message = Some(String::from("plan closed"));
             }
+            return;
         }
 
-        // Bridge approvals (file write / terminal create): ←/→/Tab move,
-        // Enter allows with the selected policy choice, Esc denies once.
+        // Bridge approvals render above permissions in the composer; keep key priority identical.
+        // ←/→/Tab move, Enter allows with the selected policy choice, Esc denies once.
         if self.agents.approvals.front().is_some() {
             match key.code {
                 KeyCode::Left | KeyCode::Tab | KeyCode::BackTab => {
@@ -2775,6 +2767,29 @@ impl App {
                 }
                 KeyCode::Esc => {
                     self.confirm_bridge_approval(super::agent_bridge::ApprovalChoice::DenyOnce);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Permission selection: ←/→/Tab move, Enter confirms.
+        if self.agents.permission.is_some() {
+            match key.code {
+                KeyCode::Left | KeyCode::Tab | KeyCode::BackTab => {
+                    self.move_permission_selection(-1);
+                    return;
+                }
+                KeyCode::Right => {
+                    self.move_permission_selection(1);
+                    return;
+                }
+                KeyCode::Enter => {
+                    self.confirm_permission();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.return_to_editor();
                     return;
                 }
                 _ => {}
@@ -2865,13 +2880,6 @@ impl App {
         }
 
         match key.code {
-            KeyCode::Char(':') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                // `:` opens the ex command line from the agents pane, like in
-                // normal mode (so `:agents_stop` etc. work while focused).
-                self.command_mode_origin = Some(self.mode);
-                self.command_buffer.clear();
-                self.mode = Mode::CommandLine;
-            }
             KeyCode::Char(c) => {
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
                     match c {
@@ -2901,20 +2909,7 @@ impl App {
                 let _ = self.cycle_slash_command(-1);
             }
             KeyCode::Backspace => self.agents_draft_backspace(),
-            KeyCode::Esc => {
-                let running = self
-                    .agents
-                    .active_thread_index()
-                    .and_then(|index| self.agents.threads.get(index))
-                    .is_some_and(|thread| thread.state == ThreadUiState::Running);
-                if running {
-                    self.agents_stop_turn();
-                } else if self.agents.layout == AgentPaneLayout::Full {
-                    self.close_agents_pane();
-                } else {
-                    self.return_to_editor();
-                }
-            }
+            KeyCode::Esc => {}
             KeyCode::PageUp => self.agents_scroll(-(AGENTS_SCROLL_PAGE as isize)),
             KeyCode::PageDown => self.agents_scroll(AGENTS_SCROLL_PAGE as isize),
             KeyCode::Home => self.agents_scroll_to(0),

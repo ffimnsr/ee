@@ -2,7 +2,7 @@
 
 ## Optional Agents Tooling Plan: ACP v1 + MCP 2026-07-28
 
-Agents tooling stays optional, compile-time and runtime gated behind `agents`. ACP v1 remains the agent session protocol, and MCP `2026-07-28` remains the tool transport for the ee proxy. New tools should extend the existing `ee.*` MCP proxy surface in `crates/ee-mcp`, route execution through `ee-agent-host` handlers when editor state or approvals are needed, and avoid adding ee-owned ACP wire structs unless the official ACP SDK already defines the method.
+Agents tooling stays optional, compile-time and runtime gated behind `agents`. ACP v1 remains the agent session protocol, and MCP `2026-07-28` remains the tool transport for the ee proxy. New tools should extend the existing `ee_*` MCP proxy surface in `crates/ee-mcp`, route execution through `ee-agent-host` handlers when editor state or approvals are needed, and avoid adding ee-owned ACP wire structs unless the official ACP SDK already defines the method.
 
 Tooling goals:
 
@@ -29,35 +29,35 @@ Add low-risk read-only discovery tools to the ee MCP proxy. These tools make pat
 
 #### Tools
 
-- [x] Add `ee.workspace_roots`.
+- [x] Add `ee_workspace_roots`.
   - [x] Return configured worktree roots, active root, active file, and optional additional directories advertised to the session.
   - [x] Never return environment values or secret config.
   - [x] Validate roots as canonical absolute paths before exposing them.
-- [x] Add `ee.list_directory`.
+- [x] Add `ee_list_directory`.
   - [x] Accept `path` only.
   - [x] Return one directory level with entries containing `path`, `kind`, and `size`.
   - [x] Hide hidden/ignored entries by default.
   - [x] Reject paths outside allowed roots.
   - [x] Cap result count with host default.
-- [x] Add `ee.list_directory_all` only if hidden/ignored listing is needed.
+- [x] Add `ee_list_directory_all` only if hidden/ignored listing is needed.
   - [x] Accept `path` only.
   - [x] Return one directory level including hidden/ignored entries with flags.
-- [x] Add `ee.search_files`.
+- [x] Add `ee_search_files`.
   - [x] Accept `pattern` only.
   - [x] Search allowed roots using glob/path matching only, not content search.
   - [x] Respect project ignore rules.
   - [x] Cap results with host default.
-- [x] Add `ee.search_files_all` only if hidden/ignored file search is needed.
+- [x] Add `ee_search_files_all` only if hidden/ignored file search is needed.
   - [x] Accept `pattern` only.
   - [x] Include hidden/ignored files and mark them in results.
-- [x] Add `ee.search_text`.
+- [x] Add `ee_search_text`.
   - [x] Accept `query` only.
   - [x] Perform literal, case-sensitive search across allowed roots.
   - [x] Return bounded matches with file, 1-based line, and short context.
-- [x] Add `ee.search_text_regex` only if regex search is needed.
+- [x] Add `ee_search_text_regex` only if regex search is needed.
   - [x] Accept `pattern` only.
   - [x] Enforce regex safety, time limits, and result caps.
-- [x] Add `ee.search_text_in_files` only if scoped content search is needed.
+- [x] Add `ee_search_text_in_files` only if scoped content search is needed.
   - [x] Accept `query` and `file_glob` only.
   - [x] Perform literal search within files matching the glob.
 
@@ -83,28 +83,28 @@ Add patch-oriented editing so agents do not need full-file overwrites for common
 
 #### Tools
 
-- [x] Add `ee.replace_text`.
+- [x] Add `ee_replace_text`.
   - [x] Accept `path`, `old_text`, and `new_text` only.
   - [x] Require exactly one match for `old_text`.
   - [x] Apply through existing buffer/edit/save semantics, not raw disk writes.
   - [x] Require approval before mutating any buffer or file.
-- [x] Add `ee.apply_patch` only if multi-edit patches are needed.
+- [x] Add `ee_apply_patch` only if multi-edit patches are needed.
   - [x] Accept `path` and `edits` only.
   - [x] Each edit must use the same simple `old_text`/`new_text` shape.
   - [x] Reject range-based, hunk-based, or mixed edit shapes; add a separate tool later if needed.
-- [x] Add `ee.create_text_file`.
+- [x] Add `ee_create_text_file`.
   - [x] Accept `path` and `content` only.
   - [x] Fail if file exists.
-- [x] Add `ee.overwrite_text_file` only if overwrite is needed.
+- [x] Add `ee_overwrite_text_file` only if overwrite is needed.
   - [x] Accept `path` and `content` only.
   - [x] Require approval and clearly report existing file replacement.
-- [x] Add `ee.read_buffer`.
+- [x] Add `ee_read_buffer`.
   - [x] Accept `path` only.
   - [x] Read current editor buffer contents, including unsaved changes.
   - [x] Fall back to file read only when no buffer is open and policy allows.
-- [x] Add `ee.read_buffer_lines` only if line-window reads are needed.
+- [x] Add `ee_read_buffer_lines` only if line-window reads are needed.
   - [x] Accept `path`, `line`, and `limit` only.
-- [x] Add `ee.open_buffers`.
+- [x] Add `ee_open_buffers`.
   - [x] Return open buffer paths, dirty flags, revision ids, active selection/cursor summary, and language id when known.
   - [x] Avoid exposing full content.
 
@@ -128,34 +128,34 @@ Expose editor and LSP context that agents currently must infer from terminal out
 
 #### Tools
 
-- [x] Add `ee.get_diagnostics`.
+- [x] Add `ee_get_diagnostics`.
   - [x] Accept no arguments.
   - [x] Return bounded LSP/editor diagnostics for the current workspace with path, range, severity, source, code, and message.
-  - [x] Keep separate from current `ee.diagnostics`, which remains recent proxy/host diagnostic text.
-- [x] Add `ee.get_file_diagnostics`.
+  - [x] Keep separate from current `ee_diagnostics`, which remains recent proxy/host diagnostic text.
+- [x] Add `ee_get_file_diagnostics`.
   - [x] Accept `path` only.
   - [x] Return bounded LSP/editor diagnostics for one file.
-- [x] Add `ee.document_symbols`.
+- [x] Add `ee_document_symbols`.
   - [x] Accept `path`.
   - [x] Return LSP document symbols with name, kind, range, selection range, and container path.
-- [x] Add `ee.references`.
+- [x] Add `ee_references`.
   - [x] Accept `path`, `line`, and `character` only.
   - [x] Return bounded LSP references as absolute paths and 1-based ranges.
-- [x] Add `ee.list_code_actions`.
+- [x] Add `ee_list_code_actions`.
   - [x] Accept `path`, `line`, and `character` only.
   - [x] Return available actions with simple `action_id`, title, and kind.
   - [x] Keep listing read-only.
-- [x] Add `ee.apply_code_action`.
+- [x] Add `ee_apply_code_action`.
   - [x] Accept `path` and `action_id` only.
   - [x] Require approval and use buffer edit semantics.
-- [x] Add `ee.format_file`.
+- [x] Add `ee_format_file`.
   - [x] Accept `path`.
   - [x] Run configured formatter or LSP formatting.
   - [x] Require approval if it changes the buffer.
-- [x] Add `ee.preview_rename_symbol`.
+- [x] Add `ee_preview_rename_symbol`.
   - [x] Accept `path`, `line`, `character`, and `new_name` only.
   - [x] Return planned workspace edits without applying them.
-- [x] Add `ee.rename_symbol`.
+- [x] Add `ee_rename_symbol`.
   - [x] Accept `path`, `line`, `character`, and `new_name` only.
   - [x] Require approval before applying edits.
   - [x] Validate all touched files against allowed roots.
@@ -184,28 +184,28 @@ Expose the full ACP terminal lifecycle through MCP so agents can run and observe
 
 #### Tools
 
-- [ ] Add `ee.terminal_output`.
+- [ ] Add `ee_terminal_output`.
   - [ ] Accept `terminal_id` only.
   - [ ] Return recent bounded stdout/stderr chunks with sequence ids and truncation flags.
-- [ ] Add `ee.terminal_output_since` only if incremental polling is needed.
+- [ ] Add `ee_terminal_output_since` only if incremental polling is needed.
   - [ ] Accept `terminal_id` and `since_seq` only.
-- [ ] Add `ee.terminal_wait`.
+- [ ] Add `ee_terminal_wait`.
   - [ ] Accept `terminal_id` only.
   - [ ] Use host default timeout.
   - [ ] Return exit status when complete or timeout state when still running.
-- [ ] Add `ee.terminal_wait_long` only if longer waits are needed.
+- [ ] Add `ee_terminal_wait_long` only if longer waits are needed.
   - [ ] Accept `terminal_id` and `timeout_ms` only.
-- [ ] Add `ee.terminal_kill`.
+- [ ] Add `ee_terminal_kill`.
   - [ ] Accept `terminal_id`.
   - [ ] Terminate only terminals owned by the current agent/session unless policy explicitly allows more.
-- [ ] Add `ee.terminal_release`.
+- [ ] Add `ee_terminal_release`.
   - [ ] Accept `terminal_id`.
   - [ ] Release host resources and close retained output.
-- [ ] Add `ee.run_task`.
+- [ ] Add `ee_run_task`.
   - [ ] Accept `task_id` only.
   - [ ] Run configured safe tasks such as format, lint, test, build, or project-specific entries from `tasks.yaml`.
   - [ ] Avoid shell strings, ad-hoc args, and secret-like environment overrides.
-- [ ] Add dedicated task tools later instead of adding broad `args` to `ee.run_task` when common variants emerge.
+- [ ] Add dedicated task tools later instead of adding broad `args` to `ee_run_task` when common variants emerge.
 
 #### Implementation notes
 
@@ -225,21 +225,21 @@ Add read-only source-control tools that support review and final self-checks wit
 
 #### Tools
 
-- [ ] Add `ee.git_status`.
+- [ ] Add `ee_git_status`.
   - [ ] Return branch, detached state, staged/unstaged/untracked files, and conflict state.
   - [ ] Keep read-only and bounded.
-- [ ] Add `ee.git_diff`.
+- [ ] Add `ee_git_diff`.
   - [ ] Accept no arguments.
   - [ ] Return bounded unstaged unified diff plus truncation metadata.
-- [ ] Add `ee.git_diff_file`.
+- [ ] Add `ee_git_diff_file`.
   - [ ] Accept `path` only.
   - [ ] Return bounded unstaged unified diff for one file.
-- [ ] Add `ee.git_diff_staged` only if staged diff is needed.
+- [ ] Add `ee_git_diff_staged` only if staged diff is needed.
   - [ ] Accept no arguments.
   - [ ] Return bounded staged unified diff.
-- [ ] Add `ee.changed_files`.
+- [ ] Add `ee_changed_files`.
   - [ ] Return editor/SCM changed files with dirty-buffer state and saved state.
-- [ ] Add `ee.review_context`.
+- [ ] Add `ee_review_context`.
   - [ ] Return changed files, relevant diagnostics, nearby symbols, and configured test/task suggestions.
   - [ ] Never run tests or commands by itself.
 
@@ -260,23 +260,23 @@ Expose project guidance and bounded session context so agents follow repo rules 
 
 #### Tools
 
-- [ ] Add `ee.project_instructions`.
+- [ ] Add `ee_project_instructions`.
   - [ ] Return applicable `AGENTS.md`, `RULE.md`, workspace config rules, and tool-use constraints for the current root.
   - [ ] Include source paths and precedence order.
-- [ ] Add `ee.save_note`.
+- [ ] Add `ee_save_note`.
   - [ ] Accept `key` and `content` only.
   - [ ] Store non-secret, session-scoped notes for long-running tasks.
-- [ ] Add `ee.read_notes`.
+- [ ] Add `ee_read_notes`.
   - [ ] Accept no arguments.
   - [ ] Return bounded notes for the current agent/session only.
-- [ ] Add `ee.read_note`.
+- [ ] Add `ee_read_note`.
   - [ ] Accept `key` only.
   - [ ] Return one bounded note for the current agent/session.
-- [ ] Add `ee.file_dependency_map`.
+- [ ] Add `ee_file_dependency_map`.
   - [ ] Accept `path` only.
   - [ ] Return known file dependency edges when an index exists.
   - [ ] Fail gracefully when no graph/index is available.
-- [ ] Add `ee.symbol_dependency_map` only if symbol-scoped graph lookup is needed.
+- [ ] Add `ee_symbol_dependency_map` only if symbol-scoped graph lookup is needed.
   - [ ] Accept `path`, `line`, and `character` only.
 
 #### Implementation notes
@@ -297,7 +297,7 @@ Harden the expanded tool surface before enabling it by default.
 
 #### Work items
 
-- [ ] Add versioned `ee.tools_manifest`.
+- [ ] Add versioned `ee_tools_manifest`.
   - [ ] Accept no arguments.
   - [ ] Return tool names.
   - [ ] Return schema versions.
@@ -305,7 +305,7 @@ Harden the expanded tool surface before enabling it by default.
   - [ ] Return approval requirement.
   - [ ] Return output caps.
   - [ ] Return short examples using minimal arguments for each tool.
-- [ ] Keep existing tool names stable.
+- [ ] Keep existing tool names stable after the `ee_` compatibility rename.
 - [ ] Add new names rather than changing schemas incompatibly.
 - [ ] Document every tool argument, limit, error shape, approval behavior, and redaction rule in README and crate docs.
 - [ ] Document the rule that complicated arguments mean the tool should be split into smaller tools.
@@ -1922,6 +1922,126 @@ Rules:
 - [x] `cargo test --quiet -p ee-acp-agent-server` passes.
 - [x] `cargo test --quiet -p ee-openrouter-agent` passes when OpenRouter adapter changes.
 
+### Phase 11: Default OpenRouter to orchestrated mode
+
+Goal: make `ee-openrouter-agent` use the orchestrator by default now that Phase 9/10 parity checks passed, while keeping a short-lived explicit opt-out for fallback diagnostics.
+
+Overview: current simple provider mode still hardcodes only `tool_read_file`, so it hides orchestrator built-ins and gives agents a weaker default experience. Flip the default to orchestrated mode, keep `OPENROUTER_ORCHESTRATED=0` / `--orchestrated=false` as the escape hatch, and make tests prove startup, tool loops, cancellation, and secret handling remain unchanged.
+
+Rules:
+
+- Keep OpenRouter API key handling identical: key only in Authorization header, never transcript, tool schema, events, or logs.
+- Do not remove simple provider mode in this phase; only make it opt-out.
+- Do not claim ee MCP proxy tools are available from this phase alone; MCP bridging is Phase 12.
+- Preserve existing ACP identity (`ee-openrouter-agent`) so saved agent config keeps working.
+- Keep all new tests network-free with fake HTTP/model adapters.
+
+#### Work items
+
+- [x] Flip the OpenRouter orchestrated default.
+  - [x] Change `crates/ee-openrouter-agent/src/config.rs` so `orchestrated` defaults to `true`.
+  - [x] Update config comments from "off until parity" to "default after parity; opt out for fallback diagnostics".
+  - [x] Keep env/CLI override support for `OPENROUTER_ORCHESTRATED=0` and explicit `--orchestrated=false` if clap supports the current flag shape.
+  - [x] Add/adjust config tests for default true and explicit false override.
+- [x] Confirm simple provider remains available.
+  - [x] Add a test proving `OPENROUTER_ORCHESTRATED=0` selects `OpenRouterProvider`.
+  - [x] Add a test proving default config selects `OrchestratorProvider<OpenRouterModelAdapter>`.
+  - [x] Keep `OpenRouterProvider` tests for direct `ClientBridge` read-file behavior.
+- [x] Strengthen orchestrated OpenRouter regression coverage.
+  - [x] Test default startup through `AcpAgentServer` with fake model and no network.
+  - [x] Test read-file tool call still routes through `ClientBridge`.
+  - [x] Test cancellation during an orchestrated model/tool loop returns promptly.
+  - [x] Test OpenRouter reasoning and final answer still stream through ACP updates.
+  - [x] Test secrets do not appear in model messages, tool definitions, events, or tool results.
+- [x] Update user-facing docs/config examples.
+  - [x] Document orchestrated mode as default.
+  - [x] Document `OPENROUTER_ORCHESTRATED=0` as temporary fallback.
+  - [x] Note that ee MCP proxy tool availability depends on Phase 12 MCP bridge work.
+
+#### Actionable criteria
+
+- [x] `cargo test --quiet -p ee-openrouter-agent orchestrated` passes.
+- [x] `cargo test --quiet -p ee-openrouter-agent config` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator` passes.
+- [x] `cargo fmt --check -p ee-openrouter-agent -p ee-agent-orchestrator` passes.
+- [x] `cargo clippy --quiet -p ee-openrouter-agent -p ee-agent-orchestrator --all-targets --all-features -- -D warnings` passes.
+- [x] New tests prove default OpenRouter path is orchestrated and explicit opt-out still uses simple provider mode.
+
+### Phase 12: Bridge ACP MCP servers into orchestrated tool registry
+
+Goal: make `ee-openrouter-agent` discover and use session-advertised MCP servers, including the ee MCP proxy (`ee_workspace_roots`, `ee_list_directory`, `ee_search_text`, edit tools, diagnostics, formatting, rename, and terminal tools), through the orchestrator tool loop.
+
+Overview: host code already appends the ee MCP proxy to `session/new`, either as ACP-native `McpServer::Acp` when the agent advertises `mcp_capabilities.acp`, or as stdio fallback otherwise. The current OpenRouter simple provider and orchestrator provider ignore `NewSessionContext.mcp_servers`, so those tools never reach the model. Add provider-neutral MCP session management inside `ee-agent-orchestrator`, translate MCP tool schemas into `ToolDefinition`s, execute calls back through MCP, and gate side effects with existing policy.
+
+Rules:
+
+- Prefer official `rmcp` SDK types/transports; do not add handrolled MCP wire code unless SDK lacks coverage and tests prove why.
+- Keep backend/frontend boundary intact: MCP client/registry lives in provider/server-side crates, not UI code.
+- Do not bypass approval/policy: write, execute, terminal, code action, format, and rename tools must keep existing `SideEffectClass` / destructive-subclass gates.
+- Fail closed when a server cannot initialize, list tools, validate schemas, or execute within timeout.
+- Use provider-compatible model tool names: no dots. Expose ee proxy tools to models as `ee_` names (`ee_workspace_roots`, etc.) because some upstream providers reject dots in function/tool names.
+- Namespace external MCP tools to avoid collisions with provider-compatible separators only; keep a reversible mapping to original MCP tool names for dispatch.
+- Never send secrets from MCP server config to model transcripts, tool schemas, events, logs, or memory.
+- Keep tests deterministic and network-free with fake ACP MCP and fake stdio/HTTP MCP servers.
+
+#### Work items
+
+- [ ] Advertise ACP MCP support from orchestrated providers.
+  - [ ] Extend `OrchestratorProvider::capabilities()` with `mcp_capabilities.acp` when the provider can host MCP-over-ACP.
+  - [ ] Add ACP server/provider tests proving host chooses `McpServer::Acp` for the ee proxy when capability is advertised.
+  - [ ] Keep fallback behavior for agents/providers that do not advertise ACP MCP.
+- [ ] Capture MCP session configuration.
+  - [ ] Change `OrchestratorProvider::new_session` to read `NewSessionContext.mcp_servers` and `cwd`.
+  - [ ] Store per-session MCP server descriptors in orchestrator runtime state.
+  - [ ] Validate descriptors and redact env/header secrets before any event/log/model exposure.
+  - [ ] Add tests proving `session/new` MCP servers are retained per session and never leak secrets.
+- [ ] Implement MCP client session manager in `ee-agent-orchestrator`.
+  - [ ] Reuse `ee-mcp` / `rmcp` client pieces where they fit without adding `ee-agent-host` or `ee-cli` dependencies.
+  - [ ] Support ACP-native MCP-over-ACP transport by routing through the framework/client bridge path exposed to providers.
+  - [ ] Support stdio fallback only if required for providers without ACP-native support.
+  - [ ] Enforce connect/list/call timeouts and cancellation.
+  - [ ] Close MCP connections on session close/cancel/drop.
+  - [ ] Add fake server tests for connect, initialize, tools/list, tools/call, timeout, and shutdown.
+- [ ] Translate MCP tools into provider-compatible orchestrator tool definitions.
+  - [ ] Convert MCP tool names, descriptions, and input schemas to `ToolDefinition`.
+  - [x] Rename ee proxy MCP tools from `ee.*` to `ee_*` (for example, `ee.workspace_roots` → `ee_workspace_roots`).
+  - [ ] Keep a reversible dispatch mapping for sanitized external MCP tool names when provider-facing names differ from source names.
+  - [ ] Namespace non-ee server tools with provider-compatible names such as `mcp_<server_id>_<tool_name>` after sanitizing unsupported characters.
+  - [ ] Reject or disambiguate sanitized name collisions fail-closed before advertising tools to the model.
+  - [ ] Infer side-effect class/subclass from original MCP tool names and configured metadata, not only sanitized display names.
+  - [ ] Default unknown external MCP tools to conservative policy requiring approval or deny-by-default until classified.
+  - [ ] Add schema conversion tests, name-sanitization tests, reversible-mapping tests, collision tests, invalid schema rejection tests, and policy classification tests.
+- [ ] Execute MCP tool calls through orchestrator policy pipeline.
+  - [ ] Register MCP-backed tools in `ToolRegistry` after successful `tools/list`.
+  - [ ] Execute model tool intents by calling MCP `tools/call` and normalizing `CallToolResult` into `ToolResult`.
+  - [ ] Map MCP `isError` tool results to failed `ToolResult` without crashing the turn.
+  - [ ] Stream tool-call lifecycle updates through existing `UpdateSink`.
+  - [ ] Respect cancellation before connect/list/call and during long calls.
+  - [ ] Add tests for success, tool error, protocol error, timeout, cancellation, and policy-denied write/execute calls.
+- [ ] Expose ee MCP proxy tools to OpenRouter in default orchestrated mode.
+  - [ ] Add an end-to-end fake OpenRouter test where `session/new` includes ee proxy MCP server and OpenRouter receives `ee_workspace_roots` in tool schemas.
+  - [ ] Add a test where model calls `ee_workspace_roots`, dispatch maps it to MCP `ee_workspace_roots`, and result comes from the fake ee proxy backend.
+  - [ ] Add a test proving no advertised model-facing tool name contains `.`.
+  - [ ] Add a test where model calls an ee write/edit tool and existing approval/policy blocks or routes it correctly.
+  - [ ] Add a regression test for user prompt "what MCP tools do I have" proving response can list more than `tool_read_file` when ee proxy is present.
+- [ ] Update docs and diagnostics.
+  - [ ] Document orchestrated MCP support and fallback modes.
+  - [ ] Add diagnostics when no MCP tools are registered: no servers configured, connect failed, list failed, or policy filtered all tools.
+  - [ ] Surface bounded MCP discovery errors to user without secrets.
+
+#### Actionable criteria
+
+- [ ] `cargo test --quiet -p ee-agent-orchestrator mcp` passes.
+- [ ] `cargo test --quiet -p ee-openrouter-agent orchestrated` passes.
+- [ ] `cargo test --quiet -p ee-agent-host mcp_over_acp` passes.
+- [ ] `cargo test --quiet -p ee-mcp` passes if shared MCP client/proxy code changes.
+- [ ] `cargo fmt --check -p ee-agent-orchestrator -p ee-openrouter-agent -p ee-agent-host -p ee-mcp` passes.
+- [ ] `cargo clippy --quiet -p ee-agent-orchestrator -p ee-openrouter-agent -p ee-agent-host -p ee-mcp --all-targets --all-features -- -D warnings` passes.
+- [ ] End-to-end test proves default OpenRouter orchestrated mode receives `ee_workspace_roots` and executes MCP `ee_workspace_roots` through the dispatch path.
+- [ ] Tests prove no model-facing tool schema contains provider-rejected characters such as `.`.
+- [ ] Tests prove MCP write/execute tools cannot bypass orchestrator policy or host approvals.
+- [ ] Tests prove MCP config secrets are redacted from transcripts, schemas, events, logs, and errors.
+
 ## Future Agent Orchestrator Feature Backlog
 
 Extend `ee-agent-orchestrator` after the base loop, tool, memory, budget, and subagent framework exists. These features should remain server-side, provider-neutral, deterministic under tests, and optional unless enabled by config or policy.
@@ -2580,3 +2700,72 @@ Rules:
 - [x] `cargo test --quiet -p ee-agent-orchestrator delegate_model` passes.
 - [x] Tests prove unknown model selections never create a child task node.
 - [x] Tests prove unset selections fall back to the parent adapter.
+
+### Phase 12: LLM compaction slash command
+
+Goal: support ACP-compatible `/compact` so agents can shrink long session context into durable, high-signal summaries without client-side protocol special cases.
+
+Overview: agents advertise `/compact` through `available_commands_update`; the TUI sends `/compact` as a normal `session/prompt`; providers detect the command, ask the configured model for a continuation summary, replace or augment their session context safely, and report what changed. Deterministic memory compaction remains responsible for removals of structured memory; LLM summaries are additive or history-replacing only at provider-owned boundaries.
+
+Rules:
+
+- Keep slash commands agent-advertised and agent-handled; `ee-cli` must not special-case `/compact` behavior beyond normal command display/input.
+- Preserve the system prompt, recent useful tail context, decisions, constraints, validation results, and protected memory.
+- Do not let LLM output delete protected memory or policy state.
+- Redact secret-like values before sending history into compaction prompts or status messages.
+- Keep compaction bounded by configurable input bytes, retained tail messages, and request timeout/cancellation.
+- Avoid tool calls during compaction unless a later explicit phase needs tool-backed context refresh.
+- Tests must be deterministic and network-free with fake/scripted model adapters.
+
+#### Work items
+
+- [ ] Add shared slash-command parsing.
+  - [ ] Parse `/compact` and `/compact <instructions>` only when the first non-space character is `/`.
+  - [ ] Reject false positives such as `/compactness`.
+  - [ ] Preserve optional instruction text exactly after command whitespace normalization.
+  - [ ] Add parser tests for empty, normal prompt, exact command, command with instructions, and prefix collision cases.
+- [ ] Wire ACP command advertisement.
+  - [ ] Represent advertised commands as typed `AvailableCommand` values, including description and optional input hint.
+  - [ ] Emit `available_commands_update` after `session/new` when a provider exposes initial commands.
+  - [ ] Emit the same command list after `session/load` when restored providers expose initial commands.
+  - [ ] Advertise `/compact` from `ee-openrouter-agent` simple provider.
+  - [ ] Advertise `/compact` from `ee-agent-orchestrator` provider adapter.
+  - [ ] Add ACP server tests proving initial commands reach the client as session updates.
+- [ ] Implement simple OpenRouter history compaction.
+  - [ ] Add compaction config knobs for minimum message count, retained tail messages, and maximum compaction input bytes.
+  - [ ] Build a compaction prompt that asks for user goal, completed work, current state, important files/symbols, decisions/constraints, pending work, validation status, and risks/errors.
+  - [ ] Bound serialized history included in the compaction request.
+  - [ ] Redact secret-like values from the compaction request and from emitted status text.
+  - [ ] Call OpenRouter with no tools for compaction.
+  - [ ] Replace stored history with compacted summary plus a safe recent tail.
+  - [ ] Keep tool-call/tool-result pairs consistent when retaining tail messages.
+  - [ ] Emit a user-visible completion message with before/after message and byte counts.
+  - [ ] Add tests for no-op small history, bounded input, summary replacement, tail retention, empty-summary rejection, and cancellation.
+- [ ] Implement orchestrator compaction command.
+  - [ ] Detect `/compact` before entering the normal model-tool loop.
+  - [ ] Run deterministic `compact_memory` first.
+  - [ ] Build a provenance-rich compaction context from task graph, memory, recent events, validation facts, and budget state.
+  - [ ] Ask the configured model for a compact continuation summary without exposing tools.
+  - [ ] Store the summary as model-derived session memory without deleting protected keys.
+  - [ ] Emit report fields for merged duplicates, decayed observations, preserved protected items, summary bytes, and retained context bytes.
+  - [ ] Add tests proving protected memory survives and normal tools are not invoked.
+- [ ] Add optional TUI polish without changing protocol behavior.
+  - [ ] Show advertised command descriptions in an agents command list or footer hint.
+  - [ ] Use `AvailableCommand.input.hint` as a draft placeholder when cycling slash commands.
+  - [ ] Add pane tests only for display/input behavior, not compaction semantics.
+- [ ] Document compaction behavior.
+  - [ ] Document `/compact` and `/compact <instructions>` usage for OpenRouter agent users.
+  - [ ] Document compaction config environment variables.
+  - [ ] Explain that client sends `/compact` as a normal ACP prompt and provider owns history/memory changes.
+  - [ ] Document security limits: redaction, protected memory preservation, bounded input, and no tool calls.
+
+#### Actionable criteria
+
+- [ ] `cargo test --quiet -p ee-acp-agent-server available_commands` passes.
+- [ ] `cargo test --quiet -p ee-openrouter-agent compact` passes.
+- [ ] `cargo test --quiet -p ee-agent-orchestrator compact` passes.
+- [ ] `cargo fmt --check -p ee-acp-agent-server -p ee-openrouter-agent -p ee-agent-orchestrator` passes.
+- [ ] `cargo clippy -p ee-acp-agent-server -p ee-openrouter-agent -p ee-agent-orchestrator --all-targets --all-features -- -D warnings` passes.
+- [ ] Tests prove `/compact` reaches providers as normal prompt text and no `ee-cli` compaction special case exists.
+- [ ] Tests prove compaction cannot remove protected decisions, constraints, or validation memory.
+- [ ] Tests prove compaction requests are bounded and network-free under test.

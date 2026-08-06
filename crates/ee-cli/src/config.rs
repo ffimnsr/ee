@@ -305,7 +305,7 @@ pub(crate) struct McpSettings {
 
 /// Resolved ee MCP proxy runtime settings.
 ///
-/// The proxy exposes `ee.*` tools (file read/write, terminal create,
+/// The proxy exposes `ee_*` tools (file read/write, terminal create,
 /// diagnostics) as a local MCP server that ACP agents can connect to; every
 /// tool call routes through the same approval and bridge paths as direct ACP
 /// client methods.

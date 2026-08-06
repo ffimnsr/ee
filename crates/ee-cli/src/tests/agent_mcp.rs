@@ -95,6 +95,16 @@ fn mcp_app(
     proxy: bool,
 ) -> (App, tempfile::TempDir, ScriptedFake) {
     let temp = tempfile::tempdir().unwrap();
+    let (app, fake) = mcp_app_in(&temp, agent_script, mcp_servers, proxy);
+    (app, temp, fake)
+}
+
+fn mcp_app_in(
+    temp: &tempfile::TempDir,
+    agent_script: FakeAgentScript,
+    mcp_servers: bool,
+    proxy: bool,
+) -> (App, ScriptedFake) {
     let mut toml =
         String::from("[agents]\nenabled = true\n\n[agents.servers.fake]\ncommand = \"unused\"\n");
     if mcp_servers {
@@ -114,7 +124,7 @@ fn mcp_app(
     drop(_cwd_lock);
     let fake = ScriptedFake::new(agent_script);
     app.agents.test_fake_transports.insert(String::from("fake"), Arc::new(fake.clone()));
-    (app, temp, fake)
+    (app, fake)
 }
 
 fn install_mcp_fake(app: &mut App, script: FakeMcpScript) -> McpScriptedFake {
@@ -133,7 +143,14 @@ fn wait_until(app: &mut App, label: &str, mut condition: impl FnMut(&App) -> boo
         }
         thread::sleep(Duration::from_millis(10));
     }
-    panic!("timed out waiting for {label}; status={:?}", app.backend.status_message.as_deref());
+    panic!(
+        "timed out waiting for {label}; mode={:?} approvals={} permission={} elicitation={} status={:?}",
+        app.mode,
+        app.agents.approvals.len(),
+        app.agents.permission.is_some(),
+        app.agents.elicitation.is_some(),
+        app.backend.status_message.as_deref()
+    );
 }
 
 /// Waits until the MCP server `id` reached the Ready state.
@@ -1290,21 +1307,15 @@ fn session_new_omits_acp_native_proxy_when_proxy_disabled() {
 
 #[test]
 fn mcp_over_acp_write_denial_leaves_buffer_unchanged() {
-    let target = {
-        // The target path must exist before the script is built (the fake
-        // captures it into the tools/call frame).
-        let temp = tempfile::tempdir().unwrap();
-        let target = temp.path().join("acp-proxy.txt");
-        fs::write(&target, "original").unwrap();
-        (temp, target.display().to_string())
-    };
-    let (_temp, target_text) = target;
-    let target = std::path::PathBuf::from(&target_text);
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("acp-proxy.txt");
+    fs::write(&target, "original").unwrap();
+    let target_text = target.display().to_string();
     let script = acp_connect_script(json!({
-        "name": "ee.write_text_file",
+        "name": "ee_write_text_file",
         "arguments": { "path": target_text, "content": "agent-wrote-this" }
     }));
-    let (mut app, _temp_dir, fake) = mcp_app(script, false, true);
+    let (mut app, fake) = mcp_app_in(&temp, script, false, true);
     open_pane_and_wait_ready(&mut app);
 
     // The write reaches the same approval prompt as direct ACP methods.
@@ -1335,7 +1346,7 @@ fn mcp_over_acp_write_denial_leaves_buffer_unchanged() {
 #[test]
 fn mcp_over_acp_terminal_denial_does_not_spawn_terminal() {
     let script = acp_connect_script(json!({
-        "name": "ee.terminal_create",
+        "name": "ee_terminal_create",
         "arguments": { "command": "sleep", "args": ["30"] }
     }));
     let (mut app, _temp, fake) = mcp_app(script, false, true);

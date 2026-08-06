@@ -20,6 +20,7 @@ build
 !/RULE.md
 !/CHANGELOG.md
 !/CONTRIBUTING.md
+!/ISSUES.md
 !/.github/copilot-instructions.md
 !/docs/
 !/docs/upgrades/

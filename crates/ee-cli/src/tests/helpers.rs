@@ -477,6 +477,15 @@ pub fn report_open_to_first_render_breakdown(label: &str, line_builder: fn(usize
 
 pub fn run_ex(app: &mut App, command: &str) {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    if app.mode == crate::app::Mode::Agent {
+        app.mode = crate::app::Mode::CommandLine;
+        app.command_buffer.clear();
+        app.command_buffer.push_str(command);
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        return;
+    }
+
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)));
     for ch in command.chars() {
         app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));

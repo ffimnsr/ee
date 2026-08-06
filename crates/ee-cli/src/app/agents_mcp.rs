@@ -147,7 +147,7 @@ pub(crate) struct McpBrowseState {
     pub(crate) pending_get: Option<std_mpsc::Receiver<Result<String, String>>>,
 }
 
-/// Cached code action details for `ee.apply_code_action`.
+/// Cached code action details for `ee_apply_code_action`.
 #[derive(Debug, Clone)]
 pub(crate) struct CachedProxyCodeAction {
     pub(crate) path: String,

@@ -207,7 +207,7 @@ fn agents_mode_advertises_editor_backed_optional_client_capabilities() {
 }
 
 #[test]
-fn agents_pane_restores_mode_that_opened_command_line() {
+fn agents_close_restores_mode_that_opened_command_line() {
     let (mut app, _temp, _fake) = fake_agents_app(base_script());
 
     app.mode = Mode::CommandLine;
@@ -219,10 +219,26 @@ fn agents_pane_restores_mode_that_opened_command_line() {
     });
     assert_eq!(app.mode, Mode::Agent);
 
-    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    run_ex(&mut app, "agents_close");
 
     assert_eq!(app.mode, Mode::Insert, "focus returns to command-line origin mode");
-    assert_eq!(app.agents.layout, AgentPaneLayout::Closed, "Esc closes full-screen agents pane");
+    assert_eq!(app.agents.layout, AgentPaneLayout::Closed, "explicit close hides agents pane");
+}
+
+#[test]
+fn colon_in_agents_pane_stays_in_agent_draft() {
+    let (mut app, _temp, _fake) = fake_agents_app(base_script());
+
+    open_pane_and_wait_ready(&mut app);
+    press(&mut app, KeyCode::Char(':'), KeyModifiers::NONE);
+
+    assert_eq!(
+        app.mode,
+        Mode::Agent,
+        "colon must not open ee command line while agents pane has focus"
+    );
+    assert_eq!(app.command_buffer, "", "editor command buffer stays untouched");
+    assert_eq!(app.agents.threads[0].draft, ":", "colon is regular agent prompt input");
 }
 
 #[test]
@@ -422,7 +438,7 @@ fn agents_thoughts_command_toggles_visibility_without_dropping_transcript() {
 }
 
 #[test]
-fn plan_updates_render_priority_status_and_replace_wholesale() {
+fn plan_updates_open_modal_and_replace_wholesale_without_scrollback_append() {
     let script = base_script()
         .wait_for("session/prompt")
         .emit(wire::session_update(
@@ -454,6 +470,20 @@ fn plan_updates_render_priority_status_and_replace_wholesale() {
     wait_until(&mut app, "plan replacement lands", |app| {
         app.agents.threads[0].plan_entries() == vec![(String::from("[medium] replacement"), 'x')]
     });
+    assert!(app.agents.threads[0].plan_modal_open, "plan update opens modal");
+    let transcript_debug = format!("{:?}", app.agents.threads[0].transcript);
+    assert!(
+        !transcript_debug.contains("replacement"),
+        "plan content must not append into chat scrollback: {transcript_debug}"
+    );
+
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(!app.agents.threads[0].plan_modal_open, "Esc closes plan modal");
+    assert_eq!(
+        app.agents.threads[0].plan_entries(),
+        vec![(String::from("[medium] replacement"), 'x')],
+        "closing modal keeps latest plan snapshot"
+    );
 }
 
 #[test]
@@ -1127,16 +1157,14 @@ fn stale_url_elicitation_completion_is_ignored_without_clearing_prompt() {
     type_text(&mut app, "go");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
-    wait_until(&mut app, "stale completion ignored", |app| {
+    wait_until(&mut app, "url elicitation remains open", |app| {
         app.agents.elicitation.as_ref().is_some_and(|prompt| prompt.url.is_some())
-            && app.agents.threads[0]
-                .system_notices()
-                .iter()
-                .any(|notice| notice.contains("stale elicitation completion ignored: el-stale"))
     });
+    std::thread::sleep(Duration::from_millis(100));
+    app.pump_agents();
     assert!(
         fake.agent().response_with_id(202).is_none(),
-        "stale completion must not answer request"
+        "stale completion must stay diagnostics-only and not answer request"
     );
 
     press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
@@ -1344,6 +1372,34 @@ fn closing_pane_preserves_thread_state_and_session() {
     wait_until(&mut app, "pane reopened", |app| app.agents_focused());
     assert_eq!(fake.agent().requests_by_method("session/new").len(), 1);
     assert_eq!(app.agents.threads.len(), 1);
+}
+
+#[test]
+fn esc_and_ctrl_c_do_not_close_or_blur_agents_pane() {
+    let (mut app, _temp, _fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(app.agents.layout, AgentPaneLayout::Full);
+    assert_eq!(app.mode, Mode::Agent);
+
+    press(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(app.agents.layout, AgentPaneLayout::Full);
+    assert_eq!(app.mode, Mode::Agent);
+}
+
+#[test]
+fn quit_slash_command_closes_agents_pane_locally() {
+    let (mut app, _temp, fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "/quit");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    assert_eq!(app.agents.layout, AgentPaneLayout::Closed);
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.agents.threads[0].draft.is_empty());
+    assert!(fake.agent().requests_by_method("session/prompt").is_empty());
 }
 
 #[test]

@@ -401,20 +401,7 @@ fn transcript_lines(item: &crate::app::TranscriptItem, width: usize) -> Vec<Line
                 ]));
             }
         }
-        TranscriptItem::Plan { entries, at } => {
-            let time = fmt_hhmm(*at);
-            lines.push(Line::from(vec![
-                Span::styled(format!("[{time}]"), dim),
-                Span::styled(" plan:", Style::default().fg(theme::FG_KEY)),
-            ]));
-            for (content, marker) in entries {
-                lines.push(Line::from(vec![
-                    Span::raw(" ".repeat(indent)),
-                    Span::styled(format!("[{marker}] "), Style::default().fg(theme::FG_KEY)),
-                    Span::styled(content.clone(), Style::default().fg(theme::FG_TEXT)),
-                ]));
-            }
-        }
+
         TranscriptItem::Permission { title, options, at } => {
             let time = fmt_hhmm(*at);
             lines.push(Line::from(vec![
@@ -570,14 +557,22 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             ThreadUiState::Closed => "closed",
             ThreadUiState::Failed => "failed",
         };
+        let plan_hint = if thread.current_plan.is_empty() {
+            String::new()
+        } else if thread.plan_modal_open {
+            String::from(" | plan:open")
+        } else {
+            String::from(" | plan:hidden")
+        };
         let footer_text = format!(
-            "{} [{}]{} | session:{} / {} | thoughts:{} | unread:{} | Ctrl-T threads {}",
+            "{} [{}]{} | session:{} / {} | thoughts:{}{} | unread:{} | Ctrl-T threads {}",
             thread.nick,
             state_label,
             thread.usage.as_deref().map(|u| format!(" | {u}")).unwrap_or_default(),
             active_index + 1,
             app.agents.threads.len(),
             if app.agents.show_thoughts { "on" } else { "off" },
+            plan_hint,
             thread.unread,
             thread.stop_reason.as_deref().unwrap_or(""),
         );
@@ -636,6 +631,56 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             y: composer_area.y,
         });
     }
+
+    if let Some(active_index) = app.agents.active_thread {
+        let thread = &app.agents.threads[active_index];
+        if thread.plan_modal_open && !thread.current_plan.is_empty() {
+            render_plan_modal(frame, inner, &thread.current_plan);
+        }
+    }
+}
+
+#[cfg(feature = "agents")]
+fn render_plan_modal(frame: &mut ratatui::Frame<'_>, area: Rect, entries: &[(String, char)]) {
+    let width = area.width.saturating_sub(4).clamp(24, 72);
+    let height = (entries.len() as u16 + 4).min(area.height.saturating_sub(2)).max(5);
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 3;
+    let modal = Rect { x, y, width, height };
+    frame.render_widget(Clear, modal);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" plan — Esc close ")
+        .border_style(Style::default().fg(theme::FG_KEY))
+        .style(Style::default().fg(theme::FG_TEXT).bg(theme::BG_CHROME));
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let text_width = inner.width.saturating_sub(4).max(4) as usize;
+    let mut lines = Vec::new();
+    for (content, marker) in entries {
+        let marker_style = match *marker {
+            'x' => Style::default().fg(theme::FG_INFO),
+            '>' => Style::default().fg(theme::FG_WARNING),
+            '-' => Style::default().fg(theme::FG_KEY),
+            _ => Style::default().fg(theme::FG_DIM),
+        };
+        let wrapped = crate::app::wrap_text(content, text_width);
+        for (index, segment) in wrapped.into_iter().enumerate() {
+            if index == 0 {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("[{marker}] "), marker_style),
+                    Span::styled(segment, Style::default().fg(theme::FG_TEXT)),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::raw("    "),
+                    Span::styled(segment, Style::default().fg(theme::FG_TEXT)),
+                ]));
+            }
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// Builds the composer line: permission choice, elicitation widget, or the

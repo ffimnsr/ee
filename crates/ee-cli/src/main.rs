@@ -162,6 +162,11 @@ enum DoCommands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    /// Open agent-facing UI entry points
+    Agent {
+        #[command(subcommand)]
+        command: AgentCommands,
+    },
     /// List installed plugins from configured plugin directories
     Plugins {
         #[command(subcommand)]
@@ -208,6 +213,12 @@ enum DoCommands {
         #[arg(value_enum)]
         shell: Shell,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentCommands {
+    /// Launch the editor directly into the agents TUI
+    Shell,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1376,6 +1387,10 @@ fn build_startup_app(launch: StartupLaunch) -> io::Result<(App, Vec<PathBuf>)> {
 
 fn main() -> io::Result<()> {
     let cli = Cli::parse();
+    let launch_agent_shell = matches!(
+        &cli.command,
+        Some(Commands::Do { command: DoCommands::Agent { command: AgentCommands::Shell } })
+    );
 
     // Apply --working-dir before any file or utility command resolution.
     if let Some(ref dir) = cli.working_dir {
@@ -1411,6 +1426,7 @@ fn main() -> io::Result<()> {
                         cmd_config_set(scope.scope(), &key, &value)
                     }
                 },
+                DoCommands::Agent { command: AgentCommands::Shell } => {}
                 DoCommands::Plugins { command } => match command {
                     PluginCommands::List => cmd_plugins_list(),
                 },
@@ -1474,7 +1490,9 @@ fn main() -> io::Result<()> {
                 },
                 DoCommands::Completions { shell } => cmd_completions(shell),
             }
-            return Ok(());
+            if !launch_agent_shell {
+                return Ok(());
+            }
         }
         None => {}
     }
@@ -1508,6 +1526,10 @@ fn main() -> io::Result<()> {
         && let Err(err) = state.restore(&mut app)
     {
         eprintln!("ee: warning: failed to restore session: {err}");
+    }
+
+    if launch_agent_shell {
+        app.open_agents_shell();
     }
 
     // Open any additional files as extra buffers.

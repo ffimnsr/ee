@@ -72,9 +72,10 @@ impl Default for OrchestratorProviderConfig {
     }
 }
 
-/// One live session's orchestrator runtime.
+/// One live session's orchestrator runtime and immutable session facts.
 struct SessionRuntime {
     runtime: Arc<OrchestratorRuntime>,
+    system_context: String,
 }
 
 /// Serialized orchestrator state kept when a session closes so a later
@@ -152,6 +153,29 @@ impl<M: ModelAdapter> OrchestratorProvider<M> {
     }
 }
 
+fn workspace_system_context(
+    cwd: &std::path::Path,
+    additional_directories: &[std::path::PathBuf],
+) -> String {
+    let mut roots = vec![cwd.to_path_buf()];
+    for directory in additional_directories {
+        if !roots.iter().any(|root| root == directory) {
+            roots.push(directory.clone());
+        }
+    }
+    let mut text = format!(
+        "Session context:\n- current_working_directory: {}\n- workspace_roots:",
+        cwd.display()
+    );
+    for root in roots {
+        text.push_str(&format!("\n  - {}", root.display()));
+    }
+    text.push_str(
+        "\nTool path rules:\n- Built-in file and terminal tools require absolute paths.\n- Resolve relative paths against current_working_directory before calling tools.",
+    );
+    text
+}
+
 impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
     fn info(&self) -> Implementation {
         self.config.implementation.clone()
@@ -170,7 +194,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
 
     fn new_session(
         &self,
-        _ctx: NewSessionContext,
+        ctx: NewSessionContext,
     ) -> ProviderFuture<Result<SessionInit, ProviderError>> {
         let config = self.config.orchestrator.clone();
         let model = self.model.clone();
@@ -182,6 +206,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
             // tests.
             let number = next_session.fetch_add(1, Ordering::Relaxed);
             let session_id = SessionId::new(format!("{SESSION_ID_PREFIX}-{number}"));
+            let system_context = workspace_system_context(&ctx.cwd, &ctx.additional_directories);
             let runtime = Arc::new(OrchestratorRuntime::with_policy(config, model, policy));
             runtime.register_builtins(&session_id).map_err(|error| {
                 ProviderError::BackendFailure(format!("failed to register built-in tools: {error}"))
@@ -189,7 +214,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
             sessions
                 .lock()
                 .expect("adapter sessions poisoned")
-                .insert(session_id.to_string(), SessionRuntime { runtime });
+                .insert(session_id.to_string(), SessionRuntime { runtime, system_context });
             Ok(SessionInit::new(session_id))
         })
     }
@@ -214,6 +239,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                     "no persisted orchestrator state for session {session_id}"
                 )));
             };
+            let system_context = workspace_system_context(&ctx.cwd, &ctx.additional_directories);
             let runtime = Arc::new(OrchestratorRuntime::with_state(
                 config,
                 model,
@@ -227,7 +253,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
             sessions
                 .lock()
                 .expect("adapter sessions poisoned")
-                .insert(session_id.to_string(), SessionRuntime { runtime });
+                .insert(session_id.to_string(), SessionRuntime { runtime, system_context });
             Ok(SessionInit::new(session_id))
         })
     }
@@ -242,18 +268,23 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
         let session_id = ctx.session_id.clone();
         let sessions = self.sessions.clone();
         Box::pin(async move {
-            let runtime = {
+            let session = {
                 let sessions = sessions.lock().expect("adapter sessions poisoned");
-                sessions.get(&session_id.to_string()).map(|session| session.runtime.clone())
+                sessions
+                    .get(&session_id.to_string())
+                    .map(|session| (session.runtime.clone(), session.system_context.clone()))
             };
-            let Some(runtime) = runtime else {
+            let Some((runtime, system_context)) = session else {
                 return Err(ProviderError::BackendFailure(format!(
                     "no orchestrator state for session {session_id}"
                 )));
             };
             // The framework's cancellation watch flips on `session/cancel`
             // and `session/close`; run_turn observes it and stops promptly.
-            runtime.run_turn(ctx, sink, client, cancel).await.map_err(ProviderError::from)
+            runtime
+                .run_turn_with_system_context(ctx, sink, client, cancel, system_context)
+                .await
+                .map_err(ProviderError::from)
         })
     }
 
@@ -419,6 +450,14 @@ mod tests {
         })
     }
 
+    fn session_new_params_with_additional(cwd: &str, additional: &[&str]) -> Value {
+        json!({
+            "cwd": cwd,
+            "additionalDirectories": additional,
+            "mcpServers": [],
+        })
+    }
+
     fn prompt_params(session_id: &str, text: &str) -> Value {
         json!({
             "sessionId": session_id,
@@ -543,6 +582,36 @@ mod tests {
 
         let result = request_result(frames[2].clone());
         assert_eq!(result["stopReason"], "end_turn");
+
+        handle.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn provider_adapter_prompt_includes_workspace_system_context() {
+        let model = Arc::new(FakeModel::new(vec![ModelResponse::new().text("ok").completed()]));
+        let provider =
+            OrchestratorProvider::new(OrchestratorProviderConfig::default(), model.clone());
+        let (handle, task) = spawn_server(provider);
+
+        handle.send(request(
+            1,
+            "session/new",
+            session_new_params_with_additional("/work/project", &["/shared/lib"]),
+        ));
+        let session_id = request_result(handle.next_frame().await)["sessionId"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+        handle.send(request(2, "session/prompt", prompt_params(&session_id, "read .ee.toml")));
+        let frames = handle.next_frames(3).await;
+        assert_eq!(request_result(frames[2].clone())["stopReason"], "end_turn");
+
+        let requests = model.requests();
+        let context = requests[0].transcript[0].text_content();
+        assert!(context.contains("current_working_directory: /work/project"), "{context}");
+        assert!(context.contains("- /shared/lib"), "{context}");
+        assert!(context.contains("require absolute paths"), "{context}");
+        assert!(context.contains("Resolve relative paths"), "{context}");
 
         handle.shutdown(task).await;
     }

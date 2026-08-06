@@ -23,7 +23,7 @@ use std::sync::Arc;
 use ee_acp_agent_server::ProviderError;
 use ee_agent_orchestrator::{
     ModelAdapter, ModelContent, ModelError, ModelFuture, ModelMessage, ModelRequest, ModelResponse,
-    ModelRole, ToolDefinition, ToolIntent,
+    ModelRole, PolicyEngine, ToolDefinition, ToolIntent, ToolPolicy,
 };
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -32,6 +32,22 @@ use crate::config::Config;
 #[cfg(test)]
 use crate::openrouter::openrouter_request_body_with_tools;
 use crate::openrouter::{OpenRouterMessage, call_openrouter};
+
+/// Builds the default policy for orchestrated OpenRouter sessions.
+///
+/// Read, execute, and delegate tools are available because orchestrated mode is
+/// the production OpenRouter path. Write tools and destructive subclasses stay
+/// denied until separately allowed by a narrower policy.
+#[must_use]
+pub fn openrouter_orchestrated_policy() -> PolicyEngine {
+    PolicyEngine::new(ToolPolicy {
+        allow_read: true,
+        allow_write: false,
+        allow_execute: true,
+        allow_delegate: true,
+        ..ToolPolicy::default()
+    })
+}
 
 /// Boxed future returned by a completion client.
 pub(crate) type OpenRouterCompletionFuture =
@@ -101,11 +117,24 @@ impl ModelAdapter for OpenRouterModelAdapter {
             };
             let messages = openrouter_messages_from_transcript(&config, &request.transcript);
             let tools = openrouter_tools_from_definitions(&request.tools);
-            let answer = completion(&config, &api_key, &messages, &tools)
-                .await
-                .map_err(|error| ModelError::Adapter(error.to_string()))?;
+            let completion = completion(&config, &api_key, &messages, &tools);
+            let answer = tokio::select! {
+                answer = completion => answer.map_err(|error| ModelError::Adapter(error.to_string()))?,
+                () = wait_cancelled(cancel) => return Err(ModelError::Cancelled),
+            };
             Ok(model_response_from_openrouter(answer))
         })
+    }
+}
+
+async fn wait_cancelled(mut cancel: watch::Receiver<bool>) {
+    if *cancel.borrow() {
+        return;
+    }
+    while cancel.changed().await.is_ok() {
+        if *cancel.borrow() {
+            return;
+        }
     }
 }
 
@@ -231,6 +260,7 @@ pub(crate) fn openrouter_body_for_request(
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::future;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -442,18 +472,23 @@ mod tests {
         fn bodies(&self) -> Vec<Value> {
             self.bodies.lock().expect("bodies poisoned").clone()
         }
+
+        fn never() -> Self {
+            Self::new(Vec::new())
+        }
     }
 
     fn scripted_client(script: ScriptedCompletion) -> Arc<OpenRouterCompletionClient> {
-        Arc::new(move |_config, _api_key, messages, _tools| {
+        Arc::new(move |_config, _api_key, messages, tools| {
             let script = script.clone();
             let messages = messages.to_vec();
+            let tools = tools.to_vec();
             Box::pin(async move {
                 script
                     .bodies
                     .lock()
                     .expect("bodies poisoned")
-                    .push(json!({ "messages": messages }));
+                    .push(json!({ "messages": messages, "tools": tools }));
                 let response = script
                     .script
                     .lock()
@@ -467,7 +502,23 @@ mod tests {
         })
     }
 
-    fn response_with_tool_call(id: &str, name: &str, path: &str) -> Value {
+    fn never_client(script: ScriptedCompletion) -> Arc<OpenRouterCompletionClient> {
+        Arc::new(move |_config, _api_key, messages, tools| {
+            let script = script.clone();
+            let messages = messages.to_vec();
+            let tools = tools.to_vec();
+            Box::pin(async move {
+                script
+                    .bodies
+                    .lock()
+                    .expect("bodies poisoned")
+                    .push(json!({ "messages": messages, "tools": tools }));
+                future::pending::<Result<OpenRouterMessage, ProviderError>>().await
+            })
+        })
+    }
+
+    fn response_with_tool_args(id: &str, name: &str, arguments: Value) -> Value {
         json!({
             "choices": [{
                 "message": {
@@ -475,7 +526,7 @@ mod tests {
                     "tool_calls": [{
                         "id": id,
                         "type": "function",
-                        "function": { "name": name, "arguments": json!({ "path": path }).to_string() }
+                        "function": { "name": name, "arguments": arguments.to_string() }
                     }]
                 },
                 "finish_reason": "tool_calls"
@@ -483,9 +534,22 @@ mod tests {
         })
     }
 
+    fn response_with_tool_call(id: &str, name: &str, path: &str) -> Value {
+        response_with_tool_args(id, name, json!({ "path": path }))
+    }
+
     fn response_with_text(text: &str) -> Value {
         json!({
             "choices": [{ "message": { "content": text }, "finish_reason": "stop" }]
+        })
+    }
+
+    fn response_with_reasoning(reasoning: &str, text: &str) -> Value {
+        json!({
+            "choices": [{
+                "message": { "reasoning": reasoning, "content": text },
+                "finish_reason": "stop"
+            }]
         })
     }
 
@@ -539,6 +603,11 @@ mod tests {
             .expect("test request builds")
     }
 
+    fn notification(method: &str, params: Value) -> RawJsonRpcMessage {
+        RawJsonRpcMessage::notification(method.to_string(), params)
+            .expect("test notification builds")
+    }
+
     fn request_result(frame: RawJsonRpcMessage) -> Value {
         let Response::Result { result, .. } = unwrap_response(frame) else {
             panic!("expected a result response");
@@ -580,7 +649,11 @@ mod tests {
             .title("OpenRouter"),
             orchestrator: config,
         };
-        let provider = OrchestratorProvider::new(provider_config, Arc::new(adapter));
+        let provider = OrchestratorProvider::with_policy(
+            provider_config,
+            Arc::new(adapter),
+            openrouter_orchestrated_policy(),
+        );
         let server = ee_acp_agent_server::AcpAgentServer::new(
             provider,
             ee_acp_agent_server::AcpAgentServerConfig::default(),
@@ -609,6 +682,131 @@ mod tests {
             "sessionId": session_id,
             "prompt": [{ "type": "text", "text": text }],
         })
+    }
+
+    #[tokio::test]
+    async fn orchestrated_mode_starts_through_acp_agent_server_without_network() {
+        let script = ScriptedCompletion::new(vec![response_with_text("unused")]);
+        let adapter =
+            OpenRouterModelAdapter::with_completion(test_config(), scripted_client(script));
+        let (handle, task) = spawn_server(adapter, OrchestratorConfig::default());
+
+        handle.send(request(1, "initialize", json!({ "protocolVersion": 1 })));
+
+        let result = request_result(handle.next_frames(1).await.remove(0));
+        assert_eq!(result["protocolVersion"], 1);
+        assert_eq!(result["agentInfo"]["name"], "ee-openrouter-agent");
+        assert_eq!(result["agentInfo"]["title"], "OpenRouter");
+
+        handle.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn orchestrated_mode_streams_reasoning_and_final_answer_updates() {
+        let script = ScriptedCompletion::new(vec![response_with_reasoning("plan step", "final")]);
+        let adapter =
+            OpenRouterModelAdapter::with_completion(test_config(), scripted_client(script));
+        let (handle, task) = spawn_server(adapter, OrchestratorConfig::default());
+        let session_id = new_session(&handle, 1).await;
+
+        handle.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
+
+        let frames = handle.next_frames(4).await;
+        let thought_params = raw_params_to_value(match &frames[1] {
+            RawJsonRpcMessage::Notification(update) => update.params.clone(),
+            other => panic!("expected thought update, got {other:?}"),
+        });
+        assert_eq!(thought_params["update"]["sessionUpdate"], "agent_thought_chunk");
+        assert_eq!(thought_params["update"]["content"]["text"], "plan step");
+        let answer_params = raw_params_to_value(match &frames[2] {
+            RawJsonRpcMessage::Notification(update) => update.params.clone(),
+            other => panic!("expected answer update, got {other:?}"),
+        });
+        assert_eq!(answer_params["update"]["sessionUpdate"], "agent_message_chunk");
+        assert_eq!(answer_params["update"]["content"]["text"], "final");
+        let result = request_result(frames[3].clone());
+        assert_eq!(result["stopReason"], "end_turn");
+
+        handle.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn orchestrated_mode_cancels_pending_model_round_promptly() {
+        let script = ScriptedCompletion::never();
+        let adapter =
+            OpenRouterModelAdapter::with_completion(test_config(), never_client(script.clone()));
+        let (handle, task) = spawn_server(adapter, OrchestratorConfig::default());
+        let session_id = new_session(&handle, 1).await;
+
+        handle.send(request(2, "session/prompt", prompt_params(&session_id, "wait")));
+        let plan = handle.next_frames(1).await.remove(0);
+        assert!(matches!(plan, RawJsonRpcMessage::Notification(_)), "plan update first");
+        handle.send(notification("session/cancel", json!({ "sessionId": session_id })));
+
+        let result = request_result(handle.next_frames(1).await.remove(0));
+        assert_eq!(result["stopReason"], "cancelled");
+        assert_eq!(script.bodies().len(), 1, "model request started before cancellation");
+
+        handle.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn orchestrated_mode_keeps_openrouter_key_out_of_messages_tools_and_events() {
+        let secret = "sk-secret-phase-11";
+        let mut config = test_config();
+        config.api_key = Some(secret.to_string());
+        let script =
+            ScriptedCompletion::new(vec![response_with_reasoning("safe reasoning", "safe answer")]);
+        let adapter =
+            OpenRouterModelAdapter::with_completion(config, scripted_client(script.clone()));
+        let (handle, task) = spawn_server(adapter, OrchestratorConfig::default());
+        let session_id = new_session(&handle, 1).await;
+
+        handle.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
+
+        let frames = handle.next_frames(4).await;
+        let result = request_result(frames[3].clone());
+        assert_eq!(result["stopReason"], "end_turn");
+        let bodies = serde_json::to_string(&script.bodies()).expect("bodies serialize");
+        let events = frames.iter().map(|frame| format!("{frame:?}")).collect::<String>();
+
+        assert!(!bodies.contains(secret), "API key must not enter model messages or tool schemas");
+        assert!(!events.contains(secret), "API key must not enter ACP updates or prompt result");
+
+        handle.shutdown(task).await;
+    }
+
+    #[test]
+    fn openrouter_orchestrated_policy_allows_execute_and_delegate_not_write() {
+        let policy = openrouter_orchestrated_policy();
+        let context = ee_agent_orchestrator::PolicyContext::default();
+        assert!(
+            policy
+                .check(
+                    &ToolDefinition::new("create_terminal", "runs")
+                        .side_effect_class(ee_agent_orchestrator::SideEffectClass::Execute),
+                    context,
+                )
+                .allow
+        );
+        assert!(
+            policy
+                .check(
+                    &ToolDefinition::new("delegate_task", "delegates")
+                        .side_effect_class(ee_agent_orchestrator::SideEffectClass::Delegate),
+                    context,
+                )
+                .allow
+        );
+        assert!(
+            !policy
+                .check(
+                    &ToolDefinition::new("write_file", "writes")
+                        .side_effect_class(ee_agent_orchestrator::SideEffectClass::Write),
+                    context,
+                )
+                .allow
+        );
     }
 
     #[tokio::test]
@@ -670,6 +868,68 @@ mod tests {
             .expect("tool observation appended");
         assert_eq!(tool_message["tool_call_id"], "call_1");
         assert!(tool_message["content"].as_str().unwrap_or_default().contains("file contents"));
+
+        handle.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn orchestrated_mode_executes_terminal_create_through_client_bridge() {
+        let script = ScriptedCompletion::new(vec![
+            response_with_tool_args("call_1", "create_terminal", json!({ "command": "echo hi" })),
+            response_with_text("done"),
+        ]);
+        let adapter =
+            OpenRouterModelAdapter::with_completion(test_config(), scripted_client(script.clone()));
+        let (handle, task) = spawn_server(adapter, OrchestratorConfig::default());
+        let session_id = new_session(&handle, 1).await;
+
+        handle.send(request(2, "session/prompt", prompt_params(&session_id, "run echo")));
+        let frames = handle.next_frames(4).await;
+        let RawJsonRpcMessage::Request(terminal_request) = &frames[3] else {
+            panic!("fourth frame is terminal/create, got {:?}", frames[3]);
+        };
+        assert_eq!(terminal_request.method.as_ref(), "terminal/create");
+        let terminal_params = raw_params_to_value(terminal_request.params.clone());
+        assert_eq!(terminal_params["sessionId"], session_id);
+        assert_eq!(terminal_params["command"], "echo hi");
+
+        handle.send(RawJsonRpcMessage::response(
+            terminal_request.id.clone(),
+            Ok(json!({ "terminalId": "term-1" })),
+        ));
+        let frames = handle.next_frames(3).await;
+        let completed_update = raw_params_to_value(match &frames[0] {
+            RawJsonRpcMessage::Notification(update) => update.params.clone(),
+            other => panic!("expected completed tool-call update, got {other:?}"),
+        });
+        assert_eq!(completed_update["update"]["status"], "completed");
+        assert_eq!(request_result(frames[2].clone())["stopReason"], "end_turn");
+
+        handle.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn orchestrated_mode_executes_delegate_task_by_default() {
+        let script = ScriptedCompletion::new(vec![
+            response_with_tool_args("call_1", "delegate_task", json!({ "prompt": "inspect" })),
+            response_with_text("child answer"),
+            response_with_text("parent done"),
+        ]);
+        let adapter =
+            OpenRouterModelAdapter::with_completion(test_config(), scripted_client(script.clone()));
+        let (handle, task) = spawn_server(adapter, OrchestratorConfig::default());
+        let session_id = new_session(&handle, 1).await;
+
+        handle.send(request(2, "session/prompt", prompt_params(&session_id, "delegate")));
+        let frames = handle.next_frames(6).await;
+        let completed_update = raw_params_to_value(match &frames[3] {
+            RawJsonRpcMessage::Notification(update) => update.params.clone(),
+            other => panic!("expected completed delegate update, got {other:?}"),
+        });
+        assert_eq!(completed_update["update"]["sessionUpdate"], "tool_call_update");
+        assert_eq!(completed_update["update"]["status"], "completed");
+        assert_eq!(request_result(frames[5].clone())["stopReason"], "end_turn");
+        assert_eq!(script.bodies().len(), 3, "parent, child, parent model rounds");
 
         handle.shutdown(task).await;
     }

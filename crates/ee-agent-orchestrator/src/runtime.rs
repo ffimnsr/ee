@@ -18,7 +18,7 @@ use crate::config::OrchestratorConfig;
 use crate::error::OrchestratorError;
 use crate::events::{EventRecorder, OrchestratorEvent};
 use crate::final_response::{FinalResponseBuilder, ValidationRecorder, changed_files_from_log};
-use crate::loop_engine::{LoopEngine, LoopOptions};
+use crate::loop_engine::{LoopEngine, LoopOptions, TurnSystemContext};
 use crate::memory::MemoryStore;
 use crate::model::ModelAdapter;
 use crate::model_registry::{DEFAULT_MODEL_ID, ModelRegistry};
@@ -237,6 +237,27 @@ impl OrchestratorRuntime {
         self.run_turn_recording(ctx, sink, client, cancel, EventRecorder::new()).await
     }
 
+    /// Runs one turn with immutable session context prepended to the model
+    /// transcript as system facts.
+    pub async fn run_turn_with_system_context(
+        &self,
+        ctx: PromptContext,
+        sink: UpdateSink,
+        client: ClientBridge,
+        cancel: watch::Receiver<bool>,
+        system_context: String,
+    ) -> Result<PromptResult, OrchestratorError> {
+        self.run_turn_recording_with_system_context(
+            ctx,
+            sink,
+            client,
+            cancel,
+            EventRecorder::new(),
+            Some(system_context),
+        )
+        .await
+    }
+
     /// Same as [`OrchestratorRuntime::run_turn`] but records every loop
     /// decision into `events`; used by tests to assert stable decision
     /// sequences.
@@ -247,6 +268,18 @@ impl OrchestratorRuntime {
         client: ClientBridge,
         cancel: watch::Receiver<bool>,
         events: EventRecorder,
+    ) -> Result<PromptResult, OrchestratorError> {
+        self.run_turn_recording_with_system_context(ctx, sink, client, cancel, events, None).await
+    }
+
+    async fn run_turn_recording_with_system_context(
+        &self,
+        ctx: PromptContext,
+        sink: UpdateSink,
+        client: ClientBridge,
+        cancel: watch::Receiver<bool>,
+        events: EventRecorder,
+        system_context: Option<String>,
     ) -> Result<PromptResult, OrchestratorError> {
         let (title, description) = task_summary(&ctx);
         let (task, entries) = {
@@ -275,7 +308,16 @@ impl OrchestratorRuntime {
                 ..LoopOptions::default()
             },
         );
-        engine.run(ctx, sink, client, cancel, task, memory).await
+        engine
+            .run_with_system_context(
+                ctx,
+                sink,
+                client,
+                cancel,
+                task,
+                TurnSystemContext { memory, session: system_context },
+            )
+            .await
     }
 
     /// Runs one strategic turn: selects a [`TurnStrategy`] from observed

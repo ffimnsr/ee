@@ -1,6 +1,13 @@
 use super::*;
 
 impl App {
+    /// Opens the agents pane from non-command-line entry points such as
+    /// `ee do agent shell`, preserving the same enabled/disabled behavior as
+    /// `:agents`.
+    pub(crate) fn open_agents_shell(&mut self) -> bool {
+        self.dispatch_agents_command("agents", "")
+    }
+
     /// Agents-mode command surface (Phase 0 inert path + Phase 3 pane).
     ///
     /// With the `agents` feature the full pane command set runs; without it

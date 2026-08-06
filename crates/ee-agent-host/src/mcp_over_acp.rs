@@ -13,7 +13,7 @@
 //!   method metadata"), enforcing strict ordering and identity rules.
 //! - Inner MCP messages are served by the existing
 //!   [`ee_mcp::EeMcpProxy`] (`rmcp::ServerHandler`) over an in-process
-//!   transport, so the `ee.*` tool definitions, argument validation,
+//!   transport, so the `ee_*` tool definitions, argument validation,
 //!   absolute-path rules, terminal env redaction, and result mapping are
 //!   reused verbatim.
 //! - Tool execution routes through the same [`ClientRequestHandler`] as
@@ -777,7 +777,7 @@ pub(crate) struct McpOverAcpRegistry {
     next_connection_id: AtomicU64,
     /// Proxy tool call executor (runs on the host runtime).
     jobs: mpsc::UnboundedSender<ProxyJob>,
-    /// Agent stderr capture for the `ee.diagnostics` tool.
+    /// Agent stderr capture for the `ee_diagnostics` tool.
     process: Arc<Mutex<Option<AgentProcess>>>,
 }
 

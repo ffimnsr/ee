@@ -62,6 +62,15 @@ pub(crate) struct LoopOptions {
     pub model_id: Option<String>,
 }
 
+/// System messages prepended before one model/tool loop.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TurnSystemContext {
+    /// Compact memory facts from the runtime store.
+    pub memory: Option<String>,
+    /// Immutable session facts such as cwd and path rules.
+    pub session: Option<String>,
+}
+
 impl Default for LoopOptions {
     fn default() -> Self {
         Self {
@@ -118,6 +127,7 @@ impl LoopEngine {
 
     /// Runs one turn for `task`, bounded by `turn_timeout`, seeding the
     /// transcript with the given compact memory context (when any).
+    #[cfg(test)]
     pub(crate) async fn run(
         &self,
         ctx: PromptContext,
@@ -127,9 +137,35 @@ impl LoopEngine {
         task: TaskNode,
         memory: Option<String>,
     ) -> Result<PromptResult, OrchestratorError> {
+        self.run_with_system_context(
+            ctx,
+            sink,
+            client,
+            cancel,
+            task,
+            TurnSystemContext { memory, session: None },
+        )
+        .await
+    }
+
+    /// Runs one prompt after prepending bounded system context and compact
+    /// memory facts. System context is first so workspace/path rules survive as
+    /// the highest-priority session facts.
+    pub(crate) async fn run_with_system_context(
+        &self,
+        ctx: PromptContext,
+        sink: UpdateSink,
+        client: ClientBridge,
+        cancel: watch::Receiver<bool>,
+        task: TaskNode,
+        context: TurnSystemContext,
+    ) -> Result<PromptResult, OrchestratorError> {
         let mut transcript = Transcript::from_prompt(&ctx);
-        if let Some(facts) = &memory {
+        if let Some(facts) = &context.memory {
             transcript.prepend_system(format!("Memory facts:\n{facts}"));
+        }
+        if let Some(session) = context.session.as_deref().filter(|text| !text.is_empty()) {
+            transcript.prepend_system(session);
         }
         self.run_transcript(transcript, ctx.session_id.to_string(), sink, client, cancel, task)
             .await

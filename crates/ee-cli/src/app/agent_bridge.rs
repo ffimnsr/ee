@@ -58,27 +58,27 @@ pub(crate) const BRIDGE_READ_MAX_BYTES: usize = 1024 * 1024;
 pub(crate) const BRIDGE_TERMINAL_OUTPUT_CAP: usize = 1024 * 1024;
 /// How many bytes each terminal output reader flushes per read.
 const TERMINAL_READER_CHUNK: usize = 4096;
-/// Cap on entries returned by one `ee.list_directory` call.
+/// Cap on entries returned by one `ee_list_directory` call.
 const PROXY_LIST_DIRECTORY_LIMIT: usize = 500;
-/// Cap on matches returned by one `ee.search_files` call.
+/// Cap on matches returned by one `ee_search_files` call.
 const PROXY_SEARCH_FILES_LIMIT: usize = 500;
-/// Cap on matches returned by one `ee.search_text` call.
+/// Cap on matches returned by one `ee_search_text` call.
 const PROXY_SEARCH_TEXT_LIMIT: usize = 200;
-/// Max visible context bytes returned for one `ee.search_text` match.
+/// Max visible context bytes returned for one `ee_search_text` match.
 const PROXY_SEARCH_TEXT_CONTEXT_BYTES: usize = 200;
 /// Cap on diagnostics returned by one Phase 3 diagnostics tool.
 const PROXY_DIAGNOSTICS_LIMIT: usize = 500;
-/// Cap on document symbols returned by one `ee.document_symbols` call.
+/// Cap on document symbols returned by one `ee_document_symbols` call.
 const PROXY_DOCUMENT_SYMBOLS_LIMIT: usize = 500;
-/// Cap on references returned by one `ee.references` call.
+/// Cap on references returned by one `ee_references` call.
 const PROXY_REFERENCES_LIMIT: usize = 500;
-/// Cap on code actions returned by one `ee.list_code_actions` call.
+/// Cap on code actions returned by one `ee_list_code_actions` call.
 const PROXY_CODE_ACTIONS_LIMIT: usize = 100;
 /// Cap on files returned by one rename preview.
 const PROXY_RENAME_FILES_LIMIT: usize = 100;
 /// Cap on edits returned by one rename preview.
 const PROXY_RENAME_EDITS_LIMIT: usize = 1000;
-/// Max regex pattern length accepted by `ee.search_text_regex`.
+/// Max regex pattern length accepted by `ee_search_text_regex`.
 const PROXY_SEARCH_REGEX_MAX_PATTERN_BYTES: usize = 4096;
 /// Max wall time spent in one regex search before fail-closed timeout.
 const PROXY_SEARCH_REGEX_TIMEOUT: Duration = Duration::from_secs(2);
@@ -2256,7 +2256,7 @@ impl App {
         match self.prepare_replace_text(&path, old_text, new_text) {
             Ok((content, expectation)) => {
                 let spec = ProxyWriteSpec {
-                    title: String::from("ee.replace_text"),
+                    title: String::from("ee_replace_text"),
                     detail: format!("{} ({} bytes, 1 edit)", path.display(), content.len()),
                     prepared: PreparedWrite {
                         path,
@@ -2293,7 +2293,7 @@ impl App {
                     if edit_count == 1 { "" } else { "s" }
                 );
                 let spec = ProxyWriteSpec {
-                    title: String::from("ee.apply_patch"),
+                    title: String::from("ee_apply_patch"),
                     detail,
                     prepared: PreparedWrite {
                         path,
@@ -2333,7 +2333,7 @@ impl App {
             Ok(None) => {
                 let created = content.to_string();
                 let spec = ProxyWriteSpec {
-                    title: String::from("ee.create_text_file"),
+                    title: String::from("ee_create_text_file"),
                     detail: format!("{} ({} bytes, 1 edit)", path.display(), created.len()),
                     prepared: PreparedWrite {
                         path,
@@ -2367,7 +2367,7 @@ impl App {
             Ok(Some(revision)) => {
                 let updated = content.to_string();
                 let spec = ProxyWriteSpec {
-                    title: String::from("ee.overwrite_text_file"),
+                    title: String::from("ee_overwrite_text_file"),
                     detail: format!("{} ({} bytes, 1 edit)", path.display(), updated.len()),
                     prepared: PreparedWrite {
                         path,
@@ -2892,7 +2892,7 @@ impl App {
                     if prepared.proxy_edit_count == 1 { "" } else { "s" }
                 );
                 let spec = ProxyWriteSpec {
-                    title: String::from("ee.apply_code_action"),
+                    title: String::from("ee_apply_code_action"),
                     detail,
                     prepared,
                 };
@@ -2932,7 +2932,7 @@ impl App {
                             if prepared.proxy_edit_count == 1 { "" } else { "s" }
                         );
                         let spec = ProxyWriteSpec {
-                            title: String::from("ee.format_file"),
+                            title: String::from("ee_format_file"),
                             detail,
                             prepared,
                         };
@@ -3008,7 +3008,7 @@ impl App {
                         if total_edits == 1 { "" } else { "s" }
                     );
                     self.request_bridge_approval(ApprovalPrompt::proxy_write_batch(
-                        String::from("ee.rename_symbol"),
+                        String::from("ee_rename_symbol"),
                         detail,
                         writes,
                         total_edits,

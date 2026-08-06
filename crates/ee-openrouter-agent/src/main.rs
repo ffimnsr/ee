@@ -11,7 +11,7 @@ use ee_agent_orchestrator::{OrchestratorProvider, OrchestratorProviderConfig};
 use ee_agent_protocol::Implementation;
 use ee_openrouter_agent::config::{Args, Config};
 use ee_openrouter_agent::dotenv::load_dotenv;
-use ee_openrouter_agent::orchestrated::OpenRouterModelAdapter;
+use ee_openrouter_agent::orchestrated::{OpenRouterModelAdapter, openrouter_orchestrated_policy};
 use ee_openrouter_agent::provider::OpenRouterProvider;
 
 #[tokio::main(flavor = "current_thread")]
@@ -26,15 +26,24 @@ async fn main() {
     };
     let config = Config::from_args_and_dotenv(args, &dotenv);
     let server_config = AcpAgentServerConfig::default();
-    let result = if config.orchestrated {
-        run_orchestrated(config, server_config).await
-    } else {
-        run_simple(config, server_config).await
+    let result = match provider_mode(&config) {
+        ProviderMode::Orchestrated => run_orchestrated(config, server_config).await,
+        ProviderMode::Simple => run_simple(config, server_config).await,
     };
     if let Err(error) = result {
         eprintln!("ee-openrouter-agent: {error}");
         std::process::exit(1);
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderMode {
+    Simple,
+    Orchestrated,
+}
+
+fn provider_mode(config: &Config) -> ProviderMode {
+    if config.orchestrated { ProviderMode::Orchestrated } else { ProviderMode::Simple }
 }
 
 /// Simple provider mode: OpenRouter owns session history and the bounded
@@ -60,9 +69,49 @@ async fn run_orchestrated(
             .title("OpenRouter"),
         ..OrchestratorProviderConfig::default()
     };
-    let provider = OrchestratorProvider::new(provider_config, Arc::new(adapter));
+    let provider = OrchestratorProvider::with_policy(
+        provider_config,
+        Arc::new(adapter),
+        openrouter_orchestrated_policy(),
+    );
     AcpAgentServer::new(provider, server_config)
         .run_stdio()
         .await
         .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use ee_openrouter_agent::config::DEFAULT_API_URL;
+
+    fn config(orchestrated: bool) -> Config {
+        Config {
+            model: String::from("test/model"),
+            api_url: String::from(DEFAULT_API_URL),
+            api_key: Some(String::from("sk-test")),
+            site_url: None,
+            app_title: String::from("ee-test"),
+            timeout: Duration::from_secs(1),
+            system_prompt: String::from("system"),
+            reasoning_effort: None,
+            orchestrated,
+        }
+    }
+
+    #[test]
+    fn default_config_selects_orchestrator_provider_path() {
+        let config = config(true);
+
+        assert_eq!(provider_mode(&config), ProviderMode::Orchestrated);
+    }
+
+    #[test]
+    fn opt_out_config_selects_simple_openrouter_provider_path() {
+        let config = config(false);
+
+        assert_eq!(provider_mode(&config), ProviderMode::Simple);
+    }
 }

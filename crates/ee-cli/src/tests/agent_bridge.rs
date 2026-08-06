@@ -96,7 +96,11 @@ fn wait_until(app: &mut App, label: &str, mut condition: impl FnMut(&App) -> boo
         thread::sleep(Duration::from_millis(10));
     }
     panic!(
-        "timed out waiting for {label}; status={:?} active={:?} lines={:?}",
+        "timed out waiting for {label}; mode={:?} approvals={} permission={} elicitation={} status={:?} active={:?} lines={:?}",
+        app.mode,
+        app.agents.approvals.len(),
+        app.agents.permission.is_some(),
+        app.agents.elicitation.is_some(),
         app.backend.status_message.as_deref(),
         app.backend.active().path,
         app.backend.lines
@@ -171,6 +175,9 @@ fn read_open_buffer_returns_unsaved_in_memory_text() {
 
     // Open the file in the editor and type unsaved text.
     open_buffer_and_wait(&mut app, &file);
+    wait_until(&mut app, "buffer content loaded", |app| {
+        app.backend.lines == vec![String::from("seed"), String::new()]
+    });
     press(&mut app, KeyCode::Char('i'), KeyModifiers::NONE);
     for ch in "unsaved".chars() {
         press(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
@@ -436,6 +443,10 @@ fn concurrent_user_edit_merges_into_agent_write() {
     let script = base_script().emit(write_text_file(103, "s1", &path, "one\nTWO\nthreeX\n"));
     let (mut app, _temp, fake) = fake_agents_app(script);
     open_buffer_and_wait(&mut app, &file);
+    wait_until(&mut app, "buffer content loaded", |app| {
+        app.backend.lines
+            == vec![String::from("one"), String::from("two"), String::from("three"), String::new()]
+    });
 
     // The user edits line 3 while the agent write is queued.
     app.backend.replace_line_range(2, 2, &[String::from("threeX")]).unwrap();
@@ -496,7 +507,6 @@ fn terminal_output_is_capped_and_preserves_final_visible_output() {
             json!({ "outputByteLimit": 8 }),
         ))
         .capture(CaptureSource::Response { id: 102 }, "result.terminalId", "term_id")
-        .wait_for_response(102)
         .delay(400)
         .emit(json!({
             "jsonrpc": "2.0",
@@ -509,6 +519,12 @@ fn terminal_output_is_capped_and_preserves_final_visible_output() {
 
     wait_until(&mut app, "terminal approval appears", |app| app.agents.approvals.front().is_some());
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE); // Allow once
+
+    wait_until(&mut app, "terminal create answered", |_| {
+        fake.agent().response_with_id(102).is_some()
+    });
+    let created = fake.agent().response_with_id(102).expect("create response");
+    assert!(created.get("result").is_some(), "terminal create must succeed: {created}");
 
     wait_until(&mut app, "terminal output answered", |_| {
         fake.agent().response_with_id(104).is_some()
@@ -525,7 +541,6 @@ fn terminal_kill_resolves_wait_for_exit() {
     let script = base_script()
         .emit(terminal_create(102, "s1", "sleep", json!(["30"]), json!({})))
         .capture(CaptureSource::Response { id: 102 }, "result.terminalId", "term_id")
-        .wait_for_response(102)
         .emit(json!({
             "jsonrpc": "2.0",
             "id": 105,
@@ -563,8 +578,6 @@ fn terminal_release_invalidates_acp_id_but_keeps_output_displayable() {
     let script = base_script()
         .emit(terminal_create(102, "s1", "sh", json!(["-c", "printf hello"]), json!({})))
         .capture(CaptureSource::Response { id: 102 }, "result.terminalId", "term_id")
-        .wait_for_response(102)
-        .delay(300)
         .emit(json!({
             "jsonrpc": "2.0",
             "id": 107,

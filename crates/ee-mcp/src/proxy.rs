@@ -207,7 +207,7 @@ pub trait EeProxyBackend: Send + Sync + 'static {
     fn diagnostics(&self) -> Vec<String>;
 }
 
-/// Structured result of `ee.workspace_roots`.
+/// Structured result of `ee_workspace_roots`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceRootsResult {
@@ -218,7 +218,7 @@ pub struct WorkspaceRootsResult {
     pub additional_directories: Vec<String>,
 }
 
-/// One entry returned by `ee.list_directory`.
+/// One entry returned by `ee_list_directory`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectoryEntry {
     pub path: String,
@@ -226,7 +226,7 @@ pub struct DirectoryEntry {
     pub size: u64,
 }
 
-/// Structured result of `ee.list_directory`.
+/// Structured result of `ee_list_directory`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListDirectoryResult {
@@ -234,7 +234,7 @@ pub struct ListDirectoryResult {
     pub truncated: bool,
 }
 
-/// One entry returned by `ee.list_directory_all`.
+/// One entry returned by `ee_list_directory_all`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectoryEntryAll {
     pub path: String,
@@ -244,7 +244,7 @@ pub struct DirectoryEntryAll {
     pub ignored: bool,
 }
 
-/// Structured result of `ee.list_directory_all`.
+/// Structured result of `ee_list_directory_all`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListDirectoryAllResult {
@@ -252,7 +252,7 @@ pub struct ListDirectoryAllResult {
     pub truncated: bool,
 }
 
-/// Structured result of `ee.search_files`.
+/// Structured result of `ee_search_files`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchFilesResult {
@@ -260,7 +260,7 @@ pub struct SearchFilesResult {
     pub truncated: bool,
 }
 
-/// One path match returned by `ee.search_files_all`.
+/// One path match returned by `ee_search_files_all`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileMatch {
     pub path: String,
@@ -268,7 +268,7 @@ pub struct FileMatch {
     pub ignored: bool,
 }
 
-/// Structured result of `ee.search_files_all`.
+/// Structured result of `ee_search_files_all`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchFilesAllResult {
@@ -276,7 +276,7 @@ pub struct SearchFilesAllResult {
     pub truncated: bool,
 }
 
-/// One literal text match returned by `ee.search_text`.
+/// One literal text match returned by `ee_search_text`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextMatch {
     pub path: String,
@@ -284,7 +284,7 @@ pub struct TextMatch {
     pub context: String,
 }
 
-/// Structured result of `ee.search_text`.
+/// Structured result of `ee_search_text`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchTextResult {
@@ -292,7 +292,7 @@ pub struct SearchTextResult {
     pub truncated: bool,
 }
 
-/// One literal text edit for `ee.apply_patch`.
+/// One literal text edit for `ee_apply_patch`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextEdit {
     pub old_text: String,
@@ -311,7 +311,7 @@ pub struct EditTextResult {
     pub dirty: bool,
 }
 
-/// One open buffer summary from `ee.open_buffers`.
+/// One open buffer summary from `ee_open_buffers`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenBufferEntry {
@@ -324,7 +324,7 @@ pub struct OpenBufferEntry {
     pub active: bool,
 }
 
-/// Structured result of `ee.open_buffers`.
+/// Structured result of `ee_open_buffers`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenBuffersResult {
@@ -341,7 +341,7 @@ pub struct TextRange {
     pub end_character: u32,
 }
 
-/// One diagnostic returned by `ee.get_diagnostics`.
+/// One diagnostic returned by `ee_get_diagnostics`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosticEntry {
@@ -362,7 +362,7 @@ pub struct DiagnosticsResult {
     pub total: u32,
 }
 
-/// One document symbol returned by `ee.document_symbols`.
+/// One document symbol returned by `ee_document_symbols`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentSymbolEntry {
@@ -373,7 +373,7 @@ pub struct DocumentSymbolEntry {
     pub container_path: String,
 }
 
-/// Structured result of `ee.document_symbols`.
+/// Structured result of `ee_document_symbols`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentSymbolsResult {
@@ -382,7 +382,7 @@ pub struct DocumentSymbolsResult {
     pub total: u32,
 }
 
-/// One reference location returned by `ee.references`.
+/// One reference location returned by `ee_references`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReferenceEntry {
@@ -390,7 +390,7 @@ pub struct ReferenceEntry {
     pub range: TextRange,
 }
 
-/// Structured result of `ee.references`.
+/// Structured result of `ee_references`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReferencesResult {
@@ -408,7 +408,7 @@ pub struct CodeActionEntry {
     pub kind: Option<String>,
 }
 
-/// Structured result of `ee.list_code_actions`.
+/// Structured result of `ee_list_code_actions`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeActionsResult {
@@ -433,7 +433,7 @@ pub struct PlannedFileEdit {
     pub edits: Vec<PlannedTextEdit>,
 }
 
-/// Structured result of `ee.preview_rename_symbol`.
+/// Structured result of `ee_preview_rename_symbol`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenamePreviewResult {
@@ -455,7 +455,7 @@ pub struct WorkspaceEditResult {
 /// An in-process MCP server exposing ee editor operations as MCP tools.
 ///
 /// The server speaks MCP `2026-07-28` only and advertises the fixed
-/// `ee.*` tool set returned by [`list_tools`](rmcp::ServerHandler::list_tools).
+/// `ee_*` tool set returned by [`list_tools`](rmcp::ServerHandler::list_tools).
 /// Tool execution is delegated to the [`EeProxyBackend`] supplied at
 /// construction.
 pub struct EeMcpProxy {
@@ -483,12 +483,12 @@ impl EeMcpProxy {
     fn tools() -> Vec<Tool> {
         vec![
             Tool::new(
-                "ee.workspace_roots",
+                "ee_workspace_roots",
                 "Return canonical workspace roots plus active root and active file. Result is bounded to session-advertised roots only.",
                 schema(json!({ "type": "object", "properties": {} })),
             ),
             Tool::new(
-                "ee.list_directory",
+                "ee_list_directory",
                 "List one directory level from the editor workspace (absolute path). Hidden/ignored entries are skipped and results are bounded by the host default cap.",
                 schema(json!({
                     "type": "object",
@@ -499,7 +499,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.list_directory_all",
+                "ee_list_directory_all",
                 "List one directory level including hidden and ignored entries. Results are bounded by the host default cap.",
                 schema(json!({
                     "type": "object",
@@ -510,7 +510,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.search_files",
+                "ee_search_files",
                 "Search workspace files by path or glob pattern. Results are bounded by the host default cap and respect ignore rules.",
                 schema(json!({
                     "type": "object",
@@ -521,7 +521,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.search_files_all",
+                "ee_search_files_all",
                 "Search workspace files including hidden and ignored paths. Results are bounded by the host default cap.",
                 schema(json!({
                     "type": "object",
@@ -532,7 +532,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.search_text",
+                "ee_search_text",
                 "Perform literal case-sensitive text search across workspace files. Results are bounded by the host default cap.",
                 schema(json!({
                     "type": "object",
@@ -543,7 +543,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.search_text_regex",
+                "ee_search_text_regex",
                 "Perform regex text search across workspace files. Results are bounded by the host default cap and regex execution is safety-limited by the host.",
                 schema(json!({
                     "type": "object",
@@ -554,7 +554,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.search_text_in_files",
+                "ee_search_text_in_files",
                 "Perform literal case-sensitive text search inside glob-matched files. Results are bounded by the host default cap.",
                 schema(json!({
                     "type": "object",
@@ -566,7 +566,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.replace_text",
+                "ee_replace_text",
                 "Replace exactly one literal match in an editor file. Requires absolute path, approval before mutation, and fails when old_text is missing or ambiguous.",
                 schema(json!({
                     "type": "object",
@@ -579,7 +579,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.apply_patch",
+                "ee_apply_patch",
                 "Apply multiple literal old_text/new_text edits to one file. Each edit uses the same simple shape; range or hunk patches are rejected.",
                 schema(json!({
                     "type": "object",
@@ -601,7 +601,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.create_text_file",
+                "ee_create_text_file",
                 "Create a new text file in the editor workspace. Fails when the file already exists and requires approval before mutation.",
                 schema(json!({
                     "type": "object",
@@ -613,7 +613,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.overwrite_text_file",
+                "ee_overwrite_text_file",
                 "Overwrite an existing text file in the editor workspace. Requires approval and reports the replacement as structured success.",
                 schema(json!({
                     "type": "object",
@@ -625,7 +625,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.read_buffer",
+                "ee_read_buffer",
                 "Read current editor buffer content, including unsaved changes. Falls back to disk only when no buffer is open and policy allows.",
                 schema(json!({
                     "type": "object",
@@ -636,7 +636,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.read_buffer_lines",
+                "ee_read_buffer_lines",
                 "Read a bounded line window from current editor buffer content using 1-based line and explicit limit.",
                 schema(json!({
                     "type": "object",
@@ -649,17 +649,17 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.open_buffers",
+                "ee_open_buffers",
                 "Return open buffer paths, dirty flags, revision ids, cursor or selection summaries, and language ids without exposing full content.",
                 schema(json!({ "type": "object", "properties": {} })),
             ),
             Tool::new(
-                "ee.get_diagnostics",
+                "ee_get_diagnostics",
                 "Return bounded workspace diagnostics from editor and LSP state. Paths are absolute, ranges are 1-based, and results include truncation metadata when capped.",
                 schema(json!({ "type": "object", "properties": {} })),
             ),
             Tool::new(
-                "ee.get_file_diagnostics",
+                "ee_get_file_diagnostics",
                 "Return bounded diagnostics for one file from editor and LSP state. Requires an absolute path.",
                 schema(json!({
                     "type": "object",
@@ -670,7 +670,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.document_symbols",
+                "ee_document_symbols",
                 "Return bounded document symbols for one file with 1-based ranges and stable container paths.",
                 schema(json!({
                     "type": "object",
@@ -681,7 +681,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.references",
+                "ee_references",
                 "Return bounded references for symbol at absolute path and 1-based line and character.",
                 schema(json!({
                     "type": "object",
@@ -694,7 +694,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.list_code_actions",
+                "ee_list_code_actions",
                 "List bounded code actions at absolute path and 1-based line and character without applying them.",
                 schema(json!({
                     "type": "object",
@@ -707,7 +707,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.apply_code_action",
+                "ee_apply_code_action",
                 "Apply one previously listed code action by action_id. Requires approval and uses buffer edit semantics.",
                 schema(json!({
                     "type": "object",
@@ -719,7 +719,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.format_file",
+                "ee_format_file",
                 "Format one file through configured formatter or LSP formatting. Requires approval when it changes the buffer.",
                 schema(json!({
                     "type": "object",
@@ -730,7 +730,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.preview_rename_symbol",
+                "ee_preview_rename_symbol",
                 "Preview planned rename edits for symbol at absolute path and 1-based line and character without applying them.",
                 schema(json!({
                     "type": "object",
@@ -744,7 +744,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.rename_symbol",
+                "ee_rename_symbol",
                 "Apply a rename through buffer edit semantics after validating every touched file is inside allowed roots. Requires approval.",
                 schema(json!({
                     "type": "object",
@@ -758,7 +758,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.read_text_file",
+                "ee_read_text_file",
                 "Read a text file from the editor workspace (absolute path).",
                 schema(json!({
                     "type": "object",
@@ -771,7 +771,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.write_text_file",
+                "ee_write_text_file",
                 "Write text content to a file in the editor workspace (absolute path).",
                 schema(json!({
                     "type": "object",
@@ -783,7 +783,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.terminal_create",
+                "ee_terminal_create",
                 "Start a terminal in the editor workspace running a command.",
                 schema(json!({
                     "type": "object",
@@ -800,7 +800,7 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
-                "ee.diagnostics",
+                "ee_diagnostics",
                 "Recent editor diagnostics (stderr lines); never contains secrets.",
                 schema(json!({ "type": "object", "properties": {} })),
             ),
@@ -813,12 +813,12 @@ impl EeMcpProxy {
         request: &CallToolRequestParams,
     ) -> Result<CallToolResponse, ErrorData> {
         match request.name.as_ref() {
-            "ee.workspace_roots" => Ok(self
+            "ee_workspace_roots" => Ok(self
                 .backend
                 .workspace_roots()
                 .map(|roots| complete(CallToolResult::structured(json!(roots))))
                 .unwrap_or_else(backend_error_result)),
-            "ee.list_directory" => {
+            "ee_list_directory" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
                 require_absolute(path)?;
@@ -828,7 +828,7 @@ impl EeMcpProxy {
                     .map(|listing| complete(CallToolResult::structured(json!(listing))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.list_directory_all" => {
+            "ee_list_directory_all" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
                 require_absolute(path)?;
@@ -838,7 +838,7 @@ impl EeMcpProxy {
                     .map(|listing| complete(CallToolResult::structured(json!(listing))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.search_files" => {
+            "ee_search_files" => {
                 let arguments = require_arguments(request)?;
                 let pattern = require_nonempty_string(arguments, "pattern")?;
                 Ok(self
@@ -847,7 +847,7 @@ impl EeMcpProxy {
                     .map(|matches| complete(CallToolResult::structured(json!(matches))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.search_files_all" => {
+            "ee_search_files_all" => {
                 let arguments = require_arguments(request)?;
                 let pattern = require_nonempty_string(arguments, "pattern")?;
                 Ok(self
@@ -856,7 +856,7 @@ impl EeMcpProxy {
                     .map(|matches| complete(CallToolResult::structured(json!(matches))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.search_text" => {
+            "ee_search_text" => {
                 let arguments = require_arguments(request)?;
                 let query = require_nonempty_string(arguments, "query")?;
                 Ok(self
@@ -865,7 +865,7 @@ impl EeMcpProxy {
                     .map(|matches| complete(CallToolResult::structured(json!(matches))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.search_text_regex" => {
+            "ee_search_text_regex" => {
                 let arguments = require_arguments(request)?;
                 let pattern = require_nonempty_string(arguments, "pattern")?;
                 Ok(self
@@ -874,7 +874,7 @@ impl EeMcpProxy {
                     .map(|matches| complete(CallToolResult::structured(json!(matches))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.search_text_in_files" => {
+            "ee_search_text_in_files" => {
                 let arguments = require_arguments(request)?;
                 let query = require_nonempty_string(arguments, "query")?;
                 let file_glob = require_nonempty_string(arguments, "file_glob")?;
@@ -884,7 +884,7 @@ impl EeMcpProxy {
                     .map(|matches| complete(CallToolResult::structured(json!(matches))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.replace_text" => {
+            "ee_replace_text" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
                 require_absolute(path)?;
@@ -896,7 +896,7 @@ impl EeMcpProxy {
                     .map(|result| complete(CallToolResult::structured(json!(result))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.apply_patch" => {
+            "ee_apply_patch" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
                 require_absolute(path)?;
@@ -907,7 +907,7 @@ impl EeMcpProxy {
                     .map(|result| complete(CallToolResult::structured(json!(result))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.create_text_file" => {
+            "ee_create_text_file" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
                 require_absolute(path)?;
@@ -918,7 +918,7 @@ impl EeMcpProxy {
                     .map(|result| complete(CallToolResult::structured(json!(result))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.overwrite_text_file" => {
+            "ee_overwrite_text_file" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
                 require_absolute(path)?;
@@ -929,7 +929,7 @@ impl EeMcpProxy {
                     .map(|result| complete(CallToolResult::structured(json!(result))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.read_buffer" => {
+            "ee_read_buffer" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
                 require_absolute(path)?;
@@ -939,7 +939,7 @@ impl EeMcpProxy {
                     .map(|text| complete(CallToolResult::success(vec![ContentBlock::text(text)])))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.read_buffer_lines" => {
+            "ee_read_buffer_lines" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
                 require_absolute(path)?;
@@ -951,17 +951,17 @@ impl EeMcpProxy {
                     .map(|text| complete(CallToolResult::success(vec![ContentBlock::text(text)])))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.open_buffers" => Ok(self
+            "ee_open_buffers" => Ok(self
                 .backend
                 .open_buffers()
                 .map(|buffers| complete(CallToolResult::structured(json!(buffers))))
                 .unwrap_or_else(backend_error_result)),
-            "ee.get_diagnostics" => Ok(self
+            "ee_get_diagnostics" => Ok(self
                 .backend
                 .get_diagnostics()
                 .map(|diagnostics| complete(CallToolResult::structured(json!(diagnostics))))
                 .unwrap_or_else(backend_error_result)),
-            "ee.get_file_diagnostics" => {
+            "ee_get_file_diagnostics" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
                 require_absolute(path)?;
@@ -971,7 +971,7 @@ impl EeMcpProxy {
                     .map(|diagnostics| complete(CallToolResult::structured(json!(diagnostics))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.document_symbols" => {
+            "ee_document_symbols" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
                 require_absolute(path)?;
@@ -981,7 +981,7 @@ impl EeMcpProxy {
                     .map(|symbols| complete(CallToolResult::structured(json!(symbols))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.references" => {
+            "ee_references" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
                 require_absolute(path)?;
@@ -993,7 +993,7 @@ impl EeMcpProxy {
                     .map(|references| complete(CallToolResult::structured(json!(references))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.list_code_actions" => {
+            "ee_list_code_actions" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
                 require_absolute(path)?;
@@ -1005,7 +1005,7 @@ impl EeMcpProxy {
                     .map(|actions| complete(CallToolResult::structured(json!(actions))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.apply_code_action" => {
+            "ee_apply_code_action" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
                 require_absolute(path)?;
@@ -1016,7 +1016,7 @@ impl EeMcpProxy {
                     .map(|result| complete(CallToolResult::structured(json!(result))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.format_file" => {
+            "ee_format_file" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
                 require_absolute(path)?;
@@ -1026,7 +1026,7 @@ impl EeMcpProxy {
                     .map(|result| complete(CallToolResult::structured(json!(result))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.preview_rename_symbol" => {
+            "ee_preview_rename_symbol" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
                 require_absolute(path)?;
@@ -1039,7 +1039,7 @@ impl EeMcpProxy {
                     .map(|preview| complete(CallToolResult::structured(json!(preview))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.rename_symbol" => {
+            "ee_rename_symbol" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
                 require_absolute(path)?;
@@ -1052,7 +1052,7 @@ impl EeMcpProxy {
                     .map(|result| complete(CallToolResult::structured(json!(result))))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.read_text_file" => {
+            "ee_read_text_file" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
                 require_absolute(path)?;
@@ -1064,7 +1064,7 @@ impl EeMcpProxy {
                     .map(|text| complete(CallToolResult::success(vec![ContentBlock::text(text)])))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.write_text_file" => {
+            "ee_write_text_file" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
                 require_absolute(path)?;
@@ -1080,7 +1080,7 @@ impl EeMcpProxy {
                     })
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.terminal_create" => {
+            "ee_terminal_create" => {
                 let arguments = require_arguments(request)?;
                 let command = require_string(arguments, "command")?;
                 if command.is_empty() {
@@ -1104,7 +1104,7 @@ impl EeMcpProxy {
                     .map(|id| complete(CallToolResult::success(vec![ContentBlock::text(id)])))
                     .unwrap_or_else(backend_error_result))
             }
-            "ee.diagnostics" => {
+            "ee_diagnostics" => {
                 let lines = self.backend.diagnostics();
                 Ok(complete(CallToolResult::success(vec![ContentBlock::text(lines.join("\n"))])))
             }
@@ -2102,44 +2102,45 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "ee.workspace_roots",
-                "ee.list_directory",
-                "ee.list_directory_all",
-                "ee.search_files",
-                "ee.search_files_all",
-                "ee.search_text",
-                "ee.search_text_regex",
-                "ee.search_text_in_files",
-                "ee.replace_text",
-                "ee.apply_patch",
-                "ee.create_text_file",
-                "ee.overwrite_text_file",
-                "ee.read_buffer",
-                "ee.read_buffer_lines",
-                "ee.open_buffers",
-                "ee.get_diagnostics",
-                "ee.get_file_diagnostics",
-                "ee.document_symbols",
-                "ee.references",
-                "ee.list_code_actions",
-                "ee.apply_code_action",
-                "ee.format_file",
-                "ee.preview_rename_symbol",
-                "ee.rename_symbol",
-                "ee.read_text_file",
-                "ee.write_text_file",
-                "ee.terminal_create",
-                "ee.diagnostics",
+                "ee_workspace_roots",
+                "ee_list_directory",
+                "ee_list_directory_all",
+                "ee_search_files",
+                "ee_search_files_all",
+                "ee_search_text",
+                "ee_search_text_regex",
+                "ee_search_text_in_files",
+                "ee_replace_text",
+                "ee_apply_patch",
+                "ee_create_text_file",
+                "ee_overwrite_text_file",
+                "ee_read_buffer",
+                "ee_read_buffer_lines",
+                "ee_open_buffers",
+                "ee_get_diagnostics",
+                "ee_get_file_diagnostics",
+                "ee_document_symbols",
+                "ee_references",
+                "ee_list_code_actions",
+                "ee_apply_code_action",
+                "ee_format_file",
+                "ee_preview_rename_symbol",
+                "ee_rename_symbol",
+                "ee_read_text_file",
+                "ee_write_text_file",
+                "ee_terminal_create",
+                "ee_diagnostics",
             ]
         );
-        assert!(tools.iter().all(|tool| tool.name.starts_with("ee.")));
+        assert!(tools.iter().all(|tool| tool.name.starts_with("ee_")));
+        assert!(tools.iter().all(|tool| !tool.name.contains('.')));
         assert!(tools.iter().all(|tool| tool.input_schema.contains_key("properties")));
-        assert!(tools.iter().find(|tool| tool.name == "ee.list_directory").is_some_and(|tool| {
+        assert!(tools.iter().find(|tool| tool.name == "ee_list_directory").is_some_and(|tool| {
             tool.description
                 .as_ref()
                 .is_some_and(|description| description.contains("host default cap"))
         }));
-        assert!(tools.iter().find(|tool| tool.name == "ee.search_text_regex").is_some_and(
+        assert!(tools.iter().find(|tool| tool.name == "ee_search_text_regex").is_some_and(
             |tool| {
                 tool.description
                     .as_ref()
@@ -2157,7 +2158,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             REQUEST_TIMEOUT,
-            client.call_tool(CallToolRequestParams::new("ee.workspace_roots")),
+            client.call_tool(CallToolRequestParams::new("ee_workspace_roots")),
         )
         .await
         .expect("call timed out")
@@ -2176,7 +2177,7 @@ mod tests {
         let backend = Arc::new(ScriptedBackend::default());
         let (client, server) = connect(backend.clone()).await;
 
-        let params = CallToolRequestParams::new("ee.list_directory")
+        let params = CallToolRequestParams::new("ee_list_directory")
             .with_arguments(arguments(json!({ "path": "/abs/work" })));
         let result = tokio::time::timeout(REQUEST_TIMEOUT, client.call_tool(params))
             .await
@@ -2198,7 +2199,7 @@ mod tests {
         let files = tokio::time::timeout(
             REQUEST_TIMEOUT,
             client.call_tool(
-                CallToolRequestParams::new("ee.search_files")
+                CallToolRequestParams::new("ee_search_files")
                     .with_arguments(arguments(json!({ "pattern": "src/*.rs" }))),
             ),
         )
@@ -2213,7 +2214,7 @@ mod tests {
         let files_all = tokio::time::timeout(
             REQUEST_TIMEOUT,
             client.call_tool(
-                CallToolRequestParams::new("ee.search_files_all")
+                CallToolRequestParams::new("ee_search_files_all")
                     .with_arguments(arguments(json!({ "pattern": ".git/*" }))),
             ),
         )
@@ -2228,7 +2229,7 @@ mod tests {
         let text = tokio::time::timeout(
             REQUEST_TIMEOUT,
             client.call_tool(
-                CallToolRequestParams::new("ee.search_text")
+                CallToolRequestParams::new("ee_search_text")
                     .with_arguments(arguments(json!({ "query": "needle" }))),
             ),
         )
@@ -2242,7 +2243,7 @@ mod tests {
         let regex = tokio::time::timeout(
             REQUEST_TIMEOUT,
             client.call_tool(
-                CallToolRequestParams::new("ee.search_text_regex")
+                CallToolRequestParams::new("ee_search_text_regex")
                     .with_arguments(arguments(json!({ "pattern": "main" }))),
             ),
         )
@@ -2253,7 +2254,7 @@ mod tests {
 
         let scoped = tokio::time::timeout(
             REQUEST_TIMEOUT,
-            client.call_tool(CallToolRequestParams::new("ee.search_text_in_files").with_arguments(
+            client.call_tool(CallToolRequestParams::new("ee_search_text_in_files").with_arguments(
                 arguments(json!({ "query": "needle", "file_glob": "src/main.rs" })),
             )),
         )
@@ -2283,7 +2284,7 @@ mod tests {
 
         let replace = tokio::time::timeout(
             REQUEST_TIMEOUT,
-            client.call_tool(CallToolRequestParams::new("ee.replace_text").with_arguments(
+            client.call_tool(CallToolRequestParams::new("ee_replace_text").with_arguments(
                 arguments(json!({
                     "path": "/abs/work/src/main.rs",
                     "old_text": "old",
@@ -2301,7 +2302,7 @@ mod tests {
 
         let patch = tokio::time::timeout(
             REQUEST_TIMEOUT,
-            client.call_tool(CallToolRequestParams::new("ee.apply_patch").with_arguments(
+            client.call_tool(CallToolRequestParams::new("ee_apply_patch").with_arguments(
                 arguments(json!({
                     "path": "/abs/work/src/main.rs",
                     "edits": [{ "old_text": "a", "new_text": "b" }]
@@ -2315,7 +2316,7 @@ mod tests {
 
         let open_buffers = tokio::time::timeout(
             REQUEST_TIMEOUT,
-            client.call_tool(CallToolRequestParams::new("ee.open_buffers")),
+            client.call_tool(CallToolRequestParams::new("ee_open_buffers")),
         )
         .await
         .expect("open_buffers timed out")
@@ -2328,7 +2329,7 @@ mod tests {
         let _read_buffer = tokio::time::timeout(
             REQUEST_TIMEOUT,
             client.call_tool(
-                CallToolRequestParams::new("ee.read_buffer")
+                CallToolRequestParams::new("ee_read_buffer")
                     .with_arguments(arguments(json!({ "path": "/abs/work/src/main.rs" }))),
             ),
         )
@@ -2346,7 +2347,7 @@ mod tests {
 
         let error = tokio::time::timeout(
             REQUEST_TIMEOUT,
-            client.call_tool(CallToolRequestParams::new("ee.apply_patch").with_arguments(
+            client.call_tool(CallToolRequestParams::new("ee_apply_patch").with_arguments(
                 arguments(json!({
                     "path": "/abs/work/src/main.rs",
                     "edits": [{ "range": [1, 2], "new_text": "x" }]
@@ -2360,7 +2361,7 @@ mod tests {
 
         let error = tokio::time::timeout(
             REQUEST_TIMEOUT,
-            client.call_tool(CallToolRequestParams::new("ee.read_buffer_lines").with_arguments(
+            client.call_tool(CallToolRequestParams::new("ee_read_buffer_lines").with_arguments(
                 arguments(json!({ "path": "/abs/work/src/main.rs", "line": 0, "limit": 1 })),
             )),
         )
@@ -2377,7 +2378,7 @@ mod tests {
         let backend = Arc::new(ScriptedBackend::default());
         let (client, server) = connect(backend.clone()).await;
 
-        let params = CallToolRequestParams::new("ee.list_directory_all")
+        let params = CallToolRequestParams::new("ee_list_directory_all")
             .with_arguments(arguments(json!({ "path": "/abs/work" })));
         let result = tokio::time::timeout(REQUEST_TIMEOUT, client.call_tool(params))
             .await
@@ -2396,7 +2397,7 @@ mod tests {
         let backend = Arc::new(ScriptedBackend::default());
         let (client, server) = connect(backend.clone()).await;
 
-        let params = CallToolRequestParams::new("ee.read_text_file")
+        let params = CallToolRequestParams::new("ee_read_text_file")
             .with_arguments(arguments(json!({ "path": "/abs/notes.txt", "line": 3, "limit": 10 })));
         let result = tokio::time::timeout(REQUEST_TIMEOUT, client.call_tool(params))
             .await
@@ -2416,7 +2417,7 @@ mod tests {
         let backend = Arc::new(ScriptedBackend::default());
         let (client, server) = connect(backend.clone()).await;
 
-        let params = CallToolRequestParams::new("ee.read_text_file")
+        let params = CallToolRequestParams::new("ee_read_text_file")
             .with_arguments(arguments(json!({ "path": "relative.txt" })));
         let result = tokio::time::timeout(REQUEST_TIMEOUT, client.call_tool(params))
             .await
@@ -2433,7 +2434,7 @@ mod tests {
         let backend = Arc::new(ScriptedBackend::default());
         let (client, server) = connect(backend.clone()).await;
 
-        let params = CallToolRequestParams::new("ee.write_text_file")
+        let params = CallToolRequestParams::new("ee_write_text_file")
             .with_arguments(arguments(json!({ "path": "/abs/out.txt", "content": "hello" })));
         let result = tokio::time::timeout(REQUEST_TIMEOUT, client.call_tool(params))
             .await
@@ -2453,7 +2454,7 @@ mod tests {
         let backend: Arc<dyn EeProxyBackend> = Arc::new(DenyWriteBackend);
         let (client, server) = connect(backend).await;
 
-        let params = CallToolRequestParams::new("ee.write_text_file")
+        let params = CallToolRequestParams::new("ee_write_text_file")
             .with_arguments(arguments(json!({ "path": "/abs/out.txt", "content": "hello" })));
         let result = tokio::time::timeout(REQUEST_TIMEOUT, client.call_tool(params))
             .await
@@ -2472,7 +2473,7 @@ mod tests {
         let backend = Arc::new(ScriptedBackend::default());
         let (client, server) = connect(backend.clone()).await;
 
-        let params = CallToolRequestParams::new("ee.terminal_create").with_arguments(arguments(
+        let params = CallToolRequestParams::new("ee_terminal_create").with_arguments(arguments(
             json!({ "command": "cargo", "env": { "API_TOKEN": "sekrit" } }),
         ));
         let result = tokio::time::timeout(REQUEST_TIMEOUT, client.call_tool(params))
@@ -2491,7 +2492,7 @@ mod tests {
         let (client, server) = connect(backend.clone()).await;
 
         let params =
-            CallToolRequestParams::new("ee.terminal_create").with_arguments(arguments(json!({
+            CallToolRequestParams::new("ee_terminal_create").with_arguments(arguments(json!({
                 "command": "cargo",
                 "args": ["check"],
                 "cwd": "/abs/work",
@@ -2521,7 +2522,7 @@ mod tests {
         let backend = Arc::new(ScriptedBackend::default());
         let (client, server) = connect(backend).await;
 
-        let params = CallToolRequestParams::new("ee.nope");
+        let params = CallToolRequestParams::new("ee_nope");
         let result = tokio::time::timeout(REQUEST_TIMEOUT, client.call_tool(params))
             .await
             .expect("call timed out");

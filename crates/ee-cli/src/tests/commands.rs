@@ -75,6 +75,15 @@ fn cli_utility_commands_live_under_do() {
         })
     ));
 
+    let cli = crate::Cli::try_parse_from(["ee", "do", "agent", "shell"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Agent { command: crate::AgentCommands::Shell }
+        })
+    ));
+
     let cli = crate::Cli::try_parse_from(["ee", "do", "plugins", "list"]).unwrap();
 
     assert!(matches!(

@@ -370,7 +370,7 @@ async fn mcp_over_acp_direct_mcp_config_forwarding_works_independently() {
 #[tokio::test]
 async fn mcp_over_acp_workspace_roots_tool_round_trips_through_the_handler() {
     let script = connect_and_init_script()
-        .emit(emit_message(202, "tools/call", Some(json!({ "name": "ee.workspace_roots" }))))
+        .emit(emit_message(202, "tools/call", Some(json!({ "name": "ee_workspace_roots" }))))
         .wait_for_response(202);
     let handler = Arc::new(ScriptedHandler::default());
     let (fake, host) = spawn_host(script, handler.clone()).await;
@@ -393,7 +393,7 @@ async fn mcp_over_acp_workspace_roots_tool_round_trips_through_the_handler() {
 #[tokio::test]
 async fn mcp_over_acp_open_buffers_tool_round_trips_through_the_handler() {
     let script = connect_and_init_script()
-        .emit(emit_message(202, "tools/call", Some(json!({ "name": "ee.open_buffers" }))))
+        .emit(emit_message(202, "tools/call", Some(json!({ "name": "ee_open_buffers" }))))
         .wait_for_response(202);
     let handler = Arc::new(ScriptedHandler::default());
     let (fake, host) = spawn_host(script, handler.clone()).await;
@@ -436,34 +436,34 @@ async fn mcp_over_acp_connect_and_tools_list_round_trip() {
     assert_eq!(
         names,
         vec![
-            "ee.workspace_roots",
-            "ee.list_directory",
-            "ee.list_directory_all",
-            "ee.search_files",
-            "ee.search_files_all",
-            "ee.search_text",
-            "ee.search_text_regex",
-            "ee.search_text_in_files",
-            "ee.replace_text",
-            "ee.apply_patch",
-            "ee.create_text_file",
-            "ee.overwrite_text_file",
-            "ee.read_buffer",
-            "ee.read_buffer_lines",
-            "ee.open_buffers",
-            "ee.get_diagnostics",
-            "ee.get_file_diagnostics",
-            "ee.document_symbols",
-            "ee.references",
-            "ee.list_code_actions",
-            "ee.apply_code_action",
-            "ee.format_file",
-            "ee.preview_rename_symbol",
-            "ee.rename_symbol",
-            "ee.read_text_file",
-            "ee.write_text_file",
-            "ee.terminal_create",
-            "ee.diagnostics",
+            "ee_workspace_roots",
+            "ee_list_directory",
+            "ee_list_directory_all",
+            "ee_search_files",
+            "ee_search_files_all",
+            "ee_search_text",
+            "ee_search_text_regex",
+            "ee_search_text_in_files",
+            "ee_replace_text",
+            "ee_apply_patch",
+            "ee_create_text_file",
+            "ee_overwrite_text_file",
+            "ee_read_buffer",
+            "ee_read_buffer_lines",
+            "ee_open_buffers",
+            "ee_get_diagnostics",
+            "ee_get_file_diagnostics",
+            "ee_document_symbols",
+            "ee_references",
+            "ee_list_code_actions",
+            "ee_apply_code_action",
+            "ee_format_file",
+            "ee_preview_rename_symbol",
+            "ee_rename_symbol",
+            "ee_read_text_file",
+            "ee_write_text_file",
+            "ee_terminal_create",
+            "ee_diagnostics",
         ]
     );
     host.connection.close().await;
@@ -676,7 +676,7 @@ async fn mcp_over_acp_write_tool_denial_leaves_buffer_and_disk_unchanged() {
             202,
             "tools/call",
             Some(json!({
-                "name": "ee.write_text_file",
+                "name": "ee_write_text_file",
                 "arguments": { "path": "/tmp/ee-mcp-over-acp-write.txt", "content": "boom" }
             })),
         ))
@@ -716,7 +716,7 @@ async fn mcp_over_acp_terminal_create_denial_does_not_spawn_terminal() {
             202,
             "tools/call",
             Some(json!({
-                "name": "ee.terminal_create",
+                "name": "ee_terminal_create",
                 "arguments": { "command": "touch", "args": ["/tmp/ee-denied-terminal"] }
             })),
         ))
@@ -747,7 +747,7 @@ async fn mcp_over_acp_read_tool_round_trips_through_the_handler() {
             202,
             "tools/call",
             Some(json!({
-                "name": "ee.read_text_file",
+                "name": "ee_read_text_file",
                 "arguments": { "path": "/tmp/ee-mcp-over-acp-read.txt" }
             })),
         ))
@@ -785,7 +785,7 @@ async fn mcp_over_acp_unadvertised_capabilities_are_rejected_before_the_handler(
             202,
             "tools/call",
             Some(json!({
-                "name": "ee.write_text_file",
+                "name": "ee_write_text_file",
                 "arguments": { "path": "/tmp/x", "content": "boom" }
             })),
         ))
@@ -808,7 +808,7 @@ async fn mcp_over_acp_unadvertised_capabilities_are_rejected_before_the_handler(
 #[tokio::test]
 async fn mcp_over_acp_diagnostics_tool_returns_bounded_redacted_stderr() {
     let script = connect_and_init_script()
-        .emit(emit_message(202, "tools/call", Some(json!({ "name": "ee.diagnostics" }))))
+        .emit(emit_message(202, "tools/call", Some(json!({ "name": "ee_diagnostics" }))))
         .wait_for_response(202);
     let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
     let connection = ready_connection(&fake, &host).await;

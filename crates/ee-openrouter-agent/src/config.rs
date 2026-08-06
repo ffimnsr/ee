@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{ArgAction, Parser, builder::BoolishValueParser};
 
 /// Default OpenRouter chat-completions endpoint.
 pub const DEFAULT_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -44,8 +44,17 @@ pub struct Args {
     system_prompt: String,
     /// Run in orchestrated mode: ee-agent-orchestrator owns the model–tool
     /// loop and OpenRouter acts as the model adapter instead of the simple
-    /// provider mode.  Off until orchestrated mode reaches parity.
-    #[arg(long, env = "OPENROUTER_ORCHESTRATED", default_value_t = false)]
+    /// provider mode. Default after parity; opt out for fallback diagnostics.
+    #[arg(
+        long,
+        env = "OPENROUTER_ORCHESTRATED",
+        default_value_t = true,
+        action = ArgAction::Set,
+        value_parser = BoolishValueParser::new(),
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+    )]
     orchestrated: bool,
 }
 
@@ -104,7 +113,50 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, MutexGuard};
+
     use super::*;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        _lock: MutexGuard<'static, ()>,
+        name: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let lock = ENV_LOCK.lock().expect("env lock poisoned");
+            let previous = std::env::var(name).ok();
+            // SAFETY: test holds a process-wide env mutex for this crate and
+            // restores the value in Drop before releasing the lock.
+            unsafe { std::env::set_var(name, value) };
+            Self { _lock: lock, name, previous }
+        }
+
+        fn unset(name: &'static str) -> Self {
+            let lock = ENV_LOCK.lock().expect("env lock poisoned");
+            let previous = std::env::var(name).ok();
+            // SAFETY: test holds a process-wide env mutex for this crate and
+            // restores the value in Drop before releasing the lock.
+            unsafe { std::env::remove_var(name) };
+            Self { _lock: lock, name, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: guard still holds the env mutex, and this restores the
+            // exact prior state before any other guarded env mutation can run.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.name, value),
+                    None => std::env::remove_var(self.name),
+                }
+            }
+        }
+    }
 
     fn args() -> Args {
         Args {
@@ -115,7 +167,7 @@ mod tests {
             timeout_ms: 1_000,
             reasoning_effort: None,
             system_prompt: String::from("system"),
-            orchestrated: false,
+            orchestrated: true,
         }
     }
 
@@ -131,8 +183,36 @@ mod tests {
         assert_eq!(config.timeout, Duration::from_millis(42_000));
         assert_eq!(config.system_prompt, "system");
         assert!(config.reasoning_effort.is_none());
-        assert!(!config.orchestrated, "defaults to simple provider mode");
+        assert!(config.orchestrated, "defaults to orchestrated mode");
         assert!(config.api_key.is_none());
+    }
+
+    #[test]
+    fn cli_default_keeps_orchestrated_enabled() {
+        let _env = EnvGuard::unset("OPENROUTER_ORCHESTRATED");
+        let parsed = Args::try_parse_from(["ee-openrouter-agent"]).expect("default args parse");
+        let config = Config::from_args_and_dotenv(parsed, &BTreeMap::new());
+
+        assert!(config.orchestrated, "OpenRouter defaults to orchestrated mode");
+    }
+
+    #[test]
+    fn explicit_cli_false_disables_orchestrated_mode() {
+        let parsed = Args::try_parse_from(["ee-openrouter-agent", "--orchestrated=false"])
+            .expect("explicit false parses");
+        let config = Config::from_args_and_dotenv(parsed, &BTreeMap::new());
+
+        assert!(!config.orchestrated, "explicit false remains fallback opt-out");
+    }
+
+    #[test]
+    fn explicit_env_false_disables_orchestrated_mode() {
+        let _env = EnvGuard::set("OPENROUTER_ORCHESTRATED", "0");
+        let parsed = Args::try_parse_from(["ee-openrouter-agent"])
+            .expect("env false parses when OPENROUTER_ORCHESTRATED=0");
+        let config = Config::from_args_and_dotenv(parsed, &BTreeMap::new());
+
+        assert!(!config.orchestrated, "OPENROUTER_ORCHESTRATED=0 disables fallback");
     }
 
     #[test]
