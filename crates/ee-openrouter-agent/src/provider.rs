@@ -29,7 +29,9 @@ use crate::compaction::{
     trim_history_to_budget,
 };
 use crate::config::Config;
-use crate::openrouter::{call_openrouter, openrouter_tools};
+use crate::openrouter::{
+    OpenRouterStreamDelta, call_openrouter, call_openrouter_streaming, openrouter_tools,
+};
 use crate::tools::handle_tool_call;
 
 /// Maximum number of model tool rounds in one prompt turn.
@@ -192,24 +194,38 @@ async fn run_prompt(
         if *cancel.borrow() {
             return Err(ProviderError::Cancellation);
         }
-        let answer =
-            call_openrouter(&turn.http, &turn.config, &api_key, &messages, &openrouter_tools())
-                .await?;
-
-        if !answer.reasoning.is_empty() {
-            let message_id = next_message_id(&turn.next_message, "thought");
-            sink.agent_thought_chunk(message_id, &answer.reasoning).map_err(|error| {
-                ProviderError::BackendFailure(format!("failed to emit thought update: {error}"))
-            })?;
-        }
+        let mut thought_message_id = None;
+        let mut answer_message_id = None;
+        let answer = call_openrouter_streaming(
+            &turn.http,
+            &turn.config,
+            &api_key,
+            &messages,
+            &openrouter_tools(),
+            |delta| match delta {
+                OpenRouterStreamDelta::Text(text) => {
+                    let message_id = answer_message_id
+                        .get_or_insert_with(|| next_message_id(&turn.next_message, "message"));
+                    sink.agent_message_chunk(message_id.clone(), text).map_err(|error| {
+                        ProviderError::BackendFailure(format!(
+                            "failed to emit streamed message update: {error}"
+                        ))
+                    })
+                }
+                OpenRouterStreamDelta::Reasoning(text) => {
+                    let message_id = thought_message_id
+                        .get_or_insert_with(|| next_message_id(&turn.next_message, "thought"));
+                    sink.agent_thought_chunk(message_id.clone(), text).map_err(|error| {
+                        ProviderError::BackendFailure(format!(
+                            "failed to emit streamed thought update: {error}"
+                        ))
+                    })
+                }
+            },
+        )
+        .await?;
 
         if answer.tool_calls.is_empty() {
-            if !answer.content.is_empty() {
-                let message_id = next_message_id(&turn.next_message, "message");
-                sink.agent_message_chunk(message_id, &answer.content).map_err(|error| {
-                    ProviderError::BackendFailure(format!("failed to emit message update: {error}"))
-                })?;
-            }
             pending_history.push(json!({ "role": "assistant", "content": answer.content }));
             if let Some(session) =
                 turn.sessions.lock().expect("openrouter sessions poisoned").get_mut(&session_key)

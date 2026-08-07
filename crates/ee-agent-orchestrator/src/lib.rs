@@ -279,7 +279,7 @@ pub use strategy::{
 };
 pub use streaming::{
     StreamConsumer, StreamEvent, StreamReceiver, StreamSink, StreamedTurn, StreamingModelAdapter,
-    StreamingModelFuture, run_streaming, stream_channel,
+    StreamingModelFuture, run_streaming, run_streaming_response, stream_channel,
 };
 pub use stuck::{StuckConfig, StuckDetector, StuckReason};
 pub use subagent_roles::{BuiltinSubagentRole, requires_evidence_for_name};

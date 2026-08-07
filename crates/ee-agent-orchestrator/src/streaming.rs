@@ -209,12 +209,50 @@ pub async fn run_streaming<'a, F>(
 where
     F: FnOnce(StreamSink) -> StreamingModelFuture,
 {
+    let (turn, _response) = run_streaming_parts(call, updates, cancel, message_id).await?;
+    Ok(turn)
+}
+
+/// Runs a streaming completion and preserves every final response field.
+///
+/// Streamed text and reasoning must exactly match the completed response. This
+/// prevents an adapter from showing one transcript to the user while returning
+/// different tool intents or final text to the orchestrator.
+pub async fn run_streaming_response<'a, F>(
+    call: F,
+    updates: Option<&'a UpdateSink>,
+    cancel: &'a watch::Receiver<bool>,
+    message_id: &str,
+) -> Result<ModelResponse, OrchestratorError>
+where
+    F: FnOnce(StreamSink) -> StreamingModelFuture,
+{
+    let (turn, response) = run_streaming_parts(call, updates, cancel, message_id).await?;
+    if turn.text != response.text
+        || turn.reasoning != response.reasoning.as_deref().unwrap_or_default()
+    {
+        return Err(OrchestratorError::ModelFailure(
+            "streamed model output differed from its final response".to_string(),
+        ));
+    }
+    Ok(response)
+}
+
+async fn run_streaming_parts<'a, F>(
+    call: F,
+    updates: Option<&'a UpdateSink>,
+    cancel: &'a watch::Receiver<bool>,
+    message_id: &str,
+) -> Result<(StreamedTurn, ModelResponse), OrchestratorError>
+where
+    F: FnOnce(StreamSink) -> StreamingModelFuture,
+{
     let (sink, receiver) = stream_channel();
     let future = call(sink);
     let consumer = receiver.into_consumer();
     let (turn, result) = tokio::join!(consumer.run(updates, cancel, message_id), future);
-    result?;
-    Ok(turn)
+    let response = result?;
+    Ok((turn, response))
 }
 
 #[cfg(test)]
@@ -416,6 +454,34 @@ mod tests {
         .await
         .expect("streams");
         assert_eq!(turn.text, "hi");
+        assert!(matches!(next_update(&mut rx).await, SessionUpdate::AgentMessageChunk(_)));
+    }
+
+    #[tokio::test]
+    async fn streaming_response_preserves_completion_and_tool_intents() {
+        let (sink, mut rx) = plumbing();
+        let (_cancel_tx, cancel) = watch::channel(false);
+        let intent = crate::tools::ToolIntent::new(
+            "call-1",
+            "read_file",
+            serde_json::json!({ "path": "Cargo.toml" }),
+        );
+        let model = FakeStreamingModel::new(
+            vec![StreamEvent::TextChunk("read it".into())],
+            ModelResponse::new().text("read it").tool_intents(vec![intent.clone()]).completed(),
+        );
+
+        let response = run_streaming_response(
+            |events| model.complete_streaming(request(), cancel.clone(), events),
+            Some(&sink),
+            &cancel,
+            "msg-1",
+        )
+        .await
+        .expect("streams");
+
+        assert_eq!(response.tool_intents, vec![intent]);
+        assert!(response.completed);
         assert!(matches!(next_update(&mut rx).await, SessionUpdate::AgentMessageChunk(_)));
     }
 

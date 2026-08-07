@@ -24,6 +24,7 @@ use crate::error::OrchestratorError;
 use crate::events::{EventRecorder, OrchestratorEvent};
 use crate::model::{ModelAdapter, ModelRequest, Transcript};
 use crate::model_registry::ModelInfo;
+use crate::streaming::run_streaming_response;
 use crate::stuck::StuckDetector;
 use crate::tasks::{TaskGraph, TaskNode};
 use crate::tools::{
@@ -285,11 +286,20 @@ impl LoopEngine {
             self.events.record(OrchestratorEvent::ModelRequested {
                 iteration: budget_snapshot.iterations_used,
             });
-            let response = match self.model.complete(request, cancel.clone()).await {
+            message_seq += 1;
+            let message_id = format!("msg-{message_seq}");
+            let response = match run_streaming_response(
+                |events| self.model.complete_streaming(request, cancel.clone(), events),
+                Some(sink),
+                &cancel,
+                &message_id,
+            )
+            .await
+            {
                 Ok(response) => response,
                 Err(error) => {
                     self.events.record(OrchestratorEvent::Error { error: error.to_string() });
-                    return Err(error.into());
+                    return Err(error);
                 }
             };
             self.events.record(OrchestratorEvent::ModelResponded {
@@ -316,18 +326,6 @@ impl LoopEngine {
                 budget.emit(&self.events);
             }
 
-            // Stream reasoning and assistant text before any tool work, in
-            // deterministic order.
-            if let Some(reasoning) = response.reasoning.as_deref().filter(|text| !text.is_empty()) {
-                message_seq += 1;
-                sink.agent_thought_chunk(format!("msg-{message_seq}"), reasoning)
-                    .map_err(map_update_error)?;
-            }
-            if !response.text.is_empty() {
-                message_seq += 1;
-                sink.agent_message_chunk(format!("msg-{message_seq}"), response.text.clone())
-                    .map_err(map_update_error)?;
-            }
             transcript.push_assistant(&response);
 
             if self.options.mode == LoopMode::SimpleAnswer && !response.tool_intents.is_empty() {
@@ -434,10 +432,6 @@ fn read_first_order(intents: Vec<ToolIntent>, tools: &Arc<Mutex<ToolRegistry>>) 
     }
     reads.extend(rest);
     reads
-}
-
-fn map_update_error(error: ee_acp_agent_server::UpdateSinkError) -> OrchestratorError {
-    OrchestratorError::InvalidState(format!("update emission failed: {error}"))
 }
 
 #[cfg(test)]

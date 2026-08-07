@@ -561,6 +561,29 @@ pub trait ModelAdapter: Send + Sync + 'static {
         request: ModelRequest,
         cancel: watch::Receiver<bool>,
     ) -> ModelFuture<Result<ModelResponse, ModelError>>;
+
+    /// Completes one request while forwarding displayable deltas as they arrive.
+    ///
+    /// Adapters without native streaming keep the same client contract by
+    /// emitting their completed reasoning and text as single chunks.
+    fn complete_streaming(
+        &self,
+        request: ModelRequest,
+        cancel: watch::Receiver<bool>,
+        events: crate::streaming::StreamSink,
+    ) -> ModelFuture<Result<ModelResponse, ModelError>> {
+        let completion = self.complete(request, cancel);
+        Box::pin(async move {
+            let response = completion.await?;
+            if let Some(reasoning) = response.reasoning.as_deref().filter(|text| !text.is_empty()) {
+                events.reasoning(reasoning.to_string())?;
+            }
+            if !response.text.is_empty() {
+                events.text(response.text.clone())?;
+            }
+            Ok(response)
+        })
+    }
 }
 
 #[cfg(test)]

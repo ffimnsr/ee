@@ -23,7 +23,7 @@ use std::sync::Arc;
 use ee_acp_agent_server::ProviderError;
 use ee_agent_orchestrator::{
     ModelAdapter, ModelContent, ModelError, ModelFuture, ModelMessage, ModelRequest, ModelResponse,
-    ModelRole, PolicyEngine, ToolDefinition, ToolIntent, ToolPolicy,
+    ModelRole, PolicyEngine, StreamSink, ToolDefinition, ToolIntent, ToolPolicy,
 };
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -31,7 +31,9 @@ use tokio::sync::watch;
 use crate::config::Config;
 #[cfg(test)]
 use crate::openrouter::openrouter_request_body_with_tools;
-use crate::openrouter::{OpenRouterMessage, call_openrouter};
+use crate::openrouter::{
+    OpenRouterMessage, OpenRouterStreamDelta, call_openrouter, call_openrouter_streaming,
+};
 
 /// Builds the default policy for orchestrated OpenRouter sessions.
 ///
@@ -60,10 +62,16 @@ pub(crate) type OpenRouterCompletionFuture =
 pub(crate) type OpenRouterCompletionClient =
     dyn Fn(&Config, &str, &[Value], &[Value]) -> OpenRouterCompletionFuture + Send + Sync;
 
+/// One streaming OpenRouter chat-completions round trip.
+pub(crate) type OpenRouterStreamingClient = dyn Fn(&Config, &str, &[Value], &[Value], StreamSink) -> OpenRouterCompletionFuture
+    + Send
+    + Sync;
+
 /// OpenRouter as a normalized [`ModelAdapter`].
 pub struct OpenRouterModelAdapter {
     config: Config,
     completion: Arc<OpenRouterCompletionClient>,
+    streaming: Option<Arc<OpenRouterStreamingClient>>,
 }
 
 impl OpenRouterModelAdapter {
@@ -73,16 +81,21 @@ impl OpenRouterModelAdapter {
             .timeout(config.timeout)
             .build()
             .map_err(|error| format!("failed to build HTTP client: {error}"))?;
-        Ok(Self::with_completion(config, real_completion(http)))
+        Ok(Self {
+            config,
+            completion: real_completion(http.clone()),
+            streaming: Some(real_streaming(http)),
+        })
     }
 
     /// Builds an adapter with an injected completion client (tests).
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn with_completion(
         config: Config,
         completion: Arc<OpenRouterCompletionClient>,
     ) -> Self {
-        Self { config, completion }
+        Self { config, completion, streaming: None }
     }
 }
 
@@ -95,6 +108,35 @@ fn real_completion(http: reqwest::Client) -> Arc<OpenRouterCompletionClient> {
         let messages = messages.to_vec();
         let tools = tools.to_vec();
         Box::pin(async move { call_openrouter(&http, &config, &api_key, &messages, &tools).await })
+    })
+}
+
+fn real_streaming(http: reqwest::Client) -> Arc<OpenRouterStreamingClient> {
+    Arc::new(move |config, api_key, messages, tools, events| {
+        let http = http.clone();
+        let config = config.clone();
+        let api_key = api_key.to_string();
+        let messages = messages.to_vec();
+        let tools = tools.to_vec();
+        Box::pin(async move {
+            call_openrouter_streaming(&http, &config, &api_key, &messages, &tools, |delta| {
+                match delta {
+                    OpenRouterStreamDelta::Text(text) => events.text(text).map_err(|error| {
+                        ProviderError::BackendFailure(format!(
+                            "failed to forward OpenRouter text stream: {error}"
+                        ))
+                    }),
+                    OpenRouterStreamDelta::Reasoning(text) => {
+                        events.reasoning(text).map_err(|error| {
+                            ProviderError::BackendFailure(format!(
+                                "failed to forward OpenRouter reasoning stream: {error}"
+                            ))
+                        })
+                    }
+                }
+            })
+            .await
+        })
     })
 }
 
@@ -118,6 +160,48 @@ impl ModelAdapter for OpenRouterModelAdapter {
             let messages = openrouter_messages_from_transcript(&config, &request.transcript);
             let tools = openrouter_tools_from_definitions(&request.tools);
             let completion = completion(&config, &api_key, &messages, &tools);
+            let answer = tokio::select! {
+                answer = completion => answer.map_err(|error| ModelError::Adapter(error.to_string()))?,
+                () = wait_cancelled(cancel) => return Err(ModelError::Cancelled),
+            };
+            Ok(model_response_from_openrouter(answer))
+        })
+    }
+
+    fn complete_streaming(
+        &self,
+        request: ModelRequest,
+        cancel: watch::Receiver<bool>,
+        events: StreamSink,
+    ) -> ModelFuture<Result<ModelResponse, ModelError>> {
+        let Some(streaming) = self.streaming.clone() else {
+            let completion = self.complete(request, cancel);
+            return Box::pin(async move {
+                let response = completion.await?;
+                if let Some(reasoning) =
+                    response.reasoning.as_deref().filter(|text| !text.is_empty())
+                {
+                    events.reasoning(reasoning.to_string())?;
+                }
+                if !response.text.is_empty() {
+                    events.text(response.text.clone())?;
+                }
+                Ok(response)
+            });
+        };
+        let config = self.config.clone();
+        Box::pin(async move {
+            if *cancel.borrow() {
+                return Err(ModelError::Cancelled);
+            }
+            let Some(api_key) = config.api_key.clone() else {
+                return Err(ModelError::Adapter(
+                    "OPENROUTER_API_KEY is not set; export it before starting ee".into(),
+                ));
+            };
+            let messages = openrouter_messages_from_transcript(&config, &request.transcript);
+            let tools = openrouter_tools_from_definitions(&request.tools);
+            let completion = streaming(&config, &api_key, &messages, &tools, events);
             let answer = tokio::select! {
                 answer = completion => answer.map_err(|error| ModelError::Adapter(error.to_string()))?,
                 () = wait_cancelled(cancel) => return Err(ModelError::Cancelled),
