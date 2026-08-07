@@ -2923,6 +2923,11 @@ impl App {
     /// conversation replays into the thread), else `session/resume`.  The
     /// persisted last prompt is restored for the resend path.
     pub(super) fn agents_reconnect(&mut self) {
+        if self.agents.pending_session.is_some() {
+            self.agents.error =
+                Some(String::from("a session start or reconnect is already in progress"));
+            return;
+        }
         let Some(record) = self.load_persisted_agent_session() else {
             self.agents.error =
                 Some(String::from("no persisted agent session for this workspace to reconnect"));
