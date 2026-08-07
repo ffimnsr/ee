@@ -18,7 +18,7 @@ use ee_acp_agent_server::{
 };
 use ee_agent_orchestrator::SensitiveDataGuard;
 use ee_agent_protocol::{
-    AgentCapabilities, ContentBlock, Implementation, PromptResponse, SessionId, StopReason,
+    AgentCapabilities, ContentBlock, Implementation, PromptResponse, SessionId, StopReason, Usage,
     compact_available_command, is_compact_command, parse_slash_command,
 };
 use serde_json::{Value, json};
@@ -30,7 +30,8 @@ use crate::compaction::{
 };
 use crate::config::Config;
 use crate::openrouter::{
-    OpenRouterStreamDelta, call_openrouter, call_openrouter_streaming, openrouter_tools,
+    OpenRouterStreamDelta, OpenRouterUsage, call_openrouter, call_openrouter_streaming,
+    openrouter_tools,
 };
 use crate::tools::handle_tool_call;
 
@@ -189,6 +190,9 @@ async fn run_prompt(
     let mut messages =
         openrouter_messages(&turn.config, history.as_deref().unwrap_or_default(), &prompt_text);
     let mut pending_history = vec![json!({ "role": "user", "content": prompt_text })];
+    // Per-turn token usage, aggregated across every model round of the tool
+    // loop; unknown rounds are skipped, never counted as zero.
+    let mut turn_usage = OpenRouterUsage::default();
 
     for round in 0..=MAX_TOOL_ROUNDS {
         if *cancel.borrow() {
@@ -224,6 +228,7 @@ async fn run_prompt(
             },
         )
         .await?;
+        merge_openrouter_usage(&mut turn_usage, answer.usage);
 
         if answer.tool_calls.is_empty() {
             pending_history.push(json!({ "role": "assistant", "content": answer.content }));
@@ -232,7 +237,7 @@ async fn run_prompt(
             {
                 session.messages.extend(pending_history);
             }
-            return Ok(PromptResponse::new(StopReason::EndTurn));
+            return Ok(prompt_response_with_usage(StopReason::EndTurn, turn_usage));
         }
 
         if round == MAX_TOOL_ROUNDS {
@@ -376,7 +381,7 @@ async fn run_compact(
     sink.agent_message_chunk(message_id, guard.redact(&status)).map_err(|error| {
         ProviderError::BackendFailure(format!("failed to emit compaction status: {error}"))
     })?;
-    Ok(PromptResponse::new(StopReason::EndTurn))
+    Ok(prompt_response_with_usage(StopReason::EndTurn, answer.usage.unwrap_or_default()))
 }
 
 /// Concatenates the text content blocks of a prompt.
@@ -392,6 +397,44 @@ pub(crate) fn extract_prompt_text(prompt: &[ContentBlock]) -> String {
 
 fn next_message_id(next: &AtomicU64, kind: &str) -> String {
     format!("openrouter-{kind}-{}", next.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Sums one round's usage into the turn aggregate, skipping unknown fields.
+fn merge_openrouter_usage(target: &mut OpenRouterUsage, usage: Option<OpenRouterUsage>) {
+    let Some(usage) = usage else { return };
+    target.input_tokens = add_opt(target.input_tokens, usage.input_tokens);
+    target.output_tokens = add_opt(target.output_tokens, usage.output_tokens);
+    target.total_tokens = add_opt(target.total_tokens, usage.total_tokens);
+}
+
+fn add_opt(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.saturating_add(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+/// Maps round-trip usage to the ACP per-turn usage; the total falls back to
+/// `input + output` when OpenRouter did not report it. Returns `None` when
+/// neither input nor output tokens are known — unknown stays unknown, never
+/// counted as zero.
+fn to_sdk_usage(usage: OpenRouterUsage) -> Option<Usage> {
+    let input_tokens = usage.input_tokens?;
+    let output_tokens = usage.output_tokens?;
+    let total_tokens =
+        usage.total_tokens.unwrap_or_else(|| input_tokens.saturating_add(output_tokens));
+    Some(Usage::new(total_tokens, input_tokens, output_tokens))
+}
+
+/// Builds a prompt response, attaching reported token usage when known.
+fn prompt_response_with_usage(stop_reason: StopReason, usage: OpenRouterUsage) -> PromptResponse {
+    let mut response = PromptResponse::new(stop_reason);
+    if let Some(usage) = to_sdk_usage(usage) {
+        response = response.usage(usage);
+    }
+    response
 }
 
 #[cfg(test)]
@@ -436,6 +479,53 @@ mod tests {
     fn non_text_blocks_and_empty_prompts_yield_empty_text() {
         assert_eq!(extract_prompt_text(&[ContentBlock::Text(TextContent::new("keep"))]), "keep");
         assert_eq!(extract_prompt_text(&[]), "");
+    }
+
+    #[test]
+    fn turn_usage_aggregates_known_rounds_and_skips_unknown() {
+        let mut usage = OpenRouterUsage::default();
+        merge_openrouter_usage(&mut usage, None);
+        assert_eq!(usage, OpenRouterUsage::default(), "unknown rounds change nothing");
+        merge_openrouter_usage(
+            &mut usage,
+            Some(OpenRouterUsage {
+                input_tokens: Some(100),
+                output_tokens: Some(50),
+                total_tokens: Some(150),
+            }),
+        );
+        merge_openrouter_usage(
+            &mut usage,
+            Some(OpenRouterUsage {
+                input_tokens: None,
+                output_tokens: Some(25),
+                total_tokens: None,
+            }),
+        );
+        assert_eq!(usage.input_tokens, Some(100));
+        assert_eq!(usage.output_tokens, Some(75));
+        assert_eq!(usage.total_tokens, Some(150), "unknown total keeps prior total");
+    }
+
+    #[test]
+    fn turn_usage_unknown_never_maps_to_zero_tokens() {
+        assert_eq!(to_sdk_usage(OpenRouterUsage::default()), None);
+        let partial =
+            OpenRouterUsage { input_tokens: Some(10), output_tokens: None, total_tokens: None };
+        assert_eq!(to_sdk_usage(partial), None, "half-known usage stays unknown");
+    }
+
+    #[test]
+    fn turn_usage_maps_to_sdk_usage_with_fallback_total() {
+        let usage = OpenRouterUsage {
+            input_tokens: Some(6120),
+            output_tokens: Some(2311),
+            total_tokens: None,
+        };
+        let sdk = to_sdk_usage(usage).expect("fully known usage maps");
+        assert_eq!(sdk.input_tokens, 6120);
+        assert_eq!(sdk.output_tokens, 2311);
+        assert_eq!(sdk.total_tokens, 8431, "total falls back to input + output");
     }
 
     #[tokio::test]

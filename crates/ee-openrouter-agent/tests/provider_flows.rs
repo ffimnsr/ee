@@ -9,8 +9,9 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    Harness, MockOpenRouter, answer_response, prompt_params, reasoning_response, request,
-    request_error, request_result, respond_to, session_new_params, tool_call_response,
+    Harness, MockOpenRouter, answer_response, answer_response_with_usage, prompt_params,
+    reasoning_response, request, request_error, request_result, respond_to, session_new_params,
+    tool_call_response,
 };
 use ee_agent_protocol::{RawJsonRpcMessage, RawJsonRpcParams};
 use ee_openrouter_agent::config::Config;
@@ -206,6 +207,53 @@ async fn provider_emits_answer_update_through_framework() {
 
     let result = request_result(frames[1].clone());
     assert_eq!(result["stopReason"], "end_turn");
+
+    harness.shutdown(task).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn prompt_response_carries_reported_turn_token_usage() {
+    let mock = MockOpenRouter::start(vec![answer_response_with_usage("done", 6120, 2311)]);
+    let provider = OpenRouterProvider::new(test_config(&mock)).unwrap();
+    let (harness, task) = Harness::spawn(provider).await;
+    let session_id = new_session(&harness, 1).await;
+
+    harness.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
+
+    let frames = harness.next_frames(2).await;
+    let result = request_result(frames[1].clone());
+    assert_eq!(result["stopReason"], "end_turn");
+    assert_eq!(result["usage"]["totalTokens"], 8431);
+    assert_eq!(result["usage"]["inputTokens"], 6120);
+    assert_eq!(result["usage"]["outputTokens"], 2311);
+
+    harness.shutdown(task).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn tool_loop_turn_usage_aggregates_across_rounds() {
+    let mock = MockOpenRouter::start(vec![
+        tool_call_response("call_1", "/tmp/notes.txt"),
+        answer_response_with_usage("read it", 100, 50),
+    ]);
+    let provider = OpenRouterProvider::new(test_config(&mock)).unwrap();
+    let (harness, task) = Harness::spawn(provider).await;
+    let session_id = new_session(&harness, 1).await;
+
+    harness.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
+
+    // Tool in-progress update, then the agent → client fs request.
+    let frames = harness.next_frames(2).await;
+    let fs_request = &frames[1];
+    harness.send(respond_to(fs_request, Ok(json!({ "content": "file contents" }))));
+
+    // Tool completion, answer chunk, then the response with aggregated usage.
+    let frames = harness.next_frames(3).await;
+    let result = request_result(frames[2].clone());
+    assert_eq!(result["stopReason"], "end_turn");
+    assert_eq!(result["usage"]["totalTokens"], 150);
+    assert_eq!(result["usage"]["inputTokens"], 100);
+    assert_eq!(result["usage"]["outputTokens"], 50);
 
     harness.shutdown(task).await;
 }

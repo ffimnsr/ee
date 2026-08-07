@@ -295,3 +295,18 @@ pub fn answer_response(content: &str) -> Value {
         }]
     })
 }
+
+/// A chat-completions response with a final answer and token usage.
+pub fn answer_response_with_usage(
+    content: &str,
+    prompt_tokens: u64,
+    completion_tokens: u64,
+) -> Value {
+    let mut value = answer_response(content);
+    value["usage"] = json!({
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    });
+    value
+}

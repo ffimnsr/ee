@@ -25,6 +25,8 @@ pub(crate) struct OpenRouterMessage {
     pub tool_calls: Vec<OpenRouterToolCall>,
     /// `choices[0].finish_reason` (`stop`, `tool_calls`, `length`, ...).
     pub finish_reason: Option<String>,
+    /// Token usage reported for this round trip, when present.
+    pub usage: Option<OpenRouterUsage>,
 }
 
 /// One tool call requested by the model.
@@ -36,6 +38,21 @@ pub(crate) struct OpenRouterToolCall {
     pub name: String,
     /// Parsed tool arguments object.
     pub arguments: Value,
+}
+
+/// Token usage reported by OpenRouter for one round trip.
+///
+/// `None` fields mean OpenRouter did not report them — treated as unknown,
+/// never counted as zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct OpenRouterUsage {
+    /// `usage.prompt_tokens`.
+    pub input_tokens: Option<u64>,
+    /// `usage.completion_tokens`.
+    pub output_tokens: Option<u64>,
+    /// `usage.total_tokens`; may exceed `input + output` when cached tokens
+    /// are billed separately.
+    pub total_tokens: Option<u64>,
 }
 
 /// One displayable OpenRouter streaming delta.
@@ -307,7 +324,27 @@ pub(crate) fn extract_openrouter_message(value: &Value) -> Option<OpenRouterMess
         .unwrap_or_default();
     let finish_reason =
         value.pointer("/choices/0/finish_reason").and_then(Value::as_str).map(str::to_string);
-    Some(OpenRouterMessage { content, reasoning, raw: message.clone(), tool_calls, finish_reason })
+    Some(OpenRouterMessage {
+        content,
+        reasoning,
+        raw: message.clone(),
+        tool_calls,
+        finish_reason,
+        usage: extract_openrouter_usage(value),
+    })
+}
+
+/// Extracts `usage.prompt_tokens` / `completion_tokens` / `total_tokens`;
+/// returns `None` when the response carries no usage object.
+fn extract_openrouter_usage(value: &Value) -> Option<OpenRouterUsage> {
+    let usage = value.get("usage")?;
+    let input_tokens = usage.get("prompt_tokens").and_then(Value::as_u64);
+    let output_tokens = usage.get("completion_tokens").and_then(Value::as_u64);
+    let total_tokens = usage.get("total_tokens").and_then(Value::as_u64);
+    if input_tokens.is_none() && output_tokens.is_none() && total_tokens.is_none() {
+        return None;
+    }
+    Some(OpenRouterUsage { input_tokens, output_tokens, total_tokens })
 }
 
 /// Extracts reasoning text from first present of `reasoning`,
@@ -420,6 +457,9 @@ struct StreamAccumulator {
     reasoning: String,
     tool_calls: BTreeMap<usize, PendingToolCall>,
     finish_reason: Option<String>,
+    /// Latest reported usage; chunks carry cumulative totals, so later
+    /// occurrences replace earlier ones.
+    usage: Option<OpenRouterUsage>,
 }
 
 #[derive(Debug, Default)]
@@ -439,6 +479,9 @@ impl StreamAccumulator {
         };
         if let Some(finish_reason) = choice.get("finish_reason").and_then(Value::as_str) {
             self.finish_reason = Some(finish_reason.to_string());
+        }
+        if let Some(usage) = extract_openrouter_usage(value) {
+            self.usage = Some(usage);
         }
         let Some(delta) = choice.get("delta") else {
             return Ok(Vec::new());
@@ -531,6 +574,7 @@ impl StreamAccumulator {
             raw,
             tool_calls,
             finish_reason: self.finish_reason,
+            usage: self.usage,
         })
     }
 }
@@ -607,6 +651,60 @@ mod tests {
         });
         let message = extract_openrouter_message(&value).unwrap();
         assert_eq!(message.tool_calls[0].arguments["path"], ".ee.toml");
+    }
+
+    #[test]
+    fn extracts_openrouter_usage_fields() {
+        let value = json!({
+            "choices": [{ "message": { "content": "hi" } }],
+            "usage": {
+                "prompt_tokens": 6120,
+                "completion_tokens": 2311,
+                "total_tokens": 8431,
+            }
+        });
+        let usage = extract_openrouter_message(&value).unwrap().usage.expect("usage parsed");
+        assert_eq!(usage.input_tokens, Some(6120));
+        assert_eq!(usage.output_tokens, Some(2311));
+        assert_eq!(usage.total_tokens, Some(8431));
+    }
+
+    #[test]
+    fn missing_usage_stays_unknown_not_zero() {
+        let value = json!({ "choices": [{ "message": { "content": "hi" } }] });
+        assert_eq!(extract_openrouter_message(&value).unwrap().usage, None);
+    }
+
+    #[test]
+    fn partial_usage_keeps_only_known_fields() {
+        let value = json!({
+            "choices": [{ "message": { "content": "hi" } }],
+            "usage": { "total_tokens": 100 }
+        });
+        let usage = extract_openrouter_message(&value).unwrap().usage.expect("usage parsed");
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
+        assert_eq!(usage.total_tokens, Some(100));
+    }
+
+    #[test]
+    fn stream_accumulator_keeps_latest_usage_chunk() {
+        let mut accumulator = StreamAccumulator::default();
+        accumulator
+            .apply(&json!({ "choices": [{ "delta": { "content": "hi" } }], "usage": {
+                "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15
+            } }))
+            .unwrap();
+        accumulator
+            .apply(&json!({ "choices": [{ "delta": {}, "finish_reason": "stop" }], "usage": {
+                "prompt_tokens": 20, "completion_tokens": 9, "total_tokens": 29
+            } }))
+            .unwrap();
+        let message = accumulator.finish().unwrap();
+        let usage = message.usage.expect("usage parsed");
+        assert_eq!(usage.input_tokens, Some(20), "later cumulative usage wins");
+        assert_eq!(usage.output_tokens, Some(9));
+        assert_eq!(usage.total_tokens, Some(29));
     }
 
     #[test]

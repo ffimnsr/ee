@@ -600,7 +600,13 @@ pub mod fixture {
     }
 }
 
-/// Render `lines` into a 120×50 terminal and return the elapsed duration.
+/// Renders `lines` into a 120×50 terminal and returns the measured elapsed
+/// duration.
+///
+/// Measurement is one warm-up draw plus the minimum of three timed draws:
+/// parallel test runs share the CPU, so a single scheduler preemption must
+/// not fail a frame-budget regression test.  A real render regression stays
+/// visible because every sample slows down.
 pub fn timed_render(lines: Vec<String>) -> Duration {
     let mut app = App::from_path(None).unwrap();
     app.backend.lines = lines;
@@ -608,7 +614,14 @@ pub fn timed_render(lines: Vec<String>) -> Duration {
     let backend = TestBackend::new(120, 50);
     let mut terminal = Terminal::new(backend).unwrap();
 
-    let start = Instant::now();
+    // Warm-up: populate allocation pools and any lazily built structures.
     terminal.draw(|frame| ui(frame, &app)).unwrap();
-    start.elapsed()
+    (0..3)
+        .map(|_| {
+            let start = Instant::now();
+            terminal.draw(|frame| ui(frame, &app)).unwrap();
+            start.elapsed()
+        })
+        .min()
+        .expect("three samples")
 }

@@ -188,6 +188,8 @@ pub(crate) struct TerminalOutputSnapshot {
     pub(crate) total_bytes: u64,
     pub(crate) truncated: bool,
     pub(crate) exit_status: Option<TerminalExitStatus>,
+    pub(crate) running: bool,
+    pub(crate) elapsed_ms: u64,
 }
 
 #[derive(Debug)]
@@ -330,6 +332,7 @@ pub(crate) struct AgentTerminalTrack {
     output_readers: Vec<thread::JoinHandle<()>>,
     child: Option<Child>,
     pub(crate) exit_status: Option<TerminalExitStatus>,
+    started_at: Instant,
     pub(crate) released: bool,
 }
 
@@ -409,6 +412,7 @@ impl AgentTerminals {
             output_readers,
             child: Some(child),
             exit_status: None,
+            started_at: Instant::now(),
             released: false,
         };
         let mut registry = self.inner.lock().expect("terminals poisoned");
@@ -580,6 +584,8 @@ impl AgentTerminals {
             total_bytes: output.total(),
             truncated: output.truncated(),
             exit_status: track.exit_status.clone(),
+            running: track.child.is_some(),
+            elapsed_ms: track.started_at.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
         }
     }
 
@@ -1023,6 +1029,8 @@ impl ClientRequestHandler for BridgeUiHandler {
                                 total_bytes: snapshot.total_bytes,
                                 truncated: snapshot.truncated,
                                 exit_status,
+                                running: snapshot.running,
+                                elapsed_ms: snapshot.elapsed_ms,
                             })
                             .map_err(|error| {
                                 AgentError::HandlerError(format!(

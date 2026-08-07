@@ -540,10 +540,22 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
                     let collapsed = thread.collapsed_response_groups.contains(&group);
                     let marker = if collapsed { "+" } else { "−" };
                     let selected_marker = if selected { "> " } else { "  " };
-                    lines.push(Line::from(Span::styled(
-                        format!("{selected_marker}[{marker}] response: {thoughts} reasoning, {tools} tools"),
-                        Style::default().fg(theme::FG_DIM),
-                    )));
+                    let mut header = format!(
+                        "{selected_marker}[{marker}] response: {thoughts} reasoning, {tools} tools"
+                    );
+                    if let Some(metrics) = thread.turn_metrics.get(&group) {
+                        header.push_str(&format!(" · {}", crate::app::turn_metrics_label(metrics)));
+                    } else if thread.active_response_group == Some(group)
+                        && let Some(started) = thread.turn_started_at
+                    {
+                        // Live elapsed for the running turn.
+                        header.push_str(&format!(
+                            " · {}",
+                            crate::app::format_duration(started.elapsed())
+                        ));
+                    }
+                    lines
+                        .push(Line::from(Span::styled(header, Style::default().fg(theme::FG_DIM))));
                 }
                 if thread.collapsed_response_groups.contains(&group) {
                     continue;
@@ -575,7 +587,7 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             ThreadUiState::Failed => "failed",
         };
         let footer_text = format!(
-            "{} [{}]{} | session:{} / {} | thoughts:{} | unread:{} | Ctrl-←/→ response | Ctrl-R toggle {}",
+            "{} [{}]{} | session:{} / {} | thoughts:{} | unread:{} | last:{} | Ctrl-←/→ response | Ctrl-R toggle {}",
             thread.nick,
             state_label,
             thread.usage.as_deref().map(|u| format!(" | {u}")).unwrap_or_default(),
@@ -583,6 +595,11 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             app.agents.threads.len(),
             if app.agents.show_thoughts { "on" } else { "off" },
             thread.unread,
+            thread
+                .last_turn_metrics
+                .as_ref()
+                .map(crate::app::turn_metrics_label)
+                .unwrap_or_else(|| String::from("—")),
             thread.stop_reason.as_deref().unwrap_or(""),
         );
         let footer_style = if thread.state == ThreadUiState::Running {

@@ -1295,6 +1295,8 @@ mod tests {
                     "totalBytes": 6,
                     "truncated": false,
                     "exitStatus": null,
+                    "running": true,
+                    "elapsedMs": 1_000,
                 }))))
                 .expect("proxy terminal output response");
         });
@@ -1307,6 +1309,8 @@ mod tests {
                 total_bytes: 6,
                 truncated: false,
                 exit_status: None,
+                running: true,
+                elapsed_ms: 1_000,
             }
         );
         worker.join().expect("proxy terminal output worker");

@@ -324,6 +324,97 @@ fn prompt_submission_appends_optimistic_you_and_sends_acp_prompt() {
 }
 
 #[test]
+fn turn_completed_records_metrics_and_renders_tokens() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(wire::session_update(
+            "s1",
+            json!({ "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": "hmm" } }),
+        ))
+        .emit(wire::session_update("s1", wire::agent_message_chunk("m1", "hello back")))
+        .respond(json!({
+            "stopReason": "end_turn",
+            "usage": {
+                "totalTokens": 8431,
+                "inputTokens": 6120,
+                "outputTokens": 2311,
+            }
+        }));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "hello agent");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "turn metrics recorded", |app| {
+        app.agents.threads[0].last_turn_metrics.is_some()
+    });
+
+    let thread = &app.agents.threads[0];
+    let metrics = thread.last_turn_metrics.as_ref().expect("metrics recorded");
+    let tokens = metrics.tokens.as_ref().expect("reported tokens attached");
+    assert_eq!(tokens.total_tokens, 8431);
+    assert_eq!(tokens.input_tokens, 6120);
+    assert_eq!(tokens.output_tokens, 2311);
+    assert!(!thread.turn_metrics.is_empty(), "metrics keyed by response group");
+    assert!(thread.turn_started_at.is_none(), "start marker cleared");
+
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rows = terminal.backend().buffer();
+    let rendered: Vec<String> = (0..40)
+        .map(|y| (0..120).map(|x| rows.cell((x, y)).unwrap().symbol()).collect::<String>())
+        .collect();
+    let joined = rendered.join("\n");
+    assert!(
+        joined.contains("8,431 tokens (6,120 in / 2,311 out)"),
+        "response header must render turn metrics: {rendered:#?}"
+    );
+    assert!(
+        joined.contains("last:0.0s · 8,431 tokens"),
+        "footer must render latest turn metrics: {rendered:#?}"
+    );
+}
+
+#[test]
+fn turn_without_usage_renders_elapsed_only() {
+    let script =
+        base_script().wait_for("session/prompt").respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "hello agent");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "turn metrics recorded", |app| {
+        app.agents.threads[0].last_turn_metrics.is_some()
+    });
+
+    let metrics = app.agents.threads[0].last_turn_metrics.as_ref().expect("metrics recorded");
+    assert_eq!(metrics.tokens, None, "unknown usage stays unknown, never zero");
+    assert_eq!(crate::app::turn_metrics_label(metrics), "0.0s");
+}
+
+#[test]
+fn turn_metrics_label_formats_duration_and_tokens() {
+    use ee_agent_host::TurnMetrics;
+    use ee_agent_protocol::Usage;
+    use std::time::Duration;
+
+    let plain = TurnMetrics { elapsed: Duration::from_millis(12_400), tokens: None };
+    assert_eq!(crate::app::turn_metrics_label(&plain), "12.4s");
+
+    let with_tokens = TurnMetrics {
+        elapsed: Duration::from_secs(192),
+        tokens: Some(Usage::new(8_431, 6_120, 2_311)),
+    };
+    assert_eq!(
+        crate::app::turn_metrics_label(&with_tokens),
+        "3m 12s · 8,431 tokens (6,120 in / 2,311 out)"
+    );
+    assert_eq!(crate::app::format_duration(Duration::from_millis(500)), "0.5s");
+}
+
+#[test]
 fn separate_user_turns_do_not_concatenate_without_message_ids() {
     let script = base_script()
         .wait_for("session/prompt")

@@ -274,6 +274,12 @@ pub struct TerminalOutputResult {
     pub total_bytes: u64,
     pub truncated: bool,
     pub exit_status: Option<serde_json::Value>,
+    /// Whether process remains active when snapshot was taken.
+    #[serde(default)]
+    pub running: bool,
+    /// Monotonic lifetime from spawn through snapshot, in milliseconds.
+    #[serde(default)]
+    pub elapsed_ms: u64,
 }
 
 /// Completion state returned by `ee_terminal_wait`.
@@ -867,7 +873,7 @@ impl EeMcpProxy {
             ),
             Tool::new(
                 "ee_terminal_output",
-                "Return bounded retained output and exit status for one terminal owned by this agent session.",
+                "Return bounded retained output, running state, elapsedMs, and exit status for one terminal owned by this agent session. Inspect this before killing a command that may be running too long.",
                 schema(json!({
                     "type": "object",
                     "properties": { "terminal_id": { "type": "string" } },
@@ -2030,6 +2036,8 @@ mod tests {
                 total_bytes: 6,
                 truncated: false,
                 exit_status: None,
+                running: true,
+                elapsed_ms: 1_000,
             })
         }
 

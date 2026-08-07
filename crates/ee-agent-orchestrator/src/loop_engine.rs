@@ -22,7 +22,7 @@ use crate::budget::BudgetTracker;
 use crate::config::OrchestratorConfig;
 use crate::error::OrchestratorError;
 use crate::events::{EventRecorder, OrchestratorEvent};
-use crate::model::{ModelAdapter, ModelRequest, Transcript};
+use crate::model::{ModelAdapter, ModelRequest, ModelUsage, Transcript, prompt_result_with_usage};
 use crate::model_registry::ModelInfo;
 use crate::streaming::run_streaming_response;
 use crate::stuck::StuckDetector;
@@ -249,6 +249,9 @@ impl LoopEngine {
         let mut message_seq = 0usize;
         let mut detector = StuckDetector::new(self.config.stuck);
         let graph_handle = self.graph.clone();
+        // Per-turn token usage aggregated across every model call; rounds
+        // with unknown usage are skipped, never counted as zero.
+        let mut turn_usage = ModelUsage::new();
 
         loop {
             if *cancel.borrow() {
@@ -325,6 +328,14 @@ impl LoopEngine {
                 )?;
                 budget.emit(&self.events);
             }
+            if let Some(tokens) = response.usage.input_tokens {
+                turn_usage.input_tokens =
+                    Some(turn_usage.input_tokens.unwrap_or_default().saturating_add(tokens));
+            }
+            if let Some(tokens) = response.usage.output_tokens {
+                turn_usage.output_tokens =
+                    Some(turn_usage.output_tokens.unwrap_or_default().saturating_add(tokens));
+            }
 
             transcript.push_assistant(&response);
 
@@ -334,10 +345,10 @@ impl LoopEngine {
                 ));
             }
             if response.completed {
-                return Ok(PromptResult::new(StopReason::EndTurn));
+                return Ok(prompt_result_with_usage(StopReason::EndTurn, turn_usage));
             }
             if self.options.mode == LoopMode::SimpleAnswer {
-                return Ok(PromptResult::new(StopReason::EndTurn));
+                return Ok(prompt_result_with_usage(StopReason::EndTurn, turn_usage));
             }
             if !response.subagent_intents.is_empty() {
                 return Err(OrchestratorError::ModelFailure(
@@ -348,7 +359,7 @@ impl LoopEngine {
             if response.is_empty() {
                 empty_responses += 1;
                 if empty_responses >= 2 {
-                    return Ok(PromptResult::new(StopReason::EndTurn));
+                    return Ok(prompt_result_with_usage(StopReason::EndTurn, turn_usage));
                 }
             } else {
                 empty_responses = 0;
@@ -448,6 +459,7 @@ mod tests {
     use super::*;
     use crate::events::EventRecorder;
     use crate::memory::{MemoryItem, MemoryStore};
+    use crate::model::ModelUsage;
     use crate::model::{ModelContent, ModelError, ModelFuture, ModelResponse, ModelRole};
     use crate::tasks::{TaskId, TaskNode};
     use crate::test_support::{FakeModel, FakeTool};
@@ -559,6 +571,52 @@ mod tests {
                 OrchestratorEvent::TurnStopped { stop_reason: "end_turn".into() },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn turn_result_carries_aggregated_token_usage() {
+        let model = FakeModel::new(vec![
+            ModelResponse::new()
+                .text("partial")
+                .with_usage(ModelUsage::new().with_input_tokens(100).with_output_tokens(50)),
+            ModelResponse::new()
+                .text("final answer")
+                .completed()
+                .with_usage(ModelUsage::new().with_input_tokens(25).with_output_tokens(10)),
+        ]);
+        let (sink, client, _rx) = plumbing();
+        let events = EventRecorder::new();
+        let engine = engine_with(
+            OrchestratorConfig::default(),
+            Arc::new(model.clone()),
+            echo_tool(),
+            events.clone(),
+        );
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let result = engine.run(prompt("hello world"), sink, client, cancel_rx, task(), None).await;
+        let usage = result.expect("turn succeeds").usage.expect("turn usage attached");
+        assert_eq!(usage.input_tokens, 125, "rounds aggregate");
+        assert_eq!(usage.output_tokens, 60);
+        assert_eq!(usage.total_tokens, 185, "total derives from input + output");
+        assert_eq!(model.call_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn turn_without_reported_usage_keeps_usage_unknown() {
+        let model = FakeModel::new(vec![ModelResponse::new().text("final answer").completed()]);
+        let (sink, client, _rx) = plumbing();
+        let events = EventRecorder::new();
+        let engine = engine_with(
+            OrchestratorConfig::default(),
+            Arc::new(model.clone()),
+            echo_tool(),
+            events,
+        );
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let result = engine.run(prompt("hello world"), sink, client, cancel_rx, task(), None).await;
+        assert_eq!(result.expect("turn succeeds").usage, None, "unknown stays unknown");
     }
 
     #[tokio::test]

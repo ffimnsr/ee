@@ -72,6 +72,19 @@ pub struct PermissionRequestInfo {
     pub options: Vec<PermissionOption>,
 }
 
+/// Wall-clock and token metrics for one completed agent turn.
+///
+/// Counter-only: elapsed time plus token counts the agent reported.  Never
+/// carries prompts, output, or any other content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnMetrics {
+    /// Wall-clock duration from turn start to its terminal event.
+    pub elapsed: std::time::Duration,
+    /// Token usage reported by the agent for the whole turn, when known.
+    /// Unknown (e.g. cancelled or failed turns) stays `None`, never zero.
+    pub tokens: Option<ee_agent_protocol::Usage>,
+}
+
 /// Every observable host state change.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
@@ -89,11 +102,11 @@ pub enum AgentEvent {
     /// diagnostics and Phase 3 regression tests.
     SessionUpdate { session_id: SessionId, update: Box<SessionUpdate> },
     /// The running turn completed with a stop reason.
-    TurnCompleted { session_id: SessionId, stop_reason: StopReason },
+    TurnCompleted { session_id: SessionId, stop_reason: StopReason, metrics: TurnMetrics },
     /// The running turn was cancelled locally or by the agent.
-    TurnCancelled { session_id: SessionId },
+    TurnCancelled { session_id: SessionId, metrics: TurnMetrics },
     /// The running turn failed.
-    TurnFailed { session_id: SessionId, error: AgentError },
+    TurnFailed { session_id: SessionId, error: AgentError, metrics: TurnMetrics },
     /// The agent requested permission for a tool call.
     PermissionRequested { session_id: SessionId, request: Box<PermissionRequestInfo> },
     /// A permission decision was recorded (from the user or cancellation).

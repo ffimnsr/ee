@@ -7,6 +7,7 @@
 //! [`AgentConnection`] driver; threads never touch JSON-RPC directly.
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use ee_agent_protocol::{
     ContentBlock, PromptResponse, RequestPermissionOutcome, SessionConfigId, SessionConfigKind,
@@ -18,7 +19,9 @@ use tokio::sync::{mpsc, watch};
 
 use crate::connection::AgentConnection;
 use crate::error::AgentError;
-use crate::events::{AgentEvent, ConnectionCloseReason, PermissionRequestId, ThreadCloseReason};
+use crate::events::{
+    AgentEvent, ConnectionCloseReason, PermissionRequestId, ThreadCloseReason, TurnMetrics,
+};
 use crate::mcp_over_acp::EeProxyMode;
 use crate::reducer::{MessageKind, ReducedMessage, SessionState, apply_update};
 
@@ -30,6 +33,8 @@ pub(crate) struct ThreadShared {
     pub state: Mutex<SessionState>,
     pub order: Mutex<ee_agent_protocol::SessionUpdateOrder>,
     pub turn: Mutex<Option<watch::Sender<bool>>>,
+    /// When the running turn started; cleared when the turn finishes.
+    pub turn_started: Mutex<Option<Instant>>,
     pub modes: Mutex<Option<SessionModeState>>,
     pub events: mpsc::UnboundedSender<AgentEvent>,
 }
@@ -125,6 +130,7 @@ impl AgentThread {
             state: Mutex::new(state),
             order: Mutex::new(ee_agent_protocol::SessionUpdateOrder::new()),
             turn: Mutex::new(None),
+            turn_started: Mutex::new(None),
             modes: Mutex::new(modes),
             events: connection.inner.events.clone(),
         });
@@ -215,6 +221,7 @@ impl AgentThread {
             .shared
             .events
             .send(AgentEvent::TurnStarted { session_id: self.session_id.clone() });
+        *self.shared.turn_started.lock().expect("turn state poisoned") = Some(Instant::now());
 
         let (cancel_tx, cancel_rx) = watch::channel(false);
         {
@@ -230,21 +237,26 @@ impl AgentThread {
 
         match &result {
             Ok(response) => {
+                let metrics = self.take_turn_metrics(response.usage.clone());
                 let _ = self.shared.events.send(AgentEvent::TurnCompleted {
                     session_id: self.session_id.clone(),
                     stop_reason: response.stop_reason,
+                    metrics,
                 });
             }
             Err(AgentError::Cancelled) => {
-                let _ = self
-                    .shared
-                    .events
-                    .send(AgentEvent::TurnCancelled { session_id: self.session_id.clone() });
+                let metrics = self.take_turn_metrics(None);
+                let _ = self.shared.events.send(AgentEvent::TurnCancelled {
+                    session_id: self.session_id.clone(),
+                    metrics,
+                });
             }
             Err(error) => {
+                let metrics = self.take_turn_metrics(None);
                 let _ = self.shared.events.send(AgentEvent::TurnFailed {
                     session_id: self.session_id.clone(),
                     error: error.clone(),
+                    metrics,
                 });
             }
         }
@@ -354,6 +366,14 @@ impl AgentThread {
     fn finish_turn(&self) {
         let mut turn = self.shared.turn.lock().expect("turn state poisoned");
         *turn = None;
+    }
+
+    /// Builds the metrics for the just-finished turn and clears the start
+    /// marker.  Token usage is `None` for cancelled/failed turns.
+    fn take_turn_metrics(&self, tokens: Option<ee_agent_protocol::Usage>) -> TurnMetrics {
+        let started = self.shared.turn_started.lock().expect("turn state poisoned").take();
+        let elapsed = started.map_or(Duration::ZERO, |started| started.elapsed());
+        TurnMetrics { elapsed, tokens }
     }
 
     fn mode_config_option(&self) -> Option<SessionConfigOption> {

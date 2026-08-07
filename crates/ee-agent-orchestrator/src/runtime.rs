@@ -24,7 +24,7 @@ use crate::final_response::{FinalResponseBuilder, ValidationRecorder, changed_fi
 use crate::loop_engine::{LoopEngine, LoopOptions, TurnSystemContext};
 use crate::memory::{MemoryItem, MemoryStore};
 use crate::memory_compaction::compact_memory;
-use crate::model::{ModelAdapter, ModelMessage, ModelRequest, ModelRole};
+use crate::model::{ModelAdapter, ModelMessage, ModelRequest, ModelRole, prompt_result_with_usage};
 use crate::model_registry::{DEFAULT_MODEL_ID, ModelRegistry};
 use crate::policy::PolicyEngine;
 use crate::progress::ProgressTracker;
@@ -570,7 +570,7 @@ impl OrchestratorRuntime {
             retained_context_bytes,
         };
         let _ = sink.agent_message_chunk("compact-report", report.to_status_text());
-        Ok(PromptResult::new(ee_agent_protocol::StopReason::EndTurn))
+        Ok(prompt_result_with_usage(ee_agent_protocol::StopReason::EndTurn, response.usage))
     }
 }
 

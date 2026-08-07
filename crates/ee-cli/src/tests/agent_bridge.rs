@@ -546,6 +546,12 @@ fn terminal_kill_resolves_wait_for_exit() {
         .capture(CaptureSource::Response { id: 102 }, "result.terminalId", "term_id")
         .emit(json!({
             "jsonrpc": "2.0",
+            "id": 104,
+            "method": "terminal/output",
+            "params": { "sessionId": "s1", "terminalId": { "$capture": "term_id" } }
+        }))
+        .emit(json!({
+            "jsonrpc": "2.0",
             "id": 105,
             "method": "terminal/wait_for_exit",
             "params": { "sessionId": "s1", "terminalId": { "$capture": "term_id" } }
@@ -562,6 +568,20 @@ fn terminal_kill_resolves_wait_for_exit() {
     wait_until(&mut app, "terminal approval appears", |app| app.agents.approvals.front().is_some());
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE); // Allow once
 
+    wait_until(&mut app, "terminal output answered", |_| {
+        fake.agent().response_with_id(104).is_some()
+    });
+    // ACP v1 `terminal/output` carries output, truncation, and an optional
+    // exit status — no running flag.  Liveness is the absent exit status.
+    let output = fake.agent().response_with_id(104).expect("output response");
+    assert_eq!(output["result"]["output"], "", "sleep writes nothing: {output}");
+    assert_eq!(output["result"]["truncated"], false);
+    assert_eq!(
+        output["result"]["exitStatus"],
+        Value::Null,
+        "sleep must still be active (no exit status yet): {output}"
+    );
+
     wait_until(&mut app, "kill answered", |_| fake.agent().response_with_id(106).is_some());
     wait_until(&mut app, "wait resolved after kill", |_| {
         fake.agent().response_with_id(105).is_some()
@@ -574,6 +594,42 @@ fn terminal_kill_resolves_wait_for_exit() {
         "wait_for_exit must report the kill signal: {waited}"
     );
     assert_eq!(fake.agent().response_with_id(106).expect("kill response").get("error"), None);
+}
+
+#[test]
+fn terminal_snapshot_reports_running_and_monotonic_elapsed_ms() {
+    use crate::app::AgentTerminals;
+    use ee_agent_protocol::{CreateTerminalRequest, KillTerminalRequest, SessionId, TerminalId};
+
+    let terminals = AgentTerminals::default();
+    let created = terminals
+        .spawn(
+            &CreateTerminalRequest::new(SessionId::new("s1"), "sleep")
+                .args(vec![String::from("30")]),
+        )
+        .expect("terminal spawns");
+    let terminal_id = TerminalId::new(created.terminal_id.0.to_string());
+
+    let request = |terminal_id: TerminalId| {
+        ee_agent_protocol::TerminalOutputRequest::new(SessionId::new("s1"), terminal_id)
+    };
+    let first = terminals.output_snapshot(&request(terminal_id.clone())).expect("live snapshot");
+    assert!(first.running, "sleep must still be active in the snapshot");
+
+    thread::sleep(Duration::from_millis(5));
+    let second = terminals.output_snapshot(&request(terminal_id.clone())).expect("later snapshot");
+    assert!(
+        second.elapsed_ms >= first.elapsed_ms,
+        "elapsedMs must be monotonic: {} then {}",
+        first.elapsed_ms,
+        second.elapsed_ms
+    );
+
+    terminals
+        .kill(&KillTerminalRequest::new(SessionId::new("s1"), terminal_id.clone()))
+        .expect("kill succeeds");
+    let after = terminals.output_snapshot(&request(terminal_id)).expect("snapshot after kill");
+    assert!(!after.running, "killed terminal must report not running");
 }
 
 #[test]

@@ -312,6 +312,88 @@ async fn happy_path_streams_updates_and_completes_turn() {
 }
 
 #[tokio::test]
+async fn turn_completed_carries_elapsed_time_and_reported_tokens() {
+    let script = base_script().wait_for("session/prompt").respond(json!({
+        "stopReason": "end_turn",
+        "usage": {
+            "totalTokens": 8431,
+            "inputTokens": 6120,
+            "outputTokens": 2311,
+        }
+    }));
+    let (fake, mut host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
+
+    thread
+        .send_prompt(vec![ContentBlock::Text(TextContent::new("hi"))])
+        .await
+        .expect("prompt completes");
+
+    let metrics = loop {
+        match next_event(&mut host.events).await {
+            AgentEvent::TurnCompleted { metrics, .. } => break metrics,
+            AgentEvent::TurnStarted { .. }
+            | AgentEvent::SessionUpdate { .. }
+            | AgentEvent::ConnectionStateChanged { .. }
+            | AgentEvent::ThreadCreated { .. } => continue,
+            other => panic!("unexpected event: {other:?}"),
+        }
+    };
+    assert!(!metrics.elapsed.is_zero(), "elapsed must be measured");
+    let tokens = metrics.tokens.expect("reported usage attached");
+    assert_eq!(tokens.total_tokens, 8431);
+    assert_eq!(tokens.input_tokens, 6120);
+    assert_eq!(tokens.output_tokens, 2311);
+
+    connection.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
+async fn cancelled_turn_carries_elapsed_time_and_no_tokens() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        // Agent never answers: the turn is cancelled locally.
+        .emit(wire::session_update("s1", wire::agent_message_chunk("m1", "thinking...")));
+    let (fake, mut host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
+
+    let prompt_thread = thread.clone();
+    let prompt = tokio::spawn(async move {
+        prompt_thread.send_prompt(vec![ContentBlock::Text(TextContent::new("hi"))]).await
+    });
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while !fake.log_contains("\"method\":\"session/prompt\"") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("prompt request observed");
+    thread.cancel().await.expect("cancel succeeds");
+    assert!(matches!(prompt.await.expect("prompt task joins"), Err(AgentError::Cancelled)));
+
+    let metrics = loop {
+        match next_event(&mut host.events).await {
+            AgentEvent::TurnCancelled { metrics, .. } => break metrics,
+            AgentEvent::TurnStarted { .. }
+            | AgentEvent::SessionUpdate { .. }
+            | AgentEvent::ConnectionStateChanged { .. }
+            | AgentEvent::ThreadCreated { .. } => continue,
+            other => panic!("unexpected event: {other:?}"),
+        }
+    };
+    assert!(!metrics.elapsed.is_zero(), "elapsed must be measured");
+    assert_eq!(metrics.tokens, None, "cancelled turns report no tokens");
+
+    connection.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
 async fn unsupported_protocol_version_fails_closed() {
     let script = FakeAgentScript::new()
         .wait_for("initialize")

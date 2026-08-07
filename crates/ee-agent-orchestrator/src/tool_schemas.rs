@@ -332,11 +332,14 @@ mod tests {
   },
   {
     "name": "wait_for_terminal_exit",
-    "description": "Waits for a terminal command to exit",
+    "description": "Waits for a terminal command to exit; timeout_ms triggers kill, output capture, and release.",
     "inputSchema": {
       "properties": {
         "terminal_id": {
           "type": "string"
+        },
+        "timeout_ms": {
+          "type": "integer"
         }
       },
       "required": [
@@ -351,7 +354,8 @@ mod tests {
       "terminal_handle"
     ],
     "produces": [
-      "terminal_exit"
+      "terminal_exit",
+      "terminal_output"
     ]
   },
   {

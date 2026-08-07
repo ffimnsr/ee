@@ -16,10 +16,12 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ee_agent_host::events::{AgentConnectionState, PermissionRequestInfo, ThreadCloseReason};
+use ee_agent_host::events::{
+    AgentConnectionState, PermissionRequestInfo, ThreadCloseReason, TurnMetrics,
+};
 use ee_agent_host::{
     AgentError, AgentEvent, AgentManager, AgentManagerConfig, AgentThread, ClientRequestResponse,
     ClientRequestResult, PermissionRequestId, ToolCallState,
@@ -171,6 +173,12 @@ pub(crate) struct AgentThreadUi {
     pub(crate) usage: Option<String>,
     /// Stop reason of the last completed turn.
     pub(crate) stop_reason: Option<String>,
+    /// When the current turn started (live elapsed rendering while running).
+    pub(crate) turn_started_at: Option<Instant>,
+    /// Metrics of completed turns, keyed by their response group.
+    pub(crate) turn_metrics: BTreeMap<ResponseGroupId, TurnMetrics>,
+    /// Metrics of the most recent completed turn (footer rendering).
+    pub(crate) last_turn_metrics: Option<TurnMetrics>,
     /// Active local group for the currently streaming agent turn.
     pub(crate) active_response_group: Option<ResponseGroupId>,
     /// Next response-group identifier for this thread.
@@ -358,11 +366,23 @@ impl AgentThreadUi {
         group
     }
 
-    /// Collapses the completed turn's reasoning and tool calls.
-    fn finish_response_group(&mut self) {
-        if let Some(group) = self.active_response_group.take() {
+    /// Collapses the completed turn's reasoning and tool calls, returning
+    /// the group that finished (for attaching per-turn metrics).
+    fn finish_response_group(&mut self) -> Option<ResponseGroupId> {
+        let group = self.active_response_group.take();
+        if let Some(group) = group {
             self.collapsed_response_groups.insert(group);
         }
+        group
+    }
+
+    /// Records the metrics of the just-finished turn against its response
+    /// group, then collapses the group.
+    fn record_turn_metrics(&mut self, metrics: TurnMetrics) {
+        if let Some(group) = self.finish_response_group() {
+            self.turn_metrics.insert(group, metrics.clone());
+        }
+        self.last_turn_metrics = Some(metrics);
     }
 
     fn response_group_for_tool_call(&mut self, tool_call_id: &str) -> ResponseGroupId {
@@ -1255,7 +1275,7 @@ impl App {
                         ThreadCloseReason::ConnectionLost => String::from("connection lost"),
                     };
                     self.agents.threads[index].state = ThreadUiState::Closed;
-                    self.agents.threads[index].finish_response_group();
+                    let _ = self.agents.threads[index].finish_response_group();
                     self.agents.threads[index].push_system(text);
                     self.notify_unread(index);
                 }
@@ -1264,6 +1284,7 @@ impl App {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.agents.threads[index].state = ThreadUiState::Running;
                     self.agents.threads[index].active_response_group = None;
+                    self.agents.threads[index].turn_started_at = Some(Instant::now());
                     self.agents.threads[index].push_system(String::from("turn started"));
                     self.notify_unread(index);
                 }
@@ -1274,31 +1295,34 @@ impl App {
                     self.notify_unread(index);
                 }
             }
-            AgentEvent::TurnCompleted { session_id, stop_reason } => {
+            AgentEvent::TurnCompleted { session_id, stop_reason, metrics } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.agents.threads[index].state = ThreadUiState::Ready;
                     self.agents.threads[index].optimistic_message = None;
-                    self.agents.threads[index].finish_response_group();
+                    self.agents.threads[index].turn_started_at = None;
                     self.agents.threads[index].stop_reason = Some(format!("{stop_reason:?}"));
+                    self.agents.threads[index].record_turn_metrics(metrics);
                     self.agents.threads[index]
                         .push_system(format!("turn completed (stop: {stop_reason:?})"));
                     self.notify_unread(index);
                 }
             }
-            AgentEvent::TurnCancelled { session_id } => {
+            AgentEvent::TurnCancelled { session_id, metrics } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.agents.threads[index].state = ThreadUiState::Ready;
                     self.agents.threads[index].optimistic_message = None;
-                    self.agents.threads[index].finish_response_group();
+                    self.agents.threads[index].turn_started_at = None;
+                    self.agents.threads[index].record_turn_metrics(metrics);
                     self.agents.threads[index].push_system(String::from("turn cancelled"));
                     self.notify_unread(index);
                 }
             }
-            AgentEvent::TurnFailed { session_id, error } => {
+            AgentEvent::TurnFailed { session_id, error, metrics } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.agents.threads[index].state = ThreadUiState::Ready;
                     self.agents.threads[index].optimistic_message = None;
-                    self.agents.threads[index].finish_response_group();
+                    self.agents.threads[index].turn_started_at = None;
+                    self.agents.threads[index].record_turn_metrics(metrics);
                     self.agents.threads[index].last_error = Some(error.to_string());
                     self.agents.threads[index].push_system(format!("turn failed: {error}"));
                     self.notify_unread(index);
@@ -1676,6 +1700,9 @@ impl App {
             stick_to_bottom: true,
             usage: None,
             stop_reason: None,
+            turn_started_at: None,
+            turn_metrics: BTreeMap::new(),
+            last_turn_metrics: None,
             active_response_group: None,
             next_response_group: 1,
             selected_response_group: None,
@@ -1956,6 +1983,46 @@ fn thread_display_name(index: usize, agent_id: &str, session_title: Option<&str>
         Some(title) => format!("{}.{}", index + 1, title),
         None => format!("{}.{}", index + 1, agent_id),
     }
+}
+
+/// Formats a duration compactly: `1.2s`, `45s`, or `3m 12s`.
+pub(crate) fn format_duration(duration: Duration) -> String {
+    let total = duration.as_secs_f64();
+    if total < 60.0 {
+        return format!("{total:.1}s");
+    }
+    let minutes = total as u64 / 60;
+    let seconds = total as u64 % 60;
+    format!("{minutes}m {seconds}s")
+}
+
+/// Formats a token count with thousands separators (`8,431`).
+pub(crate) fn format_tokens(tokens: u64) -> String {
+    let digits = tokens.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Renders one completed turn's metrics: `12.4s` or
+/// `12.4s · 8,431 tokens (6,120 in / 2,311 out)`; unknown token usage is
+/// never shown as zero.
+pub(crate) fn turn_metrics_label(metrics: &TurnMetrics) -> String {
+    let mut label = format_duration(metrics.elapsed);
+    if let Some(usage) = &metrics.tokens {
+        label.push_str(&format!(
+            " · {} tokens ({} in / {} out)",
+            format_tokens(usage.total_tokens),
+            format_tokens(usage.input_tokens),
+            format_tokens(usage.output_tokens),
+        ));
+    }
+    label
 }
 
 fn is_mode_config_option(option: &SessionConfigOption) -> bool {

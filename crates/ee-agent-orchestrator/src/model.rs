@@ -251,6 +251,31 @@ impl ModelUsage {
         self.output_tokens = Some(tokens);
         self
     }
+
+    /// Maps to the ACP per-turn usage when both input and output tokens are
+    /// known; unknown stays unknown (never counted as zero).
+    #[must_use]
+    pub(crate) fn acp_usage(&self) -> Option<ee_agent_protocol::Usage> {
+        let input_tokens = self.input_tokens?;
+        let output_tokens = self.output_tokens?;
+        Some(ee_agent_protocol::Usage::new(
+            input_tokens.saturating_add(output_tokens) as u64,
+            input_tokens as u64,
+            output_tokens as u64,
+        ))
+    }
+}
+
+/// Builds an ACP prompt result, attaching reported token usage when known.
+pub(crate) fn prompt_result_with_usage(
+    stop_reason: ee_agent_protocol::StopReason,
+    usage: ModelUsage,
+) -> ee_acp_agent_server::PromptResult {
+    let mut result = ee_acp_agent_server::PromptResult::new(stop_reason);
+    if let Some(usage) = usage.acp_usage() {
+        result = result.usage(usage);
+    }
+    result
 }
 
 /// Normalized model response for one completion.

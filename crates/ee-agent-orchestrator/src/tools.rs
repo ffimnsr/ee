@@ -14,6 +14,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use ee_acp_agent_server::{ClientBridge, ProviderError, UpdateSink, UpdateSinkError};
 use ee_agent_protocol::{
@@ -438,6 +439,9 @@ impl ToolRegistry {
     }
 }
 
+/// Default maximum terminal wait before automatic timeout cleanup.
+const DEFAULT_TERMINAL_WAIT_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// Which framework `ClientBridge` method a built-in tool wraps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BridgeCall {
@@ -529,19 +533,59 @@ impl ClientBridgeTool {
             }
             BridgeCall::WaitForTerminalExit => {
                 let terminal_id = terminal_arg(&arguments)?;
-                let response = client
-                    .wait_for_terminal_exit(WaitForTerminalExitRequest::new(
-                        session_id,
-                        terminal_id,
-                    ))
-                    .await;
-                match response {
-                    Ok(response) => ToolResult::success_structured(
-                        "terminal exited",
-                        serde_json::to_value(response.exit_status)
-                            .unwrap_or_else(|_| serde_json::json!(null)),
-                    ),
-                    Err(error) => bridge_error(error),
+                let timeout = terminal_wait_timeout(&arguments)?;
+                let wait = client.wait_for_terminal_exit(WaitForTerminalExitRequest::new(
+                    session_id.clone(),
+                    terminal_id.clone(),
+                ));
+                tokio::pin!(wait);
+
+                tokio::select! {
+                    response = &mut wait => match response {
+                        Ok(response) => ToolResult::success_structured(
+                            "terminal exited",
+                            serde_json::to_value(response.exit_status)
+                                .unwrap_or_else(|_| serde_json::json!(null)),
+                        ),
+                        Err(error) => bridge_error(error),
+                    },
+                    () = tokio::time::sleep(timeout) => {
+                        let timeout_ms = timeout.as_millis() as u64;
+                        if let Err(error) = client
+                            .kill_terminal(KillTerminalRequest::new(session_id.clone(), terminal_id.clone()))
+                            .await
+                        {
+                            // ACP release also kills a still-running terminal. Attempt it even
+                            // when the explicit kill failed so timeout cleanup cannot leak work.
+                            let _ = client
+                                .release_terminal(ReleaseTerminalRequest::new(session_id, terminal_id))
+                                .await;
+                            return Ok(bridge_error(error));
+                        }
+
+                        let output = client
+                            .terminal_output(TerminalOutputRequest::new(session_id.clone(), terminal_id.clone()))
+                            .await;
+                        let released = client
+                            .release_terminal(ReleaseTerminalRequest::new(session_id, terminal_id))
+                            .await;
+
+                        match (output, released) {
+                            (Ok(output), Ok(_)) => ToolResult::success_structured(
+                                format!("terminal timed out after {timeout_ms}ms and was terminated"),
+                                serde_json::json!({
+                                    "timed_out": true,
+                                    "timeout_ms": timeout_ms,
+                                    "output": output.output,
+                                    "truncated": output.truncated,
+                                    "exit_status": output.exit_status,
+                                    "released": true,
+                                }),
+                            ),
+                            (Err(error), _) => bridge_error(error),
+                            (_, Err(error)) => bridge_error(error),
+                        }
+                    }
                 }
             }
             BridgeCall::KillTerminal => {
@@ -675,13 +719,13 @@ fn builtin_tools(session_id: &SessionId) -> Vec<Arc<dyn ServerTool>> {
         make(
             BridgeCall::WaitForTerminalExit,
             "wait_for_terminal_exit",
-            "Waits for a terminal command to exit",
+            "Waits for a terminal command to exit; timeout_ms triggers kill, output capture, and release.",
             SideEffectClass::Execute,
             None,
             none.clone()
                 .requires(vec![ToolDataClass::TerminalHandle])
-                .produces(vec![ToolDataClass::TerminalExit]),
-            schema(&[("terminal_id", "string")], &["terminal_id"]),
+                .produces(vec![ToolDataClass::TerminalExit, ToolDataClass::TerminalOutput]),
+            schema(&[("terminal_id", "string"), ("timeout_ms", "integer")], &["terminal_id"]),
         ),
         make(
             BridgeCall::KillTerminal,
@@ -727,6 +771,20 @@ fn optional_string_arg(arguments: &serde_json::Value, name: &str) -> Option<Stri
 
 fn terminal_arg(arguments: &serde_json::Value) -> Result<TerminalId, ToolResult> {
     string_arg(arguments, "terminal_id").map(TerminalId::new)
+}
+
+fn terminal_wait_timeout(arguments: &serde_json::Value) -> Result<Duration, ToolResult> {
+    let Some(timeout_ms) = arguments.get("timeout_ms") else {
+        return Ok(DEFAULT_TERMINAL_WAIT_TIMEOUT);
+    };
+    let timeout_ms = timeout_ms.as_u64().filter(|timeout_ms| *timeout_ms > 0).ok_or_else(|| {
+        invalid_args(String::from("tool argument timeout_ms must be a positive integer"))
+    })?;
+    let max_ms = DEFAULT_TERMINAL_WAIT_TIMEOUT.as_millis() as u64;
+    if timeout_ms > max_ms {
+        return Err(invalid_args(format!("tool argument timeout_ms must not exceed {max_ms}")));
+    }
+    Ok(Duration::from_millis(timeout_ms))
 }
 
 fn invalid_args(message: String) -> ToolResult {
@@ -1262,6 +1320,64 @@ mod tests {
         let result = task.await.expect("task joins").expect("executes");
         assert!(result.success);
         assert_eq!(result.text_output, "elicitation created");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_wait_timeout_kills_captures_output_and_releases() {
+        let (_sink, bridge, mut rx) = plumbing();
+        let task_bridge = bridge.clone();
+        let task = tokio::spawn(async move {
+            ClientBridgeTool::run(
+                BridgeCall::WaitForTerminalExit,
+                SessionId::new("s-1"),
+                json!({ "terminal_id": "term-1", "timeout_ms": 1 }),
+                &task_bridge,
+            )
+            .await
+        });
+
+        let RawJsonRpcMessage::Request(wait) = next_client_request(&mut rx).await else {
+            panic!("expected terminal wait request");
+        };
+        assert_eq!(wait.method.as_ref(), "terminal/wait_for_exit");
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let RawJsonRpcMessage::Request(kill) = next_client_request(&mut rx).await else {
+            panic!("expected terminal kill request");
+        };
+        assert_eq!(kill.method.as_ref(), "terminal/kill");
+        bridge.handle_response(Response::Result { id: kill.id, result: json!({}) });
+
+        let RawJsonRpcMessage::Request(output) = next_client_request(&mut rx).await else {
+            panic!("expected terminal output request");
+        };
+        assert_eq!(output.method.as_ref(), "terminal/output");
+        bridge.handle_response(Response::Result {
+            id: output.id,
+            result: json!({
+                "output": "partial output",
+                "truncated": false,
+                "exitStatus": { "exitCode": null, "signal": "9" },
+            }),
+        });
+
+        let RawJsonRpcMessage::Request(release) = next_client_request(&mut rx).await else {
+            panic!("expected terminal release request");
+        };
+        assert_eq!(release.method.as_ref(), "terminal/release");
+        bridge.handle_response(Response::Result { id: release.id, result: json!({}) });
+
+        let result = task.await.expect("task joins").expect("timeout workflow succeeds");
+        assert!(result.success);
+        assert_eq!(
+            result.structured_output.as_ref().expect("structured output")["timed_out"],
+            true
+        );
+        assert_eq!(
+            result.structured_output.as_ref().expect("structured output")["output"],
+            "partial output"
+        );
+        assert_eq!(result.structured_output.as_ref().expect("structured output")["released"], true);
     }
 
     #[tokio::test]

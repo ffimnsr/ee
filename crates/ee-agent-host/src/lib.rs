@@ -35,7 +35,7 @@ pub use connection::{
 pub use error::AgentError;
 pub use events::{
     AgentConnectionState, AgentEvent, ConnectionCloseReason, PermissionRequestId,
-    PermissionRequestInfo, ThreadCloseReason,
+    PermissionRequestInfo, ThreadCloseReason, TurnMetrics,
 };
 pub use inbound::{
     ClientRequest, ClientRequestHandler, ClientRequestResponse, ClientRequestResult,

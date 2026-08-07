@@ -64,7 +64,7 @@ pub(crate) use agent_bridge::{
 pub(crate) use agent_pane::{
     AGENTS_NICK_COL_WIDTH, AGENTS_PANE_BOTTOM_HEIGHT, AGENTS_PANE_RIGHT_WIDTH, AgentPaneLayout,
     AgentThreadUi, MessageRenderKind, ThreadUiState, TranscriptItem, agent_slash_command_names,
-    wrap_text,
+    format_duration, turn_metrics_label, wrap_text,
 };
 
 const SWIFT_MOTION_LABELS: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
