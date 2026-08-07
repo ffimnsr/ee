@@ -15,7 +15,7 @@ use crate::stuck::StuckConfig;
 /// Default maximum loop iterations per turn.
 pub const DEFAULT_MAX_LOOP_ITERATIONS: usize = 16;
 /// Default maximum tool calls per turn.
-pub const DEFAULT_MAX_TOOL_CALLS_PER_TURN: usize = 32;
+pub const DEFAULT_MAX_TOOL_CALLS_PER_TURN: usize = 180;
 /// Default maximum subagent nesting depth.
 pub const DEFAULT_MAX_SUBAGENT_DEPTH: usize = 2;
 /// Default maximum concurrently running subagents.
@@ -117,7 +117,7 @@ mod tests {
     fn defaults_use_expected_knobs() {
         let config = OrchestratorConfig::default();
         assert_eq!(config.max_loop_iterations, 16);
-        assert_eq!(config.max_tool_calls_per_turn, 32);
+        assert_eq!(config.max_tool_calls_per_turn, 180);
         assert_eq!(config.max_subagent_depth, 2);
         assert_eq!(config.max_parallel_subagents, 4);
         assert_eq!(config.turn_timeout, Duration::from_secs(300));

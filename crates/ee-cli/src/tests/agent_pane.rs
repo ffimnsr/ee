@@ -360,6 +360,37 @@ fn separate_user_turns_do_not_concatenate_without_message_ids() {
 }
 
 #[test]
+fn assistant_chunks_with_reused_message_ids_stay_in_their_turn() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(wire::session_update("s1", wire::agent_message_chunk("m1", "first reply")))
+        .respond(json!({ "stopReason": "end_turn" }))
+        .wait_for("session/prompt")
+        .emit(wire::session_update("s1", wire::agent_message_chunk("m1", "second reply")))
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "first question");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "first reply", |app| app.agents.threads[0].message_pairs().len() == 2);
+
+    type_text(&mut app, "second question");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "second reply", |app| app.agents.threads[0].message_pairs().len() == 4);
+
+    assert_eq!(
+        app.agents.threads[0].message_pairs(),
+        vec![
+            (String::from("you"), String::from("first question")),
+            (String::from("fake"), String::from("first reply")),
+            (String::from("you"), String::from("second question")),
+            (String::from("fake"), String::from("second reply")),
+        ]
+    );
+}
+
+#[test]
 fn streamed_assistant_chunks_render_in_order_with_thoughts() {
     let script = base_script()
         .wait_for("session/prompt")
@@ -400,6 +431,17 @@ fn streamed_assistant_chunks_render_in_order_with_thoughts() {
     for line in wrap_text("hello", 8) {
         assert!(!line.is_empty());
     }
+
+    let thread = &app.agents.threads[0];
+    assert_eq!(thread.response_group_ids(), vec![1]);
+    assert_eq!(thread.response_group_counts(1), (1, 0));
+    assert_eq!(thread.selected_response_group, Some(1));
+    assert!(thread.collapsed_response_groups.contains(&1), "completed turns collapse");
+
+    press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+    assert!(!app.agents.threads[0].collapsed_response_groups.contains(&1));
+    press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+    assert!(app.agents.threads[0].collapsed_response_groups.contains(&1));
 }
 
 #[test]
@@ -417,6 +459,7 @@ fn agents_thoughts_command_toggles_visibility_without_dropping_transcript() {
         text: String::from("private summary"),
         kind: crate::app::MessageRenderKind::Thought,
         message_id: Some(String::from("th-1")),
+        response_group: Some(1),
         at: std::time::SystemTime::UNIX_EPOCH,
     });
     assert_eq!(
@@ -438,7 +481,7 @@ fn agents_thoughts_command_toggles_visibility_without_dropping_transcript() {
 }
 
 #[test]
-fn plan_updates_open_modal_and_replace_wholesale_without_scrollback_append() {
+fn plan_updates_stay_hidden_until_toggled_and_replace_wholesale_without_scrollback_append() {
     let script = base_script()
         .wait_for("session/prompt")
         .emit(wire::session_update(
@@ -470,7 +513,13 @@ fn plan_updates_open_modal_and_replace_wholesale_without_scrollback_append() {
     wait_until(&mut app, "plan replacement lands", |app| {
         app.agents.threads[0].plan_entries() == vec![(String::from("[medium] replacement"), 'x')]
     });
-    assert!(app.agents.threads[0].plan_modal_open, "plan update opens modal");
+    assert!(
+        !app.agents.threads[0].plan_modal_open,
+        "plan updates remain hidden until the user toggles visibility"
+    );
+
+    press(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
+    assert!(app.agents.threads[0].plan_modal_open, "Ctrl-G opens plan modal");
     let transcript_debug = format!("{:?}", app.agents.threads[0].transcript);
     assert!(
         !transcript_debug.contains("replacement"),
@@ -519,13 +568,16 @@ fn slash_commands_are_discoverable_and_tab_inserts_prompt_text() {
             .any(|notice| notice.contains("commands: /plan — Create plan, /edit — Edit code"))
     );
 
-    // Tab cycles to the first command; the advertised input hint drafts as
-    // the placeholder text the user edits before sending.
+    // Slash-prefixed drafts autocomplete by prefix; once completed, Tab and
+    // Shift-Tab cycle through advertised commands.
+    type_text(&mut app, "/e");
     press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-    assert_eq!(app.agents.threads[0].draft, "/plan goal");
+    assert_eq!(app.agents.threads[0].draft, "/edit");
     press(&mut app, KeyCode::BackTab, KeyModifiers::SHIFT);
-    assert_eq!(app.agents.threads[0].draft, "/edit ");
-    type_text(&mut app, "file");
+    assert_eq!(app.agents.threads[0].draft, "/plan");
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(app.agents.threads[0].draft, "/edit");
+    type_text(&mut app, " file");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
     wait_until(&mut app, "slash prompt sent", |_| {
@@ -1330,6 +1382,11 @@ fn tool_call_updates_render_kind_content_locations_and_secret_conscious_diagnost
             )
         })
     });
+    let thread = &app.agents.threads[0];
+    assert_eq!(thread.response_group_ids(), vec![1]);
+    assert_eq!(thread.response_group_counts(1), (0, 1));
+    assert_eq!(thread.selected_response_group, Some(1));
+    assert!(thread.collapsed_response_groups.contains(&1), "completed turns collapse");
 }
 
 // ── Stop, close, clear ───────────────────────────────────────────────────────
@@ -1420,7 +1477,7 @@ fn quit_full_slash_command_exits_editor_locally() {
 }
 
 #[test]
-fn new_slash_command_starts_and_focuses_thread_locally() {
+fn new_thread_slash_command_starts_and_focuses_thread_locally() {
     let script = FakeAgentScript::new()
         .wait_for("initialize")
         .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
@@ -1431,10 +1488,10 @@ fn new_slash_command_starts_and_focuses_thread_locally() {
     let (mut app, _temp, fake) = fake_agents_app(script);
     open_pane_and_wait_ready(&mut app);
 
-    type_text(&mut app, "/new");
+    type_text(&mut app, "/new_thread");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
-    wait_until(&mut app, "new slash-command thread ready", |app| {
+    wait_until(&mut app, "new-thread slash-command thread ready", |app| {
         app.agents.threads.len() == 2 && app.agents.threads[1].state == ThreadUiState::Ready
     });
     assert_eq!(app.agents.active_thread, Some(1));
@@ -1463,18 +1520,18 @@ fn new_slash_command_with_arguments_is_sent_to_agent() {
 }
 
 #[test]
-fn new_slash_command_rejects_second_request_while_session_starts() {
+fn new_thread_slash_command_rejects_second_request_while_session_starts() {
     let script = base_script().wait_for("session/new");
     let (mut app, _temp, fake) = fake_agents_app(script);
     open_pane_and_wait_ready(&mut app);
 
-    type_text(&mut app, "/new");
+    type_text(&mut app, "/new_thread");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-    wait_until(&mut app, "new session request pending", |_| {
+    wait_until(&mut app, "new-thread session request pending", |_| {
         fake.agent().requests_by_method("session/new").len() == 2
     });
 
-    type_text(&mut app, "/new");
+    type_text(&mut app, "/new_thread");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
     assert_eq!(app.backend.status_message.as_deref(), Some("agent session is already starting"));

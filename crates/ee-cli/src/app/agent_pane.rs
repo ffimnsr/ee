@@ -25,13 +25,13 @@ use ee_agent_host::{
     ClientRequestResult, PermissionRequestId, ToolCallState,
 };
 use ee_agent_protocol::{
-    AvailableCommand, AvailableCommandInput, ContentBlock, CreateElicitationRequest,
-    CreateElicitationResponse, ElicitationAcceptAction, ElicitationAction, ElicitationContentValue,
-    ElicitationMode, ElicitationPropertySchema, ElicitationSchema, McpServer, McpServerStdio,
-    PermissionOption, PlanEntryPriority, PlanEntryStatus, RequestPermissionOutcome,
-    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionValue,
-    SessionConfigSelectOptions, SessionConfigValueId, SessionId, SessionModeId, SessionUpdate,
-    TextContent, ToolCallContent, ToolCallLocation, ToolCallStatus, ToolKind,
+    AvailableCommand, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
+    ElicitationAcceptAction, ElicitationAction, ElicitationContentValue, ElicitationMode,
+    ElicitationPropertySchema, ElicitationSchema, McpServer, McpServerStdio, PermissionOption,
+    PlanEntryPriority, PlanEntryStatus, RequestPermissionOutcome, SelectedPermissionOutcome,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionValue, SessionConfigSelectOptions,
+    SessionConfigValueId, SessionId, SessionModeId, SessionUpdate, TextContent, ToolCallContent,
+    ToolCallLocation, ToolCallStatus, ToolKind,
 };
 use tokio::runtime::Builder as TokioBuilder;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -88,6 +88,9 @@ pub(crate) enum MessageRenderKind {
     Thought,
 }
 
+/// Stable local identifier for reasoning and tool calls from one agent turn.
+pub(crate) type ResponseGroupId = u64;
+
 /// One line in the IRC-style scrollback.
 #[derive(Debug, Clone)]
 pub(crate) enum TranscriptItem {
@@ -97,10 +100,18 @@ pub(crate) enum TranscriptItem {
         text: String,
         kind: MessageRenderKind,
         message_id: Option<String>,
+        response_group: Option<ResponseGroupId>,
         at: SystemTime,
     },
     /// IRC-style tool notice (`* title [status]`).
-    ToolCall { id: String, title: String, status: String, detail: String, at: SystemTime },
+    ToolCall {
+        id: String,
+        title: String,
+        status: String,
+        detail: String,
+        response_group: ResponseGroupId,
+        at: SystemTime,
+    },
     /// A permission request shown in the transcript.
     Permission { title: String, options: Vec<String>, at: SystemTime },
     /// An elicitation request shown in the transcript.
@@ -160,9 +171,17 @@ pub(crate) struct AgentThreadUi {
     pub(crate) usage: Option<String>,
     /// Stop reason of the last completed turn.
     pub(crate) stop_reason: Option<String>,
+    /// Active local group for the currently streaming agent turn.
+    pub(crate) active_response_group: Option<ResponseGroupId>,
+    /// Next response-group identifier for this thread.
+    pub(crate) next_response_group: ResponseGroupId,
+    /// Response group selected for keyboard collapse control.
+    pub(crate) selected_response_group: Option<ResponseGroupId>,
+    /// Response groups whose reasoning and tools are hidden.
+    pub(crate) collapsed_response_groups: BTreeSet<ResponseGroupId>,
     /// Latest agent plan snapshot, rendered in a modal instead of scrollback.
     pub(crate) current_plan: Vec<(String, char)>,
-    /// Whether the current plan modal is visible.
+    /// Whether the user has opened the current plan modal.
     pub(crate) plan_modal_open: bool,
     /// Last turn error, when any.
     pub(crate) last_error: Option<String>,
@@ -236,6 +255,7 @@ impl AgentThreadUi {
         text: &str,
         kind: MessageRenderKind,
         message_id: Option<String>,
+        response_group: Option<ResponseGroupId>,
     ) {
         if kind == MessageRenderKind::User
             && let Some(index) = self.optimistic_message.take()
@@ -252,8 +272,11 @@ impl AgentThreadUi {
                     TranscriptItem::Message {
                         kind: existing_kind,
                         message_id: Some(existing_id),
+                        response_group: existing_response_group,
                         ..
-                    } if *existing_kind == kind && existing_id == message_id
+                    } if *existing_kind == kind
+                        && existing_id == message_id
+                        && *existing_response_group == response_group
                 )
             });
             if let Some(TranscriptItem::Message { text: target, .. }) = merges {
@@ -276,13 +299,21 @@ impl AgentThreadUi {
             text: text.to_string(),
             kind,
             message_id,
+            response_group,
             at: SystemTime::now(),
         });
         self.trim_transcript();
     }
 
     /// Upserts a tool call notice by id.
-    fn push_tool_call(&mut self, id: &str, title: &str, status: &str, detail: &str) {
+    fn push_tool_call(
+        &mut self,
+        id: &str,
+        title: &str,
+        status: &str,
+        detail: &str,
+        response_group: ResponseGroupId,
+    ) {
         let target = self.transcript.iter_mut().find(
             |item| matches!(item, TranscriptItem::ToolCall { id: existing, .. } if existing == id),
         );
@@ -309,15 +340,87 @@ impl AgentThreadUi {
             title: title.to_string(),
             status: status.to_string(),
             detail: detail.to_string(),
+            response_group,
             at: SystemTime::now(),
         });
         self.trim_transcript();
     }
 
+    fn ensure_response_group(&mut self) -> ResponseGroupId {
+        if let Some(group) = self.active_response_group {
+            return group;
+        }
+
+        let group = self.next_response_group;
+        self.next_response_group += 1;
+        self.active_response_group = Some(group);
+        self.selected_response_group = Some(group);
+        group
+    }
+
+    /// Collapses the completed turn's reasoning and tool calls.
+    fn finish_response_group(&mut self) {
+        if let Some(group) = self.active_response_group.take() {
+            self.collapsed_response_groups.insert(group);
+        }
+    }
+
+    fn response_group_for_tool_call(&mut self, tool_call_id: &str) -> ResponseGroupId {
+        self.transcript
+            .iter()
+            .find_map(|item| match item {
+                TranscriptItem::ToolCall { id, response_group, .. } if id == tool_call_id => {
+                    Some(*response_group)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| self.ensure_response_group())
+    }
+
+    pub(crate) fn response_group_ids(&self) -> Vec<ResponseGroupId> {
+        self.transcript
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Message {
+                    kind: MessageRenderKind::Thought,
+                    response_group,
+                    ..
+                } => *response_group,
+                TranscriptItem::ToolCall { response_group, .. } => Some(*response_group),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    pub(crate) fn response_group_counts(&self, group: ResponseGroupId) -> (usize, usize) {
+        self.transcript.iter().fold((0, 0), |(thoughts, tools), item| match item {
+            TranscriptItem::Message {
+                kind: MessageRenderKind::Thought,
+                response_group: Some(item_group),
+                ..
+            } if *item_group == group => (thoughts + 1, tools),
+            TranscriptItem::ToolCall { response_group, .. } if *response_group == group => {
+                (thoughts, tools + 1)
+            }
+            _ => (thoughts, tools),
+        })
+    }
+
+    pub(crate) fn response_group_for_item(&self, item: &TranscriptItem) -> Option<ResponseGroupId> {
+        match item {
+            TranscriptItem::Message {
+                kind: MessageRenderKind::Thought, response_group, ..
+            } => *response_group,
+            TranscriptItem::ToolCall { response_group, .. } => Some(*response_group),
+            _ => None,
+        }
+    }
+
     /// Replaces the plan snapshot wholesale (ACP plans are complete snapshots).
     fn replace_plan(&mut self, entries: Vec<(String, char)>) {
         self.current_plan = entries;
-        self.plan_modal_open = !self.current_plan.is_empty();
     }
 
     /// Appends a system notice.
@@ -1152,6 +1255,7 @@ impl App {
                         ThreadCloseReason::ConnectionLost => String::from("connection lost"),
                     };
                     self.agents.threads[index].state = ThreadUiState::Closed;
+                    self.agents.threads[index].finish_response_group();
                     self.agents.threads[index].push_system(text);
                     self.notify_unread(index);
                 }
@@ -1159,6 +1263,7 @@ impl App {
             AgentEvent::TurnStarted { session_id } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.agents.threads[index].state = ThreadUiState::Running;
+                    self.agents.threads[index].active_response_group = None;
                     self.agents.threads[index].push_system(String::from("turn started"));
                     self.notify_unread(index);
                 }
@@ -1173,6 +1278,7 @@ impl App {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.agents.threads[index].state = ThreadUiState::Ready;
                     self.agents.threads[index].optimistic_message = None;
+                    self.agents.threads[index].finish_response_group();
                     self.agents.threads[index].stop_reason = Some(format!("{stop_reason:?}"));
                     self.agents.threads[index]
                         .push_system(format!("turn completed (stop: {stop_reason:?})"));
@@ -1183,6 +1289,7 @@ impl App {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.agents.threads[index].state = ThreadUiState::Ready;
                     self.agents.threads[index].optimistic_message = None;
+                    self.agents.threads[index].finish_response_group();
                     self.agents.threads[index].push_system(String::from("turn cancelled"));
                     self.notify_unread(index);
                 }
@@ -1191,6 +1298,7 @@ impl App {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.agents.threads[index].state = ThreadUiState::Ready;
                     self.agents.threads[index].optimistic_message = None;
+                    self.agents.threads[index].finish_response_group();
                     self.agents.threads[index].last_error = Some(error.to_string());
                     self.agents.threads[index].push_system(format!("turn failed: {error}"));
                     self.notify_unread(index);
@@ -1302,26 +1410,33 @@ impl App {
                     &text,
                     MessageRenderKind::User,
                     message_id,
+                    None,
                 );
             }
             SessionUpdate::AgentMessageChunk(chunk) => {
                 let text = content_block_text(&chunk.content);
                 let message_id = chunk.message_id.as_ref().map(|id| id.0.to_string());
-                self.agents.threads[thread_index].push_message(
+                let thread = &mut self.agents.threads[thread_index];
+                let response_group = thread.ensure_response_group();
+                thread.push_message(
                     &nick,
                     &text,
                     MessageRenderKind::Assistant,
                     message_id,
+                    Some(response_group),
                 );
             }
             SessionUpdate::AgentThoughtChunk(chunk) => {
                 let text = content_block_text(&chunk.content);
                 let message_id = chunk.message_id.as_ref().map(|id| id.0.to_string());
-                self.agents.threads[thread_index].push_message(
+                let thread = &mut self.agents.threads[thread_index];
+                let response_group = thread.ensure_response_group();
+                thread.push_message(
                     "think",
                     &text,
                     MessageRenderKind::Thought,
                     message_id,
+                    Some(response_group),
                 );
             }
             SessionUpdate::ToolCall(tool_call) => {
@@ -1520,11 +1635,13 @@ impl App {
         let Some(tool_call) = snapshot.tool_calls.get(tool_call_id) else {
             return;
         };
+        let response_group = thread.response_group_for_tool_call(&tool_call.tool_call_id);
         thread.push_tool_call(
             &tool_call.tool_call_id,
             &tool_call.title,
             &tool_call_status_label(tool_call.status),
             &tool_call_detail_from_state(tool_call),
+            response_group,
         );
     }
 
@@ -1559,6 +1676,10 @@ impl App {
             stick_to_bottom: true,
             usage: None,
             stop_reason: None,
+            active_response_group: None,
+            next_response_group: 1,
+            selected_response_group: None,
+            collapsed_response_groups: BTreeSet::new(),
             current_plan: Vec::new(),
             plan_modal_open: false,
             last_error: None,
@@ -1924,6 +2045,20 @@ fn split_slash_command(draft: &str) -> (Option<String>, String) {
     (name, rest)
 }
 
+const LOCAL_AGENT_SLASH_COMMANDS: &[&str] = &["quit", "quit_full", "new_thread"];
+
+/// Lists local and agent-advertised slash commands without duplicate names.
+pub(crate) fn agent_slash_command_names(commands: &[AvailableCommand]) -> Vec<&str> {
+    let mut names = LOCAL_AGENT_SLASH_COMMANDS.to_vec();
+    for command in commands {
+        let name = command.name.as_str();
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 /// Renders the advertised command list for the transcript notice:
 /// `/name — description` when a description is advertised, `/name` otherwise.
 fn available_commands_summary(commands: &[AvailableCommand]) -> String {
@@ -1940,21 +2075,12 @@ fn available_commands_summary(commands: &[AvailableCommand]) -> String {
         .join(", ")
 }
 
-/// Draft text for a cycled command: the trailing input text (whitespace
-/// normalized) when present, otherwise the advertised input hint as a draft
-/// placeholder, otherwise `/name `.
-fn slash_command_draft(command: &AvailableCommand, rest: &str) -> String {
-    if !rest.trim().is_empty() {
-        return format!("/{} {}", command.name, rest.trim_start());
-    }
-    let hint = match command.input.as_ref() {
-        Some(AvailableCommandInput::Unstructured(input)) => input.hint.trim(),
-        _ => "",
-    };
-    if hint.is_empty() {
-        format!("/{} ", command.name)
+/// Draft text for a cycled command, preserving any trailing user text.
+fn slash_command_draft(command_name: &str, rest: &str) -> String {
+    if rest.trim().is_empty() {
+        format!("/{command_name}")
     } else {
-        format!("/{} {hint}", command.name)
+        format!("/{command_name} {}", rest.trim_start())
     }
 }
 
@@ -1970,7 +2096,7 @@ fn is_agents_quit_full_slash_command(draft: &str) -> bool {
 
 fn is_agents_new_slash_command(draft: &str) -> bool {
     let (name, rest) = split_slash_command(draft);
-    matches!(name.as_deref(), Some("new")) && rest.trim().is_empty()
+    matches!(name.as_deref(), Some("new_thread")) && rest.trim().is_empty()
 }
 
 /// Deterministic display-width wrapping used by the transcript renderer.
@@ -2661,39 +2787,38 @@ impl App {
         }
         let draft = thread.draft.clone();
         let (current_name, rest) = split_slash_command(&draft);
-        // A trailing input hint drafted as a placeholder is not user text:
-        // cycling away from it does not carry it into the next command.
-        let rest_is_placeholder = current_name.as_deref().is_some_and(|name| {
-            thread
-                .available_commands
+        // Preserve user-entered arguments while cycling slash commands.
+        if !draft.trim_start().starts_with('/') {
+            return false;
+        }
+        let command_name = current_name.as_deref().unwrap_or_default();
+        let command_names = agent_slash_command_names(&thread.available_commands);
+        let current_index = command_names.iter().position(|name| *name == command_name);
+        let matching_indices: Vec<usize> = if current_index.is_some() {
+            (0..command_names.len()).collect()
+        } else {
+            command_names
                 .iter()
-                .find(|command| command.name == name)
-                .and_then(|command| command.input.as_ref())
-                .and_then(|input| match input {
-                    AvailableCommandInput::Unstructured(input) => Some(input.hint.trim()),
-                    _ => None,
-                })
-                .is_some_and(|hint| !hint.is_empty() && rest.trim() == hint)
-        });
-        let rest = if rest_is_placeholder { String::new() } else { rest };
-        let current_index = current_name.and_then(|name| {
-            thread.available_commands.iter().position(|command| command.name == name)
-        });
-        let next_index = match current_index {
-            Some(index) => (index as isize + delta)
-                .rem_euclid(thread.available_commands.len() as isize)
-                as usize,
-            None if draft.trim().is_empty() || draft.starts_with('/') => {
-                if delta >= 0 {
-                    0
-                } else {
-                    thread.available_commands.len() - 1
-                }
-            }
-            None => return false,
+                .enumerate()
+                .filter_map(|(index, name)| name.starts_with(command_name).then_some(index))
+                .collect()
         };
-        let command = &thread.available_commands[next_index];
-        thread.draft = slash_command_draft(command, &rest);
+        let Some(next_index) = (!matching_indices.is_empty()).then(|| {
+            let position = current_index.and_then(|index| {
+                matching_indices.iter().position(|candidate| *candidate == index)
+            });
+            let next_position = match position {
+                Some(position) => {
+                    (position as isize + delta).rem_euclid(matching_indices.len() as isize) as usize
+                }
+                None if delta >= 0 => 0,
+                None => matching_indices.len() - 1,
+            };
+            matching_indices[next_position]
+        }) else {
+            return false;
+        };
+        thread.draft = slash_command_draft(command_names[next_index], &rest);
         true
     }
 
@@ -2740,7 +2865,7 @@ impl App {
         }
         thread.draft.clear();
         let prompt_text = draft.trim_end().to_string();
-        thread.push_message("you", &prompt_text, MessageRenderKind::User, None);
+        thread.push_message("you", &prompt_text, MessageRenderKind::User, None, None);
         thread.optimistic_message = Some(thread.transcript.len().saturating_sub(1));
         let host = self.agents.host.as_ref().expect("host present");
         let blocks = vec![ContentBlock::Text(TextContent::new(prompt_text))];
@@ -3038,12 +3163,20 @@ impl App {
                         'n' => self.agents_switch_thread(1),
                         'p' => self.agents_switch_thread(-1),
                         't' => self.open_agents_thread_picker(),
+                        'g' => self.agents_toggle_plan(),
+                        'r' => self.agents_toggle_selected_response_group(),
                         'u' => self.agents_clear_draft(),
                         _ => {}
                     }
                 } else if !key.modifiers.contains(KeyModifiers::ALT) {
                     self.agents_append_draft(&c.to_string());
                 }
+            }
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.agents_select_response_group(-1);
+            }
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.agents_select_response_group(1);
             }
             KeyCode::Enter => {
                 if key.modifiers.contains(KeyModifiers::ALT) {
@@ -3067,6 +3200,52 @@ impl App {
             KeyCode::Home => self.agents_scroll_to(0),
             KeyCode::End => self.agents_scroll_to_bottom(),
             _ => {}
+        }
+    }
+
+    /// Toggles the active thread's plan modal (Ctrl-G).
+    fn agents_toggle_plan(&mut self) {
+        if let Some(active) = self.agents.active_thread_index() {
+            let thread = &mut self.agents.threads[active];
+            if !thread.current_plan.is_empty() {
+                thread.plan_modal_open = !thread.plan_modal_open;
+            }
+        }
+    }
+
+    /// Selects a response group containing reasoning or tool calls.
+    fn agents_select_response_group(&mut self, delta: isize) {
+        let Some(active) = self.agents.active_thread_index() else {
+            return;
+        };
+        let thread = &mut self.agents.threads[active];
+        let groups = thread.response_group_ids();
+        let Some(current) = thread.selected_response_group else {
+            thread.selected_response_group = groups.last().copied();
+            return;
+        };
+        let Some(index) = groups.iter().position(|group| *group == current) else {
+            thread.selected_response_group = groups.last().copied();
+            return;
+        };
+        thread.selected_response_group =
+            Some(groups[(index as isize + delta).rem_euclid(groups.len() as isize) as usize]);
+    }
+
+    /// Toggles reasoning and tool visibility for the selected response group.
+    fn agents_toggle_selected_response_group(&mut self) {
+        let Some(active) = self.agents.active_thread_index() else {
+            return;
+        };
+        let thread = &mut self.agents.threads[active];
+        let Some(group) = thread.selected_response_group else {
+            return;
+        };
+        if !thread.response_group_ids().contains(&group) {
+            return;
+        }
+        if !thread.collapsed_response_groups.insert(group) {
+            thread.collapsed_response_groups.remove(&group);
         }
     }
 
@@ -3245,9 +3424,9 @@ mod tests {
 
     fn compact_command() -> AvailableCommand {
         AvailableCommand::new("compact", "Summarize the session history").input(
-            AvailableCommandInput::Unstructured(ee_agent_protocol::UnstructuredCommandInput::new(
-                "optional instructions",
-            )),
+            ee_agent_protocol::AvailableCommandInput::Unstructured(
+                ee_agent_protocol::UnstructuredCommandInput::new("optional instructions"),
+            ),
         )
     }
 
@@ -3277,19 +3456,16 @@ mod tests {
     }
 
     #[test]
-    fn slash_command_draft_uses_input_hint_as_placeholder() {
-        // Commands with an unstructured input hint draft the hint text so the
-        // user edits it before sending.
-        assert_eq!(slash_command_draft(&compact_command(), ""), "/compact optional instructions");
-        // Existing trailing text is preserved with whitespace normalized.
+    fn slash_command_draft_inserts_only_the_command_name() {
+        assert_eq!(slash_command_draft("compact", ""), "/compact");
+        assert_eq!(slash_command_draft("compact", "  keep API v2 "), "/compact keep API v2 ");
+    }
+
+    #[test]
+    fn agent_slash_command_names_include_local_and_advertised_commands() {
         assert_eq!(
-            slash_command_draft(&compact_command(), "  keep API v2 "),
-            "/compact keep API v2 "
-        );
-        // Commands without an input hint draft a bare `/name `.
-        assert_eq!(
-            slash_command_draft(&AvailableCommand::new("plan", "Create a plan"), ""),
-            "/plan "
+            agent_slash_command_names(&[compact_command(), AvailableCommand::new("quit", "")]),
+            vec!["quit", "quit_full", "new_thread", "compact"]
         );
     }
 }

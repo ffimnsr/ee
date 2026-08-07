@@ -520,6 +520,7 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let composer = if let Some(active_index) = app.agents.active_thread {
         let thread = &app.agents.threads[active_index];
         let mut lines = Vec::new();
+        let mut rendered_response_groups = std::collections::BTreeSet::new();
         for item in &thread.transcript {
             if !app.agents.show_thoughts
                 && matches!(
@@ -531,6 +532,22 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
                 )
             {
                 continue;
+            }
+            if let Some(group) = thread.response_group_for_item(item) {
+                if rendered_response_groups.insert(group) {
+                    let (thoughts, tools) = thread.response_group_counts(group);
+                    let selected = thread.selected_response_group == Some(group);
+                    let collapsed = thread.collapsed_response_groups.contains(&group);
+                    let marker = if collapsed { "+" } else { "−" };
+                    let selected_marker = if selected { "> " } else { "  " };
+                    lines.push(Line::from(Span::styled(
+                        format!("{selected_marker}[{marker}] response: {thoughts} reasoning, {tools} tools"),
+                        Style::default().fg(theme::FG_DIM),
+                    )));
+                }
+                if thread.collapsed_response_groups.contains(&group) {
+                    continue;
+                }
             }
             lines.extend(transcript_lines(item, transcript_area.width.saturating_sub(1) as usize));
         }
@@ -557,22 +574,14 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             ThreadUiState::Closed => "closed",
             ThreadUiState::Failed => "failed",
         };
-        let plan_hint = if thread.current_plan.is_empty() {
-            String::new()
-        } else if thread.plan_modal_open {
-            String::from(" | plan:open")
-        } else {
-            String::from(" | plan:hidden")
-        };
         let footer_text = format!(
-            "{} [{}]{} | session:{} / {} | thoughts:{}{} | unread:{} | Ctrl-T threads {}",
+            "{} [{}]{} | session:{} / {} | thoughts:{} | unread:{} | Ctrl-←/→ response | Ctrl-R toggle {}",
             thread.nick,
             state_label,
             thread.usage.as_deref().map(|u| format!(" | {u}")).unwrap_or_default(),
             active_index + 1,
             app.agents.threads.len(),
             if app.agents.show_thoughts { "on" } else { "off" },
-            plan_hint,
             thread.unread,
             thread.stop_reason.as_deref().unwrap_or(""),
         );
@@ -684,7 +693,7 @@ fn plan_modal_rect(area: Rect, entry_count: usize) -> Rect {
     let width = area.width.saturating_sub(4).clamp(24, 72);
     let height = (entry_count as u16 + 4).min(area.height.saturating_sub(2)).max(5);
     let x = area.x + area.width.saturating_sub(width).saturating_sub(2);
-    let y = area.y + area.height.saturating_sub(height) / 3;
+    let y = area.y.saturating_add(2);
     Rect { x, y, width, height }
 }
 
@@ -816,11 +825,29 @@ fn agents_composer_line(app: &App, thread: &crate::app::AgentThreadUi) -> Vec<Sp
         return spans;
     }
     let draft = &thread.draft;
-    vec![
+    let command_hint = draft
+        .trim_start()
+        .strip_prefix('/')
+        .filter(|prefix| !prefix.chars().any(char::is_whitespace))
+        .map(|prefix| {
+            crate::app::agent_slash_command_names(&thread.available_commands)
+                .into_iter()
+                .filter(|command| command.starts_with(prefix))
+                .take(3)
+                .map(|command| format!("/{command}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .filter(|matches| !matches.is_empty());
+    let mut spans = vec![
         Span::styled("prompt> ", Style::default().fg(theme::FG_KEY).add_modifier(Modifier::BOLD)),
         Span::styled(draft.clone(), Style::default().fg(theme::FG_TEXT)),
         Span::styled("█", Style::default().fg(theme::FG_KEY)),
-    ]
+    ];
+    if let Some(matches) = command_hint {
+        spans.push(Span::styled(format!("  Tab: {matches}"), theme_style(theme::FG_DIM)));
+    }
+    spans
 }
 
 /// Builds the composer line shown while no session exists yet.
@@ -2837,12 +2864,12 @@ mod tests {
 
     #[cfg(feature = "agents")]
     #[test]
-    fn plan_modal_floats_at_right_edge() {
+    fn plan_modal_floats_at_top_right() {
         let area = Rect { x: 10, y: 4, width: 120, height: 40 };
 
         let modal = plan_modal_rect(area, 2);
 
-        assert_eq!(modal, Rect { x: 56, y: 15, width: 72, height: 6 });
+        assert_eq!(modal, Rect { x: 56, y: 6, width: 72, height: 6 });
     }
 
     #[test]
