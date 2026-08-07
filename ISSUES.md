@@ -2105,6 +2105,79 @@ Rules:
 - [x] `cargo test --quiet -p ee-agent-orchestrator trace` passes.
 - [x] Tests prove replay never invokes real tools or model providers.
 
+### Phase 1a: Resilient turn recovery (resumable interruptions)
+
+Goal: make orchestrated turns resilient to fatal-looking stops (deadline, timeout, transient provider failure) by persisting durable checkpoints and resuming on the same session without losing completed work. Feature-gated by `RecoveryConfig::enabled` (disabled = legacy fail-fast behavior).
+
+Rules:
+
+- Classify faults structurally at the failure point; never parse error strings.
+- Persist bounded, secret-conscious checkpoints (no raw secrets, no unbounded content).
+- Never auto-resume ambiguous side-effecting operations; block identical write/execute replays on resume.
+- Cancellation and explicit close never leave stale pending checkpoints.
+
+#### Work items
+
+- [x] Shared wire types in `ee-agent-protocol`: `RecoverableFault`, `RecoverableError` carried in JSON-RPC error `data.recoverable`.
+- [x] ACP server `ProviderError::Recoverable` / `RateLimited` / `Transient` variants with structured JSON-RPC data.
+- [x] Orchestrator fault taxonomy + `TurnOutcome::{Completed, Interrupted}` and `RecoverableInterruption` (safe-resume flag, retry hint, checkpoint id, counters).
+- [x] Distinct `OrchestratorError::DeadlineExceeded` (separate from `BudgetExceeded`).
+- [x] Budget: per-turn deadline re-anchoring (`reset_deadline`; idle sessions no longer consume the next slice) + `deadline_remaining`.
+- [x] Checkpoint schema v2: `ResumeState` (exact transcript tail, active task, completed tool calls, in-flight marker, resume count, first-started timestamp), provider identity, capture time.
+- [x] Durable atomic bounded `CheckpointStore`: temp-file+rename, SHA-256 checksums, per-session caps, TTL pruning, memory fallback, delete-on-close.
+- [x] Loop engine: transcript survives errors, milestone checkpoint captures (debounced) + forced interruption capture, in-flight marker, completed-tool idempotency guard (`ToolResultReused`), write/execute/delegate replay blocking on resumed runs.
+- [x] Runtime: `run_turn_recoverable` (deadline/timeout → `Interrupted`), `resume_turn` (fresh slice deadline, cumulative caps, provider identity + session-timeout validation), completed/cancelled turns clear pending checkpoints.
+- [x] Provider adapter: recoverable JSON-RPC error surface, safe single auto-resume (`auto_resume_max`), manual resume on prompt re-send, `/discard` command, crash restore via `session/load` from the checkpoint store, checkpoint cleanup on close.
+- [x] OpenRouter: structural HTTP classification (429/5xx transient, Retry-After parse, 401/403 permanent), capped exponential jitter backoff, streaming retry only before first delta, retry config knobs, recovery enabled in orchestrated mode with `EE_CHECKPOINT_DIR`.
+- [x] Host: `TurnPausedRecoverable` event + `RecoverableInfo` parsing from error data (plain errors still surface as `TurnFailed`).
+- [x] CLI: `ThreadUiState::PausedRecoverable`, Resume/Discard commands (`:agents_resume`, `:agents_discard`), prompt retention for resume, paused state blocks new prompts, footer/picker labels.
+- [x] Observability: `CheckpointSaved` / `TurnInterrupted` / `TurnResumed` / `ToolResultReused` events; recovery counters in `OrchestratorMetrics`.
+- [x] Tests: paused-clock deadline resume, crash-at-boundary capture, hung-stream timeout, resumed counters/task reuse, duplicate-write replay blocking, provider mismatch + session-timeout rejection, cancellation cleanup, completed-turn cleanup, `/discard` flow, auto-resume, wire-level recoverable error data, host pause event, CLI pause/resume/discard flows, OpenRouter classification/backoff.
+
+#### Actionable criteria
+
+- [x] `cargo test --quiet -p ee-agent-orchestrator recovery` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator checkpoint_store` passes.
+- [x] `cargo test --quiet -p ee-agent-orchestrator provider_adapter_` passes.
+- [x] `cargo test --quiet -p ee-agent-host recoverable_error` passes.
+- [x] `cargo test --quiet -p ee-cli --features agents recoverable_pause` passes.
+- [x] `cargo test --quiet -p ee-openrouter-agent` passes.
+- [x] `cargo clippy` clean on all touched crates.
+
+#### Follow-up (implemented)
+
+Current resume path: the client re-sends the original prompt; the provider detects the pending checkpoint and continues it. This covers the ee TUI (which retains prompt blocks) but not clients that lose the prompt or generic ACP hosts.
+
+Per ACP v1 session-setup spec: `session/load` restores a session AND replays the entire conversation via `session/update`; `session/resume` restores context with NO replay. Neither continues a paused turn itself — the client sends `session/prompt` afterward and the pending-checkpoint detection resumes the turn. Both host client APIs exist (`AgentConnection::load_session` / `resume_session`).
+
+- [x] `session/load` replay conformance (see the dedicated follow-up below).
+- [x] Route the SDK `session/resume` method in the ACP dispatcher (registry defines `ResumeSessionRequest`/`ResumeSessionResponse`; the dispatcher ignored it).
+  - [x] Spec wire semantics: params are sessionId + cwd + mcpServers (+ additionalDirectories); NO prompt, NO replay; respond `{}` after restoring context.
+  - [x] Provider restores from the checkpoint store (same fallback as `session/load`); the interrupted turn is then resumed by the next `session/prompt` re-send via the existing pending-checkpoint detection. A live session (same process) is reused as-is; without pending state the resume is rejected.
+  - [x] Advertise `SessionCapabilities.resume` when recovery is enabled.
+  - [x] Host `resume_session` already exists (capability-gated); wired into the TUI reconnect flow as the fallback when the agent does not advertise `loadSession`.
+  - [x] Wire-level tests: `session/resume` restores without replay; next prompt resumes the paused turn; rejected without pending state.
+- [x] Agent-advertised `/resume` slash command (plan alternative to the wire method; needs no protocol change).
+  - [x] Provider detects a pending checkpoint on a `/resume` prompt and continues it without appending the command text as a user message.
+  - [x] Advertise via `available_commands_update` (`discard_available_command` pattern; `resume_available_command` added to `ee-agent-protocol`).
+  - [x] Covers the client-crash case: after `session/resume` or `session/load`, the client types `/resume` and the turn continues without the original prompt.
+  - [x] Tests: `/resume` continues from checkpoint (command text never reaches the model transcript); `/resume` without pending checkpoint is an ordinary prompt.
+- [x] TUI wiring for both lifecycle methods: reconnect flow after agent/process restart (session id is client-persisted), plus prompt persistence across TUI restarts for the resend path.
+- [x] Generic-client resume: closed by the `/resume` command — any ACP host that lost the original prompt types `/resume` and the pending-checkpoint detection continues the turn (no prompt text required).
+
+#### Follow-up: incomplete `session/load` (implemented)
+
+`session/load` now meets the ACP v1 contract: the agent **replays the entire conversation** as `session/update` notifications (`user_message_chunk` / `agent_message_chunk`) before responding. The dispatcher registers the session provisionally and defers the response so every replayed update precedes it (FIFO outbound); a failed load removes the provisional session.
+
+What shipped:
+
+- [x] Conversation replay: the provider streams `user_message_chunk` / `agent_message_chunk` for the whole recorded conversation, then the load response follows. Replay ids are deterministic (`replay-u-<n>` / `replay-a-<n>`), unique per message.
+- [x] Transcript persistence: `PersistedSession` (written by `close_session`) now carries the session's memory-bounded conversation log (max 256 messages, oldest dropped first), captured via an `UpdateSink` observer in the provider adapter (agent text chunks) plus user prompts recorded at submit.
+- [x] Capability honesty: replay is implemented, so `loadSession` stays advertised.
+- [x] Client wiring: `:agents_reconnect` in the TUI loads the client-persisted session record (workspace-keyed file under the platform state directory) via `AgentConnection::load_session`, buffering replay updates until the thread is registered; `session/resume` is the fallback when load is not advertised. Existing threads are rebound instead of duplicated.
+- [x] Crash-restore reachability: post-close loads replay the persisted conversation; post-crash loads (pending checkpoint) replay the checkpoint's `ResumeState` transcript tail as a bounded fallback. New session ids skip ids present in the durable checkpoint store (cross-restart collision guard).
+- [x] Tests: replay order and message ids; load after close; load after crash with a pending checkpoint; load with no persisted state; duplicate/already-registered load rejection; `session/resume` wire flows; `/resume` command flows; TUI reconnect (replay applied, load preferred over resume, last prompt restored); capability gating on the host side (existing `host_flows` tests).
+
 ### Phase 2: Strategy selection and structured final responses
 
 Goal: let orchestrator choose deterministic turn strategies and produce consistent user-facing final summaries.

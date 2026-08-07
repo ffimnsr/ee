@@ -10,14 +10,14 @@ use std::path::PathBuf;
 
 use ee_agent_protocol::{
     AvailableCommand, AvailableCommandInput, InitializeResponse, ListSessionsResponse,
-    LoadSessionResponse, NewSessionResponse, ProtocolVersion, RawJsonRpcMessage, SessionId,
-    UnstructuredCommandInput,
+    LoadSessionResponse, NewSessionResponse, ProtocolVersion, RawJsonRpcMessage,
+    ResumeSessionResponse, SessionId, UnstructuredCommandInput,
 };
 use serde_json::json;
 
 use common::{
-    FakeProvider, PromptBehavior, error_reason, notification, prompt_params, request,
-    request_error, request_result, session_new_params, spawn_server,
+    FakeProvider, PromptBehavior, error_reason, notification, prompt_params, raw_params_to_value,
+    request, request_error, request_result, session_new_params, spawn_server,
 };
 
 /// The command list advertised in the fake provider's session inits.
@@ -73,7 +73,7 @@ async fn session_new_emits_available_commands_update_after_response() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn session_load_emits_available_commands_update_after_response() {
+async fn session_load_emits_available_commands_update_before_response() {
     let (provider, _log) = FakeProvider::new(&[]);
     let provider = provider.with_commands(advertised_commands());
     let (handle, task) = spawn_server(provider).await;
@@ -87,9 +87,12 @@ async fn session_load_emits_available_commands_update_after_response() {
     handle.send(request(1, "session/load", params));
     let frames = handle.next_frames(2).await;
 
+    // `session/load` is deferred: every update the provider queues (the
+    // command advertisement included) streams before the response, matching
+    // the ACP v1 replay-then-respond contract.
+    expect_available_commands_update(frames[0].clone(), "loaded-session");
     let _response: LoadSessionResponse =
-        serde_json::from_value(request_result(frames[0].clone())).expect("parses response");
-    expect_available_commands_update(frames[1].clone(), "loaded-session");
+        serde_json::from_value(request_result(frames[1].clone())).expect("parses response");
 
     handle.shutdown(task).await;
 }
@@ -299,6 +302,198 @@ async fn session_load_rejects_relative_cwd_before_provider_call() {
     let error = request_error(handle.next_frame().await);
     assert_eq!(i32::from(error.code), -32602);
     assert!(!log.has_call("load_session"));
+
+    handle.shutdown(task).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_load_streams_conversation_replay_before_response() {
+    // ACP v1: `session/load` replays the whole conversation as
+    // `session/update` notifications and only then responds `null`.
+    let (provider, _log) = FakeProvider::new(&[]);
+    let provider = provider.with_replay(vec![
+        ("user", "what's the capital of France?"),
+        ("agent", "Paris."),
+        ("user", "and of Spain?"),
+        ("agent", "Madrid."),
+    ]);
+    let (handle, task) = spawn_server(provider).await;
+
+    let params = json!({
+        "sessionId": "loaded-session",
+        "cwd": "/work",
+        "additionalDirectories": [],
+        "mcpServers": [],
+    });
+    handle.send(request(1, "session/load", params));
+    let frames = handle.next_frames(5).await;
+
+    // The four replayed messages stream first, in order, with deterministic
+    // ids; the load response follows last.
+    let expected = [
+        ("user_message_chunk", "replay-u-1", "what's the capital of France?"),
+        ("agent_message_chunk", "replay-a-2", "Paris."),
+        ("user_message_chunk", "replay-u-3", "and of Spain?"),
+        ("agent_message_chunk", "replay-a-4", "Madrid."),
+    ];
+    for (index, (kind, message_id, text)) in expected.iter().enumerate() {
+        let RawJsonRpcMessage::Notification(update) = &frames[index] else {
+            panic!("expected replay update {}, got {:?}", index, frames[index]);
+        };
+        let params = raw_params_to_value(update.params.clone());
+        assert_eq!(params["sessionId"], "loaded-session");
+        assert_eq!(params["update"]["sessionUpdate"], *kind);
+        assert_eq!(params["update"]["messageId"], *message_id);
+        assert_eq!(params["update"]["content"]["text"], *text);
+    }
+    let _response: LoadSessionResponse =
+        serde_json::from_value(request_result(frames[4].clone())).expect("parses response");
+
+    // The loaded session is registered and promptable afterwards.
+    handle.send(request(2, "session/list", json!({})));
+    let result = request_result(handle.next_frame().await);
+    let response: ListSessionsResponse =
+        serde_json::from_value(result).expect("parses as ListSessionsResponse");
+    assert_eq!(response.sessions.len(), 1);
+    assert_eq!(response.sessions[0].session_id, SessionId::new("loaded-session"));
+
+    handle.shutdown(task).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_load_failure_removes_provisional_session() {
+    let (provider, _log) = FakeProvider::new(&[]);
+    let provider = provider.with_load_error("no persisted orchestrator state");
+    let (handle, task) = spawn_server(provider).await;
+
+    let params = json!({
+        "sessionId": "ghost-session",
+        "cwd": "/work",
+        "additionalDirectories": [],
+        "mcpServers": [],
+    });
+    handle.send(request(1, "session/load", params));
+    let error = request_error(handle.next_frame().await);
+    assert!(error.message.contains("no persisted orchestrator state"), "{error:?}");
+
+    // The failed load left no session behind: a prompt is rejected.
+    handle.send(request(
+        2,
+        "session/prompt",
+        json!({
+            "sessionId": "ghost-session",
+            "prompt": [{ "type": "text", "text": "hello" }],
+        }),
+    ));
+    let error = request_error(handle.next_frame().await);
+    assert!(error.message.contains("session"), "unknown session rejected: {error:?}");
+
+    handle.shutdown(task).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_load_rejects_already_registered_session() {
+    let (provider, _log) = FakeProvider::new(&[]);
+    let (handle, task) = spawn_server(provider).await;
+
+    let params = json!({
+        "sessionId": "dupe-session",
+        "cwd": "/work",
+        "additionalDirectories": [],
+        "mcpServers": [],
+    });
+    handle.send(request(1, "session/load", params.clone()));
+    let _ = request_result(handle.next_frame().await);
+    // A second load of the same id is a duplicate; reconnecting clients use
+    // `session/resume`.
+    handle.send(request(2, "session/load", params));
+    let error = request_error(handle.next_frame().await);
+    assert!(
+        error_reason(&error).contains("already registered"),
+        "duplicate load rejected: {error:?}"
+    );
+
+    handle.shutdown(task).await;
+}
+
+// ── session/resume ────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_resume_registers_session_and_returns_empty_result() {
+    let (provider, log) = FakeProvider::new(&[]);
+    let provider = provider.with_commands(advertised_commands());
+    let (handle, task) = spawn_server(provider).await;
+
+    let params = json!({
+        "sessionId": "resumed-session",
+        "cwd": "/work",
+        "additionalDirectories": [],
+        "mcpServers": [],
+    });
+    handle.send(request(1, "session/resume", params));
+    let frames = handle.next_frames(2).await;
+
+    let _response: ResumeSessionResponse =
+        serde_json::from_value(request_result(frames[0].clone())).expect("parses response");
+    expect_available_commands_update(frames[1].clone(), "resumed-session");
+    assert!(log.has_call("load_session:resumed-session"), "default resume delegates to load");
+
+    // The resumed session is registered and promptable.
+    handle.send(request(
+        2,
+        "session/prompt",
+        json!({
+            "sessionId": "resumed-session",
+            "prompt": [{ "type": "text", "text": "hello" }],
+        }),
+    ));
+    let result = request_result(handle.next_frame().await);
+    assert_eq!(result["stopReason"], "end_turn");
+
+    handle.shutdown(task).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_resume_rejects_relative_cwd_before_provider_call() {
+    let (provider, log) = FakeProvider::new(&[]);
+    let (handle, task) = spawn_server(provider).await;
+
+    let params = json!({
+        "sessionId": "resumed-session",
+        "cwd": "relative/dir",
+        "additionalDirectories": [],
+        "mcpServers": [],
+    });
+    handle.send(request(1, "session/resume", params));
+    let error = request_error(handle.next_frame().await);
+    assert_eq!(i32::from(error.code), -32602);
+    assert!(!log.has_call("load_session"));
+
+    handle.shutdown(task).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_resume_without_pending_state_is_rejected() {
+    let (provider, _log) = FakeProvider::new(&[]);
+    let provider =
+        provider.with_load_error("no pending checkpoint for session x; nothing to resume");
+    let (handle, task) = spawn_server(provider).await;
+
+    let params = json!({
+        "sessionId": "ghost-session",
+        "cwd": "/work",
+        "additionalDirectories": [],
+        "mcpServers": [],
+    });
+    handle.send(request(1, "session/resume", params));
+    let error = request_error(handle.next_frame().await);
+    assert!(error.message.contains("nothing to resume"), "provider rejection surfaces: {error:?}");
+    // No session was registered.
+    handle.send(request(2, "session/list", json!({})));
+    let result = request_result(handle.next_frame().await);
+    let response: ListSessionsResponse =
+        serde_json::from_value(result).expect("parses as ListSessionsResponse");
+    assert!(response.sessions.is_empty(), "failed resume registers nothing");
 
     handle.shutdown(task).await;
 }

@@ -4,6 +4,7 @@
 //! memory knobs that later phases wire into the loop engine, tool executor,
 //! subagent manager, and memory store.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -36,6 +37,70 @@ pub const DEFAULT_MAX_SUBAGENTS_PER_TURN: usize = 8;
 pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 /// Default maximum concurrently running independent read-only tools.
 pub const DEFAULT_MAX_PARALLEL_TOOLS: usize = 4;
+/// Default model context-window size in tokens, reported as the ACP
+/// `usage_update` context-window denominator.
+pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
+/// Recovery knobs for resumable turns (feature-gated by [`RecoveryConfig::enabled`]).
+///
+/// When disabled (the default), turns keep today's fail-fast behavior: a
+/// deadline or transient failure is an ordinary error.  When enabled, the
+/// runtime captures durable checkpoints at turn milestones, deadline and
+/// timeout interruptions become [`TurnOutcome::Interrupted`], and a resumed
+/// turn restarts only the wall-clock slice while retaining cumulative budget
+/// counters, completed tool results, and the task/memory stores.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct RecoveryConfig {
+    /// Master switch: recoverable turn outcomes and durable checkpoints.
+    pub enabled: bool,
+    /// Directory for durable checkpoints; `None` keeps checkpoints in memory
+    /// only (same-process resume, no crash restore).
+    pub checkpoint_dir: Option<PathBuf>,
+    /// Checkpoints retained per session before the oldest is pruned.
+    pub max_checkpoints_per_session: usize,
+    /// Retention window; expired checkpoints are pruned on access.
+    pub checkpoint_ttl: Duration,
+    /// Serialized checkpoint byte cap; captures above it fail closed.
+    pub max_checkpoint_bytes: usize,
+    /// Automatic resumes per turn before manual confirmation is required.
+    /// Ambiguous-side-effect interruptions are never auto-resumed.
+    pub auto_resume_max: u32,
+    /// Cumulative session wall-clock cap across slices; `None` means the
+    /// turn may resume indefinitely.
+    pub session_timeout: Option<Duration>,
+}
+
+impl Default for RecoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            checkpoint_dir: None,
+            max_checkpoints_per_session: DEFAULT_MAX_CHECKPOINTS_PER_SESSION,
+            checkpoint_ttl: DEFAULT_CHECKPOINT_TTL,
+            max_checkpoint_bytes: DEFAULT_MAX_CHECKPOINT_BYTES,
+            auto_resume_max: DEFAULT_AUTO_RESUME_MAX,
+            session_timeout: None,
+        }
+    }
+}
+
+impl RecoveryConfig {
+    /// Enables recovery, persisting checkpoints in `dir` when provided
+    /// (memory-only otherwise).  The type is `#[non_exhaustive]`, so external
+    /// crates construct it through builders like this one.
+    #[must_use]
+    pub fn durable(checkpoint_dir: Option<std::path::PathBuf>) -> Self {
+        Self { enabled: true, checkpoint_dir, ..Self::default() }
+    }
+}
+/// Default checkpoints retained per session before the oldest is pruned.
+pub const DEFAULT_MAX_CHECKPOINTS_PER_SESSION: usize = 8;
+/// Default checkpoint retention: 7 days.
+pub const DEFAULT_CHECKPOINT_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// Default serialized checkpoint byte cap: 4 MiB.
+pub const DEFAULT_MAX_CHECKPOINT_BYTES: usize = 4 * 1024 * 1024;
+/// Default automatic resumes per turn before manual resume is required.
+pub const DEFAULT_AUTO_RESUME_MAX: u32 = 1;
 
 /// Shared configuration for one [`crate::OrchestratorRuntime`] instance.
 ///
@@ -76,6 +141,8 @@ pub struct OrchestratorConfig {
     pub max_input_tokens: Option<usize>,
     /// Optional per-turn output-token cap; unknown provider usage fails closed.
     pub max_output_tokens: Option<usize>,
+    /// Model context-window size in tokens; the ACP `usage_update.size`.
+    pub context_window_tokens: u64,
     /// Stuck-detection thresholds for the loop engine.
     pub stuck: StuckConfig,
     /// Bounded self-review behavior after tool/edit loops.
@@ -83,6 +150,8 @@ pub struct OrchestratorConfig {
     /// LLM compaction knobs (Phase 12): deterministic memory compaction
     /// settings plus the compaction-context input bound.
     pub compaction: CompactionConfig,
+    /// Resumable-turn recovery knobs (feature-gated; disabled by default).
+    pub recovery: RecoveryConfig,
 }
 
 impl Default for OrchestratorConfig {
@@ -102,9 +171,11 @@ impl Default for OrchestratorConfig {
             max_parallel_tools: DEFAULT_MAX_PARALLEL_TOOLS,
             max_input_tokens: None,
             max_output_tokens: None,
+            context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
             stuck: StuckConfig::default(),
             reflection: ReflectionConfig::default(),
             compaction: CompactionConfig::default(),
+            recovery: RecoveryConfig::default(),
         }
     }
 }
@@ -130,6 +201,7 @@ mod tests {
         assert_eq!(config.max_parallel_tools, 4);
         assert_eq!(config.max_input_tokens, None);
         assert_eq!(config.max_output_tokens, None);
+        assert_eq!(config.context_window_tokens, DEFAULT_CONTEXT_WINDOW_TOKENS);
         assert_eq!(
             config.stuck,
             StuckConfig {
@@ -144,6 +216,8 @@ mod tests {
             ReflectionConfig { enabled: false, max_review_iterations: 1, max_fix_iterations: 1 }
         );
         assert_eq!(config.compaction, CompactionConfig::default());
+        assert_eq!(config.recovery, RecoveryConfig::default());
+        assert!(!config.recovery.enabled);
     }
 
     #[test]
@@ -163,6 +237,7 @@ mod tests {
             max_parallel_tools: 3,
             max_input_tokens: Some(1000),
             max_output_tokens: Some(2000),
+            context_window_tokens: 250_000,
             stuck: StuckConfig {
                 max_repeated_model_responses: 2,
                 max_repeated_tool_calls: 2,
@@ -175,6 +250,7 @@ mod tests {
                 max_fix_iterations: 1,
             },
             compaction: CompactionConfig { max_input_bytes: 2048, ..CompactionConfig::default() },
+            recovery: RecoveryConfig { enabled: true, ..RecoveryConfig::default() },
         };
         let json = serde_json::to_string(&config).expect("config serializes");
         let restored: OrchestratorConfig = serde_json::from_str(&json).expect("config parses");
@@ -192,11 +268,13 @@ mod tests {
         assert_eq!(restored.max_parallel_tools, 3);
         assert_eq!(restored.max_input_tokens, Some(1000));
         assert_eq!(restored.max_output_tokens, Some(2000));
+        assert_eq!(restored.context_window_tokens, 250_000);
         assert_eq!(restored.stuck.max_repeated_model_responses, 2);
         assert_eq!(restored.stuck.max_no_progress_iterations, 2);
         assert!(restored.reflection.enabled);
         assert_eq!(restored.reflection.max_review_iterations, 2);
         assert_eq!(restored.reflection.max_fix_iterations, 1);
         assert_eq!(restored.compaction.max_input_bytes, 2048);
+        assert!(restored.recovery.enabled);
     }
 }

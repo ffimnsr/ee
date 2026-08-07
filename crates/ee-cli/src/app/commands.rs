@@ -755,7 +755,10 @@ impl App {
             | "agents_threads"
             | "agents_next"
             | "agents_prev"
-            | "agents_stop" => "agents",
+            | "agents_stop"
+            | "agents_resume"
+            | "agents_discard"
+            | "agents_reconnect" => "agents",
             _ => "editing",
         };
 
@@ -1059,6 +1062,18 @@ impl App {
             "agents_next" => (Cow::Borrowed("switch to the next agent thread"), None),
             "agents_prev" => (Cow::Borrowed("switch to the previous agent thread"), None),
             "agents_stop" => (Cow::Borrowed("stop the active agent session"), None),
+            "agents_resume" => {
+                (Cow::Borrowed("resume a paused recoverable agent turn from its checkpoint"), None)
+            }
+            "agents_discard" => {
+                (Cow::Borrowed("discard a paused recoverable agent turn's checkpoint"), None)
+            }
+            "agents_reconnect" => (
+                Cow::Borrowed(
+                    "reconnect the persisted agent session of this workspace (load or resume)",
+                ),
+                None,
+            ),
             "agents_clear" => (Cow::Borrowed("clear the active agent session"), None),
             "buffers" => (Cow::Borrowed("print open buffers to status line"), None),
             "buffer_close" => (Cow::Borrowed("close current buffer"), None),
@@ -2826,7 +2841,10 @@ impl App {
             | "agents_threads"
             | "agents_next"
             | "agents_prev"
-            | "agents_stop" => {
+            | "agents_stop"
+            | "agents_resume"
+            | "agents_discard"
+            | "agents_reconnect" => {
                 if self.dispatch_agents_command(head, tail) {
                     // The agents pane keeps keyboard focus (or restores its
                     // previous editor mode); skip the trailing

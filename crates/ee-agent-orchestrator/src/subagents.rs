@@ -497,7 +497,7 @@ impl SubagentManager {
         let sink = UpdateSink::new(SessionId::new(SUBAGENT_SESSION), sink_tx);
         let outcome = engine
             .run_transcript(
-                transcript,
+                &mut transcript,
                 SUBAGENT_SESSION.to_string(),
                 sink,
                 client,
@@ -509,7 +509,7 @@ impl SubagentManager {
             child_budget.lock().expect("budget tracker poisoned").snapshot().tool_calls_used;
 
         let (status, summary, error_summary) = match outcome {
-            Ok((_, transcript)) => (
+            Ok(_) => (
                 SubagentStatus::Completed,
                 transcript.last_assistant_text().unwrap_or_default(),
                 None,

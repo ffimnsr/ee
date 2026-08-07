@@ -23,7 +23,7 @@ use std::sync::Arc;
 use ee_acp_agent_server::ProviderError;
 use ee_agent_orchestrator::{
     ModelAdapter, ModelContent, ModelError, ModelFuture, ModelMessage, ModelRequest, ModelResponse,
-    ModelRole, PolicyEngine, StreamSink, ToolDefinition, ToolIntent, ToolPolicy,
+    ModelRole, ModelUsage, PolicyEngine, StreamSink, ToolDefinition, ToolIntent, ToolPolicy,
 };
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -32,7 +32,8 @@ use crate::config::Config;
 #[cfg(test)]
 use crate::openrouter::openrouter_request_body_with_tools;
 use crate::openrouter::{
-    OpenRouterMessage, OpenRouterStreamDelta, call_openrouter, call_openrouter_streaming,
+    OpenRouterMessage, OpenRouterStreamDelta, call_openrouter_streaming_with_retry,
+    call_openrouter_with_retry,
 };
 
 /// Builds the default policy for orchestrated OpenRouter sessions.
@@ -107,7 +108,9 @@ fn real_completion(http: reqwest::Client) -> Arc<OpenRouterCompletionClient> {
         let api_key = api_key.to_string();
         let messages = messages.to_vec();
         let tools = tools.to_vec();
-        Box::pin(async move { call_openrouter(&http, &config, &api_key, &messages, &tools).await })
+        Box::pin(async move {
+            call_openrouter_with_retry(&http, &config, &api_key, &messages, &tools).await
+        })
     })
 }
 
@@ -119,22 +122,26 @@ fn real_streaming(http: reqwest::Client) -> Arc<OpenRouterStreamingClient> {
         let messages = messages.to_vec();
         let tools = tools.to_vec();
         Box::pin(async move {
-            call_openrouter_streaming(&http, &config, &api_key, &messages, &tools, |delta| {
-                match delta {
-                    OpenRouterStreamDelta::Text(text) => events.text(text).map_err(|error| {
-                        ProviderError::BackendFailure(format!(
-                            "failed to forward OpenRouter text stream: {error}"
-                        ))
-                    }),
-                    OpenRouterStreamDelta::Reasoning(text) => {
-                        events.reasoning(text).map_err(|error| {
-                            ProviderError::BackendFailure(format!(
-                                "failed to forward OpenRouter reasoning stream: {error}"
-                            ))
-                        })
-                    }
-                }
-            })
+            let mut on_delta = |delta: OpenRouterStreamDelta| match delta {
+                OpenRouterStreamDelta::Text(text) => events.text(text).map_err(|error| {
+                    ProviderError::BackendFailure(format!(
+                        "failed to forward OpenRouter text stream: {error}"
+                    ))
+                }),
+                OpenRouterStreamDelta::Reasoning(text) => events.reasoning(text).map_err(|error| {
+                    ProviderError::BackendFailure(format!(
+                        "failed to forward OpenRouter reasoning stream: {error}"
+                    ))
+                }),
+            };
+            call_openrouter_streaming_with_retry(
+                &http,
+                &config,
+                &api_key,
+                &messages,
+                &tools,
+                &mut on_delta,
+            )
             .await
         })
     })
@@ -317,7 +324,14 @@ pub(crate) fn model_response_from_openrouter(answer: OpenRouterMessage) -> Model
         .into_iter()
         .map(|call| ToolIntent::new(call.id, map_tool_name(&call.name), call.arguments))
         .collect();
-    let mut response = ModelResponse::new().text(answer.content).tool_intents(intents);
+    let openrouter_usage = answer.usage.unwrap_or_default();
+    let mut usage = ModelUsage::new();
+    usage.input_tokens =
+        openrouter_usage.input_tokens.and_then(|tokens| usize::try_from(tokens).ok());
+    usage.output_tokens =
+        openrouter_usage.output_tokens.and_then(|tokens| usize::try_from(tokens).ok());
+    let mut response =
+        ModelResponse::new().text(answer.content).tool_intents(intents).with_usage(usage);
     if !answer.reasoning.is_empty() {
         response = response.reasoning(answer.reasoning);
     }
@@ -372,6 +386,15 @@ mod tests {
             compact_min_messages: 4,
             compact_retained_tail: 2,
             compact_max_input_bytes: 65_536,
+            retry_max_attempts: crate::config::DEFAULT_RETRY_MAX_ATTEMPTS,
+            retry_base_delay: std::time::Duration::from_millis(
+                crate::config::DEFAULT_RETRY_BASE_DELAY_MS,
+            ),
+            retry_max_delay: std::time::Duration::from_millis(
+                crate::config::DEFAULT_RETRY_MAX_DELAY_MS,
+            ),
+            checkpoint_dir: None,
+            context_window: crate::config::DEFAULT_CONTEXT_WINDOW_TOKENS,
         }
     }
 
@@ -503,6 +526,17 @@ mod tests {
         assert_eq!(response.reasoning.as_deref(), Some("think first"));
         assert_eq!(response.text, "answer");
         assert!(response.completed);
+    }
+
+    #[test]
+    fn usage_converts_to_normalized_usage() {
+        let response = model_response_from_openrouter(openrouter_message(json!({
+            "choices": [{ "message": { "content": "answer" }, "finish_reason": "stop" }],
+            "usage": { "prompt_tokens": 6_120, "completion_tokens": 2_311 }
+        })));
+
+        assert_eq!(response.usage.input_tokens, Some(6_120));
+        assert_eq!(response.usage.output_tokens, Some(2_311));
     }
 
     #[test]

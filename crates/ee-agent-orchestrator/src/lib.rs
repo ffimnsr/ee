@@ -134,6 +134,7 @@
 
 pub mod budget;
 pub mod checkpoint;
+pub mod checkpoint_store;
 pub mod compaction;
 pub mod config;
 pub mod context_pack;
@@ -162,6 +163,7 @@ pub mod progress_scoring;
 pub mod prompt_injection;
 pub mod provider_adapter;
 pub mod rate_limit;
+pub mod recovery;
 pub mod reflection;
 #[cfg(feature = "test-utils")]
 pub mod replay;
@@ -192,14 +194,16 @@ pub mod write_conflicts;
 
 pub use budget::{BudgetConfig, BudgetSnapshot, BudgetTracker};
 pub use checkpoint::{
-    CHECKPOINT_SCHEMA_VERSION, DEFAULT_CHECKPOINT_PROVENANCE, IdGeneratorState,
-    OrchestratorCheckpoint, RestoreReport, SubagentTreeState, TranscriptSummary,
+    CHECKPOINT_SCHEMA_VERSION, CompletedToolCall, DEFAULT_CHECKPOINT_PROVENANCE, IdGeneratorState,
+    InFlightOperation, OrchestratorCheckpoint, RestoreReport, ResumeState, SubagentTreeState,
+    TranscriptSummary, current_unix_millis,
 };
+pub use checkpoint_store::{CheckpointMeta, CheckpointStore};
 pub use compaction::{
     CompactTurnReport, CompactionConfig, DEFAULT_COMPACT_MAX_INPUT_BYTES, SESSION_SUMMARY_KEY,
     build_compaction_context, build_compaction_prompt,
 };
-pub use config::OrchestratorConfig;
+pub use config::{OrchestratorConfig, RecoveryConfig};
 pub use context_pack::{
     ActiveTaskSummary, ContextItemProvenance, ContextMemoryItem, ContextPack, ContextPackBuilder,
     ContextPackConfig, ContextTruncation, DEFAULT_CONTEXT_PACK_MAX_BYTES,
@@ -259,6 +263,7 @@ pub use provider_adapter::{
     OrchestratorProviderConfig, SESSION_ID_PREFIX,
 };
 pub use rate_limit::{RateLimitClock, RateLimitConfig, RateLimitPermit, RateLimiter, TokioClock};
+pub use recovery::{RecoverableInterruption, TurnOutcome, session_timeout_expired};
 pub use reflection::{
     ReflectionConfig, ReflectionOutcome, ReviewContext, ReviewFinding, build_review_context,
     build_review_request, create_finding_tasks, findings_from_response, mark_finding_tasks,

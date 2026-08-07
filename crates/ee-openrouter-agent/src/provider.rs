@@ -18,8 +18,9 @@ use ee_acp_agent_server::{
 };
 use ee_agent_orchestrator::SensitiveDataGuard;
 use ee_agent_protocol::{
-    AgentCapabilities, ContentBlock, Implementation, PromptResponse, SessionId, StopReason, Usage,
-    compact_available_command, is_compact_command, parse_slash_command,
+    AgentCapabilities, ContentBlock, Implementation, PromptResponse, SessionId, SessionUpdate,
+    StopReason, Usage, UsageUpdate, compact_available_command, is_compact_command,
+    parse_slash_command,
 };
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -30,7 +31,7 @@ use crate::compaction::{
 };
 use crate::config::Config;
 use crate::openrouter::{
-    OpenRouterStreamDelta, OpenRouterUsage, call_openrouter, call_openrouter_streaming,
+    OpenRouterStreamDelta, OpenRouterUsage, call_openrouter, call_openrouter_streaming_with_retry,
     openrouter_tools,
 };
 use crate::tools::handle_tool_call;
@@ -200,35 +201,37 @@ async fn run_prompt(
         }
         let mut thought_message_id = None;
         let mut answer_message_id = None;
-        let answer = call_openrouter_streaming(
+        let mut on_delta = |delta: OpenRouterStreamDelta| match delta {
+            OpenRouterStreamDelta::Text(text) => {
+                let message_id = answer_message_id
+                    .get_or_insert_with(|| next_message_id(&turn.next_message, "message"));
+                sink.agent_message_chunk(message_id.clone(), text).map_err(|error| {
+                    ProviderError::BackendFailure(format!(
+                        "failed to emit streamed message update: {error}"
+                    ))
+                })
+            }
+            OpenRouterStreamDelta::Reasoning(text) => {
+                let message_id = thought_message_id
+                    .get_or_insert_with(|| next_message_id(&turn.next_message, "thought"));
+                sink.agent_thought_chunk(message_id.clone(), text).map_err(|error| {
+                    ProviderError::BackendFailure(format!(
+                        "failed to emit streamed thought update: {error}"
+                    ))
+                })
+            }
+        };
+        let answer = call_openrouter_streaming_with_retry(
             &turn.http,
             &turn.config,
             &api_key,
             &messages,
             &openrouter_tools(),
-            |delta| match delta {
-                OpenRouterStreamDelta::Text(text) => {
-                    let message_id = answer_message_id
-                        .get_or_insert_with(|| next_message_id(&turn.next_message, "message"));
-                    sink.agent_message_chunk(message_id.clone(), text).map_err(|error| {
-                        ProviderError::BackendFailure(format!(
-                            "failed to emit streamed message update: {error}"
-                        ))
-                    })
-                }
-                OpenRouterStreamDelta::Reasoning(text) => {
-                    let message_id = thought_message_id
-                        .get_or_insert_with(|| next_message_id(&turn.next_message, "thought"));
-                    sink.agent_thought_chunk(message_id.clone(), text).map_err(|error| {
-                        ProviderError::BackendFailure(format!(
-                            "failed to emit streamed thought update: {error}"
-                        ))
-                    })
-                }
-            },
+            &mut on_delta,
         )
         .await?;
         merge_openrouter_usage(&mut turn_usage, answer.usage);
+        emit_context_usage(&sink, answer.usage, turn.config.context_window);
 
         if answer.tool_calls.is_empty() {
             pending_history.push(json!({ "role": "assistant", "content": answer.content }));
@@ -344,6 +347,7 @@ async fn run_compact(
 
     // No tools during compaction; one bounded, cancellable round trip.
     let answer = call_openrouter(&turn.http, &turn.config, &api_key, &messages, &[]).await?;
+    emit_context_usage(&sink, answer.usage, turn.config.context_window);
     if *cancel.borrow() {
         return Err(ProviderError::Cancellation);
     }
@@ -397,6 +401,16 @@ pub(crate) fn extract_prompt_text(prompt: &[ContentBlock]) -> String {
 
 fn next_message_id(next: &AtomicU64, kind: &str) -> String {
     format!("openrouter-{kind}-{}", next.fetch_add(1, Ordering::Relaxed))
+}
+
+/// Reports the current context-window usage through the ACP `usage_update`
+/// notification: `used` is the round's `prompt_tokens` (the full context sent
+/// to the model), `size` the configured window.  Unknown usage emits nothing.
+fn emit_context_usage(sink: &UpdateSink, usage: Option<OpenRouterUsage>, context_window: u64) {
+    if let Some(input_tokens) = usage.and_then(|usage| usage.input_tokens) {
+        let _ = sink
+            .raw_update(SessionUpdate::UsageUpdate(UsageUpdate::new(input_tokens, context_window)));
+    }
 }
 
 /// Sums one round's usage into the turn aggregate, skipping unknown fields.
@@ -458,6 +472,15 @@ mod tests {
             compact_min_messages: 4,
             compact_retained_tail: 2,
             compact_max_input_bytes: 65_536,
+            retry_max_attempts: crate::config::DEFAULT_RETRY_MAX_ATTEMPTS,
+            retry_base_delay: std::time::Duration::from_millis(
+                crate::config::DEFAULT_RETRY_BASE_DELAY_MS,
+            ),
+            retry_max_delay: std::time::Duration::from_millis(
+                crate::config::DEFAULT_RETRY_MAX_DELAY_MS,
+            ),
+            checkpoint_dir: None,
+            context_window: crate::config::DEFAULT_CONTEXT_WINDOW_TOKENS,
         }
     }
 

@@ -15,14 +15,14 @@ use std::sync::Arc;
 use ee_agent_protocol::registry::{
     INITIALIZE_METHOD_NAME, SESSION_CANCEL_NOTIFICATION, SESSION_CLOSE_METHOD_NAME,
     SESSION_LIST_METHOD_NAME, SESSION_LOAD_METHOD_NAME, SESSION_NEW_METHOD_NAME,
-    SESSION_PROMPT_METHOD_NAME,
+    SESSION_PROMPT_METHOD_NAME, SESSION_RESUME_METHOD_NAME,
 };
 use ee_agent_protocol::{
     AvailableCommand, AvailableCommandsUpdate, CancelNotification, CloseSessionRequest,
     CloseSessionResponse, Error as RpcError, InitializeRequest, InitializeResponse,
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
-    NewSessionRequest, NewSessionResponse, PromptRequest, ProtocolVersion, RequestId, SessionId,
-    SessionInfo, SessionUpdate,
+    NewSessionRequest, NewSessionResponse, PromptRequest, ProtocolVersion, RequestId,
+    ResumeSessionRequest, ResumeSessionResponse, SessionId, SessionInfo, SessionUpdate,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -80,7 +80,13 @@ impl<P: AgentProvider> RequestDispatcher<P> {
         match method {
             INITIALIZE_METHOD_NAME => DispatchOutcome::Immediate(self.initialize(params).await),
             SESSION_NEW_METHOD_NAME => DispatchOutcome::Immediate(self.session_new(params).await),
-            SESSION_LOAD_METHOD_NAME => DispatchOutcome::Immediate(self.session_load(params).await),
+            SESSION_LOAD_METHOD_NAME => match self.session_load(params).await {
+                Ok(outcome) => outcome,
+                Err(error) => DispatchOutcome::Immediate(Err(error)),
+            },
+            SESSION_RESUME_METHOD_NAME => {
+                DispatchOutcome::Immediate(self.session_resume(params).await)
+            }
             SESSION_LIST_METHOD_NAME => DispatchOutcome::Immediate(self.session_list(params).await),
             SESSION_CLOSE_METHOD_NAME => {
                 DispatchOutcome::Immediate(self.session_close(params).await)
@@ -172,10 +178,135 @@ impl<P: AgentProvider> RequestDispatcher<P> {
         to_value(response)
     }
 
-    /// `session/load`: validates absolute paths, delegates to the provider,
-    /// and registers the loaded session.
-    async fn session_load(&self, params: Value) -> Result<Value, RpcError> {
+    /// `session/load`: validates absolute paths, registers the session
+    /// provisionally (so conversation-replay updates reach the client), and
+    /// delegates to the provider.  The response is deferred: the provider
+    /// streams the whole conversation as `session/update` notifications
+    /// through its replay sink, then the queued `DeferredResponse` follows
+    /// them in FIFO order (ACP v1 requires replay before the empty result).
+    /// A failed load removes the provisional session.
+    async fn session_load(&self, params: Value) -> Result<DispatchOutcome, RpcError> {
         let request: LoadSessionRequest = parse_params(params)?;
+        validate_absolute_paths(&request.cwd, &request.additional_directories)
+            .map_err(|error| error.into_rpc_error())?;
+
+        // A session that is already live is a duplicate (reconnecting
+        // clients use `session/resume`); reject before any provider call.
+        if self.sessions.contains(&request.session_id) {
+            return Err(RpcError::internal_error().data(serde_json::json!({
+                "reason": format!("session already registered: {}", request.session_id),
+            })));
+        }
+        // Reserve the session for the load (like a prompt): concurrent
+        // same-session loads/prompts are rejected, and shutdown/cancel can
+        // await the bounded load task.
+        let (cancel_tx, _cancel_rx) = watch::channel(false);
+        let generation = self
+            .active_prompts
+            .start(&request.session_id, cancel_tx.clone())
+            .map_err(|error| match error {
+                ActivePromptError::AlreadyActive(session_id) => {
+                    concurrent_prompt_error(&session_id)
+                }
+            })?;
+        drop(cancel_tx);
+        // Register provisionally so conversation-replay updates reach the
+        // client; a failed load removes it again.
+        self.register_session(ServerSession {
+            session_id: request.session_id.clone(),
+            cwd: Some(request.cwd.clone()),
+            additional_directories: request.additional_directories.clone(),
+            mcp_servers: request.mcp_servers.clone(),
+            title: None,
+            metadata: Value::Null,
+        })?;
+        let ctx = LoadSessionContext {
+            session_id: request.session_id.clone(),
+            cwd: request.cwd.clone(),
+            additional_directories: request.additional_directories.clone(),
+            mcp_servers: request.mcp_servers.clone(),
+            metadata: request.meta.clone(),
+            replay_sink: Some(UpdateSink::new(
+                request.session_id.clone(),
+                self.outbound_tx.clone(),
+            )),
+        };
+        let provider = self.provider.clone();
+        let config = self.config.clone();
+        let sessions = self.sessions.clone();
+        let active_prompts = self.active_prompts.clone();
+        let outbound_tx = self.outbound_tx.clone();
+        let request_id = self.request_id.clone();
+        let session_id = request.session_id.clone();
+        let join_session_id = session_id.clone();
+        let join_request_id = request_id.clone();
+        let attach_session_id = join_session_id.clone();
+        let join = tokio::spawn(async move {
+            let result: Result<Value, RpcError> = async {
+                let init =
+                    match tokio::time::timeout(config.request_timeout, provider.load_session(ctx))
+                        .await
+                    {
+                        Ok(Ok(init)) => init,
+                        Ok(Err(provider_error)) => {
+                            sessions.remove(&session_id);
+                            return Err(AcpServerError::Provider(provider_error).into_rpc_error());
+                        }
+                        Err(_) => {
+                            sessions.remove(&session_id);
+                            return Err(AcpServerError::RequestTimeout {
+                                request_id: join_request_id,
+                            }
+                            .into_rpc_error());
+                        }
+                    };
+                if let Err(error) = reject_invalid_provider_session_id(&init.session_id) {
+                    sessions.remove(&session_id);
+                    return Err(error);
+                }
+                // The provisional entry is replaced with the provider-resolved
+                // session (title etc.); replay updates already streamed under
+                // the same id.  A `session/close` racing the load removes the
+                // entry; the load then leaves it gone.
+                if let Some(mut resolved) = sessions.remove(&session_id) {
+                    resolved.title = init.title.clone();
+                    resolved.metadata = Value::Null;
+                    let _ = sessions.insert_new(resolved);
+                }
+                // Same command advertisement as `session/new`: restored
+                // providers re-advertise their initial commands for the
+                // loaded session; the update queues ahead of the deferred
+                // response.
+                if !init.commands.is_empty() {
+                    let update = SessionUpdate::AvailableCommandsUpdate(
+                        AvailableCommandsUpdate::new(init.commands),
+                    );
+                    let _ = outbound_tx.send(OutboundEvent::Update {
+                        session_id: session_id.clone(),
+                        update: Box::new(update),
+                    });
+                }
+                to_value(
+                    LoadSessionResponse::new()
+                        .modes(init.modes)
+                        .config_options(init.config_options),
+                )
+            }
+            .await;
+            let _ = outbound_tx.send(OutboundEvent::DeferredResponse { request_id, result });
+            active_prompts.remove(&join_session_id);
+        });
+        self.active_prompts.attach_join(&attach_session_id, generation, join);
+        Ok(DispatchOutcome::Deferred)
+    }
+
+    /// `session/resume`: restores session context with NO conversation
+    /// replay (ACP v1).  The provider restores from its checkpoint store;
+    /// the interrupted turn is then continued by the next `session/prompt`
+    /// re-send via the provider's pending-checkpoint detection.  An already
+    /// registered session (same-process reconnect) is reused.
+    async fn session_resume(&self, params: Value) -> Result<Value, RpcError> {
+        let request: ResumeSessionRequest = parse_params(params)?;
         validate_absolute_paths(&request.cwd, &request.additional_directories)
             .map_err(|error| error.into_rpc_error())?;
 
@@ -185,23 +316,26 @@ impl<P: AgentProvider> RequestDispatcher<P> {
             additional_directories: request.additional_directories.clone(),
             mcp_servers: request.mcp_servers.clone(),
             metadata: request.meta.clone(),
+            replay_sink: None,
         };
-        let init = self.with_provider_timeout(self.provider.load_session(ctx)).await?;
+        let init = self.with_provider_timeout(self.provider.resume_session(ctx)).await?;
         reject_invalid_provider_session_id(&init.session_id)?;
 
-        self.register_session(ServerSession {
-            session_id: init.session_id.clone(),
-            cwd: Some(request.cwd.clone()),
-            additional_directories: request.additional_directories.clone(),
-            mcp_servers: request.mcp_servers.clone(),
-            title: init.title.clone(),
-            metadata: Value::Null,
-        })?;
-        // Same command advertisement as `session/new`: restored providers
-        // re-advertise their initial commands for the loaded session.
+        if !self.sessions.contains(&init.session_id) {
+            self.register_session(ServerSession {
+                session_id: init.session_id.clone(),
+                cwd: Some(request.cwd.clone()),
+                additional_directories: request.additional_directories.clone(),
+                mcp_servers: request.mcp_servers.clone(),
+                title: init.title.clone(),
+                metadata: Value::Null,
+            })?;
+        }
+        // Same command advertisement as `session/new`/`session/load`: the
+        // resumed session re-advertises its available commands.
         self.emit_available_commands(&init.session_id, init.commands)?;
         let response =
-            LoadSessionResponse::new().modes(init.modes).config_options(init.config_options);
+            ResumeSessionResponse::new().modes(init.modes).config_options(init.config_options);
         to_value(response)
     }
 
@@ -400,7 +534,7 @@ fn reject_invalid_provider_session_id(session_id: &SessionId) -> Result<(), RpcE
 
 fn concurrent_prompt_error(session_id: &SessionId) -> RpcError {
     RpcError::invalid_params().data(serde_json::json!({
-        "reason": format!("a prompt is already active for session {session_id}"),
+        "reason": format!("a prompt or load is already active for session {session_id}"),
     }))
 }
 

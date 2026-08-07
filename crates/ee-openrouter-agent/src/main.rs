@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use ee_acp_agent_server::{AcpAgentServer, AcpAgentServerConfig};
-use ee_agent_orchestrator::{OrchestratorProvider, OrchestratorProviderConfig};
+use ee_agent_orchestrator::{OrchestratorConfig, OrchestratorProvider, OrchestratorProviderConfig};
 use ee_agent_protocol::Implementation;
 use ee_openrouter_agent::config::{Args, Config};
 use ee_openrouter_agent::dotenv::load_dotenv;
@@ -62,11 +62,19 @@ async fn run_orchestrated(
     config: Config,
     server_config: AcpAgentServerConfig,
 ) -> Result<(), String> {
-    let adapter = OpenRouterModelAdapter::new(config)?;
+    let adapter = OpenRouterModelAdapter::new(config.clone())?;
     // Keep the agent identity the same in both modes.
     let provider_config = OrchestratorProviderConfig {
         implementation: Implementation::new("ee-openrouter-agent", env!("CARGO_PKG_VERSION"))
             .title("OpenRouter"),
+        orchestrator: OrchestratorConfig {
+            context_window_tokens: config.context_window,
+            // Resumable turns: durable checkpoints in the configured
+            // directory (or memory-only when unset), safe single
+            // auto-resume after deadline/transient stops.
+            recovery: ee_agent_orchestrator::RecoveryConfig::durable(config.checkpoint_dir.clone()),
+            ..OrchestratorConfig::default()
+        },
         ..OrchestratorProviderConfig::default()
     };
     let provider = OrchestratorProvider::with_policy(
@@ -86,6 +94,7 @@ mod tests {
 
     use super::*;
     use ee_openrouter_agent::config::DEFAULT_API_URL;
+    use ee_openrouter_agent::config::DEFAULT_CONTEXT_WINDOW_TOKENS;
 
     fn config(orchestrated: bool) -> Config {
         Config {
@@ -101,6 +110,11 @@ mod tests {
             compact_min_messages: 4,
             compact_retained_tail: 2,
             compact_max_input_bytes: 65_536,
+            context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
+            retry_max_attempts: 0,
+            retry_base_delay: Duration::from_millis(1),
+            retry_max_delay: Duration::from_millis(10),
+            checkpoint_dir: None,
         }
     }
 

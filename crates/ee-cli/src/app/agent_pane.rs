@@ -12,7 +12,7 @@
 //! pane state is absent and `:agents` reports the compile-time disabled
 //! message.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ee_agent_host::events::{
-    AgentConnectionState, PermissionRequestInfo, ThreadCloseReason, TurnMetrics,
+    AgentConnectionState, PermissionRequestInfo, RecoverableInfo, ThreadCloseReason, TurnMetrics,
 };
 use ee_agent_host::{
     AgentError, AgentEvent, AgentManager, AgentManagerConfig, AgentThread, ClientRequestResponse,
@@ -138,8 +138,19 @@ pub(crate) enum ThreadUiState {
     Starting,
     Ready,
     Running,
+    PausedRecoverable,
     Closed,
     Failed,
+}
+
+/// A paused turn awaiting a resume/discard decision.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingRecovery {
+    /// Structured payload from the agent's JSON-RPC error `data`.
+    pub(crate) info: RecoverableInfo,
+    /// The prompt blocks the paused turn was started with, re-sent verbatim
+    /// on Resume.
+    pub(crate) prompt: Vec<ContentBlock>,
 }
 
 /// One open agent session thread (IRC channel equivalent).
@@ -193,6 +204,12 @@ pub(crate) struct AgentThreadUi {
     pub(crate) plan_modal_open: bool,
     /// Last turn error, when any.
     pub(crate) last_error: Option<String>,
+    /// Paused turn awaiting resume/discard, when the agent reported a
+    /// recoverable interruption.
+    pub(crate) pending_recovery: Option<PendingRecovery>,
+    /// Prompt blocks of the most recent turn, kept for resume until the turn
+    /// reaches a terminal state.
+    pub(crate) last_prompt: Option<Vec<ContentBlock>>,
     /// Slash commands currently advertised by the agent.
     pub(crate) available_commands: Vec<AvailableCommand>,
     /// Session title from `session_info_update`, when present.
@@ -880,6 +897,14 @@ enum HostCommand {
         ee_proxy_stdio_fallback: Option<McpServerStdio>,
         reply: std_mpsc::Sender<Result<AgentThread, String>>,
     },
+    ReconnectSession {
+        agent_id: String,
+        session_id: String,
+        cwd: PathBuf,
+        additional_directories: Vec<PathBuf>,
+        mcp_servers: Vec<McpServer>,
+        reply: std_mpsc::Sender<Result<AgentThread, String>>,
+    },
     SendPrompt {
         thread: AgentThread,
         blocks: Vec<ContentBlock>,
@@ -929,6 +954,46 @@ fn host_worker(
                     let result = manager
                         .new_session(&agent_id, roots, mcp_servers, ee_proxy_stdio_fallback)
                         .await;
+                    let _ = reply.send(result.map_err(|error| error.to_string()));
+                }
+                HostCommand::ReconnectSession {
+                    agent_id,
+                    session_id,
+                    cwd,
+                    additional_directories,
+                    mcp_servers,
+                    reply,
+                } => {
+                    // Prefer `session/load`: it replays the conversation into
+                    // the client.  Fall back to `session/resume` (no replay)
+                    // only when the agent does not advertise load.
+                    let session_id = ee_agent_protocol::SessionId::new(session_id);
+                    let result = match manager
+                        .load_session(
+                            &agent_id,
+                            session_id.clone(),
+                            cwd.clone(),
+                            additional_directories.clone(),
+                            mcp_servers.clone(),
+                        )
+                        .await
+                    {
+                        Ok(thread) => Ok(thread),
+                        Err(AgentError::CapabilityUnsupported { method })
+                            if method == "session/load" =>
+                        {
+                            manager
+                                .resume_session(
+                                    &agent_id,
+                                    session_id,
+                                    cwd,
+                                    additional_directories,
+                                    mcp_servers,
+                                )
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    };
                     let _ = reply.send(result.map_err(|error| error.to_string()));
                 }
                 HostCommand::SendPrompt { thread, blocks } => {
@@ -1001,6 +1066,27 @@ impl AgentHostBridge {
         reply_rx
     }
 
+    /// Enqueues a reconnect request (load, falling back to resume).
+    fn request_reconnect(
+        &self,
+        agent_id: String,
+        session_id: String,
+        cwd: PathBuf,
+        additional_directories: Vec<PathBuf>,
+        mcp_servers: Vec<McpServer>,
+    ) -> std_mpsc::Receiver<Result<AgentThread, String>> {
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        let _ = self.commands.send(HostCommand::ReconnectSession {
+            agent_id,
+            session_id,
+            cwd,
+            additional_directories,
+            mcp_servers,
+            reply: reply_tx,
+        });
+        reply_rx
+    }
+
     /// Enqueues a prompt turn (fire-and-forget; events carry the outcome).
     fn send_prompt(&self, thread: AgentThread, blocks: Vec<ContentBlock>) {
         let _ = self.commands.send(HostCommand::SendPrompt { thread, blocks });
@@ -1062,7 +1148,26 @@ impl Drop for AgentHostBridge {
 #[derive(Debug)]
 pub(crate) struct PendingSession {
     pub(crate) agent_id: String,
+    /// Known up front for reconnects; `None` for fresh `session/new` (the id
+    /// arrives with the reply).
+    pub(crate) session_id: Option<String>,
     pub(crate) reply: std_mpsc::Receiver<Result<AgentThread, String>>,
+}
+
+/// Client-persisted reconnect record: the last agent session of a workspace
+/// plus the text of its last prompt (for the resend path after a restart).
+/// Lives under the platform state directory, keyed by canonical workspace
+/// path, so a restarted TUI can reconnect to the same agent session.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PersistedAgentSession {
+    /// Agent server id the session belongs to.
+    agent_id: String,
+    /// Session id as returned by `session/new` (stable across restarts for
+    /// durable recovery checkpoints).
+    session_id: String,
+    /// The last submitted prompt text, kept while a turn is recoverable so
+    /// the resend path works after a restart.
+    last_prompt: Option<String>,
 }
 
 /// All agents-pane UI state; `Default` is the closed, inert startup state.
@@ -1089,6 +1194,11 @@ pub(crate) struct AgentPaneState {
     /// Session ids that already emitted `ThreadCreated` (event may beat the
     /// new-session reply; both orders are handled).
     pub(crate) created_sessions: BTreeSet<String>,
+    /// Reconnect in flight: `session/update` notifications that arrive before
+    /// the reconnect reply (the load replays the conversation while the
+    /// thread is not registered yet) are buffered here and applied after
+    /// registration.
+    pub(crate) pending_replay: HashMap<String, Vec<SessionUpdate>>,
     pub(crate) bridge_tx: std_mpsc::Sender<super::agent_bridge::BridgeUiMessage>,
     pub(crate) bridge_rx: std_mpsc::Receiver<super::agent_bridge::BridgeUiMessage>,
     /// Shared agent terminal registry (spawned here, queried by the host).
@@ -1116,6 +1226,10 @@ pub(crate) struct AgentPaneState {
     /// grants from real user state).
     #[cfg(test)]
     pub(crate) test_trust_store_base: Option<PathBuf>,
+    /// Test-only: session-state file base directory (isolates the persisted
+    /// reconnect record from real user state).
+    #[cfg(test)]
+    pub(crate) test_session_state_base: Option<PathBuf>,
 }
 
 impl Default for AgentPaneState {
@@ -1138,6 +1252,7 @@ impl Default for AgentPaneState {
             previous_editor_mode: None,
             host: None,
             created_sessions: BTreeSet::new(),
+            pending_replay: HashMap::new(),
             bridge_tx,
             bridge_rx,
             terminals: super::agent_bridge::AgentTerminals::default(),
@@ -1152,6 +1267,8 @@ impl Default for AgentPaneState {
             test_secret_store: None,
             #[cfg(test)]
             test_trust_store_base: None,
+            #[cfg(test)]
+            test_session_state_base: None,
         }
     }
 }
@@ -1293,6 +1410,13 @@ impl App {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.apply_session_update(index, &update);
                     self.notify_unread(index);
+                } else if let Some(buffer) =
+                    self.agents.pending_replay.get_mut(&session_id.0.to_string())
+                {
+                    // Reconnect in flight: `session/load` replays the
+                    // conversation before the thread is registered; keep the
+                    // updates and apply them once the reply lands.
+                    buffer.push(*update);
                 }
             }
             AgentEvent::TurnCompleted { session_id, stop_reason, metrics } => {
@@ -1302,10 +1426,14 @@ impl App {
                     self.agents.threads[index].turn_started_at = None;
                     self.agents.threads[index].stop_reason = Some(format!("{stop_reason:?}"));
                     self.agents.threads[index].record_turn_metrics(metrics);
+                    self.agents.threads[index].pending_recovery = None;
+                    self.agents.threads[index].last_prompt = None;
                     self.agents.threads[index]
                         .push_system(format!("turn completed (stop: {stop_reason:?})"));
                     self.notify_unread(index);
                 }
+                // The turn is no longer resumable; drop the persisted prompt.
+                self.update_persisted_last_prompt(None);
             }
             AgentEvent::TurnCancelled { session_id, metrics } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
@@ -1313,9 +1441,12 @@ impl App {
                     self.agents.threads[index].optimistic_message = None;
                     self.agents.threads[index].turn_started_at = None;
                     self.agents.threads[index].record_turn_metrics(metrics);
+                    self.agents.threads[index].pending_recovery = None;
+                    self.agents.threads[index].last_prompt = None;
                     self.agents.threads[index].push_system(String::from("turn cancelled"));
                     self.notify_unread(index);
                 }
+                self.update_persisted_last_prompt(None);
             }
             AgentEvent::TurnFailed { session_id, error, metrics } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
@@ -1324,7 +1455,29 @@ impl App {
                     self.agents.threads[index].turn_started_at = None;
                     self.agents.threads[index].record_turn_metrics(metrics);
                     self.agents.threads[index].last_error = Some(error.to_string());
+                    self.agents.threads[index].pending_recovery = None;
                     self.agents.threads[index].push_system(format!("turn failed: {error}"));
+                    self.notify_unread(index);
+                }
+                self.update_persisted_last_prompt(None);
+            }
+            AgentEvent::TurnPausedRecoverable { session_id, metrics, recoverable } => {
+                if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
+                    let thread = &mut self.agents.threads[index];
+                    thread.state = ThreadUiState::PausedRecoverable;
+                    thread.optimistic_message = None;
+                    thread.turn_started_at = None;
+                    thread.record_turn_metrics(metrics);
+                    let info = *recoverable;
+                    let notice = format!(
+                        "turn paused: {} (resume with :agents_resume, discard with :agents_discard)",
+                        info.detail
+                    );
+                    thread.push_system(notice);
+                    // Keep the prompt that started the turn for Resume; it
+                    // was captured at submit time.
+                    thread.pending_recovery =
+                        thread.last_prompt.take().map(|prompt| PendingRecovery { info, prompt });
                     self.notify_unread(index);
                 }
             }
@@ -1710,6 +1863,8 @@ impl App {
             current_plan: Vec::new(),
             plan_modal_open: false,
             last_error: None,
+            pending_recovery: None,
+            last_prompt: None,
             available_commands: snapshot.available_commands,
             session_title,
             session_updated_at,
@@ -1721,6 +1876,18 @@ impl App {
             .last_mut()
             .expect("thread pushed")
             .push_system(format!("session started ({session_id})"));
+        // Persist the client-side reconnect record for this workspace; the
+        // last prompt carries over only when this is the same session
+        // (reconnect), so a paused turn stays resumable after a restart.
+        let last_prompt = self
+            .load_persisted_agent_session()
+            .filter(|record| record.session_id == session_id)
+            .and_then(|record| record.last_prompt);
+        self.save_persisted_agent_session(Some(&PersistedAgentSession {
+            agent_id: agent_id.to_string(),
+            session_id: session_id.clone(),
+            last_prompt,
+        }));
     }
 
     /// Bumps unread/activity for a thread unless it is focused.
@@ -1770,10 +1937,56 @@ impl App {
         match result {
             Ok(Ok(thread)) => {
                 let pending = self.agents.pending_session.take().expect("pending session present");
-                self.register_session_thread(&pending.agent_id, thread);
+                let session_id = pending.session_id;
+                let agent_id = pending.agent_id;
+                if let Some(index) = session_id.as_ref().and_then(|id| self.agents.thread_index(id))
+                {
+                    // Same-process reconnect: a thread for this session
+                    // already exists, so rebind the fresh connection
+                    // instead of duplicating the thread.
+                    self.agents.threads[index].host = thread;
+                    self.agents.threads[index].state = ThreadUiState::Ready;
+                    self.agents.threads[index].push_system(String::from("session reconnected"));
+                    self.sync_thread_snapshot_fields(index);
+                    self.agents.active_thread = Some(index);
+                    // Keep the persisted last prompt (resend path).
+                    let last_prompt =
+                        self.load_persisted_agent_session().and_then(|record| record.last_prompt);
+                    self.save_persisted_agent_session(Some(&PersistedAgentSession {
+                        agent_id,
+                        session_id: session_id.clone().expect("rebound session id"),
+                        last_prompt,
+                    }));
+                } else {
+                    self.register_session_thread(&agent_id, thread);
+                }
+                if let Some(session_id) = session_id {
+                    // Reconnect: apply the conversation replay updates that
+                    // streamed while the thread was not registered yet, then
+                    // restore the persisted last prompt for the resend path.
+                    if let Some(index) = self
+                        .agents
+                        .thread_index(&session_id)
+                        .zip(self.agents.pending_replay.remove(&session_id))
+                    {
+                        for update in index.1 {
+                            self.apply_session_update(index.0, &update);
+                        }
+                    }
+                    if let Some(record) = self.load_persisted_agent_session()
+                        && let Some(text) = record.last_prompt
+                        && let Some(index) = self.agents.thread_index(&session_id)
+                    {
+                        self.agents.threads[index].last_prompt =
+                            Some(vec![ContentBlock::Text(TextContent::new(text))]);
+                    }
+                }
             }
             Ok(Err(message)) => {
-                self.agents.pending_session = None;
+                let pending = self.agents.pending_session.take().expect("pending session present");
+                if let Some(session_id) = pending.session_id {
+                    self.agents.pending_replay.remove(&session_id);
+                }
                 self.agents.error = Some(message.clone());
                 let notice = format!("session start failed: {message}");
                 if let Some(active) = self.agents.active_thread_index() {
@@ -1784,6 +1997,7 @@ impl App {
             Err(std_mpsc::TryRecvError::Empty) => {}
             Err(std_mpsc::TryRecvError::Disconnected) => {
                 self.agents.pending_session = None;
+                self.agents.pending_replay.clear();
                 self.agents.error = Some(String::from("agent host stopped"));
             }
         }
@@ -2246,6 +2460,18 @@ impl App {
                 self.agents_stop_turn();
                 true
             }
+            "agents_resume" => {
+                self.resume_paused_turn();
+                true
+            }
+            "agents_discard" => {
+                self.discard_paused_turn();
+                true
+            }
+            "agents_reconnect" => {
+                self.agents_reconnect();
+                true
+            }
             "agents_new" => {
                 self.agents_new_session();
                 true
@@ -2522,6 +2748,7 @@ impl App {
                     ThreadUiState::Starting => "starting",
                     ThreadUiState::Ready => "ready",
                     ThreadUiState::Running => "running",
+                    ThreadUiState::PausedRecoverable => "paused (recoverable)",
                     ThreadUiState::Closed => "closed",
                     ThreadUiState::Failed => "failed",
                 };
@@ -2688,7 +2915,97 @@ impl App {
             self.agents.mcp.proxy.as_ref().map(super::agents_mcp::proxy_stdio_fallback_entry);
         let reply =
             host.request_new_session(agent_id.clone(), roots, mcp_servers, ee_proxy_stdio_fallback);
-        self.agents.pending_session = Some(PendingSession { agent_id, reply });
+        self.agents.pending_session = Some(PendingSession { agent_id, session_id: None, reply });
+    }
+
+    /// Reconnects the persisted session of this workspace after an agent/
+    /// process restart: `session/load` when the agent advertises it (the
+    /// conversation replays into the thread), else `session/resume`.  The
+    /// persisted last prompt is restored for the resend path.
+    pub(super) fn agents_reconnect(&mut self) {
+        let Some(record) = self.load_persisted_agent_session() else {
+            self.agents.error =
+                Some(String::from("no persisted agent session for this workspace to reconnect"));
+            return;
+        };
+        self.ensure_agents_host();
+        let Some(host) = &self.agents.host else {
+            return;
+        };
+        // `session/load` replays the conversation while the reply is still
+        // in flight; those updates are buffered until the thread exists.
+        self.agents.pending_replay.insert(record.session_id.clone(), Vec::new());
+        let roots = self.agents_workspace_roots();
+        let cwd = roots.first().cloned().unwrap_or_else(|| self.working_dir.clone());
+        let additional_directories = roots.iter().skip(1).cloned().collect();
+        let mcp_servers = super::agents_mcp::mcp_forward_entries(&self.config.mcp);
+        let reply = host.request_reconnect(
+            record.agent_id.clone(),
+            record.session_id.clone(),
+            cwd,
+            additional_directories,
+            mcp_servers,
+        );
+        self.agents.pending_session = Some(PendingSession {
+            agent_id: record.agent_id.clone(),
+            session_id: Some(record.session_id.clone()),
+            reply,
+        });
+        self.backend.status_message =
+            Some(format!("reconnecting session {}...", record.session_id));
+    }
+
+    /// The path of the client-persisted agent session record (per-workspace
+    /// entries under the platform state directory).
+    fn agents_session_record_path(&self) -> Option<std::path::PathBuf> {
+        #[cfg(test)]
+        if let Some(base) = self.agents.test_session_state_base.as_deref() {
+            return Some(base.join("agent-sessions.json"));
+        }
+        crate::logs::state_dir().map(|dir| dir.join("agent-sessions.json"))
+    }
+
+    /// Loads the persisted session record for the primary workspace.
+    fn load_persisted_agent_session(&self) -> Option<PersistedAgentSession> {
+        let path = self.agents_session_record_path()?;
+        let documents: HashMap<String, PersistedAgentSession> =
+            serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        documents.get(&self.primary_workspace_identity().as_string()).cloned()
+    }
+
+    /// Persists (or removes) the session record for the primary workspace.
+    fn save_persisted_agent_session(&self, record: Option<&PersistedAgentSession>) {
+        let Some(path) = self.agents_session_record_path() else {
+            return;
+        };
+        let mut documents: HashMap<String, PersistedAgentSession> = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        let key = self.primary_workspace_identity().as_string();
+        match record {
+            Some(record) => {
+                documents.insert(key, record.clone());
+            }
+            None => {
+                documents.remove(&key);
+            }
+        }
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(json) = serde_json::to_string(&documents) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+
+    /// Updates the persisted record's last prompt (or clears it).
+    fn update_persisted_last_prompt(&self, last_prompt: Option<&str>) {
+        let Some(mut record) = self.load_persisted_agent_session() else {
+            return;
+        };
+        record.last_prompt = last_prompt.map(str::to_string);
+        self.save_persisted_agent_session(Some(&record));
     }
 
     /// Absolute workspace roots forwarded as ACP session context.
@@ -2926,16 +3243,62 @@ impl App {
             return;
         }
         if !matches!(thread.state, ThreadUiState::Ready) {
-            self.agents.error =
-                Some(String::from("agent session is not ready; cannot send prompt"));
+            self.agents.error = Some(match thread.state {
+                ThreadUiState::PausedRecoverable => String::from(
+                    "a turn is paused and recoverable; resume with :agents_resume or discard with :agents_discard",
+                ),
+                _ => String::from("agent session is not ready; cannot send prompt"),
+            });
             return;
         }
         thread.draft.clear();
         let prompt_text = draft.trim_end().to_string();
+        // Persist the prompt so a restart mid-turn can resume by re-sending it.
+        self.update_persisted_last_prompt(Some(&prompt_text));
+        let thread = &mut self.agents.threads[active];
         thread.push_message("you", &prompt_text, MessageRenderKind::User, None, None);
         thread.optimistic_message = Some(thread.transcript.len().saturating_sub(1));
         let host = self.agents.host.as_ref().expect("host present");
         let blocks = vec![ContentBlock::Text(TextContent::new(prompt_text))];
+        thread.last_prompt = Some(blocks.clone());
+        host.send_prompt(thread.host.clone(), blocks);
+    }
+
+    /// Resumes the paused turn: re-sends the exact prompt blocks that started
+    /// it, so the agent continues from its checkpoint.
+    fn resume_paused_turn(&mut self) {
+        let Some(active) = self.agents.active_thread_index() else {
+            return;
+        };
+        let Some(blocks) =
+            self.agents.threads[active].pending_recovery.clone().map(|pending| pending.prompt)
+        else {
+            self.agents.error = Some(String::from("no paused turn to resume"));
+            return;
+        };
+        let thread = &mut self.agents.threads[active];
+        thread.state = ThreadUiState::Running;
+        thread.turn_started_at = Some(Instant::now());
+        thread.push_system(String::from("resuming paused turn"));
+        let host = self.agents.host.as_ref().expect("host present");
+        host.send_prompt(thread.host.clone(), blocks);
+    }
+
+    /// Discards the paused turn: tells the agent to drop its checkpoint and
+    /// returns the thread to ready.
+    fn discard_paused_turn(&mut self) {
+        let Some(active) = self.agents.active_thread_index() else {
+            return;
+        };
+        let thread = &mut self.agents.threads[active];
+        if thread.pending_recovery.is_none() {
+            self.agents.error = Some(String::from("no paused turn to discard"));
+            return;
+        }
+        thread.state = ThreadUiState::Running;
+        thread.push_system(String::from("discarding paused turn"));
+        let host = self.agents.host.as_ref().expect("host present");
+        let blocks = vec![ContentBlock::Text(TextContent::new(String::from("/discard")))];
         host.send_prompt(thread.host.clone(), blocks);
     }
 
@@ -2943,7 +3306,7 @@ impl App {
         self.ensure_agents_host();
         let Some(agent_id) = self.default_agent_id() else {
             let message = String::from(
-                "no agent configured; add [agents.servers.<id>] in .ee.toml, then run :agents_new",
+                "no agent configured; add [agents.servers.<id>] in .ee.toml, then run /new_thread",
             );
             self.agents.error = Some(message.clone());
             self.backend.status_message = Some(message);

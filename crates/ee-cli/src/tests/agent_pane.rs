@@ -13,11 +13,14 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ee_agent_host::FakeTransportFactory;
 use ee_agent_host::fake::{FakeAgent, FakeAgentScript, FakeAgentTransport, wire};
+use ee_agent_protocol::ContentBlock;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use serde_json::{Value, json};
 
-use crate::app::{AgentPaneLayout, App, Mode, ThreadUiState, TranscriptItem, wrap_text};
+use crate::app::{
+    AgentPaneLayout, App, MessageRenderKind, Mode, ThreadUiState, TranscriptItem, wrap_text,
+};
 use crate::tests::helpers::*;
 use crate::ui::ui;
 
@@ -324,6 +327,238 @@ fn prompt_submission_appends_optimistic_you_and_sends_acp_prompt() {
 }
 
 #[test]
+fn recoverable_pause_offers_resume_and_resume_resends_prompt() {
+    // The agent answers the first prompt with a recoverable interruption
+    // (deadline, durable checkpoint), then completes the resumed prompt.
+    let script = base_script()
+        .wait_for("session/prompt")
+        .respond_error_with_data(
+            -32603,
+            "recoverable turn interruption: paused after 300s",
+            json!({
+                "recoverable": {
+                    "fault": "deadline",
+                    "detail": "paused after 300s",
+                    "cause": null,
+                    "safe_resume": true,
+                    "retry_after": null,
+                    "checkpoint_id": "s1-0000000001",
+                    "completed_tool_calls": 4,
+                    "resumed_count": 0,
+                }
+            }),
+        )
+        .wait_for("session/prompt")
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "hello agent");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "turn paused notice", |app| {
+        app.agents.threads[0].system_notices().iter().any(|n| n.contains("turn paused"))
+    });
+    assert_eq!(app.agents.threads[0].state, ThreadUiState::PausedRecoverable);
+    let pending = app.agents.threads[0].pending_recovery.clone().expect("pending recovery kept");
+    assert!(pending.info.safe_resume);
+    assert_eq!(pending.info.checkpoint_id.as_deref(), Some("s1-0000000001"));
+    assert_eq!(pending.info.completed_tool_calls, 4);
+    // The original prompt is retained for Resume.
+    let text = pending.prompt.iter().find_map(|block| match block {
+        ContentBlock::Text(text) => Some(text.text.clone()),
+        _ => None,
+    });
+    assert_eq!(text.as_deref(), Some("hello agent"));
+    // Typing a new prompt while paused is rejected.
+    type_text(&mut app, "new question");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.agents.threads[0].state, ThreadUiState::PausedRecoverable);
+    assert!(app.agents.error.as_deref().is_some_and(|error| error.contains("resume")));
+
+    // Resume re-sends the original prompt and the turn completes.
+    run_ex(&mut app, "agents_resume");
+    wait_until(&mut app, "resumed prompt sent", |_| {
+        fake.agent().requests_by_method("session/prompt").len() == 2
+    });
+    wait_until(&mut app, "turn completed after resume", |app| {
+        app.agents.threads[0].state == ThreadUiState::Ready
+            && app.agents.threads[0].system_notices().iter().any(|n| n.contains("turn completed"))
+    });
+    assert!(app.agents.threads[0].pending_recovery.is_none(), "resume clears the pause");
+}
+
+#[test]
+fn recoverable_pause_discard_clears_state() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .respond_error_with_data(
+            -32603,
+            "recoverable turn interruption: paused after 300s",
+            json!({
+                "recoverable": {
+                    "fault": "deadline",
+                    "detail": "paused after 300s",
+                    "cause": null,
+                    "safe_resume": true,
+                    "retry_after": null,
+                    "checkpoint_id": "s1-0000000001",
+                    "completed_tool_calls": 0,
+                    "resumed_count": 0,
+                }
+            }),
+        )
+        .wait_for("session/prompt")
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "hello agent");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "turn paused notice", |app| {
+        app.agents.threads[0].state == ThreadUiState::PausedRecoverable
+    });
+
+    // Discard tells the agent to drop the checkpoint (`/discard` prompt).
+    run_ex(&mut app, "agents_discard");
+    wait_until(&mut app, "discard prompt sent", |_| {
+        fake.agent().requests_by_method("session/prompt").len() == 2
+    });
+    wait_until(&mut app, "turn completed after discard", |app| {
+        app.agents.threads[0].state == ThreadUiState::Ready
+    });
+    assert!(app.agents.threads[0].pending_recovery.is_none(), "discard clears the pause");
+}
+
+#[test]
+fn agents_reconnect_loads_persisted_session_and_replays_conversation() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let script = FakeAgentScript::new()
+        // The restarted agent advertises load (replay) and resume.
+        .wait_for("initialize")
+        .respond(json!({
+            "protocolVersion": 1,
+            "agentCapabilities": {
+                "loadSession": true,
+                "sessionCapabilities": { "resume": {} }
+            }
+        }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/prompt")
+        .respond_error_with_data(
+            -32603,
+            "recoverable turn interruption: paused after 300s",
+            json!({
+                "recoverable": {
+                    "fault": "deadline",
+                    "detail": "paused after 300s",
+                    "cause": null,
+                    "safe_resume": true,
+                    "retry_after": null,
+                    "checkpoint_id": "s1-0000000001",
+                    "completed_tool_calls": 0,
+                    "resumed_count": 0,
+                }
+            }),
+        )
+        // The simulated restart answers `session/load` by replaying the
+        // conversation, then responds (the SDK parses an empty object).
+        .wait_for("session/load")
+        .emit(wire::session_update("s1", wire::user_message_chunk("hello agent")))
+        .emit(wire::session_update("s1", wire::agent_message_chunk("m1", "first answer")))
+        .respond(json!({}));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    app.agents.test_session_state_base = Some(state_dir.path().to_path_buf());
+    open_pane_and_wait_ready(&mut app);
+
+    // Submit a prompt that pauses: the persisted record now holds the
+    // session id and the prompt text (client-persisted for the resend path).
+    type_text(&mut app, "hello agent");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "turn paused notice", |app| {
+        app.agents.threads[0].state == ThreadUiState::PausedRecoverable
+    });
+
+    // Reconnect: `session/load` (preferred over `session/resume`) restores
+    // the session and replays the conversation; the existing thread is
+    // rebound to the fresh connection.
+    run_ex(&mut app, "agents_reconnect");
+    let deadline = Instant::now() + WAIT;
+    loop {
+        app.pump_agents();
+        let _ = app.backend.drain_events();
+        if app.agents.threads.len() == 1
+            && app.agents.threads[0].state == ThreadUiState::Ready
+            && app.agents.threads[0].transcript.iter().any(|item| {
+                matches!(
+                    item,
+                    TranscriptItem::Message {
+                        kind: MessageRenderKind::User,
+                        text,
+                        ..
+                    } if text == "hello agent"
+                )
+            })
+            && app.agents.threads[0].transcript.iter().any(|item| {
+                matches!(
+                    item,
+                    TranscriptItem::Message {
+                        kind: MessageRenderKind::Assistant,
+                        text,
+                        ..
+                    } if text == "first answer"
+                )
+            })
+        {
+            break;
+        }
+        if Instant::now() > deadline {
+            panic!(
+                "reconnect replay never applied; threads={} pending_session={:?} pending_replay={:?} fake_log={:?}",
+                app.agents.threads.len(),
+                app.agents.pending_session.is_some(),
+                app.agents.pending_replay.keys().collect::<Vec<_>>(),
+                fake.agent().log(),
+            );
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !fake.agent().requests_by_method("session/load").is_empty(),
+        "reconnect sends session/load"
+    );
+    assert!(
+        fake.agent().requests_by_method("session/resume").is_empty(),
+        "load is preferred over resume"
+    );
+    // The persisted last prompt is restored for the resend path.
+    let restored = app.agents.threads[0].last_prompt.as_ref().and_then(|blocks| {
+        blocks.iter().find_map(|block| match block {
+            ContentBlock::Text(text) => Some(text.text.clone()),
+            _ => None,
+        })
+    });
+    assert_eq!(restored.as_deref(), Some("hello agent"));
+}
+
+#[test]
+fn agents_reconnect_without_persisted_session_reports_error() {
+    // A fresh state directory and no session ever created: there is no
+    // persisted record to reconnect.
+    let state_dir = tempfile::tempdir().unwrap();
+    let (mut app, _temp, _fake) = fake_agents_app(base_script());
+    app.agents.test_session_state_base = Some(state_dir.path().to_path_buf());
+
+    run_ex(&mut app, "agents_reconnect");
+    assert!(
+        app.agents
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("no persisted agent session"))
+    );
+}
+
+#[test]
 fn turn_completed_records_metrics_and_renders_tokens() {
     let script = base_script()
         .wait_for("session/prompt")
@@ -392,6 +627,78 @@ fn turn_without_usage_renders_elapsed_only() {
     let metrics = app.agents.threads[0].last_turn_metrics.as_ref().expect("metrics recorded");
     assert_eq!(metrics.tokens, None, "unknown usage stays unknown, never zero");
     assert_eq!(crate::app::turn_metrics_label(metrics), "0.0s");
+}
+
+#[test]
+fn usage_update_renders_context_window_right_aligned_above_composer() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(wire::session_update(
+            "s1",
+            json!({ "sessionUpdate": "usage_update", "used": 10_000, "size": 100_000 }),
+        ))
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "hello agent");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "usage update recorded", |app| app.agents.threads[0].usage.is_some());
+    assert_eq!(app.agents.threads[0].usage.as_deref(), Some("10k/100k tokens"));
+
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rows = terminal.backend().buffer();
+    let rendered: Vec<String> = (0..24)
+        .map(|y| (0..120).map(|x| rows.cell((x, y)).unwrap().symbol()).collect::<String>())
+        .collect();
+
+    let composer_row =
+        rendered.iter().position(|row| row.contains("prompt>")).expect("composer row");
+    let footer_row = &rendered[composer_row - 1];
+    assert!(
+        footer_row.contains("10k/100k tokens"),
+        "footer row above the composer must carry the context usage: {rendered:#?}"
+    );
+    let label = "10k/100k tokens";
+    // Byte offsets shift for multi-byte glyphs (←/→ borders); compare in
+    // character columns.
+    let label_end = footer_row
+        .match_indices(label)
+        .last()
+        .map(|(byte_start, _)| footer_row[..byte_start].chars().count() + label.chars().count());
+    assert_eq!(
+        label_end,
+        Some(119),
+        "context usage must sit right-aligned at the row end: {rendered:#?}"
+    );
+
+    // Narrow panes: the left footer overflows, but the usage label must stay
+    // pinned to the rightmost edge (not truncated away).
+    let backend = TestBackend::new(60, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rows = terminal.backend().buffer();
+    let rendered: Vec<String> = (0..24)
+        .map(|y| (0..60).map(|x| rows.cell((x, y)).unwrap().symbol()).collect::<String>())
+        .collect();
+    let composer_row =
+        rendered.iter().position(|row| row.contains("prompt>")).expect("composer row");
+    let footer_row = &rendered[composer_row - 1];
+    assert!(
+        footer_row.contains("10k/100k tokens"),
+        "usage must survive narrow panes: {rendered:#?}"
+    );
+    let label_end = footer_row
+        .match_indices(label)
+        .last()
+        .map(|(byte_start, _)| footer_row[..byte_start].chars().count() + label.chars().count());
+    assert_eq!(
+        label_end,
+        Some(59),
+        "usage must stay right-aligned at the edge in narrow panes: {rendered:#?}"
+    );
 }
 
 #[test]

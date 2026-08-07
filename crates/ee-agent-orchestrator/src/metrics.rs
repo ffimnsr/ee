@@ -25,6 +25,9 @@ pub struct OrchestratorMetrics {
     cancellations: u64,
     policy_denials: u64,
     budget_stops: u64,
+    recovery_interruptions: u64,
+    auto_resumes: u64,
+    duplicate_operations_blocked: u64,
     input_bytes: u64,
     output_bytes: u64,
     input_tokens: u64,
@@ -66,6 +69,21 @@ impl OrchestratorMetrics {
     /// Counts one budget-exceeded stop.
     pub fn record_budget_stop(&mut self) {
         self.budget_stops += 1;
+    }
+
+    /// Counts one recoverable turn interruption.
+    pub fn record_recovery_interruption(&mut self) {
+        self.recovery_interruptions += 1;
+    }
+
+    /// Counts one automatic turn resume.
+    pub fn record_auto_resume(&mut self) {
+        self.auto_resumes += 1;
+    }
+
+    /// Counts one blocked duplicate write/execute replay on a resumed turn.
+    pub fn record_duplicate_operation_blocked(&mut self) {
+        self.duplicate_operations_blocked += 1;
     }
 
     /// Accumulates known input/output bytes.
@@ -144,6 +162,24 @@ impl OrchestratorMetrics {
     #[must_use]
     pub fn budget_stops(&self) -> u64 {
         self.budget_stops
+    }
+
+    /// Recoverable turn interruptions counted.
+    #[must_use]
+    pub fn recovery_interruptions(&self) -> u64 {
+        self.recovery_interruptions
+    }
+
+    /// Automatic turn resumes counted.
+    #[must_use]
+    pub fn auto_resumes(&self) -> u64 {
+        self.auto_resumes
+    }
+
+    /// Blocked duplicate write/execute replays counted.
+    #[must_use]
+    pub fn duplicate_operations_blocked(&self) -> u64 {
+        self.duplicate_operations_blocked
     }
 
     /// Accumulated input bytes.

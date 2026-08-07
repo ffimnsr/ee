@@ -436,7 +436,7 @@ impl StrategyExecutor {
         &self,
         mode: LoopMode,
         read_first: bool,
-        transcript: Transcript,
+        mut transcript: Transcript,
         session_id: String,
         run: StrategyRun,
     ) -> Result<(PromptResult, Transcript), OrchestratorError> {
@@ -457,8 +457,9 @@ impl StrategyExecutor {
             options,
         );
         engine
-            .run_transcript(transcript, session_id, run.sink, run.client, run.cancel, run.task)
+            .run_transcript(&mut transcript, session_id, run.sink, run.client, run.cancel, run.task)
             .await
+            .map(|result| (result, transcript))
     }
 
     /// `ValidateThenReview`: run the edit loop, then a bounded review phase

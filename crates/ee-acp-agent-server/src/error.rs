@@ -7,7 +7,9 @@
 //! [`AcpServerError::jsonrpc_code`] / [`AcpServerError::jsonrpc_message`].
 
 use std::fmt;
+use std::time::Duration;
 
+use ee_agent_protocol::recovery::RecoverableError;
 use ee_agent_protocol::{Error as RpcError, RequestId, SessionId};
 
 /// JSON-RPC code for a cancelled request (ACP/MCP cancellation convention).
@@ -68,6 +70,26 @@ pub enum ProviderError {
     ClientRequestFailure(String),
     /// The provider denied the request on permission grounds.
     PermissionDenied(String),
+    /// The turn stopped on a recoverable interruption: completed work is
+    /// durable and the same session may resume without losing it.
+    Recoverable(RecoverableError),
+    /// The provider rate-limited the request; `retry_after` carries the
+    /// server hint when one was provided.
+    RateLimited {
+        /// Server-provided retry hint, when present.
+        retry_after: Option<Duration>,
+        /// Human-readable detail.
+        detail: String,
+    },
+    /// A transient provider/network failure that may succeed on retry
+    /// (5xx, connection reset, ...).  Never used for side-effecting
+    /// operations by providers that cannot prove the request did not land.
+    Transient {
+        /// Server-provided retry hint, when present.
+        retry_after: Option<Duration>,
+        /// Human-readable detail.
+        detail: String,
+    },
 }
 
 impl AcpServerError {
@@ -105,8 +127,9 @@ impl AcpServerError {
 
     /// Builds a JSON-RPC [`RpcError`] carrying this error's code and message.
     ///
-    /// `InvalidParams` additionally carries the reason in `data` so clients
-    /// can surface the exact validation failure.
+    /// Structured payloads ride in `data` so clients can act on them without
+    /// parsing messages: `InvalidParams` carries `reason`, recoverable turns
+    /// carry `recoverable`, and rate limits carry `rate_limited`.
     #[must_use]
     pub fn into_rpc_error(&self) -> RpcError {
         match self {
@@ -114,6 +137,7 @@ impl AcpServerError {
                 RpcError::new(self.jsonrpc_code(), self.jsonrpc_message())
                     .data(serde_json::json!({ "reason": reason }))
             }
+            Self::Provider(provider) => provider.into_rpc_error(),
             _ => RpcError::new(self.jsonrpc_code(), self.jsonrpc_message()),
         }
     }
@@ -128,6 +152,7 @@ impl ProviderError {
             Self::BackendFailure(_) | Self::ClientRequestFailure(_) => -32603,
             Self::Cancellation => CODE_REQUEST_CANCELLED,
             Self::PermissionDenied(_) => CODE_PERMISSION_DENIED,
+            Self::Recoverable(_) | Self::RateLimited { .. } | Self::Transient { .. } => -32603,
         }
     }
 
@@ -140,6 +165,39 @@ impl ProviderError {
             Self::Cancellation => "request cancelled".to_string(),
             Self::ClientRequestFailure(reason) => format!("client request failed: {reason}"),
             Self::PermissionDenied(reason) => format!("permission denied: {reason}"),
+            Self::Recoverable(recoverable) => {
+                format!("recoverable turn interruption: {}", recoverable.detail)
+            }
+            Self::RateLimited { detail, .. } => format!("provider rate limited: {detail}"),
+            Self::Transient { detail, .. } => format!("transient provider failure: {detail}"),
+        }
+    }
+
+    /// Builds a JSON-RPC [`RpcError`] carrying the structured `data` payload
+    /// (`recoverable` / `rate_limited`) so clients can offer Resume/Discard
+    /// without parsing messages.
+    #[must_use]
+    pub fn into_rpc_error(&self) -> RpcError {
+        match self {
+            Self::Recoverable(recoverable) => {
+                RpcError::new(self.jsonrpc_code(), self.jsonrpc_message())
+                    .data(serde_json::json!({ "recoverable": recoverable }))
+            }
+            Self::RateLimited { retry_after, .. } => {
+                RpcError::new(self.jsonrpc_code(), self.jsonrpc_message()).data(
+                    serde_json::json!({ "rate_limited": {
+                        "retry_after_ms": retry_after.map(|duration| duration.as_millis() as u64),
+                    } }),
+                )
+            }
+            Self::Transient { retry_after, .. } => {
+                RpcError::new(self.jsonrpc_code(), self.jsonrpc_message()).data(
+                    serde_json::json!({ "transient": {
+                        "retry_after_ms": retry_after.map(|duration| duration.as_millis() as u64),
+                    } }),
+                )
+            }
+            _ => RpcError::new(self.jsonrpc_code(), self.jsonrpc_message()),
         }
     }
 }
@@ -174,6 +232,11 @@ impl fmt::Display for ProviderError {
             Self::Cancellation => f.write_str("request cancelled"),
             Self::ClientRequestFailure(reason) => write!(f, "client request failed: {reason}"),
             Self::PermissionDenied(reason) => write!(f, "permission denied: {reason}"),
+            Self::Recoverable(recoverable) => {
+                write!(f, "recoverable turn interruption: {}", recoverable.detail)
+            }
+            Self::RateLimited { detail, .. } => write!(f, "provider rate limited: {detail}"),
+            Self::Transient { detail, .. } => write!(f, "transient provider failure: {detail}"),
         }
     }
 }
@@ -214,6 +277,28 @@ mod tests {
             (ProviderError::Cancellation, -32800, "request cancelled"),
             (ProviderError::ClientRequestFailure("nope".into()), -32603, "client request failed"),
             (ProviderError::PermissionDenied("locked".into()), -32001, "permission denied"),
+            (
+                ProviderError::Recoverable(
+                    RecoverableError::new(ee_agent_protocol::RecoverableFault::Deadline, "paused")
+                        .with_checkpoint_id("ck-1")
+                        .with_counts(4, 1),
+                ),
+                -32603,
+                "recoverable turn interruption",
+            ),
+            (
+                ProviderError::RateLimited {
+                    retry_after: Some(std::time::Duration::from_secs(30)),
+                    detail: "429".into(),
+                },
+                -32603,
+                "provider rate limited",
+            ),
+            (
+                ProviderError::Transient { retry_after: None, detail: "503".into() },
+                -32603,
+                "transient provider failure",
+            ),
         ]
     }
 
@@ -268,6 +353,64 @@ mod tests {
         assert!(rpc.message.contains("invalid params: cwd must be an absolute path"));
         let data = rpc.data.expect("invalid params carries data");
         assert_eq!(data["reason"], "cwd must be an absolute path");
+    }
+
+    #[test]
+    fn recoverable_error_carries_structured_data() {
+        let error = ProviderError::Recoverable(
+            RecoverableError::new(ee_agent_protocol::RecoverableFault::Deadline, "turn paused")
+                .with_checkpoint_id("ck-7")
+                .with_counts(4, 1)
+                .with_retry_after(5_000),
+        );
+        let rpc = error.into_rpc_error();
+        assert_eq!(i32::from(rpc.code), -32603);
+        let data = rpc.data.expect("recoverable carries data");
+        assert_eq!(data["recoverable"]["fault"], "deadline");
+        assert_eq!(data["recoverable"]["checkpoint_id"], "ck-7");
+        assert_eq!(data["recoverable"]["completed_tool_calls"], 4);
+        assert_eq!(data["recoverable"]["retry_after"], 5_000);
+        // The payload round-trips into the shared wire type.
+        let parsed: ee_agent_protocol::RecoverableError =
+            serde_json::from_value(data["recoverable"].clone()).expect("parses");
+        assert_eq!(parsed.fault, ee_agent_protocol::RecoverableFault::Deadline);
+        assert!(parsed.safe_resume);
+    }
+
+    #[test]
+    fn rate_limited_error_carries_retry_hint() {
+        let error = ProviderError::RateLimited {
+            retry_after: Some(std::time::Duration::from_secs(30)),
+            detail: "slow down".into(),
+        };
+        let rpc = error.into_rpc_error();
+        let data = rpc.data.expect("rate limited carries data");
+        assert_eq!(data["rate_limited"]["retry_after_ms"], 30_000);
+    }
+
+    #[test]
+    fn transient_error_carries_retry_hint() {
+        let error = ProviderError::Transient {
+            retry_after: Some(std::time::Duration::from_secs(5)),
+            detail: "upstream down".into(),
+        };
+        let rpc = error.into_rpc_error();
+        let data = rpc.data.expect("transient carries data");
+        assert_eq!(data["transient"]["retry_after_ms"], 5_000);
+    }
+
+    #[test]
+    fn ambiguous_fault_is_never_safe_to_resume() {
+        let error = ProviderError::Recoverable(
+            RecoverableError::new(ee_agent_protocol::RecoverableFault::AmbiguousTool, "paused")
+                .with_safe_resume(false),
+        );
+        let rpc = error.into_rpc_error();
+        let data = rpc.data.expect("recoverable carries data");
+        let parsed: ee_agent_protocol::RecoverableError =
+            serde_json::from_value(data["recoverable"].clone()).expect("parses");
+        assert!(!parsed.safe_resume);
+        assert!(!parsed.fault.is_safe_to_resume());
     }
 
     #[test]

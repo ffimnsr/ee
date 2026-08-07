@@ -558,6 +558,79 @@ async fn agent_eof_mid_turn_resolves_prompt_with_typed_error() {
 }
 
 #[tokio::test]
+async fn recoverable_error_surfaces_as_paused_event_with_structured_info() {
+    let script = base_script().wait_for("session/prompt").respond_error_with_data(
+        -32603,
+        "recoverable turn interruption: paused after 300s",
+        json!({
+            "recoverable": {
+                "fault": "deadline",
+                "detail": "paused after 300s",
+                "cause": null,
+                "safe_resume": true,
+                "retry_after": null,
+                "checkpoint_id": "s-1-0000000003",
+                "completed_tool_calls": 4,
+                "resumed_count": 0,
+            }
+        }),
+    );
+    let (fake, mut host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
+
+    let error =
+        thread.send_prompt(vec![ContentBlock::Text(TextContent::new("hi"))]).await.unwrap_err();
+    assert!(matches!(error, AgentError::Rpc(_)), "wire error stays an Rpc error: {error:?}");
+    assert!(!thread.is_turn_running(), "the thread stays alive after a pause");
+
+    let paused = loop {
+        match next_event(&mut host.events).await {
+            AgentEvent::TurnPausedRecoverable { recoverable, .. } => break *recoverable,
+            AgentEvent::TurnStarted { .. }
+            | AgentEvent::SessionUpdate { .. }
+            | AgentEvent::ConnectionStateChanged { .. }
+            | AgentEvent::ThreadCreated { .. } => continue,
+            other => panic!("unexpected event: {other:?}"),
+        }
+    };
+    assert_eq!(paused.fault, "deadline");
+    assert_eq!(paused.detail, "paused after 300s");
+    assert!(paused.safe_resume);
+    assert_eq!(paused.checkpoint_id.as_deref(), Some("s-1-0000000003"));
+    assert_eq!(paused.completed_tool_calls, 4);
+    assert_eq!(paused.resumed_count, 0);
+
+    host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
+async fn plain_errors_still_surface_as_turn_failed() {
+    let script = base_script().wait_for("session/prompt").respond_error(-32603, "backend exploded");
+    let (fake, mut host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
+
+    let error =
+        thread.send_prompt(vec![ContentBlock::Text(TextContent::new("hi"))]).await.unwrap_err();
+    assert!(matches!(error, AgentError::Rpc(_)));
+
+    let mut saw_failed = false;
+    while let Ok(Some(event)) = tokio::time::timeout(TEST_TIMEOUT, host.events.recv()).await {
+        if matches!(event, AgentEvent::TurnFailed { .. }) {
+            saw_failed = true;
+            break;
+        }
+    }
+    assert!(saw_failed, "plain errors keep the TurnFailed path");
+    host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
 async fn cancel_sends_session_cancel_and_resolves_prompt() {
     let script = base_script()
         .wait_for("session/prompt")

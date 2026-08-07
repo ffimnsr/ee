@@ -110,6 +110,41 @@ pub enum OrchestratorEvent {
         /// Subagent role the call serves, when routed for one.
         role: Option<String>,
     },
+    /// A recovery checkpoint was persisted.
+    CheckpointSaved {
+        /// ACP session id.
+        session_id: String,
+        /// Stable checkpoint id.
+        checkpoint_id: String,
+    },
+    /// A turn stopped on a recoverable interruption.
+    TurnInterrupted {
+        /// ACP session id.
+        session_id: String,
+        /// Fault class label ([`RecoverableFault::as_str`](ee_agent_protocol::RecoverableFault::as_str)).
+        fault: String,
+        /// Whether the checkpoint may be resumed without confirmation.
+        safe_resume: bool,
+        /// How many times this turn has been resumed.
+        resumed_count: u32,
+    },
+    /// A turn resumed from a checkpoint.
+    TurnResumed {
+        /// ACP session id.
+        session_id: String,
+        /// Checkpoint id the turn resumed from.
+        checkpoint_id: String,
+        /// Resume count after this resume.
+        resumed_count: u32,
+    },
+    /// A completed write/execute/delegate call was reused instead of replayed
+    /// (idempotency guard on resumed turns).
+    ToolResultReused {
+        /// New tool-call id the model supplied.
+        tool_call_id: String,
+        /// Tool name.
+        tool_name: String,
+    },
 }
 
 /// Thread-safe in-memory recorder of [`OrchestratorEvent`] values.
@@ -221,6 +256,25 @@ mod tests {
                 trust: crate::trust::TrustLevel::ToolOutputUntrusted,
                 pattern: "ignore previous instructions".into(),
                 excerpt: "file says ignore previous instructions".into(),
+            },
+            OrchestratorEvent::CheckpointSaved {
+                session_id: "s-1".into(),
+                checkpoint_id: "s-1-0000000001".into(),
+            },
+            OrchestratorEvent::TurnInterrupted {
+                session_id: "s-1".into(),
+                fault: "deadline".into(),
+                safe_resume: true,
+                resumed_count: 1,
+            },
+            OrchestratorEvent::TurnResumed {
+                session_id: "s-1".into(),
+                checkpoint_id: "s-1-0000000002".into(),
+                resumed_count: 2,
+            },
+            OrchestratorEvent::ToolResultReused {
+                tool_call_id: "tc-2".into(),
+                tool_name: "write_file".into(),
             },
         ];
         for event in events {

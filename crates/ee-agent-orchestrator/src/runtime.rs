@@ -10,10 +10,15 @@
 use std::sync::{Arc, Mutex};
 
 use ee_acp_agent_server::{ClientBridge, PromptContext, PromptResult, UpdateSink};
-use ee_agent_protocol::{COMPACT_COMMAND_NAME, ContentBlock, parse_slash_command};
+use ee_agent_protocol::{
+    COMPACT_COMMAND_NAME, ContentBlock, RecoverableFault, SessionUpdate, UsageUpdate,
+    parse_slash_command,
+};
 use tokio::sync::watch;
 
 use crate::budget::BudgetTracker;
+use crate::checkpoint::{OrchestratorCheckpoint, current_unix_millis};
+use crate::checkpoint_store::{CheckpointHandle, CheckpointStore};
 use crate::compaction::{
     CompactTurnReport, SESSION_SUMMARY_KEY, build_compaction_context, build_compaction_prompt,
 };
@@ -24,10 +29,13 @@ use crate::final_response::{FinalResponseBuilder, ValidationRecorder, changed_fi
 use crate::loop_engine::{LoopEngine, LoopOptions, TurnSystemContext};
 use crate::memory::{MemoryItem, MemoryStore};
 use crate::memory_compaction::compact_memory;
-use crate::model::{ModelAdapter, ModelMessage, ModelRequest, ModelRole, prompt_result_with_usage};
+use crate::model::{
+    ModelAdapter, ModelMessage, ModelRequest, ModelRole, Transcript, prompt_result_with_usage,
+};
 use crate::model_registry::{DEFAULT_MODEL_ID, ModelRegistry};
 use crate::policy::PolicyEngine;
 use crate::progress::ProgressTracker;
+use crate::recovery::{RecoverableInterruption, TurnOutcome, session_timeout_expired};
 use crate::sensitive_data::SensitiveDataGuard;
 use crate::strategy::{
     StrategicInput, StrategyContext, StrategyExecutor, StrategyRun, StrategySelector, TurnResult,
@@ -52,6 +60,8 @@ pub struct OrchestratorRuntime {
     memory: Arc<Mutex<MemoryStore>>,
     budget: Arc<Mutex<BudgetTracker>>,
     policy: PolicyEngine,
+    checkpoints: Arc<CheckpointStore>,
+    events: EventRecorder,
 }
 
 impl OrchestratorRuntime {
@@ -171,6 +181,8 @@ impl OrchestratorRuntime {
         let budget = Arc::new(Mutex::new(budget));
         let models = Arc::new(models);
         let tools = Arc::new(Mutex::new(ToolRegistry::new()));
+        let checkpoints = Arc::new(CheckpointStore::new(&config.recovery));
+        let events = EventRecorder::new();
         let manager = Arc::new(SubagentManager::new(
             config.clone(),
             models.clone(),
@@ -184,7 +196,37 @@ impl OrchestratorRuntime {
             .expect("tool registry poisoned")
             .register(Arc::new(DelegateTool::new(manager)))
             .expect("registers delegate_task");
-        Self { config, models, tools, tasks, memory, budget, policy }
+        Self { config, models, tools, tasks, memory, budget, policy, checkpoints, events }
+    }
+
+    /// Snapshot of the runtime's recovery/loop events (diagnostics and
+    /// traceability; the loop's own recorder is separate).
+    #[must_use]
+    pub fn event_snapshot(&self) -> Vec<OrchestratorEvent> {
+        self.events.events()
+    }
+
+    /// The checkpoint store backing this runtime (same directory as every
+    /// other runtime sharing the recovery config).
+    #[must_use]
+    pub(crate) fn checkpoint_store(&self) -> Arc<CheckpointStore> {
+        self.checkpoints.clone()
+    }
+
+    /// Replaces the task/memory/budget stores from a validated checkpoint
+    /// and restarts the wall-clock deadline slice.  Cumulative budget
+    /// counters are retained; only the deadline is fresh.
+    pub fn restore_from_checkpoint(
+        &self,
+        checkpoint: &OrchestratorCheckpoint,
+    ) -> Result<(), OrchestratorError> {
+        checkpoint.validate()?;
+        *self.tasks.lock().expect("task graph poisoned") = checkpoint.tasks.clone();
+        *self.memory.lock().expect("memory store poisoned") = checkpoint.memory.clone();
+        let mut budget = BudgetTracker::new(&checkpoint.config);
+        budget.restore_used(&checkpoint.budget)?;
+        *self.budget.lock().expect("budget tracker poisoned") = budget;
+        Ok(())
     }
 
     /// The active configuration.
@@ -275,6 +317,254 @@ impl OrchestratorRuntime {
         .await
     }
 
+    /// Runs one turn with recovery enabled: milestone checkpoints are
+    /// persisted and deadline/timeout stops become
+    /// [`TurnOutcome::Interrupted`] carrying a durable checkpoint instead of
+    /// a fatal error.  Completed turns and cancellations clear the session's
+    /// pending checkpoints.  `provider` stamps the checkpoint identity used
+    /// by crash restore.
+    pub async fn run_turn_recoverable(
+        &self,
+        ctx: PromptContext,
+        sink: UpdateSink,
+        client: ClientBridge,
+        cancel: watch::Receiver<bool>,
+        system_context: String,
+        provider: &str,
+    ) -> Result<TurnOutcome, OrchestratorError> {
+        if !self.config.recovery.enabled {
+            let result = self
+                .run_turn_recording_with_system_context(
+                    ctx,
+                    sink,
+                    client,
+                    cancel,
+                    EventRecorder::new(),
+                    Some(system_context),
+                )
+                .await?;
+            return Ok(TurnOutcome::Completed(result));
+        }
+        // Agent-advertised slash commands arrive as ordinary prompt text;
+        // `/compact` takes the compaction path before any task or tool work.
+        let prompt_text = prompt_text(&ctx);
+        if let Some(command) = parse_slash_command(&prompt_text)
+            && command.name == COMPACT_COMMAND_NAME
+        {
+            let result = self
+                .run_compact_turn(ctx, sink, cancel, command.instructions, Some(system_context))
+                .await?;
+            return Ok(TurnOutcome::Completed(result));
+        }
+        let (title, description) = task_summary(&ctx);
+        let (task, entries) = {
+            let mut tasks = self.tasks.lock().expect("task graph poisoned");
+            let task = tasks.create_root(&title, &description);
+            let entries = tasks.plan_entries();
+            (task, entries)
+        };
+        sink.plan_replace(entries).map_err(|error| {
+            OrchestratorError::InvalidState(format!("plan emission failed: {error}"))
+        })?;
+        let session_id = ctx.session_id.to_string();
+        let handle = CheckpointHandle::new(self.checkpoints.clone(), &session_id, provider);
+        let outcome = self
+            .run_loop_with_options(
+                ctx.clone(),
+                sink,
+                client,
+                cancel,
+                task,
+                Some(system_context),
+                self.events.clone(),
+                LoopOptions {
+                    graph: Some(self.tasks.clone()),
+                    available_models: self.models.advertised(),
+                    model_id: Some(DEFAULT_MODEL_ID.to_string()),
+                    memory: Some(self.memory.clone()),
+                    checkpoint: Some(handle),
+                    ..LoopOptions::default()
+                },
+            )
+            .await;
+        match outcome {
+            Ok(result) => {
+                self.checkpoints.delete_session(&session_id);
+                Ok(TurnOutcome::Completed(result))
+            }
+            Err(OrchestratorError::Cancellation) => {
+                self.checkpoints.delete_session(&session_id);
+                Err(OrchestratorError::Cancellation)
+            }
+            Err(OrchestratorError::DeadlineExceeded(detail)) => Ok(TurnOutcome::Interrupted(
+                self.interruption_for(&session_id, RecoverableFault::Deadline, detail, None)?,
+            )),
+            Err(OrchestratorError::Timeout(detail)) => Ok(TurnOutcome::Interrupted(
+                self.interruption_for(&session_id, RecoverableFault::Deadline, detail, None)?,
+            )),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Resumes an interrupted turn from its latest checkpoint: restores the
+    /// stores (fresh deadline slice, cumulative counters retained), appends
+    /// the new prompt to the checkpoint transcript tail, and runs the loop
+    /// with the completed-tool idempotency guard.  `provider` must match the
+    /// checkpoint's provider identity (crash-restore validation).
+    pub async fn resume_turn(
+        &self,
+        ctx: PromptContext,
+        sink: UpdateSink,
+        client: ClientBridge,
+        cancel: watch::Receiver<bool>,
+        system_context: String,
+        provider: &str,
+    ) -> Result<TurnOutcome, OrchestratorError> {
+        let session_id = ctx.session_id.to_string();
+        let Some((checkpoint_id, checkpoint)) =
+            self.checkpoints.load_latest(&session_id).map_err(|error| {
+                OrchestratorError::Serialization(format!(
+                    "failed to load pending checkpoint: {error}"
+                ))
+            })?
+        else {
+            return Err(OrchestratorError::InvalidState(format!(
+                "no pending checkpoint for session {session_id}"
+            )));
+        };
+        if checkpoint.provider != provider {
+            return Err(OrchestratorError::PolicyDenied(format!(
+                "checkpoint provider {:?} does not match {:?}; refusing restore",
+                checkpoint.provider, provider
+            )));
+        }
+        let resume = checkpoint.resume.clone().ok_or_else(|| {
+            OrchestratorError::InvalidState("checkpoint has no resumable turn state".into())
+        })?;
+        if session_timeout_expired(
+            &self.config,
+            resume.first_started_at_millis,
+            current_unix_millis(),
+        ) {
+            self.checkpoints.delete_session(&session_id);
+            return Err(OrchestratorError::InvalidState(
+                "session exceeded its cumulative timeout; checkpoint discarded".into(),
+            ));
+        }
+        self.restore_from_checkpoint(&checkpoint)?;
+        let mut resumed = resume.clone();
+        resumed.resumed_count += 1;
+        resumed.in_flight = None;
+        self.events.record(OrchestratorEvent::TurnResumed {
+            session_id: session_id.clone(),
+            checkpoint_id: checkpoint_id.clone(),
+            resumed_count: resumed.resumed_count,
+        });
+        let mut transcript = Transcript::new();
+        transcript.messages = resume.transcript;
+        // `/resume` continuation carries no prompt text: the original prompt
+        // already lives in the checkpoint transcript, so nothing is appended.
+        if !ctx.prompt.is_empty() {
+            transcript.messages.extend(Transcript::from_prompt(&ctx).messages);
+        }
+        let memory = self.memory.lock().expect("memory store poisoned").compact_context();
+        if let Some(facts) = memory {
+            transcript.prepend_system(format!("Memory facts:\n{facts}"));
+        }
+        if !system_context.is_empty() {
+            transcript.prepend_system(&system_context);
+        }
+        let handle = CheckpointHandle::new(self.checkpoints.clone(), &session_id, provider);
+        let model = self.models.default_adapter()?;
+        let engine = LoopEngine::new(
+            self.config.clone(),
+            model,
+            self.tools.clone(),
+            self.budget.clone(),
+            self.policy.clone(),
+            self.events.clone(),
+            LoopOptions {
+                graph: Some(self.tasks.clone()),
+                available_models: self.models.advertised(),
+                model_id: Some(DEFAULT_MODEL_ID.to_string()),
+                memory: Some(self.memory.clone()),
+                checkpoint: Some(handle),
+                resume_state: Some(resumed),
+                ..LoopOptions::default()
+            },
+        );
+        let task = {
+            let tasks = self.tasks.lock().expect("task graph poisoned");
+            tasks.get(&crate::tasks::TaskId::new(resume.active_task_id.clone())).cloned()
+        }
+        .ok_or_else(|| {
+            OrchestratorError::InvalidState(format!(
+                "resume references unknown active task {}",
+                resume.active_task_id
+            ))
+        })?;
+        let outcome = engine
+            .run_transcript(&mut transcript, session_id.clone(), sink, client, cancel, task)
+            .await;
+        match outcome {
+            Ok(result) => {
+                self.checkpoints.delete_session(&session_id);
+                Ok(TurnOutcome::Completed(result))
+            }
+            Err(OrchestratorError::Cancellation) => {
+                self.checkpoints.delete_session(&session_id);
+                Err(OrchestratorError::Cancellation)
+            }
+            Err(OrchestratorError::DeadlineExceeded(detail)) => {
+                Ok(TurnOutcome::Interrupted(self.interruption_for(
+                    &session_id,
+                    RecoverableFault::Deadline,
+                    detail,
+                    Some(resume.resumed_count + 1),
+                )?))
+            }
+            Err(OrchestratorError::Timeout(detail)) => {
+                Ok(TurnOutcome::Interrupted(self.interruption_for(
+                    &session_id,
+                    RecoverableFault::Deadline,
+                    detail,
+                    Some(resume.resumed_count + 1),
+                )?))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Builds a [`RecoverableInterruption`] from the session's latest
+    /// checkpoint, recording the interruption event.
+    fn interruption_for(
+        &self,
+        session_id: &str,
+        fault: RecoverableFault,
+        detail: String,
+        resumed_count_hint: Option<u32>,
+    ) -> Result<RecoverableInterruption, OrchestratorError> {
+        let latest = self.checkpoints.load_latest(session_id)?;
+        let interruption = RecoverableInterruption::from_checkpoint(
+            fault,
+            detail,
+            None,
+            None,
+            latest.as_ref().map(|(id, checkpoint)| (id.as_str(), checkpoint)),
+        );
+        let interruption = match resumed_count_hint {
+            Some(count) => RecoverableInterruption { resumed_count: count, ..interruption },
+            None => interruption,
+        };
+        self.events.record(OrchestratorEvent::TurnInterrupted {
+            session_id: session_id.to_string(),
+            fault: fault.as_str().to_string(),
+            safe_resume: interruption.safe_resume,
+            resumed_count: interruption.resumed_count,
+        });
+        Ok(interruption)
+    }
+
     /// Same as [`OrchestratorRuntime::run_turn`] but records every loop
     /// decision into `events`; used by tests to assert stable decision
     /// sequences.
@@ -319,6 +609,44 @@ impl OrchestratorRuntime {
         sink.plan_replace(entries).map_err(|error| {
             OrchestratorError::InvalidState(format!("plan emission failed: {error}"))
         })?;
+        self.run_loop_with_options(
+            ctx,
+            sink,
+            client,
+            cancel,
+            task,
+            system_context,
+            events,
+            LoopOptions {
+                graph: Some(self.tasks.clone()),
+                available_models: self.models.advertised(),
+                model_id: Some(DEFAULT_MODEL_ID.to_string()),
+                ..LoopOptions::default()
+            },
+        )
+        .await
+    }
+
+    /// Shared turn runner: builds the engine from `options` and runs one
+    /// bounded turn over the prompt with the given system context.  The
+    /// wall-clock deadline is re-anchored to this turn's slice (a runtime
+    /// may idle between turns for longer than one timeout).
+    #[allow(clippy::too_many_arguments)]
+    async fn run_loop_with_options(
+        &self,
+        ctx: PromptContext,
+        sink: UpdateSink,
+        client: ClientBridge,
+        cancel: watch::Receiver<bool>,
+        task: TaskNode,
+        system_context: Option<String>,
+        events: EventRecorder,
+        options: LoopOptions,
+    ) -> Result<PromptResult, OrchestratorError> {
+        self.budget
+            .lock()
+            .expect("budget tracker poisoned")
+            .reset_deadline(self.config.turn_timeout);
         let memory = self.memory.lock().expect("memory store poisoned").compact_context();
         let model = self.models.default_adapter()?;
         let engine = LoopEngine::new(
@@ -328,12 +656,7 @@ impl OrchestratorRuntime {
             self.budget.clone(),
             self.policy.clone(),
             events,
-            LoopOptions {
-                graph: Some(self.tasks.clone()),
-                available_models: self.models.advertised(),
-                model_id: Some(DEFAULT_MODEL_ID.to_string()),
-                ..LoopOptions::default()
-            },
+            options,
         );
         engine
             .run_with_system_context(
@@ -388,6 +711,11 @@ impl OrchestratorRuntime {
         sink.plan_replace(entries).map_err(|error| {
             OrchestratorError::InvalidState(format!("plan emission failed: {error}"))
         })?;
+        // Fresh slice: strategic turns re-anchor the deadline too.
+        self.budget
+            .lock()
+            .expect("budget tracker poisoned")
+            .reset_deadline(self.config.turn_timeout);
         let prompt_text = ctx
             .prompt
             .iter()
@@ -516,6 +844,12 @@ impl OrchestratorRuntime {
             "LLM session compaction summary",
         );
         let model = self.models.default_adapter()?;
+        // Fresh slice: the compaction model call gets the full per-turn
+        // timeout, regardless of how long the session idled.
+        self.budget
+            .lock()
+            .expect("budget tracker poisoned")
+            .reset_deadline(self.config.turn_timeout);
         // The compaction model call consumes budget like any other call;
         // budget exhaustion or token caps fail closed.
         self.budget.lock().expect("budget tracker poisoned").try_reserve_model_call()?;
@@ -539,6 +873,14 @@ impl OrchestratorRuntime {
             response.usage.input_tokens,
             response.usage.output_tokens,
         )?;
+        // Context-window usage after the compaction model call; unknown
+        // usage emits nothing.
+        if let Some(input_tokens) = response.usage.input_tokens {
+            let _ = sink.raw_update(SessionUpdate::UsageUpdate(UsageUpdate::new(
+                input_tokens as u64,
+                self.config.context_window_tokens,
+            )));
+        }
         if *cancel.borrow() {
             return Err(OrchestratorError::Cancellation);
         }
@@ -614,6 +956,7 @@ fn task_summary(ctx: &PromptContext) -> (String, String) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -1427,5 +1770,471 @@ mod tests {
         assert!(!calls[0].tools.is_empty(), "normal loop advertises tools");
         assert_eq!(runtime.tasks().len(), 1, "root task created by the normal loop");
         assert!(runtime.memory().query("summary:session").is_none());
+    }
+
+    // ── Recovery: resumable turn interruptions ───────────────────────────
+
+    /// Model that parks on the virtual clock before answering, with per-call
+    /// delays: a long first delay lets the outer turn timeout fire
+    /// deterministically, fast later delays let resumed slices complete.
+    /// Cancellation is observed after the park.
+    #[derive(Clone)]
+    struct DelayedModel {
+        delays: Arc<Mutex<VecDeque<Duration>>>,
+        default_delay: Duration,
+        inner: FakeModel,
+    }
+
+    impl DelayedModel {
+        fn new(delays: Vec<Duration>, default_delay: Duration, inner: FakeModel) -> Self {
+            Self { delays: Arc::new(Mutex::new(delays.into())), default_delay, inner }
+        }
+    }
+
+    impl ModelAdapter for DelayedModel {
+        fn complete(
+            &self,
+            request: crate::model::ModelRequest,
+            cancel: watch::Receiver<bool>,
+        ) -> crate::model::ModelFuture<Result<crate::model::ModelResponse, crate::model::ModelError>>
+        {
+            let delay = self
+                .delays
+                .lock()
+                .expect("delays poisoned")
+                .pop_front()
+                .unwrap_or(self.default_delay);
+            let inner = self.inner.clone();
+            Box::pin(async move {
+                tokio::time::sleep(delay).await;
+                if *cancel.borrow() {
+                    return Err(crate::model::ModelError::Cancelled);
+                }
+                inner.complete(request, cancel).await
+            })
+        }
+    }
+
+    fn recovery_config(turn_timeout: Duration) -> OrchestratorConfig {
+        OrchestratorConfig {
+            turn_timeout,
+            recovery: crate::config::RecoveryConfig {
+                enabled: true,
+                ..crate::config::RecoveryConfig::default()
+            },
+            // Scripted text-only responses make no task-graph progress;
+            // disable the no-progress rule for these tests.
+            stuck: crate::stuck::StuckConfig {
+                max_no_progress_iterations: 100,
+                ..crate::stuck::StuckConfig::default()
+            },
+            ..OrchestratorConfig::default()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_stop_becomes_interrupted_outcome_with_durable_checkpoint() {
+        // The first model call parks past the slice; the outer turn timeout
+        // fires deterministically under the paused clock.
+        let model = Arc::new(DelayedModel::new(
+            vec![Duration::from_millis(5_000)],
+            Duration::ZERO,
+            FakeModel::new(vec![
+                ModelResponse::new().text("one"),
+                ModelResponse::new().text("two"),
+            ]),
+        ));
+        let runtime =
+            OrchestratorRuntime::new(recovery_config(Duration::from_millis(40)), model.clone());
+        let (sink, client, _rx) = plumbing();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let outcome = tokio::join!(
+            runtime.run_turn_recoverable(
+                prompt("hello"),
+                sink,
+                client,
+                cancel_rx,
+                String::new(),
+                "test-provider",
+            ),
+            async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                tokio::time::advance(Duration::from_millis(500)).await;
+            },
+        )
+        .0;
+        let interruption = match outcome.expect("recoverable run returns an outcome") {
+            TurnOutcome::Interrupted(interruption) => interruption,
+            other => panic!("expected interruption, got {other:?}"),
+        };
+        assert_eq!(interruption.fault, ee_agent_protocol::RecoverableFault::Deadline);
+        assert!(interruption.safe_resume, "no in-flight tool; resuming is safe");
+        assert_eq!(interruption.resumed_count, 0);
+        assert!(interruption.checkpoint_id.is_some(), "checkpoint persisted");
+
+        let store = runtime.checkpoint_store();
+        let (id, checkpoint) = store.load_latest("s-1").expect("loads").expect("pending");
+        assert_eq!(id, interruption.checkpoint_id.unwrap());
+        assert_eq!(checkpoint.provider, "test-provider");
+        let resume = checkpoint.resume.expect("resume state captured");
+        assert!(
+            resume.transcript.iter().any(|message| message.role == ModelRole::User),
+            "transcript tail carries the user turn"
+        );
+        assert!(runtime.event_snapshot().iter().any(|event| {
+            matches!(
+                event,
+                OrchestratorEvent::TurnInterrupted { fault, .. } if fault == "deadline"
+            )
+        }));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resumed_turn_completes_without_new_root_and_retains_counters() {
+        let model = Arc::new(DelayedModel::new(
+            vec![Duration::from_millis(5_000)],
+            Duration::ZERO,
+            FakeModel::new(vec![
+                ModelResponse::new().text("one"),
+                ModelResponse::new().text("two"),
+                ModelResponse::new().text("three"),
+                ModelResponse::new().text("four"),
+                ModelResponse::new().text("five"),
+                ModelResponse::new().text("six").completed(),
+            ]),
+        ));
+        let runtime =
+            OrchestratorRuntime::new(recovery_config(Duration::from_millis(40)), model.clone());
+        let (sink, client, _rx) = plumbing();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let outcome = tokio::join!(
+            runtime.run_turn_recoverable(
+                prompt("hello"),
+                sink,
+                client,
+                cancel_rx,
+                String::new(),
+                "test-provider",
+            ),
+            async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                tokio::time::advance(Duration::from_millis(500)).await;
+            },
+        )
+        .0;
+        assert!(
+            matches!(outcome, Ok(TurnOutcome::Interrupted(_))),
+            "first slice interrupts, got {outcome:?}"
+        );
+        assert_eq!(runtime.tasks().len(), 1, "one root task so far");
+        assert_eq!(model.inner.call_count(), 0, "hung slice consumes no scripted responses");
+
+        // Resume: same session, same prompt; the checkpoint is consumed.
+        // The clock only advances enough to fire the scripted 1 ms model
+        // sleeps; a 500 ms jump would land past the fresh slice deadline.
+        let (sink, client, _rx) = plumbing();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let outcome = tokio::join!(
+            runtime.resume_turn(
+                prompt("hello"),
+                sink,
+                client,
+                cancel_rx,
+                String::new(),
+                "test-provider",
+            ),
+            async {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                tokio::time::advance(Duration::from_millis(10)).await;
+            },
+        )
+        .0;
+        match outcome.expect("resume returns an outcome") {
+            TurnOutcome::Completed(result) => {
+                assert_eq!(result.stop_reason, StopReason::EndTurn);
+            }
+            other => panic!("resumed turn should complete, got {other:?}"),
+        }
+        // One root task survives; no second root was created by the resume.
+        assert_eq!(runtime.tasks().len(), 1, "resume reuses the existing root task");
+        // Cumulative counters retained: slice 1 reserved one model call
+        // before its hang; the resume consumed the six scripted responses.
+        assert_eq!(runtime.budget_snapshot().model_calls_used, 7);
+        assert_eq!(model.inner.call_count(), 6);
+        // Completed turns clear pending checkpoints.
+        assert!(runtime.checkpoint_store().load_latest("s-1").expect("loads").is_none());
+        assert!(runtime.event_snapshot().iter().any(|event| {
+            matches!(event, OrchestratorEvent::TurnResumed { checkpoint_id, .. } if !checkpoint_id.is_empty())
+        }));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resumed_turn_never_replays_identical_write_calls() {
+        let write = || ToolIntent::new("tc-1", "write_file", json!({ "path": "/tmp/x" }));
+        let tool = Arc::new(FakeTool::new(
+            ToolDefinition::new("write_file", "writes a file")
+                .side_effect_class(SideEffectClass::Write),
+            ToolResult::success("written"),
+        ));
+        // Slice 1: one instant write, then a hang that trips the outer
+        // timeout.  Slice 2 (resume): the model asks for the identical write
+        // again, then completes.
+        let model = Arc::new(DelayedModel::new(
+            vec![Duration::ZERO, Duration::from_millis(5_000)],
+            Duration::ZERO,
+            FakeModel::new(vec![
+                ModelResponse::new().text("write now").tool_intents(vec![write()]),
+                ModelResponse::new().text("one"),
+                ModelResponse::new().text("write again").tool_intents(vec![write()]),
+                ModelResponse::new().text("done").completed(),
+            ]),
+        ));
+        let runtime = OrchestratorRuntime::with_policy(
+            recovery_config(Duration::from_millis(40)),
+            model,
+            PolicyEngine::new(ToolPolicy { allow_write: true, ..ToolPolicy::default() }),
+        );
+        runtime.register_tool(tool.clone()).expect("registers write_file");
+        let (sink, client, _rx) = plumbing();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let outcome = tokio::join!(
+            runtime.run_turn_recoverable(
+                prompt("hello"),
+                sink,
+                client,
+                cancel_rx,
+                String::new(),
+                "test-provider",
+            ),
+            async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                tokio::time::advance(Duration::from_millis(500)).await;
+            },
+        )
+        .0;
+        assert!(
+            matches!(outcome, Ok(TurnOutcome::Interrupted(_))),
+            "first slice interrupts, got {outcome:?}"
+        );
+        assert_eq!(tool.call_count(), 1, "the first slice executed the write once");
+
+        let (sink, client, _rx) = plumbing();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let outcome = tokio::join!(
+            runtime.resume_turn(
+                prompt("hello"),
+                sink,
+                client,
+                cancel_rx,
+                String::new(),
+                "test-provider",
+            ),
+            async {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                tokio::time::advance(Duration::from_millis(50)).await;
+            },
+        )
+        .0;
+        assert!(
+            matches!(outcome, Ok(TurnOutcome::Completed(_))),
+            "resumed turn completes, got {outcome:?}"
+        );
+        assert_eq!(
+            tool.call_count(),
+            1,
+            "identical write call reused from the checkpoint, never replayed"
+        );
+        assert!(runtime.event_snapshot().iter().any(|event| {
+            matches!(
+                event,
+                OrchestratorEvent::ToolResultReused { tool_name, .. } if tool_name == "write_file"
+            )
+        }));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_clears_pending_checkpoints() {
+        // The model parks briefly so the bumper can flip the cancel watch
+        // before the slice's outer timeout fires.
+        let model = Arc::new(DelayedModel::new(
+            vec![Duration::from_millis(10)],
+            Duration::from_millis(10),
+            FakeModel::new(vec![ModelResponse::new().text("one")]),
+        ));
+        // A long slice: cancellation (not the outer timeout) must end the
+        // turn deterministically.
+        let runtime = OrchestratorRuntime::new(recovery_config(Duration::from_secs(10)), model);
+        let (sink, client, _rx) = plumbing();
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let outcome = tokio::join!(
+            runtime.run_turn_recoverable(
+                prompt("hello"),
+                sink,
+                client,
+                cancel_rx,
+                String::new(),
+                "test-provider",
+            ),
+            async {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                cancel_tx.send(true).expect("cancels");
+                tokio::time::advance(Duration::from_millis(20)).await;
+            },
+        )
+        .0;
+        assert!(matches!(outcome, Err(OrchestratorError::Cancellation)), "got {outcome:?}");
+        assert!(
+            runtime.checkpoint_store().load_latest("s-1").expect("loads").is_none(),
+            "a cancelled turn never leaves a stale pending checkpoint"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_turn_clears_pending_checkpoints() {
+        let model = Arc::new(FakeModel::new(vec![ModelResponse::new().text("done").completed()]));
+        let runtime = OrchestratorRuntime::new(recovery_config(Duration::from_secs(30)), model);
+        let (sink, client, _rx) = plumbing();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let outcome = runtime
+            .run_turn_recoverable(
+                prompt("hello"),
+                sink,
+                client,
+                cancel_rx,
+                String::new(),
+                "test-provider",
+            )
+            .await
+            .expect("outcome");
+        assert!(matches!(outcome, TurnOutcome::Completed(_)));
+        assert!(
+            runtime.checkpoint_store().load_latest("s-1").expect("loads").is_none(),
+            "completed turns clear milestone checkpoints"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_is_reanchored_per_turn_not_per_session() {
+        // A runtime may idle between turns for longer than one timeout; the
+        // next turn must get a fresh slice instead of failing instantly on
+        // the session-creation deadline.
+        let model = Arc::new(FakeModel::new(vec![ModelResponse::new().text("done").completed()]));
+        let runtime = OrchestratorRuntime::new(recovery_config(Duration::from_secs(30)), model);
+        tokio::time::advance(Duration::from_secs(120)).await;
+        let (sink, client, _rx) = plumbing();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let outcome = runtime
+            .run_turn_recoverable(
+                prompt("hello"),
+                sink,
+                client,
+                cancel_rx,
+                String::new(),
+                "test-provider",
+            )
+            .await
+            .expect("outcome");
+        assert!(
+            matches!(outcome, TurnOutcome::Completed(_)),
+            "idle time must not consume the next turn's slice: {outcome:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resume_rejects_provider_mismatch_and_expired_sessions() {
+        let model = Arc::new(DelayedModel::new(
+            vec![Duration::from_millis(5_000)],
+            Duration::ZERO,
+            FakeModel::new(vec![ModelResponse::new().text("one")]),
+        ));
+        let runtime = OrchestratorRuntime::new(recovery_config(Duration::from_millis(40)), model);
+        let (sink, client, _rx) = plumbing();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let outcome = tokio::join!(
+            runtime.run_turn_recoverable(
+                prompt("hello"),
+                sink,
+                client,
+                cancel_rx,
+                String::new(),
+                "test-provider",
+            ),
+            async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                tokio::time::advance(Duration::from_millis(500)).await;
+            },
+        )
+        .0;
+        assert!(matches!(outcome, Ok(TurnOutcome::Interrupted(_))));
+
+        // A different provider identity must never restore the checkpoint.
+        let (sink, client, _rx) = plumbing();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let error = runtime
+            .resume_turn(prompt("hello"), sink, client, cancel_rx, String::new(), "other-provider")
+            .await
+            .expect_err("provider mismatch rejects restore");
+        assert!(
+            matches!(error, OrchestratorError::PolicyDenied(ref reason) if reason.contains("provider")),
+            "{error}"
+        );
+
+        // A checkpoint beyond the cumulative session cap is discarded.
+        let runtime = OrchestratorRuntime::new(
+            OrchestratorConfig {
+                turn_timeout: Duration::from_millis(40),
+                recovery: crate::config::RecoveryConfig {
+                    enabled: true,
+                    session_timeout: Some(Duration::from_secs(1)),
+                    ..crate::config::RecoveryConfig::default()
+                },
+                ..OrchestratorConfig::default()
+            },
+            Arc::new(DelayedModel::new(
+                vec![Duration::from_millis(5_000)],
+                Duration::ZERO,
+                FakeModel::new(vec![ModelResponse::new().text("one")]),
+            )),
+        );
+        let (sink, client, _rx) = plumbing();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let outcome = tokio::join!(
+            runtime.run_turn_recoverable(
+                prompt("hello"),
+                sink,
+                client,
+                cancel_rx,
+                String::new(),
+                "test-provider",
+            ),
+            async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                tokio::time::advance(Duration::from_millis(500)).await;
+            },
+        )
+        .0;
+        assert!(matches!(outcome, Ok(TurnOutcome::Interrupted(_))));
+        // Age the checkpoint past the one-second session cap.
+        {
+            let store = runtime.checkpoint_store();
+            let (_, mut checkpoint) = store.load_latest("s-1").expect("loads").expect("pending");
+            checkpoint.created_at_millis = crate::checkpoint::current_unix_millis();
+            if let Some(resume) = checkpoint.resume.as_mut() {
+                resume.first_started_at_millis =
+                    crate::checkpoint::current_unix_millis().saturating_sub(2_000);
+            }
+            store.save("s-1", &checkpoint).expect("rewrites aged checkpoint");
+        }
+        let (sink, client, _rx) = plumbing();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let error = runtime
+            .resume_turn(prompt("hello"), sink, client, cancel_rx, String::new(), "test-provider")
+            .await
+            .expect_err("session cap rejects resume");
+        assert!(error.to_string().contains("cumulative timeout"), "{error}");
+        assert!(
+            runtime.checkpoint_store().load_latest("s-1").expect("loads").is_none(),
+            "expired checkpoint discarded"
+        );
     }
 }

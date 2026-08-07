@@ -14,7 +14,7 @@ use common::{
     tool_call_response,
 };
 use ee_agent_protocol::{RawJsonRpcMessage, RawJsonRpcParams};
-use ee_openrouter_agent::config::Config;
+use ee_openrouter_agent::config::{Config, DEFAULT_CONTEXT_WINDOW_TOKENS};
 use ee_openrouter_agent::provider::OpenRouterProvider;
 use serde_json::{Value, json};
 
@@ -41,6 +41,15 @@ fn test_config_with(
         compact_min_messages,
         compact_retained_tail,
         compact_max_input_bytes,
+        context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
+        retry_max_attempts: ee_openrouter_agent::config::DEFAULT_RETRY_MAX_ATTEMPTS,
+        retry_base_delay: Duration::from_millis(
+            ee_openrouter_agent::config::DEFAULT_RETRY_BASE_DELAY_MS,
+        ),
+        retry_max_delay: Duration::from_millis(
+            ee_openrouter_agent::config::DEFAULT_RETRY_MAX_DELAY_MS,
+        ),
+        checkpoint_dir: None,
     }
 }
 
@@ -220,12 +229,51 @@ async fn prompt_response_carries_reported_turn_token_usage() {
 
     harness.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
 
-    let frames = harness.next_frames(2).await;
-    let result = request_result(frames[1].clone());
+    // Answer chunk, usage_update notification, then the response.
+    let frames = harness.next_frames(3).await;
+    let result = request_result(frames[2].clone());
     assert_eq!(result["stopReason"], "end_turn");
     assert_eq!(result["usage"]["totalTokens"], 8431);
     assert_eq!(result["usage"]["inputTokens"], 6120);
     assert_eq!(result["usage"]["outputTokens"], 2311);
+
+    harness.shutdown(task).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn provider_emits_context_usage_update_with_used_and_window() {
+    let mock = MockOpenRouter::start(vec![answer_response_with_usage("done", 6120, 2311)]);
+    let provider = OpenRouterProvider::new(test_config(&mock)).unwrap();
+    let (harness, task) = Harness::spawn(provider).await;
+    let session_id = new_session(&harness, 1).await;
+
+    harness.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
+
+    // Answer chunk, usage_update notification, then the response.
+    let frames = harness.next_frames(3).await;
+    let update = update_of(&frames[1]);
+    assert_eq!(update["sessionUpdate"], "usage_update");
+    assert_eq!(update["used"], 6120, "used is the current context sent to the model");
+    assert_eq!(
+        update["size"], DEFAULT_CONTEXT_WINDOW_TOKENS,
+        "size is the configured context window"
+    );
+
+    harness.shutdown(task).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unknown_usage_emits_no_context_usage_update() {
+    let mock = MockOpenRouter::start(vec![answer_response("done")]);
+    let provider = OpenRouterProvider::new(test_config(&mock)).unwrap();
+    let (harness, task) = Harness::spawn(provider).await;
+    let session_id = new_session(&harness, 1).await;
+
+    harness.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
+
+    let frames = harness.next_frames(2).await;
+    assert_eq!(update_of(&frames[0])["sessionUpdate"], "agent_message_chunk");
+    assert_eq!(request_result(frames[1].clone())["stopReason"], "end_turn");
 
     harness.shutdown(task).await;
 }
@@ -247,9 +295,13 @@ async fn tool_loop_turn_usage_aggregates_across_rounds() {
     let fs_request = &frames[1];
     harness.send(respond_to(fs_request, Ok(json!({ "content": "file contents" }))));
 
-    // Tool completion, answer chunk, then the response with aggregated usage.
-    let frames = harness.next_frames(3).await;
-    let result = request_result(frames[2].clone());
+    // Tool completion, answer chunk, usage_update, then the response with
+    // aggregated usage.
+    let frames = harness.next_frames(4).await;
+    let update = update_of(&frames[2]);
+    assert_eq!(update["sessionUpdate"], "usage_update");
+    assert_eq!(update["used"], 100, "context usage follows the last round");
+    let result = request_result(frames[3].clone());
     assert_eq!(result["stopReason"], "end_turn");
     assert_eq!(result["usage"]["totalTokens"], 150);
     assert_eq!(result["usage"]["inputTokens"], 100);

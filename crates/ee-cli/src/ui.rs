@@ -578,19 +578,27 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         }
         frame.render_widget(Paragraph::new(window).scroll((0, 0)), transcript_area);
 
-        // Footer: nick, state, usage, unread, stop reason.
+        // Footer: nick, state, unread, stop reason (left) and the session's
+        // ACP context-window usage (used/size tokens) right-aligned — this is
+        // the row directly above the composer.  The stop reason is omitted
+        // here because the transcript already logs `turn completed (stop: …)`.
         let state_label = match thread.state {
-            ThreadUiState::Starting => "starting",
-            ThreadUiState::Ready => "ready",
-            ThreadUiState::Running => "running",
-            ThreadUiState::Closed => "closed",
-            ThreadUiState::Failed => "failed",
+            ThreadUiState::Starting => "starting".into(),
+            ThreadUiState::Ready => "ready".into(),
+            ThreadUiState::Running => "running".into(),
+            ThreadUiState::PausedRecoverable => thread.pending_recovery.as_ref().map_or_else(
+                || std::borrow::Cow::Borrowed("paused (recoverable)"),
+                |pending| {
+                    std::borrow::Cow::Owned(format!("paused (recoverable: {})", pending.info.fault))
+                },
+            ),
+            ThreadUiState::Closed => "closed".into(),
+            ThreadUiState::Failed => "failed".into(),
         };
         let footer_text = format!(
-            "{} [{}]{} | session:{} / {} | thoughts:{} | unread:{} | last:{} | Ctrl-←/→ response | Ctrl-R toggle {}",
+            "{} [{}] | session:{} / {} | thoughts:{} | unread:{} | last:{} | Ctrl-←/→ response | Ctrl-R toggle",
             thread.nick,
             state_label,
-            thread.usage.as_deref().map(|u| format!(" | {u}")).unwrap_or_default(),
             active_index + 1,
             app.agents.threads.len(),
             if app.agents.show_thoughts { "on" } else { "off" },
@@ -600,17 +608,34 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
                 .as_ref()
                 .map(crate::app::turn_metrics_label)
                 .unwrap_or_else(|| String::from("—")),
-            thread.stop_reason.as_deref().unwrap_or(""),
         );
         let footer_style = if thread.state == ThreadUiState::Running {
             Style::default().fg(theme::FG_WARNING)
         } else {
             theme_style(theme::FG_DIM)
         };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(footer_text, footer_style))),
-            footer_area,
-        );
+        let usage_label = thread.usage.as_deref().unwrap_or_default();
+        let usage_width = usage_label.width().min(footer_area.width as usize) as u16;
+        let footer_line = Line::from(Span::styled(footer_text, footer_style));
+        if usage_width == 0 {
+            frame.render_widget(Paragraph::new(footer_line), footer_area);
+        } else {
+            // Split the row: the left footer truncates independently so the
+            // context usage always stays visible at the rightmost edge, even
+            // in narrow panes where the left text overflows.
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(0), Constraint::Length(usage_width)])
+                .split(footer_area);
+            frame.render_widget(Paragraph::new(footer_line), cols[0]);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    usage_label.to_string(),
+                    theme_style(theme::FG_DIM),
+                ))),
+                cols[1],
+            );
+        }
         agents_composer_line(app, thread)
     } else {
         let mut lines = vec![Line::from(vec![
@@ -629,14 +654,14 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             ]));
         } else {
             lines.push(Line::from(Span::styled(
-                "-!- configure [agents.servers.<id>] in .ee.toml, then press : and run agents_new",
+                "-!- configure [agents.servers.<id>] in .ee.toml, then type /new_thread",
                 theme_style(theme::FG_DIM),
             )));
         }
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), transcript_area);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "agents [no session] | Enter starts after config | :agents_new | :agents_threads | Esc close",
+                "agents [no session] | Enter starts after config | /new_thread | /quit | Esc close",
                 theme_style(theme::FG_DIM),
             ))),
             footer_area,

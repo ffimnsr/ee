@@ -22,6 +22,11 @@ pub enum OrchestratorError {
     PolicyDenied(String),
     /// A configured budget (iterations, tool calls, memory, ...) was exceeded.
     BudgetExceeded(String),
+    /// A wall-clock deadline (turn slice, model call, ...) was exceeded.
+    /// Distinct from [`OrchestratorError::BudgetExceeded`] so the runtime can
+    /// convert deadline stops into recoverable interruptions instead of
+    /// budget failures.
+    DeadlineExceeded(String),
     /// A wall-clock limit (turn, tool, ...) was exceeded.
     Timeout(String),
     /// The turn was cancelled.
@@ -52,6 +57,7 @@ impl fmt::Display for OrchestratorError {
             Self::ToolFailure(reason) => write!(f, "tool failure: {reason}"),
             Self::PolicyDenied(reason) => write!(f, "policy denied: {reason}"),
             Self::BudgetExceeded(reason) => write!(f, "budget exceeded: {reason}"),
+            Self::DeadlineExceeded(reason) => write!(f, "deadline exceeded: {reason}"),
             Self::Timeout(reason) => write!(f, "orchestrator timeout: {reason}"),
             Self::Cancellation => f.write_str("turn cancelled"),
             Self::InvalidState(reason) => write!(f, "orchestrator state error: {reason}"),
@@ -91,6 +97,9 @@ impl From<OrchestratorError> for ProviderError {
             OrchestratorError::BudgetExceeded(reason) => {
                 ProviderError::BackendFailure(format!("budget exceeded: {reason}"))
             }
+            OrchestratorError::DeadlineExceeded(reason) => {
+                ProviderError::BackendFailure(format!("deadline exceeded: {reason}"))
+            }
             OrchestratorError::Timeout(reason) => {
                 ProviderError::BackendFailure(format!("orchestrator timeout: {reason}"))
             }
@@ -121,6 +130,7 @@ mod tests {
             (OrchestratorError::ToolFailure("boom".into()), "tool failure"),
             (OrchestratorError::PolicyDenied("no".into()), "policy denied"),
             (OrchestratorError::BudgetExceeded("loop".into()), "budget exceeded"),
+            (OrchestratorError::DeadlineExceeded("turn".into()), "deadline exceeded"),
             (OrchestratorError::Timeout("turn".into()), "orchestrator timeout"),
             (OrchestratorError::Cancellation, "turn cancelled"),
             (OrchestratorError::InvalidState("dup".into()), "orchestrator state error"),
@@ -148,6 +158,15 @@ mod tests {
     fn cancellation_helpers_agree() {
         assert!(OrchestratorError::Cancellation.is_cancellation());
         assert!(!OrchestratorError::ModelFailure("x".into()).is_cancellation());
+    }
+
+    #[test]
+    fn deadline_is_distinct_from_budget_exceeded() {
+        let deadline: OrchestratorError = OrchestratorError::DeadlineExceeded("slice".into());
+        let budget: OrchestratorError = OrchestratorError::BudgetExceeded("count".into());
+        assert_ne!(deadline, budget);
+        assert!(deadline.to_string().contains("deadline exceeded"));
+        assert!(!deadline.is_cancellation());
     }
 
     #[test]
@@ -182,6 +201,10 @@ mod tests {
             (
                 OrchestratorError::BudgetExceeded("b".into()),
                 ProviderError::BackendFailure("budget exceeded: b".into()),
+            ),
+            (
+                OrchestratorError::DeadlineExceeded("d".into()),
+                ProviderError::BackendFailure("deadline exceeded: d".into()),
             ),
             (
                 OrchestratorError::Timeout("to".into()),

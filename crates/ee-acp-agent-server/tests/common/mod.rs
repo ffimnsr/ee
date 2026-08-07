@@ -13,9 +13,10 @@ pub use ee_acp_agent_server::{
     PromptResult, ProviderError, ProviderFuture, SessionInit, UpdateSink,
 };
 use ee_agent_protocol::{
-    AgentCapabilities, AvailableCommand, CreateTerminalRequest, Error as RpcError, Implementation,
-    RawJsonRpcMessage, RawJsonRpcParams, ReadTextFileRequest, RequestId, Response,
-    SessionCapabilities, SessionCloseCapabilities, SessionId, SessionListCapabilities, StopReason,
+    AgentCapabilities, AvailableCommand, ContentBlock, ContentChunk, CreateTerminalRequest,
+    Error as RpcError, Implementation, MessageId, RawJsonRpcMessage, RawJsonRpcParams,
+    ReadTextFileRequest, RequestId, Response, SessionCapabilities, SessionCloseCapabilities,
+    SessionId, SessionListCapabilities, SessionUpdate, StopReason, TextContent,
 };
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -83,6 +84,12 @@ pub struct FakeProvider {
     ids: Arc<Mutex<VecDeque<String>>>,
     /// Commands advertised in every `SessionInit` (empty by default).
     commands: Arc<Mutex<Vec<AvailableCommand>>>,
+    /// `(role, text)` conversation messages replayed by `session/load`
+    /// through the replay sink (empty by default).
+    replay: Arc<Mutex<Vec<(String, String)>>>,
+    /// When set, `session/load`/`session/resume` fail with this message
+    /// (simulates "no persisted state").
+    load_error: Arc<Mutex<Option<String>>>,
     pub behaviors: Arc<Mutex<HashMap<String, PromptBehavior>>>,
 }
 
@@ -93,6 +100,8 @@ impl FakeProvider {
             log: log.clone(),
             ids: Arc::new(Mutex::new(ids.iter().map(|id| id.to_string()).collect())),
             commands: Arc::new(Mutex::new(Vec::new())),
+            replay: Arc::new(Mutex::new(Vec::new())),
+            load_error: Arc::new(Mutex::new(None)),
             behaviors: Arc::new(Mutex::new(HashMap::new())),
         };
         (provider, log)
@@ -102,6 +111,23 @@ impl FakeProvider {
     /// framework forwards them as `available_commands_update`).
     pub fn with_commands(self, commands: Vec<AvailableCommand>) -> Self {
         *self.commands.lock().expect("fake provider commands poisoned") = commands;
+        self
+    }
+
+    /// Makes `session/load` replay the given `(role, text)` conversation
+    /// messages through the replay sink before responding (tests prove the
+    /// ACP v1 replay-before-response ordering).
+    pub fn with_replay(self, messages: Vec<(&str, &str)>) -> Self {
+        *self.replay.lock().expect("fake provider replay poisoned") =
+            messages.into_iter().map(|(role, text)| (role.to_string(), text.to_string())).collect();
+        self
+    }
+
+    /// Makes `session/load`/`session/resume` fail with `message` (simulates
+    /// a provider with no persisted state to restore).
+    pub fn with_load_error(self, message: &str) -> Self {
+        *self.load_error.lock().expect("fake provider load error poisoned") =
+            Some(message.to_string());
         self
     }
 
@@ -155,8 +181,35 @@ impl AgentProvider for FakeProvider {
         let log = self.log.clone();
         let session_id = ctx.session_id.clone();
         let commands = self.commands.lock().expect("fake provider commands poisoned").clone();
+        let replay = self.replay.lock().expect("fake provider replay poisoned").clone();
+        let load_error = self.load_error.lock().expect("fake provider load error poisoned").clone();
+        let sink = ctx.replay_sink;
         Box::pin(async move {
             log.record(format!("load_session:{session_id}"));
+            if let Some(message) = load_error {
+                return Err(ProviderError::BackendFailure(message));
+            }
+            if let Some(sink) = sink {
+                for (index, (role, text)) in replay.iter().enumerate() {
+                    match role.as_str() {
+                        "user" => {
+                            let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(
+                                text.clone(),
+                            )))
+                            .message_id(MessageId::new(format!("replay-u-{}", index + 1)));
+                            sink.raw_update(SessionUpdate::UserMessageChunk(chunk)).map_err(
+                                |error| ProviderError::BackendFailure(error.to_string()),
+                            )?;
+                        }
+                        _ => {
+                            sink.agent_message_chunk(format!("replay-a-{}", index + 1), text)
+                                .map_err(|error| {
+                                    ProviderError::BackendFailure(error.to_string())
+                                })?;
+                        }
+                    }
+                }
+            }
             Ok(SessionInit::new(session_id).commands(commands))
         })
     }

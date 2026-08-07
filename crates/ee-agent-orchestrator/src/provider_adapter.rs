@@ -33,13 +33,16 @@ use ee_acp_agent_server::{
     PromptResult, ProviderError, ProviderFuture, SessionInit, UpdateSink,
 };
 use ee_agent_protocol::{
-    AgentCapabilities, COMPACT_COMMAND_NAME, Implementation, McpCapabilities, SessionCapabilities,
-    SessionCloseCapabilities, SessionId, SessionListCapabilities, compact_available_command,
-    parse_slash_command,
+    AgentCapabilities, COMPACT_COMMAND_NAME, ContentBlock, ContentChunk, DISCARD_COMMAND_NAME,
+    Implementation, McpCapabilities, MessageId, SessionCapabilities, SessionCloseCapabilities,
+    SessionId, SessionListCapabilities, SessionResumeCapabilities, SessionUpdate, StopReason,
+    TextContent, compact_available_command, discard_available_command, is_resume_command,
+    parse_slash_command, resume_available_command,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
+use crate::checkpoint_store::CheckpointStore;
 use crate::config::OrchestratorConfig;
 use crate::mcp::{
     McpBackedTool, McpDiscoveryDiagnostic, McpServerDescriptor, McpSessionManager, McpToolPolicy,
@@ -47,6 +50,7 @@ use crate::mcp::{
 use crate::memory::MemoryStore;
 use crate::model::ModelAdapter;
 use crate::policy::PolicyEngine;
+use crate::recovery::TurnOutcome;
 use crate::runtime::OrchestratorRuntime;
 use crate::tasks::TaskGraph;
 
@@ -91,7 +95,30 @@ struct SessionRuntime {
     system_context: String,
     /// Validated, secret-redacted MCP server descriptors from `session/new`.
     mcp_servers: Vec<McpServerDescriptor>,
+    /// Memory-bounded conversation log (user prompts + agent text chunks as
+    /// the client saw them), persisted on close and replayed by
+    /// `session/load` (ACP v1 conversation replay).
+    conversation: Arc<Mutex<Vec<ConversationMessage>>>,
 }
+
+/// One recorded conversation message for `session/load` replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ConversationMessage {
+    role: ConversationRole,
+    text: String,
+}
+
+/// Who produced a recorded conversation message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::enum_variant_names)]
+enum ConversationRole {
+    User,
+    Agent,
+}
+
+/// Upper bound of recorded conversation messages; the oldest messages are
+/// dropped first (the replay stays memory-bounded).
+const CONVERSATION_MAX_MESSAGES: usize = 256;
 
 /// Serialized orchestrator state kept when a session closes so a later
 /// `session/load` can restore it.
@@ -99,6 +126,10 @@ struct SessionRuntime {
 struct PersistedSession {
     tasks: TaskGraph,
     memory: MemoryStore,
+    /// Conversation log captured during the session (memory-bounded);
+    /// replayed as `user_message_chunk` / `agent_message_chunk` updates by
+    /// `session/load`.
+    conversation: Vec<ConversationMessage>,
 }
 
 /// ACP provider adapter around [`OrchestratorRuntime`].
@@ -269,6 +300,141 @@ impl Drop for McpTurnCleanup {
     }
 }
 
+/// Appends one recorded user message to the conversation log (bounded).
+fn record_user_message(
+    conversation: &Arc<Mutex<Vec<ConversationMessage>>>,
+    text: impl Into<String>,
+) {
+    let mut log = conversation.lock().expect("conversation poisoned");
+    log.push(ConversationMessage { role: ConversationRole::User, text: text.into() });
+    if log.len() > CONVERSATION_MAX_MESSAGES {
+        let overflow = log.len() - CONVERSATION_MAX_MESSAGES;
+        log.drain(..overflow);
+    }
+}
+
+/// Streams a recorded conversation to the client as `user_message_chunk` /
+/// `agent_message_chunk` updates, in order, with deterministic replay ids
+/// (ACP v1 `session/load` conversation replay).  With no sink (or nothing
+/// recorded) this is a no-op.
+fn replay_conversation(
+    sink: Option<&UpdateSink>,
+    conversation: &[ConversationMessage],
+) -> Result<(), ProviderError> {
+    let Some(sink) = sink else { return Ok(()) };
+    for (index, message) in conversation.iter().enumerate() {
+        let block = ContentBlock::Text(TextContent::new(message.text.clone()));
+        match message.role {
+            ConversationRole::User => {
+                let chunk = ContentChunk::new(block)
+                    .message_id(MessageId::new(format!("replay-u-{}", index + 1)));
+                sink.raw_update(SessionUpdate::UserMessageChunk(chunk)).map_err(|error| {
+                    ProviderError::BackendFailure(format!("failed to replay user message: {error}"))
+                })?;
+            }
+            ConversationRole::Agent => {
+                sink.agent_message_chunk(format!("replay-a-{}", index + 1), message.text.clone())
+                    .map_err(|error| {
+                    ProviderError::BackendFailure(format!(
+                        "failed to replay agent message: {error}"
+                    ))
+                })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Builds a runtime restored from a pending checkpoint, verifying the
+/// provider identity.  The checkpoint stays in the store (the resumed turn
+/// decides when to clear it).
+fn restore_runtime_from_checkpoint<M: ModelAdapter>(
+    checkpoint: &crate::checkpoint::OrchestratorCheckpoint,
+    implementation_name: &str,
+    model: Arc<M>,
+    policy: PolicyEngine,
+) -> Result<Arc<OrchestratorRuntime>, ProviderError> {
+    if checkpoint.provider != implementation_name {
+        return Err(ProviderError::BackendFailure(format!(
+            "checkpoint provider {:?} does not match {:?}; refusing restore",
+            checkpoint.provider, implementation_name
+        )));
+    }
+    OrchestratorRuntime::from_checkpoint(checkpoint, model, policy)
+        .map(Arc::new)
+        .map_err(ProviderError::from)
+}
+
+/// Replays the pending turn's checkpoint transcript tail as conversation
+/// chunks (crash-restore fallback): user and assistant text messages only.
+fn replay_checkpoint_transcript(
+    sink: Option<&UpdateSink>,
+    checkpoint: &crate::checkpoint::OrchestratorCheckpoint,
+) -> Result<(), ProviderError> {
+    let Some(sink) = sink else { return Ok(()) };
+    let Some(resume) = checkpoint.resume.as_ref() else { return Ok(()) };
+    for (index, message) in resume.transcript.iter().enumerate() {
+        let text = message.text_content();
+        if text.is_empty() {
+            continue;
+        }
+        match message.role {
+            crate::model::ModelRole::User => {
+                let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
+                    .message_id(MessageId::new(format!("replay-u-{}", index + 1)));
+                sink.raw_update(SessionUpdate::UserMessageChunk(chunk)).map_err(|error| {
+                    ProviderError::BackendFailure(format!(
+                        "failed to replay checkpoint user message: {error}"
+                    ))
+                })?;
+            }
+            crate::model::ModelRole::Assistant => {
+                sink.agent_message_chunk(format!("replay-a-{}", index + 1), text).map_err(
+                    |error| {
+                        ProviderError::BackendFailure(format!(
+                            "failed to replay checkpoint agent message: {error}"
+                        ))
+                    },
+                )?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The initial slash commands advertised for a session: `/compact` always;
+/// `/discard` and `/resume` only when recovery is enabled.
+fn initial_commands(recovery_enabled: bool) -> Vec<ee_agent_protocol::AvailableCommand> {
+    let mut commands = vec![compact_available_command()];
+    if recovery_enabled {
+        commands.push(discard_available_command());
+        commands.push(resume_available_command());
+    }
+    commands
+}
+
+/// Next session number: the in-process counter, raised past every session id
+/// that survives in the durable checkpoint store (cross-restart collision
+/// guard so a reconnected `session-1` is never shadowed by a fresh one).
+fn next_session_number(next_session: &AtomicU64, recovery: &crate::config::RecoveryConfig) -> u64 {
+    let base = CheckpointStore::new(recovery)
+        .session_ids()
+        .into_iter()
+        .filter_map(|id| {
+            id.strip_prefix(&format!("{SESSION_ID_PREFIX}-"))
+                .and_then(|suffix| suffix.parse::<u64>().ok())
+        })
+        .max()
+        .map_or(1, |max| max + 1);
+    // Take the next in-process number, then make sure the counter itself
+    // stays above the durable base so subsequent allocations never repeat it.
+    let previous = next_session.fetch_add(1, Ordering::Relaxed);
+    let number = previous.max(base);
+    next_session.fetch_max(number + 1, Ordering::Relaxed);
+    number
+}
+
 fn workspace_system_context(
     cwd: &std::path::Path,
     additional_directories: &[std::path::PathBuf],
@@ -299,19 +465,23 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
 
     fn capabilities(&self) -> AgentCapabilities {
         // Load is supported (restores persisted state); session listing and
-        // closing are handled by the framework.  The provider hosts
-        // MCP-over-ACP for every session (the `ClientBridge` mcp/* path), so
-        // `mcp_capabilities.acp` is advertised; hosts then append the ee
-        // proxy as `McpServer::Acp` instead of the stdio fallback.  Prompt/
-        // image capabilities stay at their defaults.
+        // closing are handled by the framework.  Recovery-enabled providers
+        // also advertise `session/resume` (checkpoint restore without
+        // replay).  The provider hosts MCP-over-ACP for every session (the
+        // `ClientBridge` mcp/* path), so `mcp_capabilities.acp` is
+        // advertised; hosts then append the ee proxy as `McpServer::Acp`
+        // instead of the stdio fallback.  Prompt/image capabilities stay at
+        // their defaults.
+        let mut session_capabilities = SessionCapabilities::new()
+            .list(SessionListCapabilities::new())
+            .close(SessionCloseCapabilities::new());
+        if self.config.orchestrator.recovery.enabled {
+            session_capabilities = session_capabilities.resume(SessionResumeCapabilities::new());
+        }
         AgentCapabilities::default()
             .load_session(true)
             .mcp_capabilities(McpCapabilities::new().acp(true))
-            .session_capabilities(
-                SessionCapabilities::new()
-                    .list(SessionListCapabilities::new())
-                    .close(SessionCloseCapabilities::new()),
-            )
+            .session_capabilities(session_capabilities)
     }
 
     fn new_session(
@@ -323,10 +493,12 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
         let policy = self.policy.clone();
         let sessions = self.sessions.clone();
         let next_session = self.next_session.clone();
+        let recovery_enabled = config.recovery.enabled;
         Box::pin(async move {
-            // Process-local monotonic id; deterministic (`session-1`, ...) for
-            // tests.
-            let number = next_session.fetch_add(1, Ordering::Relaxed);
+            // Monotonic id per process, raised past ids that survive in the
+            // durable checkpoint store so a reconnected session is never
+            // shadowed by a fresh one after a restart.
+            let number = next_session_number(&next_session, &config.recovery);
             let session_id = SessionId::new(format!("{SESSION_ID_PREFIX}-{number}"));
             let system_context = workspace_system_context(&ctx.cwd, &ctx.additional_directories);
             let mcp_servers = validate_mcp_servers(&ctx.mcp_servers)?;
@@ -336,9 +508,14 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
             })?;
             sessions.lock().expect("adapter sessions poisoned").insert(
                 session_id.to_string(),
-                SessionRuntime { runtime, system_context, mcp_servers },
+                SessionRuntime {
+                    runtime,
+                    system_context,
+                    mcp_servers,
+                    conversation: Arc::new(Mutex::new(Vec::new())),
+                },
             );
-            Ok(SessionInit::new(session_id).commands(vec![compact_available_command()]))
+            Ok(SessionInit::new(session_id).commands(initial_commands(recovery_enabled)))
         })
     }
 
@@ -347,38 +524,154 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
         ctx: LoadSessionContext,
     ) -> ProviderFuture<Result<SessionInit, ProviderError>> {
         let config = self.config.orchestrator.clone();
+        let implementation = self.config.implementation.clone();
         let model = self.model.clone();
         let policy = self.policy.clone();
         let sessions = self.sessions.clone();
         let persisted = self.persisted.clone();
         let session_id = ctx.session_id.clone();
+        let recovery_enabled = config.recovery.enabled;
         Box::pin(async move {
-            let Some(state) = persisted
-                .lock()
-                .expect("adapter persisted poisoned")
-                .remove(&session_id.to_string())
-            else {
-                return Err(ProviderError::BackendFailure(format!(
-                    "no persisted orchestrator state for session {session_id}"
-                )));
-            };
             let system_context = workspace_system_context(&ctx.cwd, &ctx.additional_directories);
             let mcp_servers = validate_mcp_servers(&ctx.mcp_servers)?;
-            let runtime = Arc::new(OrchestratorRuntime::with_state(
-                config,
-                model,
-                policy,
-                state.tasks,
-                state.memory,
-            ));
+            // A live session (same process, e.g. reconnect) is reused
+            // as-is, including its recorded conversation.
+            if let Some(entry) =
+                sessions.lock().expect("adapter sessions poisoned").get(&session_id.to_string())
+            {
+                replay_conversation(
+                    ctx.replay_sink.as_ref(),
+                    &entry.conversation.lock().expect("conversation poisoned"),
+                )?;
+                return Ok(
+                    SessionInit::new(session_id).commands(initial_commands(recovery_enabled))
+                );
+            }
+            let state = persisted
+                .lock()
+                .expect("adapter persisted poisoned")
+                .remove(&session_id.to_string());
+            let (runtime, conversation) = match state {
+                Some(state) => (
+                    Arc::new(OrchestratorRuntime::with_state(
+                        config,
+                        model.clone(),
+                        policy.clone(),
+                        state.tasks,
+                        state.memory,
+                    )),
+                    state.conversation,
+                ),
+                None => {
+                    // Crash restore: no in-memory state survived, so rebuild
+                    // from the durable checkpoint store when the provider
+                    // identity matches.
+                    let store = CheckpointStore::new(&config.recovery);
+                    let Some((_id, checkpoint)) =
+                        store.load_latest(&session_id.to_string()).map_err(|error| {
+                            ProviderError::BackendFailure(format!(
+                                "failed to read pending checkpoint: {error}"
+                            ))
+                        })?
+                    else {
+                        return Err(ProviderError::BackendFailure(format!(
+                            "no persisted orchestrator state for session {session_id}"
+                        )));
+                    };
+                    // The pending checkpoint stays until the resumed turn
+                    // completes or the client discards it.
+                    let runtime = restore_runtime_from_checkpoint(
+                        &checkpoint,
+                        &implementation.name,
+                        model.clone(),
+                        policy.clone(),
+                    )?;
+                    // Crash fallback replay: the checkpoint's transcript
+                    // tail is the only conversation that survived.
+                    replay_checkpoint_transcript(ctx.replay_sink.as_ref(), &checkpoint)?;
+                    (runtime, Vec::new())
+                }
+            };
             runtime.register_builtins(&session_id).map_err(|error| {
                 ProviderError::BackendFailure(format!("failed to register built-in tools: {error}"))
             })?;
+            replay_conversation(ctx.replay_sink.as_ref(), &conversation)?;
             sessions.lock().expect("adapter sessions poisoned").insert(
                 session_id.to_string(),
-                SessionRuntime { runtime, system_context, mcp_servers },
+                SessionRuntime {
+                    runtime,
+                    system_context,
+                    mcp_servers,
+                    conversation: Arc::new(Mutex::new(conversation)),
+                },
             );
-            Ok(SessionInit::new(session_id).commands(vec![compact_available_command()]))
+            Ok(SessionInit::new(session_id).commands(initial_commands(recovery_enabled)))
+        })
+    }
+
+    fn resume_session(
+        &self,
+        ctx: LoadSessionContext,
+    ) -> ProviderFuture<Result<SessionInit, ProviderError>> {
+        let config = self.config.orchestrator.clone();
+        let implementation = self.config.implementation.clone();
+        let model = self.model.clone();
+        let policy = self.policy.clone();
+        let sessions = self.sessions.clone();
+        let session_id = ctx.session_id.clone();
+        let recovery_enabled = config.recovery.enabled;
+        Box::pin(async move {
+            // `session/resume` restores context with NO replay (ACP v1): the
+            // interrupted turn is continued by the next `session/prompt` via
+            // the pending-checkpoint detection.  A live session (same
+            // process) is reused as-is.
+            let mcp_servers = validate_mcp_servers(&ctx.mcp_servers)?;
+            let mut live = false;
+            {
+                let mut sessions = sessions.lock().expect("adapter sessions poisoned");
+                if let Some(entry) = sessions.get_mut(&session_id.to_string()) {
+                    live = true;
+                    entry.mcp_servers = mcp_servers.clone();
+                }
+            }
+            if !live {
+                let store = CheckpointStore::new(&config.recovery);
+                let Some((_id, checkpoint)) =
+                    store.load_latest(&session_id.to_string()).map_err(|error| {
+                        ProviderError::BackendFailure(format!(
+                            "failed to read pending checkpoint: {error}"
+                        ))
+                    })?
+                else {
+                    return Err(ProviderError::BackendFailure(format!(
+                        "no pending checkpoint for session {session_id}; nothing to resume"
+                    )));
+                };
+                let runtime = restore_runtime_from_checkpoint(
+                    &checkpoint,
+                    &implementation.name,
+                    model.clone(),
+                    policy.clone(),
+                )?;
+                runtime.register_builtins(&session_id).map_err(|error| {
+                    ProviderError::BackendFailure(format!(
+                        "failed to register built-in tools: {error}"
+                    ))
+                })?;
+                let system_context =
+                    workspace_system_context(&ctx.cwd, &ctx.additional_directories);
+                // The checkpoint stays pending: the next prompt resumes it.
+                sessions.lock().expect("adapter sessions poisoned").insert(
+                    session_id.to_string(),
+                    SessionRuntime {
+                        runtime,
+                        system_context,
+                        mcp_servers,
+                        conversation: Arc::new(Mutex::new(Vec::new())),
+                    },
+                );
+            }
+            Ok(SessionInit::new(session_id).commands(initial_commands(recovery_enabled)))
         })
     }
 
@@ -393,6 +686,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
         let sessions = self.sessions.clone();
         let mcp_policy = self.config.mcp.clone();
         let policy = self.policy.clone();
+        let implementation_name = self.config.implementation.name.clone();
         Box::pin(async move {
             let session = {
                 let sessions = sessions.lock().expect("adapter sessions poisoned");
@@ -401,10 +695,11 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                         session.runtime.clone(),
                         session.system_context.clone(),
                         session.mcp_servers.clone(),
+                        session.conversation.clone(),
                     )
                 })
             };
-            let Some((runtime, system_context, mcp_servers)) = session else {
+            let Some((runtime, system_context, mcp_servers, conversation)) = session else {
                 return Err(ProviderError::BackendFailure(format!(
                     "no orchestrator state for session {session_id}"
                 )));
@@ -430,6 +725,48 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                     .await
                     .map_err(ProviderError::from);
             }
+            // `/discard` rejects a paused turn's pending checkpoint: the
+            // interrupted work is dropped instead of resumed.  Only valid
+            // when recovery is enabled; otherwise it is an ordinary prompt.
+            let recovery = runtime.config().recovery.clone();
+            let store = runtime.checkpoint_store();
+            if recovery.enabled
+                && parse_slash_command(&prompt_text)
+                    .is_some_and(|command| command.name == DISCARD_COMMAND_NAME)
+            {
+                store.delete_session(&session_id.to_string());
+                let _ = sink
+                    .agent_message_chunk("discard", "paused turn discarded; checkpoint cleared");
+                return Ok(PromptResult::new(StopReason::EndTurn));
+            }
+            let has_pending = store.has_pending(&session_id.to_string());
+            // `/resume` continues a paused turn without the original prompt
+            // (client-crash continuation).  Without a pending checkpoint it
+            // is an ordinary prompt whose text reaches the model.
+            let resume_command = recovery.enabled && is_resume_command(&prompt_text);
+            if !has_pending {
+                record_user_message(&conversation, prompt_text);
+            }
+            // Record the client-visible conversation for `session/load`
+            // replay: user prompts here, agent text chunks through a sink
+            // observer.
+            let recording_conversation = conversation.clone();
+            let sink = sink.with_observer(Arc::new(move |update| {
+                if let SessionUpdate::AgentMessageChunk(chunk) = update {
+                    let text = match &chunk.content {
+                        ee_agent_protocol::ContentBlock::Text(text) => text.text.clone(),
+                        _ => String::new(),
+                    };
+                    if !text.is_empty() {
+                        let mut log = recording_conversation.lock().expect("conversation poisoned");
+                        log.push(ConversationMessage { role: ConversationRole::Agent, text });
+                        if log.len() > CONVERSATION_MAX_MESSAGES {
+                            let overflow = log.len() - CONVERSATION_MAX_MESSAGES;
+                            log.drain(..overflow);
+                        }
+                    }
+                }
+            }));
             // Phase 12: bridge the session's MCP servers into the tool
             // registry for this prompt.  The manager is per prompt (the
             // `ClientBridge` is per prompt), while the validated descriptors
@@ -460,11 +797,72 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                 McpTurnCleanup { runtime: runtime.clone(), manager: Some(manager), registered };
             // The framework's cancellation watch flips on `session/cancel`
             // and `session/close`; run_turn observes it and stops promptly.
-            let result = runtime
-                .run_turn_with_system_context(ctx, sink, client, cancel, system_context)
-                .await;
+            let provider_name = implementation_name;
+            // Auto-resume needs the prompt inputs after the first run consumed
+            // them; clone once up front.
+            let resume_ctx = ctx.clone();
+            let resume_sink = sink.clone();
+            let resume_client = client.clone();
+            let resume_cancel = cancel.clone();
+            let resume_system = system_context.clone();
+            let result = if !recovery.enabled {
+                runtime
+                    .run_turn_with_system_context(ctx, sink, client, cancel, system_context)
+                    .await
+                    .map(TurnOutcome::Completed)
+            } else if has_pending {
+                // A paused turn awaits: the same prompt resumes it from its
+                // checkpoint (manual resume), continuing completed work.
+                // `/resume` resumes without appending the command text as a
+                // user message.
+                let resume_ctx = if resume_command {
+                    PromptContext::new(ctx.session_id.clone(), Vec::new())
+                } else {
+                    ctx
+                };
+                runtime
+                    .resume_turn(resume_ctx, sink, client, cancel, system_context, &provider_name)
+                    .await
+            } else {
+                runtime
+                    .run_turn_recoverable(ctx, sink, client, cancel, system_context, &provider_name)
+                    .await
+            };
+            let result = match result {
+                Ok(TurnOutcome::Completed(result)) => Ok(result),
+                Ok(TurnOutcome::Interrupted(interruption)) => {
+                    // Safe single auto-resume: transient/deadline faults with
+                    // a durable checkpoint and no ambiguous in-flight tool
+                    // resume once automatically, capped by the config.
+                    let auto_resume = recovery.auto_resume_max > 0
+                        && interruption.safe_resume
+                        && interruption.resumed_count < recovery.auto_resume_max;
+                    if auto_resume {
+                        match runtime
+                            .resume_turn(
+                                resume_ctx,
+                                resume_sink,
+                                resume_client,
+                                resume_cancel,
+                                resume_system,
+                                &provider_name,
+                            )
+                            .await
+                        {
+                            Ok(TurnOutcome::Completed(result)) => Ok(result),
+                            Ok(TurnOutcome::Interrupted(again)) => {
+                                Err(ProviderError::Recoverable(again.into_wire()))
+                            }
+                            Err(error) => Err(ProviderError::from(error)),
+                        }
+                    } else {
+                        Err(ProviderError::Recoverable(interruption.into_wire()))
+                    }
+                }
+                Err(error) => Err(ProviderError::from(error)),
+            };
             cleanup.finish().await;
-            result.map_err(ProviderError::from)
+            result
         })
     }
 
@@ -487,11 +885,17 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                 // Idempotent: the session was never created here.
                 return Ok(());
             };
+            // Explicit close finalizes the session: pending recovery
+            // checkpoints are deleted (the interrupted work is abandoned
+            // unless the host loads the persisted state below).
+            runtime.runtime.checkpoint_store().delete_session(&session_id.to_string());
+            let conversation = runtime.conversation.lock().expect("conversation poisoned").clone();
             persisted.lock().expect("adapter persisted poisoned").insert(
                 session_id.to_string(),
                 PersistedSession {
                     tasks: runtime.runtime.tasks(),
                     memory: runtime.runtime.memory(),
+                    conversation,
                 },
             );
             Ok(())
@@ -515,10 +919,521 @@ mod tests {
     use tokio::sync::watch;
 
     use super::*;
-    use crate::model::{ModelError, ModelFuture, ModelRequest, ModelResponse};
+    use crate::config::RecoveryConfig;
+    use crate::model::{ModelAdapter, ModelError, ModelFuture, ModelRequest, ModelResponse};
     use crate::test_support::FakeModel;
 
-    // ── Server-over-memory-transport harness ─────────────────────────────
+    /// Model that parks in real time before answering, with per-call delays
+    /// so a deterministic first-call hang triggers the outer turn timeout
+    /// while resumed calls complete well inside the slice.
+    #[derive(Clone)]
+    struct DelayedModel {
+        delays: Arc<Mutex<VecDeque<std::time::Duration>>>,
+        default_delay: std::time::Duration,
+        inner: FakeModel,
+    }
+
+    impl DelayedModel {
+        fn new(
+            hang_first: std::time::Duration,
+            default_delay: std::time::Duration,
+            inner: FakeModel,
+        ) -> Self {
+            let mut delays = VecDeque::new();
+            delays.push_back(hang_first);
+            Self { delays: Arc::new(Mutex::new(delays)), default_delay, inner }
+        }
+    }
+
+    impl ModelAdapter for DelayedModel {
+        fn complete(
+            &self,
+            request: ModelRequest,
+            cancel: watch::Receiver<bool>,
+        ) -> ModelFuture<Result<ModelResponse, ModelError>> {
+            let delay = self
+                .delays
+                .lock()
+                .expect("delays poisoned")
+                .pop_front()
+                .unwrap_or(self.default_delay);
+            let inner = self.inner.clone();
+            Box::pin(async move {
+                tokio::time::sleep(delay).await;
+                inner.complete(request, cancel).await
+            })
+        }
+    }
+
+    fn recovery_provider(
+        model: Arc<DelayedModel>,
+        auto_resume_max: u32,
+    ) -> OrchestratorProvider<DelayedModel> {
+        let mut recovery = RecoveryConfig::durable(None);
+        recovery.auto_resume_max = auto_resume_max;
+        OrchestratorProvider::with_policy(
+            OrchestratorProviderConfig {
+                orchestrator: OrchestratorConfig {
+                    turn_timeout: std::time::Duration::from_millis(500),
+                    recovery,
+                    // Scripted text-only responses make no task-graph
+                    // progress; disable the no-progress rule for the test.
+                    stuck: crate::stuck::StuckConfig {
+                        max_no_progress_iterations: 100,
+                        ..crate::stuck::StuckConfig::default()
+                    },
+                    ..OrchestratorConfig::default()
+                },
+                ..OrchestratorProviderConfig::default()
+            },
+            model,
+            PolicyEngine::default(),
+        )
+    }
+
+    /// Script with enough 1 ms answers to complete a resumed slice inside
+    /// the 500 ms turn timeout (the first call hangs past the slice).
+    fn resume_script() -> FakeModel {
+        let mut responses = Vec::new();
+        for index in 0..12 {
+            let response = if index == 11 {
+                ModelResponse::new().text("done").completed()
+            } else {
+                ModelResponse::new().text(format!("step {index}"))
+            };
+            responses.push(response);
+        }
+        FakeModel::new(responses)
+    }
+
+    #[tokio::test]
+    async fn provider_adapter_surfaces_recoverable_interruption_and_manual_resume() {
+        let model = Arc::new(DelayedModel::new(
+            std::time::Duration::from_millis(5_000),
+            std::time::Duration::from_millis(1),
+            resume_script(),
+        ));
+        let provider = recovery_provider(model, 0);
+        let (handle, task) = spawn_server(provider);
+        let session_id = new_session(&handle, 1).await;
+
+        // Prompt 1: the first model call hangs past the slice; the provider
+        // answers with a JSON-RPC error carrying the recoverable payload.
+        handle.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
+        let frame = next_response_frame(&handle).await;
+        let Response::Error { error, .. } = unwrap_response(frame.clone()) else {
+            panic!("expected an error response, got {frame:?}");
+        };
+        let recoverable =
+            &error.data.as_ref().expect("recoverable error carries data")["recoverable"];
+        assert_eq!(recoverable["fault"], "deadline");
+        assert_eq!(recoverable["safe_resume"], true);
+        assert_eq!(recoverable["resumed_count"], 0);
+        assert!(
+            recoverable["checkpoint_id"].as_str().is_some(),
+            "checkpoint id on the wire: {recoverable}"
+        );
+
+        // Prompt 2 with the same prompt resumes from the checkpoint and
+        // completes; the pending checkpoint is cleared.
+        handle.send(request(3, "session/prompt", prompt_params(&session_id, "hello")));
+        let result = request_result(next_response_frame(&handle).await);
+        assert_eq!(result["stopReason"], "end_turn", "resumed turn completes: {result}");
+
+        handle.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn provider_adapter_auto_resumes_once_and_completes() {
+        let model = Arc::new(DelayedModel::new(
+            std::time::Duration::from_millis(5_000),
+            std::time::Duration::from_millis(1),
+            resume_script(),
+        ));
+        let provider = recovery_provider(model, 1);
+        let (handle, task) = spawn_server(provider);
+        let session_id = new_session(&handle, 1).await;
+
+        // One prompt: the first slice times out, the safe single auto-resume
+        // continues from the checkpoint and completes.
+        handle.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
+        let result = request_result(next_response_frame(&handle).await);
+        assert_eq!(result["stopReason"], "end_turn", "auto-resume completes: {result}");
+
+        handle.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn provider_adapter_discard_command_clears_checkpoint() {
+        let model = Arc::new(DelayedModel::new(
+            std::time::Duration::from_millis(5_000),
+            std::time::Duration::from_millis(1),
+            resume_script(),
+        ));
+        let provider = recovery_provider(model, 0);
+        let (handle, task) = spawn_server(provider);
+        let session_id = new_session(&handle, 1).await;
+
+        // Prompt 1 times out with a recoverable error (not asserted here;
+        // the discard flow below is the point).
+        handle.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
+        let _ = next_response_frame(&handle).await;
+
+        // `/discard` drops the pending checkpoint and answers end_turn.
+        handle.send(request(3, "session/prompt", prompt_params(&session_id, "/discard")));
+        let result = request_result(next_response_frame(&handle).await);
+        assert_eq!(result["stopReason"], "end_turn", "discard answers end_turn: {result}");
+
+        // A later prompt is a fresh turn, not a resume: the full script
+        // replays inside the fresh slice.
+        handle.send(request(4, "session/prompt", prompt_params(&session_id, "again")));
+        let result = request_result(next_response_frame(&handle).await);
+        assert_eq!(result["stopReason"], "end_turn", "fresh prompt after discard: {result}");
+
+        handle.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn provider_adapter_resume_command_continues_paused_turn_without_prompt_text() {
+        let model = Arc::new(DelayedModel::new(
+            std::time::Duration::from_millis(5_000),
+            std::time::Duration::from_millis(1),
+            resume_script(),
+        ));
+        let provider = recovery_provider(model.clone(), 0);
+        let (handle, task) = spawn_server(provider);
+        let session_id = new_session(&handle, 1).await;
+
+        // Prompt 1 times out and leaves a pending checkpoint.
+        handle.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
+        let frame = next_response_frame(&handle).await;
+        let Response::Error { .. } = unwrap_response(frame) else {
+            panic!("expected a recoverable error");
+        };
+
+        // `/resume` continues the paused turn without appending the command
+        // text to the model transcript.
+        handle.send(request(3, "session/prompt", prompt_params(&session_id, "/resume")));
+        let result = request_result(next_response_frame(&handle).await);
+        assert_eq!(result["stopReason"], "end_turn", "resumed turn completes: {result}");
+        for request in model.inner.requests() {
+            for message in &request.transcript {
+                assert!(
+                    !message.text_content().contains("/resume"),
+                    "no model message may carry the /resume command text"
+                );
+            }
+        }
+        assert!(
+            model.inner.requests().iter().any(|request| {
+                request.transcript.iter().any(|message| message.text_content().contains("hello"))
+            }),
+            "the original prompt is present in the resumed transcript"
+        );
+
+        handle.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn provider_adapter_resume_command_without_pending_is_ordinary_prompt() {
+        let model = Arc::new(FakeModel::new(vec![ModelResponse::new().text("ok").completed()]));
+        let provider = recovery_provider(
+            Arc::new(DelayedModel::new(
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+                (*model).clone(),
+            )),
+            0,
+        );
+        let (handle, task) = spawn_server(provider);
+        let session_id = new_session(&handle, 1).await;
+
+        handle.send(request(2, "session/prompt", prompt_params(&session_id, "/resume")));
+        let result = request_result(next_response_frame(&handle).await);
+        assert_eq!(result["stopReason"], "end_turn", "ordinary turn runs: {result}");
+        let requests = model.requests();
+        assert!(
+            requests.iter().any(|request| {
+                request.transcript.iter().any(|message| message.text_content() == "/resume")
+            }),
+            "without a pending checkpoint /resume reaches the model as text"
+        );
+
+        handle.shutdown(task).await;
+    }
+
+    /// Provider with durable recovery in `dir` (crash-restore capable).
+    fn durable_recovery_provider(
+        model: Arc<DelayedModel>,
+        dir: &std::path::Path,
+    ) -> OrchestratorProvider<DelayedModel> {
+        let mut recovery = RecoveryConfig::durable(Some(dir.to_path_buf()));
+        recovery.auto_resume_max = 0;
+        OrchestratorProvider::with_policy(
+            OrchestratorProviderConfig {
+                orchestrator: OrchestratorConfig {
+                    turn_timeout: std::time::Duration::from_millis(500),
+                    recovery,
+                    stuck: crate::stuck::StuckConfig {
+                        max_no_progress_iterations: 100,
+                        ..crate::stuck::StuckConfig::default()
+                    },
+                    ..OrchestratorConfig::default()
+                },
+                ..OrchestratorProviderConfig::default()
+            },
+            model,
+            PolicyEngine::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn provider_adapter_session_resume_restores_pending_turn_without_replay() {
+        let dir = tempfile::TempDir::new().expect("checkpoint dir");
+        let model = Arc::new(DelayedModel::new(
+            std::time::Duration::from_millis(5_000),
+            std::time::Duration::from_millis(1),
+            resume_script(),
+        ));
+        // Provider A pauses the turn and persists a durable checkpoint.
+        let provider_a = durable_recovery_provider(model.clone(), dir.path());
+        let (handle_a, task_a) = spawn_server(provider_a);
+        let session_id = new_session(&handle_a, 1).await;
+        handle_a.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
+        let frame = next_response_frame(&handle_a).await;
+        let Response::Error { .. } = unwrap_response(frame) else {
+            panic!("expected a recoverable error");
+        };
+        handle_a.shutdown(task_a).await;
+
+        // Provider B (fresh process) restores via session/resume: no replay
+        // updates precede the `{}` response.
+        let provider_b = durable_recovery_provider(model, dir.path());
+        let (handle_b, task_b) = spawn_server(provider_b);
+        handle_b.send(request(
+            1,
+            "session/resume",
+            json!({ "sessionId": session_id, "cwd": "/work", "mcpServers": [] }),
+        ));
+        let result = request_result(handle_b.next_frame().await);
+        assert_eq!(result, json!({}), "resume answers the empty result object: {result}");
+        assert!(handle_b.outbound().is_empty(), "no replay updates before the resume response");
+
+        // The next prompt continues the paused turn from the checkpoint.
+        handle_b.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
+        let result = request_result(next_response_frame(&handle_b).await);
+        assert_eq!(result["stopReason"], "end_turn", "paused turn resumes after session/resume");
+
+        handle_b.shutdown(task_b).await;
+    }
+
+    #[tokio::test]
+    async fn provider_adapter_session_resume_without_pending_state_is_rejected() {
+        let dir = tempfile::TempDir::new().expect("checkpoint dir");
+        let model = Arc::new(FakeModel::new(vec![ModelResponse::new().text("done").completed()]));
+        // Provider A completes the turn: the checkpoint is cleared.
+        let provider_a = durable_recovery_provider(
+            Arc::new(DelayedModel::new(
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+                (*model).clone(),
+            )),
+            dir.path(),
+        );
+        let (handle_a, task_a) = spawn_server(provider_a);
+        let session_id = new_session(&handle_a, 1).await;
+        handle_a.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
+        let result = request_result(next_response_frame(&handle_a).await);
+        assert_eq!(result["stopReason"], "end_turn");
+        handle_a.shutdown(task_a).await;
+
+        // Provider B has no in-memory state and no pending checkpoint.
+        let provider_b = durable_recovery_provider(
+            Arc::new(DelayedModel::new(
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+                (*model).clone(),
+            )),
+            dir.path(),
+        );
+        let (handle_b, task_b) = spawn_server(provider_b);
+        handle_b.send(request(
+            1,
+            "session/resume",
+            json!({ "sessionId": session_id, "cwd": "/work", "mcpServers": [] }),
+        ));
+        let error = request_error(handle_b.next_frame().await);
+        assert!(
+            error.message.contains("no pending checkpoint"),
+            "resume without pending state is rejected: {error:?}"
+        );
+
+        handle_b.shutdown(task_b).await;
+    }
+
+    #[tokio::test]
+    async fn provider_adapter_load_after_crash_replays_checkpoint_transcript() {
+        let dir = tempfile::TempDir::new().expect("checkpoint dir");
+        let model = Arc::new(DelayedModel::new(
+            std::time::Duration::from_millis(5_000),
+            std::time::Duration::from_millis(1),
+            resume_script(),
+        ));
+        // Provider A pauses the turn; the checkpoint holds the transcript
+        // tail (the user message).
+        let provider_a = durable_recovery_provider(model.clone(), dir.path());
+        let (handle_a, task_a) = spawn_server(provider_a);
+        let session_id = new_session(&handle_a, 1).await;
+        handle_a.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
+        let frame = next_response_frame(&handle_a).await;
+        let Response::Error { .. } = unwrap_response(frame) else {
+            panic!("expected a recoverable error");
+        };
+        handle_a.shutdown(task_a).await;
+
+        // Provider B loads from the checkpoint store: the pending turn's
+        // transcript tail is replayed as the crash-restore conversation.
+        let provider_b = durable_recovery_provider(model, dir.path());
+        let (handle_b, task_b) = spawn_server(provider_b);
+        handle_b.send(request(
+            1,
+            "session/load",
+            json!({ "sessionId": session_id, "cwd": "/work", "mcpServers": [] }),
+        ));
+        let mut replayed_user_texts = Vec::new();
+        let mut commands_seen = false;
+        let mut response = None;
+        for _ in 0..10 {
+            let frame = handle_b.next_frame_real().await;
+            match &frame {
+                RawJsonRpcMessage::Notification(update) => {
+                    let params = raw_params_to_value(update.params.clone());
+                    match params["update"]["sessionUpdate"].as_str() {
+                        Some("user_message_chunk") => {
+                            replayed_user_texts.push(
+                                params["update"]["content"]["text"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_string(),
+                            );
+                        }
+                        Some("available_commands_update") => commands_seen = true,
+                        _ => {}
+                    }
+                }
+                RawJsonRpcMessage::Response(_) => {
+                    response = Some(frame);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            replayed_user_texts.iter().any(|text| text == "hello"),
+            "crash replay carries the pending user message: {replayed_user_texts:?}"
+        );
+        assert!(commands_seen, "loaded providers re-advertise their commands");
+        let result = request_result(response.expect("load response arrives after replay"));
+        assert_eq!(result, json!({}), "load responds null after replay");
+
+        // The loaded session resumes the paused turn on the next prompt.
+        handle_b.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
+        let result = request_result(next_response_frame(&handle_b).await);
+        assert_eq!(result["stopReason"], "end_turn", "paused turn resumes after crash load");
+
+        handle_b.shutdown(task_b).await;
+    }
+
+    #[tokio::test]
+    async fn provider_adapter_initialize_advertises_resume_capability_only_with_recovery() {
+        let plain = Arc::new(FakeModel::new(Vec::new()));
+        let provider =
+            OrchestratorProvider::new(OrchestratorProviderConfig::default(), plain.clone());
+        let (handle, task) = spawn_server(provider);
+        handle.send(request(1, "initialize", json!({ "protocolVersion": 1 })));
+        let result = request_result(handle.next_frame().await);
+        assert_eq!(
+            result["agentCapabilities"]["sessionCapabilities"]["resume"],
+            Value::Null,
+            "no resume advertisement without recovery"
+        );
+        handle.shutdown(task).await;
+
+        let recovered = Arc::new(FakeModel::new(Vec::new()));
+        let provider = recovery_provider(
+            Arc::new(DelayedModel::new(
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+                (*recovered).clone(),
+            )),
+            0,
+        );
+        let (handle, task) = spawn_server(provider);
+        handle.send(request(1, "initialize", json!({ "protocolVersion": 1 })));
+        let result = request_result(handle.next_frame().await);
+        assert_eq!(
+            result["agentCapabilities"]["sessionCapabilities"]["resume"],
+            json!({}),
+            "recovery advertises session/resume"
+        );
+        handle.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn provider_adapter_new_session_avoids_durable_checkpoint_collision() {
+        let dir = tempfile::TempDir::new().expect("checkpoint dir");
+        let model = Arc::new(DelayedModel::new(
+            std::time::Duration::from_millis(5_000),
+            std::time::Duration::from_millis(1),
+            resume_script(),
+        ));
+        // Provider A creates `session-1` and pauses it (durable checkpoint).
+        let provider_a = durable_recovery_provider(model.clone(), dir.path());
+        let (handle_a, task_a) = spawn_server(provider_a);
+        let session_id = new_session(&handle_a, 1).await;
+        assert_eq!(session_id, "session-1");
+        handle_a.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
+        let frame = next_response_frame(&handle_a).await;
+        let Response::Error { .. } = unwrap_response(frame) else {
+            panic!("expected a recoverable error");
+        };
+        handle_a.shutdown(task_a).await;
+
+        // Provider B (fresh process) must not shadow the reconnected
+        // `session-1` when creating a new session.
+        let provider_b = durable_recovery_provider(model, dir.path());
+        let (handle_b, task_b) = spawn_server(provider_b);
+        handle_b.send(request(1, "session/new", session_new_params("/work")));
+        let result = request_result(handle_b.next_frame().await);
+        assert_eq!(result["sessionId"], "session-2", "fresh id skips durable ids: {result}");
+        // Subsequent allocations stay monotonic past the durable base (drain
+        // the first session's command advertisement first).
+        let frame = handle_b.next_frame().await;
+        let RawJsonRpcMessage::Notification(update) = &frame else {
+            panic!("expected the available_commands_update, got {frame:?}");
+        };
+        assert_eq!(
+            raw_params_to_value(update.params.clone())["update"]["sessionUpdate"],
+            "available_commands_update"
+        );
+        handle_b.send(request(2, "session/new", session_new_params("/work")));
+        let result = request_result(handle_b.next_frame().await);
+        assert_eq!(result["sessionId"], "session-3", "ids stay monotonic: {result}");
+
+        handle_b.shutdown(task_b).await;
+    }
+
+    /// Waits (real time) for the next response frame, skipping update
+    /// notifications.  Parks on a timer so the server task always gets
+    /// scheduled.
+    async fn next_response_frame(handle: &Harness) -> RawJsonRpcMessage {
+        loop {
+            let frame = handle.next_frame_real().await;
+            if let RawJsonRpcMessage::Response(_) = &frame {
+                return frame;
+            }
+        }
+    }
 
     /// Minimal harness mirroring `ee-acp-agent-server`'s test utilities: feed
     /// inbound frames, read outbound frames in order.
@@ -538,6 +1453,25 @@ mod tests {
 
         async fn next_frame(&self) -> RawJsonRpcMessage {
             self.next_frames(1).await.remove(0)
+        }
+
+        /// Real-time frame poll: parks on a timer between polls so spawned
+        /// server tasks are never starved by a busy yield loop.  Overflow
+        /// frames stay queued for the next call (never dropped).
+        async fn next_frame_real(&self) -> RawJsonRpcMessage {
+            loop {
+                let ready = {
+                    let mut pending = self.pending.lock().expect("harness pending poisoned");
+                    if pending.is_empty() {
+                        pending.extend(self.handle.take_outbound());
+                    }
+                    pending.pop_front()
+                };
+                if let Some(frame) = ready {
+                    return frame;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
         }
 
         /// Waits for exactly `count` outbound frames, keeping overflow
@@ -594,8 +1528,8 @@ mod tests {
     }
 
     fn request_result(frame: RawJsonRpcMessage) -> Value {
-        let Response::Result { result, .. } = unwrap_response(frame) else {
-            panic!("expected a result response");
+        let Response::Result { result, .. } = unwrap_response(frame.clone()) else {
+            panic!("expected a result response, got {frame:?}");
         };
         result
     }
@@ -959,7 +1893,8 @@ mod tests {
         handle.send(request(3, "session/close", json!({ "sessionId": session_id })));
         let _ = request_result(handle.next_frame().await);
 
-        // Loading restores the persisted graph; the next turn keeps it.
+        // Loading restores the persisted graph and replays the recorded
+        // conversation (user prompt + agent text) before the response.
         handle.send(request(
             4,
             "session/load",
@@ -970,20 +1905,35 @@ mod tests {
                 "mcpServers": [],
             }),
         ));
-        let result = request_result(handle.next_frame().await);
+        // Replay order: user message, agent message, then the re-advertised
+        // initial commands, then the response (all updates precede it).
+        let frames = handle.next_frames(4).await;
+        let RawJsonRpcMessage::Notification(user) = &frames[0] else {
+            panic!("expected the replayed user message, got {:?}", frames[0]);
+        };
+        let user_params = raw_params_to_value(user.params.clone());
+        assert_eq!(user_params["update"]["sessionUpdate"], "user_message_chunk");
+        assert_eq!(user_params["update"]["messageId"], "replay-u-1");
+        assert_eq!(user_params["update"]["content"]["text"], "hello");
+        let RawJsonRpcMessage::Notification(agent) = &frames[1] else {
+            panic!("expected the replayed agent message, got {:?}", frames[1]);
+        };
+        let agent_params = raw_params_to_value(agent.params.clone());
+        assert_eq!(agent_params["update"]["sessionUpdate"], "agent_message_chunk");
+        assert_eq!(agent_params["update"]["messageId"], "replay-a-2");
+        assert_eq!(agent_params["update"]["content"]["text"], "first turn");
+        let RawJsonRpcMessage::Notification(commands) = &frames[2] else {
+            panic!("expected the available_commands_update, got {:?}", frames[2]);
+        };
+        assert_eq!(
+            raw_params_to_value(commands.params.clone())["update"]["sessionUpdate"],
+            "available_commands_update"
+        );
+        let result = request_result(frames[3].clone());
         assert_eq!(
             result,
             json!({}),
             "LoadSessionResponse carries no session id; restore is proven by state"
-        );
-        // Restored providers re-advertise their initial commands.
-        let frame = handle.next_frame().await;
-        let RawJsonRpcMessage::Notification(update) = &frame else {
-            panic!("expected the available_commands_update, got {frame:?}");
-        };
-        assert_eq!(
-            raw_params_to_value(update.params.clone())["update"]["sessionUpdate"],
-            "available_commands_update"
         );
         let (tasks, _memory) = probe.session_state(&session_id).expect("restored state");
         assert_eq!(tasks.len(), 1, "persisted root task restored");

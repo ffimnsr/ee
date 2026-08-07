@@ -80,6 +80,11 @@ pub struct LoadSessionContext {
     pub mcp_servers: Vec<McpServer>,
     /// Raw `_meta` from the `session/load` request, if present.
     pub metadata: Option<Meta>,
+    /// Sink for ACP v1 conversation replay: the provider streams the whole
+    /// conversation as `session/update` notifications before the load
+    /// response is sent.  `session/resume` (which must NOT replay) leaves
+    /// this unset.
+    pub replay_sink: Option<UpdateSink>,
 }
 
 impl LoadSessionContext {
@@ -93,7 +98,15 @@ impl LoadSessionContext {
             additional_directories: Vec::new(),
             mcp_servers: Vec::new(),
             metadata: None,
+            replay_sink: None,
         }
+    }
+
+    /// Sets the conversation-replay sink (ACP v1 `session/load`).
+    #[must_use]
+    pub fn with_replay_sink(mut self, sink: UpdateSink) -> Self {
+        self.replay_sink = Some(sink);
+        self
     }
 }
 
@@ -221,6 +234,18 @@ pub trait AgentProvider: Send + Sync + 'static {
         &self,
         ctx: LoadSessionContext,
     ) -> ProviderFuture<Result<SessionInit, ProviderError>>;
+
+    /// Resumes an existing session without replaying the conversation (ACP
+    /// v1 `session/resume`): restores the session context so the client can
+    /// continue sending prompts.  Providers with no distinct resume path may
+    /// rely on the default, which restores exactly like [`Self::load_session`]
+    /// (minus replay).
+    fn resume_session(
+        &self,
+        ctx: LoadSessionContext,
+    ) -> ProviderFuture<Result<SessionInit, ProviderError>> {
+        self.load_session(ctx)
+    }
 
     /// Processes one prompt turn, streaming updates through `sink` and
     /// making agent → client requests through `client` (see

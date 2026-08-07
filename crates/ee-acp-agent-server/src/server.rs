@@ -59,6 +59,15 @@ pub enum OutboundEvent {
         /// deterministic `StopReason::Cancelled` result.
         result: Result<PromptResponse, ProviderError>,
     },
+    /// A deferred non-prompt response finished (e.g. `session/load` with
+    /// conversation replay); the loop writes it after every update the
+    /// provider queued, so streamed updates always precede the response.
+    DeferredResponse {
+        /// The id of the request this answers.
+        request_id: RequestId,
+        /// The serialized result, or a JSON-RPC error.
+        result: Result<serde_json::Value, ee_agent_protocol::Error>,
+    },
     /// One agent → client request to write (from a prompt's `ClientBridge`).
     ClientRequest {
         /// The fully-built JSON-RPC request frame.
@@ -376,6 +385,15 @@ impl<P: AgentProvider> AcpAgentServer<P> {
                             }
                             Some(OutboundEvent::ClientRequest { frame }) => {
                                 transport.write_message(frame).await?;
+                            }
+                            Some(OutboundEvent::DeferredResponse { request_id, result }) => {
+                                let response = match result {
+                                    Ok(value) => RawJsonRpcMessage::response(request_id, Ok(value)),
+                                    Err(error) => {
+                                        RawJsonRpcMessage::response(request_id, Err(error))
+                                    }
+                                };
+                                transport.write_message(response).await?;
                             }
                             None => {
                                 // Unreachable while the server holds its own

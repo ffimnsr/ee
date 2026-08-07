@@ -10,6 +10,7 @@
 //! longer knows are dropped (never emitted).
 
 use std::fmt;
+use std::sync::Arc;
 
 use ee_agent_protocol::{
     AvailableCommand, AvailableCommandsUpdate, ContentBlock, ContentChunk, MessageId, Plan,
@@ -43,14 +44,29 @@ impl fmt::Display for UpdateSinkError {
 
 impl std::error::Error for UpdateSinkError {}
 
+/// Observer invoked for every queued update (see [`UpdateSink::with_observer`]).
+type UpdateObserver = Arc<dyn Fn(&SessionUpdate) + Send + Sync>;
+
 /// Queues `session/update` notifications for one live session.
 ///
 /// Clonable; providers may keep one per subtask.  All helpers validate that
-/// required ids are non-empty before queueing.
+/// required ids are non-empty before queueing.  An optional observer sees
+/// every queued update before it is sent (used by providers that record the
+/// client-visible conversation for `session/load` replay).
 #[derive(Clone)]
 pub struct UpdateSink {
     session_id: SessionId,
     tx: mpsc::UnboundedSender<OutboundEvent>,
+    observer: Option<UpdateObserver>,
+}
+
+impl fmt::Debug for UpdateSink {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UpdateSink")
+            .field("session_id", &self.session_id)
+            .field("observer", &self.observer.is_some())
+            .finish()
+    }
 }
 
 impl UpdateSink {
@@ -60,7 +76,16 @@ impl UpdateSink {
     /// crates (e.g. `ee-agent-orchestrator`) use it to build sinks over
     /// their own outbound channels.
     pub fn new(session_id: SessionId, tx: mpsc::UnboundedSender<OutboundEvent>) -> Self {
-        Self { session_id, tx }
+        Self { session_id, tx, observer: None }
+    }
+
+    /// Attaches an observer invoked with every queued update (before it is
+    /// sent).  Used by providers to record the conversation for `session/load`
+    /// replay without intercepting the sink itself.
+    #[must_use]
+    pub fn with_observer(mut self, observer: UpdateObserver) -> Self {
+        self.observer = Some(observer);
+        self
     }
 
     /// Test-only constructor: binds a sink to a session id and an outbound
@@ -197,6 +222,9 @@ impl UpdateSink {
     }
 
     fn emit(&self, update: SessionUpdate) -> Result<(), UpdateSinkError> {
+        if let Some(observer) = &self.observer {
+            observer(&update);
+        }
         self.tx
             .send(OutboundEvent::Update {
                 session_id: self.session_id.clone(),

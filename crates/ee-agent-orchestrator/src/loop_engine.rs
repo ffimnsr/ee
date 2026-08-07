@@ -15,20 +15,26 @@
 use std::sync::{Arc, Mutex};
 
 use ee_acp_agent_server::{ClientBridge, PromptContext, PromptResult, UpdateSink};
-use ee_agent_protocol::StopReason;
+use ee_agent_protocol::{SessionUpdate, StopReason, UsageUpdate};
 use tokio::sync::watch;
 
 use crate::budget::BudgetTracker;
+use crate::checkpoint::{
+    CompletedToolCall, IdGeneratorState, InFlightOperation, OrchestratorCheckpoint, ResumeState,
+    SubagentTreeState, TranscriptSummary, current_unix_millis,
+};
+use crate::checkpoint_store::CheckpointHandle;
 use crate::config::OrchestratorConfig;
 use crate::error::OrchestratorError;
 use crate::events::{EventRecorder, OrchestratorEvent};
+use crate::memory::MemoryStore;
 use crate::model::{ModelAdapter, ModelRequest, ModelUsage, Transcript, prompt_result_with_usage};
 use crate::model_registry::ModelInfo;
 use crate::streaming::run_streaming_response;
 use crate::stuck::StuckDetector;
 use crate::tasks::{TaskGraph, TaskNode};
 use crate::tools::{
-    SideEffectClass, ToolExecutionLogEntry, ToolExecutor, ToolIntent, ToolRegistry,
+    SideEffectClass, ToolExecutionLogEntry, ToolExecutor, ToolIntent, ToolRegistry, ToolResult,
 };
 
 /// How the loop engine executes one turn.
@@ -61,6 +67,14 @@ pub(crate) struct LoopOptions {
     /// Registry id of the adapter this loop runs on (diagnostic and used as
     /// the delegation fallback).
     pub model_id: Option<String>,
+    /// Optional memory store for checkpoint captures; required (along with
+    /// `checkpoint`) for recovery.
+    pub memory: Option<Arc<Mutex<MemoryStore>>>,
+    /// Optional durable checkpoint writer; `None` disables recovery captures.
+    pub checkpoint: Option<CheckpointHandle>,
+    /// Incoming resume state when this run continues an interrupted turn;
+    /// completed tool results are reused instead of replayed.
+    pub resume_state: Option<ResumeState>,
 }
 
 /// System messages prepended before one model/tool loop.
@@ -82,6 +96,9 @@ impl Default for LoopOptions {
             graph: None,
             available_models: Vec::new(),
             model_id: None,
+            memory: None,
+            checkpoint: None,
+            resume_state: None,
         }
     }
 }
@@ -97,6 +114,9 @@ pub(crate) struct LoopEngine {
     events: EventRecorder,
     options: LoopOptions,
     graph: Option<Arc<Mutex<TaskGraph>>>,
+    memory: Option<Arc<Mutex<MemoryStore>>>,
+    checkpoint: Option<CheckpointHandle>,
+    resume_state: Option<ResumeState>,
 }
 
 impl LoopEngine {
@@ -123,7 +143,22 @@ impl LoopEngine {
         )
         .with_model_id(options.model_id.clone());
         let graph = options.graph.clone();
-        Self { config, model, tools, budget, executor, events, options, graph }
+        let memory = options.memory.clone();
+        let checkpoint = options.checkpoint.clone();
+        let resume_state = options.resume_state.clone();
+        Self {
+            config,
+            model,
+            tools,
+            budget,
+            executor,
+            events,
+            options,
+            graph,
+            memory,
+            checkpoint,
+            resume_state,
+        }
     }
 
     /// Runs one turn for `task`, bounded by `turn_timeout`, seeding the
@@ -168,28 +203,58 @@ impl LoopEngine {
         if let Some(session) = context.session.as_deref().filter(|text| !text.is_empty()) {
             transcript.prepend_system(session);
         }
-        self.run_transcript(transcript, ctx.session_id.to_string(), sink, client, cancel, task)
+        self.run_transcript(&mut transcript, ctx.session_id.to_string(), sink, client, cancel, task)
             .await
-            .map(|(result, _transcript)| result)
     }
 
     /// Runs a turn over a prebuilt transcript, bounded by `turn_timeout`,
     /// returning the transcript so callers (e.g. subagents) can extract the
     /// final assistant summary.
+    ///
+    /// The transcript is borrowed, so it is available for checkpoint
+    /// captures even when the turn fails (deadline, timeout, cancellation,
+    /// or an ordinary error).  When recovery is wired, deadline and timeout
+    /// stops persist a recovery checkpoint before the error is returned.
     pub(crate) async fn run_transcript(
         &self,
-        transcript: Transcript,
+        transcript: &mut Transcript,
         session_id: String,
         sink: UpdateSink,
         client: ClientBridge,
         cancel: watch::Receiver<bool>,
         task: TaskNode,
-    ) -> Result<(PromptResult, Transcript), OrchestratorError> {
+    ) -> Result<PromptResult, OrchestratorError> {
+        // Per-turn mutable recovery state: in-flight marker, completed tools,
+        // and the resume counters.  Shared with the loop so the interruption
+        // capture (which runs after the loop future is dropped on timeout)
+        // sees the exact final state.
+        let track = Arc::new(Mutex::new(ResumeState {
+            transcript: Vec::new(),
+            active_task_id: task.id.as_str().to_string(),
+            completed_tools: self
+                .resume_state
+                .as_ref()
+                .map_or_else(Vec::new, |resume| resume.completed_tools.clone()),
+            in_flight: self.resume_state.as_ref().and_then(|resume| resume.in_flight.clone()),
+            resumed_count: self.resume_state.as_ref().map_or(0, |resume| resume.resumed_count),
+            first_started_at_millis: self
+                .resume_state
+                .as_ref()
+                .map_or_else(current_unix_millis, |resume| resume.first_started_at_millis),
+        }));
         let turn = tokio::time::timeout(
             self.config.turn_timeout,
-            self.run_loop(transcript, session_id, sink, client, cancel, task),
+            self.run_loop(
+                transcript,
+                track.clone(),
+                session_id,
+                sink,
+                client,
+                cancel,
+                task.clone(),
+            ),
         );
-        match turn.await {
+        let outcome = match turn.await {
             Ok(outcome) => outcome,
             Err(_elapsed) => {
                 self.events.record(OrchestratorEvent::Error {
@@ -205,28 +270,47 @@ impl LoopEngine {
                     self.config.turn_timeout
                 )))
             }
+        };
+        // Deadline and timeout stops persist a recovery checkpoint (the
+        // in-flight marker rides along when a tool was mid-execution).
+        // Cancellation and ordinary errors do not capture: a cancelled turn
+        // must never leave a stale pending checkpoint behind.
+        if self.checkpoint.is_some()
+            && matches!(
+                outcome,
+                Err(OrchestratorError::DeadlineExceeded(_)) | Err(OrchestratorError::Timeout(_))
+            )
+        {
+            self.capture_checkpoint(transcript, &track, &task, true).await;
         }
+        outcome
     }
 
-    /// Runs the loop, recording the terminal stop event on every path.
+    /// Runs the loop, recording the terminal stop event on every path.  The
+    /// transcript and per-turn recovery track are borrowed so both survive
+    /// errors.
+    #[allow(clippy::too_many_arguments)]
     async fn run_loop(
         &self,
-        mut transcript: Transcript,
+        transcript: &mut Transcript,
+        track: Arc<Mutex<ResumeState>>,
         session_id: String,
         sink: UpdateSink,
         client: ClientBridge,
         cancel: watch::Receiver<bool>,
         task: TaskNode,
-    ) -> Result<(PromptResult, Transcript), OrchestratorError> {
+    ) -> Result<PromptResult, OrchestratorError> {
         self.events.record(OrchestratorEvent::TurnStarted {
             session_id,
             task_id: task.id.as_str().to_string(),
         });
-        let outcome = self.run_loop_inner(&mut transcript, &sink, &client, cancel, &task).await;
+        let outcome = self.run_loop_inner(transcript, &track, &sink, &client, cancel, &task).await;
         let stop_reason = match &outcome {
             Ok(_) => "end_turn",
             Err(OrchestratorError::Cancellation) => "cancelled",
             Err(OrchestratorError::BudgetExceeded(_)) => "budget_exceeded",
+            Err(OrchestratorError::DeadlineExceeded(_)) => "deadline_exceeded",
+            Err(OrchestratorError::Timeout(_)) => "timeout",
             Err(OrchestratorError::Stuck(_)) => "stuck",
             Err(error) => {
                 self.events.record(OrchestratorEvent::Error { error: error.to_string() });
@@ -234,12 +318,13 @@ impl LoopEngine {
             }
         };
         self.events.record(OrchestratorEvent::TurnStopped { stop_reason: stop_reason.into() });
-        outcome.map(|result| (result, transcript))
+        outcome
     }
 
     async fn run_loop_inner(
         &self,
         transcript: &mut Transcript,
+        track: &Mutex<ResumeState>,
         sink: &UpdateSink,
         client: &ClientBridge,
         cancel: watch::Receiver<bool>,
@@ -336,8 +421,20 @@ impl LoopEngine {
                 turn_usage.output_tokens =
                     Some(turn_usage.output_tokens.unwrap_or_default().saturating_add(tokens));
             }
+            // Report the context-window usage: the model call's input tokens
+            // are the full context sent this round; the window size comes
+            // from the configuration.  Unknown usage emits nothing.
+            if let Some(input_tokens) = response.usage.input_tokens {
+                let _ = sink.raw_update(SessionUpdate::UsageUpdate(UsageUpdate::new(
+                    input_tokens as u64,
+                    self.config.context_window_tokens,
+                )));
+            }
 
             transcript.push_assistant(&response);
+            // Model response before tools: persist the assistant turn so an
+            // interruption after tools leaves a durable transcript tail.
+            self.capture_checkpoint(transcript, track, task, false).await;
 
             if self.options.mode == LoopMode::SimpleAnswer && !response.tool_intents.is_empty() {
                 return Err(OrchestratorError::ModelFailure(
@@ -377,23 +474,48 @@ impl LoopEngine {
                     tool_call_id: intent.tool_call_id.clone(),
                     tool_name: intent.name.clone(),
                 });
-                let executed = self
-                    .executor
-                    .execute(&intent, sink, client, cancel.clone(), task, transcript.messages())
-                    .await;
-                let success = executed.as_ref().is_ok_and(|result| result.success);
-                self.events.record(OrchestratorEvent::ToolFinished {
-                    tool_call_id: intent.tool_call_id.clone(),
-                    tool_name: intent.name.clone(),
-                    success,
-                });
                 let class = self
                     .tools
                     .lock()
                     .expect("tool registry poisoned")
                     .get(&intent.name)
                     .map(|tool| tool.definition().side_effect_class);
-                if let Some(log) = &self.options.execution_log {
+                // Resumed turns never replay a completed write/execute/delegate
+                // call with identical arguments: the stored summary is reused
+                // and the operation is not re-run (idempotency guard).
+                let reuse = self.try_reuse_completed(&intent, class, track, transcript);
+                let reused = reuse.is_some();
+                let executed = match reuse {
+                    Some(result) => Ok(result),
+                    None => {
+                        track.lock().expect("recovery track poisoned").in_flight =
+                            Some(InFlightOperation {
+                                tool_call_id: intent.tool_call_id.clone(),
+                                tool_name: intent.name.clone(),
+                                started_at_millis: current_unix_millis(),
+                            });
+                        let executed = self
+                            .executor
+                            .execute(
+                                &intent,
+                                sink,
+                                client,
+                                cancel.clone(),
+                                task,
+                                transcript.messages(),
+                            )
+                            .await;
+                        track.lock().expect("recovery track poisoned").in_flight = None;
+                        executed
+                    }
+                };
+                let success = executed.as_ref().is_ok_and(|result| result.success);
+                self.events.record(OrchestratorEvent::ToolFinished {
+                    tool_call_id: intent.tool_call_id.clone(),
+                    tool_name: intent.name.clone(),
+                    success,
+                });
+                if !reused && let Some(log) = &self.options.execution_log {
                     let (success, summary) = match &executed {
                         Ok(result) => (result.success, result.summary_text()),
                         Err(_) => (false, String::new()),
@@ -408,16 +530,140 @@ impl LoopEngine {
                     });
                 }
                 let result = executed?;
+                if !reused {
+                    track.lock().expect("recovery track poisoned").completed_tools.push(
+                        CompletedToolCall {
+                            tool_call_id: intent.tool_call_id.clone(),
+                            tool_name: intent.name.clone(),
+                            arguments: intent.arguments.clone(),
+                            success: result.success,
+                            summary: result.summary_text(),
+                            side_effect_class: class.unwrap_or(SideEffectClass::Read),
+                        },
+                    );
+                }
                 if let Some(reason) = detector.observe_tool_call(&intent, class, &result) {
                     return Err(OrchestratorError::Stuck(reason.to_string()));
                 }
                 transcript.push_tool_result(intent.tool_call_id.clone(), result);
+                self.capture_checkpoint(transcript, track, task, false).await;
             }
             let graph = graph_handle
                 .as_ref()
                 .map(|handle| handle.lock().expect("task graph poisoned").clone());
             if let Some(reason) = detector.observe_iteration(graph.as_ref()) {
                 return Err(OrchestratorError::Stuck(reason.to_string()));
+            }
+        }
+    }
+
+    /// Reuses the stored result of a completed write/execute/delegate call
+    /// when the model requests the identical operation again after a resume;
+    /// pushes the reused observation into the transcript and returns the
+    /// reconstructed result.  Reads are never reused (they are idempotent
+    /// and may re-run).
+    fn try_reuse_completed(
+        &self,
+        intent: &ToolIntent,
+        class: Option<SideEffectClass>,
+        track: &Mutex<ResumeState>,
+        transcript: &mut Transcript,
+    ) -> Option<ToolResult> {
+        // Idempotency guard only exists on resumed runs: within a fresh run
+        // the stuck detector needs repeated identical calls to execute.
+        self.resume_state.as_ref()?;
+        let class = class?;
+        if !matches!(
+            class,
+            SideEffectClass::Write | SideEffectClass::Execute | SideEffectClass::Delegate
+        ) {
+            return None;
+        }
+        let completed = track
+            .lock()
+            .expect("recovery track poisoned")
+            .completed_tools
+            .iter()
+            .find(|completed| {
+                completed.tool_name == intent.name && completed.arguments == intent.arguments
+            })
+            .cloned()?;
+        self.events.record(OrchestratorEvent::ToolResultReused {
+            tool_call_id: intent.tool_call_id.clone(),
+            tool_name: intent.name.clone(),
+        });
+        let result = ToolResult {
+            success: completed.success,
+            text_output: completed.summary.clone(),
+            structured_output: None,
+            error_kind: None,
+        };
+        transcript.push_tool_result(intent.tool_call_id.clone(), result.clone());
+        Some(result)
+    }
+
+    /// Builds and persists a recovery checkpoint from the current stores and
+    /// the per-turn recovery track.  Best-effort: capture failures are
+    /// recorded as events and never fail the turn.
+    async fn capture_checkpoint(
+        &self,
+        transcript: &Transcript,
+        track: &Mutex<ResumeState>,
+        task: &TaskNode,
+        force: bool,
+    ) {
+        let Some(handle) = &self.checkpoint else { return };
+        let Some(memory) = &self.memory else { return };
+        let Some(tasks) = self.graph.as_ref() else { return };
+        let mut resume = track.lock().expect("recovery track poisoned").clone();
+        resume.transcript = transcript.messages().to_vec();
+        resume.active_task_id = task.id.as_str().to_string();
+        let checkpoint = {
+            let tasks = tasks.lock().expect("task graph poisoned").clone();
+            let memory = memory.lock().expect("memory store poisoned").clone();
+            let budget = self.budget.lock().expect("budget tracker poisoned").snapshot();
+            let summary = TranscriptSummary::from_transcript(transcript.messages());
+            OrchestratorCheckpoint::with_recovery(
+                "checkpoint",
+                self.config.clone(),
+                handle.session_id(),
+                tasks,
+                memory,
+                summary,
+                budget,
+                SubagentTreeState::new(),
+                IdGeneratorState::new(),
+                handle.provider(),
+                current_unix_millis(),
+                Some(resume),
+            )
+        };
+        let checkpoint = match checkpoint {
+            Ok(checkpoint) => checkpoint,
+            Err(error) => {
+                self.events.record(OrchestratorEvent::Error {
+                    error: format!("checkpoint capture failed: {error}"),
+                });
+                return;
+            }
+        };
+        let saved = if force {
+            handle.save_terminal(&checkpoint).map(Some)
+        } else {
+            handle.save_milestone(&checkpoint)
+        };
+        match saved {
+            Ok(Some(checkpoint_id)) => {
+                self.events.record(OrchestratorEvent::CheckpointSaved {
+                    session_id: handle.session_id().to_string(),
+                    checkpoint_id,
+                });
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.events.record(OrchestratorEvent::Error {
+                    error: format!("checkpoint capture failed: {error}"),
+                });
             }
         }
     }
@@ -571,6 +817,42 @@ mod tests {
                 OrchestratorEvent::TurnStopped { stop_reason: "end_turn".into() },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn model_usage_emits_context_usage_update() {
+        let model = FakeModel::new(vec![
+            ModelResponse::new()
+                .text("final answer")
+                .completed()
+                .with_usage(ModelUsage::new().with_input_tokens(120).with_output_tokens(30)),
+        ]);
+        let (sink, client, mut rx) = plumbing();
+        let events = EventRecorder::new();
+        let engine = engine_with(
+            OrchestratorConfig::default(),
+            Arc::new(model.clone()),
+            echo_tool(),
+            events,
+        );
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        engine
+            .run(prompt("hello world"), sink, client, cancel_rx, task(), None)
+            .await
+            .expect("turn succeeds");
+
+        let mut usage = None;
+        while let Ok(event) = rx.try_recv() {
+            if let OutboundEvent::Update { update, .. } = event
+                && let SessionUpdate::UsageUpdate(update) = *update
+            {
+                usage = Some(update);
+            }
+        }
+        let usage = usage.expect("context usage update emitted");
+        assert_eq!(usage.used, 120, "used is the context sent to the model");
+        assert_eq!(usage.size, crate::config::DEFAULT_CONTEXT_WINDOW_TOKENS);
     }
 
     #[tokio::test]

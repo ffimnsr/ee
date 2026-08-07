@@ -800,6 +800,11 @@ fn bridge_error(error: ProviderError) -> ToolResult {
         ProviderError::BackendFailure(_) | ProviderError::ClientRequestFailure(_) => {
             ToolErrorKind::Backend
         }
+        // Recoverable interruptions, rate limits, and transient failures
+        // are backend-class tool failures from the bridge's perspective.
+        ProviderError::Recoverable(_)
+        | ProviderError::RateLimited { .. }
+        | ProviderError::Transient { .. } => ToolErrorKind::Backend,
     };
     ToolResult::failure(kind, error.to_string())
 }

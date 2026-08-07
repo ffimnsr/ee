@@ -27,6 +27,7 @@
 pub mod capabilities;
 pub mod mcp_over_acp;
 pub mod ordering;
+pub mod recovery;
 pub mod registry;
 pub mod slash_command;
 pub mod validate;
@@ -35,6 +36,7 @@ pub mod version;
 // Convenience re-exports of the boundary helpers at the crate root.
 pub use capabilities::*;
 pub use ordering::*;
+pub use recovery::*;
 pub use registry::*;
 pub use slash_command::*;
 pub use validate::*;

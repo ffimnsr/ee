@@ -5,6 +5,7 @@
 //! the ACP client while OpenRouter is still generating them.
 
 use std::collections::BTreeMap;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Value, json};
@@ -83,14 +84,16 @@ pub(crate) async fn call_openrouter(
     )
     .await?;
     let status = response.status();
+    let retry_after = parse_retry_after(response.headers());
     let value = response.json::<Value>().await.map_err(|error| {
         ProviderError::BackendFailure(format!("OpenRouter response was not JSON: {error}"))
     })?;
     if !status.is_success() {
-        return Err(ProviderError::BackendFailure(openrouter_error_message(
+        return Err(classify_http_error(
             status.as_u16(),
-            &value,
-        )));
+            retry_after,
+            openrouter_error_message(status.as_u16(), &value),
+        ));
     }
     extract_openrouter_message(&value).ok_or_else(|| {
         ProviderError::BackendFailure(format!(
@@ -122,16 +125,18 @@ where
     )
     .await?;
     let status = response.status();
+    let retry_after = parse_retry_after(response.headers());
     if !status.is_success() {
         let value = response.json::<Value>().await.map_err(|error| {
             ProviderError::BackendFailure(format!(
                 "OpenRouter error response was not JSON: {error}"
             ))
         })?;
-        return Err(ProviderError::BackendFailure(openrouter_error_message(
+        return Err(classify_http_error(
             status.as_u16(),
-            &value,
-        )));
+            retry_after,
+            openrouter_error_message(status.as_u16(), &value),
+        ));
     }
     let is_sse = response
         .headers()
@@ -392,6 +397,138 @@ pub(crate) fn openrouter_error_message(status: u16, value: &Value) -> String {
     }
 }
 
+/// Classifies a non-success OpenRouter status into a retry decision and a
+/// typed provider error.  Structural classification: never string parsing.
+#[must_use]
+pub(crate) fn classify_http_error(
+    status: u16,
+    retry_after: Option<Duration>,
+    detail: String,
+) -> ProviderError {
+    match status {
+        429 => ProviderError::RateLimited { retry_after, detail },
+        // Transient server/network classes; safe to retry only before any
+        // response bytes were produced (streaming guards that itself).
+        408 | 409 | 425 | 500 | 502 | 503 | 504 | 521 | 522 | 524 => {
+            ProviderError::Transient { retry_after, detail }
+        }
+        // 401/403 are permanent credential/policy problems: never retried,
+        // never auto-resumed.
+        401 | 403 => ProviderError::BackendFailure(detail),
+        _ if status >= 500 => ProviderError::Transient { retry_after, detail },
+        _ => ProviderError::InvalidRequest(detail),
+    }
+}
+
+/// Whether a provider error may be retried (rate limits and transient
+/// failures only; never side-effecting retries).
+#[must_use]
+pub(crate) fn is_retryable(error: &ProviderError) -> bool {
+    matches!(error, ProviderError::RateLimited { .. } | ProviderError::Transient { .. })
+}
+
+/// Server-provided retry hint, when the error carries one.
+#[must_use]
+pub(crate) fn retry_after_of(error: &ProviderError) -> Option<Duration> {
+    match error {
+        ProviderError::RateLimited { retry_after, .. }
+        | ProviderError::Transient { retry_after, .. } => *retry_after,
+        _ => None,
+    }
+}
+
+/// Parses a `Retry-After` header value (delta-seconds form; HTTP dates are
+/// rare and rejected rather than mis-parsed).
+#[must_use]
+pub(crate) fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
+    let value = headers.get("retry-after")?.to_str().ok()?.trim();
+    value.parse::<u64>().ok().map(Duration::from_secs)
+}
+
+/// Retry delay for `attempt` (0-based): the server hint wins when present
+/// (capped), otherwise exponential backoff with bounded jitter.
+#[must_use]
+pub(crate) fn retry_delay(
+    config: &Config,
+    attempt: u32,
+    retry_after: Option<Duration>,
+) -> Duration {
+    if let Some(hint) = retry_after {
+        return hint.min(config.retry_max_delay);
+    }
+    let base = config.retry_base_delay.as_millis() as u64;
+    let backoff = base.saturating_mul(1 << attempt.min(10));
+    let capped = backoff.min(config.retry_max_delay.as_millis() as u64);
+    // Bounded jitter (±20%) so bursts do not retry in lockstep.
+    let jitter = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.subsec_nanos() as u64)
+        % (capped / 5 + 1);
+    Duration::from_millis(capped + jitter)
+}
+
+/// One buffered chat-completions round trip with transient/429 retries.
+/// Retries only when the first attempt produced no response body (the
+/// non-success branch reads the body before classifying, so a retry after a
+/// buffered error is always safe).
+pub(crate) async fn call_openrouter_with_retry(
+    http: &reqwest::Client,
+    config: &Config,
+    api_key: &str,
+    messages: &[Value],
+    tools: &[Value],
+) -> Result<OpenRouterMessage, ProviderError> {
+    let mut last_error: Option<ProviderError> = None;
+    for attempt in 0..=config.retry_max_attempts {
+        match call_openrouter(http, config, api_key, messages, tools).await {
+            Err(error) if is_retryable(&error) && attempt < config.retry_max_attempts => {
+                let hint = retry_after_of(&error);
+                last_error = Some(error);
+                tokio::time::sleep(retry_delay(config, attempt, hint)).await;
+            }
+            other => return other,
+        }
+    }
+    Err(last_error.expect("at least one attempt ran"))
+}
+
+/// One streaming round trip with transient/429 retries.  A retry only
+/// happens when *no* delta was emitted yet: once the stream produced bytes,
+/// a retry would duplicate output, so the error surfaces instead.
+pub(crate) async fn call_openrouter_streaming_with_retry<F>(
+    http: &reqwest::Client,
+    config: &Config,
+    api_key: &str,
+    messages: &[Value],
+    tools: &[Value],
+    on_delta: &mut F,
+) -> Result<OpenRouterMessage, ProviderError>
+where
+    F: FnMut(OpenRouterStreamDelta) -> Result<(), ProviderError>,
+{
+    let mut started = false;
+    let mut last_error: Option<ProviderError> = None;
+    for attempt in 0..=config.retry_max_attempts {
+        let started_ref = &mut started;
+        let result = call_openrouter_streaming(http, config, api_key, messages, tools, |delta| {
+            *started_ref = true;
+            on_delta(delta)
+        })
+        .await;
+        match result {
+            Err(error)
+                if !started && is_retryable(&error) && attempt < config.retry_max_attempts =>
+            {
+                let hint = retry_after_of(&error);
+                last_error = Some(error);
+                tokio::time::sleep(retry_delay(config, attempt, hint)).await;
+            }
+            other => return other,
+        }
+    }
+    Err(last_error.expect("at least one attempt ran"))
+}
+
 /// Incremental SSE framing state. Events are decoded only once their blank
 /// line terminator has arrived, so split UTF-8 sequences remain intact.
 #[derive(Debug, Default)]
@@ -597,6 +734,15 @@ mod tests {
             compact_min_messages: 4,
             compact_retained_tail: 2,
             compact_max_input_bytes: 65_536,
+            retry_max_attempts: crate::config::DEFAULT_RETRY_MAX_ATTEMPTS,
+            retry_base_delay: std::time::Duration::from_millis(
+                crate::config::DEFAULT_RETRY_BASE_DELAY_MS,
+            ),
+            retry_max_delay: std::time::Duration::from_millis(
+                crate::config::DEFAULT_RETRY_MAX_DELAY_MS,
+            ),
+            checkpoint_dir: None,
+            context_window: crate::config::DEFAULT_CONTEXT_WINDOW_TOKENS,
         }
     }
 
@@ -771,5 +917,87 @@ mod tests {
     fn openrouter_http_errors_extract_message() {
         let value = json!({ "error": { "message": "rate limited" } });
         assert_eq!(openrouter_error_message(429, &value), "OpenRouter HTTP 429: rate limited");
+    }
+
+    #[test]
+    fn classifies_http_errors_into_retry_decisions() {
+        use ee_acp_agent_server::ProviderError;
+        let hint = Some(Duration::from_secs(3));
+        let cases: Vec<(u16, &dyn Fn(&ProviderError) -> bool)> = vec![
+            (429, &|error| matches!(error, ProviderError::RateLimited { .. })),
+            (408, &|error| matches!(error, ProviderError::Transient { .. })),
+            (500, &|error| matches!(error, ProviderError::Transient { .. })),
+            (502, &|error| matches!(error, ProviderError::Transient { .. })),
+            (503, &|error| matches!(error, ProviderError::Transient { .. })),
+            (504, &|error| matches!(error, ProviderError::Transient { .. })),
+            (599, &|error| matches!(error, ProviderError::Transient { .. })),
+            (401, &|error| matches!(error, ProviderError::BackendFailure(_))),
+            (403, &|error| matches!(error, ProviderError::BackendFailure(_))),
+            (400, &|error| matches!(error, ProviderError::InvalidRequest(_))),
+            (404, &|error| matches!(error, ProviderError::InvalidRequest(_))),
+        ];
+        for (status, predicate) in cases {
+            let error = classify_http_error(status, hint, format!("HTTP {status}"));
+            assert!(predicate(&error), "status {status} classified wrong: {error:?}");
+        }
+        match classify_http_error(429, hint, "slow".into()) {
+            ProviderError::RateLimited { retry_after, .. } => assert_eq!(retry_after, hint),
+            other => panic!("expected rate limited, got {other:?}"),
+        }
+        match classify_http_error(503, hint, "down".into()) {
+            ProviderError::Transient { retry_after, .. } => assert_eq!(retry_after, hint),
+            other => panic!("expected transient, got {other:?}"),
+        }
+        assert!(is_retryable(&ProviderError::RateLimited {
+            retry_after: None,
+            detail: "x".into()
+        }));
+        assert!(is_retryable(&ProviderError::Transient { retry_after: None, detail: "x".into() }));
+        assert!(!is_retryable(&ProviderError::BackendFailure("x".into())));
+        assert!(!is_retryable(&ProviderError::InvalidRequest("x".into())));
+        assert!(!is_retryable(&ProviderError::Cancellation));
+    }
+
+    #[test]
+    fn parses_retry_after_seconds_and_ignores_dates() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(parse_retry_after(&headers), None);
+        headers.insert("retry-after", HeaderValue::from_static("120"));
+        assert_eq!(parse_retry_after(&headers), Some(Duration::from_secs(120)));
+        headers.insert("retry-after", HeaderValue::from_static("Tue, 15 Nov 1994 08:12:31 GMT"));
+        assert_eq!(parse_retry_after(&headers), None, "HTTP dates are rejected, not mis-parsed");
+        headers.insert("retry-after", HeaderValue::from_static("abc"));
+        assert_eq!(parse_retry_after(&headers), None);
+    }
+
+    #[test]
+    fn retry_delay_prefers_capped_server_hint() {
+        let config = Config {
+            retry_base_delay: Duration::from_millis(100),
+            retry_max_delay: Duration::from_secs(10),
+            ..test_config()
+        };
+        assert_eq!(retry_delay(&config, 0, Some(Duration::from_secs(2))), Duration::from_secs(2));
+        assert_eq!(retry_delay(&config, 0, Some(Duration::from_secs(60))), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn retry_delay_backs_off_exponentially_with_bounded_jitter() {
+        let config = Config {
+            retry_base_delay: Duration::from_millis(100),
+            retry_max_delay: Duration::from_secs(10),
+            ..test_config()
+        };
+        for attempt in 0..5 {
+            let delay = retry_delay(&config, attempt, None).as_millis() as u64;
+            let expected = 100u64 << attempt.min(10);
+            let ceiling = expected + expected / 5 + 1;
+            assert!(
+                (expected..=ceiling).contains(&delay),
+                "attempt {attempt}: {delay} outside [{expected}, {ceiling}]"
+            );
+        }
+        let delay = retry_delay(&config, 20, None).as_millis() as u64;
+        assert!(delay <= 10_000 + 10_000 / 5 + 1, "{delay}");
     }
 }

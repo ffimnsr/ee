@@ -14,6 +14,19 @@ use crate::{AvailableCommand, AvailableCommandInput, UnstructuredCommandInput};
 /// The advertised slash-command name for LLM session compaction.
 pub const COMPACT_COMMAND_NAME: &str = "compact";
 
+/// The advertised slash-command name for discarding a paused turn's pending
+/// checkpoint (manual-resume rejection).  Only meaningful when recovery is
+/// enabled and a recoverable interruption is pending.
+pub const DISCARD_COMMAND_NAME: &str = "discard";
+
+/// The advertised slash-command name for continuing a paused turn from its
+/// pending checkpoint without re-sending the original prompt.  Covers the
+/// client-crash case: after `session/resume` or `session/load`, the client
+/// types `/resume` and the turn continues even though the original prompt
+/// text is lost.  Without a pending checkpoint the command is an ordinary
+/// prompt.
+pub const RESUME_COMMAND_NAME: &str = "resume";
+
 /// One parsed slash command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlashCommand {
@@ -69,6 +82,34 @@ pub fn compact_available_command() -> AvailableCommand {
     .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
         "optional instructions for what the summary must preserve",
     )))
+}
+
+/// The `/discard` command advertised by providers when recovery is enabled:
+/// rejects the pending checkpoint of a paused turn, dropping the interrupted
+/// work instead of resuming it.
+#[must_use]
+pub fn discard_available_command() -> AvailableCommand {
+    AvailableCommand::new(
+        DISCARD_COMMAND_NAME,
+        "Discard the paused turn's checkpoint and drop its incomplete work.",
+    )
+}
+
+/// Whether the prompt is a `/resume` (or `/resume <instructions>`) command.
+#[must_use]
+pub fn is_resume_command(text: &str) -> bool {
+    parse_slash_command(text).is_some_and(|command| command.name == RESUME_COMMAND_NAME)
+}
+
+/// The `/resume` command advertised by providers when recovery is enabled:
+/// continues a paused turn from its pending checkpoint without the original
+/// prompt (client-crash continuation).
+#[must_use]
+pub fn resume_available_command() -> AvailableCommand {
+    AvailableCommand::new(
+        RESUME_COMMAND_NAME,
+        "Continue the paused turn from its checkpoint without re-sending the original prompt.",
+    )
 }
 
 #[cfg(test)]
@@ -146,6 +187,29 @@ mod tests {
         assert!(!is_compact_command("/compactness"));
         assert!(!is_compact_command("/compactness with args"));
         assert!(!is_compact_command("run /compact now"));
+    }
+
+    #[test]
+    fn resume_detection_matches_name_exactly() {
+        assert!(is_resume_command("/resume"));
+        assert!(is_resume_command("/resume keep going"));
+        assert!(is_resume_command("  /resume"));
+        assert!(!is_resume_command("resume"));
+        assert!(!is_resume_command("/resumed"));
+        assert!(!is_resume_command("/compact"));
+        assert!(!is_resume_command("run /resume now"));
+    }
+
+    #[test]
+    fn advertised_resume_command_carries_name_and_description() {
+        let command = resume_available_command();
+        assert_eq!(command.name, RESUME_COMMAND_NAME);
+        assert!(!command.description.is_empty(), "description advertised");
+        assert!(command.input.is_none(), "/resume carries no input hint");
+        let json = serde_json::to_string(&command).expect("serializes");
+        let restored: AvailableCommand = serde_json::from_str(&json).expect("parses");
+        assert_eq!(restored, command);
+        assert!(json.contains("resume"), "{json}");
     }
 
     #[test]

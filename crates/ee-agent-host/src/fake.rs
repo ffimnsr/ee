@@ -64,6 +64,9 @@ pub enum FakeStep {
     Respond { result: Value },
     /// Respond to the remembered request with a JSON-RPC error.
     RespondError { code: i64, message: String },
+    /// Respond to the remembered request with a JSON-RPC error carrying a
+    /// structured `data` payload.
+    RespondErrorWithData { code: i64, message: String, data: Value },
     /// Emit a JSON value as a line to the host (notification or
     /// agent-to-client request).  `{"$capture": "name"}` placeholders are
     /// substituted from previously captured slots.
@@ -135,6 +138,17 @@ impl FakeAgentScript {
     #[must_use]
     pub fn respond_error(self, code: i64, message: impl Into<String>) -> Self {
         self.step(FakeStep::RespondError { code, message: message.into() })
+    }
+
+    /// Appends [`FakeStep::RespondErrorWithData`].
+    #[must_use]
+    pub fn respond_error_with_data(
+        self,
+        code: i64,
+        message: impl Into<String>,
+        data: Value,
+    ) -> Self {
+        self.step(FakeStep::RespondErrorWithData { code, message: message.into(), data })
     }
 
     /// Appends [`FakeStep::Emit`].
@@ -377,6 +391,7 @@ async fn driver(
             EmitRaw,
             Respond,
             RespondError,
+            RespondErrorWithData,
             Close,
             WaitFor,
             WaitForResponse,
@@ -389,6 +404,7 @@ async fn driver(
             Some(FakeStep::EmitRaw(_)) => StepKind::EmitRaw,
             Some(FakeStep::Respond { .. }) => StepKind::Respond,
             Some(FakeStep::RespondError { .. }) => StepKind::RespondError,
+            Some(FakeStep::RespondErrorWithData { .. }) => StepKind::RespondErrorWithData,
             Some(FakeStep::Close) => StepKind::Close,
             Some(FakeStep::WaitFor { .. }) => StepKind::WaitFor,
             Some(FakeStep::WaitForResponse { .. }) => StepKind::WaitForResponse,
@@ -429,6 +445,20 @@ async fn driver(
                     id.as_ref(),
                     None,
                     Some(json!({ "code": code, "message": message })),
+                );
+            }
+            StepKind::RespondErrorWithData => {
+                let Some(FakeStep::RespondErrorWithData { code, message, data }) =
+                    steps.pop_front()
+                else {
+                    unreachable!("kind matched above")
+                };
+                let id = remembered.as_ref().and_then(|request| request.id.clone());
+                emit_response(
+                    &to_host,
+                    id.as_ref(),
+                    None,
+                    Some(json!({ "code": code, "message": message, "data": data })),
                 );
             }
             StepKind::Close => {

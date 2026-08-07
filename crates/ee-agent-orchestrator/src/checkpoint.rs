@@ -2,13 +2,14 @@
 //!
 //! An [`OrchestratorCheckpoint`] captures the bounded, secret-conscious state
 //! of one session — config, task graph, memory store, transcript summary,
-//! budget snapshot, finished subagent outcomes, and the deterministic id
-//! generator counter — so turns are inspectable and resumable.  Restore is
+//! budget snapshot, finished subagent outcomes, the deterministic id
+//! generator counter, and (for recovery checkpoints) an exact resumable
+//! [`ResumeState`] — so turns are inspectable and resumable.  Restore is
 //! fail-closed: [`OrchestratorCheckpoint::validate`] rejects unsupported
 //! schema versions, dangling task references, over-limit or sensitive memory,
-//! and budget snapshots that do not match the checkpoint config.  Every
-//! restored item is attributed to the checkpoint's provenance through a
-//! [`RestoreReport`].
+//! budget snapshots that do not match the checkpoint config, and resume state
+//! that references unknown tasks.  Every restored item is attributed to the
+//! checkpoint's provenance through a [`RestoreReport`].
 
 use std::collections::BTreeMap;
 
@@ -23,9 +24,13 @@ use crate::policy::PolicyEngine;
 use crate::runtime::OrchestratorRuntime;
 use crate::subagents::{SubagentId, SubagentResult};
 use crate::tasks::{TaskGraph, TaskId, TaskStatus};
+use crate::tools::SideEffectClass;
 
 /// Current checkpoint schema version; restore rejects everything else.
-pub const CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+///
+/// v2 adds recovery state: [`ResumeState`], creation timestamp, and provider
+/// identity.  v1 checkpoints fail closed (never migrated silently).
+pub const CHECKPOINT_SCHEMA_VERSION: u32 = 2;
 /// Cap on transcript tail messages kept in a [`TranscriptSummary`]; older
 /// messages are dropped, so snapshots stay bounded.
 pub const MAX_TRANSCRIPT_TAIL_MESSAGES: usize = 8;
@@ -208,6 +213,59 @@ impl SubagentTreeState {
     }
 }
 
+/// One completed tool call with its durable result summary, kept for
+/// idempotent resume: replaying an identical call after an interruption
+/// would re-run a side effect, so resumed turns reuse these results instead.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct CompletedToolCall {
+    /// Model-supplied tool-call id.
+    pub tool_call_id: String,
+    /// Tool name.
+    pub tool_name: String,
+    /// Exact arguments the model supplied.
+    pub arguments: serde_json::Value,
+    /// Whether the call succeeded.
+    pub success: bool,
+    /// Bounded result summary (never raw tool output).
+    pub summary: String,
+    /// Side-effect class, so replays of write/execute calls are blocked.
+    pub side_effect_class: SideEffectClass,
+}
+
+/// A tool that was in flight when the turn stopped.  Its completion is
+/// unknown, so automatic replay is blocked (ambiguous side effect).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct InFlightOperation {
+    /// Model-supplied tool-call id.
+    pub tool_call_id: String,
+    /// Tool name.
+    pub tool_name: String,
+    /// Wall-clock millis when execution started.
+    pub started_at_millis: u64,
+}
+
+/// Exact resumable turn state carried by recovery checkpoints.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ResumeState {
+    /// Exact transcript tail (already bounded by the memory limit).  A
+    /// resumed turn continues from here instead of rebuilding the prompt.
+    pub transcript: Vec<ModelMessage>,
+    /// Id of the active root task the resumed turn continues.
+    pub active_task_id: String,
+    /// Completed tool calls (bounded), reused instead of replayed.
+    pub completed_tools: Vec<CompletedToolCall>,
+    /// The in-flight operation, when one was interrupted.
+    pub in_flight: Option<InFlightOperation>,
+    /// How many times this turn has already been resumed.
+    pub resumed_count: u32,
+    /// Wall-clock millis when the turn first started, for the cumulative
+    /// session-timeout cap.
+    pub first_started_at_millis: u64,
+}
+
 /// Serializable snapshot of one orchestrated session's state.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -216,6 +274,11 @@ pub struct OrchestratorCheckpoint {
     pub schema_version: u32,
     /// Where this snapshot came from (e.g. `checkpoint`, `session/load`).
     pub provenance: String,
+    /// Provider identity that produced the checkpoint (workspace+provider
+    /// provenance for crash restore); e.g. `ee-openrouter-agent`.
+    pub provider: String,
+    /// Wall-clock millis when the checkpoint was captured.
+    pub created_at_millis: u64,
     /// Config snapshot; restore rebuilds budget limits from it.
     pub config: OrchestratorConfig,
     /// Active ACP session id.
@@ -232,6 +295,9 @@ pub struct OrchestratorCheckpoint {
     pub subagents: SubagentTreeState,
     /// Deterministic id generator state.
     pub id_generator: IdGeneratorState,
+    /// Exact resumable turn state; `None` for plain snapshots without
+    /// pending work.
+    pub resume: Option<ResumeState>,
 }
 
 impl OrchestratorCheckpoint {
@@ -252,9 +318,44 @@ impl OrchestratorCheckpoint {
         subagents: SubagentTreeState,
         id_generator: IdGeneratorState,
     ) -> Result<Self, OrchestratorError> {
+        Self::with_recovery(
+            provenance,
+            config,
+            session_id,
+            tasks,
+            memory,
+            transcript_summary,
+            budget,
+            subagents,
+            id_generator,
+            "unknown".to_string(),
+            current_unix_millis(),
+            None,
+        )
+    }
+
+    /// Builds a checkpoint including recovery state (provider identity,
+    /// capture time, and the exact resumable [`ResumeState`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_recovery(
+        provenance: impl Into<String>,
+        config: OrchestratorConfig,
+        session_id: impl Into<String>,
+        tasks: TaskGraph,
+        memory: MemoryStore,
+        transcript_summary: TranscriptSummary,
+        budget: BudgetSnapshot,
+        subagents: SubagentTreeState,
+        id_generator: IdGeneratorState,
+        provider: impl Into<String>,
+        created_at_millis: u64,
+        resume: Option<ResumeState>,
+    ) -> Result<Self, OrchestratorError> {
         let checkpoint = Self {
             schema_version: CHECKPOINT_SCHEMA_VERSION,
             provenance: provenance.into(),
+            provider: provider.into(),
+            created_at_millis,
             config,
             session_id: session_id.into(),
             tasks,
@@ -263,6 +364,7 @@ impl OrchestratorCheckpoint {
             budget,
             subagents,
             id_generator,
+            resume,
         };
         checkpoint.validate()?;
         Ok(checkpoint)
@@ -335,6 +437,28 @@ impl OrchestratorCheckpoint {
             ));
         }
         self.subagents.validate(&self.tasks)?;
+        if let Some(resume) = &self.resume {
+            if self.tasks.get(&TaskId::new(resume.active_task_id.clone())).is_none() {
+                return Err(OrchestratorError::InvalidState(format!(
+                    "resume state references unknown active task {}",
+                    resume.active_task_id
+                )));
+            }
+            for completed in &resume.completed_tools {
+                if completed.tool_call_id.is_empty() {
+                    return Err(OrchestratorError::InvalidState(
+                        "resume state holds a completed tool call with an empty id".into(),
+                    ));
+                }
+            }
+            if let Some(in_flight) = &resume.in_flight
+                && in_flight.tool_call_id.is_empty()
+            {
+                return Err(OrchestratorError::InvalidState(
+                    "resume state holds an in-flight operation with an empty id".into(),
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -355,6 +479,14 @@ impl OrchestratorCheckpoint {
         };
         Ok((runtime, report))
     }
+}
+
+/// Current wall-clock time in Unix milliseconds (checkpoint timestamps).
+#[must_use]
+pub fn current_unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
 }
 
 /// Provenance-attributed summary of what a restore rebuilt.
@@ -460,7 +592,7 @@ mod tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(CHECKPOINT_SCHEMA_VERSION, 1);
+        assert_eq!(CHECKPOINT_SCHEMA_VERSION, 2);
         assert_eq!(sample_checkpoint().schema_version(), CHECKPOINT_SCHEMA_VERSION);
     }
 
@@ -471,6 +603,117 @@ mod tests {
         let restored: OrchestratorCheckpoint = serde_json::from_str(&json).expect("parses");
         assert_eq!(restored, checkpoint);
         assert!(restored.validate().is_ok());
+    }
+
+    #[test]
+    fn recovery_checkpoint_roundtrips_resume_state() {
+        let base = sample_checkpoint();
+        let checkpoint = OrchestratorCheckpoint::with_recovery(
+            "recovery",
+            base.config.clone(),
+            "s-1",
+            base.tasks.clone(),
+            base.memory.clone(),
+            base.transcript_summary.clone(),
+            base.budget,
+            base.subagents.clone(),
+            base.id_generator,
+            "ee-openrouter-agent",
+            1_700_000_000_000,
+            Some(ResumeState {
+                transcript: vec![ModelMessage::text(ModelRole::User, "hello")],
+                active_task_id: base.tasks.list()[0].id.as_str().to_string(),
+                completed_tools: vec![CompletedToolCall {
+                    tool_call_id: "tc-1".into(),
+                    tool_name: "read_file".into(),
+                    arguments: serde_json::json!({ "path": "/work/a.txt" }),
+                    success: true,
+                    summary: "a.txt: hello".into(),
+                    side_effect_class: crate::tools::SideEffectClass::Read,
+                }],
+                in_flight: None,
+                resumed_count: 1,
+                first_started_at_millis: 1_699_000_000_000,
+            }),
+        )
+        .expect("recovery checkpoint is valid");
+        assert_eq!(checkpoint.provider, "ee-openrouter-agent");
+        let json = serde_json::to_string(&checkpoint).expect("serializes");
+        let restored: OrchestratorCheckpoint = serde_json::from_str(&json).expect("parses");
+        assert_eq!(restored, checkpoint);
+        assert!(restored.validate().is_ok());
+        let resume = restored.resume.expect("resume state survives");
+        assert_eq!(resume.completed_tools[0].tool_name, "read_file");
+        assert_eq!(resume.resumed_count, 1);
+    }
+
+    #[test]
+    fn resume_state_rejects_unknown_active_task() {
+        let base = sample_checkpoint();
+        let checkpoint = OrchestratorCheckpoint::with_recovery(
+            "recovery",
+            base.config.clone(),
+            "s-1",
+            base.tasks.clone(),
+            base.memory.clone(),
+            base.transcript_summary.clone(),
+            base.budget,
+            base.subagents.clone(),
+            base.id_generator,
+            "provider",
+            1,
+            Some(ResumeState {
+                transcript: Vec::new(),
+                active_task_id: "task-404".into(),
+                completed_tools: Vec::new(),
+                in_flight: None,
+                resumed_count: 0,
+                first_started_at_millis: 0,
+            }),
+        )
+        .expect_err("dangling active task rejected");
+        assert!(
+            matches!(checkpoint, OrchestratorError::InvalidState(ref reason) if reason.contains("unknown active task")),
+            "{checkpoint}"
+        );
+    }
+
+    #[test]
+    fn resume_state_rejects_empty_tool_ids() {
+        let base = sample_checkpoint();
+        let error = OrchestratorCheckpoint::with_recovery(
+            "recovery",
+            base.config.clone(),
+            "s-1",
+            base.tasks.clone(),
+            base.memory.clone(),
+            base.transcript_summary.clone(),
+            base.budget,
+            base.subagents.clone(),
+            base.id_generator,
+            "provider",
+            1,
+            Some(ResumeState {
+                transcript: Vec::new(),
+                active_task_id: base.tasks.list()[0].id.as_str().to_string(),
+                completed_tools: vec![CompletedToolCall {
+                    tool_call_id: String::new(),
+                    tool_name: "read_file".into(),
+                    arguments: serde_json::json!({}),
+                    success: true,
+                    summary: "x".into(),
+                    side_effect_class: crate::tools::SideEffectClass::Read,
+                }],
+                in_flight: None,
+                resumed_count: 0,
+                first_started_at_millis: 0,
+            }),
+        )
+        .expect_err("empty tool id rejected");
+        assert!(
+            matches!(error, OrchestratorError::InvalidState(ref reason) if reason.contains("empty id")),
+            "{error}"
+        );
     }
 
     #[test]
@@ -527,7 +770,7 @@ mod tests {
 
     #[test]
     fn restore_rejects_unsupported_schema_versions() {
-        for version in [0, 2, 99] {
+        for version in [0, 1, 99] {
             let checkpoint = patched(&sample_checkpoint(), |value| {
                 value["schema_version"] = serde_json::json!(version);
             });

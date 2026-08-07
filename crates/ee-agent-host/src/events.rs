@@ -12,6 +12,7 @@ use ee_agent_protocol::{
     AgentCapabilities, AuthMethod, ElicitationId, Implementation, PermissionOption,
     RequestPermissionOutcome, SessionId, SessionUpdate, StopReason, ToolCallUpdate,
 };
+use serde::Deserialize;
 
 use crate::error::AgentError;
 
@@ -85,6 +86,34 @@ pub struct TurnMetrics {
     pub tokens: Option<ee_agent_protocol::Usage>,
 }
 
+/// Structured recoverable-turn payload deserialized from the agent's
+/// JSON-RPC error `data.recoverable` field.  Mirrors the server-side wire
+/// type; the host never synthesizes one.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RecoverableInfo {
+    /// Fault class label (`deadline`, `transient`, `rate_limited`, ...).
+    pub fault: String,
+    /// Human-readable summary of why the turn paused.
+    pub detail: String,
+    /// Underlying cause, when the agent reported one.
+    #[serde(default)]
+    pub cause: Option<String>,
+    /// Whether resuming is safe without user confirmation.
+    pub safe_resume: bool,
+    /// Server retry hint in milliseconds, when reported.
+    #[serde(default)]
+    pub retry_after: Option<u64>,
+    /// Durable checkpoint identity, when the agent persisted one.
+    #[serde(default)]
+    pub checkpoint_id: Option<String>,
+    /// Tool calls whose results are already durable.
+    #[serde(default)]
+    pub completed_tool_calls: u64,
+    /// How many times this turn has been resumed already.
+    #[serde(default)]
+    pub resumed_count: u32,
+}
+
 /// Every observable host state change.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
@@ -107,6 +136,14 @@ pub enum AgentEvent {
     TurnCancelled { session_id: SessionId, metrics: TurnMetrics },
     /// The running turn failed.
     TurnFailed { session_id: SessionId, error: AgentError, metrics: TurnMetrics },
+    /// The running turn stopped on a recoverable interruption: completed
+    /// work is durable and the same thread may resume (re-send the same
+    /// prompt) or discard (send `/discard`).
+    TurnPausedRecoverable {
+        session_id: SessionId,
+        metrics: TurnMetrics,
+        recoverable: Box<RecoverableInfo>,
+    },
     /// The agent requested permission for a tool call.
     PermissionRequested { session_id: SessionId, request: Box<PermissionRequestInfo> },
     /// A permission decision was recorded (from the user or cancellation).

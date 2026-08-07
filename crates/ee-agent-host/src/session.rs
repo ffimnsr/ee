@@ -20,7 +20,8 @@ use tokio::sync::{mpsc, watch};
 use crate::connection::AgentConnection;
 use crate::error::AgentError;
 use crate::events::{
-    AgentEvent, ConnectionCloseReason, PermissionRequestId, ThreadCloseReason, TurnMetrics,
+    AgentEvent, ConnectionCloseReason, PermissionRequestId, RecoverableInfo, ThreadCloseReason,
+    TurnMetrics,
 };
 use crate::mcp_over_acp::EeProxyMode;
 use crate::reducer::{MessageKind, ReducedMessage, SessionState, apply_update};
@@ -253,11 +254,26 @@ impl AgentThread {
             }
             Err(error) => {
                 let metrics = self.take_turn_metrics(None);
-                let _ = self.shared.events.send(AgentEvent::TurnFailed {
-                    session_id: self.session_id.clone(),
-                    error: error.clone(),
-                    metrics,
-                });
+                // A recoverable interruption carries structured data in the
+                // JSON-RPC error; surface it as a pause, not a failure, so
+                // the UI can offer Resume/Discard.
+                if let AgentError::Rpc(rpc_error) = error
+                    && let Some(data) = &rpc_error.data
+                    && let Some(recoverable) = data.get("recoverable")
+                    && let Ok(info) = serde_json::from_value::<RecoverableInfo>(recoverable.clone())
+                {
+                    let _ = self.shared.events.send(AgentEvent::TurnPausedRecoverable {
+                        session_id: self.session_id.clone(),
+                        metrics,
+                        recoverable: Box::new(info),
+                    });
+                } else {
+                    let _ = self.shared.events.send(AgentEvent::TurnFailed {
+                        session_id: self.session_id.clone(),
+                        error: error.clone(),
+                        metrics,
+                    });
+                }
             }
         }
         result

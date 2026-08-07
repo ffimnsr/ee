@@ -5,6 +5,7 @@
 //! come from the local `.env` file via [`Config::from_args_and_dotenv`].
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{ArgAction, Parser, builder::BoolishValueParser};
@@ -22,6 +23,15 @@ pub const DEFAULT_COMPACT_RETAINED_TAIL: usize = 8;
 /// Default maximum serialized bytes of history included in one compaction
 /// request (system prompt and compaction prompt included).
 pub const DEFAULT_COMPACT_MAX_INPUT_BYTES: usize = 64 * 1024;
+/// Default model context-window size in tokens, used for the ACP
+/// `usage_update` context-window denominator.
+pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
+/// Default maximum transient/429 retries per model call.
+pub const DEFAULT_RETRY_MAX_ATTEMPTS: u32 = 2;
+/// Default initial retry backoff: 500 ms.
+pub const DEFAULT_RETRY_BASE_DELAY_MS: u64 = 500;
+/// Default retry backoff cap: 30 seconds.
+pub const DEFAULT_RETRY_MAX_DELAY_MS: u64 = 30_000;
 
 /// Command-line arguments; every field also reads its `OPENROUTER_*`
 /// environment variable.
@@ -58,6 +68,9 @@ pub struct Args {
     /// Maximum serialized bytes of history included in one compaction request.
     #[arg(long, env = "OPENROUTER_COMPACT_MAX_INPUT_BYTES", default_value_t = DEFAULT_COMPACT_MAX_INPUT_BYTES)]
     compact_max_input_bytes: usize,
+    /// Model context-window size in tokens (reported as `usage_update.size`).
+    #[arg(long, env = "OPENROUTER_CONTEXT_WINDOW", default_value_t = DEFAULT_CONTEXT_WINDOW_TOKENS)]
+    context_window: u64,
     /// Run in orchestrated mode: ee-agent-orchestrator owns the model–tool
     /// loop and OpenRouter acts as the model adapter instead of the simple
     /// provider mode. Default after parity; opt out for fallback diagnostics.
@@ -72,6 +85,19 @@ pub struct Args {
         default_missing_value = "true",
     )]
     orchestrated: bool,
+    /// Maximum transient/429 retries per model call before failing the turn.
+    #[arg(long, env = "OPENROUTER_RETRY_MAX_ATTEMPTS", default_value_t = DEFAULT_RETRY_MAX_ATTEMPTS)]
+    retry_max_attempts: u32,
+    /// Initial retry backoff in milliseconds (doubles per attempt, capped).
+    #[arg(long, env = "OPENROUTER_RETRY_BASE_DELAY_MS", default_value_t = DEFAULT_RETRY_BASE_DELAY_MS)]
+    retry_base_delay_ms: u64,
+    /// Retry backoff cap in milliseconds (and cap for server Retry-After hints).
+    #[arg(long, env = "OPENROUTER_RETRY_MAX_DELAY_MS", default_value_t = DEFAULT_RETRY_MAX_DELAY_MS)]
+    retry_max_delay_ms: u64,
+    /// Directory for durable turn checkpoints (recovery); unset keeps
+    /// checkpoints in memory only.
+    #[arg(long, env = "EE_CHECKPOINT_DIR")]
+    checkpoint_dir: Option<PathBuf>,
 }
 
 /// Resolved agent configuration.
@@ -104,6 +130,17 @@ pub struct Config {
     /// Maximum serialized bytes of history included in one compaction
     /// request (system prompt and compaction prompt included).
     pub compact_max_input_bytes: usize,
+    /// Model context-window size in tokens; the ACP `usage_update.size`.
+    pub context_window: u64,
+    /// Maximum transient/429 retries per model call before failing the turn.
+    pub retry_max_attempts: u32,
+    /// Initial retry backoff (doubles per attempt, capped at
+    /// `retry_max_delay_ms`).
+    pub retry_base_delay: Duration,
+    /// Retry backoff cap and cap for server Retry-After hints.
+    pub retry_max_delay: Duration,
+    /// Durable checkpoint directory for orchestrator recovery.
+    pub checkpoint_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -124,6 +161,11 @@ impl Config {
             compact_min_messages: args.compact_min_messages,
             compact_retained_tail: args.compact_retained_tail,
             compact_max_input_bytes: args.compact_max_input_bytes,
+            context_window: args.context_window,
+            retry_max_attempts: args.retry_max_attempts,
+            retry_base_delay: Duration::from_millis(args.retry_base_delay_ms),
+            retry_max_delay: Duration::from_millis(args.retry_max_delay_ms),
+            checkpoint_dir: args.checkpoint_dir,
         }
     }
 
@@ -197,6 +239,11 @@ mod tests {
             compact_min_messages: DEFAULT_COMPACT_MIN_MESSAGES,
             compact_retained_tail: DEFAULT_COMPACT_RETAINED_TAIL,
             compact_max_input_bytes: DEFAULT_COMPACT_MAX_INPUT_BYTES,
+            context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
+            retry_max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
+            retry_base_delay_ms: DEFAULT_RETRY_BASE_DELAY_MS,
+            retry_max_delay_ms: DEFAULT_RETRY_MAX_DELAY_MS,
+            checkpoint_dir: None,
         }
     }
 
@@ -216,6 +263,11 @@ mod tests {
         assert_eq!(config.compact_min_messages, DEFAULT_COMPACT_MIN_MESSAGES);
         assert_eq!(config.compact_retained_tail, DEFAULT_COMPACT_RETAINED_TAIL);
         assert_eq!(config.compact_max_input_bytes, DEFAULT_COMPACT_MAX_INPUT_BYTES);
+        assert_eq!(config.context_window, DEFAULT_CONTEXT_WINDOW_TOKENS);
+        assert_eq!(config.retry_max_attempts, DEFAULT_RETRY_MAX_ATTEMPTS);
+        assert_eq!(config.retry_base_delay, Duration::from_millis(DEFAULT_RETRY_BASE_DELAY_MS));
+        assert_eq!(config.retry_max_delay, Duration::from_millis(DEFAULT_RETRY_MAX_DELAY_MS));
+        assert!(config.checkpoint_dir.is_none());
         assert!(config.api_key.is_none());
     }
 

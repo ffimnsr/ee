@@ -13,6 +13,7 @@
 //! tests and future UI display.
 
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tokio::time::Instant;
 
 use crate::config::OrchestratorConfig;
@@ -319,9 +320,22 @@ impl BudgetTracker {
         if let Some(deadline) = self.deadline
             && Instant::now() >= deadline
         {
-            return Err(OrchestratorError::BudgetExceeded("wall-clock deadline exceeded".into()));
+            return Err(OrchestratorError::DeadlineExceeded("wall-clock deadline exceeded".into()));
         }
         Ok(())
+    }
+
+    /// Re-anchors the wall-clock deadline to `now + turn_timeout` (a fresh
+    /// turn slice).  Cumulative counters are untouched, so resumed slices
+    /// keep their caps while restarting only the clock.
+    pub fn reset_deadline(&mut self, turn_timeout: Duration) {
+        self.deadline = Some(Instant::now() + turn_timeout);
+    }
+
+    /// Remaining time until the wall-clock deadline, if one is set.
+    #[must_use]
+    pub fn deadline_remaining(&self) -> Option<Duration> {
+        self.deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()))
     }
 
     /// Restores usage counters from a snapshot (checkpoint restore).
@@ -552,10 +566,37 @@ mod tests {
         tokio::time::advance(Duration::from_secs(11)).await;
         let error = tracker.try_reserve_model_call().expect_err("deadline passed");
         assert!(
-            matches!(error, OrchestratorError::BudgetExceeded(ref r) if r.contains("deadline"))
+            matches!(error, OrchestratorError::DeadlineExceeded(ref r) if r.contains("deadline"))
         );
         assert!(tracker.try_reserve_tool_call().is_err(), "all reservations share the deadline");
         assert!(tracker.try_reserve_subagent().is_err(), "all reservations share the deadline");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_remaining_counts_down_and_expires() {
+        let config = BudgetConfig {
+            deadline: Some(Instant::now() + Duration::from_secs(10)),
+            ..BudgetConfig::from_config(&OrchestratorConfig::default())
+        };
+        let tracker = BudgetTracker::with_config(config);
+        assert_eq!(tracker.deadline_remaining(), Some(Duration::from_secs(10)));
+        tokio::time::advance(Duration::from_secs(4)).await;
+        let remaining = tracker.deadline_remaining().expect("still ahead");
+        assert!(remaining <= Duration::from_secs(7) && remaining > Duration::from_secs(5));
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert_eq!(tracker.deadline_remaining(), Some(Duration::ZERO));
+        assert!(tracker.check_deadline().is_err(), "expired deadline fails");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_deadline_means_no_remaining_time() {
+        let config = BudgetConfig {
+            deadline: None,
+            ..BudgetConfig::from_config(&OrchestratorConfig::default())
+        };
+        let tracker = BudgetTracker::with_config(config);
+        assert_eq!(tracker.deadline_remaining(), None);
+        assert!(tracker.check_deadline().is_ok());
     }
 
     #[tokio::test(start_paused = true)]

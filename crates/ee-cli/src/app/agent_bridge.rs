@@ -2199,7 +2199,7 @@ impl App {
 
     /// Canonical workspace identity for the primary (working-directory)
     /// root.
-    fn primary_workspace_identity(&self) -> WorkspaceIdentity {
+    pub(super) fn primary_workspace_identity(&self) -> WorkspaceIdentity {
         let root =
             std::fs::canonicalize(&self.working_dir).unwrap_or_else(|_| self.working_dir.clone());
         WorkspaceIdentity::from_canonical_root_bytes(root.as_os_str().as_encoded_bytes())

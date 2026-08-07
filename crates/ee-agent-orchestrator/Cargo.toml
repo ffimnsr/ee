@@ -29,10 +29,12 @@ globset.workspace = true
 rmcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing.workspace = true
 
 [dev-dependencies]
 ee-acp-agent-server = { workspace = true, features = ["test-utils"] }
 ee-agent-orchestrator = { path = ".", features = ["test-utils"] }
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "test-util"] }
