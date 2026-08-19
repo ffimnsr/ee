@@ -114,7 +114,17 @@ impl HandlerCapabilities {
             | "_ee/format_file"
             | "_ee/preview_rename_symbol"
             | "_ee/rename_symbol"
-            | "_ee/terminal_output" => self.proxy_discovery,
+            | "_ee/terminal_output"
+            | "_ee/git_status"
+            | "_ee/git_diff"
+            | "_ee/git_diff_file"
+            | "_ee/changed_files"
+            | "_ee/review_context"
+            | "_ee/project_instructions"
+            | "_ee/save_note"
+            | "_ee/read_notes"
+            | "_ee/read_note"
+            | "_ee/file_dependency_map" => self.proxy_discovery,
             _ => false,
         }
     }
@@ -227,6 +237,29 @@ pub enum ClientRequest {
         character: u32,
         new_name: String,
     },
+    ProxyGitStatus,
+    ProxyGitDiff,
+    ProxyGitDiffFile {
+        path: String,
+    },
+    ProxyChangedFiles,
+    ProxyReviewContext,
+    ProxyProjectInstructions,
+    ProxySaveNote {
+        scope: String,
+        key: String,
+        content: String,
+    },
+    ProxyReadNotes {
+        scope: String,
+    },
+    ProxyReadNote {
+        scope: String,
+        key: String,
+    },
+    ProxyFileDependencyMap {
+        path: String,
+    },
     /// Internal MCP proxy request. Unlike ACP `terminal/output`, returns the
     /// proxy's structured terminal-output schema in `ProxyValue`.
     ProxyTerminalOutput(TerminalOutputRequest),
@@ -269,6 +302,16 @@ impl ClientRequest {
             Self::ProxyFormatFile { .. } => "_ee/format_file",
             Self::ProxyPreviewRenameSymbol { .. } => "_ee/preview_rename_symbol",
             Self::ProxyRenameSymbol { .. } => "_ee/rename_symbol",
+            Self::ProxyGitStatus => "_ee/git_status",
+            Self::ProxyGitDiff => "_ee/git_diff",
+            Self::ProxyGitDiffFile { .. } => "_ee/git_diff_file",
+            Self::ProxyChangedFiles => "_ee/changed_files",
+            Self::ProxyReviewContext => "_ee/review_context",
+            Self::ProxyProjectInstructions => "_ee/project_instructions",
+            Self::ProxySaveNote { .. } => "_ee/save_note",
+            Self::ProxyReadNotes { .. } => "_ee/read_notes",
+            Self::ProxyReadNote { .. } => "_ee/read_note",
+            Self::ProxyFileDependencyMap { .. } => "_ee/file_dependency_map",
             Self::ProxyTerminalOutput(_) => "_ee/terminal_output",
             Self::ReadTextFile(_) => FS_READ_TEXT_FILE_METHOD_NAME,
             Self::WriteTextFile(_) => FS_WRITE_TEXT_FILE_METHOD_NAME,
@@ -310,7 +353,17 @@ impl ClientRequest {
             | Self::ProxyApplyCodeAction { .. }
             | Self::ProxyFormatFile { .. }
             | Self::ProxyPreviewRenameSymbol { .. }
-            | Self::ProxyRenameSymbol { .. } => None,
+            | Self::ProxyRenameSymbol { .. }
+            | Self::ProxyGitStatus
+            | Self::ProxyGitDiff
+            | Self::ProxyGitDiffFile { .. }
+            | Self::ProxyChangedFiles
+            | Self::ProxyReviewContext
+            | Self::ProxyProjectInstructions
+            | Self::ProxySaveNote { .. }
+            | Self::ProxyReadNotes { .. }
+            | Self::ProxyReadNote { .. }
+            | Self::ProxyFileDependencyMap { .. } => None,
             Self::ProxyTerminalOutput(request) => Some(&request.session_id),
             Self::ReadTextFile(request) => Some(&request.session_id),
             Self::WriteTextFile(request) => Some(&request.session_id),
@@ -488,6 +541,11 @@ mod tests {
             "_ee/read_buffer",
             "_ee/read_buffer_lines",
             "_ee/open_buffers",
+            "_ee/git_status",
+            "_ee/git_diff",
+            "_ee/git_diff_file",
+            "_ee/changed_files",
+            "_ee/review_context",
             "_ee/terminal_output",
         ] {
             assert!(caps.supports(method), "{method} should be supported");
@@ -558,6 +616,15 @@ mod tests {
         ));
         assert_eq!(proxy_terminal.method(), "_ee/terminal_output");
         assert_eq!(proxy_terminal.session_id(), Some(&session));
+
+        let git_status = ClientRequest::ProxyGitStatus;
+        assert_eq!(git_status.method(), "_ee/git_status");
+        assert_eq!(git_status.session_id(), None);
+        assert!(HandlerCapabilities::all().supports(git_status.method()));
+
+        let git_diff_file = ClientRequest::ProxyGitDiffFile { path: String::from("/tmp/x") };
+        assert_eq!(git_diff_file.method(), "_ee/git_diff_file");
+        assert_eq!(git_diff_file.session_id(), None);
     }
 
     #[tokio::test]

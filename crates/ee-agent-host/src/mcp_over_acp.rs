@@ -52,11 +52,13 @@ use ee_agent_protocol::{
     WaitForTerminalExitRequest,
 };
 use ee_mcp::{
-    CodeActionsResult, DiagnosticsResult, DocumentSymbolsResult, EditTextResult, EeMcpProxy,
-    EeProxyBackend, ListDirectoryAllResult, ListDirectoryResult, OpenBuffersResult, ProxyToolError,
-    ReferencesResult, RenamePreviewResult, SearchFilesAllResult, SearchFilesResult,
-    SearchTextResult, TerminalOutputResult, TerminalWaitResult, TextEdit, WorkspaceEditResult,
-    WorkspaceRootsResult,
+    ChangedFilesResult, CodeActionsResult, DiagnosticsResult, DocumentSymbolsResult,
+    EditTextResult, EeMcpProxy, EeProxyBackend, FileDependencyMapResult, GitDiffResult,
+    GitStatusResult, ListDirectoryAllResult, ListDirectoryResult, OpenBuffersResult,
+    ProjectInstructionsResult, ProxyToolError, ReferencesResult, RenamePreviewResult,
+    ReviewContextResult, SearchFilesAllResult, SearchFilesResult, SearchTextResult,
+    SessionNoteResult, SessionNotesResult, TerminalOutputResult, TerminalWaitResult, TextEdit,
+    WorkspaceEditResult, WorkspaceRootsResult,
 };
 use rmcp::model::{JsonRpcMessage, RequestId, ServerNotification, ServerRequest, ServerResult};
 use rmcp::service::{RoleServer, RxJsonRpcMessage, TxJsonRpcMessage};
@@ -121,6 +123,24 @@ struct ProxyJob {
 
 type ClientRequestResult = Result<ClientRequestResponse, AgentError>;
 
+fn proxy_value<T: serde::de::DeserializeOwned>(
+    response: ClientRequestResponse,
+    operation: &str,
+) -> Result<T, ProxyToolError> {
+    match response {
+        ClientRequestResponse::ProxyValue(value) => {
+            serde_json::from_value(value).map_err(|error| ProxyToolError {
+                message: format!("proxy {operation} returned invalid payload: {error}"),
+                is_permission_denied: false,
+            })
+        }
+        _ => Err(ProxyToolError {
+            message: format!("proxy {operation} returned an unexpected response"),
+            is_permission_denied: false,
+        }),
+    }
+}
+
 /// Drives proxy tool calls through the shared handler on the host runtime.
 ///
 /// The capability gate mirrors [`crate::connection::dispatch_client_request`]:
@@ -152,6 +172,8 @@ async fn proxy_executor(
 struct HostProxyBackend {
     jobs: mpsc::UnboundedSender<ProxyJob>,
     process: Arc<Mutex<Option<AgentProcess>>>,
+    scope: String,
+    supported_tools: Option<Vec<String>>,
 }
 
 impl HostProxyBackend {
@@ -192,6 +214,10 @@ impl HostProxyBackend {
 }
 
 impl EeProxyBackend for HostProxyBackend {
+    fn supported_tools(&self) -> Option<Vec<String>> {
+        self.supported_tools.clone()
+    }
+
     fn workspace_roots(&self) -> Result<WorkspaceRootsResult, ProxyToolError> {
         match self.call(ClientRequest::ProxyWorkspaceRoots)? {
             ClientRequestResponse::ProxyValue(value) => {
@@ -621,6 +647,58 @@ impl EeProxyBackend for HostProxyBackend {
         }
     }
 
+    fn git_status(&self) -> Result<GitStatusResult, ProxyToolError> {
+        proxy_value(self.call(ClientRequest::ProxyGitStatus)?, "git_status")
+    }
+
+    fn git_diff(&self) -> Result<GitDiffResult, ProxyToolError> {
+        proxy_value(self.call(ClientRequest::ProxyGitDiff)?, "git_diff")
+    }
+
+    fn git_diff_file(&self, path: String) -> Result<GitDiffResult, ProxyToolError> {
+        proxy_value(self.call(ClientRequest::ProxyGitDiffFile { path })?, "git_diff_file")
+    }
+
+    fn changed_files(&self) -> Result<ChangedFilesResult, ProxyToolError> {
+        proxy_value(self.call(ClientRequest::ProxyChangedFiles)?, "changed_files")
+    }
+
+    fn review_context(&self) -> Result<ReviewContextResult, ProxyToolError> {
+        proxy_value(self.call(ClientRequest::ProxyReviewContext)?, "review_context")
+    }
+
+    fn project_instructions(&self) -> Result<ProjectInstructionsResult, ProxyToolError> {
+        proxy_value(self.call(ClientRequest::ProxyProjectInstructions)?, "project_instructions")
+    }
+
+    fn save_note(&self, key: String, content: String) -> Result<SessionNoteResult, ProxyToolError> {
+        proxy_value(
+            self.call(ClientRequest::ProxySaveNote { scope: self.scope.clone(), key, content })?,
+            "save_note",
+        )
+    }
+
+    fn read_notes(&self) -> Result<SessionNotesResult, ProxyToolError> {
+        proxy_value(
+            self.call(ClientRequest::ProxyReadNotes { scope: self.scope.clone() })?,
+            "read_notes",
+        )
+    }
+
+    fn read_note(&self, key: String) -> Result<SessionNoteResult, ProxyToolError> {
+        proxy_value(
+            self.call(ClientRequest::ProxyReadNote { scope: self.scope.clone(), key })?,
+            "read_note",
+        )
+    }
+
+    fn file_dependency_map(&self, path: String) -> Result<FileDependencyMapResult, ProxyToolError> {
+        proxy_value(
+            self.call(ClientRequest::ProxyFileDependencyMap { path })?,
+            "file_dependency_map",
+        )
+    }
+
     fn read_text_file(
         &self,
         path: String,
@@ -900,6 +978,7 @@ pub(crate) struct McpOverAcpRegistry {
     jobs: mpsc::UnboundedSender<ProxyJob>,
     /// Agent stderr capture for the `ee_diagnostics` tool.
     process: Arc<Mutex<Option<AgentProcess>>>,
+    proxy_discovery: bool,
 }
 
 impl McpOverAcpRegistry {
@@ -926,6 +1005,7 @@ impl McpOverAcpRegistry {
             next_connection_id: AtomicU64::new(0),
             jobs: jobs_tx,
             process,
+            proxy_discovery: handler_capabilities.proxy_discovery,
         }
     }
 
@@ -986,7 +1066,12 @@ impl McpOverAcpRegistry {
         // The serve thread runs its own current_thread runtime: proxy tool
         // calls block it synchronously while awaiting the host-side
         // approval round trip (never blocking the host runtime).
-        let backend = HostProxyBackend { jobs: self.jobs.clone(), process: self.process.clone() };
+        let backend = HostProxyBackend {
+            jobs: self.jobs.clone(),
+            process: self.process.clone(),
+            scope: connection_id.to_string(),
+            supported_tools: (!self.proxy_discovery).then(Vec::new),
+        };
         let proxy = EeMcpProxy::new(Arc::new(backend));
         let transport = McpOverAcpTransport { rx: rx_rx, pending: pending.clone() };
         let thread_connection = connection.clone();
@@ -1278,7 +1363,12 @@ mod tests {
     #[test]
     fn proxy_terminal_output_uses_structured_proxy_response() {
         let (jobs, mut received) = mpsc::unbounded_channel();
-        let backend = HostProxyBackend { jobs, process: Arc::new(Mutex::new(None)) };
+        let backend = HostProxyBackend {
+            jobs,
+            process: Arc::new(Mutex::new(None)),
+            scope: String::from("test"),
+            supported_tools: None,
+        };
         let worker = std::thread::spawn(move || {
             let job = received.blocking_recv().expect("proxy terminal output request");
             match job.request {
@@ -1319,7 +1409,12 @@ mod tests {
     #[test]
     fn proxy_terminal_output_since_filters_chunks_and_reconstructs_output() {
         let (jobs, mut received) = mpsc::unbounded_channel();
-        let backend = HostProxyBackend { jobs, process: Arc::new(Mutex::new(None)) };
+        let backend = HostProxyBackend {
+            jobs,
+            process: Arc::new(Mutex::new(None)),
+            scope: String::from("test"),
+            supported_tools: None,
+        };
         let worker = std::thread::spawn(move || {
             let job = received.blocking_recv().expect("proxy terminal output request");
             match job.request {

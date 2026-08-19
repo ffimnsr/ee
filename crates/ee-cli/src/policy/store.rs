@@ -33,6 +33,17 @@ pub(crate) const TRUST_SCHEMA_VERSION: u64 = 1;
 const TRUST_STATE_SUBDIR: &str = "trust";
 const STORE_FILE_EXTENSION: &str = "toml";
 
+fn default_load_time() -> SystemTime {
+    #[cfg(test)]
+    {
+        crate::policy::clock::fixture_now()
+    }
+    #[cfg(not(test))]
+    {
+        SystemTime::now()
+    }
+}
+
 /// Host-local store for one canonical workspace.
 #[derive(Debug)]
 pub(crate) struct TrustStore {
@@ -140,7 +151,7 @@ impl TrustStore {
     /// path) is a typed error.  Invalid rule entries are rejected
     /// individually — unique valid entries continue loading.
     pub(crate) fn load(&self) -> Result<TrustStoreDocument, TrustStoreError> {
-        self.load_at(SystemTime::now())
+        self.load_at(default_load_time())
     }
 
     /// [`Self::load`] with injected time (Phase 6): scope validation (past
@@ -170,7 +181,7 @@ impl TrustStore {
     /// Fail-closed effective policy: any load problem yields an empty rule
     /// set with the workspace gate disabled, so every operation prompts.
     pub(crate) fn effective(&self) -> TrustStoreDocument {
-        self.effective_at(SystemTime::now())
+        self.effective_at(default_load_time())
     }
 
     /// [`Self::effective`] with injected time (Phase 6).

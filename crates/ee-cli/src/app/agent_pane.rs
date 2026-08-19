@@ -3620,10 +3620,8 @@ impl App {
                     self.submit_prompt();
                 }
             }
-            KeyCode::Tab => {
-                if !self.cycle_slash_command(1) {
-                    self.agents_append_draft("\t");
-                }
+            KeyCode::Tab if !self.cycle_slash_command(1) => {
+                self.agents_append_draft("\t");
             }
             KeyCode::BackTab => {
                 let _ = self.cycle_slash_command(-1);
@@ -3752,10 +3750,8 @@ impl App {
             && let Some(field) = prompt.fields.get_mut(prompt.selected_field)
         {
             match &mut field.value {
-                ElicitationFieldValue::Text(text) => {
-                    if c != '\n' {
-                        text.push(c);
-                    }
+                ElicitationFieldValue::Text(text) if c != '\n' => {
+                    text.push(c);
                 }
                 ElicitationFieldValue::Number(text)
                     if c.is_ascii_digit() || c == '.' || c == '-' =>

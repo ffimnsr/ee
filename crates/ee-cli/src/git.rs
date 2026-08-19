@@ -1,11 +1,255 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::io;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
+use git2::{Diff, DiffFormat, DiffOptions, ErrorCode, Repository, Status, StatusOptions};
 use similar::{ChangeTag, TextDiff};
+
+pub(crate) const DEFAULT_GIT_STATUS_FILE_LIMIT: usize = 512;
+pub(crate) const DEFAULT_GIT_DIFF_BYTE_LIMIT: usize = 256 * 1024;
+
+/// Per-request output limits for read-only Git operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GitReadLimits {
+    pub(crate) max_status_files: usize,
+    pub(crate) max_diff_bytes: usize,
+}
+
+impl Default for GitReadLimits {
+    fn default() -> Self {
+        Self {
+            max_status_files: DEFAULT_GIT_STATUS_FILE_LIMIT,
+            max_diff_bytes: DEFAULT_GIT_DIFF_BYTE_LIMIT,
+        }
+    }
+}
+
+/// Canonical working-tree identity for library-backed Git reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GitRepository {
+    root: PathBuf,
+}
+
+#[allow(dead_code)] // `staged_diff` stays library-backed for a future optional MCP tool.
+impl GitRepository {
+    /// Discovers repository containing `path`. A non-repository path returns `Ok(None)`.
+    pub(crate) fn discover(path: &Path) -> Result<Option<Self>, git2::Error> {
+        let search_path = if path.is_dir() { path } else { path.parent().unwrap_or(path) };
+        let repository = match Repository::discover(search_path) {
+            Ok(repository) => repository,
+            Err(error) if error.code() == ErrorCode::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let root =
+            repository.workdir().unwrap_or(repository.path()).canonicalize().map_err(|error| {
+                git2::Error::from_str(&format!("cannot canonicalize Git repository root: {error}"))
+            })?;
+        Ok(Some(Self { root }))
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub(crate) fn status(&self, limits: GitReadLimits) -> Result<GitStatusReport, git2::Error> {
+        let repository = self.open()?;
+        let mut options = StatusOptions::new();
+        options
+            .include_untracked(true)
+            .recurse_untracked_dirs(true)
+            .include_unmodified(false)
+            .renames_head_to_index(true)
+            .renames_index_to_workdir(true);
+        let statuses = repository.statuses(Some(&mut options))?;
+        let total_file_count = statuses.len();
+        let mut report = GitStatusReport {
+            repo_root: self.root.clone(),
+            branch: branch_from_repository(&repository)?,
+            detached: repository.head_detached()?,
+            staged: Vec::new(),
+            unstaged: Vec::new(),
+            untracked: Vec::new(),
+            conflicts: Vec::new(),
+            file_limit: limits.max_status_files,
+            returned_file_count: total_file_count.min(limits.max_status_files),
+            total_file_count,
+            omitted_file_count: total_file_count.saturating_sub(limits.max_status_files),
+            truncated: total_file_count > limits.max_status_files,
+        };
+
+        for entry in statuses.iter().take(limits.max_status_files) {
+            let Some(path) = entry.path() else { continue };
+            let path = PathBuf::from(path);
+            let status = entry.status();
+            if status.intersects(
+                Status::INDEX_NEW
+                    | Status::INDEX_MODIFIED
+                    | Status::INDEX_DELETED
+                    | Status::INDEX_RENAMED
+                    | Status::INDEX_TYPECHANGE,
+            ) {
+                report.staged.push(path.clone());
+            }
+            if status.intersects(
+                Status::WT_MODIFIED
+                    | Status::WT_DELETED
+                    | Status::WT_RENAMED
+                    | Status::WT_TYPECHANGE,
+            ) {
+                report.unstaged.push(path.clone());
+            }
+            if status.contains(Status::WT_NEW) {
+                report.untracked.push(path.clone());
+            }
+            if status.contains(Status::CONFLICTED) {
+                report.conflicts.push(path);
+            }
+        }
+
+        Ok(report)
+    }
+
+    pub(crate) fn unstaged_diff(&self, limits: GitReadLimits) -> Result<GitDiff, git2::Error> {
+        self.unstaged_diff_for_relative_path(None, limits)
+    }
+
+    /// Produces an unstaged diff for one repository-relative path.
+    pub(crate) fn unstaged_diff_for_path(
+        &self,
+        path: &Path,
+        limits: GitReadLimits,
+    ) -> Result<GitDiff, git2::Error> {
+        let path = self.relative_path(path)?;
+        self.unstaged_diff_for_relative_path(Some(&path), limits)
+    }
+
+    pub(crate) fn staged_diff(&self, limits: GitReadLimits) -> Result<GitDiff, git2::Error> {
+        let repository = self.open()?;
+        let index = repository.index()?;
+        let head_tree = repository.head().ok().and_then(|head| head.peel_to_tree().ok());
+        let diff = repository.diff_tree_to_index(head_tree.as_ref(), Some(&index), None)?;
+        render_git_diff(&diff, limits.max_diff_bytes)
+    }
+
+    fn open(&self) -> Result<Repository, git2::Error> {
+        Repository::open(&self.root)
+    }
+
+    fn unstaged_diff_for_relative_path(
+        &self,
+        path: Option<&Path>,
+        limits: GitReadLimits,
+    ) -> Result<GitDiff, git2::Error> {
+        let repository = self.open()?;
+        let index = repository.index()?;
+        let mut options = DiffOptions::new();
+        if let Some(path) = path {
+            options.pathspec(path.to_string_lossy().as_ref());
+        }
+        let diff = repository.diff_index_to_workdir(Some(&index), Some(&mut options))?;
+        render_git_diff(&diff, limits.max_diff_bytes)
+    }
+
+    fn relative_path(&self, path: &Path) -> Result<PathBuf, git2::Error> {
+        let path = if path.is_absolute() {
+            let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            path.strip_prefix(&self.root)
+                .map_err(|_| git2::Error::from_str("Git path is outside repository root"))?
+                .to_path_buf()
+        } else {
+            path.to_path_buf()
+        };
+
+        let mut relative = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::Normal(component) => relative.push(component),
+                Component::CurDir => {}
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err(git2::Error::from_str("Git path must be repository-relative"));
+                }
+            }
+        }
+        if relative.as_os_str().is_empty() {
+            return Err(git2::Error::from_str("Git path must name a file"));
+        }
+        Ok(relative)
+    }
+}
+
+/// Bounded working-tree status. File paths are relative to `repo_root`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GitStatusReport {
+    pub(crate) repo_root: PathBuf,
+    pub(crate) branch: Option<String>,
+    pub(crate) detached: bool,
+    pub(crate) staged: Vec<PathBuf>,
+    pub(crate) unstaged: Vec<PathBuf>,
+    pub(crate) untracked: Vec<PathBuf>,
+    pub(crate) conflicts: Vec<PathBuf>,
+    pub(crate) file_limit: usize,
+    pub(crate) returned_file_count: usize,
+    pub(crate) total_file_count: usize,
+    pub(crate) omitted_file_count: usize,
+    pub(crate) truncated: bool,
+}
+
+/// Bounded unified diff output.
+#[allow(dead_code)] // `staged_diff` keeps this shared type ready for optional future exposure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GitDiff {
+    pub(crate) text: String,
+    pub(crate) bytes_returned: usize,
+    pub(crate) byte_limit: usize,
+    pub(crate) truncated: bool,
+}
+
+fn branch_from_repository(repository: &Repository) -> Result<Option<String>, git2::Error> {
+    let head = match repository.head() {
+        Ok(head) => head,
+        Err(error) if error.code() == ErrorCode::UnbornBranch => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    Ok((!repository.head_detached()? && head.is_branch())
+        .then(|| head.shorthand().map(str::to_owned))
+        .flatten())
+}
+
+#[allow(dead_code)]
+fn render_git_diff(diff: &Diff<'_>, byte_limit: usize) -> Result<GitDiff, git2::Error> {
+    let mut text = String::new();
+    let mut truncated = false;
+    let result = diff.print(DiffFormat::Patch, |_delta, _hunk, line| {
+        let mut content = String::new();
+        if matches!(line.origin(), '+' | '-' | ' ') {
+            content.push(line.origin());
+        }
+        content.push_str(&String::from_utf8_lossy(line.content()));
+        let remaining = byte_limit.saturating_sub(text.len());
+        if content.len() <= remaining {
+            text.push_str(&content);
+            true
+        } else {
+            let mut end = remaining;
+            while end > 0 && !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.push_str(&content[..end]);
+            truncated = true;
+            false
+        }
+    });
+    if let Err(error) = result
+        && !truncated
+    {
+        return Err(error);
+    }
+
+    Ok(GitDiff { bytes_returned: text.len(), text, byte_limit, truncated })
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct GitBufferCache {
@@ -133,27 +377,27 @@ pub(crate) fn inspect_buffer(
     path: &Path,
     current_lines: &[String],
 ) -> io::Result<Option<GitBufferStatus>> {
-    let parent = path.parent().unwrap_or(path);
-    let Some(repo_root) = crate::config::find_git_root(parent) else {
+    let Some(repository) = GitRepository::discover(path).map_err(git_error)? else {
         return Ok(None);
     };
-    let Ok(repo_relative) = path.strip_prefix(&repo_root) else {
-        return Ok(None);
+    let repo_relative = match repository.relative_path(path) {
+        Ok(path) => normalize_pathspec(&path),
+        Err(_) => return Ok(None),
     };
-    let repo_relative = normalize_pathspec(repo_relative);
-    let branch = branch_name(&repo_root).unwrap_or_else(|_| String::from("HEAD"));
-    let tracked_blob = read_head_blob(&repo_root, &repo_relative)?;
+    let branch = branch_name(&repository).unwrap_or_else(|_| String::from("HEAD"));
+    let tracked_blob = read_head_blob(&repository, &repo_relative)?;
     let tracked = tracked_blob.is_some();
     let base_lines = tracked_blob.unwrap_or_default();
     let (hunks, line_signs) = diff_hunks(&base_lines, current_lines);
 
     Ok(Some(GitBufferStatus {
-        repo_name: repo_root
+        repo_name: repository
+            .root()
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("repo")
             .to_owned(),
-        repo_root,
+        repo_root: repository.root().to_path_buf(),
         repo_relative,
         branch,
         tracked,
@@ -164,50 +408,33 @@ pub(crate) fn inspect_buffer(
 }
 
 pub(crate) fn blame_line(path: &Path, line: usize) -> io::Result<Option<GitBlameInfo>> {
-    let parent = path.parent().unwrap_or(path);
-    let Some(repo_root) = crate::config::find_git_root(parent) else {
+    let Some(repository) = GitRepository::discover(path).map_err(git_error)? else {
         return Ok(None);
     };
-    let Ok(repo_relative) = path.strip_prefix(&repo_root) else {
+    let repo_relative = match repository.relative_path(path) {
+        Ok(path) => path,
+        Err(_) => return Ok(None),
+    };
+    let repository_handle = repository.open().map_err(git_error)?;
+    let mut options = git2::BlameOptions::new();
+    options.min_line(line + 1).max_line(line + 1);
+    let blame = match repository_handle.blame_file(&repo_relative, Some(&mut options)) {
+        Ok(blame) => blame,
+        Err(_) => return Ok(None),
+    };
+    let Some(hunk) = blame.get_line(line + 1) else {
         return Ok(None);
     };
-    let repo_relative = normalize_pathspec(repo_relative);
-    let range = format!("{},{}", line + 1, line + 1);
-    let output = git_command(&repo_root)
-        .arg("blame")
-        .arg("--porcelain")
-        .arg("-L")
-        .arg(&range)
-        .arg("--")
-        .arg(&repo_relative)
-        .output()?;
-    if !output.status.success() {
-        return Ok(None);
-    }
+    let commit = hunk.final_commit_id();
+    let author = hunk.final_signature().name().unwrap_or_default().to_owned();
+    let author_time = Some(hunk.final_signature().when().seconds().to_string());
+    let summary = repository_handle
+        .find_commit(commit)
+        .ok()
+        .and_then(|commit| commit.summary().map(str::to_owned))
+        .unwrap_or_default();
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut lines = stdout.lines();
-    let first = lines.next().unwrap_or_default();
-    let commit = first.split_whitespace().next().unwrap_or_default().to_owned();
-    let mut author = String::new();
-    let mut summary = String::new();
-    let mut author_time = None;
-
-    for entry in lines {
-        if let Some(value) = entry.strip_prefix("author ") {
-            author = value.to_owned();
-        } else if let Some(value) = entry.strip_prefix("summary ") {
-            summary = value.to_owned();
-        } else if let Some(value) = entry.strip_prefix("author-time ") {
-            author_time = Some(value.to_owned());
-        }
-    }
-
-    if commit.is_empty() {
-        return Ok(None);
-    }
-
-    Ok(Some(GitBlameInfo { commit, author, summary, author_time }))
+    Ok(Some(GitBlameInfo { commit: commit.to_string(), author, summary, author_time }))
 }
 
 pub(crate) fn render_diff(status: &GitBufferStatus, hunk: Option<&GitHunk>) -> String {
@@ -259,70 +486,66 @@ pub(crate) fn format_blame(blame: &GitBlameInfo, line: usize) -> String {
 }
 
 pub(crate) fn changed_files(repo_root: &Path) -> io::Result<Vec<PathBuf>> {
-    let output = git_command(repo_root)
-        .arg("status")
-        .arg("--porcelain=v1")
-        .arg("-z")
-        .arg("--untracked-files=all")
-        .output()?;
-    if !output.status.success() {
-        return Err(io::Error::other("git status failed"));
-    }
-
+    let repository = GitRepository::discover(repo_root)
+        .map_err(git_error)?
+        .ok_or_else(|| io::Error::other("Git repository not found"))?;
+    let report = repository
+        .status(GitReadLimits {
+            max_status_files: usize::MAX,
+            max_diff_bytes: DEFAULT_GIT_DIFF_BYTE_LIMIT,
+        })
+        .map_err(git_error)?;
     let mut files = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    let mut records = output.stdout.split(|byte| *byte == 0).filter(|record| !record.is_empty());
-
-    while let Some(record) = records.next() {
-        if record.len() < 4 {
-            continue;
-        }
-        let status = &record[..2];
-        let mut path = String::from_utf8_lossy(&record[3..]).into_owned();
-        if matches!(status[0], b'R' | b'C') || matches!(status[1], b'R' | b'C') {
-            let Some(rename_target) = records.next() else { continue };
-            path = String::from_utf8_lossy(rename_target).into_owned();
-        }
-        let absolute = repo_root.join(path);
+    let mut seen = HashSet::new();
+    for path in report
+        .staged
+        .iter()
+        .chain(&report.unstaged)
+        .chain(&report.untracked)
+        .chain(&report.conflicts)
+    {
+        let absolute = repository.root().join(path);
         if seen.insert(absolute.clone()) {
             files.push(absolute);
         }
     }
-
     Ok(files)
 }
 
-fn git_command(repo_root: &Path) -> Command {
-    let mut command = Command::new("git");
-    command.arg("-C").arg(repo_root);
-    command
+fn branch_name(repository: &GitRepository) -> io::Result<String> {
+    let repository_handle = repository.open().map_err(git_error)?;
+    if let Some(branch) = branch_from_repository(&repository_handle).map_err(git_error)? {
+        return Ok(branch);
+    }
+    if repository_handle.head_detached().unwrap_or(false)
+        && let Ok(head) = repository_handle.head()
+        && let Some(target) = head.target()
+    {
+        return Ok(target.to_string().chars().take(8).collect());
+    }
+    Ok(String::from("HEAD"))
 }
 
-fn branch_name(repo_root: &Path) -> io::Result<String> {
-    let output = git_command(repo_root).arg("branch").arg("--show-current").output()?;
-    if output.status.success() {
-        let branch = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if !branch.is_empty() {
-            return Ok(branch);
-        }
-    }
-
-    let fallback = git_command(repo_root).arg("rev-parse").arg("--short").arg("HEAD").output()?;
-    if fallback.status.success() {
-        Ok(String::from_utf8_lossy(&fallback.stdout).trim().to_owned())
-    } else {
-        Ok(String::from("HEAD"))
-    }
-}
-
-fn read_head_blob(repo_root: &Path, repo_relative: &str) -> io::Result<Option<Vec<String>>> {
-    let output =
-        git_command(repo_root).arg("show").arg(format!("HEAD:{repo_relative}")).output()?;
-    if !output.status.success() {
+fn read_head_blob(
+    repository: &GitRepository,
+    repo_relative: &str,
+) -> io::Result<Option<Vec<String>>> {
+    let repository_handle = repository.open().map_err(git_error)?;
+    let Some(tree) = repository_handle.head().ok().and_then(|head| head.peel_to_tree().ok()) else {
         return Ok(None);
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(Some(split_blob_lines(&stdout)))
+    };
+    let Ok(entry) = tree.get_path(Path::new(repo_relative)) else {
+        return Ok(None);
+    };
+    let Ok(blob) = repository_handle.find_blob(entry.id()) else {
+        return Ok(None);
+    };
+    let text = String::from_utf8_lossy(blob.content());
+    Ok(Some(split_blob_lines(&text)))
+}
+
+fn git_error(error: git2::Error) -> io::Error {
+    io::Error::other(error)
 }
 
 fn split_blob_lines(text: &str) -> Vec<String> {

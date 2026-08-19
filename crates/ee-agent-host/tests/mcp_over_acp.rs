@@ -418,7 +418,8 @@ async fn mcp_over_acp_connect_and_tools_list_round_trip() {
     let script = connect_and_init_script()
         .emit(emit_message(202, "tools/list", None))
         .wait_for_response(202);
-    let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let (fake, host) =
+        spawn_host(script, Arc::new(RecordingHandler::new(HandlerCapabilities::all()))).await;
     let connection = ready_connection(&fake, &host).await;
     connection
         .new_session(vec![PathBuf::from("/work")], Vec::new(), Some(stdio_fallback()))
@@ -469,6 +470,17 @@ async fn mcp_over_acp_connect_and_tools_list_round_trip() {
             "ee_terminal_wait_long",
             "ee_terminal_kill",
             "ee_terminal_release",
+            "ee_git_status",
+            "ee_git_diff",
+            "ee_git_diff_file",
+            "ee_changed_files",
+            "ee_review_context",
+            "ee_project_instructions",
+            "ee_save_note",
+            "ee_read_notes",
+            "ee_read_note",
+            "ee_file_dependency_map",
+            "ee_tools_manifest",
             "ee_diagnostics",
         ]
     );
@@ -825,7 +837,7 @@ async fn mcp_over_acp_diagnostics_tool_returns_bounded_redacted_stderr() {
 
     let reply = await_response(&fake, 202).await;
     let result = reply["result"].as_object().expect("tool result payload");
-    assert_eq!(result["isError"], json!(false));
+    assert_eq!(result["isError"], json!(true));
     host.connection.close().await;
     fake.join(TEST_TIMEOUT).await;
 }

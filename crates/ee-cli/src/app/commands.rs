@@ -2844,20 +2844,39 @@ impl App {
             | "agents_stop"
             | "agents_resume"
             | "agents_discard"
-            | "agents_reconnect" => {
-                if self.dispatch_agents_command(head, tail) {
-                    // The agents pane keeps keyboard focus (or restores its
-                    // previous editor mode); skip the trailing
-                    // `enter_normal_mode` but still clear the command line.
-                    self.command_buffer.clear();
-                    // Commands run from the pane's `:` command line must
-                    // return focus to the pane.
-                    if self.mode == Mode::CommandLine && self.agents_pane_open() {
-                        self.mode = Mode::Agent;
-                    }
-                    return;
+            | "agents_reconnect"
+                if self.dispatch_agents_command(head, tail) =>
+            {
+                // The agents pane keeps keyboard focus (or restores its
+                // previous editor mode); skip the trailing
+                // `enter_normal_mode` but still clear the command line.
+                self.command_buffer.clear();
+                // Commands run from the pane's `:` command line must
+                // return focus to the pane.
+                if self.mode == Mode::CommandLine && self.agents_pane_open() {
+                    self.mode = Mode::Agent;
                 }
+                return;
             }
+            "agents"
+            | "agents_clear"
+            | "agents_close"
+            | "agents_config"
+            | "agents_config_set"
+            | "agents_config_toggle"
+            | "agents_layout"
+            | "agents_thoughts"
+            | "agents_mcp"
+            | "agents_mode_next"
+            | "agents_mode_prev"
+            | "agents_new"
+            | "agents_threads"
+            | "agents_next"
+            | "agents_prev"
+            | "agents_stop"
+            | "agents_resume"
+            | "agents_discard"
+            | "agents_reconnect" => {}
             other if !other.is_empty() => {
                 self.backend.status_message = Some(format!("unknown command: {other}"));
             }

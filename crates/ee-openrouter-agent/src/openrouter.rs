@@ -922,23 +922,39 @@ mod tests {
     #[test]
     fn classifies_http_errors_into_retry_decisions() {
         use ee_acp_agent_server::ProviderError;
+        enum ExpectedError {
+            RateLimited,
+            Transient,
+            BackendFailure,
+            InvalidRequest,
+        }
+
         let hint = Some(Duration::from_secs(3));
-        let cases: Vec<(u16, &dyn Fn(&ProviderError) -> bool)> = vec![
-            (429, &|error| matches!(error, ProviderError::RateLimited { .. })),
-            (408, &|error| matches!(error, ProviderError::Transient { .. })),
-            (500, &|error| matches!(error, ProviderError::Transient { .. })),
-            (502, &|error| matches!(error, ProviderError::Transient { .. })),
-            (503, &|error| matches!(error, ProviderError::Transient { .. })),
-            (504, &|error| matches!(error, ProviderError::Transient { .. })),
-            (599, &|error| matches!(error, ProviderError::Transient { .. })),
-            (401, &|error| matches!(error, ProviderError::BackendFailure(_))),
-            (403, &|error| matches!(error, ProviderError::BackendFailure(_))),
-            (400, &|error| matches!(error, ProviderError::InvalidRequest(_))),
-            (404, &|error| matches!(error, ProviderError::InvalidRequest(_))),
+        let cases = [
+            (429, ExpectedError::RateLimited),
+            (408, ExpectedError::Transient),
+            (500, ExpectedError::Transient),
+            (502, ExpectedError::Transient),
+            (503, ExpectedError::Transient),
+            (504, ExpectedError::Transient),
+            (599, ExpectedError::Transient),
+            (401, ExpectedError::BackendFailure),
+            (403, ExpectedError::BackendFailure),
+            (400, ExpectedError::InvalidRequest),
+            (404, ExpectedError::InvalidRequest),
         ];
-        for (status, predicate) in cases {
+        for (status, expected) in cases {
             let error = classify_http_error(status, hint, format!("HTTP {status}"));
-            assert!(predicate(&error), "status {status} classified wrong: {error:?}");
+            assert!(
+                matches!(
+                    (&expected, &error),
+                    (ExpectedError::RateLimited, ProviderError::RateLimited { .. })
+                        | (ExpectedError::Transient, ProviderError::Transient { .. })
+                        | (ExpectedError::BackendFailure, ProviderError::BackendFailure(_))
+                        | (ExpectedError::InvalidRequest, ProviderError::InvalidRequest(_))
+                ),
+                "status {status} classified wrong: {error:?}"
+            );
         }
         match classify_http_error(429, hint, "slow".into()) {
             ProviderError::RateLimited { retry_after, .. } => assert_eq!(retry_after, hint),

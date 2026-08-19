@@ -256,13 +256,17 @@ fn visual_line_mode_highlights_selected_lines_in_render() {
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
-    app.backend.pump().unwrap(); // wait for cursor-at-line-0 update from xi-core
+    app.backend.pump_until(|state| state.cursor_line == 0).expect("cursor returns to first line");
+    assert_eq!(app.backend.cursor_line, 0);
 
     // Enter visual-line mode and extend down one line.
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::SHIFT)));
     assert_eq!(app.mode, Mode::VisualLine);
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
-    app.backend.pump().unwrap(); // wait for move_down_and_modify_selection update
+    app.backend
+        .pump_until(|state| state.cursor_line == 1)
+        .expect("visual-line cursor moves to second line");
+    assert_eq!(app.backend.cursor_line, 1);
 
     let width: u16 = 40;
     let height: u16 = 10;

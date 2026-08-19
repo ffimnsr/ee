@@ -11,6 +11,7 @@
 //! fail-closed protocol-version pin.
 
 use std::borrow::Cow;
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -47,6 +48,13 @@ impl std::fmt::Display for ProxyToolError {
 }
 
 impl std::error::Error for ProxyToolError {}
+
+fn unavailable_proxy_tool<T>(name: &str) -> Result<T, ProxyToolError> {
+    Err(ProxyToolError {
+        message: format!("{name} are unavailable in this proxy mode"),
+        is_permission_denied: false,
+    })
+}
 
 /// Backend implementing the editor operations the ee MCP proxy exposes.
 ///
@@ -240,6 +248,81 @@ pub trait EeProxyBackend: Send + Sync + 'static {
 
     /// Releases a terminal owned by this proxy session.
     fn terminal_release(&self, terminal_id: String) -> Result<(), ProxyToolError>;
+
+    /// Returns bounded repository status for active workspace context.
+    fn git_status(&self) -> Result<GitStatusResult, ProxyToolError> {
+        Err(ProxyToolError {
+            message: String::from("Git status is unavailable in this proxy mode"),
+            is_permission_denied: false,
+        })
+    }
+
+    /// Returns bounded unstaged unified diff for active workspace context.
+    fn git_diff(&self) -> Result<GitDiffResult, ProxyToolError> {
+        Err(ProxyToolError {
+            message: String::from("Git diff is unavailable in this proxy mode"),
+            is_permission_denied: false,
+        })
+    }
+
+    /// Returns bounded unstaged unified diff for one absolute workspace file.
+    fn git_diff_file(&self, path: String) -> Result<GitDiffResult, ProxyToolError> {
+        let _ = path;
+        Err(ProxyToolError {
+            message: String::from("Git file diff is unavailable in this proxy mode"),
+            is_permission_denied: false,
+        })
+    }
+
+    /// Returns SCM state merged with editor dirty/saved state.
+    fn changed_files(&self) -> Result<ChangedFilesResult, ProxyToolError> {
+        Err(ProxyToolError {
+            message: String::from("Changed-file context is unavailable in this proxy mode"),
+            is_permission_denied: false,
+        })
+    }
+
+    /// Returns bounded review context without running commands or tests.
+    fn review_context(&self) -> Result<ReviewContextResult, ProxyToolError> {
+        Err(ProxyToolError {
+            message: String::from("Review context is unavailable in this proxy mode"),
+            is_permission_denied: false,
+        })
+    }
+
+    /// Returns bounded workspace-local instructions and safe config summaries.
+    fn project_instructions(&self) -> Result<ProjectInstructionsResult, ProxyToolError> {
+        unavailable_proxy_tool("Project instructions")
+    }
+
+    /// Stores one validated, non-secret note for this proxy connection scope.
+    fn save_note(&self, key: String, content: String) -> Result<SessionNoteResult, ProxyToolError> {
+        let _ = (key, content);
+        unavailable_proxy_tool("Session notes")
+    }
+
+    /// Returns bounded notes for this proxy connection scope.
+    fn read_notes(&self) -> Result<SessionNotesResult, ProxyToolError> {
+        unavailable_proxy_tool("Session notes")
+    }
+
+    /// Returns one bounded note for this proxy connection scope.
+    fn read_note(&self, key: String) -> Result<SessionNoteResult, ProxyToolError> {
+        let _ = key;
+        unavailable_proxy_tool("Session notes")
+    }
+
+    /// Returns known file edges from an optional dependency index.
+    fn file_dependency_map(&self, path: String) -> Result<FileDependencyMapResult, ProxyToolError> {
+        let _ = path;
+        unavailable_proxy_tool("File dependency map")
+    }
+
+    /// Optional exact supported-tool profile. `None` means every stable tool is supported.
+    /// Hosts use this to avoid advertising partial implementations as complete.
+    fn supported_tools(&self) -> Option<Vec<String>> {
+        None
+    }
 
     /// Recent stderr/diagnostic lines, bounded; never contains secrets.
     fn diagnostics(&self) -> Vec<String>;
@@ -524,21 +607,208 @@ pub struct WorkspaceEditResult {
     pub edit_count: u32,
 }
 
+/// Bounded SCM status returned by `ee_git_status`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitStatusResult {
+    pub repo_root: String,
+    pub branch: Option<String>,
+    pub detached: bool,
+    pub staged: Vec<String>,
+    pub unstaged: Vec<String>,
+    pub untracked: Vec<String>,
+    pub conflicts: Vec<String>,
+    pub file_limit: u32,
+    pub returned_file_count: u32,
+    pub total_file_count: u32,
+    pub omitted_file_count: u32,
+    pub truncated: bool,
+}
+
+/// Bounded unified diff returned by `ee_git_diff` tools.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiffResult {
+    pub diff: String,
+    pub bytes_returned: u64,
+    pub byte_limit: u64,
+    pub truncated: bool,
+}
+
+/// One source-control change merged with editor buffer state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangedFileEntry {
+    pub path: String,
+    pub staged: bool,
+    pub unstaged: bool,
+    pub untracked: bool,
+    pub conflicted: bool,
+    pub dirty: bool,
+    pub saved: bool,
+}
+
+/// Bounded changed-file result returned by `ee_changed_files`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangedFilesResult {
+    pub files: Vec<ChangedFileEntry>,
+    pub file_limit: u32,
+    pub total_file_count: u32,
+    pub omitted_file_count: u32,
+    pub truncated: bool,
+}
+
+/// One bounded workspace-local instruction or safe configuration summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectInstructionSource {
+    pub path: String,
+    pub kind: String,
+    pub precedence: u32,
+    pub content: String,
+    pub truncated: bool,
+}
+
+/// Structured workspace guidance returned by `ee_project_instructions`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectInstructionsResult {
+    pub root: String,
+    pub sources: Vec<ProjectInstructionSource>,
+    pub tool_constraints: Vec<String>,
+    pub truncated: bool,
+}
+
+/// One bounded non-secret note scoped to trusted proxy connection state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionNoteResult {
+    pub key: String,
+    pub content: String,
+    pub bytes: u32,
+    pub truncated: bool,
+}
+
+/// Bounded note listing for current proxy connection scope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionNotesResult {
+    pub notes: Vec<SessionNoteResult>,
+    pub note_limit: u32,
+    pub total_note_count: u32,
+    pub omitted_note_count: u32,
+    pub truncated: bool,
+}
+
+/// One known file dependency edge from an optional editor index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDependencyEdge {
+    pub path: String,
+    pub kind: String,
+}
+
+/// Bounded result from an optional editor-owned file dependency index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileDependencyMapResult {
+    pub path: String,
+    pub available: bool,
+    pub reason: Option<String>,
+    pub freshness: String,
+    pub indexed_at: Option<String>,
+    pub outgoing: Vec<FileDependencyEdge>,
+    pub incoming: Vec<FileDependencyEdge>,
+    pub truncated: bool,
+}
+
+/// Bounded read-only context for final review. `test_suggestions` never execute automatically.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewContextResult {
+    pub changed_files: ChangedFilesResult,
+    pub diagnostics: DiagnosticsResult,
+    pub nearby_symbols: Vec<DocumentSymbolEntry>,
+    pub symbols_truncated: bool,
+    pub test_suggestions: Vec<String>,
+}
+
+/// One bounded output limit advertised by the tools manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolOutputCap {
+    pub kind: String,
+    pub max: u64,
+}
+
+/// One stable ee tool contract. Incompatible changes require a new tool name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolManifestEntry {
+    pub name: String,
+    pub schema_version: u64,
+    pub input_schema: serde_json::Value,
+    pub side_effect: String,
+    pub approval: String,
+    pub output_caps: Vec<ToolOutputCap>,
+    pub example: serde_json::Value,
+}
+
+/// Versioned, session-cacheable ee proxy contract returned by `ee_tools_manifest`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolsManifestResult {
+    pub manifest_version: u64,
+    pub tools: Vec<ToolManifestEntry>,
+}
+
 /// An in-process MCP server exposing ee editor operations as MCP tools.
 ///
-/// The server speaks MCP `2026-07-28` only and advertises the fixed
-/// `ee_*` tool set returned by [`list_tools`](rmcp::ServerHandler::list_tools).
-/// Tool execution is delegated to the [`EeProxyBackend`] supplied at
-/// construction.
+/// The server speaks MCP `2026-07-28` only. Stable names start with `ee_`.
+/// Tool execution is delegated to the [`EeProxyBackend`] supplied at construction.
 pub struct EeMcpProxy {
     backend: Arc<dyn EeProxyBackend>,
+    supported_tools: Option<BTreeSet<String>>,
 }
 
 impl EeMcpProxy {
     /// Creates a proxy delegating tool execution to `backend`.
     #[must_use]
     pub fn new(backend: Arc<dyn EeProxyBackend>) -> Self {
-        Self { backend }
+        let supported_tools = backend.supported_tools().map(|tools| tools.into_iter().collect());
+        Self { backend, supported_tools }
+    }
+
+    /// Creates a proxy with an exact host-supported profile. The manifest tool is always available.
+    #[must_use]
+    pub fn with_supported_tools(backend: Arc<dyn EeProxyBackend>, tools: Vec<String>) -> Self {
+        Self { backend, supported_tools: Some(tools.into_iter().collect()) }
+    }
+
+    fn is_supported(&self, name: &str) -> bool {
+        name == "ee_tools_manifest"
+            || self.supported_tools.as_ref().is_none_or(|tools| tools.contains(name))
+    }
+
+    fn tools(&self) -> Vec<Tool> {
+        Self::all_tools().into_iter().filter(|tool| self.is_supported(tool.name.as_ref())).collect()
+    }
+
+    fn tools_manifest(&self) -> ToolsManifestResult {
+        ToolsManifestResult {
+            manifest_version: crate::EE_TOOL_SCHEMA_VERSION,
+            tools: self
+                .tools()
+                .into_iter()
+                .map(|tool| {
+                    manifest_entry(
+                        tool.name.as_ref(),
+                        serde_json::Value::Object((*tool.input_schema).clone()),
+                    )
+                })
+                .collect(),
+        }
     }
 
     /// The server capabilities advertised in `initialize` and `discover`.
@@ -552,7 +822,7 @@ impl EeMcpProxy {
     }
 
     /// The fixed tool list (tool names are namespaced under `ee.`).
-    fn tools() -> Vec<Tool> {
+    fn all_tools() -> Vec<Tool> {
         vec![
             Tool::new(
                 "ee_workspace_roots",
@@ -938,6 +1208,95 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
+                "ee_git_status",
+                "Return bounded read-only Git branch, detached state, staged, unstaged, untracked, and conflict paths for active workspace repository.",
+                schema(
+                    json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                ),
+            ),
+            Tool::new(
+                "ee_git_diff",
+                "Return bounded read-only unstaged unified diff for active workspace repository with truncation metadata.",
+                schema(
+                    json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                ),
+            ),
+            Tool::new(
+                "ee_git_diff_file",
+                "Return bounded read-only unstaged unified diff for one absolute workspace file with truncation metadata.",
+                schema(json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"],
+                    "additionalProperties": false,
+                })),
+            ),
+            Tool::new(
+                "ee_changed_files",
+                "Return bounded SCM changed files merged with editor dirty and saved-buffer state.",
+                schema(
+                    json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                ),
+            ),
+            Tool::new(
+                "ee_review_context",
+                "Return read-only changed files, relevant diagnostics, nearby symbols, and configured validation suggestions. Never runs tests or commands.",
+                schema(
+                    json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                ),
+            ),
+            Tool::new(
+                "ee_project_instructions",
+                "Return bounded applicable workspace instructions, safe configuration summaries, source paths, and precedence order.",
+                schema(
+                    json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                ),
+            ),
+            Tool::new(
+                "ee_save_note",
+                "Store one bounded non-secret note for current proxy connection only. Notes are never persisted without explicit user opt-in.",
+                schema(json!({
+                    "type": "object",
+                    "properties": { "key": { "type": "string" }, "content": { "type": "string" } },
+                    "required": ["key", "content"],
+                    "additionalProperties": false,
+                })),
+            ),
+            Tool::new(
+                "ee_read_notes",
+                "Return bounded non-secret notes for current proxy connection only.",
+                schema(
+                    json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                ),
+            ),
+            Tool::new(
+                "ee_read_note",
+                "Return one bounded non-secret note for current proxy connection only.",
+                schema(json!({
+                    "type": "object",
+                    "properties": { "key": { "type": "string" } },
+                    "required": ["key"],
+                    "additionalProperties": false,
+                })),
+            ),
+            Tool::new(
+                "ee_file_dependency_map",
+                "Return known bounded dependency edges for one absolute workspace file. Reports unavailable or stale index state without fabricating edges.",
+                schema(json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"],
+                    "additionalProperties": false,
+                })),
+            ),
+            Tool::new(
+                "ee_tools_manifest",
+                "Return versioned stable ee tool contracts: schema versions, side effects, approvals, result caps, and minimal examples. Safe to cache for this MCP session.",
+                schema(
+                    json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                ),
+            ),
+            Tool::new(
                 "ee_diagnostics",
                 "Recent editor diagnostics (stderr lines); never contains secrets.",
                 schema(json!({ "type": "object", "properties": {} })),
@@ -950,7 +1309,16 @@ impl EeMcpProxy {
         &self,
         request: &CallToolRequestParams,
     ) -> Result<CallToolResponse, ErrorData> {
+        if !self.is_supported(request.name.as_ref()) {
+            return Ok(complete(CallToolResult::error(vec![ContentBlock::text(format!(
+                "tool '{}' unavailable in this host mode",
+                request.name
+            ))])));
+        }
         match request.name.as_ref() {
+            "ee_tools_manifest" => {
+                Ok(complete(CallToolResult::structured(json!(self.tools_manifest()))))
+            }
             "ee_workspace_roots" => Ok(self
                 .backend
                 .workspace_roots()
@@ -1306,6 +1674,75 @@ impl EeMcpProxy {
                     .unwrap_or_else(backend_error_result))
             }
 
+            "ee_git_status" => Ok(self
+                .backend
+                .git_status()
+                .map(|result| complete(CallToolResult::structured(json!(result))))
+                .unwrap_or_else(backend_error_result)),
+            "ee_git_diff" => Ok(self
+                .backend
+                .git_diff()
+                .map(|result| complete(CallToolResult::structured(json!(result))))
+                .unwrap_or_else(backend_error_result)),
+            "ee_git_diff_file" => {
+                let arguments = require_arguments(request)?;
+                let path = require_string(arguments, "path")?;
+                require_absolute(path)?;
+                Ok(self
+                    .backend
+                    .git_diff_file(path.to_owned())
+                    .map(|result| complete(CallToolResult::structured(json!(result))))
+                    .unwrap_or_else(backend_error_result))
+            }
+            "ee_changed_files" => Ok(self
+                .backend
+                .changed_files()
+                .map(|result| complete(CallToolResult::structured(json!(result))))
+                .unwrap_or_else(backend_error_result)),
+            "ee_review_context" => Ok(self
+                .backend
+                .review_context()
+                .map(|result| complete(CallToolResult::structured(json!(result))))
+                .unwrap_or_else(backend_error_result)),
+            "ee_project_instructions" => Ok(self
+                .backend
+                .project_instructions()
+                .map(|result| complete(CallToolResult::structured(json!(result))))
+                .unwrap_or_else(backend_error_result)),
+            "ee_save_note" => {
+                let arguments = require_arguments(request)?;
+                let key = require_nonempty_string(arguments, "key")?;
+                let content = require_nonempty_string(arguments, "content")?;
+                Ok(self
+                    .backend
+                    .save_note(key.to_owned(), content.to_owned())
+                    .map(|result| complete(CallToolResult::structured(json!(result))))
+                    .unwrap_or_else(backend_error_result))
+            }
+            "ee_read_notes" => Ok(self
+                .backend
+                .read_notes()
+                .map(|result| complete(CallToolResult::structured(json!(result))))
+                .unwrap_or_else(backend_error_result)),
+            "ee_read_note" => {
+                let arguments = require_arguments(request)?;
+                let key = require_nonempty_string(arguments, "key")?;
+                Ok(self
+                    .backend
+                    .read_note(key.to_owned())
+                    .map(|result| complete(CallToolResult::structured(json!(result))))
+                    .unwrap_or_else(backend_error_result))
+            }
+            "ee_file_dependency_map" => {
+                let arguments = require_arguments(request)?;
+                let path = require_string(arguments, "path")?;
+                require_absolute(path)?;
+                Ok(self
+                    .backend
+                    .file_dependency_map(path.to_owned())
+                    .map(|result| complete(CallToolResult::structured(json!(result))))
+                    .unwrap_or_else(backend_error_result))
+            }
             "ee_diagnostics" => {
                 let lines = self.backend.diagnostics();
                 Ok(complete(CallToolResult::success(vec![ContentBlock::text(lines.join("\n"))])))
@@ -1363,7 +1800,7 @@ impl rmcp::ServerHandler for EeMcpProxy {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListToolsResult, ErrorData>> + MaybeSendFuture + '_ {
-        std::future::ready(Ok(ListToolsResult::with_all_items(Self::tools())))
+        std::future::ready(Ok(ListToolsResult::with_all_items(self.tools())))
     }
 
     /// Dispatches a tool call to the backend; see [`EeMcpProxy::dispatch_tool`].
@@ -1398,6 +1835,52 @@ fn backend_error_result(error: ProxyToolError) -> CallToolResponse {
 /// Converts a `serde_json::json!` literal into a tool input schema object.
 fn schema(value: serde_json::Value) -> JsonObject {
     value.as_object().expect("tool schema must be a JSON object").clone()
+}
+
+fn manifest_entry(name: &str, input_schema: serde_json::Value) -> ToolManifestEntry {
+    let side_effect = crate::side_effect_class(name).as_str().to_owned();
+    let approval = match side_effect.as_str() {
+        "read" => "none",
+        "write" | "execute" => "required",
+        _ => "none",
+    }
+    .to_owned();
+    let max = match name {
+        "ee_git_diff" | "ee_git_diff_file" => 256 * 1024,
+        "ee_read_text_file" | "ee_read_buffer" => 1024 * 1024,
+        "ee_terminal_output" | "ee_terminal_output_since" => 1024 * 1024,
+        "ee_search_text" | "ee_search_text_regex" | "ee_search_text_in_files" => 200,
+        _ => 500,
+    };
+    let example = if name == "ee_tools_manifest"
+        || name == "ee_workspace_roots"
+        || name == "ee_git_status"
+        || name == "ee_git_diff"
+        || name == "ee_changed_files"
+        || name == "ee_review_context"
+        || name == "ee_project_instructions"
+        || name == "ee_read_notes"
+        || name == "ee_diagnostics"
+    {
+        json!({})
+    } else if name == "ee_save_note" {
+        json!({ "key": "plan", "content": "inspect parser" })
+    } else if name == "ee_read_note" {
+        json!({ "key": "plan" })
+    } else if name.contains("terminal") {
+        json!({ "terminal_id": "term-1" })
+    } else {
+        json!({ "path": "/workspace/src/lib.rs" })
+    };
+    ToolManifestEntry {
+        name: name.to_owned(),
+        schema_version: crate::EE_TOOL_SCHEMA_VERSION,
+        input_schema,
+        side_effect,
+        approval,
+        output_caps: vec![ToolOutputCap { kind: String::from("result"), max }],
+        example,
+    }
 }
 
 /// Requires the tool call to carry arguments.
@@ -1995,6 +2478,78 @@ mod tests {
             })
         }
 
+        fn git_status(&self) -> Result<GitStatusResult, ProxyToolError> {
+            self.record(String::from("git_status"));
+            Ok(GitStatusResult {
+                repo_root: String::from("/abs/work"),
+                branch: Some(String::from("main")),
+                detached: false,
+                staged: vec![String::from("staged.rs")],
+                unstaged: vec![String::from("src/main.rs")],
+                untracked: vec![String::from("new.rs")],
+                conflicts: Vec::new(),
+                file_limit: 512,
+                returned_file_count: 3,
+                total_file_count: 3,
+                omitted_file_count: 0,
+                truncated: false,
+            })
+        }
+
+        fn git_diff(&self) -> Result<GitDiffResult, ProxyToolError> {
+            self.record(String::from("git_diff"));
+            Ok(GitDiffResult {
+                diff: String::from("diff --git a/src/main.rs b/src/main.rs\n"),
+                bytes_returned: 40,
+                byte_limit: 1024,
+                truncated: false,
+            })
+        }
+
+        fn git_diff_file(&self, path: String) -> Result<GitDiffResult, ProxyToolError> {
+            self.record(format!("git_diff_file:{path}"));
+            Ok(GitDiffResult {
+                diff: format!("diff --git a/{path} b/{path}\n"),
+                bytes_returned: 32,
+                byte_limit: 1024,
+                truncated: false,
+            })
+        }
+
+        fn changed_files(&self) -> Result<ChangedFilesResult, ProxyToolError> {
+            self.record(String::from("changed_files"));
+            Ok(ChangedFilesResult {
+                files: vec![ChangedFileEntry {
+                    path: String::from("/abs/work/src/main.rs"),
+                    staged: false,
+                    unstaged: true,
+                    untracked: false,
+                    conflicted: false,
+                    dirty: true,
+                    saved: false,
+                }],
+                file_limit: 512,
+                total_file_count: 1,
+                omitted_file_count: 0,
+                truncated: false,
+            })
+        }
+
+        fn review_context(&self) -> Result<ReviewContextResult, ProxyToolError> {
+            self.record(String::from("review_context"));
+            Ok(ReviewContextResult {
+                changed_files: self.changed_files()?,
+                diagnostics: DiagnosticsResult {
+                    diagnostics: Vec::new(),
+                    truncated: false,
+                    total: 0,
+                },
+                nearby_symbols: Vec::new(),
+                symbols_truncated: false,
+                test_suggestions: Vec::new(),
+            })
+        }
+
         fn read_text_file(
             &self,
             path: String,
@@ -2406,12 +2961,24 @@ mod tests {
                 "ee_terminal_wait_long",
                 "ee_terminal_kill",
                 "ee_terminal_release",
+                "ee_git_status",
+                "ee_git_diff",
+                "ee_git_diff_file",
+                "ee_changed_files",
+                "ee_review_context",
+                "ee_project_instructions",
+                "ee_save_note",
+                "ee_read_notes",
+                "ee_read_note",
+                "ee_file_dependency_map",
+                "ee_tools_manifest",
                 "ee_diagnostics",
             ]
         );
         assert!(tools.iter().all(|tool| tool.name.starts_with("ee_")));
         assert!(tools.iter().all(|tool| !tool.name.contains('.')));
         assert!(tools.iter().all(|tool| tool.input_schema.contains_key("properties")));
+        assert!(tools.iter().any(|tool| tool.name == "ee_tools_manifest"));
         assert!(tools.iter().find(|tool| tool.name == "ee_list_directory").is_some_and(|tool| {
             tool.description
                 .as_ref()
@@ -2424,6 +2991,105 @@ mod tests {
                     .is_some_and(|description| description.contains("safety-limited"))
             }
         ));
+
+        shutdown(&client, &server);
+    }
+
+    #[test]
+    fn supported_tool_profile_filters_discovery_but_keeps_manifest() {
+        let proxy = EeMcpProxy::with_supported_tools(
+            Arc::new(ScriptedBackend::default()),
+            vec![String::from("ee_workspace_roots")],
+        );
+        let tools = proxy.tools();
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
+        assert_eq!(names, vec!["ee_workspace_roots", "ee_tools_manifest"]);
+    }
+
+    #[test]
+    fn tools_manifest_is_versioned_complete_and_cache_safe() {
+        let proxy = EeMcpProxy::new(Arc::new(ScriptedBackend::default()));
+        let manifest = proxy.tools_manifest();
+        assert_eq!(manifest.manifest_version, crate::EE_TOOL_SCHEMA_VERSION);
+        assert!(manifest.tools.iter().all(|entry| entry.name.starts_with("ee_")));
+        assert!(
+            manifest
+                .tools
+                .iter()
+                .all(|entry| entry.schema_version == crate::EE_TOOL_SCHEMA_VERSION)
+        );
+        assert!(
+            manifest
+                .tools
+                .iter()
+                .all(|entry| !entry.approval.is_empty() && !entry.output_caps.is_empty())
+        );
+        assert!(manifest.tools.iter().any(|entry| entry.name == "ee_tools_manifest"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn git_and_review_tools_return_structured_content() {
+        let backend = Arc::new(ScriptedBackend::default());
+        let (client, server) = connect(backend.clone()).await;
+
+        let status = tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            client.call_tool(CallToolRequestParams::new("ee_git_status")),
+        )
+        .await
+        .expect("status timed out")
+        .expect("status call failed");
+        assert_eq!(status.structured_content.expect("status content")["branch"], json!("main"));
+
+        let diff = tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            client.call_tool(
+                CallToolRequestParams::new("ee_git_diff_file")
+                    .with_arguments(arguments(json!({ "path": "/abs/work/src/main.rs" }))),
+            ),
+        )
+        .await
+        .expect("diff timed out")
+        .expect("diff call failed");
+        assert!(
+            diff.structured_content.expect("diff content")["diff"]
+                .as_str()
+                .expect("diff text")
+                .contains("src/main.rs")
+        );
+
+        let changed = tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            client.call_tool(CallToolRequestParams::new("ee_changed_files")),
+        )
+        .await
+        .expect("changed files timed out")
+        .expect("changed files call failed");
+        assert_eq!(
+            changed.structured_content.expect("changed content")["files"].as_array().map(Vec::len),
+            Some(1)
+        );
+
+        let review = tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            client.call_tool(CallToolRequestParams::new("ee_review_context")),
+        )
+        .await
+        .expect("review timed out")
+        .expect("review call failed");
+        assert!(
+            review.structured_content.expect("review content").get("testSuggestions").is_some()
+        );
+        assert_eq!(
+            backend.calls(),
+            vec![
+                "git_status",
+                "git_diff_file:/abs/work/src/main.rs",
+                "changed_files",
+                "review_context",
+                "changed_files"
+            ]
+        );
 
         shutdown(&client, &server);
     }

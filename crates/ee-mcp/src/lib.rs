@@ -28,6 +28,17 @@
 //! secret rejection, primitive namespacing/validation, host events, and
 //! lifecycle orchestration.
 //!
+//! # ee proxy contract
+//!
+//! Editor proxy tool names are stable `ee_` identifiers. Clients should call
+//! `ee_tools_manifest` once per MCP session and cache its versioned response;
+//! it lists currently supported tools, schema versions, side-effect classes,
+//! approval behavior, output caps, and minimal examples. Hosts may advertise a
+//! partial tool set, and known disabled tools fail closed as tool-level errors.
+//! New incompatible schemas require a new tool name; complex arguments should
+//! become smaller focused tools. Paths, sensitive values, and diagnostics stay
+//! subject to host validation, bounds, and redaction.
+//!
 //! [`rmcp`]: https://docs.rs/rmcp
 //! [`ClientLifecycleMode::Discover`]: rmcp::service::ClientLifecycleMode
 
@@ -57,13 +68,17 @@ pub use events::{McpEvent, McpServerState};
 pub use handler::{EeClientHandler, ElicitationBroker};
 pub use manager::{McpClientManager, McpSubscription, NamespacedPrimitive};
 pub use proxy::{
-    CodeActionEntry, CodeActionsResult, DiagnosticEntry, DiagnosticsResult, DirectoryEntry,
-    DirectoryEntryAll, DocumentSymbolEntry, DocumentSymbolsResult, EditTextResult, EeMcpProxy,
-    EeProxyBackend, FileMatch, ListDirectoryAllResult, ListDirectoryResult, OpenBufferEntry,
-    OpenBuffersResult, PlannedFileEdit, PlannedTextEdit, ProxyToolError, ReferenceEntry,
-    ReferencesResult, RenamePreviewResult, SearchFilesAllResult, SearchFilesResult,
-    SearchTextResult, TerminalOutputChunk, TerminalOutputResult, TerminalWaitResult, TextEdit,
-    TextMatch, TextRange, WorkspaceEditResult, WorkspaceRootsResult,
+    ChangedFileEntry, ChangedFilesResult, CodeActionEntry, CodeActionsResult, DiagnosticEntry,
+    DiagnosticsResult, DirectoryEntry, DirectoryEntryAll, DocumentSymbolEntry,
+    DocumentSymbolsResult, EditTextResult, EeMcpProxy, EeProxyBackend, FileDependencyEdge,
+    FileDependencyMapResult, FileMatch, GitDiffResult, GitStatusResult, ListDirectoryAllResult,
+    ListDirectoryResult, OpenBufferEntry, OpenBuffersResult, PlannedFileEdit, PlannedTextEdit,
+    ProjectInstructionSource, ProjectInstructionsResult, ProxyToolError, ReferenceEntry,
+    ReferencesResult, RenamePreviewResult, ReviewContextResult, SearchFilesAllResult,
+    SearchFilesResult, SearchTextResult, SessionNoteResult, SessionNotesResult,
+    TerminalOutputChunk, TerminalOutputResult, TerminalWaitResult, TextEdit, TextMatch, TextRange,
+    ToolManifestEntry, ToolOutputCap, ToolsManifestResult, WorkspaceEditResult,
+    WorkspaceRootsResult,
 };
 pub use registry::{
     NamespacedPrompt, NamespacedResource, NamespacedTool, PrimitiveRegistry, PrimitiveSummary,

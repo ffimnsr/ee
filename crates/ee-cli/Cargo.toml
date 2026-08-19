@@ -42,6 +42,7 @@ ee-agent-host = { workspace = true, optional = true }
 ee-agent-protocol = { workspace = true, optional = true }
 ee-mcp = { workspace = true, optional = true }
 rmcp = { workspace = true, features = ["server"], optional = true }
+git2.workspace = true
 globset.workspace = true
 grep-regex.workspace = true
 grep-searcher.workspace = true

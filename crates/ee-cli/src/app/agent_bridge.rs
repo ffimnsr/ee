@@ -110,6 +110,10 @@ const PROXY_CODE_ACTIONS_LIMIT: usize = 100;
 const PROXY_RENAME_FILES_LIMIT: usize = 100;
 /// Cap on edits returned by one rename preview.
 const PROXY_RENAME_EDITS_LIMIT: usize = 1000;
+/// Cap on symbols returned by one review-context request.
+const PROXY_REVIEW_SYMBOLS_LIMIT: usize = 500;
+/// Cap on changed files queried for document symbols during review-context assembly.
+const PROXY_REVIEW_SYMBOL_FILE_LIMIT: usize = 32;
 /// Max regex pattern length accepted by `ee_search_text_regex`.
 const PROXY_SEARCH_REGEX_MAX_PATTERN_BYTES: usize = 4096;
 /// Max wall time spent in one regex search before fail-closed timeout.
@@ -976,6 +980,86 @@ impl ClientRequestHandler for BridgeUiHandler {
                     })
                     .await
                 }
+                ClientRequest::ProxyGitStatus => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: super::agents_mcp::ProxyToolCall::GitStatus,
+                        reply,
+                    })
+                    .await
+                }
+                ClientRequest::ProxyGitDiff => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: super::agents_mcp::ProxyToolCall::GitDiff,
+                        reply,
+                    })
+                    .await
+                }
+                ClientRequest::ProxyGitDiffFile { path } => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: super::agents_mcp::ProxyToolCall::GitDiffFile { path },
+                        reply,
+                    })
+                    .await
+                }
+                ClientRequest::ProxyChangedFiles => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: super::agents_mcp::ProxyToolCall::ChangedFiles,
+                        reply,
+                    })
+                    .await
+                }
+                ClientRequest::ProxyReviewContext => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: super::agents_mcp::ProxyToolCall::ReviewContext,
+                        reply,
+                    })
+                    .await
+                }
+                ClientRequest::ProxyProjectInstructions => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: super::agents_mcp::ProxyToolCall::ProjectInstructions,
+                        reply,
+                    })
+                    .await
+                }
+                ClientRequest::ProxySaveNote { scope, key, content } => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: super::agents_mcp::ProxyToolCall::SaveNote { scope, key, content },
+                        reply,
+                    })
+                    .await
+                }
+                ClientRequest::ProxyReadNotes { scope } => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: super::agents_mcp::ProxyToolCall::ReadNotes { scope },
+                        reply,
+                    })
+                    .await
+                }
+                ClientRequest::ProxyReadNote { scope, key } => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: super::agents_mcp::ProxyToolCall::ReadNote { scope, key },
+                        reply,
+                    })
+                    .await
+                }
+                ClientRequest::ProxyFileDependencyMap { path } => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: super::agents_mcp::ProxyToolCall::FileDependencyMap { path },
+                        reply,
+                    })
+                    .await
+                }
                 ClientRequest::ReadTextFile(request) => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ReadFile {
                         request,
@@ -1827,6 +1911,63 @@ impl App {
             }
             super::agents_mcp::ProxyToolCall::RenameSymbol { path, line, character, new_name } => {
                 self.queue_proxy_rename_symbol(&path, line, character, &new_name, route, reply);
+            }
+            super::agents_mcp::ProxyToolCall::GitStatus => {
+                let _ = reply.send(self.proxy_git_status().map(ClientRequestResponse::ProxyValue));
+            }
+            super::agents_mcp::ProxyToolCall::GitDiff => {
+                let _ = reply.send(self.proxy_git_diff().map(ClientRequestResponse::ProxyValue));
+            }
+            super::agents_mcp::ProxyToolCall::GitDiffFile { path } => {
+                let _ = reply.send(
+                    self.proxy_git_diff_file(Path::new(&path))
+                        .map(ClientRequestResponse::ProxyValue),
+                );
+            }
+            super::agents_mcp::ProxyToolCall::ChangedFiles => {
+                let _ =
+                    reply.send(self.proxy_changed_files().map(ClientRequestResponse::ProxyValue));
+            }
+            super::agents_mcp::ProxyToolCall::ReviewContext => {
+                let _ =
+                    reply.send(self.proxy_review_context().map(ClientRequestResponse::ProxyValue));
+            }
+            super::agents_mcp::ProxyToolCall::ProjectInstructions => {
+                let result = self
+                    .active_root_path()
+                    .ok_or_else(|| AgentError::invalid_params("no active workspace root"))
+                    .and_then(|root| super::agent_knowledge::project_instructions(&root))
+                    .and_then(|result| {
+                        serde_json::to_value(result)
+                            .map_err(|error| AgentError::HandlerError(error.to_string()))
+                    });
+                let _ = reply.send(result.map(ClientRequestResponse::ProxyValue));
+            }
+            super::agents_mcp::ProxyToolCall::SaveNote { scope, key, content } => {
+                let result =
+                    self.project_knowledge.save_note(&scope, &key, &content).and_then(|result| {
+                        serde_json::to_value(result)
+                            .map_err(|error| AgentError::HandlerError(error.to_string()))
+                    });
+                let _ = reply.send(result.map(ClientRequestResponse::ProxyValue));
+            }
+            super::agents_mcp::ProxyToolCall::ReadNotes { scope } => {
+                let result = self.project_knowledge.read_notes(&scope).and_then(|result| {
+                    serde_json::to_value(result)
+                        .map_err(|error| AgentError::HandlerError(error.to_string()))
+                });
+                let _ = reply.send(result.map(ClientRequestResponse::ProxyValue));
+            }
+            super::agents_mcp::ProxyToolCall::ReadNote { scope, key } => {
+                let result = self.project_knowledge.read_note(&scope, &key).and_then(|result| {
+                    serde_json::to_value(result)
+                        .map_err(|error| AgentError::HandlerError(error.to_string()))
+                });
+                let _ = reply.send(result.map(ClientRequestResponse::ProxyValue));
+            }
+            super::agents_mcp::ProxyToolCall::FileDependencyMap { path } => {
+                let result = self.proxy_file_dependency_map(Path::new(&path));
+                let _ = reply.send(result.map(ClientRequestResponse::ProxyValue));
             }
             super::agents_mcp::ProxyToolCall::Read(request) => {
                 // Phase 4: MCP read normalization (stdio route) before the
@@ -3911,6 +4052,248 @@ impl App {
             .map_err(|error| AgentError::HandlerError(error.to_string()))
     }
 
+    fn proxy_git_repository(&self) -> Result<crate::git::GitRepository, AgentError> {
+        let root = self
+            .active_root_path()
+            .or_else(|| std::fs::canonicalize(&self.working_dir).ok())
+            .ok_or_else(|| {
+                AgentError::HandlerError(String::from("active workspace root is unavailable"))
+            })?;
+        crate::git::GitRepository::discover(&root)
+            .map_err(|error| {
+                AgentError::HandlerError(format!("Git repository discovery failed: {error}"))
+            })?
+            .ok_or_else(|| {
+                AgentError::HandlerError(String::from("active workspace is not a Git repository"))
+            })
+    }
+
+    fn proxy_git_status(&self) -> Result<serde_json::Value, AgentError> {
+        let report = self
+            .proxy_git_repository()?
+            .status(crate::git::GitReadLimits::default())
+            .map_err(|error| AgentError::HandlerError(format!("Git status failed: {error}")))?;
+        let result = ee_mcp::GitStatusResult {
+            repo_root: report.repo_root.display().to_string(),
+            branch: report.branch,
+            detached: report.detached,
+            staged: report
+                .staged
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            unstaged: report
+                .unstaged
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            untracked: report
+                .untracked
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            conflicts: report
+                .conflicts
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            file_limit: u32::try_from(report.file_limit).unwrap_or(u32::MAX),
+            returned_file_count: u32::try_from(report.returned_file_count).unwrap_or(u32::MAX),
+            total_file_count: u32::try_from(report.total_file_count).unwrap_or(u32::MAX),
+            omitted_file_count: u32::try_from(report.omitted_file_count).unwrap_or(u32::MAX),
+            truncated: report.truncated,
+        };
+        serde_json::to_value(result).map_err(|error| AgentError::HandlerError(error.to_string()))
+    }
+
+    fn proxy_git_diff(&self) -> Result<serde_json::Value, AgentError> {
+        let diff = self
+            .proxy_git_repository()?
+            .unstaged_diff(crate::git::GitReadLimits::default())
+            .map_err(|error| AgentError::HandlerError(format!("Git diff failed: {error}")))?;
+        self.proxy_git_diff_value(diff)
+    }
+
+    fn proxy_git_diff_file(&self, path: &Path) -> Result<serde_json::Value, AgentError> {
+        if !path.is_absolute() {
+            return Err(AgentError::invalid_params("path must be absolute"));
+        }
+        if !self.path_in_effective_workspace(path) {
+            return Err(AgentError::invalid_params(format!(
+                "path outside allowed workspace: {}",
+                path.display()
+            )));
+        }
+        let diff = self
+            .proxy_git_repository()?
+            .unstaged_diff_for_path(path, crate::git::GitReadLimits::default())
+            .map_err(|error| AgentError::HandlerError(format!("Git file diff failed: {error}")))?;
+        self.proxy_git_diff_value(diff)
+    }
+
+    fn proxy_git_diff_value(
+        &self,
+        diff: crate::git::GitDiff,
+    ) -> Result<serde_json::Value, AgentError> {
+        serde_json::to_value(ee_mcp::GitDiffResult {
+            diff: diff.text,
+            bytes_returned: u64::try_from(diff.bytes_returned).unwrap_or(u64::MAX),
+            byte_limit: u64::try_from(diff.byte_limit).unwrap_or(u64::MAX),
+            truncated: diff.truncated,
+        })
+        .map_err(|error| AgentError::HandlerError(error.to_string()))
+    }
+
+    fn proxy_changed_files_result(&self) -> Result<ee_mcp::ChangedFilesResult, AgentError> {
+        let repository = self.proxy_git_repository()?;
+        let report = repository
+            .status(crate::git::GitReadLimits::default())
+            .map_err(|error| AgentError::HandlerError(format!("Git status failed: {error}")))?;
+        let mut files = BTreeMap::<PathBuf, ee_mcp::ChangedFileEntry>::new();
+        let mut insert_status =
+            |path: &Path, staged: bool, unstaged: bool, untracked: bool, conflicted: bool| {
+                let path = report.repo_root.join(path);
+                let entry = files.entry(path.clone()).or_insert_with(|| ee_mcp::ChangedFileEntry {
+                    path: path.display().to_string(),
+                    staged: false,
+                    unstaged: false,
+                    untracked: false,
+                    conflicted: false,
+                    dirty: false,
+                    saved: true,
+                });
+                entry.staged |= staged;
+                entry.unstaged |= unstaged;
+                entry.untracked |= untracked;
+                entry.conflicted |= conflicted;
+            };
+        for path in &report.staged {
+            insert_status(path, true, false, false, false);
+        }
+        for path in &report.unstaged {
+            insert_status(path, false, true, false, false);
+        }
+        for path in &report.untracked {
+            insert_status(path, false, false, true, false);
+        }
+        for path in &report.conflicts {
+            insert_status(path, false, false, false, true);
+        }
+        for buffer in self.backend.all_bufs() {
+            let Some(path) = &buffer.path else { continue };
+            let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            if !canonical.starts_with(repository.root()) {
+                continue;
+            }
+            let entry =
+                files.entry(canonical.clone()).or_insert_with(|| ee_mcp::ChangedFileEntry {
+                    path: canonical.display().to_string(),
+                    staged: false,
+                    unstaged: false,
+                    untracked: false,
+                    conflicted: false,
+                    dirty: false,
+                    saved: true,
+                });
+            entry.dirty = !buffer.pristine;
+            entry.saved = buffer_saved_state(buffer);
+        }
+        let file_limit = report.file_limit;
+        let mut files = files.into_values().collect::<Vec<_>>();
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        files.retain(|entry| {
+            entry.staged || entry.unstaged || entry.untracked || entry.conflicted || entry.dirty
+        });
+        let total_file_count = report.total_file_count.max(files.len());
+        files.truncate(file_limit);
+        let omitted_file_count = total_file_count.saturating_sub(files.len());
+        Ok(ee_mcp::ChangedFilesResult {
+            files,
+            file_limit: u32::try_from(file_limit).unwrap_or(u32::MAX),
+            total_file_count: u32::try_from(total_file_count).unwrap_or(u32::MAX),
+            omitted_file_count: u32::try_from(omitted_file_count).unwrap_or(u32::MAX),
+            truncated: report.truncated || omitted_file_count > 0,
+        })
+    }
+
+    fn proxy_changed_files(&self) -> Result<serde_json::Value, AgentError> {
+        serde_json::to_value(self.proxy_changed_files_result()?)
+            .map_err(|error| AgentError::HandlerError(error.to_string()))
+    }
+
+    fn proxy_review_context(&mut self) -> Result<serde_json::Value, AgentError> {
+        let changed_files = self.proxy_changed_files_result()?;
+        let changed_paths =
+            changed_files.files.iter().map(|entry| entry.path.as_str()).collect::<BTreeSet<_>>();
+        let mut diagnostics = self
+            .proxy_diagnostic_entries(None)
+            .into_iter()
+            .filter(|entry| changed_paths.contains(entry.path.as_str()))
+            .collect::<Vec<_>>();
+        diagnostics.sort_by(|left, right| {
+            left.path
+                .cmp(&right.path)
+                .then(left.range.start_line.cmp(&right.range.start_line))
+                .then(left.range.start_character.cmp(&right.range.start_character))
+        });
+        let diagnostic_total = u32::try_from(diagnostics.len()).unwrap_or(u32::MAX);
+        let diagnostics_truncated = diagnostics.len() > PROXY_DIAGNOSTICS_LIMIT;
+        diagnostics.truncate(PROXY_DIAGNOSTICS_LIMIT);
+
+        let mut nearby_symbols = Vec::new();
+        let mut symbols_truncated = false;
+        for entry in changed_files.files.iter().take(PROXY_REVIEW_SYMBOL_FILE_LIMIT) {
+            if nearby_symbols.len() >= PROXY_REVIEW_SYMBOLS_LIMIT {
+                symbols_truncated = true;
+                break;
+            }
+            let path = Path::new(&entry.path);
+            if self.buffer_id_for_path(path).is_none() {
+                continue;
+            }
+            let payload = match self.proxy_document_symbols(path) {
+                Ok(payload) => payload,
+                Err(_) => continue,
+            };
+            let Ok(result) = serde_json::from_value::<ee_mcp::DocumentSymbolsResult>(payload)
+            else {
+                continue;
+            };
+            symbols_truncated |= result.truncated;
+            nearby_symbols.extend(
+                result
+                    .symbols
+                    .into_iter()
+                    .take(PROXY_REVIEW_SYMBOLS_LIMIT.saturating_sub(nearby_symbols.len())),
+            );
+        }
+        symbols_truncated |= changed_files.files.len() > PROXY_REVIEW_SYMBOL_FILE_LIMIT;
+
+        let test_suggestions = self.proxy_git_repository().map_or_else(
+            |_| Vec::new(),
+            |repository| {
+                if repository.root().join("Cargo.toml").is_file() {
+                    vec![String::from("cargo test --quiet")]
+                } else {
+                    Vec::new()
+                }
+            },
+        );
+        serde_json::to_value(ee_mcp::ReviewContextResult {
+            changed_files,
+            diagnostics: ee_mcp::DiagnosticsResult {
+                diagnostics,
+                truncated: diagnostics_truncated,
+                total: diagnostic_total,
+            },
+            nearby_symbols,
+            symbols_truncated,
+            // Only suggest a quiet Cargo validation when workspace shape proves it applies.
+            test_suggestions,
+        })
+        .map_err(|error| AgentError::HandlerError(error.to_string()))
+    }
+
     fn proxy_document_symbols(&mut self, path: &Path) -> Result<serde_json::Value, AgentError> {
         let payload = self.proxy_agent_tool_payload(
             path,
@@ -4299,6 +4682,20 @@ impl App {
                 let _ = reply.send(Err(error));
             }
         }
+    }
+
+    fn proxy_file_dependency_map(&self, path: &Path) -> Result<serde_json::Value, AgentError> {
+        if !path.is_absolute() {
+            return Err(AgentError::invalid_params("path must be absolute"));
+        }
+        let canonical = std::fs::canonicalize(path).map_err(|error| {
+            AgentError::Io(format!("cannot resolve dependency-map path: {error}"))
+        })?;
+        if !self.path_in_workspace(&canonical) {
+            return Err(AgentError::invalid_params("path outside allowed workspace"));
+        }
+        serde_json::to_value(super::agent_knowledge::unavailable_dependency_map(canonical))
+            .map_err(|error| AgentError::HandlerError(error.to_string()))
     }
 
     fn proxy_workspace_roots(&self) -> Result<serde_json::Value, AgentError> {

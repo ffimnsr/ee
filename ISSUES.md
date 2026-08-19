@@ -221,34 +221,34 @@ Add read-only source-control tools that support review and final self-checks wit
 
 #### Tools
 
-- [ ] Add `ee_git_status`.
-  - [ ] Return branch, detached state, staged/unstaged/untracked files, and conflict state.
-  - [ ] Keep read-only and bounded.
-- [ ] Add `ee_git_diff`.
-  - [ ] Accept no arguments.
-  - [ ] Return bounded unstaged unified diff plus truncation metadata.
-- [ ] Add `ee_git_diff_file`.
-  - [ ] Accept `path` only.
-  - [ ] Return bounded unstaged unified diff for one file.
+- [x] Add `ee_git_status`.
+  - [x] Return branch, detached state, staged/unstaged/untracked files, and conflict state.
+  - [x] Keep read-only and bounded.
+- [x] Add `ee_git_diff`.
+  - [x] Accept no arguments.
+  - [x] Return bounded unstaged unified diff plus truncation metadata.
+- [x] Add `ee_git_diff_file`.
+  - [x] Accept `path` only.
+  - [x] Return bounded unstaged unified diff for one file.
 - [ ] Add `ee_git_diff_staged` only if staged diff is needed.
   - [ ] Accept no arguments.
   - [ ] Return bounded staged unified diff.
-- [ ] Add `ee_changed_files`.
-  - [ ] Return editor/SCM changed files with dirty-buffer state and saved state.
-- [ ] Add `ee_review_context`.
-  - [ ] Return changed files, relevant diagnostics, nearby symbols, and configured test/task suggestions.
-  - [ ] Never run tests or commands by itself.
+- [x] Add `ee_changed_files`.
+  - [x] Return editor/SCM changed files with dirty-buffer state and saved state.
+- [x] Add `ee_review_context`.
+  - [x] Return changed files, relevant diagnostics, nearby symbols, and configured test/task suggestions.
+  - [x] Never run tests or commands by itself.
 
 #### Implementation notes
 
-- [ ] Prefer library or existing editor SCM integration over shell commands where available.
-- [ ] Treat repository paths as canonical identities.
-- [ ] Do not invent local path-normalization helpers for cache keys or persisted ids.
-- [ ] Redact credentials from remote URLs and command diagnostics.
+- [x] Prefer library or existing editor SCM integration over shell commands where available.
+- [x] Treat repository paths as canonical identities.
+- [x] Do not invent local path-normalization helpers for cache keys or persisted ids.
+- [x] Redact credentials from remote URLs and command diagnostics.
 
 #### Exit criteria
 
-- [ ] LLM can summarize changes, inspect diffs, and identify obvious validation tasks from editor-provided context.
+- [x] LLM can summarize changes, inspect diffs, and identify obvious validation tasks from editor-provided context.
 
 ### Phase 6: Project memory and instructions tools
 
@@ -256,36 +256,36 @@ Expose project guidance and bounded session context so agents follow repo rules 
 
 #### Tools
 
-- [ ] Add `ee_project_instructions`.
-  - [ ] Return applicable `AGENTS.md`, `RULE.md`, workspace config rules, and tool-use constraints for the current root.
-  - [ ] Include source paths and precedence order.
-- [ ] Add `ee_save_note`.
-  - [ ] Accept `key` and `content` only.
-  - [ ] Store non-secret, session-scoped notes for long-running tasks.
-- [ ] Add `ee_read_notes`.
-  - [ ] Accept no arguments.
-  - [ ] Return bounded notes for the current agent/session only.
-- [ ] Add `ee_read_note`.
-  - [ ] Accept `key` only.
-  - [ ] Return one bounded note for the current agent/session.
-- [ ] Add `ee_file_dependency_map`.
-  - [ ] Accept `path` only.
-  - [ ] Return known file dependency edges when an index exists.
-  - [ ] Fail gracefully when no graph/index is available.
+- [x] Add `ee_project_instructions`.
+  - [x] Return applicable `AGENTS.md`, `RULE.md`, workspace config rules, and tool-use constraints for the current root.
+  - [x] Include source paths and precedence order.
+- [x] Add `ee_save_note`.
+  - [x] Accept `key` and `content` only.
+  - [x] Store non-secret, session-scoped notes for long-running tasks.
+- [x] Add `ee_read_notes`.
+  - [x] Accept no arguments.
+  - [x] Return bounded notes for the current agent/session only.
+- [x] Add `ee_read_note`.
+  - [x] Accept `key` only.
+  - [x] Return one bounded note for the current agent/session.
+- [x] Add `ee_file_dependency_map`.
+  - [x] Accept `path` only.
+  - [x] Return known file dependency edges when an index exists.
+  - [x] Fail gracefully when no graph/index is available.
 - [ ] Add `ee_symbol_dependency_map` only if symbol-scoped graph lookup is needed.
   - [ ] Accept `path`, `line`, and `character` only.
 
 #### Implementation notes
 
-- [ ] Never store secrets, environment values, tokens, or raw terminal output in notes.
-- [ ] Keep notes session-scoped by default.
-- [ ] Require explicit user opt-in before workspace persistence.
-- [ ] Mark freshness in graph-backed responses when data is stale.
+- [x] Never store secrets, environment values, tokens, or raw terminal output in notes.
+- [x] Keep notes session-scoped by default.
+- [x] Require explicit user opt-in before workspace persistence.
+- [x] Mark freshness in graph-backed responses when data is stale.
 
 #### Exit criteria
 
-- [ ] LLM can retrieve current project rules and task memory through structured, bounded tools.
-- [ ] Knowledge tools degrade safely when no index or saved context exists.
+- [x] LLM can retrieve current project rules and task memory through structured, bounded tools.
+- [x] Knowledge tools degrade safely when no index or saved context exists.
 
 ### Phase 7: Tool governance, schemas, and compatibility
 

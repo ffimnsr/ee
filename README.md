@@ -206,6 +206,12 @@ timeout_ms = 5000
 
 Agents ex commands are lowercase snake_case only: `:agents`, `:agents_close`, `:agents_stop`, `:agents_new`, and `:agents_clear`. CamelCase aliases are rejected. In focused Agents composer, exact `/new` starts and focuses a fresh chat thread; exact `/quit` closes pane while keeping its sessions running. Slash commands with arguments remain normal agent prompts.
 
+#### ee MCP proxy contract
+
+The editor proxy uses stable `ee_` tool names. Call `ee_tools_manifest` with `{}` first; its versioned, session-cacheable response lists only tools current host supports, plus each tool schema version, `read`/`write`/`execute` side-effect class, approval requirement, result cap, and minimal argument example. Existing tool names and schemas stay compatible. Incompatible argument changes require a new tool name.
+
+Read tools do not require approval. Write and execute tools require editor approval unless an existing bounded trust rule permits exact operation. Tool calls with malformed arguments fail as MCP invalid-parameter errors; disabled or unsupported known tools return a tool-level `isError` result. Paths must be absolute and inside editor workspace roots. Results are bounded; callers must inspect truncation metadata where provided. Secret-like environment values, credentials, and sensitive diagnostics are rejected or redacted. Keep arguments small and explicit: when an operation needs nested modes or many optional fields, add smaller focused tools instead of extending one complex schema.
+
 #### LLM session compaction (`/compact`)
 
 Agents advertise slash commands through ACP `available_commands_update`; the pane lists them (name plus description) and Tab cycles them, using each command's advertised input hint as the draft placeholder. `ee-openrouter-agent` and `ee-agent-orchestrator` advertise `/compact`, and the client sends it as a normal `session/prompt` — there is no client-side compaction special case, and the provider owns every history or memory change.

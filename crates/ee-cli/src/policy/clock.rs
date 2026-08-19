@@ -7,16 +7,40 @@
 //! [`PolicyClock::Fake`] whose time advances only on demand.
 
 use std::sync::{Arc, Mutex};
+#[cfg(test)]
+use std::time::UNIX_EPOCH;
 use std::time::{Duration, SystemTime};
 
 /// Injectable clock for trust-policy time reads.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) enum PolicyClock {
     /// Real wall clock (production).
-    #[default]
     System,
     /// Deterministic fake clock for tests; advances only via [`Self::advance`].
     Fake(Arc<Mutex<SystemTime>>),
+}
+
+#[allow(clippy::derivable_impls)]
+impl Default for PolicyClock {
+    fn default() -> Self {
+        #[cfg(test)]
+        {
+            Self::fake_at(fixture_now())
+        }
+        #[cfg(not(test))]
+        {
+            Self::System
+        }
+    }
+}
+
+/// Stable test time before static trust-fixture expiry (`2026-08-08`).
+///
+/// Static fixtures exercise parsing and policy semantics, not wall-clock time.
+/// Expiry-specific tests must inject their own `PolicyClock::fake_at` value.
+#[cfg(test)]
+pub(crate) fn fixture_now() -> SystemTime {
+    UNIX_EPOCH + Duration::from_secs(1_786_104_000)
 }
 
 impl PolicyClock {

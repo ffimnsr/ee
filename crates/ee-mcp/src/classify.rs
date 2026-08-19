@@ -60,6 +60,16 @@ pub fn side_effect_class(tool: &str) -> SideEffectClass {
         | "ee_terminal_output_since"
         | "ee_terminal_wait"
         | "ee_terminal_wait_long"
+        | "ee_git_status"
+        | "ee_git_diff"
+        | "ee_git_diff_file"
+        | "ee_changed_files"
+        | "ee_review_context"
+        | "ee_tools_manifest"
+        | "ee_project_instructions"
+        | "ee_read_notes"
+        | "ee_read_note"
+        | "ee_file_dependency_map"
         | "ee_diagnostics" => SideEffectClass::Read,
         // Mutating tools.
         "ee_replace_text"
@@ -69,7 +79,8 @@ pub fn side_effect_class(tool: &str) -> SideEffectClass {
         | "ee_apply_code_action"
         | "ee_format_file"
         | "ee_rename_symbol"
-        | "ee_write_text_file" => SideEffectClass::Write,
+        | "ee_write_text_file"
+        | "ee_save_note" => SideEffectClass::Write,
         // Process lifecycle tools.
         "ee_terminal_create" | "ee_terminal_kill" | "ee_terminal_release" => {
             SideEffectClass::Execute

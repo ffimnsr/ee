@@ -669,6 +669,25 @@ pub(crate) enum ProxyCall {
         character: u32,
         new_name: String,
     },
+    GitStatus,
+    GitDiff,
+    GitDiffFile {
+        path: String,
+    },
+    ChangedFiles,
+    ReviewContext,
+    ProjectInstructions,
+    SaveNote {
+        key: String,
+        content: String,
+    },
+    ReadNotes,
+    ReadNote {
+        key: String,
+    },
+    FileDependencyMap {
+        path: String,
+    },
     ReadTextFile {
         path: String,
         line: Option<u32>,
@@ -781,6 +800,16 @@ pub(crate) enum ProxyToolCall {
     FormatFile { path: String },
     PreviewRenameSymbol { path: String, line: u32, character: u32, new_name: String },
     RenameSymbol { path: String, line: u32, character: u32, new_name: String },
+    GitStatus,
+    GitDiff,
+    GitDiffFile { path: String },
+    ChangedFiles,
+    ReviewContext,
+    ProjectInstructions,
+    SaveNote { scope: String, key: String, content: String },
+    ReadNotes { scope: String },
+    ReadNote { scope: String, key: String },
+    FileDependencyMap { path: String },
     Read(ReadTextFileRequest),
     Write(WriteTextFileRequest),
     Terminal(CreateTerminalRequest),
@@ -804,6 +833,8 @@ async fn serve_proxy_connection(
         let _ = write_half.write_all(b"{\"error\":\"bad token\"}\n").await;
         return;
     }
+    static NEXT_PROXY_SESSION: AtomicU64 = AtomicU64::new(0);
+    let scope = format!("proxy-{}", NEXT_PROXY_SESSION.fetch_add(1, Ordering::Relaxed));
     loop {
         let Ok(Some(line)) = read_bounded_line(&mut reader, PROXY_MAX_FRAME_BYTES).await else {
             return;
@@ -820,7 +851,7 @@ async fn serve_proxy_connection(
         };
         let params = request.get("params").cloned().unwrap_or_else(|| serde_json::json!({}));
         let reply = match serde_json::from_value::<ProxyCall>(params) {
-            Ok(call) => proxy_call_to_bridge(call, &bridge_tx).await,
+            Ok(call) => proxy_call_to_bridge(call, &scope, &bridge_tx).await,
             Err(_) => ProxyReply::Err {
                 error: ProxyErrorBody {
                     message: String::from("invalid proxy call"),
@@ -840,6 +871,7 @@ async fn serve_proxy_connection(
 /// creates queue an approval prompt.
 async fn proxy_call_to_bridge(
     call: ProxyCall,
+    scope: &str,
     bridge_tx: &std_mpsc::Sender<BridgeUiMessage>,
 ) -> ProxyReply {
     let session_id = SessionId::new("proxy");
@@ -897,6 +929,18 @@ async fn proxy_call_to_bridge(
         ProxyCall::RenameSymbol { path, line, character, new_name } => {
             ProxyToolCall::RenameSymbol { path, line, character, new_name }
         }
+        ProxyCall::GitStatus => ProxyToolCall::GitStatus,
+        ProxyCall::GitDiff => ProxyToolCall::GitDiff,
+        ProxyCall::GitDiffFile { path } => ProxyToolCall::GitDiffFile { path },
+        ProxyCall::ChangedFiles => ProxyToolCall::ChangedFiles,
+        ProxyCall::ReviewContext => ProxyToolCall::ReviewContext,
+        ProxyCall::ProjectInstructions => ProxyToolCall::ProjectInstructions,
+        ProxyCall::SaveNote { key, content } => {
+            ProxyToolCall::SaveNote { scope: scope.to_owned(), key, content }
+        }
+        ProxyCall::ReadNotes => ProxyToolCall::ReadNotes { scope: scope.to_owned() },
+        ProxyCall::ReadNote { key } => ProxyToolCall::ReadNote { scope: scope.to_owned(), key },
+        ProxyCall::FileDependencyMap { path } => ProxyToolCall::FileDependencyMap { path },
         ProxyCall::ReadTextFile { path, line, limit } => {
             let mut request = ReadTextFileRequest::new(session_id, path);
             request.line = line;
@@ -1042,6 +1086,20 @@ impl SocketProxyBackend {
             .map(ToOwned::to_owned)
             .ok_or_else(|| String::from("proxy reply missing string value"))
     }
+}
+
+fn proxy_value<T: serde::de::DeserializeOwned>(
+    value: &Result<serde_json::Value, String>,
+    operation: &str,
+) -> Result<T, ee_mcp::ProxyToolError> {
+    let value = value.as_ref().map_err(|message| ee_mcp::ProxyToolError {
+        message: message.clone(),
+        is_permission_denied: false,
+    })?;
+    serde_json::from_value(value.clone()).map_err(|error| ee_mcp::ProxyToolError {
+        message: format!("proxy {operation} reply invalid: {error}"),
+        is_permission_denied: false,
+    })
 }
 
 impl ee_mcp::EeProxyBackend for SocketProxyBackend {
@@ -1396,6 +1454,55 @@ impl ee_mcp::EeProxyBackend for SocketProxyBackend {
             message: format!("proxy rename_symbol reply invalid: {error}"),
             is_permission_denied: false,
         })
+    }
+
+    fn git_status(&self) -> Result<ee_mcp::GitStatusResult, ee_mcp::ProxyToolError> {
+        proxy_value(&self.call_value(ProxyCall::GitStatus), "git_status")
+    }
+
+    fn git_diff(&self) -> Result<ee_mcp::GitDiffResult, ee_mcp::ProxyToolError> {
+        proxy_value(&self.call_value(ProxyCall::GitDiff), "git_diff")
+    }
+
+    fn git_diff_file(&self, path: String) -> Result<ee_mcp::GitDiffResult, ee_mcp::ProxyToolError> {
+        proxy_value(&self.call_value(ProxyCall::GitDiffFile { path }), "git_diff_file")
+    }
+
+    fn changed_files(&self) -> Result<ee_mcp::ChangedFilesResult, ee_mcp::ProxyToolError> {
+        proxy_value(&self.call_value(ProxyCall::ChangedFiles), "changed_files")
+    }
+
+    fn review_context(&self) -> Result<ee_mcp::ReviewContextResult, ee_mcp::ProxyToolError> {
+        proxy_value(&self.call_value(ProxyCall::ReviewContext), "review_context")
+    }
+
+    fn project_instructions(
+        &self,
+    ) -> Result<ee_mcp::ProjectInstructionsResult, ee_mcp::ProxyToolError> {
+        proxy_value(&self.call_value(ProxyCall::ProjectInstructions), "project_instructions")
+    }
+
+    fn save_note(
+        &self,
+        key: String,
+        content: String,
+    ) -> Result<ee_mcp::SessionNoteResult, ee_mcp::ProxyToolError> {
+        proxy_value(&self.call_value(ProxyCall::SaveNote { key, content }), "save_note")
+    }
+
+    fn read_notes(&self) -> Result<ee_mcp::SessionNotesResult, ee_mcp::ProxyToolError> {
+        proxy_value(&self.call_value(ProxyCall::ReadNotes), "read_notes")
+    }
+
+    fn read_note(&self, key: String) -> Result<ee_mcp::SessionNoteResult, ee_mcp::ProxyToolError> {
+        proxy_value(&self.call_value(ProxyCall::ReadNote { key }), "read_note")
+    }
+
+    fn file_dependency_map(
+        &self,
+        path: String,
+    ) -> Result<ee_mcp::FileDependencyMapResult, ee_mcp::ProxyToolError> {
+        proxy_value(&self.call_value(ProxyCall::FileDependencyMap { path }), "file_dependency_map")
     }
 
     fn read_text_file(

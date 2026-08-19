@@ -398,7 +398,7 @@ mod e2e {
         );
         assert_eq!(rule.scope.max_uses, Some(PERSISTENT_TERMINAL_MAX_USES));
         let expiry = rule.scope.expires_at.expect("expiry");
-        let now = SystemTime::now();
+        let now = app.trust_clock.now();
         assert!(expiry > now + Duration::from_secs(59 * 60), "expiry ~1h ahead");
         assert!(expiry < now + Duration::from_secs(61 * 60), "expiry ~1h ahead");
         assert_eq!(

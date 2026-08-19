@@ -332,6 +332,9 @@ pub(crate) struct App {
     /// Agents pane state (feature `agents`); default is closed and inert.
     #[cfg(feature = "agents")]
     pub(crate) agents: super::agent_pane::AgentPaneState,
+    /// Runtime-only agent project guidance and session notes; never persisted.
+    #[cfg(feature = "agents")]
+    pub(crate) project_knowledge: super::agent_knowledge::ProjectKnowledge,
     /// Injectable trust-policy clock (Phase 6): production uses the system
     /// clock; tests substitute a deterministic fake.
     #[cfg(feature = "agents")]
@@ -434,6 +437,8 @@ impl App {
             privileged_save_pending: None,
             #[cfg(feature = "agents")]
             agents: super::agent_pane::AgentPaneState::default(),
+            #[cfg(feature = "agents")]
+            project_knowledge: super::agent_knowledge::ProjectKnowledge::default(),
             #[cfg(feature = "agents")]
             trust_clock: crate::policy::PolicyClock::default(),
             redraw_requested: false,
