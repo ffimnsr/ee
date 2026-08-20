@@ -94,6 +94,21 @@ fn mcp_read_rule(
     })
 }
 
+fn mcp_read_profile_rule(
+    id: &str,
+    workspace: WorkspaceIdentity,
+    transport_identity: &str,
+) -> TrustRule {
+    TrustRule::McpReadProfile(crate::policy::McpReadProfileRule {
+        id: id.to_string(),
+        scope: scope(workspace),
+        server: "ee".to_string(),
+        transport_identity: transport_identity.to_string(),
+        tool_schema_version: ee_mcp::EE_TOOL_SCHEMA_VERSION,
+        profile: crate::policy::EE_MCP_SAFE_READ_PROFILE.to_string(),
+    })
+}
+
 fn mcp_read_op(
     workspace: WorkspaceIdentity,
     transport_identity: &str,
@@ -245,6 +260,126 @@ fn mcp_read_rule_requires_gate_and_exact_tool_identity() {
     }
 }
 
+#[test]
+fn mcp_safe_read_profile_is_exactly_scoped_and_never_matches_write_or_unknown_tools() {
+    let ws = identity(b"/work/root");
+    let rule = mcp_read_profile_rule("mcp_profile_stdio", ws, "stdio:ee --mcp-proxy");
+    let read =
+        mcp_read_op(ws, "stdio:ee --mcp-proxy", "ee_read_text_file", "src/main.rs", Some(42));
+    assert_eq!(decide(&read, std::slice::from_ref(&rule), true).outcome, TrustOutcome::Allow);
+
+    let other_safe_read = TrustOperation {
+        workspace: ws,
+        agent: None,
+        transport: crate::policy::TransportKind::McpStdio,
+        category: TrustCategory::Read,
+        identity: OperationIdentity::Mcp {
+            server: "ee".to_string(),
+            transport_identity: "stdio:ee --mcp-proxy".to_string(),
+            tool: "ee_git_status".to_string(),
+            tool_schema_version: ee_mcp::EE_TOOL_SCHEMA_VERSION,
+            arguments_json: "{}".to_string(),
+        },
+    };
+    assert_eq!(
+        decide(&other_safe_read, std::slice::from_ref(&rule), true).outcome,
+        TrustOutcome::Allow
+    );
+
+    for (label, candidate) in [
+        ("ACP route", mcp_read_op(ws, "acp:ee", "ee_read_text_file", "src/main.rs", Some(42))),
+        (
+            "unknown tool",
+            mcp_read_op(ws, "stdio:ee --mcp-proxy", "ee_unknown", "src/main.rs", Some(42)),
+        ),
+        (
+            "wrong schema",
+            TrustOperation {
+                identity: OperationIdentity::McpRead {
+                    server: "ee".to_string(),
+                    transport_identity: "stdio:ee --mcp-proxy".to_string(),
+                    tool: "ee_read_text_file".to_string(),
+                    tool_schema_version: ee_mcp::EE_TOOL_SCHEMA_VERSION + 1,
+                    relative_path: "src/main.rs".to_string(),
+                    byte_count: Some(42),
+                },
+                ..read.clone()
+            },
+        ),
+        ("write category", TrustOperation { category: TrustCategory::WriteModify, ..read.clone() }),
+        ("execute category", TrustOperation { category: TrustCategory::Execute, ..read.clone() }),
+    ] {
+        assert_eq!(
+            decide(&candidate, std::slice::from_ref(&rule), true).outcome,
+            TrustOutcome::Prompt,
+            "{label} must fail closed"
+        );
+    }
+}
+
+#[test]
+fn mcp_safe_read_profile_covers_every_pinned_manifest_read_tool() {
+    let ws = identity(b"/work/root");
+    let rule = mcp_read_profile_rule("mcp_profile_stdio", ws, "stdio:ee --mcp-proxy");
+
+    for tool in [
+        "ee_workspace_roots",
+        "ee_list_directory",
+        "ee_list_directory_all",
+        "ee_search_files",
+        "ee_search_files_all",
+        "ee_search_text",
+        "ee_search_text_regex",
+        "ee_search_text_in_files",
+        "ee_read_buffer",
+        "ee_read_buffer_lines",
+        "ee_open_buffers",
+        "ee_get_diagnostics",
+        "ee_get_file_diagnostics",
+        "ee_document_symbols",
+        "ee_references",
+        "ee_list_code_actions",
+        "ee_preview_rename_symbol",
+        "ee_read_text_file",
+        "ee_terminal_output",
+        "ee_terminal_output_since",
+        "ee_terminal_wait",
+        "ee_terminal_wait_long",
+        "ee_git_status",
+        "ee_git_diff",
+        "ee_git_diff_file",
+        "ee_changed_files",
+        "ee_review_context",
+        "ee_tools_manifest",
+        "ee_project_instructions",
+        "ee_read_notes",
+        "ee_read_note",
+        "ee_file_dependency_map",
+        "ee_diagnostics",
+    ] {
+        assert_eq!(
+            ee_mcp::classify::side_effect_class(tool),
+            ee_mcp::SideEffectClass::Read,
+            "{tool}"
+        );
+        let operation = mcp_read_op(ws, "stdio:ee --mcp-proxy", tool, "src/main.rs", Some(42));
+        assert_eq!(
+            decide(&operation, std::slice::from_ref(&rule), true).outcome,
+            TrustOutcome::Allow,
+            "{tool} must match safe-read profile"
+        );
+    }
+
+    for tool in ["ee_apply_patch", "ee_terminal_create", "ee_unknown"] {
+        let operation = mcp_read_op(ws, "stdio:ee --mcp-proxy", tool, "src/main.rs", Some(42));
+        assert_eq!(
+            decide(&operation, std::slice::from_ref(&rule), true).outcome,
+            TrustOutcome::Prompt,
+            "{tool} must not match safe-read profile"
+        );
+    }
+}
+
 // ── Protected-path classification ────────────────────────────────────────────
 
 #[test]
@@ -301,6 +436,20 @@ identity = "{identity}"
 [policy]
 workspace_enabled = false
 
+[[mcp_read_profile_allow]]
+id = "mcp_profile_bad"
+server = "ee"
+transport_identity = "stdio:ee --mcp-proxy"
+tool_schema_version = 1
+profile = "mystery_profile"
+
+[[mcp_read_profile_allow]]
+id = "mcp_profile_ok"
+server = "ee"
+transport_identity = "stdio:ee --mcp-proxy"
+tool_schema_version = 1
+profile = "ee_mcp_safe_read"
+
 [[profile_allow]]
 id = "profile_bad"
 profile = "mystery_profile"
@@ -318,7 +467,7 @@ max_uses = 20
     write_store_text(store.path(), &text);
     let document = store.load().expect("load");
     let ids: Vec<&str> = document.rules.iter().map(TrustRule::id).collect();
-    assert_eq!(ids, vec!["profile_ok"], "unknown profile id rejected at load");
+    assert_eq!(ids, vec!["mcp_profile_ok", "profile_ok"], "unknown profile ids rejected at load");
 }
 
 fn store_setup() -> (TempDir, TempDir, TrustStore) {

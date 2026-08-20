@@ -13,10 +13,13 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ee_agent_host::FakeTransportFactory;
 use ee_agent_host::fake::{CaptureSource, FakeAgent, FakeAgentScript, FakeAgentTransport, wire};
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
 use serde_json::{Value, json};
 
 use crate::app::{App, ThreadUiState};
 use crate::tests::helpers::*;
+use crate::ui::ui;
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -496,6 +499,53 @@ fn terminal_denial_does_not_spawn_process() {
     assert!(
         response["result"].as_object().and_then(|result| result.get("terminalId")).is_none(),
         "no terminal id on denial"
+    );
+}
+
+#[test]
+fn terminal_approval_expands_detail_and_highlights_each_choice() {
+    let script = base_script().emit(terminal_create(
+        102,
+        "s1",
+        "git",
+        json!(["--no-pager", "log", "--oneline", "--decorate", "--all", "--branches", "--remotes"]),
+        json!({}),
+    ));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+    wait_until(&mut app, "terminal approval appears", |app| app.agents.approvals.front().is_some());
+
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(app.agents.approvals.front().expect("approval").selected, 1);
+
+    let backend = TestBackend::new(72, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rows = terminal.backend().buffer();
+    let rendered: Vec<String> =
+        (0..20).map(|y| (0..72).map(|x| rows.cell((x, y)).unwrap().symbol()).collect()).collect();
+
+    for fragment in ["git", "--no-pager", "--decorate", "--remotes"] {
+        assert!(
+            rendered.iter().any(|row| row.contains(fragment)),
+            "approval detail must wrap instead of clipping {fragment:?}: {rendered:#?}"
+        );
+    }
+    let approval_start = rendered
+        .iter()
+        .position(|row| row.contains("approval required [2/"))
+        .expect("expanded approval header");
+    let approval_rows = &rendered[approval_start..];
+    let allow_once_row =
+        approval_rows.iter().position(|row| row.contains("Allow once")).expect("allow once row");
+    let allow_session_row = approval_rows
+        .iter()
+        .position(|row| row.contains("> Allow session"))
+        .expect("selected allow session row");
+    assert_ne!(allow_once_row, allow_session_row, "choices need individual rows: {rendered:#?}");
+    assert!(
+        approval_rows.iter().any(|row| row.contains("↑/↓ select")),
+        "approval controls must advertise vertical navigation: {rendered:#?}"
     );
 }
 

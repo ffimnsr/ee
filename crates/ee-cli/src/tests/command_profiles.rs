@@ -14,7 +14,8 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use crate::policy::profiles::{
-    PROFILE_REGISTRY_VERSION, PROFILES, is_known_profile, match_profile_entry,
+    PROFILE_REGISTRY_VERSION, PROFILES, TERMINAL_READONLY_PROFILE, is_known_profile,
+    match_profile_entry,
 };
 use crate::policy::rules::TrustRule;
 use crate::policy::session::SessionPolicy;
@@ -80,10 +81,11 @@ fn decide(
 
 #[test]
 fn profile_registry_is_versioned_and_application_owned() {
-    assert_eq!(PROFILE_REGISTRY_VERSION, 1);
+    assert_eq!(PROFILE_REGISTRY_VERSION, 2);
     let ids: Vec<&str> = PROFILES.iter().map(|profile| profile.id).collect();
-    assert_eq!(ids, vec!["git_readonly", "rust_validate"]);
+    assert_eq!(ids, vec!["git_readonly", TERMINAL_READONLY_PROFILE, "rust_validate"]);
     assert!(is_known_profile("git_readonly"));
+    assert!(is_known_profile(TERMINAL_READONLY_PROFILE));
     assert!(is_known_profile("rust_validate"));
     assert!(!is_known_profile("mystery_profile"));
     assert!(!is_known_profile(""));
@@ -98,6 +100,12 @@ fn profile_entries_cover_only_curated_validation_commands() {
         ("git", &["log"][..], "git_readonly"),
         ("git", &["show"][..], "git_readonly"),
         ("git", &["branch", "--show-current"][..], "git_readonly"),
+        ("pwd", &[][..], TERMINAL_READONLY_PROFILE),
+        ("ls", &[][..], TERMINAL_READONLY_PROFILE),
+        ("ls", &["-a"][..], TERMINAL_READONLY_PROFILE),
+        ("ls", &["-l"][..], TERMINAL_READONLY_PROFILE),
+        ("ls", &["-la"][..], TERMINAL_READONLY_PROFILE),
+        ("ls", &["-al"][..], TERMINAL_READONLY_PROFILE),
         ("cargo", &["fmt", "--check"][..], "rust_validate"),
         ("cargo", &["test", "--quiet"][..], "rust_validate"),
         ("cargo", &["clippy"][..], "rust_validate"),
@@ -136,6 +144,13 @@ fn profile_entries_exclude_mutation_install_publish_and_shell() {
         // Partial-argument variants never match fixed entries.
         ("git", &["status", "--short"][..]),
         ("git", &["branch"][..]),
+        // terminal_readonly accepts only exact pwd/ls here; cat operands are
+        // validated against the live workspace by App::profile_id_for_request.
+        ("pwd", &["unexpected"][..]),
+        ("ls", &["-R"][..]),
+        ("ls", &["src"][..]),
+        ("cat", &[][..]),
+        ("cat", &["-n", "src/main.rs"][..]),
     ] {
         assert!(
             match_profile_entry(executable, &tokens(argv)).is_none(),
@@ -159,6 +174,8 @@ fn profile_entries_carry_bounded_caps_and_fixed_flags() {
     }
     let git = PROFILES.iter().find(|profile| profile.id == "git_readonly").unwrap();
     assert_eq!(git.entries.len(), 5);
+    let terminal = PROFILES.iter().find(|profile| profile.id == TERMINAL_READONLY_PROFILE).unwrap();
+    assert_eq!(terminal.entries.len(), 6);
     let rust = PROFILES.iter().find(|profile| profile.id == "rust_validate").unwrap();
     assert_eq!(rust.entries.len(), 3);
 }
@@ -258,6 +275,78 @@ mod e2e {
         let reply = proxy_recv(&mut stream);
         assert!(reply["result"]["error"].is_object(), "denied: {reply}");
         assert_eq!(app.agents.terminals.tracked_count(), 3);
+    }
+
+    #[test]
+    fn terminal_readonly_profile_auto_allows_only_valid_workspace_reads() {
+        let (mut app, temp, _fake) = mcp_app(base_agent_script(), false, true);
+        open_pane_and_wait_ready(&mut app);
+        fs::create_dir_all(temp.path().join("src")).unwrap();
+        fs::write(temp.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(temp.path().join(".env"), "TOKEN=secret\n").unwrap();
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        app.agents.test_trust_store_base = Some(state_dir.clone());
+        seed_profile_store(&state_dir, temp.path(), true, TERMINAL_READONLY_PROFILE);
+
+        let mut stream = connect_proxy(&app);
+        for (id, command, args) in [
+            (1u64, "pwd", json!([])),
+            (2, "ls", json!(["-la"])),
+            (3, "cat", json!(["src/main.rs"])),
+        ] {
+            proxy_send(&mut stream, id, terminal_frame(command, args));
+            wait_until(&mut app, "terminal-read command spawned", |app| {
+                app.agents.terminals.tracked_count() >= id as usize
+                    && app.agents.approvals.is_empty()
+            });
+            let reply = proxy_recv(&mut stream);
+            assert!(
+                reply["result"]["value"].as_str().is_some(),
+                "{command} must auto-allow: {reply}"
+            );
+        }
+
+        for (id, command, args) in [
+            (4u64, "ls", json!(["-R"])),
+            (6, "cat", json!(["src/main.rs", "Cargo.toml"])),
+            (7, "cat", json!([".env"])),
+            (8, "cat", json!(["src"])),
+            (9, "cat", json!(["../outside"])),
+            (10, "cat", json!(["/etc/passwd"])),
+        ] {
+            proxy_send(&mut stream, id, terminal_frame(command, args));
+            wait_until(&mut app, "invalid terminal-read command prompts", |app| {
+                !app.agents.approvals.is_empty()
+            });
+            assert_eq!(app.agents.terminals.tracked_count(), 3, "{command} must not auto-spawn");
+            run_ex(&mut app, "agents");
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE); // Deny
+            let reply = proxy_recv(&mut stream);
+            assert!(reply["result"]["error"].is_object(), "denied: {reply}");
+        }
+
+        #[cfg(unix)]
+        {
+            let outside = tempfile::tempdir().unwrap();
+            fs::write(outside.path().join("secret.txt"), "secret").unwrap();
+            std::os::unix::fs::symlink(
+                outside.path().join("secret.txt"),
+                temp.path().join("src/escape"),
+            )
+            .unwrap();
+            proxy_send(&mut stream, 11, terminal_frame("cat", json!(["src/escape"])));
+            wait_until(&mut app, "symlink escape prompts", |app| !app.agents.approvals.is_empty());
+            assert_eq!(
+                app.agents.terminals.tracked_count(),
+                3,
+                "symlink escape must not auto-spawn"
+            );
+            run_ex(&mut app, "agents");
+            press(&mut app, KeyCode::Esc, KeyModifiers::NONE); // Deny
+            let reply = proxy_recv(&mut stream);
+            assert!(reply["result"]["error"].is_object(), "denied: {reply}");
+        }
     }
 
     #[test]

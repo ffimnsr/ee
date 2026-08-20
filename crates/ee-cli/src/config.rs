@@ -1514,13 +1514,26 @@ impl EditorSettings {
             self.agents.default_agent = Some(default_agent.clone());
         }
         for (id, server) in &patch.servers {
-            match resolve_agent_server(id, server, kind) {
+            let existing = self.agents.servers.get(id);
+            match merge_agent_server(id, server, existing, kind) {
                 Ok(resolved) => {
                     self.agents.servers.insert(id.clone(), resolved);
                 }
                 Err(err) => eprintln!("ee: warning: invalid agents server `{id}`: {err}"),
             }
         }
+    }
+
+    fn finalize_agents(&mut self) {
+        self.agents.servers.retain(|id, server| {
+            if server.command.trim().is_empty() {
+                eprintln!(
+                    "ee: warning: invalid agents server `{id}`: agent server command must not be empty"
+                );
+                return false;
+            }
+            true
+        });
     }
 
     fn merge_mcp_toml(&mut self, patch: &McpToml) {
@@ -1540,47 +1553,62 @@ impl EditorSettings {
     }
 }
 
-fn resolve_agent_server(
-    id: &str,
-    server: &AgentServerToml,
-    kind: ConfigLayerKind,
-) -> Result<AgentServerSettings, String> {
+fn validate_agent_server(id: &str, server: &AgentServerToml) -> Result<(), String> {
     if id.trim().is_empty() {
         return Err(String::from("agent server id must not be empty"));
     }
-    let command = server.command.as_deref().unwrap_or_default().trim();
-    if command.is_empty() {
+    if server.command.as_deref().is_some_and(|command| command.trim().is_empty()) {
         return Err(String::from("agent server command must not be empty"));
     }
-    let mut env = BTreeMap::new();
     for (key, value) in &server.env {
         if crate::secrets::is_secret_reference_text(value) {
-            match crate::secrets::SecretReference::parse(value) {
-                Ok(_reference) => {
-                    if !matches!(kind, ConfigLayerKind::UserXdg | ConfigLayerKind::UserLegacy) {
-                        return Err(format!(
-                            "secret references are only allowed in user config layers, \
-                             but agents.servers.{id}.env.{key} comes from {} config",
-                            kind.label()
-                        ));
-                    }
-                    env.insert(key.clone(), AgentEnvValue { layer: kind, raw: value.clone() });
-                }
-                Err(err) => {
-                    return Err(format!(
-                        "invalid secret reference in agents.servers.{id}.env.{key}: {err}"
-                    ));
-                }
-            }
-        } else {
-            env.insert(key.clone(), AgentEnvValue { layer: kind, raw: value.clone() });
+            crate::secrets::SecretReference::parse(value).map_err(|err| {
+                format!("invalid secret reference in agents.servers.{id}.env.{key}: {err}")
+            })?;
         }
     }
+    Ok(())
+}
+
+fn merge_agent_server(
+    id: &str,
+    server: &AgentServerToml,
+    existing: Option<&AgentServerSettings>,
+    kind: ConfigLayerKind,
+) -> Result<AgentServerSettings, String> {
+    validate_agent_server(id, server)?;
+
+    let command = server
+        .command
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_owned)
+        .or_else(|| existing.map(|server| server.command.clone()))
+        .unwrap_or_default();
+    let args = server
+        .args
+        .clone()
+        .or_else(|| existing.map(|server| server.args.clone()))
+        .unwrap_or_default();
+    let mut env = existing.map(|server| server.env.clone()).unwrap_or_default();
+    for (key, value) in &server.env {
+        if crate::secrets::is_secret_reference_text(value)
+            && !matches!(kind, ConfigLayerKind::UserXdg | ConfigLayerKind::UserLegacy)
+        {
+            return Err(format!(
+                "secret references are only allowed in user config layers, \
+                 but agents.servers.{id}.env.{key} comes from {} config",
+                kind.label()
+            ));
+        }
+        env.insert(key.clone(), AgentEnvValue { layer: kind, raw: value.clone() });
+    }
+
     Ok(AgentServerSettings {
-        command: command.to_owned(),
-        args: server.args.clone().unwrap_or_default(),
+        command,
+        args,
         env,
-        cwd: server.cwd.clone(),
+        cwd: server.cwd.clone().or_else(|| existing.and_then(|server| server.cwd.clone())),
     })
 }
 
@@ -1734,6 +1762,7 @@ fn load_config_with_env(file_path: Option<&Path>, env: &ConfigEnvironment) -> Ed
     }
 
     settings.lsp = lsp.finalize();
+    settings.finalize_agents();
 
     settings
 }
@@ -2064,9 +2093,9 @@ fn validate_agents_mcp_config(parsed: &EeToml) -> Result<(), String> {
     if let Some(agents) = &parsed.agents {
         for (id, server) in &agents.servers {
             // Validation checks shape and reference grammar only; layer
-            // provenance is enforced during the merge, not on standalone
-            // files (the file's eventual layer is unknown here).
-            resolve_agent_server(id, server, ConfigLayerKind::UserXdg)
+            // provenance and required effective fields are enforced during
+            // the merge, because this file may contain only a server patch.
+            validate_agent_server(id, server)
                 .map_err(|err| format!("agents server `{id}`: {err}"))?;
             effective_ids.insert(id.clone());
         }
@@ -3967,7 +3996,7 @@ env = { OPENROUTER_API_KEY = "global-literal" }
     }
 
     #[test]
-    fn resolve_agent_server_rejects_malformed_secret_reference_with_field_path() {
+    fn validate_agent_server_rejects_malformed_secret_reference_with_field_path() {
         let server = AgentServerToml {
             command: Some(String::from("agent-bin")),
             args: None,
@@ -3977,8 +4006,7 @@ env = { OPENROUTER_API_KEY = "global-literal" }
             )]),
             cwd: None,
         };
-        let err =
-            resolve_agent_server("gh", &server, ConfigLayerKind::UserXdg).expect_err("rejected");
+        let err = validate_agent_server("gh", &server).expect_err("rejected");
         assert!(err.contains("agents.servers.gh.env.OPENROUTER_API_KEY"), "field path: {err}");
         assert!(!err.contains("bad name"), "no raw value echo: {err}");
     }
@@ -3998,7 +4026,7 @@ env = { OPENROUTER_API_KEY = "global-literal" }
             cwd: None,
         };
         let resolved =
-            resolve_agent_server("gh", &server, ConfigLayerKind::Ancestor).expect("literals");
+            merge_agent_server("gh", &server, None, ConfigLayerKind::Ancestor).expect("literals");
         assert_eq!(
             resolved.env.get("ENDPOINT").expect("literal").raw,
             "https://api.example.com/secret://openrouter-api-key"

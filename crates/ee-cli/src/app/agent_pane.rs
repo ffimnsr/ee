@@ -3455,15 +3455,15 @@ impl App {
             return;
         }
 
-        // Bridge approvals render above permissions in the composer; keep key priority identical.
-        // ←/→/Tab move, Enter allows with the selected policy choice, Esc denies once.
+        // Bridge approvals render above permissions in the composer. Up/down selects
+        // a visible option row; left/right and tab remain aliases for compatibility.
         if self.agents.approvals.front().is_some() {
             match key.code {
-                KeyCode::Left | KeyCode::Tab | KeyCode::BackTab => {
+                KeyCode::Up | KeyCode::Left | KeyCode::BackTab => {
                     self.move_approval_selection(-1);
                     return;
                 }
-                KeyCode::Right => {
+                KeyCode::Down | KeyCode::Right | KeyCode::Tab => {
                     self.move_approval_selection(1);
                     return;
                 }

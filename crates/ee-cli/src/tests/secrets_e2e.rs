@@ -126,6 +126,55 @@ fn secrets_e2e_global_reference_reaches_launch_config_never_user_visible() {
     assert!(!show.contains(SEEDED), "config output omits plaintext");
 }
 
+#[test]
+fn secrets_e2e_user_reference_overlays_workspace_agent_server() {
+    let fixture = E2eStore::new();
+    fixture.create_secret("openrouter-api-key", SEEDED);
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let env = test_config_environment(dir.path());
+    write_config_layer(
+        &env,
+        ConfigLayerKind::Ancestor,
+        r#"
+[agents]
+enabled = true
+
+[agents.servers.fake]
+command = "agent-bin"
+args = ["--serve"]
+env = { LOG_LEVEL = "info" }
+"#,
+    );
+    write_config_layer(
+        &env,
+        ConfigLayerKind::UserXdg,
+        r#"
+[agents.servers.fake.env]
+OPENROUTER_API_KEY = "secret://openrouter-api-key"
+"#,
+    );
+
+    let settings = load_config_for_test(&env);
+    let server = settings.agents.servers.get("fake").expect("merged server");
+    assert_eq!(server.command, "agent-bin");
+    assert_eq!(server.args, ["--serve"]);
+    assert_eq!(server.env.get("LOG_LEVEL").map(|value| value.raw.as_str()), Some("info"));
+    let api_key = server.env.get("OPENROUTER_API_KEY").expect("user secret reference");
+    assert_eq!(api_key.raw, REFERENCE);
+    assert_eq!(api_key.layer, ConfigLayerKind::UserXdg);
+
+    let launch_env =
+        resolve::resolve_agent_env(&fixture.store, server).expect("resolved launch env");
+    assert_eq!(launch_env.get("OPENROUTER_API_KEY").map(String::as_str), Some(SEEDED));
+    assert_eq!(launch_env.get("LOG_LEVEL").map(String::as_str), Some("info"));
+
+    let show = toml::to_string_pretty(&crate::config::resolved_config_with_env(None, &env))
+        .expect("config document");
+    assert!(show.contains(REFERENCE), "config output preserves the reference");
+    assert!(!show.contains(SEEDED), "config output omits plaintext");
+}
+
 // ── Negative fixtures ────────────────────────────────────────────────────────
 
 #[test]

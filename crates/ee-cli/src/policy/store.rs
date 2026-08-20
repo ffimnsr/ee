@@ -22,7 +22,8 @@ use std::time::SystemTime;
 use serde::Serialize;
 
 use super::rules::{
-    RawCommandRule, RawMcpReadRule, RawMcpRule, RawProfileRule, RawReadPathRule, RawWriteRule,
+    RawCommandRule, RawMcpReadProfileRule, RawMcpReadRule, RawMcpRule, RawProfileRule,
+    RawReadPathRule, RawWriteRule,
 };
 use super::{TrustRule, WorkspaceIdentity};
 
@@ -287,7 +288,7 @@ pub(crate) fn store_path_from(base_state_dir: &Path, workspace: &WorkspaceIdenti
 
 // ── Parsing ──────────────────────────────────────────────────────────────────
 
-const DOCUMENT_KEYS: [&str; 9] = [
+const DOCUMENT_KEYS: [&str; 10] = [
     "schema_version",
     "workspace",
     "policy",
@@ -295,6 +296,7 @@ const DOCUMENT_KEYS: [&str; 9] = [
     "mcp_allow",
     "read_path_allow",
     "mcp_read_allow",
+    "mcp_read_profile_allow",
     "profile_allow",
     "write_allow",
 ];
@@ -390,6 +392,13 @@ fn parse_document(
             rules.push(TrustRule::McpRead(rule));
         }
     }
+    for entry in rule_entries(table, "mcp_read_profile_allow")? {
+        if let Ok(raw) = entry.clone().try_into::<RawMcpReadProfileRule>()
+            && let Ok(rule) = super::rules::McpReadProfileRule::from_raw(raw, identity)
+        {
+            rules.push(TrustRule::McpReadProfile(rule));
+        }
+    }
     for entry in rule_entries(table, "profile_allow")? {
         if let Ok(raw) = entry.clone().try_into::<RawProfileRule>()
             && let Ok(rule) = super::rules::ProfileRule::from_raw(raw, identity)
@@ -470,6 +479,8 @@ struct RawDocument {
     read_path_allow: Vec<RawReadPathRule>,
     #[serde(rename = "mcp_read_allow", skip_serializing_if = "Vec::is_empty")]
     mcp_read_allow: Vec<RawMcpReadRule>,
+    #[serde(rename = "mcp_read_profile_allow", skip_serializing_if = "Vec::is_empty")]
+    mcp_read_profile_allow: Vec<RawMcpReadProfileRule>,
     #[serde(rename = "profile_allow", skip_serializing_if = "Vec::is_empty")]
     profile_allow: Vec<RawProfileRule>,
     #[serde(rename = "write_allow", skip_serializing_if = "Vec::is_empty")]
@@ -491,6 +502,7 @@ fn serialize_document(document: &TrustStoreDocument) -> Result<String, TrustStor
     let mut mcp_allow: Vec<RawMcpRule> = Vec::new();
     let mut read_path_allow: Vec<RawReadPathRule> = Vec::new();
     let mut mcp_read_allow: Vec<RawMcpReadRule> = Vec::new();
+    let mut mcp_read_profile_allow: Vec<RawMcpReadProfileRule> = Vec::new();
     let mut profile_allow: Vec<RawProfileRule> = Vec::new();
     let mut write_allow: Vec<RawWriteRule> = Vec::new();
     for rule in &document.rules {
@@ -499,6 +511,7 @@ fn serialize_document(document: &TrustStoreDocument) -> Result<String, TrustStor
             TrustRule::Mcp(rule) => mcp_allow.push(rule.into()),
             TrustRule::ReadPath(rule) => read_path_allow.push(rule.into()),
             TrustRule::McpRead(rule) => mcp_read_allow.push(rule.into()),
+            TrustRule::McpReadProfile(rule) => mcp_read_profile_allow.push(rule.into()),
             TrustRule::Profile(rule) => profile_allow.push(rule.into()),
             TrustRule::Write(rule) => write_allow.push(rule.into()),
         }
@@ -507,6 +520,7 @@ fn serialize_document(document: &TrustStoreDocument) -> Result<String, TrustStor
     mcp_allow.sort_by(|a, b| a.id.cmp(&b.id));
     read_path_allow.sort_by(|a, b| a.id.cmp(&b.id));
     mcp_read_allow.sort_by(|a, b| a.id.cmp(&b.id));
+    mcp_read_profile_allow.sort_by(|a, b| a.id.cmp(&b.id));
     profile_allow.sort_by(|a, b| a.id.cmp(&b.id));
     write_allow.sort_by(|a, b| a.id.cmp(&b.id));
     let raw = RawDocument {
@@ -517,6 +531,7 @@ fn serialize_document(document: &TrustStoreDocument) -> Result<String, TrustStor
         mcp_allow,
         read_path_allow,
         mcp_read_allow,
+        mcp_read_profile_allow,
         profile_allow,
         write_allow,
     };

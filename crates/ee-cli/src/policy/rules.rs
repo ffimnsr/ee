@@ -2,8 +2,8 @@
 //! foundation).
 //!
 //! The store document defines six typed rule arrays (`command_allow`,
-//! `mcp_allow`, `read_path_allow`, `mcp_read_allow`, `profile_allow`,
-//! `write_allow`).  Each raw entry is deserialized with
+//! `mcp_allow`, `read_path_allow`, `mcp_read_allow`, `mcp_read_profile_allow`,
+//! `profile_allow`, `write_allow`). Each raw entry is deserialized with
 //! `deny_unknown_fields` semantics, validated against the schema rules, and
 //! converted into the tagged [`TrustRule`] enum used by the evaluator.
 //! Unknown fields, cross-kind fields, invalid enum values, malformed
@@ -164,6 +164,19 @@ pub(crate) struct McpReadRule {
     pub(crate) max_bytes: u64,
 }
 
+/// Fixed application-owned MCP read-tool profile. Server, transport, and
+/// manifest schema remain exact matches; the profile id determines its fixed
+/// read-only tool list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct McpReadProfileRule {
+    pub(crate) id: String,
+    pub(crate) scope: TrustRuleScope,
+    pub(crate) server: String,
+    pub(crate) transport_identity: String,
+    pub(crate) tool_schema_version: u64,
+    pub(crate) profile: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProfileRule {
     pub(crate) id: String,
@@ -190,6 +203,7 @@ pub(crate) enum TrustRule {
     Mcp(McpRule),
     ReadPath(ReadPathRule),
     McpRead(McpReadRule),
+    McpReadProfile(McpReadProfileRule),
     Profile(ProfileRule),
     Write(WriteRule),
 }
@@ -201,6 +215,7 @@ impl TrustRule {
             TrustRule::Mcp(rule) => &rule.id,
             TrustRule::ReadPath(rule) => &rule.id,
             TrustRule::McpRead(rule) => &rule.id,
+            TrustRule::McpReadProfile(rule) => &rule.id,
             TrustRule::Profile(rule) => &rule.id,
             TrustRule::Write(rule) => &rule.id,
         }
@@ -212,6 +227,7 @@ impl TrustRule {
             TrustRule::Mcp(rule) => &rule.scope,
             TrustRule::ReadPath(rule) => &rule.scope,
             TrustRule::McpRead(rule) => &rule.scope,
+            TrustRule::McpReadProfile(rule) => &rule.scope,
             TrustRule::Profile(rule) => &rule.scope,
             TrustRule::Write(rule) => &rule.scope,
         }
@@ -278,6 +294,33 @@ impl TrustRule {
                     && rule.tool_schema_version == *tool_schema_version
                     && rule.path_prefix.matches(relative_path)
                     && rule.size_ok(*byte_count)
+            }
+            TrustRule::McpReadProfile(rule) => {
+                if operation.category != TrustCategory::Read {
+                    return false;
+                }
+                let (server, transport_identity, tool, tool_schema_version) =
+                    match &operation.identity {
+                        OperationIdentity::McpRead {
+                            server,
+                            transport_identity,
+                            tool,
+                            tool_schema_version,
+                            ..
+                        }
+                        | OperationIdentity::Mcp {
+                            server,
+                            transport_identity,
+                            tool,
+                            tool_schema_version,
+                            ..
+                        } => (server, transport_identity, tool, tool_schema_version),
+                        _ => return false,
+                    };
+                rule.server == *server
+                    && rule.transport_identity == *transport_identity
+                    && rule.tool_schema_version == *tool_schema_version
+                    && super::profiles::mcp_read_profile_matches(&rule.profile, tool)
             }
             TrustRule::Profile(rule) => {
                 let OperationIdentity::Profile { profile } = &operation.identity else {
@@ -384,6 +427,19 @@ pub(crate) struct RawMcpReadRule {
     pub(crate) tool_schema_version: u64,
     pub(crate) path_prefix: String,
     pub(crate) max_bytes: u64,
+    pub(crate) expires_at: Option<String>,
+    pub(crate) max_uses: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawMcpReadProfileRule {
+    pub(crate) id: String,
+    pub(crate) agent: Option<String>,
+    pub(crate) server: String,
+    pub(crate) transport_identity: String,
+    pub(crate) tool_schema_version: u64,
+    pub(crate) profile: String,
     pub(crate) expires_at: Option<String>,
     pub(crate) max_uses: Option<u64>,
 }
@@ -616,6 +672,40 @@ impl McpReadRule {
     }
 }
 
+impl McpReadProfileRule {
+    pub(crate) fn from_raw(
+        raw: RawMcpReadProfileRule,
+        workspace: WorkspaceIdentity,
+    ) -> Result<Self, String> {
+        let id = require_non_empty("id", &raw.id)?;
+        let agent = optional_non_empty("agent", raw.agent)?;
+        parse_identity_fields(
+            &raw.server,
+            &raw.transport_identity,
+            "ee_mcp_safe_read",
+            raw.tool_schema_version,
+        )?;
+        let profile = require_non_empty("profile", &raw.profile)?;
+        validate_no_control("profile", &profile)?;
+        if !super::profiles::is_known_mcp_read_profile(&profile) {
+            return Err(format!("unknown MCP read profile id: {profile}"));
+        }
+        Ok(Self {
+            id,
+            scope: TrustRuleScope {
+                workspace,
+                agent,
+                expires_at: parse_optional_expiry(raw.expires_at)?,
+                max_uses: parse_optional_uses(raw.max_uses)?,
+            },
+            server: raw.server,
+            transport_identity: raw.transport_identity,
+            tool_schema_version: raw.tool_schema_version,
+            profile,
+        })
+    }
+}
+
 impl ProfileRule {
     pub(crate) fn from_raw(
         raw: RawProfileRule,
@@ -746,6 +836,21 @@ impl From<&McpReadRule> for RawMcpReadRule {
             tool_schema_version: rule.tool_schema_version,
             path_prefix: rule.path_prefix.display().to_string(),
             max_bytes: rule.max_bytes,
+            expires_at: rule.scope.expires_at.map(format_expiry),
+            max_uses: rule.scope.max_uses,
+        }
+    }
+}
+
+impl From<&McpReadProfileRule> for RawMcpReadProfileRule {
+    fn from(rule: &McpReadProfileRule) -> Self {
+        Self {
+            id: rule.id.clone(),
+            agent: rule.scope.agent.clone(),
+            server: rule.server.clone(),
+            transport_identity: rule.transport_identity.clone(),
+            tool_schema_version: rule.tool_schema_version,
+            profile: rule.profile.clone(),
             expires_at: rule.scope.expires_at.map(format_expiry),
             max_uses: rule.scope.max_uses,
         }

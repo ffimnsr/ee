@@ -56,14 +56,15 @@ pub(crate) use mcp::{McpInvocation, generate_mcp_rule_id};
 pub(crate) use paths::is_protected_relative_path;
 #[allow(unused_imports)]
 pub(crate) use profiles::{
-    CuratedProfile, PROFILE_REGISTRY_VERSION, PROFILES, ProfileEntry, is_known_profile,
-    match_profile_entry,
+    CuratedProfile, EE_MCP_SAFE_READ_PROFILE, EE_MCP_SAFE_READ_TOOL_SCHEMA_VERSION,
+    PROFILE_REGISTRY_VERSION, PROFILES, ProfileEntry, TERMINAL_READONLY_PROFILE,
+    is_known_mcp_read_profile, is_known_profile, match_profile_entry, mcp_read_profile_matches,
 };
 #[allow(unused_imports)]
 pub(crate) use rules::{
     CommandRule, MAX_WRITE_FILE_BYTES, MAX_WRITE_FILES, MAX_WRITE_TOTAL_BYTES, MatchMode,
-    McpReadRule, McpRule, PathPrefix, ProfileRule, ReadPathRule, TrustRule, WriteOperationKind,
-    WriteRule, generate_write_rule_id,
+    McpReadProfileRule, McpReadRule, McpRule, PathPrefix, ProfileRule, ReadPathRule, TrustRule,
+    WriteOperationKind, WriteRule, generate_write_rule_id,
 };
 #[allow(unused_imports)]
 pub(crate) use session::{SessionChoice, SessionPolicy};

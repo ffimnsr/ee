@@ -3,9 +3,9 @@ use std::io::{self, IsTerminal as _, Read, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -234,6 +234,58 @@ enum DoCommands {
 enum AgentCommands {
     /// Launch the editor directly into the agents TUI
     Shell,
+    /// Manage host-local workspace trust grants
+    Trust {
+        #[command(subcommand)]
+        command: AgentTrustCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AgentTrustCommands {
+    /// Grant all built-in trust profiles, or only profiles named with --profile
+    Grant {
+        /// Built-in host-local profile to grant; repeat to grant multiple profiles
+        #[arg(long = "profile", value_enum)]
+        profiles: Vec<AgentTrustProfile>,
+    },
+    /// Revoke one or more built-in host-local trust profiles
+    Revoke {
+        /// Built-in host-local profile to revoke; repeat to revoke multiple profiles
+        #[arg(long = "profile", value_enum, required = true)]
+        profiles: Vec<AgentTrustProfile>,
+    },
+}
+
+/// Application-owned trust profiles exposed by the CLI. Project configuration
+/// cannot add values to this enum or grant their authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum AgentTrustProfile {
+    /// Bounded ee MCP read tools on stdio and ACP routes
+    #[value(name = "mcp_safe_read")]
+    McpSafeRead,
+    /// Exact workspace-root Git read commands
+    #[value(name = "git_readonly")]
+    GitReadonly,
+    /// Bounded workspace-root terminal inspection commands
+    #[value(name = "terminal_readonly")]
+    TerminalReadonly,
+}
+
+const ALL_AGENT_TRUST_PROFILES: &[AgentTrustProfile] = &[
+    AgentTrustProfile::McpSafeRead,
+    AgentTrustProfile::GitReadonly,
+    AgentTrustProfile::TerminalReadonly,
+];
+
+impl AgentTrustProfile {
+    fn name(self) -> &'static str {
+        match self {
+            Self::McpSafeRead => "mcp_safe_read",
+            Self::GitReadonly => "git_readonly",
+            Self::TerminalReadonly => "terminal_readonly",
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -503,6 +555,138 @@ fn cmd_doctor(config_path: Option<&PathBuf>) {
     print_language_query_diagnostics();
     println!();
     println!("No problems detected.");
+}
+
+const AGENT_TRUST_GRANT_DURATION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+const AGENT_TRUST_GRANT_MAX_USES: u64 = 10_000;
+
+/// Persists selected application-owned trust profiles for one workspace.
+fn grant_agent_trust_profiles_at(
+    store: &policy::TrustStore,
+    now: SystemTime,
+    profiles: &[AgentTrustProfile],
+) -> Result<policy::TrustStoreDocument, policy::TrustStoreError> {
+    let mut document = store.load()?;
+    let scope = policy::TrustRuleScope {
+        workspace: *store.workspace(),
+        agent: None,
+        expires_at: Some(now + AGENT_TRUST_GRANT_DURATION),
+        max_uses: Some(AGENT_TRUST_GRANT_MAX_USES),
+    };
+    document.workspace_enabled = true;
+
+    if profiles.contains(&AgentTrustProfile::McpSafeRead) {
+        for (id, transport_identity) in [
+            ("agent_trust_mcp_read_stdio", "stdio:ee --mcp-proxy"),
+            ("agent_trust_mcp_read_acp", "acp:ee"),
+        ] {
+            let exists = document.rules.iter().any(|rule| {
+                matches!(
+                    rule,
+                    policy::TrustRule::McpReadProfile(existing)
+                        if existing.server == "ee"
+                            && existing.transport_identity == transport_identity
+                            && existing.tool_schema_version == policy::EE_MCP_SAFE_READ_TOOL_SCHEMA_VERSION
+                            && existing.profile == policy::EE_MCP_SAFE_READ_PROFILE
+                )
+            });
+            if !exists {
+                document.rules.push(policy::TrustRule::McpReadProfile(
+                    policy::McpReadProfileRule {
+                        id: id.to_string(),
+                        scope: scope.clone(),
+                        server: "ee".to_string(),
+                        transport_identity: transport_identity.to_string(),
+                        tool_schema_version: policy::EE_MCP_SAFE_READ_TOOL_SCHEMA_VERSION,
+                        profile: policy::EE_MCP_SAFE_READ_PROFILE.to_string(),
+                    },
+                ));
+            }
+        }
+    }
+
+    for (selected, id, profile) in [
+        (AgentTrustProfile::GitReadonly, "agent_trust_git_readonly", "git_readonly"),
+        (
+            AgentTrustProfile::TerminalReadonly,
+            "agent_trust_terminal_readonly",
+            policy::TERMINAL_READONLY_PROFILE,
+        ),
+    ] {
+        if profiles.contains(&selected)
+            && !document.rules.iter().any(|rule| {
+                matches!(rule, policy::TrustRule::Profile(existing) if existing.profile == profile)
+            })
+        {
+            document.rules.push(policy::TrustRule::Profile(policy::ProfileRule {
+                id: id.to_string(),
+                scope: scope.clone(),
+                profile: profile.to_string(),
+            }));
+        }
+    }
+    store.write(&document)?;
+    Ok(document)
+}
+
+/// Removes selected application-owned trust profiles from one host-local
+/// workspace store. The workspace gate and unrelated host-local rules remain.
+fn revoke_agent_trust_profiles_at(
+    store: &policy::TrustStore,
+    now: SystemTime,
+    profiles: &[AgentTrustProfile],
+) -> Result<usize, policy::TrustStoreError> {
+    let mut document = store.load_at(now)?;
+    let before = document.rules.len();
+    document.rules.retain(|rule| !match rule {
+        policy::TrustRule::McpReadProfile(rule) => {
+            profiles.contains(&AgentTrustProfile::McpSafeRead)
+                && rule.server == "ee"
+                && rule.profile == policy::EE_MCP_SAFE_READ_PROFILE
+        }
+        policy::TrustRule::Profile(rule) => {
+            (profiles.contains(&AgentTrustProfile::GitReadonly) && rule.profile == "git_readonly")
+                || (profiles.contains(&AgentTrustProfile::TerminalReadonly)
+                    && rule.profile == policy::TERMINAL_READONLY_PROFILE)
+        }
+        _ => false,
+    });
+    let removed = before.saturating_sub(document.rules.len());
+    if removed > 0 {
+        store.write(&document)?;
+    }
+    Ok(removed)
+}
+
+fn selected_agent_trust_profiles(profiles: &[AgentTrustProfile]) -> &[AgentTrustProfile] {
+    if profiles.is_empty() { ALL_AGENT_TRUST_PROFILES } else { profiles }
+}
+
+fn profile_names(profiles: &[AgentTrustProfile]) -> String {
+    profiles.iter().map(|profile| profile.name()).collect::<Vec<_>>().join(", ")
+}
+
+fn cmd_agent_trust_grant(profiles: &[AgentTrustProfile]) -> io::Result<()> {
+    let profiles = selected_agent_trust_profiles(profiles);
+    let workspace = std::env::current_dir()?;
+    let store = policy::TrustStore::default_for(&workspace).map_err(io::Error::other)?;
+    grant_agent_trust_profiles_at(&store, SystemTime::now(), profiles).map_err(io::Error::other)?;
+    println!("agent trust granted for current workspace: {}", profile_names(profiles));
+    println!("host-local store: {}", store.path().display());
+    Ok(())
+}
+
+fn cmd_agent_trust_revoke(profiles: &[AgentTrustProfile]) -> io::Result<()> {
+    let workspace = std::env::current_dir()?;
+    let store = policy::TrustStore::default_for(&workspace).map_err(io::Error::other)?;
+    let removed = revoke_agent_trust_profiles_at(&store, SystemTime::now(), profiles)
+        .map_err(io::Error::other)?;
+    println!(
+        "agent trust revoked for current workspace: {} ({removed} rule(s) removed)",
+        profile_names(profiles)
+    );
+    println!("host-local store: {}", store.path().display());
+    Ok(())
 }
 
 fn print_language_query_diagnostics() {
@@ -1572,6 +1756,18 @@ fn main() -> io::Result<()> {
                     }
                 },
                 DoCommands::Agent { command: AgentCommands::Shell } => {}
+                DoCommands::Agent {
+                    command:
+                        AgentCommands::Trust { command: AgentTrustCommands::Grant { profiles } },
+                } => {
+                    cmd_agent_trust_grant(&profiles)?;
+                }
+                DoCommands::Agent {
+                    command:
+                        AgentCommands::Trust { command: AgentTrustCommands::Revoke { profiles } },
+                } => {
+                    cmd_agent_trust_revoke(&profiles)?;
+                }
                 DoCommands::Plugins { command } => match command {
                     PluginCommands::List => cmd_plugins_list(),
                 },

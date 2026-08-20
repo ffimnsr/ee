@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use clap::{CommandFactory, Parser};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -19,6 +19,110 @@ use crate::backend::BackendEvent;
 use crate::buffer::BufferManager;
 use crate::picker::PickerKind;
 use crate::tests::helpers::*;
+
+#[test]
+fn agent_trust_grant_persists_host_local_read_and_git_rules() {
+    let state = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let store = crate::policy::TrustStore::at(state.path(), workspace.path()).unwrap();
+
+    let document = crate::grant_agent_trust_profiles_at(
+        &store,
+        SystemTime::now(),
+        crate::ALL_AGENT_TRUST_PROFILES,
+    )
+    .unwrap();
+    assert!(document.workspace_enabled);
+    assert!(store.path().starts_with(state.path().join("trust")));
+    assert!(!store.path().starts_with(workspace.path()));
+
+    let read_rules = document
+        .rules
+        .iter()
+        .filter_map(|rule| match rule {
+            crate::policy::TrustRule::McpReadProfile(rule) => Some(rule),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(read_rules.len(), 2);
+    assert!(read_rules.iter().any(|rule| rule.transport_identity == "stdio:ee --mcp-proxy"));
+    assert!(read_rules.iter().any(|rule| rule.transport_identity == "acp:ee"));
+    assert!(read_rules.iter().all(|rule| {
+        rule.server == "ee"
+            && rule.tool_schema_version == crate::policy::EE_MCP_SAFE_READ_TOOL_SCHEMA_VERSION
+            && rule.profile == crate::policy::EE_MCP_SAFE_READ_PROFILE
+    }));
+    for profile in ["git_readonly", crate::policy::TERMINAL_READONLY_PROFILE] {
+        assert!(
+            document.rules.iter().any(|rule| {
+                matches!(rule, crate::policy::TrustRule::Profile(rule) if rule.profile == profile)
+            }),
+            "missing {profile} grant"
+        );
+    }
+}
+
+#[test]
+fn agent_trust_profiles_are_selective_and_revocable() {
+    let state = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let store = crate::policy::TrustStore::at(state.path(), workspace.path()).unwrap();
+    let now = SystemTime::now();
+
+    let terminal = crate::grant_agent_trust_profiles_at(
+        &store,
+        now,
+        &[crate::AgentTrustProfile::TerminalReadonly],
+    )
+    .unwrap();
+    assert!(terminal.workspace_enabled);
+    assert!(terminal.rules.iter().any(|rule| {
+        matches!(rule, crate::policy::TrustRule::Profile(rule)
+            if rule.profile == crate::policy::TERMINAL_READONLY_PROFILE)
+    }));
+    assert!(!terminal.rules.iter().any(|rule| {
+        matches!(rule, crate::policy::TrustRule::Profile(rule) if rule.profile == "git_readonly")
+    }));
+    assert!(
+        !terminal
+            .rules
+            .iter()
+            .any(|rule| matches!(rule, crate::policy::TrustRule::McpReadProfile(_)))
+    );
+
+    assert_eq!(
+        crate::revoke_agent_trust_profiles_at(
+            &store,
+            now,
+            &[crate::AgentTrustProfile::TerminalReadonly],
+        )
+        .unwrap(),
+        1
+    );
+    let after_revoke = store.load_at(now).unwrap();
+    assert!(after_revoke.workspace_enabled, "revoke keeps the workspace gate for other rules");
+    assert!(after_revoke.rules.is_empty());
+
+    let mcp =
+        crate::grant_agent_trust_profiles_at(&store, now, &[crate::AgentTrustProfile::McpSafeRead])
+            .unwrap();
+    assert_eq!(
+        mcp.rules
+            .iter()
+            .filter(|rule| matches!(rule, crate::policy::TrustRule::McpReadProfile(_)))
+            .count(),
+        2
+    );
+    assert_eq!(
+        crate::revoke_agent_trust_profiles_at(
+            &store,
+            now,
+            &[crate::AgentTrustProfile::McpSafeRead],
+        )
+        .unwrap(),
+        2
+    );
+}
 
 #[test]
 fn cli_restore_session_flag_parses() {
@@ -105,6 +209,67 @@ fn cli_utility_commands_live_under_do() {
             command: crate::DoCommands::Agent { command: crate::AgentCommands::Shell }
         })
     ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "agent", "trust", "grant"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Agent {
+                command: crate::AgentCommands::Trust {
+                    command: crate::AgentTrustCommands::Grant { profiles }
+                }
+            }
+        }) if profiles.is_empty()
+    ));
+
+    let cli = crate::Cli::try_parse_from([
+        "ee",
+        "do",
+        "agent",
+        "trust",
+        "grant",
+        "--profile",
+        "terminal_readonly",
+        "--profile",
+        "git_readonly",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Agent {
+                command: crate::AgentCommands::Trust {
+                    command: crate::AgentTrustCommands::Grant { profiles }
+                }
+            }
+        }) if profiles == vec![
+            crate::AgentTrustProfile::TerminalReadonly,
+            crate::AgentTrustProfile::GitReadonly,
+        ]
+    ));
+
+    let cli = crate::Cli::try_parse_from([
+        "ee",
+        "do",
+        "agent",
+        "trust",
+        "revoke",
+        "--profile",
+        "terminal_readonly",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Agent {
+                command: crate::AgentCommands::Trust {
+                    command: crate::AgentTrustCommands::Revoke { profiles }
+                }
+            }
+        }) if profiles == vec![crate::AgentTrustProfile::TerminalReadonly]
+    ));
+    assert!(crate::Cli::try_parse_from(["ee", "do", "agent", "trust", "revoke"]).is_err());
 
     let cli = crate::Cli::try_parse_from(["ee", "do", "plugins", "list"]).unwrap();
 

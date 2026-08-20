@@ -508,9 +508,21 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         return;
     }
 
+    let approval_composer = approval_composer_lines(app, inner.width as usize);
+    // Keep one transcript row and the footer visible. Pending approvals consume the
+    // remaining space so their command detail and every choice stay readable.
+    let composer_height = approval_composer
+        .as_ref()
+        .map(|(lines, _)| lines.len().min(inner.height.saturating_sub(2) as usize) as u16)
+        .unwrap_or(1)
+        .max(1);
     let rows = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(composer_height),
+        ])
         .split(inner);
     let transcript_area = rows[0];
     let footer_area = rows[1];
@@ -669,18 +681,31 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         agents_pending_composer_line(app)
     };
 
-    // Composer line: prompt, permission choice, elicitation widget, or draft.
-    let cursor_col = composer
-        .iter()
-        .map(|span| span.width())
-        .sum::<usize>()
-        .min(composer_area.width.saturating_sub(1) as usize);
-    frame.render_widget(Paragraph::new(Line::from(composer)), composer_area);
-    if app.agents_focused() {
-        frame.set_cursor_position(Position {
-            x: composer_area.x.saturating_add(cursor_col as u16),
-            y: composer_area.y,
-        });
+    // Composer: a pending approval expands into a wrapped detail plus one visible
+    // row per choice. Everything else stays single-line to preserve editor space.
+    if let Some((lines, selected_row)) = approval_composer {
+        frame.render_widget(Paragraph::new(lines), composer_area);
+        if app.agents_focused() {
+            frame.set_cursor_position(Position {
+                x: composer_area.x,
+                y: composer_area.y.saturating_add(
+                    selected_row.min(composer_area.height.saturating_sub(1) as usize) as u16,
+                ),
+            });
+        }
+    } else {
+        let cursor_col = composer
+            .iter()
+            .map(|span| span.width())
+            .sum::<usize>()
+            .min(composer_area.width.saturating_sub(1) as usize);
+        frame.render_widget(Paragraph::new(Line::from(composer)), composer_area);
+        if app.agents_focused() {
+            frame.set_cursor_position(Position {
+                x: composer_area.x.saturating_add(cursor_col as u16),
+                y: composer_area.y,
+            });
+        }
     }
 
     if let Some(active_index) = app.agents.active_thread {
@@ -739,34 +764,56 @@ fn plan_modal_rect(area: Rect, entry_count: usize) -> Rect {
     Rect { x, y, width, height }
 }
 
-/// Builds the composer line: permission choice, elicitation widget, or the
-/// prompt draft.
+/// Builds expanded approval rows. Returns selected option row for cursor placement.
+#[cfg(feature = "agents")]
+fn approval_composer_lines(app: &App, width: usize) -> Option<(Vec<Line<'static>>, usize)> {
+    let approval = app.agents.approvals.front()?;
+    let count = approval.options.len();
+    let selected = approval.selected.min(count.saturating_sub(1));
+    let detail_width = width.saturating_sub(2).max(4);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            "approval required ",
+            Style::default().fg(theme::FG_WARNING).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("[{}/{}] {}", selected + 1, count, approval.title),
+            Style::default().fg(theme::FG_TEXT),
+        ),
+    ])];
+
+    for segment in crate::app::wrap_text(&approval.detail, detail_width) {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(segment, Style::default().fg(theme::FG_TEXT)),
+        ]));
+    }
+
+    let first_option_row = lines.len();
+    for (index, (label, _)) in approval.options.iter().enumerate() {
+        let is_selected = index == selected;
+        let style = if is_selected {
+            Style::default().fg(theme::FG_KEY).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::FG_DIM)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(if is_selected { "> " } else { "  " }, style),
+            Span::styled(label.clone(), style),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(
+        "  ↑/↓ select · Enter confirm · Esc deny",
+        theme_style(theme::FG_DIM),
+    )));
+
+    Some((lines, first_option_row + selected))
+}
+
+/// Builds the single-line composer for permission choice, elicitation widget, or
+/// prompt draft. Pending bridge approvals use `approval_composer_lines` instead.
 #[cfg(feature = "agents")]
 fn agents_composer_line(app: &App, thread: &crate::app::AgentThreadUi) -> Vec<Span<'static>> {
-    if let Some(approval) = app.agents.approvals.front() {
-        let count = approval.options.len();
-        let selected = approval.selected.min(count.saturating_sub(1));
-        let label = approval
-            .options
-            .get(selected)
-            .cloned()
-            .map(|(label, _)| label)
-            .unwrap_or_else(|| String::from("(none)"));
-        return vec![
-            Span::styled("> ", Style::default().fg(theme::FG_KEY)),
-            Span::styled(
-                format!("[{}/{}] ", selected + 1, count),
-                Style::default().fg(theme::FG_WARNING),
-            ),
-            Span::styled(
-                format!("{} — {}", approval.title, approval.detail),
-                Style::default().fg(theme::FG_TEXT),
-            ),
-            Span::styled(" ", Style::default().fg(theme::FG_DIM)),
-            Span::styled(label, Style::default().fg(theme::FG_WARNING)),
-            Span::styled(" (Enter confirm, ←/→ change, Esc deny)", theme_style(theme::FG_DIM)),
-        ];
-    }
     if let Some(permission) = &app.agents.permission {
         let count = permission.options.len();
         let selected = permission.selected.min(count.saturating_sub(1));

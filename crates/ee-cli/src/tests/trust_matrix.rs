@@ -59,6 +59,7 @@ fn rule_with_agent(rule: &TrustRule, agent: &str) -> TrustRule {
         TrustRule::Mcp(r) => r.scope.agent = Some(agent.into()),
         TrustRule::ReadPath(r) => r.scope.agent = Some(agent.into()),
         TrustRule::McpRead(r) => r.scope.agent = Some(agent.into()),
+        TrustRule::McpReadProfile(r) => r.scope.agent = Some(agent.into()),
         TrustRule::Profile(r) => r.scope.agent = Some(agent.into()),
         TrustRule::Write(r) => r.scope.agent = Some(agent.into()),
     }
@@ -73,6 +74,7 @@ fn rule_with_expiry(rule: &TrustRule, expires: Option<&str>) -> TrustRule {
         TrustRule::Mcp(r) => r.scope.expires_at = expires.map(at),
         TrustRule::ReadPath(r) => r.scope.expires_at = expires.map(at),
         TrustRule::McpRead(r) => r.scope.expires_at = expires.map(at),
+        TrustRule::McpReadProfile(r) => r.scope.expires_at = expires.map(at),
         TrustRule::Profile(r) => r.scope.expires_at = expires.map(at),
         TrustRule::Write(r) => r.scope.expires_at = expires.map(at),
     }
@@ -88,6 +90,7 @@ fn rule_with_max_uses(rule: &TrustRule, max_uses: Option<u64>) -> TrustRule {
         TrustRule::Mcp(r) => r.scope.max_uses = max_uses,
         TrustRule::ReadPath(r) => r.scope.max_uses = max_uses,
         TrustRule::McpRead(r) => r.scope.max_uses = max_uses,
+        TrustRule::McpReadProfile(r) => r.scope.max_uses = max_uses,
         TrustRule::Profile(r) => r.scope.max_uses = max_uses,
         TrustRule::Write(r) => r.scope.max_uses = max_uses,
     }
@@ -615,6 +618,7 @@ fn generated_config_schema_has_no_authority_granting_fields() {
         "mcp_allow",
         "read_path_allow",
         "mcp_read_allow",
+        "mcp_read_profile_allow",
         "profile_allow",
         "write_allow",
         "workspace_enabled",

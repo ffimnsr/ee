@@ -53,11 +53,11 @@ use super::agents_mcp::ProxyRoute;
 use crate::policy::{
     CommandInvocation, CommandRule, DecisionReason, MAX_WRITE_FILE_BYTES, MAX_WRITE_FILES,
     MAX_WRITE_TOTAL_BYTES, MatchMode, McpInvocation, McpRule, OperationIdentity, PathPrefix,
-    PolicyInput, TransportKind, TrustCategory, TrustDecision, TrustOperation, TrustOutcome,
-    TrustRule, TrustRuleScope, TrustStore, TrustStoreDocument, TrustStoreError, WorkspaceIdentity,
-    WriteOperationKind, WriteRule, evaluate, generate_command_rule_id, generate_mcp_rule_id,
-    generate_write_rule_id, is_protected_relative_path, match_profile_entry, resolve_command_cwd,
-    validate_command_tokens,
+    PolicyInput, TERMINAL_READONLY_PROFILE, TransportKind, TrustCategory, TrustDecision,
+    TrustOperation, TrustOutcome, TrustRule, TrustRuleScope, TrustStore, TrustStoreDocument,
+    TrustStoreError, WorkspaceIdentity, WriteOperationKind, WriteRule, evaluate,
+    generate_command_rule_id, generate_mcp_rule_id, generate_write_rule_id,
+    is_protected_relative_path, match_profile_entry, resolve_command_cwd, validate_command_tokens,
 };
 
 // ── Policy constants ─────────────────────────────────────────────────────────
@@ -1970,9 +1970,17 @@ impl App {
                 let _ = reply.send(result.map(ClientRequestResponse::ProxyValue));
             }
             super::agents_mcp::ProxyToolCall::Read(request) => {
-                // Phase 4: MCP read normalization (stdio route) before the
-                // shared read pipeline.
-                let _ = self.mcp_read_decision(&request, route);
+                // Existing read-only MCP behavior remains prompt-free until
+                // this workspace explicitly enables the broad safe-read
+                // profile. Once present, require its exact route/tool/schema
+                // authorization before serving bytes.
+                let decision = self.mcp_read_decision(&request, route);
+                if self.mcp_read_profile_enforced() && decision.outcome != TrustOutcome::Allow {
+                    let _ = reply.send(Err(AgentError::PermissionDenied {
+                        reason: "MCP safe-read profile does not authorize this request".to_string(),
+                    }));
+                    return;
+                }
                 self.bridge_read_file(&request, reply);
             }
             super::agents_mcp::ProxyToolCall::Write(request) => {
@@ -2450,9 +2458,9 @@ impl App {
         })
     }
 
-    /// Phase 4: the curated profile covering a terminal request, when the
-    /// request matches a fixed registry entry exactly and runs at the
-    /// primary workspace root.
+    /// Curated profile covering a terminal request. Profiles require the
+    /// primary workspace-root cwd. Fixed commands use exact argv; `cat` uses
+    /// one validated workspace-relative regular-file operand.
     fn profile_id_for_request(&self, request: &CreateTerminalRequest) -> Option<&'static str> {
         let primary =
             std::fs::canonicalize(&self.working_dir).unwrap_or_else(|_| self.working_dir.clone());
@@ -2461,7 +2469,50 @@ impl App {
         if canonical_cwd != primary {
             return None;
         }
-        match_profile_entry(&request.command, &request.args).map(|(id, _)| id)
+        if let Some((id, _)) = match_profile_entry(&request.command, &request.args) {
+            return Some(id);
+        }
+        self.terminal_readonly_cat_profile(&primary, request)
+    }
+
+    /// Matches `cat <one-relative-regular-workspace-file>` for the built-in
+    /// terminal-read profile. Shell syntax, flags, traversal, protected paths,
+    /// secret-store files, missing files, special files, and escapes fail
+    /// closed before a profile rule is considered.
+    fn terminal_readonly_cat_profile(
+        &self,
+        primary: &Path,
+        request: &CreateTerminalRequest,
+    ) -> Option<&'static str> {
+        if request.command != "cat" || request.args.len() != 1 {
+            return None;
+        }
+        validate_command_tokens(&request.command, &request.args).ok()?;
+        let operand = &request.args[0];
+        let path = Path::new(operand);
+        if operand.starts_with('-')
+            || path.is_absolute()
+            || !path
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+        {
+            return None;
+        }
+
+        let canonical = std::fs::canonicalize(primary.join(path)).ok()?;
+        let relative = canonical.strip_prefix(primary).ok()?;
+        if relative.as_os_str().is_empty() || !std::fs::metadata(&canonical).ok()?.is_file() {
+            return None;
+        }
+        let relative = relative
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        if is_protected_relative_path(&relative) || self.is_secret_store_path(&canonical) {
+            return None;
+        }
+        Some(TERMINAL_READONLY_PROFILE)
     }
 
     /// Phase 4: normalized evaluation for one native workspace read.  Reads
@@ -2529,7 +2580,7 @@ impl App {
                     server: String::from("ee"),
                     transport_identity: route.transport_identity().to_string(),
                     tool: tool.to_string(),
-                    tool_schema_version: ee_mcp::EE_TOOL_SCHEMA_VERSION,
+                    tool_schema_version: crate::policy::EE_MCP_SAFE_READ_TOOL_SCHEMA_VERSION,
                     relative_path: relative.expect("eligible implies relative"),
                     byte_count: request.limit.map(u64::from),
                 },
@@ -2546,6 +2597,19 @@ impl App {
         let decision = self.evaluate_operation(&operation, READ_SESSION, READ_FINGERPRINT);
         self.push_trust_audit(&operation, &decision, READ_SESSION);
         decision
+    }
+
+    /// Whether a host-local broad MCP read profile exists for this workspace.
+    /// Legacy narrow read rules remain audit-only, preserving prompt-free read
+    /// behavior unless users explicitly opt into this profile.
+    fn mcp_read_profile_enforced(&self) -> bool {
+        self.workspace_trust_store().is_some_and(|store| {
+            store
+                .effective_at(self.trust_clock.now())
+                .rules
+                .iter()
+                .any(|rule| matches!(rule, TrustRule::McpReadProfile(_)))
+        })
     }
 
     /// Whether the path is the configured host-local secret-store vault

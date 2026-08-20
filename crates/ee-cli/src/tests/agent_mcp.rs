@@ -105,8 +105,12 @@ pub(crate) fn mcp_app_in(
     mcp_servers: bool,
     proxy: bool,
 ) -> (App, ScriptedFake) {
-    let mut toml =
-        String::from("[agents]\nenabled = true\n\n[agents.servers.fake]\ncommand = \"unused\"\n");
+    // Keep fixture configuration independent from user and system layers. In
+    // particular, a developer's `agents.servers.fake.env` secret reference
+    // must not make these fake-agent tests depend on a platform keychain.
+    let mut toml = String::from(
+        "root = true\n\n[agents]\nenabled = true\n\n[agents.servers.fake]\ncommand = \"unused\"\n",
+    );
     if mcp_servers {
         toml.push_str(
             "[mcp.servers.tools]\ntransport = \"stdio\"\ncommand = \"mcp-tools\"\nargs = [\"serve\"]\n",

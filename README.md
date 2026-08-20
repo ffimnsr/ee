@@ -218,6 +218,33 @@ The editor proxy uses stable `ee_` tool names. Call `ee_tools_manifest` with `{}
 
 Read tools do not require approval. Write and execute tools require editor approval unless an existing bounded trust rule permits exact operation. Tool calls with malformed arguments fail as MCP invalid-parameter errors; disabled or unsupported known tools return a tool-level `isError` result. Paths must be absolute and inside editor workspace roots. Results are bounded; callers must inspect truncation metadata where provided. Secret-like environment values, credentials, and sensitive diagnostics are rejected or redacted. Keep arguments small and explicit: when an operation needs nested modes or many optional fields, add smaller focused tools instead of extending one complex schema.
 
+#### Workspace agent trust
+
+Enable ee proxy when agent supports MCP:
+
+```toml
+[mcp.proxy]
+enabled = true
+```
+
+Then, from workspace root, grant every built-in safe profile:
+
+```sh
+ee do agent trust grant
+```
+
+Or select built-in profiles explicitly:
+
+```sh
+ee do agent trust grant --profile mcp_safe_read
+ee do agent trust grant --profile terminal_readonly
+ee do agent trust revoke --profile terminal_readonly
+```
+
+Repeat `--profile` to select several. Profile names are application-owned; config cannot add commands or tools. Trust writes only host-local state under `$XDG_STATE_HOME/ee/trust/`, bound to canonical workspace identity. It never reads authority from `.ee.toml`, global config, or agent-provided files.
+
+Grant covers `ee_*` safe-read tools on both stdio and ACP routes, exact workspace-root Git invocations (`git status`, `git diff`, `git log`, `git show`, and `git branch --show-current`), plus direct `pwd`, `ls`, `ls -a`, `ls -l`, `ls -la`, `ls -al`, and `cat <one workspace file>`. `cat` accepts only one relative regular file outside protected paths; flags, multiple paths, secret-like files, external paths, and symlink escapes still prompt. Shell wrappers, other Git arguments, writes, and VCS mutations still prompt. Agents should prefer `ee_list_directory`, `ee_read_text_file`, and `ee_search_*` when available.
+
 #### LLM session compaction (`/compact`)
 
 Agents advertise slash commands through ACP `available_commands_update`; the pane lists them (name plus description) and Tab cycles them, using each command's advertised input hint as the draft placeholder. `ee-openrouter-agent` and `ee-agent-orchestrator` advertise `/compact`, and the client sends it as a normal `session/prompt` — there is no client-side compaction special case, and the provider owns every history or memory change.
