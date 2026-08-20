@@ -272,8 +272,11 @@ Expose project guidance and bounded session context so agents follow repo rules 
   - [x] Accept `path` only.
   - [x] Return known file dependency edges when an index exists.
   - [x] Fail gracefully when no graph/index is available.
-- [ ] Add `ee_symbol_dependency_map` only if symbol-scoped graph lookup is needed.
+- [ ] Add `ee_symbol_dependency_map` for bounded symbol-scoped graph lookup.
   - [ ] Accept `path`, `line`, and `character` only.
+  - [ ] Return resolved symbol, definition, callers, callees, implementations, tests, ownership/module hints, and capped related files.
+  - [ ] Return graph freshness, graph version, result totals, and truncation metadata.
+  - [ ] Fail closed with a typed unavailable/stale-index error when graph lookup cannot produce trustworthy results.
 
 #### Implementation notes
 
@@ -293,14 +296,14 @@ Harden the expanded tool surface before enabling it by default.
 
 #### Work items
 
-- [ ] Add versioned `ee_tools_manifest`.
+- [ ] Add versioned `ee_tools_manifest` from one source of truth.
   - [ ] Accept no arguments.
-  - [ ] Return tool names.
-  - [ ] Return schema versions.
+  - [ ] Return tool names, schema versions, transport availability, and capability requirements.
   - [ ] Return side-effect class: `read`, `write`, or `execute`.
-  - [ ] Return approval requirement.
-  - [ ] Return output caps.
+  - [ ] Return approval requirement, output caps, redaction rules, and typed error classes.
   - [ ] Return short examples using minimal arguments for each tool.
+  - [ ] Return deprecation and replacement metadata before retiring a tool or schema version.
+  - [ ] Derive README/crate documentation and compatibility snapshots from manifest data where practical.
 - [ ] Keep existing tool names stable after the `ee_` compatibility rename.
 - [ ] Add new names rather than changing schemas incompatibly.
 - [ ] Document every tool argument, limit, error shape, approval behavior, and redaction rule in README and crate docs.
@@ -308,6 +311,8 @@ Harden the expanded tool surface before enabling it by default.
 - [ ] Add capability flags so hosts can advertise partial implementation without pretending unsupported tools exist.
 - [ ] Add integration tests for MCP stdio proxy path for each tool class.
 - [ ] Add integration tests for ACP-native MCP-over-ACP path for each tool class.
+- [ ] Snapshot tool-list and schema output to detect unintended compatibility changes.
+- [ ] Add property/fuzz tests for malformed arguments, argument caps, and output-cap boundaries.
 - [ ] Add security tests for path traversal.
 - [ ] Add security tests for symlink escape.
 - [ ] Add security tests for oversized inputs.
@@ -315,12 +320,156 @@ Harden the expanded tool surface before enabling it by default.
 - [ ] Add security tests for stale revisions.
 - [ ] Add security tests for terminal ownership.
 - [ ] Add security tests for output truncation.
+- [ ] Add security tests that manifest claims match actual tool availability, approval routing, and policy enforcement.
 
 #### Exit criteria
 
 - [ ] Expanded tools work through both stdio MCP proxy and ACP-native MCP-over-ACP.
 - [ ] Unsupported or disabled tools fail closed with clear tool-level errors.
 - [ ] Tool list is discoverable, versioned, and safe for LLM clients to cache within a session.
+- [ ] Every advertised tool has compatible schemas, explicit policy metadata, and conformance coverage on every supported transport.
+
+### Phase 8: Replayable LLM harness evaluation
+
+Build deterministic task fixtures and replay infrastructure before expanding agent behavior further. Use results to compare models, prompts, routing, tool schemas, and transports with evidence instead of subjective impressions.
+
+#### Work items
+
+- [ ] Add versioned task fixtures covering bug fixes, features, refactors, code review, investigation, and multi-file changes.
+- [ ] Add fixtures for dirty buffers, stale revisions, write conflicts, interrupted sessions, recovery, denied approvals, and unavailable capabilities.
+- [ ] Add adversarial fixtures for prompt injection in repository content, secrets/redaction, path escape, and unsafe terminal requests.
+- [ ] Record deterministic model/tool traces with redacted workspace snapshots and stable fixture inputs.
+- [ ] Score task completion, validation success, policy violations, recovery success, diff size, approval count, tool calls, model calls, latency, and estimated token/cost usage.
+- [ ] Compare fixture results across model/provider versions, prompt versions, routing configurations, and MCP transports.
+- [ ] Define pass/fail regression thresholds before changing default model, prompt, tool, or policy behavior.
+- [ ] Keep fixtures hermetic: no network, secret, user-home, or mutable global-state dependency.
+
+#### Exit criteria
+
+- [ ] Replaying same fixture produces stable evidence suitable for regression comparison.
+- [ ] CI reports harness quality regressions with failing task, score delta, and redacted trace reference.
+- [ ] Model or prompt changes cannot become defaults without baseline comparison against required fixtures.
+
+### Phase 9: Evidence-gated completion and validation
+
+Make agent completion state derive from recorded tool evidence, never model assertion alone.
+
+#### Work items
+
+- [ ] Define explicit terminal states: `verified`, `partially_verified`, `blocked`, and `unverified`.
+- [ ] Require changed-file inventory, post-write diagnostics, final diff review, and selected validation result before marking work `verified`.
+- [ ] Build dynamic validation plans from changed files, symbols, workspace configuration, and declared project tasks.
+- [ ] Return structured validation evidence: command or tool, exit status, elapsed time, affected tests, diagnostics delta, output truncation, and skip reason.
+- [ ] Require final responses to cite evidence ids or structured results for claimed builds, tests, formatting, and diagnostics.
+- [ ] Keep `partially_verified` when validation cannot run; include exact blocker and safe user follow-up.
+- [ ] Prevent reflection/review text from overriding missing, failed, stale, or denied tool evidence.
+- [ ] Add regression tests for false-success, stale-diagnostics, skipped-validation, and failed-test completion paths.
+
+#### Exit criteria
+
+- [ ] Agent cannot report successful validation without matching recorded evidence.
+- [ ] Final status clearly distinguishes verified work from blocked or unverified work.
+- [ ] Failed or unavailable validation produces actionable next steps without hiding uncertainty.
+
+### Phase 10: Task-aware context planning
+
+Select smallest fresh context set needed for current task. Prefer editor and graph evidence over broad repository dumps.
+
+#### Work items
+
+- [ ] Add task-aware context planner that prioritizes project instructions, active selection, dirty buffers, diagnostics, git diff, symbol neighborhood, relevant tests, and related config/docs.
+- [ ] Label each context item with source, revision/freshness, trust level, token cost, selection reason, and truncation reason.
+- [ ] Treat repository text, terminal output, external tool output, and user-provided content as separate trust classes.
+- [ ] Prefer bounded excerpts and explicit drill-down tools over whole-file or whole-repository injection.
+- [ ] Invalidate or refresh context after writes, buffer revisions, diagnostics updates, graph changes, and checkout changes.
+- [ ] Cache only context with compatible revision, policy, and session identity.
+- [ ] Add tests proving task planner selects buffer and diagnostics context before terminal probing when editor state exists.
+
+#### Exit criteria
+
+- [ ] Planning receives sufficient fresh context without unbounded repository reads.
+- [ ] Agent can explain source and freshness of context that informed an edit or conclusion.
+- [ ] Untrusted repository content cannot silently become trusted instruction context.
+
+### Phase 11: Auditable write transactions
+
+Strengthen existing buffer-aware edits with explicit transaction evidence and safe recovery.
+
+#### Work items
+
+- [ ] Assign transaction id, expected source revision, changed paths, approval result, and post-write revision to each mutation sequence.
+- [ ] Enforce sequence: read revision, preview, approval, apply, diagnostics, final diff, selected validation, terminal state.
+- [ ] Detect stale, ambiguous, or conflicting revisions before apply; never overwrite dirty user buffers silently.
+- [ ] Record diagnostics delta and validation evidence against transaction id.
+- [ ] Reopen work as `blocked` or `unverified` after stale state or diagnostic regression instead of broad automatic repair.
+- [ ] Allow rollback only for agent-owned transaction changes with verified revisions and explicit safety checks.
+- [ ] Add integration tests for concurrent user edits, approval denial, partial multi-file failures, diagnostics regressions, and recovery after interruption.
+
+#### Exit criteria
+
+- [ ] Every write can be traced from read revision through final verification state.
+- [ ] Conflict or stale-state failures preserve user work and return actionable structured errors.
+- [ ] Agent cannot claim final verification against pre-write diagnostics or diff state.
+
+### Phase 12: Targeted test and command intelligence
+
+Choose smallest appropriate validation action from declared project knowledge. Preserve approval and command policy boundaries.
+
+#### Work items
+
+- [ ] Add workspace-declared test/task metadata with stable command ids, scopes, prerequisites, and approval class.
+- [ ] Map changed files and resolved symbols to likely targeted tests before escalating to broader validation.
+- [ ] Return structured command results with command id, exit status, elapsed time, test ids, diagnostics, redaction, and truncation metadata.
+- [ ] Retry only explicitly classified transient failures with bounded attempt count and recorded reason.
+- [ ] Distinguish command failure, timeout, cancellation, policy denial, missing dependency, and unavailable environment.
+- [ ] Keep shell allow-lists, user approval, cancellation, and output caps mandatory for every generated validation command.
+- [ ] Add tests for target selection, escalation, transient retry limits, and unsafe command rejection.
+
+#### Exit criteria
+
+- [ ] Agent chooses focused validation when reliable target metadata exists.
+- [ ] Validation escalation is explicit, bounded, and justified by changed scope or prior result.
+- [ ] Command results provide enough evidence for Phase 9 completion states.
+
+### Phase 13: Subagent delegation quality controls
+
+Use subagents only when independent work produces more value than coordination cost. Keep root agent responsible for final synthesis and writes.
+
+#### Work items
+
+- [ ] Estimate expected information gain, token/cost budget, and write-conflict risk before delegation.
+- [ ] Restrict parallel work to independent scopes; assign one write owner per file or module.
+- [ ] Define role-specific response schema: findings, cited evidence, confidence, rejected alternatives, and recommended next action.
+- [ ] Require verifier roles to reject uncited claims and separate observed facts from inference.
+- [ ] Require root agent to reconcile contradictory findings before selecting plan or applying edits.
+- [ ] Enforce bounded recursion, per-subagent budget, cancellation propagation, and deterministic quarantine for failed delegates.
+- [ ] Record delegation effectiveness in replay metrics: useful findings, duplicate work, conflicts, latency, and cost.
+
+#### Exit criteria
+
+- [ ] Parallel delegation cannot produce overlapping unattended writes.
+- [ ] Final agent conclusions identify supporting evidence and resolved disagreements.
+- [ ] Evaluation data can show when a subagent role improves or degrades task quality.
+
+### Phase 14: Privacy-safe harness observability
+
+Measure reliability, safety, and efficiency without storing workspace secrets or raw sensitive content.
+
+#### Work items
+
+- [ ] Emit redacted per-turn waterfall events for model routing, tool execution, approval, retry, recovery, and validation.
+- [ ] Attribute runs to model/provider, prompt, manifest/schema, policy, and routing versions.
+- [ ] Aggregate tool failures by typed reason: invalid input, policy denial, stale state, timeout, transport failure, unavailable capability, or internal error.
+- [ ] Export local redacted JSONL or equivalent stable format for evaluation and debugging.
+- [ ] Link failed runs to replay fixture candidates and redacted evidence artifacts.
+- [ ] Track quality, latency, approvals, tool calls, model calls, and estimated cost without logging secrets, raw prompts, or raw terminal output by default.
+- [ ] Add retention limits, user controls, and tests for redaction before persistence or export.
+
+#### Exit criteria
+
+- [ ] Maintainers can identify quality, latency, cost, and policy regressions by versioned configuration.
+- [ ] Observability artifacts remain useful for replay while preserving workspace privacy boundaries.
+- [ ] No raw secret, token, environment value, or unapproved workspace content enters telemetry by default.
 
 ## ACP v1 Optional Method Gap Closure Plan
 
