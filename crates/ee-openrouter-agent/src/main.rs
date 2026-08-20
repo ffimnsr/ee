@@ -67,14 +67,7 @@ async fn run_orchestrated(
     let provider_config = OrchestratorProviderConfig {
         implementation: Implementation::new("ee-openrouter-agent", env!("CARGO_PKG_VERSION"))
             .title("OpenRouter"),
-        orchestrator: OrchestratorConfig {
-            context_window_tokens: config.context_window,
-            // Resumable turns: durable checkpoints in the configured
-            // directory (or memory-only when unset), safe single
-            // auto-resume after deadline/transient stops.
-            recovery: ee_agent_orchestrator::RecoveryConfig::durable(config.checkpoint_dir.clone()),
-            ..OrchestratorConfig::default()
-        },
+        orchestrator: orchestrator_config(&config),
         ..OrchestratorProviderConfig::default()
     };
     let provider = OrchestratorProvider::with_policy(
@@ -86,6 +79,18 @@ async fn run_orchestrated(
         .run_stdio()
         .await
         .map_err(|error| error.to_string())
+}
+
+fn orchestrator_config(config: &Config) -> OrchestratorConfig {
+    OrchestratorConfig {
+        context_window_tokens: config.context_window,
+        max_loop_iterations: config.max_iterations,
+        max_model_calls: config.max_iterations,
+        // Resumable turns: durable checkpoints in the configured directory (or
+        // memory-only when unset), with one safe automatic resume.
+        recovery: ee_agent_orchestrator::RecoveryConfig::durable(config.checkpoint_dir.clone()),
+        ..OrchestratorConfig::default()
+    }
 }
 
 #[cfg(test)]
@@ -111,6 +116,7 @@ mod tests {
             compact_retained_tail: 2,
             compact_max_input_bytes: 65_536,
             context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
+            max_iterations: 16,
             retry_max_attempts: 0,
             retry_base_delay: Duration::from_millis(1),
             retry_max_delay: Duration::from_millis(10),
@@ -123,6 +129,17 @@ mod tests {
         let config = config(true);
 
         assert_eq!(provider_mode(&config), ProviderMode::Orchestrated);
+    }
+
+    #[test]
+    fn shared_iteration_cap_applies_to_loop_and_model_call_budgets() {
+        let mut config = config(true);
+        config.max_iterations = 64;
+
+        let orchestrator = orchestrator_config(&config);
+
+        assert_eq!(orchestrator.max_loop_iterations, 64);
+        assert_eq!(orchestrator.max_model_calls, 64);
     }
 
     #[test]

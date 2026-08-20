@@ -105,6 +105,12 @@ pub struct ToolDefinition {
     /// Destructive side-effect subclass, when the tool deletes, overwrites,
     /// kills, or touches the network; denied by default policy.
     pub side_effect_subclass: Option<SideEffectSubclass>,
+    /// Whether a trusted editor host owns mutation approval for this tool.
+    ///
+    /// Only ee proxy tools from the pinned manifest set this. Their side-effect
+    /// class remains write or execute for scheduling and audit purposes.
+    #[serde(default)]
+    pub host_approval: bool,
     /// Capability flags the client must advertise for this tool.
     pub required_capabilities: Vec<String>,
     /// Dependency metadata for planned-batch ordering and cache invalidation.
@@ -122,6 +128,7 @@ impl ToolDefinition {
             input_schema: serde_json::json!({ "type": "object" }),
             side_effect_class: SideEffectClass::Read,
             side_effect_subclass: None,
+            host_approval: false,
             required_capabilities: Vec::new(),
             dependency: ToolDependency::new(),
         }
@@ -188,6 +195,13 @@ impl ToolDefinition {
     #[must_use]
     pub fn side_effect_subclass(mut self, subclass: SideEffectSubclass) -> Self {
         self.side_effect_subclass = Some(subclass);
+        self
+    }
+
+    /// Marks this tool as requiring approval from its trusted editor host.
+    #[must_use]
+    pub fn host_approval(mut self) -> Self {
+        self.host_approval = true;
         self
     }
 
@@ -671,6 +685,7 @@ fn builtin_tools(session_id: &SessionId) -> Vec<Arc<dyn ServerTool>> {
                 input_schema,
                 side_effect_class: class,
                 side_effect_subclass: subclass,
+                host_approval: false,
                 required_capabilities: Vec::new(),
                 dependency,
             },

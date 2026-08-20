@@ -931,7 +931,6 @@ fn agents_composer_line(app: &App, thread: &crate::app::AgentThreadUi) -> Vec<Sp
     let mut spans = vec![
         Span::styled("prompt> ", Style::default().fg(theme::FG_KEY).add_modifier(Modifier::BOLD)),
         Span::styled(draft.clone(), Style::default().fg(theme::FG_TEXT)),
-        Span::styled("█", Style::default().fg(theme::FG_KEY)),
     ];
     if let Some(matches) = command_hint {
         spans.push(Span::styled(format!("  Tab: {matches}"), theme_style(theme::FG_DIM)));
@@ -945,7 +944,6 @@ fn agents_pending_composer_line(app: &App) -> Vec<Span<'static>> {
     vec![
         Span::styled("prompt> ", Style::default().fg(theme::FG_KEY).add_modifier(Modifier::BOLD)),
         Span::styled(app.agents.pending_draft.clone(), Style::default().fg(theme::FG_TEXT)),
-        Span::styled("█", Style::default().fg(theme::FG_KEY)),
     ]
 }
 

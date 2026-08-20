@@ -221,6 +221,25 @@ pub(crate) fn default_vault_path() -> Result<PathBuf, SecretStoreError> {
     Ok(vault_path_from(&data_dir))
 }
 
+/// Removes one encrypted vault file without reading its contents, host binding,
+/// or keychain key. Returns whether a file was removed.
+///
+/// This recovery operation is intentionally idempotent so a missing vault is
+/// already reset. It preserves the OS-keychain key: a later `set` creates a
+/// fresh vault without requiring keychain mutation.
+pub(crate) fn reset_vault_file(path: &Path) -> Result<bool, SecretStoreError> {
+    match fs::remove_file(path) {
+        Ok(()) => {
+            if let Some(parent) = path.parent() {
+                sync_parent_dir(parent);
+            }
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(SecretStoreError::Io(error)),
+    }
+}
+
 /// Creates the vault parent directory (mode `0700` on Unix when newly created)
 /// and reports whether this call created it.
 #[cfg(unix)]

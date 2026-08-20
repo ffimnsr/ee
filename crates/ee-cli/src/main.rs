@@ -473,6 +473,8 @@ enum SecretsCommands {
         #[arg(value_name = "NAME")]
         name: String,
     },
+    /// Remove encrypted vault file; preserves OS-keychain key for a fresh future vault
+    Reset,
     /// Report safe secrets-store state
     Status,
 }
@@ -1045,6 +1047,13 @@ fn cmd_secrets(command: SecretsCommands) {
                 Err(err) => return exit_secrets_error(err),
             };
             secrets::cli::run_secrets_delete(&store, &name, &mut io::stdout())
+        }
+        SecretsCommands::Reset => {
+            let vault_path = match secrets::default_vault_path() {
+                Ok(path) => path,
+                Err(err) => return exit_secrets_error(err),
+            };
+            secrets::cli::run_secrets_reset(&vault_path, &mut io::stdout())
         }
         SecretsCommands::Status => {
             let store = match secrets::SecretStore::default() {

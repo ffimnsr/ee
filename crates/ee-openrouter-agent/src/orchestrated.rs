@@ -395,6 +395,7 @@ mod tests {
             ),
             checkpoint_dir: None,
             context_window: crate::config::DEFAULT_CONTEXT_WINDOW_TOKENS,
+            max_iterations: ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS,
         }
     }
 
@@ -1177,8 +1178,6 @@ mod tests {
         fail_connect: bool,
         /// Every inner MCP request logged as `method: params`.
         mcp_requests: std::sync::Mutex<Vec<String>>,
-        /// Tool-call updates streamed during the prompt (status + content).
-        tool_updates: std::sync::Mutex<Vec<Value>>,
     }
 
     impl PromptMcpRunner {
@@ -1188,7 +1187,6 @@ mod tests {
                 calls: std::collections::HashMap::new(),
                 fail_connect: false,
                 mcp_requests: std::sync::Mutex::new(Vec::new()),
-                tool_updates: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -1202,11 +1200,6 @@ mod tests {
 
         fn log(&self) -> Vec<String> {
             self.mcp_requests.lock().expect("runner log poisoned").clone()
-        }
-
-        /// Tool-call updates streamed during the prompt.
-        fn tool_updates(&self) -> Vec<Value> {
-            self.tool_updates.lock().expect("runner updates poisoned").clone()
         }
 
         /// Standard ee proxy discovery answers (connect + discover + list).
@@ -1254,12 +1247,6 @@ mod tests {
                                     .unwrap_or_default()
                                     .to_string(),
                             );
-                        }
-                        if params["update"]["sessionUpdate"] == "tool_call_update" {
-                            self.tool_updates
-                                .lock()
-                                .expect("runner updates poisoned")
-                                .push(params["update"].clone());
                         }
                     }
                     RawJsonRpcMessage::Response(response) => {
@@ -1385,14 +1372,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn orchestrated_mode_policy_blocks_ee_write_tool_before_dispatch() {
+    async fn orchestrated_mode_routes_ee_write_tool_to_host_approval() {
         let script = ScriptedCompletion::new(vec![
             response_with_tool_args(
                 "tc-1",
                 "ee_overwrite_text_file",
                 json!({ "path": "/work/x.txt", "content": "data" }),
             ),
-            response_with_text("denied, continuing"),
+            response_with_text("approval requested, continuing"),
         ]);
         let adapter =
             OpenRouterModelAdapter::with_completion(test_config(), scripted_client(script));
@@ -1403,30 +1390,25 @@ mod tests {
             ee_tool("ee_overwrite_text_file"),
             ee_tool("ee_workspace_roots"),
         ]));
+        runner.answer_call(
+            "ee_overwrite_text_file",
+            json!({
+                "resultType": "complete",
+                "content": [{ "type": "text", "text": "approval requested" }],
+            }),
+        );
 
         handle.send(request(2, "session/prompt", prompt_params(&session_id, "overwrite the file")));
         let (_thoughts, stop_reason) = runner.run(&handle).await;
-        assert_eq!(stop_reason, "end_turn", "policy denial does not crash the turn");
+        assert_eq!(stop_reason, "end_turn", "host approval dispatch does not crash the turn");
 
-        // The denial streams as a failed tool-call update with the policy
-        // reason (never a wire call).
-        let updates = runner.tool_updates();
-        assert!(
-            updates.iter().any(|update| {
-                update["status"] == "failed"
-                    && update["toolCallId"] == "tc-1"
-                    && update.to_string().contains("write tools require explicit policy")
-            }),
-            "{updates:?}"
-        );
-
-        // The write tool never reached the MCP wire.
+        // Trusted ee write tools preserve their write classification, but host
+        // approval owns the mutation decision and must receive the call.
         let log = runner.log();
         assert!(
-            log.iter().all(
-                |line| !line.contains("tools/call") || !line.contains("ee_overwrite_text_file")
-            ),
-            "MCP write tools cannot bypass orchestrator policy: {log:?}"
+            log.iter()
+                .any(|line| line.contains("tools/call") && line.contains("ee_overwrite_text_file")),
+            "ee write must reach host approval: {log:?}"
         );
 
         handle.shutdown(task).await;

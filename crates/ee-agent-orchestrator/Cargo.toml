@@ -16,13 +16,13 @@ rust-version.workspace = true
 # the framework's test-only plumbing (in-memory update sink / client bridge)
 # that the replay harness needs, plus the `ee-mcp` in-process fake MCP
 # server used by deterministic MCP bridge tests.
-test-utils = ["ee-acp-agent-server/test-utils", "dep:ee-mcp", "ee-mcp/test-utils"]
+test-utils = ["ee-acp-agent-server/test-utils", "ee-mcp/test-utils"]
 
 [dependencies]
 ee-acp-agent-server.workspace = true
-# Optional: enables the in-process fake MCP server (`ee_mcp::fake`) used by
-# the test-utils transport factory of the MCP session manager.
-ee-mcp = { workspace = true, optional = true }
+# Reuses pinned ee-proxy tool classifications. Its test-utils feature enables
+# the in-process fake MCP server used by MCP bridge tests.
+ee-mcp.workspace = true
 ee-agent-protocol.workspace = true
 futures.workspace = true
 globset.workspace = true

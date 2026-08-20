@@ -702,6 +702,34 @@ fn usage_update_renders_context_window_right_aligned_above_composer() {
 }
 
 #[test]
+fn composer_uses_only_terminal_cursor() {
+    let (mut app, _temp, _fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+    type_text(&mut app, "hello");
+
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+
+    let cursor = terminal.get_cursor_position().unwrap();
+    let rows = terminal.backend().buffer();
+    let composer_row: String =
+        (0..120).map(|x| rows.cell((x, cursor.y)).unwrap().symbol()).collect();
+    let composer_start = composer_row.find("prompt> hello").expect("composer contents");
+    let composer_start_col = composer_row[..composer_start].chars().count();
+
+    assert!(
+        !composer_row.contains('█'),
+        "composer must not render a second cursor: {composer_row:?}"
+    );
+    assert_eq!(
+        usize::from(cursor.x),
+        composer_start_col + "prompt> hello".len(),
+        "terminal cursor must sit directly after composer text"
+    );
+}
+
+#[test]
 fn turn_metrics_label_formats_duration_and_tokens() {
     use ee_agent_host::TurnMetrics;
     use ee_agent_protocol::Usage;

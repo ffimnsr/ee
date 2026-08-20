@@ -37,8 +37,10 @@ use crate::tools::{SideEffectClass, ToolDefinition, ToolErrorKind, ToolResult};
 
 use super::acp_transport::AcpBridgeTransport;
 use super::descriptor::{McpServerDescriptor, McpTransportKind};
-use super::names::{DisplayNameAllocator, has_disallowed_character, resolve_tool_name};
-use super::policy::{McpToolPolicy, classify_tool};
+use super::names::{
+    DisplayNameAllocator, EE_SERVER_NAME, has_disallowed_character, resolve_tool_name,
+};
+use super::policy::{McpToolPolicy, classify_tool, is_ee_proxy_tool};
 use super::schema::convert_input_schema;
 
 /// Minimal rmcp client handler: pins the ee identity and the 2026-07-28
@@ -71,6 +73,7 @@ struct ResolvedMcpTool {
     input_schema: Value,
     class: SideEffectClass,
     subclass: Option<SideEffectSubclass>,
+    host_approval: bool,
 }
 
 /// One MCP tool registered with the orchestrator.
@@ -90,6 +93,8 @@ pub(crate) struct McpToolInfo {
     pub class: SideEffectClass,
     /// Destructive side-effect subclass, when classified.
     pub subclass: Option<SideEffectSubclass>,
+    /// Whether trusted editor host approval controls this tool's mutation.
+    pub host_approval: bool,
 }
 
 impl McpToolInfo {
@@ -100,6 +105,9 @@ impl McpToolInfo {
                 .side_effect_class(self.class);
         if let Some(subclass) = self.subclass {
             definition = definition.side_effect_subclass(subclass);
+        }
+        if self.host_approval {
+            definition = definition.host_approval();
         }
         definition
     }
@@ -630,6 +638,7 @@ fn resolve_mcp_tool(
         input_schema,
         class: spec.class,
         subclass: spec.subclass,
+        host_approval: server_name == EE_SERVER_NAME && is_ee_proxy_tool(&tool.name),
     })
 }
 
@@ -643,6 +652,7 @@ impl ResolvedMcpTool {
             input_schema: self.input_schema,
             class: self.class,
             subclass: self.subclass,
+            host_approval: self.host_approval,
         }
     }
 }

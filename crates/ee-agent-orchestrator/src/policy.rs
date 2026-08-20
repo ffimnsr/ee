@@ -139,6 +139,14 @@ impl PolicyEngine {
     /// destructive-subclass gate.
     #[must_use]
     pub fn check(&self, tool: &ToolDefinition, context: PolicyContext) -> PolicyDecision {
+        // Trusted ee proxy mutations and terminal operations are approved by
+        // the editor host. Do not block their dispatch before that prompt.
+        if tool.host_approval
+            && matches!(tool.side_effect_class, SideEffectClass::Write | SideEffectClass::Execute)
+        {
+            return PolicyDecision::allowed();
+        }
+
         let decision = match tool.side_effect_class {
             SideEffectClass::Read => self
                 .allow_or(self.policy.allow_read, "read tools require explicit policy allowance"),
@@ -254,6 +262,15 @@ mod tests {
             assert!(!decision.allow, "{class:?} must fail closed");
             let reason = decision.reason.expect("deny carries a reason");
             assert!(reason.contains("explicit policy allowance"), "{reason}");
+        }
+    }
+
+    #[test]
+    fn host_approved_writes_and_executes_reach_the_editor_approval_gate() {
+        let engine = PolicyEngine::default();
+        for class in [SideEffectClass::Write, SideEffectClass::Execute] {
+            let decision = engine.check(&tool(class).host_approval(), PolicyContext::default());
+            assert!(decision.allow, "{class:?} must reach host approval");
         }
     }
 

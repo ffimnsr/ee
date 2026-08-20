@@ -2261,16 +2261,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_adapter_policy_denies_mcp_write_tool_without_wire_call() {
+    async fn provider_adapter_dispatches_ee_write_tool_to_host_approval() {
         let model = Arc::new(FakeModel::new(vec![
             ModelResponse::new().tool_intents(vec![crate::tools::ToolIntent::new(
                 "tc-1",
                 "ee_write_text_file",
                 json!({ "path": "/work/x.txt", "content": "data" }),
             )]),
-            ModelResponse::new().text("denied, continuing").completed(),
+            ModelResponse::new().text("approval requested, continuing").completed(),
         ]));
-        // Default provider policy: reads only — MCP write tools stay denied.
+        // ee writes retain write classification but dispatch to editor-host approval.
         let provider = OrchestratorProvider::new(OrchestratorProviderConfig::default(), model);
         let (handle, task) = spawn_server(provider);
         let session_id = mcp_new_session(&handle, 1, ee_proxy_acp_mcp_servers()).await;
@@ -2279,17 +2279,24 @@ mod tests {
             ee_tool("ee_workspace_roots"),
             ee_tool("ee_write_text_file"),
         ]));
+        runner.answer_call(
+            "ee_write_text_file",
+            json!({
+                "resultType": "complete",
+                "content": [{ "type": "text", "text": "approval requested" }],
+            }),
+        );
 
         handle.send(request(2, "session/prompt", prompt_params(&session_id, "write a file")));
         let (_thoughts, stop_reason) = runner.run(&handle).await;
-        assert_eq!(stop_reason, "end_turn", "denial does not crash the turn");
+        assert_eq!(stop_reason, "end_turn", "approval dispatch does not crash the turn");
 
-        // The write tool was never dispatched to the MCP server.
+        // The host receives the write call and owns approval before mutation.
         let log = runner.log();
         assert!(
             log.iter()
-                .all(|line| !line.contains("tools/call") || !line.contains("ee_write_text_file")),
-            "policy must block the wire call: {log:?}"
+                .any(|line| line.contains("tools/call") && line.contains("ee_write_text_file")),
+            "ee write must reach host approval: {log:?}"
         );
 
         handle.shutdown(task).await;

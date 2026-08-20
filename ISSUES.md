@@ -7,8 +7,8 @@ Agents tooling stays optional, compile-time and runtime gated behind `agents`. A
 Tooling goals:
 
 - [ ] Give LLMs enough editor-native context to avoid terminal probing and path guessing.
-- [ ] Keep read-only discovery cheap, bounded, and approval-free.
-- [ ] Route every write, terminal execution, and code action through the existing approval path.
+- [x] Keep read-only discovery cheap, bounded, and approval-free.
+- [x] Route every write, terminal execution, and code action through the existing approval path.
 - [ ] Prefer buffer-aware operations over disk-only operations when unsaved editor state exists.
 - [ ] Preserve fail-closed validation: absolute paths, workspace-root containment, bounded output, redacted secrets, and typed tool errors.
 

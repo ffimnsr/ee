@@ -743,6 +743,7 @@ mod tests {
             ),
             checkpoint_dir: None,
             context_window: crate::config::DEFAULT_CONTEXT_WINDOW_TOKENS,
+            max_iterations: ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS,
         }
     }
 

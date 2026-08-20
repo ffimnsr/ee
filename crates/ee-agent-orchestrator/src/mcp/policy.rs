@@ -3,14 +3,16 @@
 //! Classification runs on the *original* MCP tool name plus configured
 //! metadata — never on sanitized display names — so write/execute tools
 //! cannot be laundered into read class by a name sanitizer.  The ee proxy
-//! tools have a built-in table mirroring the host's approval semantics;
-//! external tools default to the conservative spec: write class with the
-//! overwrite destructive subclass, which the default policy denies and any
+//! The ee proxy tools reuse their pinned manifest classification. External
+//! tools default to the conservative spec: write class with the overwrite
+//! destructive subclass, which the default policy denies and any
 //! write-allowing policy still gates behind an explicit subclass allowance.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+
+use ee_mcp::SideEffectClass as EeProxySideEffectClass;
 
 use crate::destructive_policy::SideEffectSubclass;
 use crate::tools::SideEffectClass;
@@ -75,14 +77,31 @@ pub(crate) fn classify_tool(
     if let Some(spec) = policy.classification_overrides.get(tool_name) {
         return *spec;
     }
-    if server_name == EE_SERVER_NAME
-        && let Some(spec) = EE_PROXY_CLASSIFICATIONS
-            .iter()
-            .find_map(|(name, spec)| (*name == tool_name).then_some(*spec))
-    {
-        return spec;
+    if server_name == EE_SERVER_NAME {
+        return ee_proxy_classification(tool_name).unwrap_or_else(conservative_default);
     }
     conservative_default()
+}
+
+/// Whether `tool_name` belongs to the pinned ee proxy manifest.
+#[must_use]
+pub(crate) fn is_ee_proxy_tool(tool_name: &str) -> bool {
+    !matches!(ee_mcp::side_effect_class(tool_name), EeProxySideEffectClass::Unknown)
+}
+
+fn ee_proxy_classification(tool_name: &str) -> Option<McpToolClassSpec> {
+    let spec = match ee_mcp::side_effect_class(tool_name) {
+        EeProxySideEffectClass::Read => READ,
+        EeProxySideEffectClass::Write
+            if matches!(tool_name, "ee_create_text_file" | "ee_save_note") =>
+        {
+            WRITE
+        }
+        EeProxySideEffectClass::Write => WRITE_OVERWRITE,
+        EeProxySideEffectClass::Execute => EXECUTE,
+        EeProxySideEffectClass::Unknown => return None,
+    };
+    Some(spec)
 }
 
 const WRITE: McpToolClassSpec = McpToolClassSpec { class: SideEffectClass::Write, subclass: None };
@@ -94,40 +113,6 @@ const READ: McpToolClassSpec = McpToolClassSpec { class: SideEffectClass::Read, 
 const EXECUTE: McpToolClassSpec =
     McpToolClassSpec { class: SideEffectClass::Execute, subclass: None };
 
-/// Built-in classification of the ee proxy's fixed tool list, mirroring the
-/// host's approval semantics (reads allowed, mutations and terminal creation
-/// gated).
-pub(crate) const EE_PROXY_CLASSIFICATIONS: [(&str, McpToolClassSpec); 28] = [
-    ("ee_workspace_roots", READ),
-    ("ee_list_directory", READ),
-    ("ee_list_directory_all", READ),
-    ("ee_search_files", READ),
-    ("ee_search_files_all", READ),
-    ("ee_search_text", READ),
-    ("ee_search_text_regex", READ),
-    ("ee_search_text_in_files", READ),
-    ("ee_read_buffer", READ),
-    ("ee_read_buffer_lines", READ),
-    ("ee_open_buffers", READ),
-    ("ee_get_diagnostics", READ),
-    ("ee_get_file_diagnostics", READ),
-    ("ee_document_symbols", READ),
-    ("ee_references", READ),
-    ("ee_list_code_actions", READ),
-    ("ee_preview_rename_symbol", READ),
-    ("ee_read_text_file", READ),
-    ("ee_diagnostics", READ),
-    ("ee_replace_text", WRITE_OVERWRITE),
-    ("ee_apply_patch", WRITE_OVERWRITE),
-    ("ee_create_text_file", WRITE),
-    ("ee_overwrite_text_file", WRITE_OVERWRITE),
-    ("ee_apply_code_action", WRITE_OVERWRITE),
-    ("ee_format_file", WRITE_OVERWRITE),
-    ("ee_rename_symbol", WRITE_OVERWRITE),
-    ("ee_write_text_file", WRITE_OVERWRITE),
-    ("ee_terminal_create", EXECUTE),
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,9 +122,12 @@ mod tests {
     }
 
     #[test]
-    fn every_ee_proxy_tool_is_classified() {
-        for (name, spec) in EE_PROXY_CLASSIFICATIONS {
-            assert_eq!(classify_tool("ee", name, &policy()), spec, "{name}");
+    fn git_tools_are_classified_as_reads() {
+        for name in ["ee_git_status", "ee_git_diff", "ee_git_diff_file"] {
+            let spec = classify_tool("ee", name, &policy());
+            assert_eq!(spec.class, SideEffectClass::Read, "{name}");
+            assert_eq!(spec.subclass, None, "{name}");
+            assert!(is_ee_proxy_tool(name), "{name}");
         }
     }
 

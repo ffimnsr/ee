@@ -33,6 +33,14 @@ pub const DEFAULT_RETRY_BASE_DELAY_MS: u64 = 500;
 /// Default retry backoff cap: 30 seconds.
 pub const DEFAULT_RETRY_MAX_DELAY_MS: u64 = 30_000;
 
+fn parse_positive_usize(value: &str) -> Result<usize, String> {
+    let value = value.parse::<usize>().map_err(|_| String::from("must be a positive integer"))?;
+    if value == 0 {
+        return Err(String::from("must be at least 1"));
+    }
+    Ok(value)
+}
+
 /// Command-line arguments; every field also reads its `OPENROUTER_*`
 /// environment variable.
 #[derive(Debug, Parser)]
@@ -71,6 +79,14 @@ pub struct Args {
     /// Model context-window size in tokens (reported as `usage_update.size`).
     #[arg(long, env = "OPENROUTER_CONTEXT_WINDOW", default_value_t = DEFAULT_CONTEXT_WINDOW_TOKENS)]
     context_window: u64,
+    /// Maximum model–tool iterations and model calls per orchestrated turn.
+    #[arg(
+        long,
+        env = "OPENROUTER_MAX_ITERATIONS",
+        default_value_t = ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS,
+        value_parser = parse_positive_usize,
+    )]
+    max_iterations: usize,
     /// Run in orchestrated mode: ee-agent-orchestrator owns the model–tool
     /// loop and OpenRouter acts as the model adapter instead of the simple
     /// provider mode. Default after parity; opt out for fallback diagnostics.
@@ -132,6 +148,8 @@ pub struct Config {
     pub compact_max_input_bytes: usize,
     /// Model context-window size in tokens; the ACP `usage_update.size`.
     pub context_window: u64,
+    /// Shared maximum for model–tool iterations and model calls per turn.
+    pub max_iterations: usize,
     /// Maximum transient/429 retries per model call before failing the turn.
     pub retry_max_attempts: u32,
     /// Initial retry backoff (doubles per attempt, capped at
@@ -162,6 +180,7 @@ impl Config {
             compact_retained_tail: args.compact_retained_tail,
             compact_max_input_bytes: args.compact_max_input_bytes,
             context_window: args.context_window,
+            max_iterations: args.max_iterations,
             retry_max_attempts: args.retry_max_attempts,
             retry_base_delay: Duration::from_millis(args.retry_base_delay_ms),
             retry_max_delay: Duration::from_millis(args.retry_max_delay_ms),
@@ -240,6 +259,7 @@ mod tests {
             compact_retained_tail: DEFAULT_COMPACT_RETAINED_TAIL,
             compact_max_input_bytes: DEFAULT_COMPACT_MAX_INPUT_BYTES,
             context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
+            max_iterations: ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS,
             retry_max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
             retry_base_delay_ms: DEFAULT_RETRY_BASE_DELAY_MS,
             retry_max_delay_ms: DEFAULT_RETRY_MAX_DELAY_MS,
@@ -264,6 +284,10 @@ mod tests {
         assert_eq!(config.compact_retained_tail, DEFAULT_COMPACT_RETAINED_TAIL);
         assert_eq!(config.compact_max_input_bytes, DEFAULT_COMPACT_MAX_INPUT_BYTES);
         assert_eq!(config.context_window, DEFAULT_CONTEXT_WINDOW_TOKENS);
+        assert_eq!(
+            config.max_iterations,
+            ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS
+        );
         assert_eq!(config.retry_max_attempts, DEFAULT_RETRY_MAX_ATTEMPTS);
         assert_eq!(config.retry_base_delay, Duration::from_millis(DEFAULT_RETRY_BASE_DELAY_MS));
         assert_eq!(config.retry_max_delay, Duration::from_millis(DEFAULT_RETRY_MAX_DELAY_MS));
@@ -278,6 +302,28 @@ mod tests {
         let config = Config::from_args_and_dotenv(parsed, &BTreeMap::new());
 
         assert!(config.orchestrated, "OpenRouter defaults to orchestrated mode");
+    }
+
+    #[test]
+    fn max_iterations_cli_and_env_override_share_one_limit() {
+        let parsed = Args::try_parse_from(["ee-openrouter-agent", "--max-iterations", "64"])
+            .expect("CLI iteration cap parses");
+        let config = Config::from_args_and_dotenv(parsed, &BTreeMap::new());
+        assert_eq!(config.max_iterations, 64);
+
+        let _env = EnvGuard::set("OPENROUTER_MAX_ITERATIONS", "32");
+        let parsed = Args::try_parse_from(["ee-openrouter-agent"])
+            .expect("environment iteration cap parses");
+        let config = Config::from_args_and_dotenv(parsed, &BTreeMap::new());
+        assert_eq!(config.max_iterations, 32);
+    }
+
+    #[test]
+    fn zero_max_iterations_is_rejected() {
+        let error = Args::try_parse_from(["ee-openrouter-agent", "--max-iterations", "0"])
+            .expect_err("zero iteration cap must fail");
+
+        assert!(error.to_string().contains("must be at least 1"));
     }
 
     #[test]

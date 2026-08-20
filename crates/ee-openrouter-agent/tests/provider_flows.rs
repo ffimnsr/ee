@@ -42,6 +42,7 @@ fn test_config_with(
         compact_retained_tail,
         compact_max_input_bytes,
         context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
+        max_iterations: ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS,
         retry_max_attempts: ee_openrouter_agent::config::DEFAULT_RETRY_MAX_ATTEMPTS,
         retry_base_delay: Duration::from_millis(
             ee_openrouter_agent::config::DEFAULT_RETRY_BASE_DELAY_MS,

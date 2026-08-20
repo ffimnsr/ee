@@ -1,7 +1,7 @@
 //! `ee do secrets` command surface (phase 4).
 //!
 //! Safe, scriptable commands over the [`SecretStore`]: `set`, `get`, `list`,
-//! `delete`, and `status`. Secret values never appear as CLI arguments, in
+//! `delete`, `reset`, and `status`. Secret values never appear as CLI arguments, in
 //! stdout beyond the explicitly permitted raw `get` output, or in any
 //! diagnostic or error text. Interactive values are read with terminal echo
 //! disabled (crossterm raw mode disables echo on Unix and Windows); `--stdin`
@@ -9,10 +9,12 @@
 
 use std::fmt;
 use std::io::{self, Read, Write};
+use std::path::Path;
 
 use zeroize::Zeroizing;
 
 use super::keychain::{KEYCHAIN_ACCOUNT, KEYCHAIN_SERVICE};
+use super::vault::reset_vault_file;
 use super::{SecretName, SecretStore, SecretStoreError};
 
 /// Maximum secret value size accepted from any input source.
@@ -278,6 +280,16 @@ pub(crate) fn run_secrets_delete(
 ) -> Result<(), SecretsCliError> {
     store.delete(name)?;
     write_line(out, &format!("deleted secret {name}"))
+}
+
+/// `reset`: removes the encrypted vault file. It is idempotent and does not
+/// touch the OS-keychain key, so a future `set` creates a fresh vault.
+pub(crate) fn run_secrets_reset(
+    vault_path: &Path,
+    out: &mut dyn Write,
+) -> Result<(), SecretsCliError> {
+    let _removed = reset_vault_file(vault_path)?;
+    write_line(out, "reset encrypted secrets vault")
 }
 
 /// `status`: reports safe state only — vault path, presence, record count

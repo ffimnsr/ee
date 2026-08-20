@@ -12,7 +12,7 @@ use crate::secrets::cli::{
     EXIT_SECRETS_NOT_FOUND, EXIT_SECRETS_UNSUPPORTED_VERSION, EXIT_SECRETS_USER_INPUT,
     EXIT_SECRETS_VAULT_CORRUPTION, HiddenTerminalSecretSource, SecretValueSource, SecretsCliError,
     StdinSecretSource, exit_code, run_secrets_delete, run_secrets_get, run_secrets_list,
-    run_secrets_set, run_secrets_status,
+    run_secrets_reset, run_secrets_set, run_secrets_status,
 };
 use crate::secrets::test_support::StoredKeychain;
 use crate::secrets::{
@@ -111,6 +111,14 @@ fn secrets_command_subcommands_parse_with_all_flags() {
         cli.command,
         Some(crate::Commands::Do {
             command: crate::DoCommands::Secrets { command: crate::SecretsCommands::Delete { .. } }
+        })
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "secrets", "reset"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Secrets { command: crate::SecretsCommands::Reset }
         })
     ));
 
@@ -260,6 +268,28 @@ fn secrets_command_list_prints_sorted_names_only() {
     run_secrets_list(&store, &mut out).expect("list");
     assert_eq!(output(&out), "alpha\nmid\nzeta\n");
     assert!(!output(&out).contains(SEEDED_SECRET));
+}
+
+#[test]
+fn secrets_command_reset_removes_vault_and_preserves_key_for_fresh_storage() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (store, keychain) = store_in(dir.path());
+    store.set(&name("api-key"), &Zeroizing::new(SEEDED_SECRET.into())).expect("set secret");
+    assert!(vault_path(dir.path()).is_file(), "vault exists before reset");
+
+    let mut out = capture();
+    run_secrets_reset(store.vault_path(), &mut out).expect("reset vault");
+    assert_eq!(output(&out), "reset encrypted secrets vault\n");
+    assert!(!vault_path(dir.path()).exists(), "vault file removed");
+    assert!(matches!(store.get(&name("api-key")), Err(SecretStoreError::NotFound)));
+
+    store.set(&name("replacement"), &Zeroizing::new("fresh-value".into())).expect("fresh set");
+    assert_eq!(store.get(&name("replacement")).expect("fresh get").as_str(), "fresh-value");
+    assert_eq!(keychain.store_calls(), 1, "reset preserves existing keychain key");
+
+    let mut second_out = capture();
+    run_secrets_reset(store.vault_path(), &mut second_out).expect("second reset is idempotent");
+    assert_eq!(output(&second_out), "reset encrypted secrets vault\n");
 }
 
 #[test]
