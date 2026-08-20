@@ -650,6 +650,11 @@ fn usage_update_renders_context_window_right_aligned_above_composer() {
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|frame| ui(frame, &app)).unwrap();
     let rows = terminal.backend().buffer();
+    assert!(
+        (0..24).all(|y| rows.cell((0, y)).unwrap().symbol() != "│")
+            && (0..24).all(|y| rows.cell((119, y)).unwrap().symbol() != "│"),
+        "agents pane must not render an outer vertical border"
+    );
     let rendered: Vec<String> = (0..24)
         .map(|y| (0..120).map(|x| rows.cell((x, y)).unwrap().symbol()).collect::<String>())
         .collect();
@@ -662,15 +667,14 @@ fn usage_update_renders_context_window_right_aligned_above_composer() {
         "footer row above the composer must carry the context usage: {rendered:#?}"
     );
     let label = "10k/100k tokens";
-    // Byte offsets shift for multi-byte glyphs (←/→ borders); compare in
-    // character columns.
+    // Byte offsets shift for multi-byte glyphs; compare in character columns.
     let label_end = footer_row
         .match_indices(label)
         .last()
         .map(|(byte_start, _)| footer_row[..byte_start].chars().count() + label.chars().count());
     assert_eq!(
         label_end,
-        Some(119),
+        Some(120),
         "context usage must sit right-aligned at the row end: {rendered:#?}"
     );
 
@@ -696,7 +700,7 @@ fn usage_update_renders_context_window_right_aligned_above_composer() {
         .map(|(byte_start, _)| footer_row[..byte_start].chars().count() + label.chars().count());
     assert_eq!(
         label_end,
-        Some(59),
+        Some(60),
         "usage must stay right-aligned at the edge in narrow panes: {rendered:#?}"
     );
 }

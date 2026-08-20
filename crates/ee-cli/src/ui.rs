@@ -486,14 +486,8 @@ fn transcript_lines(item: &crate::app::TranscriptItem, width: usize) -> Vec<Line
 fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     use crate::app::ThreadUiState;
 
-    let style = Style::default().fg(theme::FG_TEXT).bg(theme::BG_CHROME);
-    let pane = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::FG_DIM))
-        .title(" agents ")
-        .style(style);
-    let inner = pane.inner(area);
-    frame.render_widget(pane, area);
+    let inner = area;
+    frame.render_widget(Paragraph::new("").style(Style::default().bg(theme::BG_CHROME)), inner);
 
     // Disabled-state message (defensive; commands never open the pane while
     // agents are disabled).
@@ -622,15 +616,18 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
                 .unwrap_or_else(|| String::from("—")),
         );
         let footer_style = if thread.state == ThreadUiState::Running {
-            Style::default().fg(theme::FG_WARNING)
+            Style::default().fg(theme::FG_WARNING).bg(theme::BG_AGENT_STATUS)
         } else {
-            theme_style(theme::FG_DIM)
+            Style::default().fg(theme::FG_AGENT_STATUS).bg(theme::BG_AGENT_STATUS)
         };
         let usage_label = thread.usage.as_deref().unwrap_or_default();
         let usage_width = usage_label.width().min(footer_area.width as usize) as u16;
         let footer_line = Line::from(Span::styled(footer_text, footer_style));
         if usage_width == 0 {
-            frame.render_widget(Paragraph::new(footer_line), footer_area);
+            frame.render_widget(
+                Paragraph::new(footer_line).style(Style::default().bg(theme::BG_AGENT_STATUS)),
+                footer_area,
+            );
         } else {
             // Split the row: the left footer truncates independently so the
             // context usage always stays visible at the rightmost edge, even
@@ -643,8 +640,9 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
                     usage_label.to_string(),
-                    theme_style(theme::FG_DIM),
-                ))),
+                    Style::default().fg(theme::FG_AGENT_STATUS).bg(theme::BG_AGENT_STATUS),
+                )))
+                .style(Style::default().bg(theme::BG_AGENT_STATUS)),
                 cols[1],
             );
         }

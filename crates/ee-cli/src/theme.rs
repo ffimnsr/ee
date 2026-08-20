@@ -7,6 +7,8 @@ pub(crate) mod ui {
     pub(crate) const BG_CHROME: Color = Color::Rgb(30, 32, 39);
     pub(crate) const BG_CHROME_ALT: Color = Color::Rgb(24, 25, 38);
     pub(crate) const BG_STATUS: Color = Color::Rgb(49, 54, 68);
+    #[cfg(feature = "agents")]
+    pub(crate) const BG_AGENT_STATUS: Color = Color::Rgb(42, 48, 65);
     pub(crate) const BG_CURSOR_LINE: Color = Color::Rgb(35, 38, 50);
     pub(crate) const BG_SELECTION: Color = Color::Rgb(68, 71, 90);
     pub(crate) const BG_COLOR_COLUMN: Color = Color::Rgb(55, 35, 35);
@@ -32,6 +34,8 @@ pub(crate) mod ui {
     pub(crate) const FG_BUFFER: Color = Color::Rgb(213, 216, 224);
     pub(crate) const FG_STATUS_FILE: Color = Color::Rgb(238, 238, 238);
     pub(crate) const FG_STATUS_FLAG: Color = Color::Rgb(100, 120, 150);
+    #[cfg(feature = "agents")]
+    pub(crate) const FG_AGENT_STATUS: Color = Color::Rgb(230, 233, 240);
     pub(crate) const FG_SUCCESS: Color = Color::Rgb(166, 227, 161);
     pub(crate) const FG_WARNING: Color = Color::Rgb(250, 179, 135);
     pub(crate) const FG_ERROR: Color = Color::Rgb(243, 139, 168);
@@ -52,6 +56,35 @@ pub(crate) mod ui {
     pub(crate) const FG_PICKER_EMPTY: Color = Color::Rgb(112, 121, 144);
     pub(crate) const FG_PICKER_INDEX: Color = Color::Rgb(92, 102, 124);
     pub(crate) const FG_PICKER_FOOTER: Color = Color::Rgb(121, 130, 151);
+
+    #[cfg(all(test, feature = "agents"))]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn agent_status_colors_are_distinct_and_high_contrast() {
+            assert_ne!(BG_AGENT_STATUS, BG_CHROME);
+            assert!(contrast_ratio(FG_AGENT_STATUS, BG_AGENT_STATUS) >= 7.0);
+        }
+
+        fn contrast_ratio(foreground: Color, background: Color) -> f64 {
+            let lighter = relative_luminance(foreground);
+            let darker = relative_luminance(background);
+            (lighter.max(darker) + 0.05) / (lighter.min(darker) + 0.05)
+        }
+
+        fn relative_luminance(color: Color) -> f64 {
+            let Color::Rgb(red, green, blue) = color else {
+                panic!("agent status colors must be RGB");
+            };
+            let channel = |value: u8| {
+                let value = f64::from(value) / 255.0;
+                if value <= 0.04045 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
+            };
+
+            0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue)
+        }
+    }
 }
 
 pub(crate) mod syntax {

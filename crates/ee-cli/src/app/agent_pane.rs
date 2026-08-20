@@ -2326,7 +2326,8 @@ fn split_slash_command(draft: &str) -> (Option<String>, String) {
     (name, rest)
 }
 
-const LOCAL_AGENT_SLASH_COMMANDS: &[&str] = &["quit", "quit_full", "new_thread"];
+const LOCAL_AGENT_SLASH_COMMANDS: &[&str] =
+    &["quit", "q", "quit_full", "qf", "new_thread", "mode", "get_mode"];
 
 /// Lists local and agent-advertised slash commands without duplicate names.
 pub(crate) fn agent_slash_command_names(commands: &[AvailableCommand]) -> Vec<&str> {
@@ -2372,7 +2373,7 @@ fn is_agents_quit_slash_command(draft: &str) -> bool {
 
 fn is_agents_quit_full_slash_command(draft: &str) -> bool {
     let (name, rest) = split_slash_command(draft);
-    matches!(name.as_deref(), Some("quit_full")) && rest.trim().is_empty()
+    matches!(name.as_deref(), Some("qf" | "quit_full")) && rest.trim().is_empty()
 }
 
 fn is_agents_new_slash_command(draft: &str) -> bool {
@@ -3057,6 +3058,72 @@ impl App {
         self.backend.status_message = Some(format!("setting config: {}", config_id.0));
     }
 
+    fn agents_show_mode(&mut self, thread_index: usize) {
+        let snapshot = self.agents.threads[thread_index].host.snapshot();
+        if let Some(mode_option) =
+            snapshot.config_options.iter().find(|option| is_mode_config_option(option))
+            && let SessionConfigKind::Select(select) = &mode_option.kind
+        {
+            self.agents.threads[thread_index]
+                .push_system(format!("mode: {}", select.current_value.0));
+            return;
+        }
+        if let Some(modes) = self.agents.threads[thread_index].host.advertised_modes() {
+            self.agents.threads[thread_index]
+                .push_system(format!("mode: {}", modes.current_mode_id.0));
+            return;
+        }
+        self.backend.status_message = Some(String::from("agent session has no advertised modes"));
+    }
+
+    fn agents_set_mode(&mut self, thread_index: usize, raw_mode: &str) {
+        let raw_mode = raw_mode.trim();
+        if raw_mode.is_empty() {
+            self.backend.status_message = Some(String::from("usage: /mode <mode>"));
+            return;
+        }
+
+        let snapshot = self.agents.threads[thread_index].host.snapshot();
+        if let Some(mode_option) =
+            snapshot.config_options.iter().find(|option| is_mode_config_option(option))
+        {
+            match parse_config_option_value(mode_option, raw_mode) {
+                Ok(value) => {
+                    self.queue_thread_config_option_change(
+                        thread_index,
+                        mode_option.id.clone(),
+                        value,
+                    );
+                }
+                Err(error) => self.backend.status_message = Some(error),
+            }
+            return;
+        }
+
+        let Some(modes) = self.agents.threads[thread_index].host.advertised_modes() else {
+            self.backend.status_message =
+                Some(String::from("agent session has no advertised modes"));
+            return;
+        };
+        let Some(mode) =
+            modes.available_modes.iter().find(|mode| mode.id.0.eq_ignore_ascii_case(raw_mode))
+        else {
+            let available = modes
+                .available_modes
+                .iter()
+                .map(|mode| mode.id.0.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.backend.status_message = Some(if available.is_empty() {
+                String::from("agent advertised no modes")
+            } else {
+                format!("unknown mode: {raw_mode}; available: {available}")
+            });
+            return;
+        };
+        self.queue_thread_mode_change(thread_index, mode.id.clone());
+    }
+
     fn agents_cycle_mode(&mut self, delta: isize) {
         let Some(active) = self.agents.active_thread_index() else {
             self.backend.status_message = Some(String::from("no active agent session"));
@@ -3241,6 +3308,25 @@ impl App {
             self.agents.threads[active].draft.clear();
             self.agents_new_session();
             return;
+        }
+        let (command, args) = split_slash_command(&draft);
+        match command.as_deref() {
+            Some("get_mode") if args.trim().is_empty() => {
+                self.agents.threads[active].draft.clear();
+                self.agents_show_mode(active);
+                return;
+            }
+            Some("get_mode") => {
+                self.agents.threads[active].draft.clear();
+                self.backend.status_message = Some(String::from("usage: /get_mode"));
+                return;
+            }
+            Some("mode") => {
+                self.agents.threads[active].draft.clear();
+                self.agents_set_mode(active, &args);
+                return;
+            }
+            _ => {}
         }
         let thread = &mut self.agents.threads[active];
         if thread.state == ThreadUiState::Running {
@@ -3896,7 +3982,16 @@ mod tests {
     fn agent_slash_command_names_include_local_and_advertised_commands() {
         assert_eq!(
             agent_slash_command_names(&[compact_command(), AvailableCommand::new("quit", "")]),
-            vec!["quit", "quit_full", "new_thread", "compact"]
+            vec!["quit", "q", "quit_full", "qf", "new_thread", "mode", "get_mode", "compact"]
         );
+    }
+
+    #[test]
+    fn local_slash_command_aliases_are_recognized() {
+        assert!(is_agents_quit_slash_command("/q"));
+        assert!(is_agents_quit_slash_command("/quit"));
+        assert!(is_agents_quit_full_slash_command("/qf"));
+        assert!(is_agents_quit_full_slash_command("/quit_full"));
+        assert!(!is_agents_quit_full_slash_command("/qf now"));
     }
 }
