@@ -141,13 +141,26 @@ pub(crate) fn redact_env_display(env: &[EnvVariable]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Git variable that prevents read commands from taking optional index locks.
+const GIT_OPTIONAL_LOCKS_ENV: &str = "GIT_OPTIONAL_LOCKS";
+
+/// Whether a request is one of the fixed, application-owned Git read commands.
+fn is_git_readonly_profile_request(request: &CreateTerminalRequest) -> bool {
+    matches!(match_profile_entry(&request.command, &request.args), Some(("git_readonly", _)))
+}
+
 /// Child environment: the parent environment minus secret-like keys, overlaid
-/// with the explicitly configured request values.
-fn sanitized_child_env(request_env: &[EnvVariable]) -> Vec<(String, String)> {
+/// with explicitly configured request values. Curated Git reads cannot take an
+/// optional index lock, even when a caller supplied a conflicting environment.
+fn terminal_child_env(request: &CreateTerminalRequest) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> =
         std::env::vars().filter(|(name, _)| !is_secret_env_key(name)).collect();
-    for variable in request_env {
+    for variable in &request.env {
         env.push((variable.name.clone(), variable.value.clone()));
+    }
+    if is_git_readonly_profile_request(request) {
+        env.retain(|(name, _)| name != GIT_OPTIONAL_LOCKS_ENV);
+        env.push((String::from(GIT_OPTIONAL_LOCKS_ENV), String::from("0")));
     }
     env
 }
@@ -383,7 +396,7 @@ impl AgentTerminals {
         let cwd = request.cwd.as_deref().unwrap_or_else(|| Path::new("."));
         let command_line = terminal_command_line(request);
         let mut command = crate::terminal::shell_command(&command_line, cwd);
-        command.envs(sanitized_child_env(&request.env));
+        command.envs(terminal_child_env(request));
         command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = command
             .spawn()
@@ -5479,6 +5492,31 @@ mod tests {
         request.args = vec![String::from("path with spaces"), String::from("$(not-expanded)")];
 
         assert_eq!(terminal_command_line(&request), "ls -la 'path with spaces' '$(not-expanded)'");
+    }
+
+    #[test]
+    fn git_readonly_profile_commands_disable_optional_index_locks() {
+        let mut request = CreateTerminalRequest::new(SessionId::new("s1"), "git");
+        request.args = vec![String::from("status")];
+        request.env = vec![EnvVariable::new(GIT_OPTIONAL_LOCKS_ENV, "1")];
+
+        let env = terminal_child_env(&request);
+        let optional_locks =
+            env.iter().filter(|(name, _)| name == GIT_OPTIONAL_LOCKS_ENV).collect::<Vec<_>>();
+        assert_eq!(
+            optional_locks,
+            vec![&(String::from(GIT_OPTIONAL_LOCKS_ENV), String::from("0"))]
+        );
+    }
+
+    #[test]
+    fn other_terminal_commands_preserve_optional_lock_environment() {
+        let mut request = CreateTerminalRequest::new(SessionId::new("s1"), "git");
+        request.args = vec![String::from("commit")];
+        request.env = vec![EnvVariable::new(GIT_OPTIONAL_LOCKS_ENV, "1")];
+
+        let env = terminal_child_env(&request);
+        assert!(env.iter().any(|(name, value)| name == GIT_OPTIONAL_LOCKS_ENV && value == "1"));
     }
 
     #[test]
