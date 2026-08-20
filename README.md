@@ -106,6 +106,12 @@ Default install targets:
 
 Override paths with `--bin-dir`, `--runtime-dir`, and `--plugin-dir`.
 
+Installer and `mk install` include OpenRouter ACP agent by default. It does nothing until configured with an OpenRouter API key. Skip it from release installation with:
+
+```sh
+sh install.sh --without-openrouter-agent
+```
+
 The installer supports `bash`, `zsh`, and `fish` completions and installs the binary into `~/.local/bin` by default.
 
 On Linux and macOS the installer also places bundled runtime assets under `~/.local/share/ee`, which matches the release runtime layout resolved relative to `~/.local/bin/ee`.

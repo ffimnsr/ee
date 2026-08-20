@@ -17,6 +17,11 @@ cat >"$package_root/ee" <<'EOF'
 exit 0
 EOF
 chmod +x "$package_root/ee"
+cat >"$package_root/ee-openrouter-agent" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$package_root/ee-openrouter-agent"
 
 cat >"$package_root/README.md" <<'EOF'
 # ee
@@ -49,6 +54,7 @@ tarball="$tmpdir/ee-x86_64-unknown-linux-musl.tar.gz"
 )
 
 bin_dir="$tmpdir/bin"
+bin_dir_without_agent="$tmpdir/bin-without-agent"
 runtime_dir="$tmpdir/runtime"
 plugin_dir="$tmpdir/plugins"
 doc_dir="$tmpdir/doc"
@@ -67,13 +73,27 @@ output="$({
 })"
 
 [[ -f "$bin_dir/ee" ]]
+[[ -f "$bin_dir/ee-openrouter-agent" ]]
 [[ -f "$runtime_dir/queries/rust/indents.scm" ]]
 [[ -f "$plugin_dir/xi-lsp-plugin/manifest.toml" ]]
 [[ -f "$plugin_dir/xi-lsp-plugin/bin/xi-lsp-plugin" ]]
 [[ -f "$doc_dir/ee/README.md" ]]
 [[ -f "$license_dir/ee/LICENSE" ]]
 [[ -f "$license_dir/ee/LICENSE-APACHE" ]]
+[[ "$output" == *"Installed ee-openrouter-agent to $bin_dir"* ]]
 [[ "$output" == *"Installed tree-sitter runtime to $runtime_dir"* ]]
 [[ "$output" == *"Installed bundled plugins to $plugin_dir"* ]]
+
+EE_INSTALL_LOCAL_PACKAGE="$tarball" \
+  sh "$script_path" \
+    --arch x86_64-unknown-linux-musl \
+    --bin-dir "$bin_dir_without_agent" \
+    --runtime-dir "$runtime_dir" \
+    --plugin-dir "$plugin_dir" \
+    --doc-dir "$doc_dir" \
+    --license-dir "$license_dir" \
+    --without-openrouter-agent \
+    --sudo true >/dev/null
+[[ ! -e "$bin_dir_without_agent/ee-openrouter-agent" ]]
 
 printf 'install.sh script passed\n'

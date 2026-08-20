@@ -8,6 +8,7 @@
 REPO_OWNER="ffimnsr"
 REPO_NAME="ee"
 PACKAGE_NAME="ee"
+OPENROUTER_AGENT_NAME="ee-openrouter-agent"
 
 main() {
     if [ "${KSH_VERSION-}" = 'Version JM 93t+ 2010-03-05' ]; then
@@ -50,6 +51,10 @@ main() {
     ensure try_sudo cp -- "${_filename_no_ext}/${_bin_name}" "${BIN_DIR}/${_bin_name}"
     ensure try_sudo chmod +x "${BIN_DIR}/${_bin_name}"
     echo "Installed ${PACKAGE_NAME} to ${BIN_DIR}"
+
+    if [ "${INSTALL_OPENROUTER_AGENT}" = "1" ]; then
+        install_openrouter_agent "${_filename_no_ext}"
+    fi
 
     install_runtime_assets "${_filename_no_ext}"
     install_plugin_assets "${_filename_no_ext}"
@@ -159,6 +164,7 @@ parse_args() {
     RUNTIME_DIR="${RUNTIME_DIR_DEFAULT}"
     PLUGIN_DIR="${PLUGIN_DIR_DEFAULT}"
     SUDO="${SUDO_DEFAULT}"
+    INSTALL_OPENROUTER_AGENT=1
 
     while [ "$#" -gt 0 ]; do
         case "$1" in
@@ -174,6 +180,8 @@ parse_args() {
             --runtime-dir=*) RUNTIME_DIR="${1#*=}" && shift 1 ;;
             --plugin-dir) PLUGIN_DIR="$2" && shift 2 ;;
             --plugin-dir=*) PLUGIN_DIR="${1#*=}" && shift 1 ;;
+            --with-openrouter-agent) INSTALL_OPENROUTER_AGENT=1 && shift 1 ;;
+            --without-openrouter-agent) INSTALL_OPENROUTER_AGENT=0 && shift 1 ;;
             --sudo) SUDO="$2" && shift 2 ;;
             --sudo=*) SUDO="${1#*=}" && shift 1 ;;
             -h|--help) usage && exit 0 ;;
@@ -200,6 +208,7 @@ ${_text_heading}Options:${_text_reset}
   --license-dir   Override license directory [default: ${LIC_DIR_DEFAULT}]
   --runtime-dir   Override tree-sitter runtime installation directory [default: ${RUNTIME_DIR_DEFAULT}]
   --plugin-dir    Override plugin installation directory [default: ${PLUGIN_DIR_DEFAULT}]
+  --without-openrouter-agent  Skip OpenRouter ACP agent binary installation
   --sudo          Override command used to elevate privileges [default: ${SUDO_DEFAULT}]
   -h, --help      Print help
 EOF
@@ -313,6 +322,17 @@ compute_sha256() {
     else
         err "need one of: sha256sum, shasum, or openssl"
     fi
+}
+
+install_openrouter_agent() {
+    local _package_root _agent_path
+    _package_root="$1"
+    _agent_path="${_package_root}/${OPENROUTER_AGENT_NAME}"
+
+    [ -f "${_agent_path}" ] || err "release package does not include ${OPENROUTER_AGENT_NAME}"
+    ensure try_sudo cp -- "${_agent_path}" "${BIN_DIR}/${OPENROUTER_AGENT_NAME}"
+    ensure try_sudo chmod +x "${BIN_DIR}/${OPENROUTER_AGENT_NAME}"
+    echo "Installed ${OPENROUTER_AGENT_NAME} to ${BIN_DIR}"
 }
 
 install_runtime_assets() {

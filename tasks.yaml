@@ -25,12 +25,13 @@ tasks:
     description: Check that documentation builds without errors.
   install:
     commands:
-      - cargo install --root "$HOME/.local" --path crates/ee-cli --all-features
+      - cargo install --root "$HOME/.local" --path crates/ee-cli --bin ee --all-features
+      - cargo install --root "$HOME/.local" --path crates/ee-openrouter-agent --bin ee-openrouter-agent
       - name: Install bundled tree-sitter runtime
         command: ./scripts/install-tree-sitter-runtime.sh
       - name: Install bundled plugins
         command: ./scripts/install-plugins.sh
-    description: Install the ee-editor at ~/.local/bin using cargo.
+    description: Install ee-editor and OpenRouter ACP agent at ~/.local/bin using cargo.
   install-githooks:
     commands:
       - rm -rf .git/hooks
