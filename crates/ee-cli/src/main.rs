@@ -275,6 +275,12 @@ impl ConfigScopeArgs {
 
 #[derive(Debug, Subcommand)]
 enum ConfigCommands {
+    /// Create a fully commented config template; default target is ./.ee.toml
+    Init {
+        /// Create user XDG config at ~/.config/ee/config.toml
+        #[arg(long, action = clap::ArgAction::SetTrue)]
+        global: bool,
+    },
     /// Show fully merged effective config for current directory
     Show,
     /// Read one key from chosen config file
@@ -637,6 +643,16 @@ fn configured_plugin_paths() -> Vec<PathBuf> {
         .flatten()
         .filter(|path| path.exists())
         .collect()
+}
+
+fn cmd_config_init(scope: config::ConfigScope) {
+    match config::init_config(scope) {
+        Ok(path) => println!("created config template: {}", path.display()),
+        Err(err) => {
+            eprintln!("{err}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn cmd_config_show() {
@@ -1544,6 +1560,11 @@ fn main() -> io::Result<()> {
             match command {
                 DoCommands::Doctor => cmd_doctor(cli.config.as_ref()),
                 DoCommands::Config { command } => match command {
+                    ConfigCommands::Init { global } => cmd_config_init(if global {
+                        config::ConfigScope::Global
+                    } else {
+                        config::ConfigScope::Local
+                    }),
                     ConfigCommands::Show => cmd_config_show(),
                     ConfigCommands::Get { scope, key } => cmd_config_get(scope.scope(), &key),
                     ConfigCommands::Set { scope, key, value } => {

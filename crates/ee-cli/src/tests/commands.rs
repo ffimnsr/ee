@@ -47,6 +47,28 @@ fn cli_utility_commands_live_under_do() {
         })
     ));
 
+    let cli = crate::Cli::try_parse_from(["ee", "do", "config", "init"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Config {
+                command: crate::ConfigCommands::Init { global: false }
+            }
+        })
+    ));
+
+    let cli = crate::Cli::try_parse_from(["ee", "do", "config", "init", "--global"]).unwrap();
+
+    assert!(matches!(
+        cli.command,
+        Some(crate::Commands::Do {
+            command: crate::DoCommands::Config {
+                command: crate::ConfigCommands::Init { global: true }
+            }
+        })
+    ));
+
     let cli = crate::Cli::try_parse_from(["ee", "do", "config", "get", "--global", "wrap_lines"])
         .unwrap();
 

@@ -11,7 +11,7 @@
 //! Later layers override earlier ones for any key that is explicitly set.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{env, fs};
@@ -39,6 +39,122 @@ use crate::keymap::{self, KeymapOperation, KeymapSettings, SequenceBinding};
 
 const SYSTEM_CONFIG_PATH: &str = "/etc/ee/config.toml";
 pub(crate) const LSP_PLUGIN_NAME: &str = "xi-lsp-plugin";
+
+const CONFIG_TEMPLATE: &str = r#"# ee configuration
+#
+# Remove `# ` from settings you want to override. All settings below are
+# optional; omitted settings inherit from lower-priority config layers.
+#
+# root = false
+# indent_style = "spaces"
+# indent_size = 4
+# tab_width = 4
+# end_of_line = "lf"
+# charset = "utf-8"
+# trim_trailing_whitespace = false
+# insert_final_newline = false
+# auto_indent = true
+# smart_indent = true
+# number_style = "absolute"
+# color_column = 80
+# show_visible_whitespace = false
+# scroll_offset = 5
+# wrap_lines = false
+# sign_column = true
+# cursor_line = false
+# statusline_format = "default"
+#
+# [lsp.servers.example]
+# language_name = "Example"
+# command = "example-language-server"
+# args = ["--stdio"]
+# extensions = ["example"]
+# filenames = ["Examplefile"]
+# supports_single_file = true
+# workspace_identifier = "Example.toml"
+# enabled = true
+# env = { EXAMPLE_LOG = "info" }
+# initialization_options = { diagnostics = { enable = true } }
+#
+# [languages.example]
+# name = "Example"
+# file_types = ["example"]
+# aliases = ["example-lang"]
+# globs = ["*.example"]
+# shebangs = ["example"]
+# scope = "source.example"
+# query_language = "example"
+# content_regex = "^example"
+# first_line_regex = "^#!.*example"
+# injection_regex = "example"
+# match_priority = 0
+# supported_query_kinds = ["highlights", "injections", "locals", "tags", "textobjects", "indents", "folds", "rainbows"]
+# lsp = ["example"]
+# enabled = true
+#
+# [languages.example.grammar]
+# library = "tree-sitter-example"
+# symbol = "tree_sitter_example"
+#
+# [languages.example.grammar.source.crate]
+# name = "tree-sitter-example"
+# version = "1.0.0"
+#
+# # Instead of `source.crate`, use exactly one Git source reference:
+# # [languages.example.grammar.source.git]
+# # url = "https://github.com/example/tree-sitter-example"
+# # rev = "0123456789abcdef0123456789abcdef01234567"
+# # branch = "main"
+# # tag = "v1.0.0"
+#
+# [keymap]
+# inherit_defaults = true
+# sequence_timeout_ms = 500
+#
+# [[keymap.unbind]]
+# mode = "normal"
+# key = "q"
+# prefix = "space"
+#
+# [[keymap.bindings]]
+# mode = "insert"
+# key = "C-s"
+# prefix = ""
+# action = "save"
+#
+# [[keymap.sequence_bindings]]
+# mode = "normal"
+# keys = ["g", "g"]
+# action = "goto_start"
+# description = "Go to start of file"
+#
+# [agents]
+# enabled = false
+# default_agent = "assistant"
+#
+# [agents.servers.assistant]
+# command = "agent-command"
+# args = ["--stdio"]
+# env = { API_KEY = "secret://agent-api-key" }
+# cwd = "/path/to/workspace"
+#
+# [mcp.proxy]
+# enabled = false
+#
+# [mcp.servers.example]
+# transport = "stdio"
+# command = "mcp-server"
+# args = ["--stdio"]
+# env = { EXAMPLE_LOG = "info" }
+# cwd = "/path/to/workspace"
+#
+# # For a remote MCP server, replace stdio fields with:
+# # [mcp.servers.remote]
+# # transport = "streamable_http"
+# # url = "https://mcp.example.com/mcp"
+# # headers = { Authorization = "Bearer secret://mcp-token" }
+# # timeout_ms = 30000
+"#;
 
 // ── Public settings ───────────────────────────────────────────────────────────
 
@@ -2021,6 +2137,30 @@ pub(crate) fn set_config_value(
     set_config_value_with_env(scope, key, raw_value, &ConfigEnvironment::from_process())
 }
 
+fn init_config_with_env(scope: ConfigScope, env: &ConfigEnvironment) -> Result<PathBuf, String> {
+    let path = config_path_for_scope_with_env(scope, env)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("Cannot create {}: {err}", parent.display()))?;
+    }
+
+    let mut file =
+        fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|err| {
+            if err.kind() == ErrorKind::AlreadyExists {
+                format!("Config already exists: {}", path.display())
+            } else {
+                format!("Cannot create {}: {err}", path.display())
+            }
+        })?;
+    file.write_all(CONFIG_TEMPLATE.as_bytes())
+        .map_err(|err| format!("Cannot write {}: {err}", path.display()))?;
+    Ok(path)
+}
+
+pub(crate) fn init_config(scope: ConfigScope) -> Result<PathBuf, String> {
+    init_config_with_env(scope, &ConfigEnvironment::from_process())
+}
+
 pub(crate) fn configure_runtime_loader_for_file(
     file_path: Option<&Path>,
     workspace_trusted: bool,
@@ -3602,6 +3742,38 @@ description = "find files"
         assert_eq!(written, env.cwd.join(".ee.toml"));
         assert!(contents.contains("[lsp.servers.rust]"));
         assert!(contents.contains("command = \"rust-analyzer\""));
+    }
+
+    #[test]
+    fn init_config_writes_fully_commented_local_template_without_overwriting() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_config_environment(temp.path());
+        std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+
+        let path = init_config_with_env(ConfigScope::Local, &env).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+
+        assert_eq!(path, env.cwd.join(".ee.toml"));
+        assert!(contents.lines().all(|line| line.is_empty() || line.starts_with('#')));
+        assert!(contents.contains("# [lsp.servers.example]"));
+        assert!(contents.contains("# [languages.example.grammar.source.crate]"));
+        assert!(contents.contains("# [agents.servers.assistant]"));
+        assert!(contents.contains("# [mcp.servers.example]"));
+
+        let error = init_config_with_env(ConfigScope::Local, &env).unwrap_err();
+        assert_eq!(error, format!("Config already exists: {}", path.display()));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), contents);
+    }
+
+    #[test]
+    fn init_config_creates_global_template_in_xdg_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_config_environment(temp.path());
+
+        let path = init_config_with_env(ConfigScope::Global, &env).unwrap();
+
+        assert_eq!(path, temp.path().join("xdg").join("ee").join("config.toml"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), CONFIG_TEMPLATE);
     }
 
     // ── Agents-mode config ──────────────────────────────────────────────────
