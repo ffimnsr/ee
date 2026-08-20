@@ -98,7 +98,9 @@ wasmtime = { version = "44.0.0", default-features = false, features = ["cranelif
 # to crate dependencies as the implementation lands.
 base64 = "0.22"
 chacha20poly1305 = "0.10.1"
-keyring = "3.6"
+# Select OS credential stores. Without a Linux backend, `keyring` falls back
+# to in-process mock storage and vault keys disappear after `ee` exits.
+keyring = { version = "3.6", features = ["apple-native", "linux-native", "windows-native"] }
 sha2 = "0.10.9"
 zeroize = "1.8.2"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }

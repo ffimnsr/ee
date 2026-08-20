@@ -2193,11 +2193,34 @@ mod tests {
     fn backend_syntax_spans_keep_yaml_keys_after_block_scalar_with_forward_context() {
         let _guard = crate::runtime_loader::runtime_loader_test_guard();
         warm_syntax_queries(&["yaml", "bash"]);
+        let yaml = "\
+tasks:
+  install:
+    commands:
+      - |
+        printf 'install\\n'
+    description: Install editor.
+  config-nearest:
+    commands:
+      - |
+        printf 'config\\n'
+";
+        let start_line = yaml
+            .lines()
+            .position(|line| line.contains("printf 'install"))
+            .expect("fixture includes install block scalar");
+        let description_line = yaml
+            .lines()
+            .position(|line| line.trim_start().starts_with("description:"))
+            .expect("fixture includes description key");
+        let config_nearest_line = yaml
+            .lines()
+            .position(|line| line.trim_start().starts_with("config-nearest:"))
+            .expect("fixture includes config-nearest key");
+        let line_count = config_nearest_line - start_line + 1;
         let mut view = View::new(1.into(), BufferId::new(2));
-        let editor = crate::editor::Editor::with_text(include_str!("../../../tasks.yaml"));
+        let editor = crate::editor::Editor::with_text(yaml);
         view.debug_force_rewrap_cols(editor.get_buffer(), 120);
-        let start_line = 61;
-        let line_count = 25;
 
         let spans = view.backend_syntax_spans_for_segment(
             editor.get_buffer(),
@@ -2207,8 +2230,8 @@ mod tests {
             true,
         );
 
-        let description = 83 - start_line;
-        let config_nearest = 84 - start_line;
+        let description = description_line - start_line;
+        let config_nearest = config_nearest_line - start_line;
         assert!(
             spans[description].iter().any(
                 |span| span.scope.starts_with("variable") || span.scope.starts_with("property")
@@ -2219,7 +2242,7 @@ mod tests {
                 |span| span.scope.starts_with("variable") || span.scope.starts_with("property")
             )
         );
-        assert!(spans[5].iter().any(|span| span.scope.starts_with("keyword")
+        assert!(spans[0].iter().any(|span| span.scope.starts_with("keyword")
             || span.scope.starts_with("string")
             || span.scope.starts_with("function")
             || span.scope.starts_with("property")));
