@@ -23,6 +23,7 @@ use crate::compaction::{
     CompactTurnReport, SESSION_SUMMARY_KEY, build_compaction_context, build_compaction_prompt,
 };
 use crate::config::OrchestratorConfig;
+use crate::context_planner::{ContextPlan, ContextPlanner, ContextPlannerConfig};
 use crate::error::OrchestratorError;
 use crate::events::{EventRecorder, OrchestratorEvent};
 use crate::final_response::{FinalResponseBuilder, ValidationRecorder, changed_files_from_log};
@@ -725,6 +726,10 @@ impl OrchestratorRuntime {
             })
             .collect::<Vec<_>>()
             .join(" ");
+        let context_plan: Option<ContextPlan> = input
+            .context
+            .as_ref()
+            .map(|context| ContextPlanner.plan(context, &ContextPlannerConfig::default()));
         let strategy_ctx = StrategyContext {
             prompt_text,
             has_code_changes: input.has_code_changes,
@@ -760,8 +765,9 @@ impl OrchestratorRuntime {
             self.tasks.clone(),
             events.clone(),
         );
-        let (prompt_result, reflection) =
-            executor.execute(decision.strategy, ctx, memory, run, &mut validation).await?;
+        let (prompt_result, reflection) = executor
+            .execute(decision.strategy, ctx, memory, context_plan.as_ref(), run, &mut validation)
+            .await?;
         let log = execution_log.lock().expect("execution log poisoned").clone();
         let changed_files = changed_files_from_log(&log, &task.id);
         let progress = ProgressTracker::from_execution_log(
@@ -783,7 +789,13 @@ impl OrchestratorRuntime {
             progress: Some(&progress),
         }
         .build();
-        Ok(TurnResult { prompt_result, strategy: decision, final_response, reflection })
+        Ok(TurnResult {
+            context_plan,
+            prompt_result,
+            strategy: decision,
+            final_response,
+            reflection,
+        })
     }
 
     /// Runs one `/compact` turn: deterministic memory compaction first, then
@@ -1480,6 +1492,82 @@ mod tests {
         );
         assert!(turn.final_response.summary.contains("no files changed"));
         assert!(!turn.final_response.validation_passed());
+    }
+
+    #[tokio::test]
+    async fn strategic_turn_uses_editor_context_before_terminal_evidence() {
+        let model =
+            Arc::new(FakeModel::new(vec![ModelResponse::new().text("implemented").completed()]));
+        let runtime = OrchestratorRuntime::new(OrchestratorConfig::default(), model.clone());
+        let (sink, client, _rx) = plumbing();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let fresh = crate::context_planner::ContextFreshness::fresh("rev-1");
+        let context = crate::context_planner::ContextPlanningInput {
+            identity: crate::context_planner::ContextPlanIdentity {
+                session_id: "s-1".to_string(),
+                policy_revision: "policy-1".to_string(),
+                workspace_revision: "workspace-1".to_string(),
+                buffer_revision: "buffer-1".to_string(),
+                diagnostics_revision: "diagnostics-1".to_string(),
+                graph_revision: "graph-1".to_string(),
+                checkout_revision: "checkout-1".to_string(),
+            },
+            candidates: vec![
+                crate::context_planner::ContextCandidate::new(
+                    "terminal:1",
+                    crate::context_planner::ContextSource::TerminalOutput,
+                    crate::context_planner::ContextTrustClass::TerminalOutput,
+                    fresh.clone(),
+                    "terminal probe result",
+                ),
+                crate::context_planner::ContextCandidate::new(
+                    "diagnostic:1",
+                    crate::context_planner::ContextSource::Diagnostics,
+                    crate::context_planner::ContextTrustClass::RepositoryContent,
+                    fresh.clone(),
+                    "type mismatch",
+                ),
+                crate::context_planner::ContextCandidate::new(
+                    "buffer:src/lib.rs",
+                    crate::context_planner::ContextSource::DirtyBuffer,
+                    crate::context_planner::ContextTrustClass::RepositoryContent,
+                    fresh,
+                    "unsaved edit",
+                ),
+            ],
+        };
+        let turn = runtime
+            .run_turn_strategic(
+                prompt("fix the active file"),
+                StrategicInput { context: Some(context), ..StrategicInput::default() },
+                sink,
+                client,
+                cancel_rx,
+            )
+            .await
+            .expect("strategic turn succeeds");
+
+        let plan = turn.context_plan.expect("host context planned");
+        assert_eq!(
+            plan.items.iter().map(|item| item.source).collect::<Vec<_>>(),
+            vec![
+                crate::context_planner::ContextSource::DirtyBuffer,
+                crate::context_planner::ContextSource::Diagnostics,
+                crate::context_planner::ContextSource::TerminalOutput,
+            ]
+        );
+        let requests = model.requests();
+        assert_eq!(requests.len(), 1, "planned context does not trigger terminal probing");
+        let context_messages = requests[0]
+            .transcript
+            .iter()
+            .filter(|message| message.metadata.contains_key("context_source"))
+            .collect::<Vec<_>>();
+        assert_eq!(context_messages.len(), 3);
+        assert_eq!(context_messages[0].metadata["context_source"], "dirty_buffer");
+        assert_eq!(context_messages[1].metadata["context_source"], "diagnostics");
+        assert_eq!(context_messages[2].metadata["context_source"], "terminal_output");
+        assert!(context_messages.iter().all(|message| message.trust.is_untrusted()));
     }
 
     #[tokio::test]

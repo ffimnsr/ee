@@ -105,6 +105,10 @@
 //! - [`context_pack`] — the [`ContextPackBuilder`]: deterministic,
 //!   provenance-rich model context within a byte budget; untrusted content is
 //!   labeled and policy reminders precede it.
+//! - [`context_planner`] — [`ContextPlanner`]: selects smallest fresh editor,
+//!   graph, diff, test, and asset excerpts with explicit trust, revision,
+//!   token-cost, selection, and omission metadata; cache reuse requires matching
+//!   session, policy, and source revisions.
 //! - [`memory_compaction`] — [`compact_memory`]: duplicate-fact merging and
 //!   low-value observation decay under pressure; decisions, constraints, and
 //!   validation results are always preserved.
@@ -145,6 +149,7 @@ pub mod compaction;
 pub mod completion;
 pub mod config;
 pub mod context_pack;
+pub mod context_planner;
 pub mod decision_log;
 pub mod destructive_policy;
 pub mod dialects;
@@ -223,6 +228,14 @@ pub use context_pack::{
     DEFAULT_MAX_FILE_REFERENCES, DEFAULT_MAX_MEMORY_ITEMS, DEFAULT_MAX_TOOL_SUMMARIES,
     FILE_REFERENCE_SUMMARY_MAX_CHARS, FileReference, ProvenanceSourceKind, TOOL_SUMMARY_MAX_CHARS,
     ToolSummaryEntry,
+};
+pub use context_planner::{
+    ContextCandidate, ContextFreshness, ContextInvalidation, ContextPlan, ContextPlanCache,
+    ContextPlanIdentity, ContextPlanner, ContextPlannerConfig, ContextPlanningInput,
+    ContextSelectionReason, ContextSource, ContextTruncationReason, ContextTrustClass,
+    DEFAULT_CONTEXT_PLAN_CACHE_MAX_ENTRIES, DEFAULT_CONTEXT_PLAN_MAX_EXCERPT_CHARS,
+    DEFAULT_CONTEXT_PLAN_MAX_ITEMS, DEFAULT_CONTEXT_PLAN_MAX_TOKENS, OmittedContextItem,
+    PlannedContextItem,
 };
 pub use decision_log::{
     DECISION_DETAIL_MAX_CHARS, DEFAULT_MAX_DECISION_LOG_ENTRIES, DecisionEntry, DecisionKind,

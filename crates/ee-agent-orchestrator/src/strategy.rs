@@ -18,6 +18,7 @@ use tokio::sync::watch;
 
 use crate::budget::BudgetTracker;
 use crate::config::OrchestratorConfig;
+use crate::context_planner::{ContextPlan, ContextPlanningInput};
 use crate::error::OrchestratorError;
 use crate::events::{EventRecorder, OrchestratorEvent};
 use crate::final_response::{
@@ -152,6 +153,10 @@ pub struct StrategicInput {
     /// cannot provide fresh inventory, diagnostics, and diff-review facts;
     /// the turn will then remain explicitly unverified.
     pub completion_evidence: Option<crate::completion::CompletionEvidence>,
+    /// Fresh bounded editor, graph, diff, test, and asset context supplied by
+    /// the host. Repository and tool content remains untrusted data.
+    #[serde(default)]
+    pub context: Option<ContextPlanningInput>,
 }
 
 /// Pure, deterministic strategy selector.
@@ -323,8 +328,8 @@ pub(crate) struct StrategyRun {
     pub execution_log: Arc<Mutex<Vec<ToolExecutionLogEntry>>>,
 }
 
-/// Outcome of one strategic turn: the ACP prompt result, the strategy
-/// decision, the typed final response, and the reflection outcome.
+/// Outcome of one strategic turn: the ACP prompt result, strategy decision,
+/// planned context, typed final response, and reflection outcome.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct TurnResult {
@@ -332,6 +337,8 @@ pub struct TurnResult {
     pub prompt_result: PromptResult,
     /// The strategy that ran.
     pub strategy: StrategyDecision,
+    /// Fresh bounded context used for this turn, when supplied by the host.
+    pub context_plan: Option<ContextPlan>,
     /// The structured final response.
     pub final_response: FinalResponse,
     /// The bounded reflection outcome (review calls, fix loops, findings).
@@ -374,10 +381,14 @@ impl StrategyExecutor {
         strategy: TurnStrategy,
         prompt: PromptContext,
         memory: Option<String>,
+        context_plan: Option<&ContextPlan>,
         run: StrategyRun,
         validation: &mut ValidationRecorder,
     ) -> Result<(PromptResult, ReflectionOutcome), OrchestratorError> {
         let mut transcript = Transcript::from_prompt(&prompt);
+        if let Some(plan) = context_plan {
+            plan.apply_to_transcript(&mut transcript);
+        }
         if let Some(facts) = &memory {
             transcript.prepend_system(format!("Memory facts:\n{facts}"));
         }
@@ -1055,6 +1066,7 @@ mod tests {
                 strategy,
                 prompt("hello world"),
                 None,
+                None,
                 run,
                 &mut validation,
             ));
@@ -1464,6 +1476,7 @@ mod tests {
             .block_on(executor.execute(
                 TurnStrategy::ToolLoop,
                 prompt("implement a fix"),
+                None,
                 None,
                 run,
                 &mut validation,

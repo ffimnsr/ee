@@ -377,19 +377,19 @@ Select smallest fresh context set needed for current task. Prefer editor and gra
 
 #### Work items
 
-- [ ] Add task-aware context planner that prioritizes project instructions, active selection, dirty buffers, diagnostics, git diff, symbol neighborhood, relevant tests, and related config/docs.
-- [ ] Label each context item with source, revision/freshness, trust level, token cost, selection reason, and truncation reason.
-- [ ] Treat repository text, terminal output, external tool output, and user-provided content as separate trust classes.
-- [ ] Prefer bounded excerpts and explicit drill-down tools over whole-file or whole-repository injection.
-- [ ] Invalidate or refresh context after writes, buffer revisions, diagnostics updates, graph changes, and checkout changes.
-- [ ] Cache only context with compatible revision, policy, and session identity.
-- [ ] Add tests proving task planner selects buffer and diagnostics context before terminal probing when editor state exists.
+- [x] Add task-aware context planner that prioritizes project instructions, active selection, dirty buffers, diagnostics, git diff, symbol neighborhood, relevant tests, and related config/docs.
+- [x] Label each context item with source, revision/freshness, trust level, token cost, selection reason, and truncation reason.
+- [x] Treat repository text, terminal output, external tool output, and user-provided content as separate trust classes.
+- [x] Prefer bounded excerpts and explicit drill-down tools over whole-file or whole-repository injection.
+- [x] Invalidate or refresh context after writes, buffer revisions, diagnostics updates, graph changes, and checkout changes.
+- [x] Cache only context with compatible revision, policy, and session identity.
+- [x] Add tests proving task planner selects buffer and diagnostics context before terminal probing when editor state exists.
 
 #### Exit criteria
 
-- [ ] Planning receives sufficient fresh context without unbounded repository reads.
-- [ ] Agent can explain source and freshness of context that informed an edit or conclusion.
-- [ ] Untrusted repository content cannot silently become trusted instruction context.
+- [x] Planning receives sufficient fresh context without unbounded repository reads.
+- [x] Agent can explain source and freshness of context that informed an edit or conclusion.
+- [x] Untrusted repository content cannot silently become trusted instruction context.
 
 ### Phase 11: Auditable write transactions
 

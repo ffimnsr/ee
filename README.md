@@ -238,6 +238,14 @@ Each replay records a stable SHA-256 trace id, redacted relative workspace snaps
 
 `ValidationPlanner::plan_with_context` combines changed files, graph-resolved changed symbols, workspace validation configuration, declared project tasks, and registered tools. Unknown tools never enter a plan. Keep validation tools narrow: if arguments need many modes, nested objects, or optional branches, split operation into smaller focused tools instead of growing one complex schema.
 
+#### Task-aware context planning
+
+`ContextPlanner` accepts only bounded host-supplied `ContextCandidate`s. It selects fresh project instructions, active selections, dirty buffers, diagnostics, git diffs, symbol neighbors, tests, related config/docs, memory, terminal output, and external-tool output in that fixed priority order. It never performs broad repository reads. `ContextPlannerConfig` caps item count, excerpt characters, and estimated tokens; omitted candidates identify `stale_revision`, `token_budget`, `item_limit`, or `duplicate`, so caller can explicitly drill down later.
+
+Every `PlannedContextItem` records source, source-local canonical id, freshness revision, source-specific trust class, estimated token cost, selection reason, and truncation reason. `ContextTrustClass` keeps `repository_content`, `terminal_output`, `external_tool_output`, and `user_provided` separate. Only `system_policy` becomes a system message; repository, terminal, and external data always enter model requests as `ToolOutputUntrusted`, where injection guard labels and delimiters apply.
+
+`ContextPlanCache` only returns plans with identical task id, session, policy, workspace, buffer, diagnostics, graph, checkout, and candidate revisions. Call `invalidate(ContextInvalidation::Write | BufferRevision | DiagnosticsRevision | GraphRevision | CheckoutRevision | PolicyChanged | SessionEnded)` after matching host state changes. No stale plan may survive a write, editor revision, diagnostics refresh, graph refresh, checkout, policy change, or session end.
+
 #### Workspace agent trust
 
 Enable ee proxy when agent supports MCP:
