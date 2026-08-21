@@ -46,6 +46,33 @@ pub fn redact_secret_values(text: &str, secrets: &[String]) -> String {
     redacted
 }
 
+/// Recursively redacts JSON values held by secret-like object keys.
+///
+/// This preserves non-sensitive structure for diagnostics and exports without
+/// exposing credentials embedded in protocol payloads.
+#[must_use]
+pub fn redact_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(redact_json).collect())
+        }
+        serde_json::Value::Object(values) => serde_json::Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| {
+                    let value = if is_secret_key(key) {
+                        serde_json::Value::String(String::from("***"))
+                    } else {
+                        redact_json(value)
+                    };
+                    (key.clone(), value)
+                })
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
+}
+
 /// Redacts header values whose names look secret-like (MCP HTTP diagnostics).
 #[must_use]
 pub fn redact_headers(
@@ -106,6 +133,28 @@ mod tests {
         // The longer value is replaced first; its replacement must not then
         // be re-matched by the shorter one.
         assert_eq!(redacted, "*** cc ***");
+    }
+
+    #[test]
+    fn json_redacts_nested_secret_like_keys() {
+        let value = serde_json::json!({
+            "token": "top-secret",
+            "safe": [
+                { "password": "nope" },
+                { "nested": { "api_key": "also-secret", "name": "kept" } }
+            ]
+        });
+
+        assert_eq!(
+            redact_json(&value),
+            serde_json::json!({
+                "token": "***",
+                "safe": [
+                    { "password": "***" },
+                    { "nested": { "api_key": "***", "name": "kept" } }
+                ]
+            })
+        );
     }
 
     #[test]

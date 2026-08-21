@@ -13,6 +13,7 @@
 //! message.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
@@ -39,6 +40,7 @@ use tokio::runtime::Builder as TokioBuilder;
 use tokio::sync::mpsc as tokio_mpsc;
 use url::Url;
 
+use super::agent_export::{format_agent_transcript_markdown, write_agent_transcript_export};
 use super::*;
 
 // ── Pane geometry constants ──────────────────────────────────────────────────
@@ -125,9 +127,9 @@ pub(crate) enum TranscriptItem {
         at: SystemTime,
     },
     /// `-!-` system notice.
-    System(String),
+    System { text: String, at: SystemTime },
     /// `-!-` stderr/debug line.
-    Stderr(String),
+    Stderr { text: String, at: SystemTime },
 }
 
 /// Thread lifecycle state shown in the channel list and footer.
@@ -238,7 +240,7 @@ impl AgentThreadUi {
         self.transcript
             .iter()
             .filter_map(|item| match item {
-                TranscriptItem::System(text) => Some(text.clone()),
+                TranscriptItem::System { text, .. } => Some(text.clone()),
                 _ => None,
             })
             .collect()
@@ -465,18 +467,21 @@ impl AgentThreadUi {
 
     /// Appends a system notice.
     pub(crate) fn push_system(&mut self, text: impl Into<String>) {
-        self.transcript.push(TranscriptItem::System(text.into()));
+        self.transcript.push(TranscriptItem::System { text: text.into(), at: SystemTime::now() });
         self.trim_transcript();
     }
 
     /// Appends a stderr/debug line (bounded).
     fn push_stderr(&mut self, line: impl Into<String>) {
-        self.transcript.push(TranscriptItem::Stderr(line.into()));
-        let mut stderr_count =
-            self.transcript.iter().filter(|i| matches!(i, TranscriptItem::Stderr(_))).count();
+        self.transcript.push(TranscriptItem::Stderr { text: line.into(), at: SystemTime::now() });
+        let mut stderr_count = self
+            .transcript
+            .iter()
+            .filter(|item| matches!(item, TranscriptItem::Stderr { .. }))
+            .count();
         let mut index = 0;
         while stderr_count > AGENTS_STDERR_MAX {
-            if matches!(self.transcript[index], TranscriptItem::Stderr(_)) {
+            if matches!(self.transcript[index], TranscriptItem::Stderr { .. }) {
                 self.transcript.remove(index);
                 stderr_count -= 1;
             } else {
@@ -1242,6 +1247,9 @@ pub(crate) struct AgentPaneState {
     /// reconnect record from real user state).
     #[cfg(test)]
     pub(crate) test_session_state_base: Option<PathBuf>,
+    /// Test-only: export output base directory (isolates transcript files from user state).
+    #[cfg(test)]
+    pub(crate) test_export_base: Option<PathBuf>,
 }
 
 impl Default for AgentPaneState {
@@ -1282,6 +1290,8 @@ impl Default for AgentPaneState {
             test_trust_store_base: None,
             #[cfg(test)]
             test_session_state_base: None,
+            #[cfg(test)]
+            test_export_base: None,
         }
     }
 }
@@ -2362,7 +2372,27 @@ fn agent_mode_ids(thread: &AgentThreadUi) -> Vec<String> {
         .unwrap_or_default()
 }
 
-const LOCAL_AGENT_SLASH_COMMANDS: &[&str] = &["quit", "q", "quit_full", "qf", "new_thread", "mode"];
+const LOCAL_AGENT_SLASH_COMMANDS: &[&str] = &[
+    "quit",
+    "q",
+    "quit_full",
+    "qf",
+    "new_thread",
+    "sessions",
+    "export",
+    "stop",
+    "resume",
+    "discard",
+    "reconnect",
+    "next",
+    "prev",
+    "clear",
+    "layout",
+    "thoughts",
+    "config",
+    "mcp",
+    "mode",
+];
 
 /// Lists local and agent-advertised slash commands without duplicate names.
 pub(crate) fn agent_slash_command_names(commands: &[AvailableCommand]) -> Vec<&str> {
@@ -2409,11 +2439,6 @@ fn is_agents_quit_slash_command(draft: &str) -> bool {
 fn is_agents_quit_full_slash_command(draft: &str) -> bool {
     let (name, rest) = split_slash_command(draft);
     matches!(name.as_deref(), Some("qf" | "quit_full")) && rest.trim().is_empty()
-}
-
-fn is_agents_new_slash_command(draft: &str) -> bool {
-    let (name, rest) = split_slash_command(draft);
-    matches!(name.as_deref(), Some("new_thread")) && rest.trim().is_empty()
 }
 
 /// Deterministic display-width wrapping used by the transcript renderer.
@@ -2675,6 +2700,47 @@ impl App {
         let current = self.agents.active_thread.unwrap_or(0) as isize;
         let next = (current + delta).rem_euclid(count as isize) as usize;
         self.focus_thread(next);
+    }
+
+    fn agent_export_dir(&self) -> io::Result<PathBuf> {
+        #[cfg(test)]
+        if let Some(base) = &self.agents.test_export_base {
+            return Ok(base.join("agent-exports"));
+        }
+        crate::logs::state_dir().map(|state_dir| state_dir.join("agent-exports")).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "platform state directory is unavailable")
+        })
+    }
+
+    /// Exports current local transcript, including redacted tool payloads, to private Markdown.
+    fn agents_export_transcript(&mut self) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session to export"));
+            return;
+        };
+        let secrets = self.agents_secret_values();
+        let (session_id, markdown) = {
+            let thread = &self.agents.threads[active];
+            (
+                thread.session_id.clone(),
+                format_agent_transcript_markdown(thread, SystemTime::now(), &secrets),
+            )
+        };
+        let result = self.agent_export_dir().and_then(|directory| {
+            write_agent_transcript_export(&directory, &session_id, &markdown)
+        });
+        match result {
+            Ok(path) => {
+                self.agents.threads[active]
+                    .push_system(format!("transcript exported: {}", path.display()));
+                self.backend.status_message =
+                    Some(format!("agent transcript exported: {}", path.display()));
+            }
+            Err(error) => {
+                self.backend.status_message =
+                    Some(format!("agent transcript export failed: {error}"));
+            }
+        }
     }
 
     /// `:agents_clear` — clear the active thread's local scrollback.
@@ -3275,20 +3341,30 @@ impl App {
             return false;
         }
 
-        if thread.available_commands.is_empty() {
-            return false;
-        }
         let command_name = current_name.as_deref().unwrap_or_default();
         let command_names = agent_slash_command_names(&thread.available_commands);
         let current_index = command_names.iter().position(|name| *name == command_name);
         let matching_indices: Vec<usize> = if current_index.is_some() {
             (0..command_names.len()).collect()
         } else {
-            command_names
+            // Prefer agent-advertised commands for ambiguous prefixes. Local
+            // commands remain available as a fallback without stealing an
+            // agent's command such as `/edit` from local `/export`.
+            let advertised_matches: Vec<usize> = thread
+                .available_commands
                 .iter()
-                .enumerate()
-                .filter_map(|(index, name)| name.starts_with(command_name).then_some(index))
-                .collect()
+                .filter(|command| command.name.starts_with(command_name))
+                .filter_map(|command| command_names.iter().position(|name| *name == command.name))
+                .collect();
+            if advertised_matches.is_empty() {
+                command_names
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, name)| name.starts_with(command_name).then_some(index))
+                    .collect()
+            } else {
+                advertised_matches
+            }
         };
         let Some(next_index) = (!matching_indices.is_empty()).then(|| {
             let position = current_index.and_then(|index| {
@@ -3324,6 +3400,112 @@ impl App {
         false
     }
 
+    /// Applies pane-local slash commands before forwarding prompt text to the agent.
+    fn submit_agents_local_slash_command(&mut self, draft: &str) -> bool {
+        let (Some(command), args) = split_slash_command(draft) else {
+            return false;
+        };
+        let args = args.trim();
+        let handled = match command.as_str() {
+            "sessions" if args.is_empty() => {
+                self.open_agents_thread_picker();
+                true
+            }
+            "export" if args.is_empty() => {
+                self.agents_export_transcript();
+                true
+            }
+            "new_thread" if args.is_empty() => {
+                self.agents_new_session();
+                true
+            }
+            "stop" if args.is_empty() => {
+                self.agents_stop_turn();
+                true
+            }
+            "resume" if args.is_empty() => {
+                self.resume_paused_turn();
+                true
+            }
+            "discard" if args.is_empty() => {
+                self.discard_paused_turn();
+                true
+            }
+            "reconnect" if args.is_empty() => {
+                self.agents_reconnect();
+                true
+            }
+            "next" if args.is_empty() => {
+                self.agents_switch_thread(1);
+                true
+            }
+            "prev" if args.is_empty() => {
+                self.agents_switch_thread(-1);
+                true
+            }
+            "clear" if args.is_empty() => {
+                self.agents_clear_scrollback();
+                true
+            }
+            "layout" => {
+                if AgentPaneLayout::parse(args).is_some() {
+                    self.agents_set_layout(args);
+                } else {
+                    self.backend.status_message =
+                        Some(String::from("usage: /layout right|bottom|full"));
+                }
+                true
+            }
+            "thoughts" => {
+                if matches!(args, "" | "toggle" | "on" | "off") {
+                    self.agents_set_thought_visibility(args);
+                } else {
+                    self.backend.status_message =
+                        Some(String::from("usage: /thoughts on|off|toggle"));
+                }
+                true
+            }
+            "config" => {
+                let mut parts = args.splitn(2, char::is_whitespace);
+                match (parts.next().unwrap_or_default(), parts.next().unwrap_or_default().trim()) {
+                    ("", _) => self.agents_list_config_options(),
+                    ("set", value)
+                        if value
+                            .split_once(char::is_whitespace)
+                            .is_some_and(|(_, value)| !value.trim().is_empty()) =>
+                    {
+                        self.agents_set_config_option_command(value)
+                    }
+                    ("toggle", value)
+                        if !value.is_empty() && !value.contains(char::is_whitespace) =>
+                    {
+                        self.agents_toggle_config_option_command(value)
+                    }
+                    _ => {
+                        self.backend.status_message = Some(String::from(
+                            "usage: /config [set <config_id> <value>|toggle <config_id>]",
+                        ));
+                    }
+                }
+                true
+            }
+            "mcp" => {
+                if matches!(args, "" | "tools" | "prompts" | "resources" | "close") {
+                    self.agents_mcp_command(args);
+                } else {
+                    self.backend.status_message =
+                        Some(String::from("usage: /mcp [tools|prompts|resources|close]"));
+                }
+                true
+            }
+            _ => false,
+        };
+        if handled {
+            self.agents_clear_draft();
+        }
+        handled
+    }
+
     /// Submits the active thread's draft as a prompt turn.
     fn submit_prompt(&mut self) {
         if self.agents.permission.is_some()
@@ -3343,15 +3525,13 @@ impl App {
         if self.submit_agents_exit_command(&draft) {
             return;
         }
+        if self.submit_agents_local_slash_command(&draft) {
+            return;
+        }
         let Some(active) = active else {
             self.submit_without_session();
             return;
         };
-        if is_agents_new_slash_command(&draft) {
-            self.agents.threads[active].draft.clear();
-            self.agents_new_session();
-            return;
-        }
         let (command, args) = split_slash_command(&draft);
         if let Some("mode") = command.as_deref() {
             self.agents.threads[active].draft.clear();
@@ -3365,9 +3545,9 @@ impl App {
         }
         if !matches!(thread.state, ThreadUiState::Ready) {
             self.agents.error = Some(match thread.state {
-                ThreadUiState::PausedRecoverable => String::from(
-                    "a turn is paused and recoverable; resume with :agents_resume or discard with :agents_discard",
-                ),
+                ThreadUiState::PausedRecoverable => {
+                    String::from("a turn is paused and recoverable; use /resume or /discard")
+                }
                 _ => String::from("agent session is not ready; cannot send prompt"),
             });
             return;
@@ -4073,7 +4253,28 @@ mod tests {
     fn agent_slash_command_names_include_local_and_advertised_commands() {
         assert_eq!(
             agent_slash_command_names(&[compact_command(), AvailableCommand::new("quit", "")]),
-            vec!["quit", "q", "quit_full", "qf", "new_thread", "mode", "compact"]
+            vec![
+                "quit",
+                "q",
+                "quit_full",
+                "qf",
+                "new_thread",
+                "sessions",
+                "export",
+                "stop",
+                "resume",
+                "discard",
+                "reconnect",
+                "next",
+                "prev",
+                "clear",
+                "layout",
+                "thoughts",
+                "config",
+                "mcp",
+                "mode",
+                "compact",
+            ]
         );
     }
 

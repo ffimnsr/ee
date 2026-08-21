@@ -323,6 +323,66 @@ fn exit_slash_commands_work_without_a_configured_agent() {
 }
 
 #[test]
+fn local_slash_commands_control_agent_tui_without_forwarding_prompts() {
+    let script = base_script().wait_for("session/new").respond(json!({ "sessionId": "s2" }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "/lay");
+    press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(app.agents.threads[0].draft, "/layout");
+    press(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+
+    type_text(&mut app, "/new_thread");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "second thread ready", |app| {
+        app.agents.threads.len() == 2 && app.agents.threads[1].state == ThreadUiState::Ready
+    });
+    assert_eq!(app.agents.active_thread, Some(1));
+
+    type_text(&mut app, "/prev");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.agents.active_thread, Some(0));
+    type_text(&mut app, "/next");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.agents.active_thread, Some(1));
+
+    type_text(&mut app, "/layout right");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.agents.layout, AgentPaneLayout::Right);
+
+    type_text(&mut app, "/thoughts off");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!app.agents.show_thoughts);
+
+    type_text(&mut app, "/config");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.backend.status_message.as_deref(), Some("no session config options advertised"));
+
+    type_text(&mut app, "/mcp");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(
+        app.backend
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("no MCP servers"))
+    );
+
+    type_text(&mut app, "/stop");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.backend.status_message.as_deref(), Some("no running turn to stop"));
+
+    assert!(!app.agents.threads[1].transcript.is_empty());
+    type_text(&mut app, "/clear");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.agents.threads[1].transcript.is_empty());
+    assert!(
+        fake.agent().requests_by_method("session/prompt").is_empty(),
+        "local slash commands must not forward prompt turns"
+    );
+}
+
+#[test]
 fn draft_typed_before_session_ready_carries_into_first_thread() {
     let (mut app, _temp, _fake) = fake_agents_app(base_script());
 
@@ -411,8 +471,10 @@ fn recoverable_pause_offers_resume_and_resume_resends_prompt() {
     assert_eq!(app.agents.threads[0].state, ThreadUiState::PausedRecoverable);
     assert!(app.agents.error.as_deref().is_some_and(|error| error.contains("resume")));
 
-    // Resume re-sends the original prompt and the turn completes.
-    run_ex(&mut app, "agents_resume");
+    // `/resume` re-sends the original prompt and the turn completes.
+    press(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+    type_text(&mut app, "/resume");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     wait_until(&mut app, "resumed prompt sent", |_| {
         fake.agent().requests_by_method("session/prompt").len() == 2
     });
@@ -454,8 +516,9 @@ fn recoverable_pause_discard_clears_state() {
         app.agents.threads[0].state == ThreadUiState::PausedRecoverable
     });
 
-    // Discard tells the agent to drop the checkpoint (`/discard` prompt).
-    run_ex(&mut app, "agents_discard");
+    // `/discard` tells the agent to drop the checkpoint.
+    type_text(&mut app, "/discard");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     wait_until(&mut app, "discard prompt sent", |_| {
         fake.agent().requests_by_method("session/prompt").len() == 2
     });
@@ -518,7 +581,8 @@ fn agents_reconnect_loads_persisted_session_and_replays_conversation() {
     // Reconnect: `session/load` (preferred over `session/resume`) restores
     // the session and replays the conversation; the existing thread is
     // rebound to the fresh connection.
-    run_ex(&mut app, "agents_reconnect");
+    type_text(&mut app, "/reconnect");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     let deadline = Instant::now() + WAIT;
     loop {
         app.pump_agents();
@@ -618,11 +682,20 @@ fn no_session_footer_uses_agent_status_background_and_ask_mode() {
         .position(|row| row.contains("agents [no session] | mode:ask"))
         .expect("no-session footer row");
 
+    let footer = &rendered[footer_y];
     assert!(
         (0..120).all(|x| {
             rows.cell((x, footer_y as u16)).unwrap().bg == crate::theme::ui::BG_AGENT_STATUS
         }),
         "no-session footer must use agent-status background: {rendered:#?}"
+    );
+    assert!(
+        !footer.contains('/'),
+        "no-session footer must not advertise slash commands: {rendered:#?}"
+    );
+    assert!(
+        !footer.contains("Enter") && !footer.contains("Esc"),
+        "no-session footer must not advertise keyboard hints: {rendered:#?}"
     );
 }
 
@@ -1040,7 +1113,8 @@ fn agents_thoughts_command_toggles_visibility_without_dropping_transcript() {
     open_pane_and_wait_ready(&mut app);
     assert!(app.agents.show_thoughts);
 
-    run_ex(&mut app, "agents_thoughts off");
+    type_text(&mut app, "/thoughts off");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     assert!(!app.agents.show_thoughts);
     assert_eq!(app.backend.status_message.as_deref(), Some("agent thoughts hidden"));
 
@@ -1058,15 +1132,14 @@ fn agents_thoughts_command_toggles_visibility_without_dropping_transcript() {
         "toggle must not drop stored thought transcript"
     );
 
-    run_ex(&mut app, "agents_thoughts toggle");
+    type_text(&mut app, "/thoughts toggle");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     assert!(app.agents.show_thoughts);
     assert_eq!(app.backend.status_message.as_deref(), Some("agent thoughts visible"));
 
-    run_ex(&mut app, "agents_thoughts maybe");
-    assert_eq!(
-        app.backend.status_message.as_deref(),
-        Some("usage: :agents_thoughts on|off|toggle")
-    );
+    type_text(&mut app, "/thoughts maybe");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.backend.status_message.as_deref(), Some("usage: /thoughts on|off|toggle"));
     assert!(app.agents.show_thoughts, "invalid input must not change visibility");
 }
 
@@ -1387,12 +1460,14 @@ fn agents_config_commands_list_and_mutate_advertised_options() {
     let (mut app, _temp, fake) = fake_agents_app(script);
     open_pane_and_wait_ready(&mut app);
 
-    run_ex(&mut app, "agents_config");
+    type_text(&mut app, "/config");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     let listed = app.backend.status_message.clone().unwrap_or_default();
     assert!(listed.contains("mode=ask"), "status: {listed}");
     assert!(listed.contains("confirmEdits=off"), "status: {listed}");
 
-    run_ex(&mut app, "agents_config_toggle confirmEdits");
+    type_text(&mut app, "/config toggle confirmEdits");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     wait_until(&mut app, "boolean config sent", |_| {
         fake.agent().requests_by_method("session/set_config_option").len() == 1
     });
@@ -1401,7 +1476,8 @@ fn agents_config_commands_list_and_mutate_advertised_options() {
     assert_eq!(toggle["params"]["type"], "boolean");
     assert_eq!(toggle["params"]["value"], true);
 
-    run_ex(&mut app, "agents_config_set mode plan");
+    type_text(&mut app, "/config set mode plan");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     wait_until(&mut app, "select config sent", |_| {
         fake.agent().requests_by_method("session/set_config_option").len() == 2
     });
@@ -2161,6 +2237,33 @@ fn tool_call_details_stay_collapsed_until_toggled_during_active_turn() {
         !response_collapsed.iter().any(|row| row.contains("Run tests [completed]")),
         "collapsed response must hide nested tool rows: {response_collapsed:#?}"
     );
+
+    let export_base = tempfile::tempdir().unwrap();
+    app.agents.test_export_base = Some(export_base.path().to_path_buf());
+    type_text(&mut app, "/export");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    let export_dir = export_base.path().join("agent-exports");
+    let export_path = fs::read_dir(&export_dir)
+        .expect("export directory")
+        .next()
+        .expect("export file")
+        .unwrap()
+        .path();
+    let exported = fs::read_to_string(&export_path).expect("exported transcript");
+    assert!(exported.contains("# Agent session transcript"));
+    assert!(exported.contains("Tool: Run tests"));
+    assert!(exported.contains("#### Input"));
+    assert!(exported.contains("#### Output"));
+    assert!(exported.contains("\"token\": \"***\""));
+    assert!(exported.contains("\"password\": \"***\""));
+    assert!(!exported.contains("super-secret"));
+    assert!(!exported.contains("nope"));
+    assert!(exported.find("User (you)") < exported.find("Tool: Run tests"));
+    assert!(app.agents.threads[0].draft.is_empty());
+    assert!(
+        app.backend.status_message.as_deref().is_some_and(|status| status.contains("exported"))
+    );
 }
 
 // ── Stop, close, clear ───────────────────────────────────────────────────────
@@ -2368,6 +2471,32 @@ fn agents_threads_opens_picker_and_focuses_selected_session() {
     assert_eq!(app.agents.active_thread, Some(0));
     assert_eq!(app.mode, Mode::Agent);
     assert!(app.picker.is_none(), "picker closes after confirm");
+}
+
+#[test]
+fn sessions_slash_command_opens_agent_thread_picker_locally() {
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s2" }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+    run_ex(&mut app, "agents_new");
+    wait_until(&mut app, "second thread ready", |app| {
+        app.agents.threads.len() == 2 && app.agents.threads[1].state == ThreadUiState::Ready
+    });
+
+    type_text(&mut app, "/sessions");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    let picker = app.picker.as_ref().expect("/sessions should open agent thread picker");
+    assert_eq!(picker.kind, crate::picker::PickerKind::AgentThreads);
+    assert_eq!(picker.title, "Agent Sessions");
+    assert_eq!(picker.selected, 1, "active thread preselected");
+    assert!(fake.agent().requests_by_method("session/prompt").is_empty());
 }
 
 #[test]

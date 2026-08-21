@@ -26,6 +26,8 @@ use crate::window::{SplitDir, TabManager, ViewDirection};
 #[cfg(feature = "agents")]
 mod agent_bridge;
 #[cfg(feature = "agents")]
+mod agent_export;
+#[cfg(feature = "agents")]
 mod agent_knowledge;
 #[cfg(feature = "agents")]
 mod agent_pane;

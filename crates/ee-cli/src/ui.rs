@@ -454,11 +454,11 @@ fn transcript_lines(
                 }
             }
         }
-        TranscriptItem::System(text) => {
+        TranscriptItem::System { text, .. } => {
             lines
                 .push(Line::from(vec![Span::styled("-!- ", dim), Span::styled(text.clone(), dim)]));
         }
-        TranscriptItem::Stderr(text) => {
+        TranscriptItem::Stderr { text, .. } => {
             lines.push(Line::from(vec![
                 Span::styled("-!- [stderr] ", Style::default().fg(theme::FG_WARNING)),
                 Span::styled(text.clone(), dim),
@@ -677,7 +677,7 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         let footer_style = Style::default().fg(theme::FG_AGENT_STATUS).bg(theme::BG_AGENT_STATUS);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "agents [no session] | mode:ask | Enter starts after config | /new_thread | /quit | Esc close",
+                "agents [no session] | mode:ask",
                 footer_style,
             )))
             .style(footer_style),
