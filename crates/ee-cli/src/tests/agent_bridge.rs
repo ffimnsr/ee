@@ -503,7 +503,7 @@ fn terminal_denial_does_not_spawn_process() {
 }
 
 #[test]
-fn terminal_approval_expands_detail_and_highlights_each_choice() {
+fn terminal_approval_renders_only_in_composer_and_highlights_each_choice() {
     let script = base_script().emit(terminal_create(
         102,
         "s1",
@@ -531,6 +531,10 @@ fn terminal_approval_expands_detail_and_highlights_each_choice() {
             "approval detail must wrap instead of clipping {fragment:?}: {rendered:#?}"
         );
     }
+    assert!(
+        !rendered.iter().any(|row| row.contains("approval: terminal/create")),
+        "approval must not duplicate into chat transcript: {rendered:#?}"
+    );
     let approval_start = rendered
         .iter()
         .position(|row| row.contains("approval required [2/"))

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use ee_agent_protocol::registry::{
     INITIALIZE_METHOD_NAME, SESSION_CANCEL_NOTIFICATION, SESSION_CLOSE_METHOD_NAME,
     SESSION_LIST_METHOD_NAME, SESSION_LOAD_METHOD_NAME, SESSION_NEW_METHOD_NAME,
-    SESSION_PROMPT_METHOD_NAME, SESSION_RESUME_METHOD_NAME,
+    SESSION_PROMPT_METHOD_NAME, SESSION_RESUME_METHOD_NAME, SESSION_SET_MODE_METHOD_NAME,
 };
 use ee_agent_protocol::{
     AvailableCommand, AvailableCommandsUpdate, CancelNotification, CloseSessionRequest,
@@ -23,6 +23,7 @@ use ee_agent_protocol::{
     ListSessionsRequest, ListSessionsResponse, LoadSessionRequest, LoadSessionResponse,
     NewSessionRequest, NewSessionResponse, PromptRequest, ProtocolVersion, RequestId,
     ResumeSessionRequest, ResumeSessionResponse, SessionId, SessionInfo, SessionUpdate,
+    SetSessionModeRequest, SetSessionModeResponse,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -33,6 +34,7 @@ use crate::config::AcpAgentServerConfig;
 use crate::error::{AcpServerError, ProviderError};
 use crate::provider::{
     AgentProvider, LoadSessionContext, NewSessionContext, PromptContext, ProviderFuture,
+    SetModeContext,
 };
 use crate::server::{ActivePromptError, ActivePrompts, OutboundEvent};
 use crate::session::{ServerSession, SessionStore, SessionStoreError};
@@ -90,6 +92,9 @@ impl<P: AgentProvider> RequestDispatcher<P> {
             SESSION_LIST_METHOD_NAME => DispatchOutcome::Immediate(self.session_list(params).await),
             SESSION_CLOSE_METHOD_NAME => {
                 DispatchOutcome::Immediate(self.session_close(params).await)
+            }
+            SESSION_SET_MODE_METHOD_NAME => {
+                DispatchOutcome::Immediate(self.session_set_mode(params).await)
             }
             SESSION_PROMPT_METHOD_NAME => match self.session_prompt(params).await {
                 Ok(outcome) => outcome,
@@ -166,6 +171,7 @@ impl<P: AgentProvider> RequestDispatcher<P> {
             additional_directories: request.additional_directories.clone(),
             mcp_servers: request.mcp_servers.clone(),
             title: init.title.clone(),
+            modes: init.modes.clone(),
             metadata: Value::Null,
         })?;
         // Advertise the provider's initial commands after the session is
@@ -218,6 +224,7 @@ impl<P: AgentProvider> RequestDispatcher<P> {
             additional_directories: request.additional_directories.clone(),
             mcp_servers: request.mcp_servers.clone(),
             title: None,
+            modes: None,
             metadata: Value::Null,
         })?;
         let ctx = LoadSessionContext {
@@ -270,6 +277,7 @@ impl<P: AgentProvider> RequestDispatcher<P> {
                 // entry; the load then leaves it gone.
                 if let Some(mut resolved) = sessions.remove(&session_id) {
                     resolved.title = init.title.clone();
+                    resolved.modes = init.modes.clone();
                     resolved.metadata = Value::Null;
                     let _ = sessions.insert_new(resolved);
                 }
@@ -328,6 +336,7 @@ impl<P: AgentProvider> RequestDispatcher<P> {
                 additional_directories: request.additional_directories.clone(),
                 mcp_servers: request.mcp_servers.clone(),
                 title: init.title.clone(),
+                modes: init.modes.clone(),
                 metadata: Value::Null,
             })?;
         }
@@ -359,6 +368,40 @@ impl<P: AgentProvider> RequestDispatcher<P> {
             })
             .collect();
         to_value(ListSessionsResponse::new(sessions))
+    }
+
+    /// `session/set_mode`: validates advertised state, applies the provider's
+    /// mode behavior, then commits framework-owned session state.
+    async fn session_set_mode(&self, params: Value) -> Result<Value, RpcError> {
+        let request: SetSessionModeRequest = parse_params(params)?;
+        let Some(session) = self.sessions.get(&request.session_id) else {
+            return Err(AcpServerError::UnknownSession(request.session_id).into_rpc_error());
+        };
+        let advertised = session.modes.is_some_and(|modes| {
+            modes.available_modes.iter().any(|mode| mode.id == request.mode_id)
+        });
+        if !advertised {
+            return Err(RpcError::invalid_params().data(serde_json::json!({
+                "reason": "mode was not advertised for this session",
+            })));
+        }
+        if self.active_prompts.contains(&request.session_id) {
+            return Err(RpcError::invalid_params().data(serde_json::json!({
+                "reason": "cannot change mode while a prompt or load is active",
+            })));
+        }
+        self.with_provider_timeout(self.provider.set_mode(SetModeContext {
+            session_id: request.session_id.clone(),
+            mode_id: request.mode_id.clone(),
+            metadata: request.meta.clone(),
+        }))
+        .await?;
+        if !self.sessions.set_mode(&request.session_id, request.mode_id) {
+            return Err(RpcError::internal_error().data(serde_json::json!({
+                "reason": "session mode disappeared before provider change completed",
+            })));
+        }
+        to_value(SetSessionModeResponse::new())
     }
 
     /// `session/prompt`: starts a cancellable prompt task for the session.
@@ -631,6 +674,7 @@ mod tests {
                 additional_directories: Vec::new(),
                 mcp_servers: Vec::new(),
                 title: None,
+                modes: None,
                 metadata: Value::Null,
             })
             .expect("seeds store");

@@ -2260,16 +2260,6 @@ impl App {
             }
             _ => {}
         }
-        if let Some(thread) = thread_index
-            && let Some(thread) = self.agents.threads.get_mut(thread)
-        {
-            thread.transcript.push(TranscriptItem::Approval {
-                title: prompt.title.clone(),
-                detail: prompt.detail.clone(),
-                options: prompt.options.iter().map(|(label, _)| label.clone()).collect(),
-                at: SystemTime::now(),
-            });
-        }
         self.agents.approvals.push_back(prompt);
         self.backend.status_message = Some(if self.agents.layout == AgentPaneLayout::Closed {
             String::from("agent approval required (open :agents)")

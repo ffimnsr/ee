@@ -287,6 +287,42 @@ fn enter_without_config_reports_needed_server_and_keeps_draft() {
 }
 
 #[test]
+fn exit_slash_commands_work_without_a_configured_agent() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join(".ee.toml"), "[agents]\nenabled = true\n").unwrap();
+    let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let _cwd_restore = CurrentDirGuard::capture();
+    std::env::set_current_dir(temp.path()).unwrap();
+    let mut app = App::from_path(None).unwrap();
+    drop(_cwd_restore);
+    drop(_cwd_lock);
+
+    run_ex(&mut app, "agents");
+    assert_eq!(app.agents.layout, AgentPaneLayout::Full);
+    assert!(app.agents.threads.is_empty());
+
+    type_text(&mut app, "/quit");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    assert_eq!(app.agents.layout, AgentPaneLayout::Closed);
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.agents.pending_draft.is_empty());
+    assert!(app.agents.pending_session.is_none());
+    assert!(app.agents.threads.is_empty());
+
+    run_ex(&mut app, "agents");
+    type_text(&mut app, "/quit_full");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    assert!(app.should_quit);
+    assert_eq!(app.agents.layout, AgentPaneLayout::Full);
+    assert_eq!(app.mode, Mode::Agent);
+    assert!(app.agents.pending_draft.is_empty());
+    assert!(app.agents.pending_session.is_none());
+    assert!(app.agents.threads.is_empty());
+}
+
+#[test]
 fn draft_typed_before_session_ready_carries_into_first_thread() {
     let (mut app, _temp, _fake) = fake_agents_app(base_script());
 
@@ -555,6 +591,99 @@ fn agents_reconnect_without_persisted_session_reports_error() {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("no persisted agent session"))
+    );
+}
+
+#[test]
+fn no_session_footer_uses_agent_status_background_and_ask_mode() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join(".ee.toml"), "[agents]\nenabled = true\n").unwrap();
+    let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let _cwd_restore = CurrentDirGuard::capture();
+    std::env::set_current_dir(temp.path()).unwrap();
+    let mut app = App::from_path(None).unwrap();
+    drop(_cwd_restore);
+    drop(_cwd_lock);
+
+    run_ex(&mut app, "agents");
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rows = terminal.backend().buffer();
+    let rendered: Vec<String> = (0..24)
+        .map(|y| (0..120).map(|x| rows.cell((x, y)).unwrap().symbol()).collect::<String>())
+        .collect();
+    let footer_y = rendered
+        .iter()
+        .position(|row| row.contains("agents [no session] | mode:ask"))
+        .expect("no-session footer row");
+
+    assert!(
+        (0..120).all(|x| {
+            rows.cell((x, footer_y as u16)).unwrap().bg == crate::theme::ui::BG_AGENT_STATUS
+        }),
+        "no-session footer must use agent-status background: {rendered:#?}"
+    );
+}
+
+#[test]
+fn footer_defaults_unadvertised_agent_mode_to_ask() {
+    let (mut app, _temp, _fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rows = terminal.backend().buffer();
+    let rendered: Vec<String> = (0..24)
+        .map(|y| (0..120).map(|x| rows.cell((x, y)).unwrap().symbol()).collect::<String>())
+        .collect();
+    let composer_row =
+        rendered.iter().position(|row| row.contains("prompt>")).expect("composer row");
+
+    assert!(
+        rendered[composer_row - 1].contains("mode:ask"),
+        "footer must default to ask mode: {rendered:#?}"
+    );
+}
+
+#[test]
+fn footer_renders_current_agent_mode() {
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({
+            "sessionId": "s1",
+            "modes": {
+                "currentModeId": "plan",
+                "availableModes": [
+                    { "id": "ask", "name": "Ask" },
+                    { "id": "plan", "name": "Plan" }
+                ]
+            }
+        }));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rows = terminal.backend().buffer();
+    let rendered: Vec<String> = (0..24)
+        .map(|y| (0..120).map(|x| rows.cell((x, y)).unwrap().symbol()).collect::<String>())
+        .collect();
+    let composer_row =
+        rendered.iter().position(|row| row.contains("prompt>")).expect("composer row");
+    let footer_row = &rendered[composer_row - 1];
+
+    assert!(
+        footer_row.contains("mode:plan"),
+        "footer must render current agent mode: {rendered:#?}"
+    );
+    assert!(
+        !footer_row.contains("Ctrl-"),
+        "footer must not render keyboard shortcuts: {rendered:#?}"
     );
 }
 
@@ -875,6 +1004,37 @@ fn streamed_assistant_chunks_render_in_order_with_thoughts() {
 }
 
 #[test]
+fn blank_agent_chunks_do_not_create_transcript_gaps() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(wire::session_update("s1", wire::agent_message_chunk("empty", "")))
+        .emit(wire::session_update("s1", wire::agent_message_chunk("visible", "reply")));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "question");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "non-empty reply", |app| app.agents.threads[0].message_pairs().len() == 2);
+
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rows = terminal.backend().buffer();
+    let rendered: Vec<String> = (0..20)
+        .map(|y| (0..80).map(|x| rows.cell((x, y)).unwrap().symbol()).collect::<String>())
+        .collect();
+
+    assert!(rendered.iter().any(|row| row.contains("reply")), "reply missing: {rendered:#?}");
+    assert!(
+        rendered.iter().all(|row| {
+            !row.contains("assistant")
+                || !row.split_once("assistant").is_some_and(|(_, text)| text.trim().is_empty())
+        }),
+        "blank assistant chunk rendered as a transcript row: {rendered:#?}"
+    );
+}
+
+#[test]
 fn agents_thoughts_command_toggles_visibility_without_dropping_transcript() {
     let (mut app, _temp, _fake) = fake_agents_app(base_script());
     open_pane_and_wait_ready(&mut app);
@@ -1015,6 +1175,115 @@ fn slash_commands_are_discoverable_and_tab_inserts_prompt_text() {
     });
     let prompt = &fake.agent().requests_by_method("session/prompt")[1];
     assert_eq!(prompt["params"]["prompt"][0]["text"], "/edit file");
+}
+
+#[test]
+fn mode_slash_command_explains_when_agent_advertises_no_modes() {
+    let (mut app, _temp, _fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "/mode");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(
+        app.agents.mode_selection.as_ref().is_some_and(|picker| picker.options.is_empty()),
+        "an unsupported mode command must open an explanatory composer"
+    );
+
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rows = terminal.backend().buffer();
+    let rendered: Vec<String> = (0..24)
+        .map(|y| (0..120).map(|x| rows.cell((x, y)).unwrap().symbol()).collect::<String>())
+        .collect();
+    assert!(
+        rendered.iter().any(|row| row.contains("mode unavailable")),
+        "unavailable mode heading missing: {rendered:#?}"
+    );
+    assert!(
+        rendered.iter().any(|row| row.contains("did not advertise selectable ACP modes")),
+        "unavailable mode reason missing: {rendered:#?}"
+    );
+
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.agents.mode_selection.is_some(), "Enter cannot dismiss unavailable mode state");
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(app.agents.mode_selection.is_none(), "Esc closes unavailable mode state");
+}
+
+#[test]
+fn mode_slash_command_opens_expanded_composer_picker() {
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({
+            "sessionId": "s1",
+            "modes": {
+                "currentModeId": "ask",
+                "availableModes": [
+                    { "id": "ask", "name": "Ask" },
+                    { "id": "plan", "name": "Plan" }
+                ]
+            }
+        }))
+        .wait_for("session/set_mode")
+        .respond(json!({}));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "/mode");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    let picker = app.agents.mode_selection.as_ref().expect("mode picker opens");
+    assert_eq!(picker.options, vec![String::from("ask"), String::from("plan")]);
+    assert_eq!(picker.selected, 0, "current mode starts selected");
+
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rows = terminal.backend().buffer();
+    let rendered: Vec<String> = (0..24)
+        .map(|y| (0..120).map(|x| rows.cell((x, y)).unwrap().symbol()).collect::<String>())
+        .collect();
+    assert!(
+        rendered.iter().any(|row| row.contains("select mode")),
+        "mode picker heading missing: {rendered:#?}"
+    );
+    assert!(
+        rendered.iter().any(|row| row.contains("> ask")),
+        "current mode must be selected: {rendered:#?}"
+    );
+    assert!(
+        rendered.iter().any(|row| row.contains("  plan")),
+        "other advertised modes must be visible: {rendered:#?}"
+    );
+
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(app.agents.mode_selection.as_ref().expect("picker remains open").selected, 1);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    wait_until(&mut app, "mode change accepted", |app| {
+        fake.agent().requests_by_method("session/set_mode").len() == 1
+            && app.agents.threads[0]
+                .host
+                .snapshot()
+                .current_mode
+                .as_ref()
+                .is_some_and(|mode| mode.0.as_ref() == "plan")
+    });
+    assert!(app.agents.mode_selection.is_none(), "picker closes after confirmation");
+
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rows = terminal.backend().buffer();
+    let rendered: Vec<String> = (0..24)
+        .map(|y| (0..120).map(|x| rows.cell((x, y)).unwrap().symbol()).collect::<String>())
+        .collect();
+    let composer_row =
+        rendered.iter().position(|row| row.contains("prompt>")).expect("composer row");
+    assert!(
+        rendered[composer_row - 1].contains("mode:plan"),
+        "footer must update after /mode plan: {rendered:#?}"
+    );
 }
 
 #[test]
@@ -1214,6 +1483,41 @@ fn agents_transcript_preserves_agent_markdown_newlines() {
     let first_col = rendered[first_row].find("first line").expect("first line column");
     let second_col = rendered[second_row].find("second line").expect("second line column");
     assert_eq!(first_col, second_col, "continuation rows must align: {rendered:#?}");
+}
+
+#[test]
+fn agent_transcript_discards_blank_rendered_lines() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(wire::session_update(
+            "s1",
+            wire::agent_message_chunk("m1", "first line\n\nsecond line\n\n"),
+        ))
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "question");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "multiline response lands", |app| {
+        app.agents.threads[0]
+            .message_pairs()
+            .iter()
+            .any(|(_, text)| text == "first line\n\nsecond line\n\n")
+    });
+
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rows = terminal.backend().buffer();
+    let rendered: Vec<String> = (0..20)
+        .map(|y| (0..80).map(|x| rows.cell((x, y)).unwrap().symbol()).collect::<String>())
+        .collect();
+    let first_row = rendered.iter().position(|row| row.contains("first line")).expect("first row");
+    let second_row =
+        rendered.iter().position(|row| row.contains("second line")).expect("second row");
+
+    assert_eq!(second_row, first_row + 1, "blank transcript rows must be trimmed: {rendered:#?}");
 }
 
 #[test]
@@ -1756,7 +2060,7 @@ fn elicitation_validation_failure_stays_local_until_user_resolves_it() {
 }
 
 #[test]
-fn tool_call_updates_render_kind_content_locations_and_secret_conscious_diagnostics() {
+fn tool_call_details_stay_collapsed_until_toggled_during_active_turn() {
     let script = base_script()
         .wait_for("session/prompt")
         .emit(wire::session_update(
@@ -1788,7 +2092,7 @@ fn tool_call_updates_render_kind_content_locations_and_secret_conscious_diagnost
                 "rawOutput": { "password": "nope" }
             }),
         ))
-        .respond(json!({ "stopReason": "end_turn" }));
+        .wait_for("session/cancel");
     let (mut app, _temp, _fake) = fake_agents_app(script);
     open_pane_and_wait_ready(&mut app);
 
@@ -1816,7 +2120,47 @@ fn tool_call_updates_render_kind_content_locations_and_secret_conscious_diagnost
     assert_eq!(thread.response_group_ids(), vec![1]);
     assert_eq!(thread.response_group_counts(1), (0, 1));
     assert_eq!(thread.selected_response_group, Some(1));
-    assert!(thread.collapsed_response_groups.contains(&1), "completed turns collapse");
+    assert_eq!(thread.state, ThreadUiState::Running);
+    assert!(!thread.expanded_tool_details.contains(&1));
+
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rows = terminal.backend().buffer();
+    let collapsed: Vec<String> = (0..24)
+        .map(|y| (0..120).map(|x| rows.cell((x, y)).unwrap().symbol()).collect::<String>())
+        .collect();
+    assert!(collapsed.iter().any(|row| row.contains("Run tests [completed]")));
+    assert!(
+        !collapsed.iter().any(|row| row.contains("content: cargo test --quiet")),
+        "tool detail must stay hidden while the turn is active: {collapsed:#?}"
+    );
+
+    press(&mut app, KeyCode::Char('e'), KeyModifiers::CONTROL);
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rows = terminal.backend().buffer();
+    let expanded: Vec<String> = (0..24)
+        .map(|y| (0..120).map(|x| rows.cell((x, y)).unwrap().symbol()).collect::<String>())
+        .collect();
+    assert!(
+        expanded.iter().any(|row| row.contains("content: cargo test --quiet")),
+        "expanded tool detail must render: {expanded:#?}"
+    );
+
+    press(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rows = terminal.backend().buffer();
+    let response_collapsed: Vec<String> = (0..24)
+        .map(|y| (0..120).map(|x| rows.cell((x, y)).unwrap().symbol()).collect::<String>())
+        .collect();
+    assert!(
+        !response_collapsed.iter().any(|row| row.contains("Run tests [completed]")),
+        "collapsed response must hide nested tool rows: {response_collapsed:#?}"
+    );
 }
 
 // ── Stop, close, clear ───────────────────────────────────────────────────────

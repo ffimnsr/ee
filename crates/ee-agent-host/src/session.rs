@@ -325,7 +325,12 @@ impl AgentThread {
                 "mode {mode_id:?} was not advertised by the agent"
             )));
         }
-        self.connection.set_mode(self.session_id.clone(), mode_id).await?;
+        self.connection.set_mode(self.session_id.clone(), mode_id.clone()).await?;
+        self.shared.state.lock().expect("session state poisoned").current_mode =
+            Some(mode_id.clone());
+        if let Some(modes) = self.shared.modes.lock().expect("modes poisoned").as_mut() {
+            modes.current_mode_id = mode_id;
+        }
         Ok(())
     }
 

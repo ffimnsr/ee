@@ -350,7 +350,11 @@ fn fmt_hhmm(at: std::time::SystemTime) -> String {
 
 /// Renders one transcript item into wrapped lines for the given width.
 #[cfg(feature = "agents")]
-fn transcript_lines(item: &crate::app::TranscriptItem, width: usize) -> Vec<Line<'static>> {
+fn transcript_lines(
+    item: &crate::app::TranscriptItem,
+    width: usize,
+    show_tool_detail: bool,
+) -> Vec<Line<'static>> {
     use crate::app::{MessageRenderKind, TranscriptItem};
     let width = width.max(8);
     let nick_col = crate::app::AGENTS_NICK_COL_WIDTH;
@@ -370,7 +374,9 @@ fn transcript_lines(item: &crate::app::TranscriptItem, width: usize) -> Vec<Line
             let time = fmt_hhmm(*at);
             let nick_display = pad_or_trim(nick, nick_col);
             let wrapped = crate::app::wrap_text(text, text_width);
-            for (index, segment) in wrapped.iter().enumerate() {
+            for (index, segment) in
+                wrapped.iter().filter(|segment| !segment.trim().is_empty()).enumerate()
+            {
                 if index == 0 {
                     lines.push(Line::from(vec![
                         Span::styled(format!("[{time}]"), dim),
@@ -394,11 +400,13 @@ fn transcript_lines(item: &crate::app::TranscriptItem, width: usize) -> Vec<Line
                 Span::styled(" * ", Style::default().fg(theme::FG_WARNING)),
                 Span::styled(format!("{title} [{status}]"), Style::default().fg(theme::FG_WARNING)),
             ]));
-            for segment in crate::app::wrap_text(detail, text_width) {
-                lines.push(Line::from(vec![
-                    Span::raw(" ".repeat(indent)),
-                    Span::styled(segment, dim),
-                ]));
+            if show_tool_detail {
+                for segment in crate::app::wrap_text(detail, text_width) {
+                    lines.push(Line::from(vec![
+                        Span::raw(" ".repeat(indent)),
+                        Span::styled(segment, dim),
+                    ]));
+                }
             }
         }
 
@@ -446,27 +454,6 @@ fn transcript_lines(item: &crate::app::TranscriptItem, width: usize) -> Vec<Line
                 }
             }
         }
-        TranscriptItem::Approval { title, detail, options, at } => {
-            let time = fmt_hhmm(*at);
-            lines.push(Line::from(vec![
-                Span::styled(format!("[{time}]"), dim),
-                Span::styled(" approval: ", Style::default().fg(theme::FG_WARNING)),
-                Span::styled(title.clone(), Style::default().fg(theme::FG_TEXT)),
-            ]));
-            for segment in crate::app::wrap_text(detail, text_width) {
-                lines.push(Line::from(vec![
-                    Span::raw(" ".repeat(indent)),
-                    Span::styled(segment, Style::default().fg(theme::FG_TEXT)),
-                ]));
-            }
-            for option in options {
-                lines.push(Line::from(vec![
-                    Span::raw(" ".repeat(indent)),
-                    Span::styled("· ", Style::default().fg(theme::FG_WARNING)),
-                    Span::styled(option.clone(), Style::default().fg(theme::FG_TEXT)),
-                ]));
-            }
-        }
         TranscriptItem::System(text) => {
             lines
                 .push(Line::from(vec![Span::styled("-!- ", dim), Span::styled(text.clone(), dim)]));
@@ -502,10 +489,11 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         return;
     }
 
-    let approval_composer = approval_composer_lines(app, inner.width as usize);
-    // Keep one transcript row and the footer visible. Pending approvals consume the
-    // remaining space so their command detail and every choice stay readable.
-    let composer_height = approval_composer
+    let expanded_composer = approval_composer_lines(app, inner.width as usize)
+        .or_else(|| mode_selection_composer_lines(app, inner.width as usize));
+    // Keep one transcript row and the footer visible. Expanded composer prompts
+    // consume remaining space so every choice stays readable.
+    let composer_height = expanded_composer
         .as_ref()
         .map(|(lines, _)| lines.len().min(inner.height.saturating_sub(2) as usize) as u16)
         .unwrap_or(1)
@@ -528,6 +516,10 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         let mut lines = Vec::new();
         let mut rendered_response_groups = std::collections::BTreeSet::new();
         for item in &thread.transcript {
+            if matches!(item, crate::app::TranscriptItem::Message { text, .. } if text.trim().is_empty())
+            {
+                continue;
+            }
             if !app.agents.show_thoughts
                 && matches!(
                     item,
@@ -539,7 +531,10 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             {
                 continue;
             }
-            if let Some(group) = thread.response_group_for_item(item) {
+            let response_group = thread.response_group_for_item(item);
+            let show_tool_detail =
+                response_group.is_some_and(|group| thread.expanded_tool_details.contains(&group));
+            if let Some(group) = response_group {
                 if rendered_response_groups.insert(group) {
                     let (thoughts, tools) = thread.response_group_counts(group);
                     let selected = thread.selected_response_group == Some(group);
@@ -567,7 +562,11 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
                     continue;
                 }
             }
-            lines.extend(transcript_lines(item, transcript_area.width.saturating_sub(1) as usize));
+            lines.extend(transcript_lines(
+                item,
+                transcript_area.width.saturating_sub(1) as usize,
+                show_tool_detail,
+            ));
         }
         let visible_height = transcript_area.height as usize;
         let top = if thread.stick_to_bottom {
@@ -584,10 +583,10 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         }
         frame.render_widget(Paragraph::new(window).scroll((0, 0)), transcript_area);
 
-        // Footer: nick, state, unread, stop reason (left) and the session's
-        // ACP context-window usage (used/size tokens) right-aligned — this is
-        // the row directly above the composer.  The stop reason is omitted
-        // here because the transcript already logs `turn completed (stop: …)`.
+        // Footer: nick, state, current mode, unread, stop reason (left), and
+        // the session's ACP context-window usage (used/size tokens) right-aligned
+        // — this is the row directly above the composer. The stop reason is omitted
+        // because the transcript already logs `turn completed (stop: …)`.
         let state_label = match thread.state {
             ThreadUiState::Starting => "starting".into(),
             ThreadUiState::Ready => "ready".into(),
@@ -601,10 +600,16 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             ThreadUiState::Closed => "closed".into(),
             ThreadUiState::Failed => "failed".into(),
         };
+        let current_mode = thread
+            .host
+            .snapshot()
+            .current_mode
+            .map_or_else(|| String::from("ask"), |mode| mode.0.to_string());
         let footer_text = format!(
-            "{} [{}] | session:{} / {} | thoughts:{} | unread:{} | last:{} | Ctrl-←/→ response | Ctrl-R toggle",
+            "{} [{}] | mode:{} | session:{} / {} | thoughts:{} | unread:{} | last:{}",
             thread.nick,
             state_label,
+            current_mode,
             active_index + 1,
             app.agents.threads.len(),
             if app.agents.show_thoughts { "on" } else { "off" },
@@ -669,19 +674,21 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             )));
         }
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), transcript_area);
+        let footer_style = Style::default().fg(theme::FG_AGENT_STATUS).bg(theme::BG_AGENT_STATUS);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "agents [no session] | Enter starts after config | /new_thread | /quit | Esc close",
-                theme_style(theme::FG_DIM),
-            ))),
+                "agents [no session] | mode:ask | Enter starts after config | /new_thread | /quit | Esc close",
+                footer_style,
+            )))
+            .style(footer_style),
             footer_area,
         );
         agents_pending_composer_line(app)
     };
 
-    // Composer: a pending approval expands into a wrapped detail plus one visible
-    // row per choice. Everything else stays single-line to preserve editor space.
-    if let Some((lines, selected_row)) = approval_composer {
+    // Expanded composer prompts render one visible row per choice. Everything else
+    // stays single-line to preserve editor space.
+    if let Some((lines, selected_row)) = expanded_composer {
         frame.render_widget(Paragraph::new(lines), composer_area);
         if app.agents_focused() {
             frame.set_cursor_position(Position {
@@ -808,8 +815,59 @@ fn approval_composer_lines(app: &App, width: usize) -> Option<(Vec<Line<'static>
     Some((lines, first_option_row + selected))
 }
 
+/// Builds expanded local mode-selection rows. Returns selected option row for cursor placement.
+#[cfg(feature = "agents")]
+fn mode_selection_composer_lines(app: &App, _width: usize) -> Option<(Vec<Line<'static>>, usize)> {
+    let prompt = app.agents.mode_selection.as_ref()?;
+    let count = prompt.options.len();
+    if count == 0 {
+        return Some((
+            vec![
+                Line::from(Span::styled(
+                    "mode unavailable",
+                    Style::default().fg(theme::FG_WARNING).add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    "  agent did not advertise selectable ACP modes",
+                    theme_style(theme::FG_TEXT),
+                )),
+                Line::from(Span::styled("  Esc close", theme_style(theme::FG_DIM))),
+            ],
+            0,
+        ));
+    }
+    let selected = prompt.selected.min(count.saturating_sub(1));
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            "select mode ",
+            Style::default().fg(theme::FG_WARNING).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("[{}/{}]", selected + 1, count), Style::default().fg(theme::FG_TEXT)),
+    ])];
+    let first_option_row = lines.len();
+    for (index, mode) in prompt.options.iter().enumerate() {
+        let is_selected = index == selected;
+        let style = if is_selected {
+            Style::default().fg(theme::FG_KEY).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::FG_DIM)
+        };
+        let label = mode.clone();
+        lines.push(Line::from(vec![
+            Span::styled(if is_selected { "> " } else { "  " }, style),
+            Span::styled(label, style),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(
+        "  ↑/↓ select · Enter confirm · Esc cancel",
+        theme_style(theme::FG_DIM),
+    )));
+
+    Some((lines, first_option_row + selected))
+}
+
 /// Builds the single-line composer for permission choice, elicitation widget, or
-/// prompt draft. Pending bridge approvals use `approval_composer_lines` instead.
+/// prompt draft. Expanded approvals and mode selection use dedicated renderers instead.
 #[cfg(feature = "agents")]
 fn agents_composer_line(app: &App, thread: &crate::app::AgentThreadUi) -> Vec<Span<'static>> {
     if let Some(permission) = &app.agents.permission {

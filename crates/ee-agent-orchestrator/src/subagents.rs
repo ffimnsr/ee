@@ -452,6 +452,7 @@ impl SubagentManager {
             allow_write: request.role.allowed_tool_classes.contains(&SideEffectClass::Write),
             allow_execute: request.role.allowed_tool_classes.contains(&SideEffectClass::Execute),
             allow_delegate: request.role.allowed_tool_classes.contains(&SideEffectClass::Delegate),
+            allow_host_approved_side_effects: true,
             max_delegate_depth: self.config.max_subagent_depth,
             max_parallel_delegates: self.config.max_parallel_subagents,
             // Destructive subclasses default to denied for children; scope

@@ -10,13 +10,13 @@ use std::sync::{Arc, Mutex};
 pub use ee_acp_agent_server::{
     AcpAgentServer, AcpAgentServerConfig, AcpServerError, AgentProvider, ClientBridge,
     LoadSessionContext, MemoryTransport, MemoryTransportHandle, NewSessionContext, PromptContext,
-    PromptResult, ProviderError, ProviderFuture, SessionInit, UpdateSink,
+    PromptResult, ProviderError, ProviderFuture, SessionInit, SetModeContext, UpdateSink,
 };
 use ee_agent_protocol::{
     AgentCapabilities, AvailableCommand, ContentBlock, ContentChunk, CreateTerminalRequest,
     Error as RpcError, Implementation, MessageId, RawJsonRpcMessage, RawJsonRpcParams,
     ReadTextFileRequest, RequestId, Response, SessionCapabilities, SessionCloseCapabilities,
-    SessionId, SessionListCapabilities, SessionUpdate, StopReason, TextContent,
+    SessionId, SessionListCapabilities, SessionModeState, SessionUpdate, StopReason, TextContent,
 };
 use serde_json::{Value, json};
 use tokio::sync::watch;
@@ -79,11 +79,16 @@ impl CallLog {
 /// Deterministic fake provider: each `session/new` takes the next id from a
 /// per-test queue, `session/load` echoes the requested id, and prompts
 /// follow the per-session [`PromptBehavior`] map.
+#[derive(Clone)]
 pub struct FakeProvider {
     pub log: CallLog,
     ids: Arc<Mutex<VecDeque<String>>>,
     /// Commands advertised in every `SessionInit` (empty by default).
     commands: Arc<Mutex<Vec<AvailableCommand>>>,
+    /// Modes advertised in every `SessionInit` (absent by default).
+    modes: Arc<Mutex<Option<SessionModeState>>>,
+    /// When set, `session/set_mode` fails with this message.
+    set_mode_error: Arc<Mutex<Option<String>>>,
     /// `(role, text)` conversation messages replayed by `session/load`
     /// through the replay sink (empty by default).
     replay: Arc<Mutex<Vec<(String, String)>>>,
@@ -100,6 +105,8 @@ impl FakeProvider {
             log: log.clone(),
             ids: Arc::new(Mutex::new(ids.iter().map(|id| id.to_string()).collect())),
             commands: Arc::new(Mutex::new(Vec::new())),
+            modes: Arc::new(Mutex::new(None)),
+            set_mode_error: Arc::new(Mutex::new(None)),
             replay: Arc::new(Mutex::new(Vec::new())),
             load_error: Arc::new(Mutex::new(None)),
             behaviors: Arc::new(Mutex::new(HashMap::new())),
@@ -112,6 +119,26 @@ impl FakeProvider {
     pub fn with_commands(self, commands: Vec<AvailableCommand>) -> Self {
         *self.commands.lock().expect("fake provider commands poisoned") = commands;
         self
+    }
+
+    /// Advertises this caller-selected mode state in every session init.
+    pub fn with_modes(self, modes: SessionModeState) -> Self {
+        *self.modes.lock().expect("fake provider modes poisoned") = Some(modes);
+        self
+    }
+
+    /// Makes `session/set_mode` fail with `message` after framework
+    /// validation reaches the provider.
+    pub fn with_set_mode_error(self, message: &str) -> Self {
+        *self.set_mode_error.lock().expect("fake provider set mode error poisoned") =
+            Some(message.to_string());
+        self
+    }
+
+    /// Changes whether later `session/set_mode` calls fail.
+    pub fn set_mode_error(&self, message: Option<&str>) {
+        *self.set_mode_error.lock().expect("fake provider set mode error poisoned") =
+            message.map(str::to_string);
     }
 
     /// Makes `session/load` replay the given `(role, text)` conversation
@@ -168,9 +195,13 @@ impl AgentProvider for FakeProvider {
         let id = self.next_id();
         let cwd = ctx.cwd.clone();
         let commands = self.commands.lock().expect("fake provider commands poisoned").clone();
+        let modes = self.modes.lock().expect("fake provider modes poisoned").clone();
         Box::pin(async move {
             log.record(format!("new_session:{}", cwd.display()));
-            Ok(SessionInit::new(SessionId::new(id)).title("Test Session").commands(commands))
+            Ok(SessionInit::new(SessionId::new(id))
+                .title("Test Session")
+                .commands(commands)
+                .modes(modes))
         })
     }
 
@@ -181,6 +212,7 @@ impl AgentProvider for FakeProvider {
         let log = self.log.clone();
         let session_id = ctx.session_id.clone();
         let commands = self.commands.lock().expect("fake provider commands poisoned").clone();
+        let modes = self.modes.lock().expect("fake provider modes poisoned").clone();
         let replay = self.replay.lock().expect("fake provider replay poisoned").clone();
         let load_error = self.load_error.lock().expect("fake provider load error poisoned").clone();
         let sink = ctx.replay_sink;
@@ -210,7 +242,21 @@ impl AgentProvider for FakeProvider {
                     }
                 }
             }
-            Ok(SessionInit::new(session_id).commands(commands))
+            Ok(SessionInit::new(session_id).commands(commands).modes(modes))
+        })
+    }
+
+    fn set_mode(&self, ctx: SetModeContext) -> ProviderFuture<Result<(), ProviderError>> {
+        let log = self.log.clone();
+        let set_mode_error =
+            self.set_mode_error.lock().expect("fake provider set mode error poisoned").clone();
+        Box::pin(async move {
+            if let Some(message) = set_mode_error {
+                log.record(format!("set_mode:{}:{}:failed", ctx.session_id, ctx.mode_id));
+                return Err(ProviderError::BackendFailure(message));
+            }
+            log.record(format!("set_mode:{}:{}", ctx.session_id, ctx.mode_id));
+            Ok(())
         })
     }
 

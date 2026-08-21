@@ -15,7 +15,7 @@ use std::pin::Pin;
 
 use ee_agent_protocol::{
     AgentCapabilities, AvailableCommand, ContentBlock, Implementation, McpServer, Meta,
-    SessionConfigOption, SessionId, SessionModeState,
+    SessionConfigOption, SessionId, SessionModeId, SessionModeState,
 };
 use tokio::sync::watch;
 
@@ -132,6 +132,26 @@ impl PromptContext {
     #[must_use]
     pub fn new(session_id: impl Into<SessionId>, prompt: Vec<ContentBlock>) -> Self {
         Self { session_id: session_id.into(), prompt, metadata: None }
+    }
+}
+
+/// Validated input for [`AgentProvider::set_mode`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SetModeContext {
+    /// Session receiving the selected mode.
+    pub session_id: SessionId,
+    /// Advertised mode identifier selected by the client.
+    pub mode_id: SessionModeId,
+    /// Raw `_meta` from the `session/set_mode` request, if present.
+    pub metadata: Option<Meta>,
+}
+
+impl SetModeContext {
+    /// Creates a context with the selected mode and no metadata.
+    #[must_use]
+    pub fn new(session_id: impl Into<SessionId>, mode_id: impl Into<SessionModeId>) -> Self {
+        Self { session_id: session_id.into(), mode_id: mode_id.into(), metadata: None }
     }
 }
 
@@ -258,6 +278,16 @@ pub trait AgentProvider: Send + Sync + 'static {
         client: ClientBridge,
         cancel: watch::Receiver<bool>,
     ) -> ProviderFuture<Result<PromptResult, ProviderError>>;
+
+    /// Applies an advertised session mode. Providers that do not implement
+    /// mode behavior reject mode changes rather than accepting inert state.
+    fn set_mode(&self, _ctx: SetModeContext) -> ProviderFuture<Result<(), ProviderError>> {
+        Box::pin(async {
+            Err(ProviderError::InvalidRequest(
+                "session/set_mode is not supported by this provider".to_string(),
+            ))
+        })
+    }
 
     /// Releases provider state for a cancelled session (prompt dispatch
     /// calls this when `session/cancel` arrives).

@@ -7,7 +7,7 @@
 //! tools) live inside the runtime, so provider code only interacts with the
 //! ACP framework surface.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use ee_acp_agent_server::{ClientBridge, PromptContext, PromptResult, UpdateSink};
 use ee_agent_protocol::{
@@ -60,7 +60,7 @@ pub struct OrchestratorRuntime {
     tasks: Arc<Mutex<TaskGraph>>,
     memory: Arc<Mutex<MemoryStore>>,
     budget: Arc<Mutex<BudgetTracker>>,
-    policy: PolicyEngine,
+    policy: Arc<RwLock<PolicyEngine>>,
     checkpoints: Arc<CheckpointStore>,
     events: EventRecorder,
 }
@@ -197,7 +197,28 @@ impl OrchestratorRuntime {
             .expect("tool registry poisoned")
             .register(Arc::new(DelegateTool::new(manager)))
             .expect("registers delegate_task");
-        Self { config, models, tools, tasks, memory, budget, policy, checkpoints, events }
+        Self {
+            config,
+            models,
+            tools,
+            tasks,
+            memory,
+            budget,
+            policy: Arc::new(RwLock::new(policy)),
+            checkpoints,
+            events,
+        }
+    }
+
+    /// Replaces the active tool policy without resetting session state.
+    pub fn set_policy(&self, policy: PolicyEngine) {
+        *self.policy.write().expect("runtime policy poisoned") = policy;
+    }
+
+    /// Snapshot of the active tool policy.
+    #[must_use]
+    pub fn policy(&self) -> PolicyEngine {
+        self.policy.read().expect("runtime policy poisoned").clone()
     }
 
     /// Snapshot of the runtime's recovery/loop events (diagnostics and
@@ -477,12 +498,13 @@ impl OrchestratorRuntime {
         }
         let handle = CheckpointHandle::new(self.checkpoints.clone(), &session_id, provider);
         let model = self.models.default_adapter()?;
+        let policy = self.policy();
         let engine = LoopEngine::new(
             self.config.clone(),
             model,
             self.tools.clone(),
             self.budget.clone(),
-            self.policy.clone(),
+            policy,
             self.events.clone(),
             LoopOptions {
                 graph: Some(self.tasks.clone()),
@@ -650,12 +672,13 @@ impl OrchestratorRuntime {
             .reset_deadline(self.config.turn_timeout);
         let memory = self.memory.lock().expect("memory store poisoned").compact_context();
         let model = self.models.default_adapter()?;
+        let policy = self.policy();
         let engine = LoopEngine::new(
             self.config.clone(),
             model,
             self.tools.clone(),
             self.budget.clone(),
-            self.policy.clone(),
+            policy,
             events,
             options,
         );
@@ -738,7 +761,7 @@ impl OrchestratorRuntime {
             prompt_text,
             has_code_changes: input.has_code_changes,
             validation_tools_available: input.validation_tools_available,
-            delegation_allowed: self.policy.policy().allow_delegate,
+            delegation_allowed: self.policy().policy().allow_delegate,
             task_graph: task_graph.clone(),
             tool_definitions: self.tools.lock().expect("tool registry poisoned").definitions(),
         };
@@ -760,12 +783,13 @@ impl OrchestratorRuntime {
         };
         let mut validation = ValidationRecorder::new();
         let model = self.models.default_adapter()?;
+        let policy = self.policy();
         let executor = StrategyExecutor::new(
             self.config.clone(),
             model,
             self.tools.clone(),
             self.budget.clone(),
-            self.policy.clone(),
+            policy,
             self.tasks.clone(),
             events.clone(),
         );

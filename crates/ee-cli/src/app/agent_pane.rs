@@ -124,8 +124,6 @@ pub(crate) enum TranscriptItem {
         url_host: Option<String>,
         at: SystemTime,
     },
-    /// A bridge approval request (file write / terminal create).
-    Approval { title: String, detail: String, options: Vec<String>, at: SystemTime },
     /// `-!-` system notice.
     System(String),
     /// `-!-` stderr/debug line.
@@ -198,6 +196,8 @@ pub(crate) struct AgentThreadUi {
     pub(crate) selected_response_group: Option<ResponseGroupId>,
     /// Response groups whose reasoning and tools are hidden.
     pub(crate) collapsed_response_groups: BTreeSet<ResponseGroupId>,
+    /// Response groups whose tool input/output detail is expanded.
+    pub(crate) expanded_tool_details: BTreeSet<ResponseGroupId>,
     /// Latest agent plan snapshot, rendered in a modal instead of scrollback.
     pub(crate) current_plan: Vec<(String, char)>,
     /// Whether the user has opened the current plan modal.
@@ -282,6 +282,9 @@ impl AgentThreadUi {
         message_id: Option<String>,
         response_group: Option<ResponseGroupId>,
     ) {
+        if text.trim().is_empty() {
+            return;
+        }
         if kind == MessageRenderKind::User
             && let Some(index) = self.optimistic_message.take()
             && let Some(TranscriptItem::Message { text: target, .. }) =
@@ -500,6 +503,14 @@ pub(crate) struct PermissionPrompt {
     #[allow(dead_code)]
     pub(crate) tool_title: String,
     pub(crate) options: Vec<PermissionOption>,
+    pub(crate) selected: usize,
+}
+
+/// Local picker shown after submitting `/mode` without an argument.
+#[derive(Debug)]
+pub(crate) struct ModeSelectionPrompt {
+    pub(crate) thread_index: usize,
+    pub(crate) options: Vec<String>,
     pub(crate) selected: usize,
 }
 
@@ -1184,6 +1195,7 @@ pub(crate) struct AgentPaneState {
     pub(crate) pending_cancel: Option<std_mpsc::Receiver<Result<(), String>>>,
     pub(crate) pending_thread_action: Option<std_mpsc::Receiver<Result<String, String>>>,
     pub(crate) permission: Option<PermissionPrompt>,
+    pub(crate) mode_selection: Option<ModeSelectionPrompt>,
     pub(crate) elicitation: Option<ElicitationPrompt>,
     /// Bridge approval queue (file writes, terminal creates); the front one
     /// is shown and answered first.
@@ -1246,6 +1258,7 @@ impl Default for AgentPaneState {
             pending_cancel: None,
             pending_thread_action: None,
             permission: None,
+            mode_selection: None,
             elicitation: None,
             approvals: VecDeque::new(),
             error: None,
@@ -1860,6 +1873,7 @@ impl App {
             next_response_group: 1,
             selected_response_group: None,
             collapsed_response_groups: BTreeSet::new(),
+            expanded_tool_details: BTreeSet::new(),
             current_plan: Vec::new(),
             plan_modal_open: false,
             last_error: None,
@@ -2243,21 +2257,25 @@ fn is_mode_config_option(option: &SessionConfigOption) -> bool {
     matches!(option.category, Some(ee_agent_protocol::SessionConfigOptionCategory::Mode))
 }
 
+fn select_option_values(options: &SessionConfigSelectOptions) -> Vec<SessionConfigValueId> {
+    match options {
+        SessionConfigSelectOptions::Ungrouped(options) => {
+            options.iter().map(|option| option.value.clone()).collect()
+        }
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|group| group.options.iter().map(|option| option.value.clone()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn cycle_select_value(
     options: &SessionConfigSelectOptions,
     current: &SessionConfigValueId,
     delta: isize,
 ) -> Option<SessionConfigValueId> {
-    let values = match options {
-        SessionConfigSelectOptions::Ungrouped(options) => {
-            options.iter().map(|option| option.value.clone()).collect::<Vec<_>>()
-        }
-        SessionConfigSelectOptions::Grouped(groups) => groups
-            .iter()
-            .flat_map(|group| group.options.iter().map(|option| option.value.clone()))
-            .collect::<Vec<_>>(),
-        _ => Vec::new(),
-    };
+    let values = select_option_values(options);
     if values.is_empty() {
         return None;
     }
@@ -2326,8 +2344,25 @@ fn split_slash_command(draft: &str) -> (Option<String>, String) {
     (name, rest)
 }
 
-const LOCAL_AGENT_SLASH_COMMANDS: &[&str] =
-    &["quit", "q", "quit_full", "qf", "new_thread", "mode", "get_mode"];
+fn agent_mode_ids(thread: &AgentThreadUi) -> Vec<String> {
+    let snapshot = thread.host.snapshot();
+    if let Some(mode_option) =
+        snapshot.config_options.iter().find(|option| is_mode_config_option(option))
+        && let SessionConfigKind::Select(select) = &mode_option.kind
+    {
+        return select_option_values(&select.options)
+            .into_iter()
+            .map(|value| value.0.to_string())
+            .collect();
+    }
+    thread
+        .host
+        .advertised_modes()
+        .map(|modes| modes.available_modes.into_iter().map(|mode| mode.id.0.to_string()).collect())
+        .unwrap_or_default()
+}
+
+const LOCAL_AGENT_SLASH_COMMANDS: &[&str] = &["quit", "q", "quit_full", "qf", "new_thread", "mode"];
 
 /// Lists local and agent-advertised slash commands without duplicate names.
 pub(crate) fn agent_slash_command_names(commands: &[AvailableCommand]) -> Vec<&str> {
@@ -2718,6 +2753,7 @@ impl App {
         // 2. Resolve pending approvals and elicitations as cancelled:
         //    dropping the reply senders makes the host resolve them.
         self.agents.approvals.clear();
+        self.agents.mode_selection = None;
         self.agents.elicitation = None;
         self.agents.permission = None;
         // 3. Kill agent-owned terminals.
@@ -3058,28 +3094,23 @@ impl App {
         self.backend.status_message = Some(format!("setting config: {}", config_id.0));
     }
 
-    fn agents_show_mode(&mut self, thread_index: usize) {
-        let snapshot = self.agents.threads[thread_index].host.snapshot();
-        if let Some(mode_option) =
-            snapshot.config_options.iter().find(|option| is_mode_config_option(option))
-            && let SessionConfigKind::Select(select) = &mode_option.kind
-        {
-            self.agents.threads[thread_index]
-                .push_system(format!("mode: {}", select.current_value.0));
-            return;
-        }
-        if let Some(modes) = self.agents.threads[thread_index].host.advertised_modes() {
-            self.agents.threads[thread_index]
-                .push_system(format!("mode: {}", modes.current_mode_id.0));
-            return;
-        }
-        self.backend.status_message = Some(String::from("agent session has no advertised modes"));
+    fn open_mode_selection(&mut self, thread_index: usize) {
+        let thread = &self.agents.threads[thread_index];
+        let options = agent_mode_ids(thread);
+        let selected = thread
+            .host
+            .snapshot()
+            .current_mode
+            .as_ref()
+            .and_then(|current| options.iter().position(|mode| mode == current.0.as_ref()))
+            .unwrap_or_default();
+        self.agents.mode_selection = Some(ModeSelectionPrompt { thread_index, options, selected });
     }
 
     fn agents_set_mode(&mut self, thread_index: usize, raw_mode: &str) {
         let raw_mode = raw_mode.trim();
         if raw_mode.is_empty() {
-            self.backend.status_message = Some(String::from("usage: /mode <mode>"));
+            self.open_mode_selection(thread_index);
             return;
         }
 
@@ -3101,8 +3132,7 @@ impl App {
         }
 
         let Some(modes) = self.agents.threads[thread_index].host.advertised_modes() else {
-            self.backend.status_message =
-                Some(String::from("agent session has no advertised modes"));
+            self.open_mode_selection(thread_index);
             return;
         };
         let Some(mode) =
@@ -3238,13 +3268,14 @@ impl App {
             return false;
         };
         let thread = &mut self.agents.threads[active];
-        if thread.available_commands.is_empty() {
-            return false;
-        }
         let draft = thread.draft.clone();
         let (current_name, rest) = split_slash_command(&draft);
         // Preserve user-entered arguments while cycling slash commands.
         if !draft.trim_start().starts_with('/') {
+            return false;
+        }
+
+        if thread.available_commands.is_empty() {
             return false;
         }
         let command_name = current_name.as_deref().unwrap_or_default();
@@ -3278,55 +3309,54 @@ impl App {
         true
     }
 
+    /// Applies pane-local exit commands without requiring an agent session.
+    fn submit_agents_exit_command(&mut self, draft: &str) -> bool {
+        if is_agents_quit_slash_command(draft) {
+            self.agents_clear_draft();
+            self.close_agents_pane();
+            return true;
+        }
+        if is_agents_quit_full_slash_command(draft) {
+            self.agents_clear_draft();
+            self.should_quit = true;
+            return true;
+        }
+        false
+    }
+
     /// Submits the active thread's draft as a prompt turn.
     fn submit_prompt(&mut self) {
-        let Some(active) = self.agents.active_thread_index() else {
-            self.submit_without_session();
-            return;
-        };
         if self.agents.permission.is_some()
+            || self.agents.mode_selection.is_some()
             || self.agents.elicitation.is_some()
             || !self.agents.approvals.is_empty()
         {
             return;
         }
-        let draft = self.agents.threads[active].draft.clone();
+        let active = self.agents.active_thread_index();
+        let draft = active
+            .map(|index| self.agents.threads[index].draft.clone())
+            .unwrap_or_else(|| self.agents.pending_draft.clone());
         if draft.trim().is_empty() {
             return;
         }
-        if is_agents_quit_slash_command(&draft) {
-            self.agents.threads[active].draft.clear();
-            self.close_agents_pane();
+        if self.submit_agents_exit_command(&draft) {
             return;
         }
-        if is_agents_quit_full_slash_command(&draft) {
-            self.agents.threads[active].draft.clear();
-            self.should_quit = true;
+        let Some(active) = active else {
+            self.submit_without_session();
             return;
-        }
+        };
         if is_agents_new_slash_command(&draft) {
             self.agents.threads[active].draft.clear();
             self.agents_new_session();
             return;
         }
         let (command, args) = split_slash_command(&draft);
-        match command.as_deref() {
-            Some("get_mode") if args.trim().is_empty() => {
-                self.agents.threads[active].draft.clear();
-                self.agents_show_mode(active);
-                return;
-            }
-            Some("get_mode") => {
-                self.agents.threads[active].draft.clear();
-                self.backend.status_message = Some(String::from("usage: /get_mode"));
-                return;
-            }
-            Some("mode") => {
-                self.agents.threads[active].draft.clear();
-                self.agents_set_mode(active, &args);
-                return;
-            }
-            _ => {}
+        if let Some("mode") = command.as_deref() {
+            self.agents.threads[active].draft.clear();
+            self.agents_set_mode(active, &args);
+            return;
         }
         let thread = &mut self.agents.threads[active];
         if thread.state == ThreadUiState::Running {
@@ -3434,6 +3464,18 @@ impl App {
             ));
         }
         self.agents.permission = None;
+    }
+
+    /// Applies the selected local mode and closes the composer picker.
+    fn confirm_mode_selection(&mut self) {
+        let Some(prompt) = self.agents.mode_selection.take() else {
+            return;
+        };
+        let Some(mode) = prompt.options.get(prompt.selected).cloned() else {
+            self.agents.mode_selection = Some(prompt);
+            return;
+        };
+        self.agents_set_mode(prompt.thread_index, &mode);
     }
 
     /// Resolves pending elicitation with accept, decline, or cancel semantics.
@@ -3571,6 +3613,29 @@ impl App {
             }
         }
 
+        // Mode selection expands in the composer just like bridge approvals.
+        if self.agents.mode_selection.is_some() {
+            match key.code {
+                KeyCode::Up | KeyCode::Left | KeyCode::BackTab => {
+                    self.move_mode_selection(-1);
+                    return;
+                }
+                KeyCode::Down | KeyCode::Right | KeyCode::Tab => {
+                    self.move_mode_selection(1);
+                    return;
+                }
+                KeyCode::Enter => {
+                    self.confirm_mode_selection();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.agents.mode_selection = None;
+                    return;
+                }
+                _ => return,
+            }
+        }
+
         // Permission selection: ←/→/Tab move, Enter confirms.
         if self.agents.permission.is_some() {
             match key.code {
@@ -3686,6 +3751,7 @@ impl App {
                         't' => self.open_agents_thread_picker(),
                         'g' => self.agents_toggle_plan(),
                         'r' => self.agents_toggle_selected_response_group(),
+                        'e' => self.agents_toggle_selected_tool_details(),
                         'u' => self.agents_clear_draft(),
                         _ => {}
                     }
@@ -3765,6 +3831,31 @@ impl App {
         }
         if !thread.collapsed_response_groups.insert(group) {
             thread.collapsed_response_groups.remove(&group);
+        }
+    }
+
+    /// Toggles tool input/output detail for the selected response group (Ctrl-E).
+    fn agents_toggle_selected_tool_details(&mut self) {
+        let Some(active) = self.agents.active_thread_index() else {
+            return;
+        };
+        let thread = &mut self.agents.threads[active];
+        let Some(group) = thread.selected_response_group else {
+            return;
+        };
+        if !thread.response_group_ids().contains(&group) {
+            return;
+        }
+        if !thread.expanded_tool_details.insert(group) {
+            thread.expanded_tool_details.remove(&group);
+        }
+    }
+
+    /// Moves the local mode selection by `delta`.
+    fn move_mode_selection(&mut self, delta: isize) {
+        if let Some(prompt) = &mut self.agents.mode_selection {
+            let count = prompt.options.len().max(1) as isize;
+            prompt.selected = (prompt.selected as isize + delta).rem_euclid(count) as usize;
         }
     }
 
@@ -3982,7 +4073,7 @@ mod tests {
     fn agent_slash_command_names_include_local_and_advertised_commands() {
         assert_eq!(
             agent_slash_command_names(&[compact_command(), AvailableCommand::new("quit", "")]),
-            vec!["quit", "q", "quit_full", "qf", "new_thread", "mode", "get_mode", "compact"]
+            vec!["quit", "q", "quit_full", "qf", "new_thread", "mode", "compact"]
         );
     }
 

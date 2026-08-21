@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::RwLock;
 
-use ee_agent_protocol::{McpServer, SessionId};
+use ee_agent_protocol::{McpServer, SessionId, SessionModeId, SessionModeState};
 
 /// One live session, owned by the framework.
 ///
@@ -28,6 +28,8 @@ pub struct ServerSession {
     pub mcp_servers: Vec<McpServer>,
     /// Human-readable session title (surfaced in `session/list`).
     pub title: Option<String>,
+    /// Advertised modes and current selected mode, when supported by provider.
+    pub modes: Option<SessionModeState>,
     /// Provider-owned metadata; the framework treats it as opaque.
     pub metadata: serde_json::Value,
 }
@@ -96,6 +98,22 @@ impl SessionStore {
         self.sessions.write().expect("session store poisoned").remove(&session_id.to_string())
     }
 
+    /// Changes a session's selected mode only when the id was advertised.
+    pub fn set_mode(&self, session_id: &SessionId, mode_id: SessionModeId) -> bool {
+        let mut sessions = self.sessions.write().expect("session store poisoned");
+        let Some(session) = sessions.get_mut(&session_id.to_string()) else {
+            return false;
+        };
+        let Some(modes) = session.modes.as_mut() else {
+            return false;
+        };
+        if !modes.available_modes.iter().any(|mode| mode.id == mode_id) {
+            return false;
+        }
+        modes.current_mode_id = mode_id;
+        true
+    }
+
     /// Whether a session with the given id is registered.
     #[must_use]
     pub fn contains(&self, session_id: &SessionId) -> bool {
@@ -115,6 +133,7 @@ mod tests {
             additional_directories: Vec::new(),
             mcp_servers: Vec::new(),
             title: None,
+            modes: None,
             metadata: serde_json::Value::Null,
         }
     }
@@ -136,6 +155,27 @@ mod tests {
         let removed = store.remove(&SessionId::new("s-1")).expect("removes");
         assert_eq!(removed.session_id, SessionId::new("s-1"));
         assert!(!store.contains(&SessionId::new("s-1")));
+    }
+
+    #[test]
+    fn set_mode_accepts_only_advertised_ids() {
+        let store = SessionStore::new();
+        let mut entry = session("s-1");
+        entry.modes = Some(SessionModeState::new(
+            "ask",
+            vec![
+                ee_agent_protocol::SessionMode::new("ask", "Ask"),
+                ee_agent_protocol::SessionMode::new("plan", "Plan"),
+            ],
+        ));
+        store.insert_new(entry).expect("inserts");
+
+        assert!(store.set_mode(&SessionId::new("s-1"), SessionModeId::new("plan")));
+        assert_eq!(
+            store.get(&SessionId::new("s-1")).expect("gets").modes.expect("modes").current_mode_id,
+            SessionModeId::new("plan")
+        );
+        assert!(!store.set_mode(&SessionId::new("s-1"), SessionModeId::new("agent")));
     }
 
     #[test]

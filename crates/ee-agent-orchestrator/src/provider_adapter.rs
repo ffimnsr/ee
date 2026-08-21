@@ -30,14 +30,14 @@ use std::sync::{Arc, Mutex};
 
 use ee_acp_agent_server::{
     AgentProvider, ClientBridge, LoadSessionContext, NewSessionContext, PromptContext,
-    PromptResult, ProviderError, ProviderFuture, SessionInit, UpdateSink,
+    PromptResult, ProviderError, ProviderFuture, SessionInit, SetModeContext, UpdateSink,
 };
 use ee_agent_protocol::{
     AgentCapabilities, COMPACT_COMMAND_NAME, ContentBlock, ContentChunk, DISCARD_COMMAND_NAME,
     Implementation, McpCapabilities, MessageId, SessionCapabilities, SessionCloseCapabilities,
-    SessionId, SessionListCapabilities, SessionResumeCapabilities, SessionUpdate, StopReason,
-    TextContent, compact_available_command, discard_available_command, is_resume_command,
-    parse_slash_command, resume_available_command,
+    SessionId, SessionListCapabilities, SessionMode, SessionModeId, SessionModeState,
+    SessionResumeCapabilities, SessionUpdate, StopReason, TextContent, compact_available_command,
+    discard_available_command, is_resume_command, parse_slash_command, resume_available_command,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -49,7 +49,7 @@ use crate::mcp::{
 };
 use crate::memory::MemoryStore;
 use crate::model::ModelAdapter;
-use crate::policy::PolicyEngine;
+use crate::policy::{PolicyEngine, ToolPolicy};
 use crate::recovery::TurnOutcome;
 use crate::runtime::OrchestratorRuntime;
 use crate::tasks::TaskGraph;
@@ -93,6 +93,9 @@ impl Default for OrchestratorProviderConfig {
 struct SessionRuntime {
     runtime: Arc<OrchestratorRuntime>,
     system_context: String,
+    /// Current ACP mode, kept in provider state so its policy and prompt
+    /// instructions remain aligned with framework session state.
+    mode: SessionModeId,
     /// Validated, secret-redacted MCP server descriptors from `session/new`.
     mcp_servers: Vec<McpServerDescriptor>,
     /// Memory-bounded conversation log (user prompts + agent text chunks as
@@ -120,12 +123,74 @@ enum ConversationRole {
 /// dropped first (the replay stays memory-bounded).
 const CONVERSATION_MAX_MESSAGES: usize = 256;
 
+const ASK_MODE_ID: &str = "ask";
+const WRITE_MODE_ID: &str = "write";
+const PLAN_MODE_ID: &str = "plan";
+
+fn default_session_mode() -> SessionModeId {
+    SessionModeId::new(ASK_MODE_ID)
+}
+
+fn session_modes(current_mode: SessionModeId) -> SessionModeState {
+    let mut modes = SessionModeState::new(
+        ASK_MODE_ID,
+        vec![
+            SessionMode::new(ASK_MODE_ID, "Ask"),
+            SessionMode::new(WRITE_MODE_ID, "Write"),
+            SessionMode::new(PLAN_MODE_ID, "Plan"),
+        ],
+    );
+    modes.current_mode_id = current_mode;
+    modes
+}
+
+fn mode_policy(base: &PolicyEngine, mode: &SessionModeId) -> Result<PolicyEngine, ProviderError> {
+    let mut policy: ToolPolicy = base.policy().clone();
+    match mode.to_string().as_str() {
+        ASK_MODE_ID => {
+            policy.allow_read = false;
+            policy.allow_write = false;
+            policy.allow_execute = false;
+            policy.allow_delegate = false;
+            policy.allow_host_approved_side_effects = false;
+        }
+        PLAN_MODE_ID => {
+            policy.allow_read = true;
+            policy.allow_write = false;
+            policy.allow_execute = false;
+            policy.allow_delegate = false;
+            policy.allow_host_approved_side_effects = false;
+        }
+        WRITE_MODE_ID => {}
+        _ => {
+            return Err(ProviderError::InvalidRequest(format!("unsupported session mode: {mode}")));
+        }
+    }
+    Ok(PolicyEngine::new(policy))
+}
+
+fn mode_system_context(system_context: String, mode: &SessionModeId) -> String {
+    let instruction = match mode.to_string().as_str() {
+        ASK_MODE_ID => "Agent mode: ask. Answer directly. Do not invoke tools or make changes.",
+        PLAN_MODE_ID => {
+            "Agent mode: plan. Investigate with read-only tools, then return an actionable plan. Do not modify files, run commands, or delegate."
+        }
+        WRITE_MODE_ID => {
+            "Agent mode: write. Implement task with allowed tools. Existing host approval gates remain required for writes and execution."
+        }
+        _ => "Agent mode: unknown. Do not invoke tools or make changes.",
+    };
+    format!("{system_context}\n\n{instruction}")
+}
+
 /// Serialized orchestrator state kept when a session closes so a later
 /// `session/load` can restore it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedSession {
     tasks: TaskGraph,
     memory: MemoryStore,
+    #[serde(default = "default_session_mode")]
+    mode: SessionModeId,
     /// Conversation log captured during the session (memory-bounded);
     /// replayed as `user_message_chunk` / `agent_message_chunk` updates by
     /// `session/load`.
@@ -204,6 +269,17 @@ impl<M: ModelAdapter> OrchestratorProvider<M> {
     pub(crate) fn session_mcp_servers(&self, session_id: &str) -> Vec<McpServerDescriptor> {
         let sessions = self.sessions.lock().expect("adapter sessions poisoned");
         sessions.get(session_id).map(|session| session.mcp_servers.clone()).unwrap_or_default()
+    }
+
+    /// Current session mode and its effective policy (tests).
+    #[cfg(test)]
+    pub(crate) fn session_mode_policy(
+        &self,
+        session_id: &str,
+    ) -> Option<(SessionModeId, PolicyEngine)> {
+        let sessions = self.sessions.lock().expect("adapter sessions poisoned");
+        let session = sessions.get(session_id)?;
+        Some((session.mode.clone(), session.runtime.policy()))
     }
 
     /// Whether a session's serialized state is still held for `session/load`.
@@ -501,8 +577,13 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
             let number = next_session_number(&next_session, &config.recovery);
             let session_id = SessionId::new(format!("{SESSION_ID_PREFIX}-{number}"));
             let system_context = workspace_system_context(&ctx.cwd, &ctx.additional_directories);
+            let mode = default_session_mode();
             let mcp_servers = validate_mcp_servers(&ctx.mcp_servers)?;
-            let runtime = Arc::new(OrchestratorRuntime::with_policy(config, model, policy));
+            let runtime = Arc::new(OrchestratorRuntime::with_policy(
+                config,
+                model,
+                mode_policy(&policy, &mode)?,
+            ));
             runtime.register_builtins(&session_id).map_err(|error| {
                 ProviderError::BackendFailure(format!("failed to register built-in tools: {error}"))
             })?;
@@ -511,11 +592,14 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                 SessionRuntime {
                     runtime,
                     system_context,
+                    mode: mode.clone(),
                     mcp_servers,
                     conversation: Arc::new(Mutex::new(Vec::new())),
                 },
             );
-            Ok(SessionInit::new(session_id).commands(initial_commands(recovery_enabled)))
+            Ok(SessionInit::new(session_id)
+                .commands(initial_commands(recovery_enabled))
+                .modes(session_modes(mode)))
         })
     }
 
@@ -543,25 +627,29 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                     ctx.replay_sink.as_ref(),
                     &entry.conversation.lock().expect("conversation poisoned"),
                 )?;
-                return Ok(
-                    SessionInit::new(session_id).commands(initial_commands(recovery_enabled))
-                );
+                return Ok(SessionInit::new(session_id)
+                    .commands(initial_commands(recovery_enabled))
+                    .modes(session_modes(entry.mode.clone())));
             }
             let state = persisted
                 .lock()
                 .expect("adapter persisted poisoned")
                 .remove(&session_id.to_string());
-            let (runtime, conversation) = match state {
-                Some(state) => (
-                    Arc::new(OrchestratorRuntime::with_state(
-                        config,
-                        model.clone(),
-                        policy.clone(),
-                        state.tasks,
-                        state.memory,
-                    )),
-                    state.conversation,
-                ),
+            let (runtime, conversation, mode) = match state {
+                Some(state) => {
+                    let mode = state.mode;
+                    (
+                        Arc::new(OrchestratorRuntime::with_state(
+                            config,
+                            model.clone(),
+                            mode_policy(&policy, &mode)?,
+                            state.tasks,
+                            state.memory,
+                        )),
+                        state.conversation,
+                        mode,
+                    )
+                }
                 None => {
                     // Crash restore: no in-memory state survived, so rebuild
                     // from the durable checkpoint store when the provider
@@ -580,16 +668,17 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                     };
                     // The pending checkpoint stays until the resumed turn
                     // completes or the client discards it.
+                    let mode = default_session_mode();
                     let runtime = restore_runtime_from_checkpoint(
                         &checkpoint,
                         &implementation.name,
                         model.clone(),
-                        policy.clone(),
+                        mode_policy(&policy, &mode)?,
                     )?;
                     // Crash fallback replay: the checkpoint's transcript
                     // tail is the only conversation that survived.
                     replay_checkpoint_transcript(ctx.replay_sink.as_ref(), &checkpoint)?;
-                    (runtime, Vec::new())
+                    (runtime, Vec::new(), mode)
                 }
             };
             runtime.register_builtins(&session_id).map_err(|error| {
@@ -601,11 +690,14 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                 SessionRuntime {
                     runtime,
                     system_context,
+                    mode: mode.clone(),
                     mcp_servers,
                     conversation: Arc::new(Mutex::new(conversation)),
                 },
             );
-            Ok(SessionInit::new(session_id).commands(initial_commands(recovery_enabled)))
+            Ok(SessionInit::new(session_id)
+                .commands(initial_commands(recovery_enabled))
+                .modes(session_modes(mode)))
         })
     }
 
@@ -626,15 +718,18 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
             // the pending-checkpoint detection.  A live session (same
             // process) is reused as-is.
             let mcp_servers = validate_mcp_servers(&ctx.mcp_servers)?;
-            let mut live = false;
-            {
+            let live_mode = {
                 let mut sessions = sessions.lock().expect("adapter sessions poisoned");
                 if let Some(entry) = sessions.get_mut(&session_id.to_string()) {
-                    live = true;
                     entry.mcp_servers = mcp_servers.clone();
+                    Some(entry.mode.clone())
+                } else {
+                    None
                 }
-            }
-            if !live {
+            };
+            let mode = if let Some(mode) = live_mode {
+                mode
+            } else {
                 let store = CheckpointStore::new(&config.recovery);
                 let Some((_id, checkpoint)) =
                     store.load_latest(&session_id.to_string()).map_err(|error| {
@@ -647,11 +742,12 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                         "no pending checkpoint for session {session_id}; nothing to resume"
                     )));
                 };
+                let mode = default_session_mode();
                 let runtime = restore_runtime_from_checkpoint(
                     &checkpoint,
                     &implementation.name,
                     model.clone(),
-                    policy.clone(),
+                    mode_policy(&policy, &mode)?,
                 )?;
                 runtime.register_builtins(&session_id).map_err(|error| {
                     ProviderError::BackendFailure(format!(
@@ -666,12 +762,16 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                     SessionRuntime {
                         runtime,
                         system_context,
+                        mode: mode.clone(),
                         mcp_servers,
                         conversation: Arc::new(Mutex::new(Vec::new())),
                     },
                 );
-            }
-            Ok(SessionInit::new(session_id).commands(initial_commands(recovery_enabled)))
+                mode
+            };
+            Ok(SessionInit::new(session_id)
+                .commands(initial_commands(recovery_enabled))
+                .modes(session_modes(mode)))
         })
     }
 
@@ -685,7 +785,6 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
         let session_id = ctx.session_id.clone();
         let sessions = self.sessions.clone();
         let mcp_policy = self.config.mcp.clone();
-        let policy = self.policy.clone();
         let implementation_name = self.config.implementation.name.clone();
         Box::pin(async move {
             let session = {
@@ -694,16 +793,18 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                     (
                         session.runtime.clone(),
                         session.system_context.clone(),
+                        session.mode.clone(),
                         session.mcp_servers.clone(),
                         session.conversation.clone(),
                     )
                 })
             };
-            let Some((runtime, system_context, mcp_servers, conversation)) = session else {
+            let Some((runtime, system_context, mode, mcp_servers, conversation)) = session else {
                 return Err(ProviderError::BackendFailure(format!(
                     "no orchestrator state for session {session_id}"
                 )));
             };
+            let system_context = mode_system_context(system_context, &mode);
             // `/compact` is detected here, before any MCP bridging or tool
             // registration, so compaction turns never connect servers or
             // expose tools; the runtime still routes the turn to its
@@ -792,7 +893,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                     }),
                 }
             }
-            emit_mcp_diagnostics(&sink, &diagnostics, &policy, &manager);
+            emit_mcp_diagnostics(&sink, &diagnostics, &runtime.policy(), &manager);
             let cleanup =
                 McpTurnCleanup { runtime: runtime.clone(), manager: Some(manager), registered };
             // The framework's cancellation watch flips on `session/cancel`
@@ -866,6 +967,24 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
         })
     }
 
+    fn set_mode(&self, ctx: SetModeContext) -> ProviderFuture<Result<(), ProviderError>> {
+        let sessions = self.sessions.clone();
+        let base_policy = self.policy.clone();
+        Box::pin(async move {
+            let policy = mode_policy(&base_policy, &ctx.mode_id)?;
+            let mut sessions = sessions.lock().expect("adapter sessions poisoned");
+            let Some(session) = sessions.get_mut(&ctx.session_id.to_string()) else {
+                return Err(ProviderError::InvalidRequest(format!(
+                    "unknown orchestrator session: {}",
+                    ctx.session_id
+                )));
+            };
+            session.runtime.set_policy(policy);
+            session.mode = ctx.mode_id;
+            Ok(())
+        })
+    }
+
     fn cancel_session(&self, _session_id: SessionId) -> ProviderFuture<Result<(), ProviderError>> {
         // The framework flips the prompt's cancellation watch before calling
         // this hook, so the in-flight `run_turn` already observes the cancel.
@@ -895,6 +1014,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                 PersistedSession {
                     tasks: runtime.runtime.tasks(),
                     memory: runtime.runtime.memory(),
+                    mode: runtime.mode,
                     conversation,
                 },
             );
@@ -1207,7 +1327,7 @@ mod tests {
         handle_a.shutdown(task_a).await;
 
         // Provider B (fresh process) restores via session/resume: no replay
-        // updates precede the `{}` response.
+        // updates precede its mode advertisement response.
         let provider_b = durable_recovery_provider(model, dir.path());
         let (handle_b, task_b) = spawn_server(provider_b);
         handle_b.send(request(
@@ -1216,7 +1336,7 @@ mod tests {
             json!({ "sessionId": session_id, "cwd": "/work", "mcpServers": [] }),
         ));
         let result = request_result(handle_b.next_frame().await);
-        assert_eq!(result, json!({}), "resume answers the empty result object: {result}");
+        assert_eq!(result["modes"]["currentModeId"], ASK_MODE_ID, "resume mode: {result}");
         assert!(handle_b.outbound().is_empty(), "no replay updates before the resume response");
 
         // The next prompt continues the paused turn from the checkpoint.
@@ -1334,7 +1454,7 @@ mod tests {
         );
         assert!(commands_seen, "loaded providers re-advertise their commands");
         let result = request_result(response.expect("load response arrives after replay"));
-        assert_eq!(result, json!({}), "load responds null after replay");
+        assert_eq!(result["modes"]["currentModeId"], ASK_MODE_ID, "load mode: {result}");
 
         // The loaded session resumes the paused turn on the next prompt.
         handle_b.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
@@ -1683,12 +1803,80 @@ mod tests {
         handle.send(request(1, "session/new", session_new_params("/work")));
         let result = request_result(handle.next_frame().await);
         assert_eq!(result["sessionId"], "session-1", "monotonic provider id");
+        assert_eq!(result["modes"]["currentModeId"], "ask");
+        assert_eq!(
+            result["modes"]["availableModes"]
+                .as_array()
+                .expect("mode list")
+                .iter()
+                .map(|mode| mode["id"].as_str().expect("mode id"))
+                .collect::<Vec<_>>(),
+            vec!["ask", "write", "plan"]
+        );
 
         let (tasks, memory) = probe.session_state("session-1").expect("session state exists");
         assert_eq!(tasks.len(), 0, "fresh task graph");
         assert!(memory.is_empty(), "fresh memory store");
 
         handle.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn provider_adapter_mode_switch_enforces_effective_tool_policy() {
+        use crate::tools::{SideEffectClass, ToolDefinition};
+
+        let provider = OrchestratorProvider::new(
+            OrchestratorProviderConfig::default(),
+            Arc::new(FakeModel::new(Vec::new())),
+        );
+        let init =
+            provider.new_session(NewSessionContext::new("/work")).await.expect("creates session");
+        let session_id = init.session_id;
+        let tool = |class| ToolDefinition::new("test", "test").side_effect_class(class);
+
+        let (mode, policy) = provider.session_mode_policy(&session_id.to_string()).expect("state");
+        assert_eq!(mode, SessionModeId::new(ASK_MODE_ID));
+        for class in [
+            SideEffectClass::Read,
+            SideEffectClass::Write,
+            SideEffectClass::Execute,
+            SideEffectClass::Delegate,
+        ] {
+            assert!(!policy.check(&tool(class), Default::default()).allow, "ask denies {class:?}");
+        }
+        assert!(
+            !policy.check(&tool(SideEffectClass::Write).host_approval(), Default::default()).allow,
+            "ask denies host-approved writes before the editor gate"
+        );
+
+        provider
+            .set_mode(SetModeContext::new(session_id.clone(), PLAN_MODE_ID))
+            .await
+            .expect("switches to plan");
+        let (mode, policy) = provider.session_mode_policy(&session_id.to_string()).expect("state");
+        assert_eq!(mode, SessionModeId::new(PLAN_MODE_ID));
+        assert!(policy.check(&tool(SideEffectClass::Read), Default::default()).allow);
+        for class in [SideEffectClass::Write, SideEffectClass::Execute, SideEffectClass::Delegate] {
+            assert!(!policy.check(&tool(class), Default::default()).allow, "plan denies {class:?}");
+        }
+        assert!(
+            !policy
+                .check(&tool(SideEffectClass::Execute).host_approval(), Default::default())
+                .allow,
+            "plan denies host-approved execution before the editor gate"
+        );
+
+        provider
+            .set_mode(SetModeContext::new(session_id.clone(), WRITE_MODE_ID))
+            .await
+            .expect("switches to write");
+        let (mode, policy) = provider.session_mode_policy(&session_id.to_string()).expect("state");
+        assert_eq!(mode, SessionModeId::new(WRITE_MODE_ID));
+        assert!(policy.check(&tool(SideEffectClass::Read), Default::default()).allow);
+        assert!(
+            policy.check(&tool(SideEffectClass::Write).host_approval(), Default::default()).allow,
+            "write preserves host approval routing"
+        );
     }
 
     #[tokio::test]
@@ -1756,7 +1944,13 @@ mod tests {
             raw_params_to_value(update.params.clone())["update"]["sessionUpdate"],
             "available_commands_update"
         );
-        handle.send(request(2, "session/prompt", prompt_params(&session_id, "read .ee.toml")));
+        handle.send(request(
+            2,
+            "session/set_mode",
+            json!({ "sessionId": session_id, "modeId": PLAN_MODE_ID }),
+        ));
+        assert_eq!(request_result(handle.next_frame().await), json!({}));
+        handle.send(request(3, "session/prompt", prompt_params(&session_id, "read .ee.toml")));
         drain_mcp_diagnostics(&handle).await;
         let frames = handle.next_frames(3).await;
         assert_eq!(request_result(frames[2].clone())["stopReason"], "end_turn");
@@ -1767,6 +1961,7 @@ mod tests {
         assert!(context.contains("- /shared/lib"), "{context}");
         assert!(context.contains("require absolute paths"), "{context}");
         assert!(context.contains("Resolve relative paths"), "{context}");
+        assert!(context.contains("Agent mode: plan"), "{context}");
 
         handle.shutdown(task).await;
     }
@@ -1785,7 +1980,13 @@ mod tests {
         let (handle, task) = spawn_server(provider);
         let session_id = new_session(&handle, 1).await;
 
-        handle.send(request(2, "session/prompt", prompt_params(&session_id, "read a file")));
+        handle.send(request(
+            2,
+            "session/set_mode",
+            json!({ "sessionId": session_id, "modeId": PLAN_MODE_ID }),
+        ));
+        assert_eq!(request_result(handle.next_frame().await), json!({}));
+        handle.send(request(3, "session/prompt", prompt_params(&session_id, "read a file")));
         // MCP diagnostics, plan, pending tool-call, in-progress tool-call,
         // then the framework-owned fs request.
         drain_mcp_diagnostics(&handle).await;
@@ -1931,9 +2132,8 @@ mod tests {
         );
         let result = request_result(frames[3].clone());
         assert_eq!(
-            result,
-            json!({}),
-            "LoadSessionResponse carries no session id; restore is proven by state"
+            result["modes"]["currentModeId"], ASK_MODE_ID,
+            "load restores mode advertisement alongside persisted state"
         );
         let (tasks, _memory) = probe.session_state(&session_id).expect("restored state");
         assert_eq!(tasks.len(), 1, "persisted root task restored");
@@ -2202,6 +2402,7 @@ mod tests {
         let probe = provider.clone();
         let (handle, task) = spawn_server(provider);
         let session_id = mcp_new_session(&handle, 1, ee_proxy_acp_mcp_servers()).await;
+        let _ = handle.next_frame().await; // initial available-commands update
 
         let mut runner =
             PromptMcpRunner::standard_ee_answers(json!([ee_tool("ee_workspace_roots")]));
@@ -2214,7 +2415,13 @@ mod tests {
             }),
         );
 
-        handle.send(request(2, "session/prompt", prompt_params(&session_id, "list roots")));
+        handle.send(request(
+            2,
+            "session/set_mode",
+            json!({ "sessionId": session_id, "modeId": PLAN_MODE_ID }),
+        ));
+        assert_eq!(request_result(handle.next_frame().await), json!({}));
+        handle.send(request(3, "session/prompt", prompt_params(&session_id, "list roots")));
         let (thoughts, stop_reason) = runner.run(&handle).await;
         assert_eq!(stop_reason, "end_turn");
 
@@ -2274,6 +2481,7 @@ mod tests {
         let provider = OrchestratorProvider::new(OrchestratorProviderConfig::default(), model);
         let (handle, task) = spawn_server(provider);
         let session_id = mcp_new_session(&handle, 1, ee_proxy_acp_mcp_servers()).await;
+        let _ = handle.next_frame().await; // initial available-commands update
 
         let mut runner = PromptMcpRunner::standard_ee_answers(json!([
             ee_tool("ee_workspace_roots"),
@@ -2287,7 +2495,13 @@ mod tests {
             }),
         );
 
-        handle.send(request(2, "session/prompt", prompt_params(&session_id, "write a file")));
+        handle.send(request(
+            2,
+            "session/set_mode",
+            json!({ "sessionId": session_id, "modeId": WRITE_MODE_ID }),
+        ));
+        assert_eq!(request_result(handle.next_frame().await), json!({}));
+        handle.send(request(3, "session/prompt", prompt_params(&session_id, "write a file")));
         let (_thoughts, stop_reason) = runner.run(&handle).await;
         assert_eq!(stop_reason, "end_turn", "approval dispatch does not crash the turn");
 

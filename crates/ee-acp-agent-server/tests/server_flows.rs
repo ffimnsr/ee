@@ -11,13 +11,13 @@ use std::path::PathBuf;
 use ee_agent_protocol::{
     AvailableCommand, AvailableCommandInput, InitializeResponse, ListSessionsResponse,
     LoadSessionResponse, NewSessionResponse, ProtocolVersion, RawJsonRpcMessage,
-    ResumeSessionResponse, SessionId, UnstructuredCommandInput,
+    ResumeSessionResponse, SessionId, SessionMode, SessionModeState, UnstructuredCommandInput,
 };
 use serde_json::json;
 
 use common::{
     FakeProvider, PromptBehavior, error_reason, notification, prompt_params, raw_params_to_value,
-    request, request_error, request_result, session_new_params, spawn_server,
+    request, request_error, request_result, session_new_params, spawn_server, wait_for_log,
 };
 
 /// The command list advertised in the fake provider's session inits.
@@ -494,6 +494,108 @@ async fn session_resume_without_pending_state_is_rejected() {
     let response: ListSessionsResponse =
         serde_json::from_value(result).expect("parses as ListSessionsResponse");
     assert!(response.sessions.is_empty(), "failed resume registers nothing");
+
+    handle.shutdown(task).await;
+}
+
+// ── session/set_mode ─────────────────────────────────────────────────────
+
+fn advertised_modes() -> SessionModeState {
+    SessionModeState::new(
+        "ask",
+        vec![SessionMode::new("ask", "Ask"), SessionMode::new("plan", "Plan")],
+    )
+}
+
+fn set_mode_params(session_id: &str, mode_id: &str) -> serde_json::Value {
+    json!({ "sessionId": session_id, "modeId": mode_id })
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_set_mode_rejects_unadvertised_mode_before_provider_call() {
+    let (provider, log) = FakeProvider::new(&["session-a"]);
+    let provider = provider.with_modes(advertised_modes());
+    let (handle, task) = spawn_server(provider).await;
+
+    handle.send(request(1, "session/new", session_new_params("/work")));
+    let _ = request_result(handle.next_frame().await);
+
+    handle.send(request(2, "session/set_mode", set_mode_params("session-a", "agent")));
+    let error = request_error(handle.next_frame().await);
+    assert_eq!(i32::from(error.code), -32602);
+    assert!(error_reason(&error).contains("not advertised"), "{error:?}");
+    assert!(!log.has_call("set_mode:"), "unadvertised mode reached provider: {:?}", log.calls());
+
+    handle.shutdown(task).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_set_mode_calls_provider_after_advertised_mode_validation() {
+    let (provider, log) = FakeProvider::new(&["session-a"]);
+    let provider = provider.with_modes(advertised_modes());
+    let (handle, task) = spawn_server(provider).await;
+
+    handle.send(request(1, "session/new", session_new_params("/work")));
+    let _ = request_result(handle.next_frame().await);
+
+    handle.send(request(2, "session/set_mode", set_mode_params("session-a", "plan")));
+    assert_eq!(request_result(handle.next_frame().await), json!({}));
+    assert!(log.has_call("set_mode:session-a:plan"), "provider received mode change");
+
+    handle.shutdown(task).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_set_mode_provider_failure_keeps_prior_selected_mode() {
+    let (provider, log) = FakeProvider::new(&["session-a"]);
+    let provider = provider.with_modes(advertised_modes());
+    let (handle, task) = spawn_server(provider.clone()).await;
+
+    handle.send(request(1, "session/new", session_new_params("/work")));
+    let _ = request_result(handle.next_frame().await);
+
+    // First change succeeds, establishing `plan` as selected mode. The next
+    // provider failure must leave that prior framework mode intact.
+    handle.send(request(2, "session/set_mode", set_mode_params("session-a", "plan")));
+    let _ = request_result(handle.next_frame().await);
+    provider.set_mode_error(Some("fake mode provider boom"));
+
+    handle.send(request(3, "session/set_mode", set_mode_params("session-a", "ask")));
+    let error = request_error(handle.next_frame().await);
+    assert!(error.message.contains("fake mode provider boom"), "{error:?}");
+    wait_for_log(&log, |calls| calls.iter().any(|call| call == "set_mode:session-a:ask:failed"))
+        .await;
+    assert_eq!(
+        log.calls().iter().filter(|call| call.as_str() == "set_mode:session-a:plan").count(),
+        1,
+        "only prior successful mode change is recorded: {:?}",
+        log.calls()
+    );
+
+    handle.shutdown(task).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_set_mode_is_rejected_while_prompt_is_active() {
+    let (provider, log) = FakeProvider::new(&["session-a"]);
+    let provider = provider.with_modes(advertised_modes());
+    provider.set_prompt_behavior("session-a", PromptBehavior::AwaitCancelThenCancelled);
+    let (handle, task) = spawn_server(provider).await;
+
+    handle.send(request(1, "session/new", session_new_params("/work")));
+    let _ = request_result(handle.next_frame().await);
+    handle.send(request(2, "session/prompt", prompt_params("session-a")));
+    wait_for_log(&log, |calls| calls.iter().any(|call| call == "prompt:session-a:started")).await;
+
+    handle.send(request(3, "session/set_mode", set_mode_params("session-a", "plan")));
+    let error = request_error(handle.next_frame().await);
+    assert_eq!(i32::from(error.code), -32602);
+    assert!(error_reason(&error).contains("is active"), "{error:?}");
+    assert!(!log.has_call("set_mode:"), "mode change reached provider while prompt active");
+
+    handle.send(notification("session/cancel", json!({ "sessionId": "session-a" })));
+    let result = request_result(handle.next_frame().await);
+    assert_eq!(result["stopReason"], "cancelled");
 
     handle.shutdown(task).await;
 }

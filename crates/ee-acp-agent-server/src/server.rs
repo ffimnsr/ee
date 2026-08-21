@@ -159,6 +159,11 @@ impl ActivePrompts {
         }
     }
 
+    /// Whether a session has an active prompt or load operation.
+    pub(crate) fn contains(&self, session_id: &SessionId) -> bool {
+        self.inner.lock().expect("active prompts poisoned").prompts.contains_key(session_id)
+    }
+
     /// Flips the cancellation signal for a session's active prompt and
     /// returns its join handle, if any.  Returns `None` when no prompt is
     /// active (or its task already finished).

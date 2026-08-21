@@ -1849,7 +1849,7 @@ async fn close_session_requires_advertised_capability() {
 }
 
 #[tokio::test]
-async fn set_mode_requires_advertised_modes() {
+async fn set_mode_updates_shared_mode_state() {
     let script = FakeAgentScript::new()
         .wait_for("initialize")
         .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
@@ -1858,7 +1858,10 @@ async fn set_mode_requires_advertised_modes() {
             "sessionId": "s1",
             "modes": {
                 "currentModeId": "ask",
-                "availableModes": [{ "id": "ask", "name": "Ask" }]
+                "availableModes": [
+                    { "id": "ask", "name": "Ask" },
+                    { "id": "plan", "name": "Plan" }
+                ]
             }
         }))
         .wait_for("session/set_mode")
@@ -1869,10 +1872,15 @@ async fn set_mode_requires_advertised_modes() {
         connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
 
     let modes = thread.advertised_modes().expect("modes advertised");
-    assert_eq!(modes.available_modes.len(), 1);
+    assert_eq!(modes.available_modes.len(), 2);
 
-    thread.set_mode(SessionModeId::new("ask")).await.expect("set_mode");
+    thread.set_mode(SessionModeId::new("plan")).await.expect("set_mode");
     assert_eq!(fake.requests_by_method("session/set_mode").len(), 1);
+    assert_eq!(thread.snapshot().current_mode, Some(SessionModeId::new("plan")));
+    assert_eq!(
+        thread.advertised_modes().expect("modes advertised").current_mode_id,
+        SessionModeId::new("plan")
+    );
 
     // Unknown mode id is rejected locally.
     let error = thread.set_mode(SessionModeId::new("code")).await.unwrap_err();

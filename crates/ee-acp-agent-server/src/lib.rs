@@ -182,7 +182,7 @@ pub use error::{AcpServerError, ProviderError};
 pub use ids::{RequestIdGenerator, SessionIdGenerator};
 pub use provider::{
     AgentProvider, LoadSessionContext, NewSessionContext, PromptContext, PromptResult,
-    ProviderFuture, SessionInit,
+    ProviderFuture, SessionInit, SetModeContext,
 };
 pub use server::AcpAgentServer;
 pub use session::{ServerSession, SessionStore, SessionStoreError};

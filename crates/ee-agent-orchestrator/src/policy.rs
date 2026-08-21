@@ -29,6 +29,9 @@ pub struct ToolPolicy {
     pub allow_execute: bool,
     /// Whether delegate-class tools are allowed.
     pub allow_delegate: bool,
+    /// Whether host-approved write and execute tools may reach the editor's
+    /// approval gate. Disabled modes deny them before any client request.
+    pub allow_host_approved_side_effects: bool,
     /// Maximum delegate nesting depth (0 denies every delegate).
     pub max_delegate_depth: usize,
     /// Maximum concurrently active delegates per delegating agent.
@@ -51,6 +54,7 @@ impl Default for ToolPolicy {
             allow_write: false,
             allow_execute: false,
             allow_delegate: false,
+            allow_host_approved_side_effects: true,
             max_delegate_depth: 2,
             max_parallel_delegates: 4,
             allowed_side_effect_subclasses: HashSet::new(),
@@ -141,7 +145,8 @@ impl PolicyEngine {
     pub fn check(&self, tool: &ToolDefinition, context: PolicyContext) -> PolicyDecision {
         // Trusted ee proxy mutations and terminal operations are approved by
         // the editor host. Do not block their dispatch before that prompt.
-        if tool.host_approval
+        if self.policy.allow_host_approved_side_effects
+            && tool.host_approval
             && matches!(tool.side_effect_class, SideEffectClass::Write | SideEffectClass::Execute)
         {
             return PolicyDecision::allowed();
@@ -271,6 +276,18 @@ mod tests {
         for class in [SideEffectClass::Write, SideEffectClass::Execute] {
             let decision = engine.check(&tool(class).host_approval(), PolicyContext::default());
             assert!(decision.allow, "{class:?} must reach host approval");
+        }
+    }
+
+    #[test]
+    fn disabled_host_approval_gate_blocks_writes_and_executes() {
+        let engine = PolicyEngine::new(ToolPolicy {
+            allow_host_approved_side_effects: false,
+            ..ToolPolicy::default()
+        });
+        for class in [SideEffectClass::Write, SideEffectClass::Execute] {
+            let decision = engine.check(&tool(class).host_approval(), PolicyContext::default());
+            assert!(!decision.allow, "{class:?} must not bypass a disabled approval gate");
         }
     }
 
