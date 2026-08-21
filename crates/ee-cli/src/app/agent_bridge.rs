@@ -3462,6 +3462,64 @@ impl App {
             .map(|buf| buf.id)
     }
 
+    /// Captures one explicitly selected, primary-workspace context file.
+    /// Open buffers win so unsaved user edits are the snapshot sent to agent.
+    pub(super) fn agent_context_file_snapshot(
+        &self,
+        relative_path: &Path,
+        max_bytes: usize,
+    ) -> Result<(PathBuf, String, String), String> {
+        if relative_path.as_os_str().is_empty() || relative_path.is_absolute() {
+            return Err(String::from("context path must be workspace-relative"));
+        }
+        let root = std::fs::canonicalize(&self.working_dir)
+            .map_err(|error| format!("cannot access workspace: {error}"))?;
+        let canonical = std::fs::canonicalize(root.join(relative_path)).map_err(|error| {
+            format!("cannot access context file {}: {error}", relative_path.display())
+        })?;
+        let relative = canonical
+            .strip_prefix(&root)
+            .map_err(|_| String::from("context file outside primary workspace"))?
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        if relative.is_empty()
+            || is_protected_relative_path(&relative)
+            || self.is_secret_store_path(&canonical)
+        {
+            return Err(format!("context file is protected: {relative}"));
+        }
+        let metadata = std::fs::metadata(&canonical)
+            .map_err(|error| format!("cannot inspect context file {relative}: {error}"))?;
+        if !metadata.is_file() {
+            return Err(format!("context path is not a regular file: {relative}"));
+        }
+
+        let content = if let Some(buffer) = self.backend.all_bufs().iter().find(|buffer| {
+            buffer.path.as_deref().is_some_and(|path| paths_equivalent(path, &canonical))
+        }) {
+            if buffer.is_vlf {
+                return Err(format!("context file is too large to snapshot: {relative}"));
+            }
+            buffer
+                .whole_text()
+                .ok_or_else(|| format!("cannot snapshot context file: {relative}"))?
+        } else {
+            if metadata.len() > u64::try_from(max_bytes).unwrap_or(u64::MAX) {
+                return Err(format!("context file exceeds {max_bytes} byte limit: {relative}"));
+            }
+            std::fs::read_to_string(&canonical)
+                .map_err(|error| format!("cannot read context file {relative}: {error}"))?
+        };
+        if content.len() > max_bytes {
+            return Err(format!("context file exceeds {max_bytes} byte limit: {relative}"));
+        }
+        let secrets = self.agents_secret_values();
+        let content = ee_agent_host::redact::redact_secret_values(&content, &secrets);
+        Ok((canonical, relative, content))
+    }
+
     fn session_thread_by_id(&self, session_id: &str) -> Option<usize> {
         self.agents.thread_index(session_id)
     }

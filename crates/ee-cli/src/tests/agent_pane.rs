@@ -471,6 +471,135 @@ fn prompt_submission_appends_optimistic_you_and_sends_acp_prompt() {
 }
 
 #[test]
+fn context_slash_command_attaches_snapshots_and_controls_session_files() {
+    let script =
+        base_script().wait_for("session/prompt").respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+    fs::write(temp.path().join("context.txt"), "context snapshot\n").unwrap();
+
+    type_text(&mut app, "/context add context.txt");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.agents.threads[0].context_files.len(), 1);
+    assert_eq!(app.agents.threads[0].context_files[0].relative_path, "context.txt");
+    assert_eq!(app.agents.threads[0].context_files[0].content, "context snapshot\n");
+    assert_eq!(
+        app.backend.status_message.as_deref(),
+        Some("context attached: context.txt (17 bytes)")
+    );
+
+    type_text(&mut app, "/context");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(
+        app.backend.status_message.as_deref(),
+        Some("context files: context.txt (17 bytes)")
+    );
+
+    type_text(&mut app, "use selected context");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "context prompt sent", |_| {
+        fake.agent().requests_by_method("session/prompt").len() == 1
+    });
+    let prompt = &fake.agent().requests_by_method("session/prompt")[0]["params"]["prompt"];
+    assert_eq!(prompt[0]["text"], "use selected context");
+    let context = prompt[1]["text"].as_str().expect("context block text");
+    assert!(context.contains("User-selected context file: `context.txt`"), "{context}");
+    assert!(context.contains("context snapshot\n"), "{context}");
+    assert!(
+        !app.agents.threads[0]
+            .system_notices()
+            .iter()
+            .any(|notice| notice.contains("context snapshot")),
+        "context body must not enter transcript"
+    );
+
+    wait_until(&mut app, "context turn completes", |app| {
+        app.agents.threads[0].state == ThreadUiState::Ready
+    });
+    type_text(&mut app, "/context remove context.txt");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.agents.threads[0].context_files.is_empty());
+    type_text(&mut app, "/context add context.txt");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    type_text(&mut app, "/context clear");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.agents.threads[0].context_files.is_empty());
+}
+
+#[test]
+fn context_slash_command_rejects_protected_outside_and_oversized_files() {
+    let (mut app, temp, _fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+    fs::write(temp.path().join(".env"), "TOKEN=secret\n").unwrap();
+    fs::write(temp.path().join("too-large.txt"), "x".repeat(64 * 1024 + 1)).unwrap();
+
+    type_text(&mut app, "/context add .env");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(
+        app.backend.status_message.as_deref().is_some_and(|message| message.contains("protected"))
+    );
+    type_text(&mut app, "/context add /tmp/outside-context.txt");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(
+        app.backend.status_message.as_deref(),
+        Some("context path must be workspace-relative")
+    );
+    type_text(&mut app, "/context add too-large.txt");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.backend.status_message.as_deref().is_some_and(|message| message.contains("limit")));
+    assert!(app.agents.threads[0].context_files.is_empty());
+
+    fs::write(temp.path().join("first.txt"), "a".repeat(64 * 1024)).unwrap();
+    fs::write(temp.path().join("second.txt"), "b".repeat(64 * 1024)).unwrap();
+    fs::write(temp.path().join("third.txt"), "c").unwrap();
+    type_text(&mut app, "/context add first.txt");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    type_text(&mut app, "/context add second.txt");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    type_text(&mut app, "/context add third.txt");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.backend.status_message.as_deref().is_some_and(|message| message.contains("total")));
+    assert_eq!(app.agents.threads[0].context_files.len(), 2);
+}
+
+#[test]
+fn context_slash_command_uses_unsaved_open_buffer_snapshot() {
+    let script =
+        base_script().wait_for("session/prompt").respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+    let path = temp.path().join("dirty.txt");
+    fs::write(&path, "disk text\n").unwrap();
+    let id = app.backend.open_buffer(Some(path.clone())).unwrap();
+    app.backend.switch_to_id(id).unwrap();
+    wait_until(&mut app, "context buffer open", |app| {
+        app.backend.active().path.as_deref() == Some(path.as_path())
+    });
+    app.backend.replace_line_range(0, 0, &[String::from("unsaved text")]).unwrap();
+    app.backend.flush_all_pending_edits().unwrap();
+    wait_until(&mut app, "context buffer dirty", |app| {
+        app.backend
+            .active()
+            .whole_text()
+            .as_deref()
+            .is_some_and(|text| text.starts_with("unsaved text"))
+    });
+
+    type_text(&mut app, "/context add dirty.txt");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.agents.threads[0].context_files[0].content.starts_with("unsaved text"));
+    type_text(&mut app, "use dirty context");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "dirty context prompt sent", |_| {
+        fake.agent().requests_by_method("session/prompt").len() == 1
+    });
+    let prompts = fake.agent().requests_by_method("session/prompt");
+    let context = prompts[0]["params"]["prompt"][1]["text"].as_str().expect("context block text");
+    assert!(context.contains("unsaved text"), "{context}");
+    assert!(!context.contains("disk text"), "{context}");
+}
+
+#[test]
 fn recoverable_pause_offers_resume_and_resume_resends_prompt() {
     // The agent answers the first prompt with a recoverable interruption
     // (deadline, durable checkpoint), then completes the resumed prompt.
@@ -494,8 +623,12 @@ fn recoverable_pause_offers_resume_and_resume_resends_prompt() {
         )
         .wait_for("session/prompt")
         .respond(json!({ "stopReason": "end_turn" }));
-    let (mut app, _temp, fake) = fake_agents_app(script);
+    let (mut app, temp, fake) = fake_agents_app(script);
     open_pane_and_wait_ready(&mut app);
+    fs::write(temp.path().join("resume-context.txt"), "original snapshot\n").unwrap();
+    type_text(&mut app, "/context add resume-context.txt");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    fs::write(temp.path().join("resume-context.txt"), "changed after attachment\n").unwrap();
 
     type_text(&mut app, "hello agent");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -513,6 +646,13 @@ fn recoverable_pause_offers_resume_and_resume_resends_prompt() {
         _ => None,
     });
     assert_eq!(text.as_deref(), Some("hello agent"));
+    assert_eq!(pending.prompt.len(), 2, "context snapshot stays with paused turn");
+    let context = match &pending.prompt[1] {
+        ContentBlock::Text(text) => &text.text,
+        _ => panic!("context block must be text"),
+    };
+    assert!(context.contains("original snapshot"), "{context}");
+    assert!(!context.contains("changed after attachment"), "{context}");
     // Typing a new prompt while paused is rejected.
     type_text(&mut app, "new question");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -526,6 +666,9 @@ fn recoverable_pause_offers_resume_and_resume_resends_prompt() {
     wait_until(&mut app, "resumed prompt sent", |_| {
         fake.agent().requests_by_method("session/prompt").len() == 2
     });
+    let prompts = fake.agent().requests_by_method("session/prompt");
+    let resumed = &prompts[1]["params"]["prompt"][1]["text"];
+    assert!(resumed.as_str().is_some_and(|text| text.contains("original snapshot")), "{resumed}");
     wait_until(&mut app, "turn completed after resume", |app| {
         app.agents.threads[0].state == ThreadUiState::Ready
             && app.agents.threads[0].system_notices().iter().any(|n| n.contains("turn completed"))

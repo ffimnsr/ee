@@ -14,7 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant, SystemTime};
@@ -57,6 +57,12 @@ pub(crate) const AGENTS_TRANSCRIPT_MAX: usize = 1500;
 pub(crate) const AGENTS_STDERR_MAX: usize = 200;
 /// Lines scrolled per PageUp/PageDown key press.
 pub(crate) const AGENTS_SCROLL_PAGE: usize = 10;
+/// Maximum explicitly attached context files per agent session.
+pub(crate) const AGENT_CONTEXT_MAX_FILES: usize = 8;
+/// Maximum bytes captured from one explicitly attached context file.
+pub(crate) const AGENT_CONTEXT_MAX_FILE_BYTES: usize = 64 * 1024;
+/// Maximum bytes captured from all explicitly attached context files.
+pub(crate) const AGENT_CONTEXT_MAX_TOTAL_BYTES: usize = 128 * 1024;
 
 // ── Pane layout ──────────────────────────────────────────────────────────────
 
@@ -153,6 +159,17 @@ pub(crate) struct PendingRecovery {
     pub(crate) prompt: Vec<ContentBlock>,
 }
 
+/// Immutable user-selected context snapshot for one agent session.
+#[derive(Debug, Clone)]
+pub(crate) struct AgentContextFile {
+    /// Canonical absolute path, used only for replacement within this session.
+    pub(crate) path: PathBuf,
+    /// Canonical primary-workspace-relative path shown to user and agent.
+    pub(crate) relative_path: String,
+    /// Redacted file content captured at attachment time.
+    pub(crate) content: String,
+}
+
 /// One open agent session thread (IRC channel equivalent).
 #[derive(Debug)]
 pub(crate) struct AgentThreadUi {
@@ -212,6 +229,8 @@ pub(crate) struct AgentThreadUi {
     /// Prompt blocks of the most recent turn, kept for resume until the turn
     /// reaches a terminal state.
     pub(crate) last_prompt: Option<Vec<ContentBlock>>,
+    /// Explicit, bounded file snapshots included with future turns in this session.
+    pub(crate) context_files: Vec<AgentContextFile>,
     /// Slash commands currently advertised by the agent.
     pub(crate) available_commands: Vec<AvailableCommand>,
     /// Session title from `session_info_update`, when present.
@@ -1911,6 +1930,7 @@ impl App {
             last_error: None,
             pending_recovery: None,
             last_prompt: None,
+            context_files: Vec::new(),
             available_commands: snapshot.available_commands,
             session_title,
             session_updated_at,
@@ -2376,6 +2396,20 @@ fn split_slash_command(draft: &str) -> (Option<String>, String) {
     (name, rest)
 }
 
+fn prompt_blocks_with_context(
+    prompt_text: &str,
+    context_files: &[AgentContextFile],
+) -> Vec<ContentBlock> {
+    let mut blocks = vec![ContentBlock::Text(TextContent::new(prompt_text))];
+    blocks.extend(context_files.iter().map(|file| {
+        ContentBlock::Text(TextContent::new(format!(
+            "User-selected context file: `{}`\n--- file snapshot ---\n{}\n--- end file snapshot ---",
+            file.relative_path, file.content
+        )))
+    }));
+    blocks
+}
+
 fn agent_mode_ids(thread: &AgentThreadUi) -> Vec<String> {
     let snapshot = thread.host.snapshot();
     if let Some(mode_option) =
@@ -2414,6 +2448,7 @@ const LOCAL_AGENT_SLASH_COMMANDS: &[&str] = &[
     "config",
     "mcp",
     "approval",
+    "context",
     "mode",
 ];
 
@@ -3476,6 +3511,116 @@ impl App {
         self.set_active_tool_approval_mode(super::agent_bridge::ToolApprovalMode::Bypass);
     }
 
+    fn agents_list_context_files(&mut self) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let files = &self.agents.threads[active].context_files;
+        self.backend.status_message = Some(if files.is_empty() {
+            String::from("context files: none")
+        } else {
+            format!(
+                "context files: {}",
+                files
+                    .iter()
+                    .map(|file| format!("{} ({} bytes)", file.relative_path, file.content.len()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        });
+    }
+
+    fn agents_add_context_file(&mut self, path: &str) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let (canonical, relative_path, content) =
+            match self.agent_context_file_snapshot(Path::new(path), AGENT_CONTEXT_MAX_FILE_BYTES) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    self.backend.status_message = Some(error);
+                    return;
+                }
+            };
+        let content_len = content.len();
+        let thread = &mut self.agents.threads[active];
+        let existing = thread.context_files.iter().position(|file| file.path == canonical);
+        let total = thread
+            .context_files
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| Some(*index) != existing)
+            .map(|(_, file)| file.content.len())
+            .sum::<usize>();
+        if total.saturating_add(content_len) > AGENT_CONTEXT_MAX_TOTAL_BYTES {
+            self.backend.status_message = Some(format!(
+                "context files exceed {AGENT_CONTEXT_MAX_TOTAL_BYTES} byte total limit"
+            ));
+            return;
+        }
+        let attached_path = relative_path.clone();
+        let context_file = AgentContextFile { path: canonical, relative_path, content };
+        if let Some(existing) = existing {
+            thread.context_files[existing] = context_file;
+        } else {
+            if thread.context_files.len() >= AGENT_CONTEXT_MAX_FILES {
+                self.backend.status_message =
+                    Some(format!("context file limit reached ({AGENT_CONTEXT_MAX_FILES})"));
+                return;
+            }
+            thread.context_files.push(context_file);
+        }
+        let notice = format!("context attached: {attached_path} ({content_len} bytes)");
+        thread.push_system(notice.clone());
+        self.backend.status_message = Some(notice);
+    }
+
+    fn agents_remove_context_file(&mut self, path: &str) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let thread = &mut self.agents.threads[active];
+        let Some(index) = thread.context_files.iter().position(|file| file.relative_path == path)
+        else {
+            self.backend.status_message = Some(format!("context file not attached: {path}"));
+            return;
+        };
+        let removed = thread.context_files.remove(index);
+        let notice = format!("context removed: {}", removed.relative_path);
+        thread.push_system(notice.clone());
+        self.backend.status_message = Some(notice);
+    }
+
+    fn agents_clear_context_files(&mut self) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let thread = &mut self.agents.threads[active];
+        let count = thread.context_files.len();
+        thread.context_files.clear();
+        let notice = format!("context files cleared ({count})");
+        thread.push_system(notice.clone());
+        self.backend.status_message = Some(notice);
+    }
+
+    fn agents_context_command(&mut self, args: &str) {
+        let mut parts = args.splitn(2, char::is_whitespace);
+        match (parts.next().unwrap_or_default(), parts.next().unwrap_or_default().trim()) {
+            ("", _) => self.agents_list_context_files(),
+            ("add", path) if !path.is_empty() => self.agents_add_context_file(path),
+            ("remove", path) if !path.is_empty() => self.agents_remove_context_file(path),
+            ("clear", "") => self.agents_clear_context_files(),
+            _ => {
+                self.backend.status_message =
+                    Some(String::from("usage: /context [add <path>|remove <path>|clear]"));
+            }
+        }
+    }
+
     /// Applies pane-local slash commands before forwarding prompt text to the agent.
     fn submit_agents_local_slash_command(&mut self, draft: &str) -> bool {
         let (Some(command), args) = split_slash_command(draft) else {
@@ -3574,6 +3719,10 @@ impl App {
                 }
                 true
             }
+            "context" => {
+                self.agents_context_command(args);
+                true
+            }
             "approval" => {
                 match args {
                     "" => match self.active_tool_approval_mode() {
@@ -3663,7 +3812,7 @@ impl App {
         thread.push_message("you", &prompt_text, MessageRenderKind::User, None, None);
         thread.optimistic_message = Some(thread.transcript.len().saturating_sub(1));
         let host = self.agents.host.as_ref().expect("host present");
-        let blocks = vec![ContentBlock::Text(TextContent::new(prompt_text))];
+        let blocks = prompt_blocks_with_context(&prompt_text, &thread.context_files);
         thread.last_prompt = Some(blocks.clone());
         host.send_prompt(thread.host.clone(), blocks);
     }
@@ -4394,6 +4543,7 @@ mod tests {
                 "config",
                 "mcp",
                 "approval",
+                "context",
                 "mode",
                 "compact",
             ]
