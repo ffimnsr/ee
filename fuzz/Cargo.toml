@@ -19,6 +19,7 @@ xi-rope = { package = "ee-xi-rope", path = "../crates/xi-rope", version = "0.10.
 xi-rpc = { package = "ee-xi-rpc", path = "../crates/xi-rpc", version = "0.10.1" }
 xi-lsp-lib = { package = "ee-xi-lsp-lib", path = "../crates/xi-lsp-lib", version = "0.10.1" }
 xi-unicode = { package = "ee-xi-unicode", path = "../crates/xi-unicode", version = "0.10.1" }
+ee-mcp = { path = "../crates/ee-mcp" }
 
 [[bin]]
 name = "xi_rope_crdt"
@@ -72,6 +73,13 @@ bench = false
 [[bin]]
 name = "xi_unicode_text"
 path = "fuzz_targets/xi_unicode_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ee_mcp_proxy_arguments"
+path = "fuzz_targets/ee_mcp_proxy_arguments.rs"
 test = false
 doc = false
 bench = false

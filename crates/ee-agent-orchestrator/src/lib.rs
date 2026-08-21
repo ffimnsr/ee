@@ -126,6 +126,8 @@
 //!   details, and no chain-of-thought.
 //! - [`replay`] — deterministic replay scripts over fake model/tools (feature
 //!   `test-utils`).
+//! - [`evaluation`] — versioned hermetic task fixtures, redacted evidence,
+//!   scorecards, and baseline regression gates (feature `test-utils`).
 //! - [`test_support`] — deterministic fakes (feature `test-utils`).
 //!
 //! Phase 1 scope: crate skeleton, config, errors, deterministic state
@@ -142,6 +144,8 @@ pub mod decision_log;
 pub mod destructive_policy;
 pub mod dialects;
 pub mod error;
+#[cfg(feature = "test-utils")]
+pub mod evaluation;
 pub mod events;
 pub mod fanout_fanin;
 pub mod final_response;
@@ -218,6 +222,14 @@ pub use decision_log::{
 pub use destructive_policy::SideEffectSubclass;
 pub use dialects::{ToolCallDialect, normalize_tool_calls};
 pub use error::OrchestratorError;
+#[cfg(feature = "test-utils")]
+pub use evaluation::{
+    EVALUATION_SCHEMA_VERSION, EvaluationBaseline, EvaluationFixture, EvaluationProfile,
+    EvaluationTransport, FixtureExpectation, FixtureKind, FixtureRun, FixtureScore, FixtureScript,
+    RegressionFailure, RegressionReport, RegressionThresholds, ReplayTrace, ScenarioTag,
+    compare_baseline, default_evaluation_profile, load_fixture_suite, require_baseline_pass,
+    required_fixture_baseline, required_fixture_suite, run_fixture, run_suite,
+};
 pub use events::{EventRecorder, OrchestratorEvent};
 pub use fanout_fanin::FanOutFanInCoordinator;
 pub use final_response::{

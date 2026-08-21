@@ -31,11 +31,13 @@
 //! # ee proxy contract
 //!
 //! Editor proxy tool names are stable `ee_` identifiers. Clients should call
-//! `ee_tools_manifest` once per MCP session and cache its versioned response;
-//! it lists currently supported tools, schema versions, side-effect classes,
-//! approval behavior, output caps, and minimal examples. Hosts may advertise a
-//! partial tool set, and known disabled tools fail closed as tool-level errors.
-//! New incompatible schemas require a new tool name; complex arguments should
+//! `ee_tools_manifest` once per MCP session with no arguments and cache its
+//! versioned response. Each entry defines its input schema, side-effect class,
+//! approval behavior, transport availability, required host capabilities,
+//! output caps, redaction rules, typed error classes, deprecation/replacement
+//! metadata, and a minimal schema-valid example. Hosts may advertise a partial
+//! tool set, and known disabled tools fail closed as tool-level errors. New
+//! incompatible schemas require a new tool name; complex arguments should
 //! become smaller focused tools. Paths, sensitive values, and diagnostics stay
 //! subject to host validation, bounds, and redaction.
 //!
@@ -53,11 +55,10 @@ pub mod handler;
 pub mod manager;
 pub mod proxy;
 pub mod registry;
+pub mod tool_governance;
 pub mod transport;
 
-pub use classify::{
-    EE_TOOL_SCHEMA_VERSION, SideEffectClass, exact_trust_eligible, side_effect_class,
-};
+pub use classify::{SideEffectClass, exact_trust_eligible, side_effect_class};
 pub use config::{
     McpServerConfig, McpServerKind, RawMcpServerSettings, RawStdioSettings,
     RawStreamableHttpSettings, StdioMcpConfig, StreamableHttpConfig,
@@ -72,17 +73,21 @@ pub use proxy::{
     DiagnosticsResult, DirectoryEntry, DirectoryEntryAll, DocumentSymbolEntry,
     DocumentSymbolsResult, EditTextResult, EeMcpProxy, EeProxyBackend, FileDependencyEdge,
     FileDependencyMapResult, FileMatch, GitDiffResult, GitStatusResult, ListDirectoryAllResult,
-    ListDirectoryResult, OpenBufferEntry, OpenBuffersResult, PlannedFileEdit, PlannedTextEdit,
-    ProjectInstructionSource, ProjectInstructionsResult, ProxyToolError, ReferenceEntry,
-    ReferencesResult, RenamePreviewResult, ReviewContextResult, SearchFilesAllResult,
-    SearchFilesResult, SearchTextResult, SessionNoteResult, SessionNotesResult,
-    TerminalOutputChunk, TerminalOutputResult, TerminalWaitResult, TextEdit, TextMatch, TextRange,
-    ToolManifestEntry, ToolOutputCap, ToolsManifestResult, WorkspaceEditResult,
-    WorkspaceRootsResult,
+    ListDirectoryResult, MAX_TOOL_ARGUMENT_BYTES, OpenBufferEntry, OpenBuffersResult,
+    PlannedFileEdit, PlannedTextEdit, ProjectInstructionSource, ProjectInstructionsResult,
+    ProxyToolError, ReferenceEntry, ReferencesResult, RenamePreviewResult, ReviewContextResult,
+    SearchFilesAllResult, SearchFilesResult, SearchTextResult, SessionNoteResult,
+    SessionNotesResult, TerminalOutputChunk, TerminalOutputResult, TerminalWaitResult, TextEdit,
+    TextMatch, TextRange, ToolManifestEntry, ToolOutputCap, ToolsManifestResult,
+    WorkspaceEditResult, WorkspaceRootsResult,
 };
 pub use registry::{
     NamespacedPrompt, NamespacedResource, NamespacedTool, PrimitiveRegistry, PrimitiveSummary,
     prompt_text,
+};
+pub use tool_governance::{
+    EE_TOOL_SCHEMA_VERSION, STABLE_TOOL_NAMES, ToolGovernance, ToolTransport, governance,
+    supports_transport, tool_names_for_transport,
 };
 
 /// The MCP protocol version implemented by the ee MCP client.

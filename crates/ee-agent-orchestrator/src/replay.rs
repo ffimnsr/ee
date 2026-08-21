@@ -301,6 +301,23 @@ pub fn tool_then_answer_replay() -> ReplayScript {
         .with_expected_tasks(vec![running_root("read a file")])
 }
 
+/// Fixture: a tool request denied by policy, followed by a completed answer.
+/// The fake result models an editor/proxy denial without touching host state.
+#[must_use]
+pub fn denied_tool_replay() -> ReplayScript {
+    let mut script = tool_then_answer_replay();
+    script.tool_responses[0].1 = ToolResult::failure(
+        crate::tools::ToolErrorKind::PermissionDenied,
+        "fixture policy denied tool execution",
+    );
+    for event in &mut script.expected_events {
+        if let OrchestratorEvent::ToolFinished { success, .. } = event {
+            *success = false;
+        }
+    }
+    script
+}
+
 /// Fixture: one `delegate_task` intent; the child consumes the fixture answer
 /// and the parent finishes with one more response.
 #[must_use]

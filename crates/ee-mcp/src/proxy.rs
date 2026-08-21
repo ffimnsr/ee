@@ -746,12 +746,31 @@ pub struct ToolOutputCap {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolManifestEntry {
+    /// Stable tool identifier. Incompatible changes require a new name.
     pub name: String,
+    /// Version of this tool's schema contract.
     pub schema_version: u64,
+    /// Complete MCP input schema.
     pub input_schema: serde_json::Value,
+    /// `read`, `write`, or `execute`.
     pub side_effect: String,
+    /// `none` or `required`; host trust rules may satisfy an approval.
     pub approval: String,
+    /// Implemented MCP routes: `stdio` and/or ACP-native `acp`.
+    pub transport_availability: Vec<String>,
+    /// Host capabilities required before the tool may be advertised.
+    pub required_capabilities: Vec<String>,
+    /// Bounded output dimensions.
     pub output_caps: Vec<ToolOutputCap>,
+    /// Values removed or rejected before output reaches an agent.
+    pub redaction_rules: Vec<String>,
+    /// Stable tool-level failures callers must handle.
+    pub error_classes: Vec<String>,
+    /// Whether callers should migrate away from this name.
+    pub deprecated: bool,
+    /// Replacement name supplied before a retirement, when deprecated.
+    pub replacement: Option<String>,
+    /// Minimal schema-valid invocation arguments.
     pub example: serde_json::Value,
 }
 
@@ -762,6 +781,13 @@ pub struct ToolsManifestResult {
     pub manifest_version: u64,
     pub tools: Vec<ToolManifestEntry>,
 }
+
+/// Maximum serialized argument object accepted for one ee proxy tool call.
+///
+/// Individual tools may impose tighter semantic limits. This common boundary
+/// prevents nested JSON or content-bearing arguments from exhausting proxy or
+/// host memory before tool-specific validation runs.
+pub const MAX_TOOL_ARGUMENT_BYTES: usize = 64 * 1024;
 
 /// An in-process MCP server exposing ee editor operations as MCP tools.
 ///
@@ -792,22 +818,17 @@ impl EeMcpProxy {
     }
 
     fn tools(&self) -> Vec<Tool> {
-        Self::all_tools().into_iter().filter(|tool| self.is_supported(tool.name.as_ref())).collect()
+        Self::all_tools()
+            .into_iter()
+            .filter(|tool| crate::governance(tool.name.as_ref()).is_some())
+            .filter(|tool| self.is_supported(tool.name.as_ref()))
+            .collect()
     }
 
     fn tools_manifest(&self) -> ToolsManifestResult {
         ToolsManifestResult {
             manifest_version: crate::EE_TOOL_SCHEMA_VERSION,
-            tools: self
-                .tools()
-                .into_iter()
-                .map(|tool| {
-                    manifest_entry(
-                        tool.name.as_ref(),
-                        serde_json::Value::Object((*tool.input_schema).clone()),
-                    )
-                })
-                .collect(),
+            tools: self.tools().into_iter().map(|tool| manifest_entry(&tool)).collect(),
         }
     }
 
@@ -1315,8 +1336,10 @@ impl EeMcpProxy {
                 request.name
             ))])));
         }
+        enforce_argument_cap(request)?;
         match request.name.as_ref() {
             "ee_tools_manifest" => {
+                require_no_arguments(request)?;
                 Ok(complete(CallToolResult::structured(json!(self.tools_manifest()))))
             }
             "ee_workspace_roots" => Ok(self
@@ -1837,49 +1860,80 @@ fn schema(value: serde_json::Value) -> JsonObject {
     value.as_object().expect("tool schema must be a JSON object").clone()
 }
 
-fn manifest_entry(name: &str, input_schema: serde_json::Value) -> ToolManifestEntry {
-    let side_effect = crate::side_effect_class(name).as_str().to_owned();
-    let approval = match side_effect.as_str() {
-        "read" => "none",
-        "write" | "execute" => "required",
-        _ => "none",
-    }
-    .to_owned();
-    let max = match name {
-        "ee_git_diff" | "ee_git_diff_file" => 256 * 1024,
-        "ee_read_text_file" | "ee_read_buffer" => 1024 * 1024,
-        "ee_terminal_output" | "ee_terminal_output_since" => 1024 * 1024,
-        "ee_search_text" | "ee_search_text_regex" | "ee_search_text_in_files" => 200,
-        _ => 500,
-    };
-    let example = if name == "ee_tools_manifest"
-        || name == "ee_workspace_roots"
-        || name == "ee_git_status"
-        || name == "ee_git_diff"
-        || name == "ee_changed_files"
-        || name == "ee_review_context"
-        || name == "ee_project_instructions"
-        || name == "ee_read_notes"
-        || name == "ee_diagnostics"
-    {
-        json!({})
-    } else if name == "ee_save_note" {
-        json!({ "key": "plan", "content": "inspect parser" })
-    } else if name == "ee_read_note" {
-        json!({ "key": "plan" })
-    } else if name.contains("terminal") {
-        json!({ "terminal_id": "term-1" })
-    } else {
-        json!({ "path": "/workspace/src/lib.rs" })
-    };
+/// Builds manifest data from the advertised schema plus canonical governance.
+/// `tools()` filters unknown records before this function runs.
+fn manifest_entry(tool: &Tool) -> ToolManifestEntry {
+    let name = tool.name.as_ref();
+    let governance = crate::governance(name).expect("advertised tool has governance");
+    let input_schema = serde_json::Value::Object((*tool.input_schema).clone());
     ToolManifestEntry {
         name: name.to_owned(),
         schema_version: crate::EE_TOOL_SCHEMA_VERSION,
+        example: minimal_example(&input_schema),
         input_schema,
-        side_effect,
-        approval,
-        output_caps: vec![ToolOutputCap { kind: String::from("result"), max }],
-        example,
+        side_effect: governance.side_effect.as_str().to_owned(),
+        approval: governance.approval.to_owned(),
+        transport_availability: governance
+            .transports
+            .iter()
+            .map(|transport| transport.as_str().to_owned())
+            .collect(),
+        required_capabilities: governance
+            .required_capabilities
+            .iter()
+            .map(|capability| (*capability).to_owned())
+            .collect(),
+        output_caps: vec![ToolOutputCap {
+            kind: governance.output_cap_kind.to_owned(),
+            max: governance.output_cap,
+        }],
+        redaction_rules: governance.redaction_rules.iter().map(|rule| (*rule).to_owned()).collect(),
+        error_classes: governance.error_classes.iter().map(|class| (*class).to_owned()).collect(),
+        deprecated: governance.deprecated,
+        replacement: governance.replacement.map(str::to_owned),
+    }
+}
+
+/// Produces short schema-valid arguments without maintaining another per-tool
+/// example table. Values illustrate argument shape only and are never paths or
+/// identifiers from the current workspace.
+fn minimal_example(input_schema: &serde_json::Value) -> serde_json::Value {
+    let required = input_schema
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str);
+    let properties = input_schema.get("properties").and_then(serde_json::Value::as_object);
+    let mut example = serde_json::Map::new();
+    for name in required {
+        let schema = properties.and_then(|properties| properties.get(name));
+        example.insert(name.to_owned(), minimal_value(name, schema));
+    }
+    serde_json::Value::Object(example)
+}
+
+fn minimal_value(name: &str, schema: Option<&serde_json::Value>) -> serde_json::Value {
+    match schema.and_then(|value| value.get("type")).and_then(serde_json::Value::as_str) {
+        Some("integer") | Some("number") => json!(if name == "since_seq" { 0 } else { 1 }),
+        Some("boolean") => json!(false),
+        Some("array") => json!([]),
+        Some("object") => json!({}),
+        _ => json!(match name {
+            "path" => "/workspace/example.rs",
+            "pattern" | "file_glob" => "*.rs",
+            "query" => "example",
+            "command" => "pwd",
+            "terminal_id" => "terminal-1",
+            "key" => "note",
+            "content" => "example",
+            "old_text" => "old",
+            "new_text" => "new",
+            "action_id" => "action-1",
+            "new_name" => "renamed",
+            "revision_id" => "revision-1",
+            _ => "example",
+        }),
     }
 }
 
@@ -1889,6 +1943,38 @@ fn require_arguments(request: &CallToolRequestParams) -> Result<&JsonObject, Err
         .arguments
         .as_ref()
         .ok_or_else(|| ErrorData::invalid_params("missing tool arguments", None))
+}
+
+/// Validates the serialized size of one tool argument object.
+///
+/// Kept public for the libFuzzer target so malformed JSON objects and cap
+/// boundaries exercise the exact production validation path.
+pub fn validate_tool_argument_size(arguments: &JsonObject) -> Result<(), ErrorData> {
+    let byte_len = serde_json::to_vec(arguments)
+        .map_err(|error| {
+            ErrorData::invalid_params(format!("tool arguments cannot serialize: {error}"), None)
+        })?
+        .len();
+    if byte_len > MAX_TOOL_ARGUMENT_BYTES {
+        return Err(ErrorData::invalid_params(
+            format!("tool arguments exceed {MAX_TOOL_ARGUMENT_BYTES} byte cap"),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// Rejects oversized serialized tool arguments before backend dispatch.
+fn enforce_argument_cap(request: &CallToolRequestParams) -> Result<(), ErrorData> {
+    request.arguments.as_ref().map_or(Ok(()), validate_tool_argument_size)
+}
+
+/// Rejects unexpected arguments for no-argument tools.
+fn require_no_arguments(request: &CallToolRequestParams) -> Result<(), ErrorData> {
+    if request.arguments.as_ref().is_some_and(|arguments| !arguments.is_empty()) {
+        return Err(ErrorData::invalid_params("tool accepts no arguments", None));
+    }
+    Ok(())
 }
 
 /// Reads a required string argument.
@@ -2925,56 +3011,7 @@ mod tests {
             .expect("list tools failed");
 
         let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
-        assert_eq!(
-            names,
-            vec![
-                "ee_workspace_roots",
-                "ee_list_directory",
-                "ee_list_directory_all",
-                "ee_search_files",
-                "ee_search_files_all",
-                "ee_search_text",
-                "ee_search_text_regex",
-                "ee_search_text_in_files",
-                "ee_replace_text",
-                "ee_apply_patch",
-                "ee_create_text_file",
-                "ee_overwrite_text_file",
-                "ee_read_buffer",
-                "ee_read_buffer_lines",
-                "ee_open_buffers",
-                "ee_get_diagnostics",
-                "ee_get_file_diagnostics",
-                "ee_document_symbols",
-                "ee_references",
-                "ee_list_code_actions",
-                "ee_apply_code_action",
-                "ee_format_file",
-                "ee_preview_rename_symbol",
-                "ee_rename_symbol",
-                "ee_read_text_file",
-                "ee_write_text_file",
-                "ee_terminal_create",
-                "ee_terminal_output",
-                "ee_terminal_output_since",
-                "ee_terminal_wait",
-                "ee_terminal_wait_long",
-                "ee_terminal_kill",
-                "ee_terminal_release",
-                "ee_git_status",
-                "ee_git_diff",
-                "ee_git_diff_file",
-                "ee_changed_files",
-                "ee_review_context",
-                "ee_project_instructions",
-                "ee_save_note",
-                "ee_read_notes",
-                "ee_read_note",
-                "ee_file_dependency_map",
-                "ee_tools_manifest",
-                "ee_diagnostics",
-            ]
-        );
+        assert_eq!(names, crate::STABLE_TOOL_NAMES);
         assert!(tools.iter().all(|tool| tool.name.starts_with("ee_")));
         assert!(tools.iter().all(|tool| !tool.name.contains('.')));
         assert!(tools.iter().all(|tool| tool.input_schema.contains_key("properties")));
@@ -3018,13 +3055,200 @@ mod tests {
                 .iter()
                 .all(|entry| entry.schema_version == crate::EE_TOOL_SCHEMA_VERSION)
         );
-        assert!(
-            manifest
-                .tools
-                .iter()
-                .all(|entry| !entry.approval.is_empty() && !entry.output_caps.is_empty())
-        );
+        assert!(manifest.tools.iter().all(|entry| {
+            !entry.approval.is_empty()
+                && !entry.transport_availability.is_empty()
+                && !entry.output_caps.is_empty()
+                && !entry.redaction_rules.is_empty()
+                && !entry.error_classes.is_empty()
+        }));
+        let advertised: Vec<&str> =
+            manifest.tools.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(advertised, crate::STABLE_TOOL_NAMES);
+        for entry in &manifest.tools {
+            assert_schema_example_is_valid(&entry.input_schema, &entry.example);
+        }
         assert!(manifest.tools.iter().any(|entry| entry.name == "ee_tools_manifest"));
+    }
+
+    #[test]
+    fn manifest_matches_discovery_governance_and_policy_classification() {
+        let proxy = EeMcpProxy::new(Arc::new(ScriptedBackend::default()));
+        let tools = proxy.tools();
+        let manifest = proxy.tools_manifest();
+        assert_eq!(tools.len(), manifest.tools.len());
+
+        for (tool, entry) in tools.iter().zip(&manifest.tools) {
+            let governance = crate::governance(tool.name.as_ref())
+                .expect("every advertised tool has canonical governance");
+            assert_eq!(entry.name, tool.name.as_ref());
+            assert_eq!(entry.input_schema, serde_json::Value::Object((*tool.input_schema).clone()));
+            assert_eq!(entry.side_effect, crate::side_effect_class(&entry.name).as_str());
+            assert_eq!(entry.approval, governance.approval);
+            assert_eq!(
+                entry.transport_availability,
+                governance
+                    .transports
+                    .iter()
+                    .map(|transport| transport.as_str().to_owned())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                entry.required_capabilities,
+                governance
+                    .required_capabilities
+                    .iter()
+                    .map(|capability| (*capability).to_owned())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(entry.output_caps[0].kind, governance.output_cap_kind);
+            assert_eq!(entry.output_caps[0].max, governance.output_cap);
+        }
+    }
+
+    #[test]
+    fn manifest_snapshot_matches_versioned_contract() {
+        let proxy = EeMcpProxy::new(Arc::new(ScriptedBackend::default()));
+        let actual = canonical_json(
+            serde_json::to_value(proxy.tools_manifest()).expect("manifest serializes"),
+        );
+        let expected = canonical_json(
+            serde_json::from_str(include_str!("../tests/fixtures/ee_tools_manifest-v1.json"))
+                .expect("manifest fixture parses"),
+        );
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    #[ignore = "run explicitly when intentionally updating the versioned manifest fixture"]
+    fn regenerate_manifest_snapshot() {
+        let proxy = EeMcpProxy::new(Arc::new(ScriptedBackend::default()));
+        let value = canonical_json(
+            serde_json::to_value(proxy.tools_manifest()).expect("manifest serializes"),
+        );
+        let snapshot = serde_json::to_string_pretty(&value).expect("canonical manifest serializes");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/ee_tools_manifest-v1.json");
+        std::fs::write(path, format!("{snapshot}\n")).expect("write manifest fixture");
+    }
+
+    fn canonical_json(value: serde_json::Value) -> serde_json::Value {
+        match value {
+            serde_json::Value::Object(entries) => {
+                let sorted = entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonical_json(value)))
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                serde_json::Value::Object(sorted.into_iter().collect())
+            }
+            serde_json::Value::Array(values) => {
+                serde_json::Value::Array(values.into_iter().map(canonical_json).collect())
+            }
+            value => value,
+        }
+    }
+
+    #[test]
+    fn argument_cap_rejects_oversized_input_before_backend_dispatch() {
+        let backend = Arc::new(ScriptedBackend::default());
+        let proxy = EeMcpProxy::new(backend.clone());
+        let oversized = "x".repeat(MAX_TOOL_ARGUMENT_BYTES);
+        let request = CallToolRequestParams::new("ee_save_note").with_arguments(arguments(json!({
+            "key": "note",
+            "content": oversized,
+        })));
+        assert!(proxy.dispatch_tool(&request).is_err());
+        assert!(backend.calls().is_empty(), "oversized arguments never reach the backend");
+    }
+
+    #[test]
+    fn argument_cap_accepts_exact_boundary_and_rejects_one_byte_over() {
+        let empty = arguments(json!({ "path": "/abs/work/a", "content": "" }));
+        let overhead = serde_json::to_vec(&empty).expect("arguments serialize").len();
+        let content_len =
+            MAX_TOOL_ARGUMENT_BYTES.checked_sub(overhead).expect("cap exceeds overhead");
+
+        let exact_backend = Arc::new(ScriptedBackend::default());
+        let exact =
+            CallToolRequestParams::new("ee_write_text_file").with_arguments(arguments(json!({
+                "path": "/abs/work/a",
+                "content": "x".repeat(content_len),
+            })));
+        assert!(EeMcpProxy::new(exact_backend.clone()).dispatch_tool(&exact).is_ok());
+        assert_eq!(exact_backend.calls().len(), 1, "exact boundary dispatches");
+
+        let over_backend = Arc::new(ScriptedBackend::default());
+        let over =
+            CallToolRequestParams::new("ee_write_text_file").with_arguments(arguments(json!({
+                "path": "/abs/work/a",
+                "content": "x".repeat(content_len + 1),
+            })));
+        assert!(EeMcpProxy::new(over_backend.clone()).dispatch_tool(&over).is_err());
+        assert!(over_backend.calls().is_empty(), "over-boundary input never dispatches");
+    }
+
+    #[test]
+    fn malformed_arguments_fail_closed_before_backend_dispatch() {
+        let cases = [
+            ("ee_list_directory", json!({})),
+            ("ee_list_directory", json!({ "path": 1 })),
+            ("ee_read_buffer_lines", json!({ "path": "/abs/work/a.rs", "line": -1, "limit": 1 })),
+            ("ee_apply_patch", json!({ "path": "/abs/work/a.rs", "edits": "not-an-array" })),
+            ("ee_terminal_create", json!({ "command": 1 })),
+            ("ee_terminal_create", json!({ "command": "pwd", "args": [1] })),
+        ];
+        for (name, value) in cases {
+            let backend = Arc::new(ScriptedBackend::default());
+            let request = CallToolRequestParams::new(name).with_arguments(arguments(value));
+            assert!(EeMcpProxy::new(backend.clone()).dispatch_tool(&request).is_err(), "{name}");
+            assert!(backend.calls().is_empty(), "{name} must not reach backend");
+        }
+    }
+
+    #[test]
+    fn manifest_rejects_arguments_and_disabled_tools_fail_at_tool_level() {
+        let proxy = EeMcpProxy::with_supported_tools(
+            Arc::new(ScriptedBackend::default()),
+            vec![String::from("ee_workspace_roots")],
+        );
+        let manifest_with_arguments = CallToolRequestParams::new("ee_tools_manifest")
+            .with_arguments(arguments(json!({ "unexpected": true })));
+        assert!(proxy.dispatch_tool(&manifest_with_arguments).is_err());
+
+        let _disabled = proxy
+            .dispatch_tool(&CallToolRequestParams::new("ee_read_text_file"))
+            .expect("known disabled tool returns a tool-level result, not a protocol error");
+    }
+
+    fn assert_schema_example_is_valid(schema: &serde_json::Value, example: &serde_json::Value) {
+        let example = example.as_object().expect("example is an object");
+        for name in schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+        {
+            let value =
+                example.get(name).unwrap_or_else(|| panic!("missing example argument {name}"));
+            let expected = schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .and_then(|properties| properties.get(name))
+                .and_then(|property| property.get("type"))
+                .and_then(serde_json::Value::as_str);
+            match expected {
+                Some("string") => assert!(value.is_string(), "{name}"),
+                Some("integer") => {
+                    assert!(value.as_i64().is_some() || value.as_u64().is_some(), "{name}")
+                }
+                Some("number") => assert!(value.is_number(), "{name}"),
+                Some("array") => assert!(value.is_array(), "{name}"),
+                Some("object") => assert!(value.is_object(), "{name}"),
+                Some("boolean") => assert!(value.is_boolean(), "{name}"),
+                _ => {}
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3427,6 +3651,22 @@ mod tests {
         assert!(backend.calls().is_empty(), "backend must not be invoked");
 
         shutdown(&client, &server);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_create_rejects_all_secret_like_environment_keys() {
+        for key in ["TOKEN", "KEY", "SECRET", "PASSWORD", "AUTH", "CREDENTIAL", "api_token"] {
+            let backend = Arc::new(ScriptedBackend::default());
+            let (client, server) = connect(backend.clone()).await;
+            let params = CallToolRequestParams::new("ee_terminal_create")
+                .with_arguments(arguments(json!({ "command": "pwd", "env": { key: "redacted" } })));
+            let result = tokio::time::timeout(REQUEST_TIMEOUT, client.call_tool(params))
+                .await
+                .expect("call timed out");
+            assert!(result.is_err(), "{key} must be rejected");
+            assert!(backend.calls().is_empty(), "{key} must not reach backend");
+            shutdown(&client, &server);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

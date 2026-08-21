@@ -296,38 +296,38 @@ Harden the expanded tool surface before enabling it by default.
 
 #### Work items
 
-- [ ] Add versioned `ee_tools_manifest` from one source of truth.
-  - [ ] Accept no arguments.
-  - [ ] Return tool names, schema versions, transport availability, and capability requirements.
-  - [ ] Return side-effect class: `read`, `write`, or `execute`.
-  - [ ] Return approval requirement, output caps, redaction rules, and typed error classes.
-  - [ ] Return short examples using minimal arguments for each tool.
-  - [ ] Return deprecation and replacement metadata before retiring a tool or schema version.
-  - [ ] Derive README/crate documentation and compatibility snapshots from manifest data where practical.
-- [ ] Keep existing tool names stable after the `ee_` compatibility rename.
-- [ ] Add new names rather than changing schemas incompatibly.
-- [ ] Document every tool argument, limit, error shape, approval behavior, and redaction rule in README and crate docs.
-- [ ] Document the rule that complicated arguments mean the tool should be split into smaller tools.
-- [ ] Add capability flags so hosts can advertise partial implementation without pretending unsupported tools exist.
-- [ ] Add integration tests for MCP stdio proxy path for each tool class.
-- [ ] Add integration tests for ACP-native MCP-over-ACP path for each tool class.
-- [ ] Snapshot tool-list and schema output to detect unintended compatibility changes.
-- [ ] Add property/fuzz tests for malformed arguments, argument caps, and output-cap boundaries.
-- [ ] Add security tests for path traversal.
-- [ ] Add security tests for symlink escape.
-- [ ] Add security tests for oversized inputs.
-- [ ] Add security tests for secret-like env keys.
-- [ ] Add security tests for stale revisions.
-- [ ] Add security tests for terminal ownership.
-- [ ] Add security tests for output truncation.
-- [ ] Add security tests that manifest claims match actual tool availability, approval routing, and policy enforcement.
+- [x] Add versioned `ee_tools_manifest` from one source of truth.
+  - [x] Accept no arguments.
+  - [x] Return tool names, schema versions, transport availability, and capability requirements.
+  - [x] Return side-effect class: `read`, `write`, or `execute`.
+  - [x] Return approval requirement, output caps, redaction rules, and typed error classes.
+  - [x] Return short examples using minimal arguments for each tool.
+  - [x] Return deprecation and replacement metadata before retiring a tool or schema version.
+  - [x] Derive README/crate documentation and compatibility snapshots from manifest data where practical.
+- [x] Keep existing tool names stable after the `ee_` compatibility rename.
+- [x] Add new names rather than changing schemas incompatibly.
+- [x] Document every tool argument, limit, error shape, approval behavior, and redaction rule in README and crate docs.
+- [x] Document the rule that complicated arguments mean the tool should be split into smaller tools.
+- [x] Add capability flags so hosts can advertise partial implementation without pretending unsupported tools exist.
+- [x] Add integration tests for MCP stdio proxy path for each tool class.
+- [x] Add integration tests for ACP-native MCP-over-ACP path for each tool class.
+- [x] Snapshot tool-list and schema output to detect unintended compatibility changes.
+- [x] Add property/fuzz tests for malformed arguments, argument caps, and output-cap boundaries.
+- [x] Add security tests for path traversal.
+- [x] Add security tests for symlink escape.
+- [x] Add security tests for oversized inputs.
+- [x] Add security tests for secret-like env keys.
+- [x] Add security tests for stale revisions.
+- [x] Add security tests for terminal ownership.
+- [x] Add security tests for output truncation.
+- [x] Add security tests that manifest claims match actual tool availability, approval routing, and policy enforcement.
 
 #### Exit criteria
 
-- [ ] Expanded tools work through both stdio MCP proxy and ACP-native MCP-over-ACP.
-- [ ] Unsupported or disabled tools fail closed with clear tool-level errors.
-- [ ] Tool list is discoverable, versioned, and safe for LLM clients to cache within a session.
-- [ ] Every advertised tool has compatible schemas, explicit policy metadata, and conformance coverage on every supported transport.
+- [x] Expanded tools work through both stdio MCP proxy and ACP-native MCP-over-ACP.
+- [x] Unsupported or disabled tools fail closed with clear tool-level errors.
+- [x] Tool list is discoverable, versioned, and safe for LLM clients to cache within a session.
+- [x] Every advertised tool has compatible schemas, explicit policy metadata, and conformance coverage on every supported transport.
 
 ### Phase 8: Replayable LLM harness evaluation
 
@@ -335,20 +335,20 @@ Build deterministic task fixtures and replay infrastructure before expanding age
 
 #### Work items
 
-- [ ] Add versioned task fixtures covering bug fixes, features, refactors, code review, investigation, and multi-file changes.
-- [ ] Add fixtures for dirty buffers, stale revisions, write conflicts, interrupted sessions, recovery, denied approvals, and unavailable capabilities.
-- [ ] Add adversarial fixtures for prompt injection in repository content, secrets/redaction, path escape, and unsafe terminal requests.
-- [ ] Record deterministic model/tool traces with redacted workspace snapshots and stable fixture inputs.
-- [ ] Score task completion, validation success, policy violations, recovery success, diff size, approval count, tool calls, model calls, latency, and estimated token/cost usage.
-- [ ] Compare fixture results across model/provider versions, prompt versions, routing configurations, and MCP transports.
-- [ ] Define pass/fail regression thresholds before changing default model, prompt, tool, or policy behavior.
-- [ ] Keep fixtures hermetic: no network, secret, user-home, or mutable global-state dependency.
+- [x] Add versioned task fixtures covering bug fixes, features, refactors, code review, investigation, and multi-file changes.
+- [x] Add fixtures for dirty buffers, stale revisions, write conflicts, interrupted sessions, recovery, denied approvals, and unavailable capabilities.
+- [x] Add adversarial fixtures for prompt injection in repository content, secrets/redaction, path escape, and unsafe terminal requests.
+- [x] Record deterministic model/tool traces with redacted workspace snapshots and stable fixture inputs.
+- [x] Score task completion, validation success, policy violations, recovery success, diff size, approval count, tool calls, model calls, latency, and estimated token/cost usage.
+- [x] Compare fixture results across model/provider versions, prompt versions, routing configurations, and MCP transports.
+- [x] Define pass/fail regression thresholds before changing default model, prompt, tool, or policy behavior.
+- [x] Keep fixtures hermetic: no network, secret, user-home, or mutable global-state dependency.
 
 #### Exit criteria
 
-- [ ] Replaying same fixture produces stable evidence suitable for regression comparison.
-- [ ] CI reports harness quality regressions with failing task, score delta, and redacted trace reference.
-- [ ] Model or prompt changes cannot become defaults without baseline comparison against required fixtures.
+- [x] Replaying same fixture produces stable evidence suitable for regression comparison.
+- [x] CI reports harness quality regressions with failing task, score delta, and redacted trace reference.
+- [x] Model or prompt changes cannot become defaults without baseline comparison against required fixtures.
 
 ### Phase 9: Evidence-gated completion and validation
 

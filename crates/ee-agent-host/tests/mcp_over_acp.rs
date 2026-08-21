@@ -489,6 +489,36 @@ async fn mcp_over_acp_connect_and_tools_list_round_trip() {
 }
 
 #[tokio::test]
+async fn mcp_over_acp_manifest_round_trips_complete_governance_metadata() {
+    let script = connect_and_init_script()
+        .emit(emit_message(202, "tools/call", Some(json!({ "name": "ee_tools_manifest" }))))
+        .wait_for_response(202);
+    let (fake, host) =
+        spawn_host(script, Arc::new(RecordingHandler::new(HandlerCapabilities::all()))).await;
+    let connection = ready_connection(&fake, &host).await;
+    connection
+        .new_session(vec![PathBuf::from("/work")], Vec::new(), Some(stdio_fallback()))
+        .await
+        .expect("session starts");
+
+    let manifest = await_response(&fake, 202).await;
+    assert_eq!(manifest["result"]["structuredContent"]["manifestVersion"], json!(1));
+    let tools =
+        manifest["result"]["structuredContent"]["tools"].as_array().expect("manifest tool list");
+    assert!(!tools.is_empty());
+    for tool in tools {
+        assert!(tool["inputSchema"].is_object(), "input schema");
+        assert!(tool["transportAvailability"].as_array().is_some_and(|routes| !routes.is_empty()));
+        assert!(tool["outputCaps"].as_array().is_some_and(|caps| !caps.is_empty()));
+        assert!(tool["redactionRules"].as_array().is_some_and(|rules| !rules.is_empty()));
+        assert!(tool["errorClasses"].as_array().is_some_and(|classes| !classes.is_empty()));
+    }
+
+    host.connection.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
 async fn mcp_over_acp_message_before_connect_is_rejected_with_invalid_params() {
     let script = acp_base_script().emit(json!({
         "jsonrpc": "2.0",

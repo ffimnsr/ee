@@ -1570,6 +1570,15 @@ impl ee_mcp::EeProxyBackend for SocketProxyBackend {
         })
     }
 
+    fn supported_tools(&self) -> Option<Vec<String>> {
+        Some(
+            ee_mcp::tool_names_for_transport(ee_mcp::ToolTransport::Stdio)
+                .into_iter()
+                .map(ToOwned::to_owned)
+                .collect(),
+        )
+    }
+
     fn diagnostics(&self) -> Vec<String> {
         self.call_text(ProxyCall::Diagnostics)
             .map(|text| text.lines().map(ToOwned::to_owned).collect())
@@ -1582,17 +1591,31 @@ impl ee_mcp::EeProxyBackend for SocketProxyBackend {
 /// Handrolled because rmcp ships no stdio transport for the server role
 /// (SDK gap; the client-side `TokioChildProcess` covers only spawners).  The
 /// frame cap is enforced on receive (fail closed).
-struct StdioProxyTransport {
-    reader: tokio::io::BufReader<tokio::io::Stdin>,
+struct StdioProxyTransport<R = tokio::io::Stdin, W = tokio::io::Stdout> {
+    reader: tokio::io::BufReader<R>,
+    writer: Arc<tokio::sync::Mutex<W>>,
 }
 
 impl StdioProxyTransport {
-    fn new() -> Self {
-        Self { reader: tokio::io::BufReader::new(tokio::io::stdin()) }
+    fn stdio() -> Self {
+        Self::new(tokio::io::stdin(), tokio::io::stdout())
     }
 }
 
-impl rmcp::transport::Transport<rmcp::service::RoleServer> for StdioProxyTransport {
+impl<R: tokio::io::AsyncRead, W> StdioProxyTransport<R, W> {
+    fn new(reader: R, writer: W) -> Self {
+        Self {
+            reader: tokio::io::BufReader::new(reader),
+            writer: Arc::new(tokio::sync::Mutex::new(writer)),
+        }
+    }
+}
+
+impl<R, W> rmcp::transport::Transport<rmcp::service::RoleServer> for StdioProxyTransport<R, W>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     type Error = std::io::Error;
 
     fn send(
@@ -1601,11 +1624,12 @@ impl rmcp::transport::Transport<rmcp::service::RoleServer> for StdioProxyTranspo
     ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send + 'static {
         use tokio::io::AsyncWriteExt;
         let line = serde_json::to_string(&item).unwrap_or_else(|_| "{}".to_string());
+        let writer = Arc::clone(&self.writer);
         async move {
-            let mut stdout = tokio::io::stdout();
-            stdout.write_all(line.as_bytes()).await?;
-            stdout.write_all(b"\n").await?;
-            stdout.flush().await
+            let mut writer = writer.lock().await;
+            writer.write_all(line.as_bytes()).await?;
+            writer.write_all(b"\n").await?;
+            writer.flush().await
         }
     }
 
@@ -1631,6 +1655,17 @@ impl rmcp::transport::Transport<rmcp::service::RoleServer> for StdioProxyTranspo
 /// The editor's listener verifies the token; the agent (which spawned this
 /// process) speaks MCP 2026-07-28 over stdin/stdout.
 pub(crate) fn run_proxy_stdio(socket: PathBuf, token: String) -> std::io::Result<()> {
+    run_proxy_stdio_with_transport(socket, token, StdioProxyTransport::stdio())
+}
+
+fn run_proxy_stdio_with_transport<T>(
+    socket: PathBuf,
+    token: String,
+    transport: T,
+) -> std::io::Result<()>
+where
+    T: rmcp::transport::Transport<rmcp::service::RoleServer> + Send + 'static,
+{
     let backend = SocketProxyBackend::connect(&socket, &token)?;
     let proxy = ee_mcp::EeMcpProxy::new(Arc::new(backend));
     let runtime = TokioBuilder::new_current_thread()
@@ -1638,9 +1673,24 @@ pub(crate) fn run_proxy_stdio(socket: PathBuf, token: String) -> std::io::Result
         .build()
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     runtime.block_on(async move {
-        let _ = rmcp::serve_server(proxy, StdioProxyTransport::new()).await;
-    });
-    Ok(())
+        let running = rmcp::serve_server(proxy, transport)
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let _ = running.waiting().await;
+        Ok(())
+    })
+}
+
+/// Test-only raw stdio runner using the same MCP server and newline framing as
+/// the subprocess entry. Duplex avoids spawning an external binary.
+#[cfg(test)]
+pub(crate) fn run_proxy_stdio_with_duplex(
+    socket: PathBuf,
+    token: String,
+    stream: tokio::io::DuplexStream,
+) -> std::io::Result<()> {
+    let (reader, writer) = tokio::io::split(stream);
+    run_proxy_stdio_with_transport(socket, token, StdioProxyTransport::new(reader, writer))
 }
 
 // ── App integration ──────────────────────────────────────────────────────────
