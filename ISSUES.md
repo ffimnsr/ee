@@ -417,19 +417,19 @@ Choose smallest appropriate validation action from declared project knowledge. P
 
 #### Work items
 
-- [ ] Add workspace-declared test/task metadata with stable command ids, scopes, prerequisites, and approval class.
-- [ ] Map changed files and resolved symbols to likely targeted tests before escalating to broader validation.
-- [ ] Return structured command results with command id, exit status, elapsed time, test ids, diagnostics, redaction, and truncation metadata.
-- [ ] Retry only explicitly classified transient failures with bounded attempt count and recorded reason.
-- [ ] Distinguish command failure, timeout, cancellation, policy denial, missing dependency, and unavailable environment.
-- [ ] Keep shell allow-lists, user approval, cancellation, and output caps mandatory for every generated validation command.
-- [ ] Add tests for target selection, escalation, transient retry limits, and unsafe command rejection.
+- [x] Add workspace-declared test/task metadata with stable command ids, scopes, prerequisites, and approval class.
+- [x] Map changed files and resolved symbols to likely targeted tests before escalating to broader validation.
+- [x] Return structured command results with command id, exit status, elapsed time, test ids, diagnostics, redaction, and truncation metadata.
+- [x] Retry only explicitly classified transient failures with bounded attempt count and recorded reason.
+- [x] Distinguish command failure, timeout, cancellation, policy denial, missing dependency, and unavailable environment.
+- [x] Keep shell allow-lists, user approval, cancellation, and output caps mandatory for every generated validation command.
+- [x] Add tests for target selection, escalation, transient retry limits, and unsafe command rejection.
 
 #### Exit criteria
 
-- [ ] Agent chooses focused validation when reliable target metadata exists.
-- [ ] Validation escalation is explicit, bounded, and justified by changed scope or prior result.
-- [ ] Command results provide enough evidence for Phase 9 completion states.
+- [x] Agent chooses focused validation when reliable target metadata exists.
+- [x] Validation escalation is explicit, bounded, and justified by changed scope or prior result.
+- [x] Command results provide enough evidence for Phase 9 completion states.
 
 ### Phase 13: Subagent delegation quality controls
 

@@ -70,6 +70,9 @@
 //!   strategy execution wrappers.
 //! - [`final_response`] — typed final responses built from observed state
 //!   (changed files, structured validation, completion evidence, provenance).
+//! - [`command_intelligence`] — versioned workspace validation-command metadata,
+//!   focused-first escalation, typed command failures, bounded retries, and
+//!   redacted/capped execution evidence.
 //! - [`validation`] — validation task planning from files, symbols, workspace
 //!   declarations, and registered tools; execution routes through the shared
 //!   executor and records structured evidence.
@@ -148,6 +151,7 @@
 pub mod budget;
 pub mod checkpoint;
 pub mod checkpoint_store;
+pub mod command_intelligence;
 pub mod compaction;
 pub mod completion;
 pub mod config;
@@ -217,6 +221,10 @@ pub use checkpoint::{
     TranscriptSummary, current_unix_millis,
 };
 pub use checkpoint_store::{CheckpointMeta, CheckpointStore};
+pub use command_intelligence::{
+    VALIDATION_COMMAND_SCHEMA_VERSION, ValidationApprovalClass, ValidationCommandFailure,
+    ValidationCommandMetadata, ValidationEscalation, ValidationScope,
+};
 pub use compaction::{
     CompactTurnReport, CompactionConfig, DEFAULT_COMPACT_MAX_INPUT_BYTES, SESSION_SUMMARY_KEY,
     build_compaction_context, build_compaction_prompt,
@@ -345,9 +353,10 @@ pub use tools::{
 pub use trace::{TraceLine, export_jsonl, is_sensitive_key, redact_assignments, redact_json};
 pub use trust::{TrustLevel, trust_for_role};
 pub use validation::{
-    DeclaredValidationTask, FileTypeRule, ValidationPlan, ValidationPlanEntry,
-    ValidationPlanReason, ValidationPlanner, ValidationPlanningContext, ValidationResult,
-    ValidationResultStore, ValidationRunner, WorkspaceValidationConfig, default_file_type_rules,
+    DeclaredValidationCommand, DeclaredValidationTask, FileTypeRule,
+    VALIDATION_COMMAND_OUTPUT_MAX_BYTES, ValidationPlan, ValidationPlanEntry, ValidationPlanReason,
+    ValidationPlanner, ValidationPlanningContext, ValidationResult, ValidationResultStore,
+    ValidationRunner, WorkspaceValidationConfig, default_file_type_rules,
     finalize_validation_tasks,
 };
 pub use workspace_scope::WorkspaceScope;

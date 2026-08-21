@@ -238,6 +238,16 @@ Each replay records a stable SHA-256 trace id, redacted relative workspace snaps
 
 `ValidationPlanner::plan_with_context` combines changed files, graph-resolved changed symbols, workspace validation configuration, declared project tasks, and registered tools. Unknown tools never enter a plan. Keep validation tools narrow: if arguments need many modes, nested objects, or optional branches, split operation into smaller focused tools instead of growing one complex schema.
 
+#### Targeted validation and command intelligence
+
+Workspace-declared validation commands use schema version `1`: `DeclaredValidationCommand { task, metadata }`. `task` supplies registered `tool_name`, display `command`, JSON-object `arguments`, optional `file_extensions`, and optional resolved `symbols`. `metadata` requires stable `command_id` and declares `scope` (`targeted` or `workspace`), prerequisite command ids, approval class (`policy` or `host`), and bounded stable `test_ids`. Empty ids, self-prerequisites, unavailable tools, and `host` metadata paired with a tool lacking `host_approval` never enter a plan.
+
+Planner selects targeted file/symbol checks first. Workspace checks become `after_focused_pass` escalations whenever a focused command exists; they run only after every earlier focused command and every explicit prerequisite passes. Missing or failed prerequisites create bounded skipped evidence with `missing_dependency`; no broad command is dispatched. This makes escalation explicit, ordered, and bounded rather than a speculative full-suite fallback.
+
+`ValidationResult` is structured command evidence: stable command id, outcome, typed failure (`command_failed`, `timeout`, `cancelled`, `policy_denied`, `missing_dependency`, `unavailable_environment`, or `invalid_arguments`), exit status, elapsed milliseconds, test ids, diagnostics delta, attempt count, retry reasons, escalation, redaction flag, output-truncation flag, and bounded output. Output is secret-redacted then capped at `8192` bytes. Only explicitly classified transient tool failures (`backend` and `timeout`) retry, under `RetryPolicy.max_retries`; policy denial, malformed arguments, and cancellation never retry.
+
+Every generated validation command executes through `ToolExecutor`; schema validation, workspace/shell scope rules, policy allow-lists, host approval, cancellation, timeout, budget, and output caps therefore remain mandatory. Do not generate shell strings or bypass executor policy from validation metadata.
+
 #### Auditable write transactions
 
 Hosts record a `WriteTransaction` for each mutation sequence and pass it through `StrategicInput.write_transaction`. Transaction evidence is serializable and includes transaction id, absolute changed paths, expected source revisions, preview summaries, approval outcome, per-path apply result, post-write path and workspace revisions, diagnostics delta, final diff, selected `ValidationRecord`, terminal state, and rollback safety evidence.

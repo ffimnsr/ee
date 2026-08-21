@@ -18,12 +18,18 @@ use ee_acp_agent_server::{ClientBridge, UpdateSink};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
+use crate::command_intelligence::{
+    ValidationApprovalClass, ValidationCommandFailure, ValidationCommandMetadata,
+    ValidationEscalation, ValidationScope,
+};
 use crate::error::OrchestratorError;
 use crate::events::{EventRecorder, OrchestratorEvent};
 use crate::final_response::{ChangedFile, ValidationOutcome, ValidationRecorder};
 use crate::model::ModelMessage;
+use crate::retries::RetryPolicy;
+use crate::sensitive_data::redact;
 use crate::tasks::{TaskGraph, TaskId, TaskStatus};
-use crate::tools::{ToolDefinition, ToolExecutor, ToolIntent};
+use crate::tools::{ToolDefinition, ToolErrorKind, ToolExecutor, ToolIntent, ToolResult};
 
 /// Default file-type → validation-tool inference rules.  Deterministic and
 /// documented; rules only produce plan entries when the named tool is
@@ -142,6 +148,32 @@ pub struct DeclaredValidationTask {
     pub symbols: Vec<String>,
 }
 
+/// A workspace task with stable command identity, scope, prerequisites,
+/// approval routing, and affected test identifiers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct DeclaredValidationCommand {
+    /// Existing task definition and selection predicates.
+    pub task: DeclaredValidationTask,
+    /// Stable command metadata. Invalid metadata is rejected from plans.
+    pub metadata: ValidationCommandMetadata,
+}
+
+impl DeclaredValidationCommand {
+    /// Creates a command declaration from an existing task definition.
+    #[must_use]
+    pub fn new(task: DeclaredValidationTask, command_id: impl Into<String>) -> Self {
+        Self { task, metadata: ValidationCommandMetadata::targeted(command_id) }
+    }
+
+    /// Replaces metadata with an explicitly declared version.
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: ValidationCommandMetadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+}
+
 impl DeclaredValidationTask {
     /// Creates an unconditional declared task.
     #[must_use]
@@ -181,9 +213,13 @@ impl DeclaredValidationTask {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct WorkspaceValidationConfig {
-    /// Declared project validation tasks, in configuration order.
+    /// Legacy declared project validation tasks, in configuration order.
+    /// They remain supported and receive targeted metadata keyed by tool name.
     #[serde(default)]
     pub declared_tasks: Vec<DeclaredValidationTask>,
+    /// Versioned command declarations with stable ids and command policy metadata.
+    #[serde(default)]
+    pub declared_commands: Vec<DeclaredValidationCommand>,
 }
 
 /// Fresh inputs for dynamic validation planning.
@@ -206,7 +242,7 @@ impl<'a> ValidationPlanningContext<'a> {
 }
 
 static EMPTY_WORKSPACE_VALIDATION_CONFIG: WorkspaceValidationConfig =
-    WorkspaceValidationConfig { declared_tasks: Vec::new() };
+    WorkspaceValidationConfig { declared_tasks: Vec::new(), declared_commands: Vec::new() };
 
 /// One planned validation execution for one changed file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,6 +258,10 @@ pub struct ValidationPlanEntry {
     pub arguments: serde_json::Value,
     /// Evidence showing why this entry was selected.
     pub reason: ValidationPlanReason,
+    /// Stable workspace command metadata, including id and prerequisites.
+    pub metadata: ValidationCommandMetadata,
+    /// Whether this is focused work or a justified broader escalation.
+    pub escalation: ValidationEscalation,
 }
 
 /// A deterministic validation plan: entries in changed-file order, each
@@ -282,9 +322,10 @@ impl ValidationPlanner {
 
     /// Builds a deterministic plan from changed files, changed symbols,
     /// workspace configuration, declared project tasks, and registered tools.
-    /// File-type entries keep changed-file order. Matching declared tasks then
-    /// append in workspace configuration order. Unknown tools never enter the
-    /// plan, and duplicate tool/argument pairs are eliminated.
+    /// Focused file and symbol checks always precede broader workspace checks.
+    /// Broader checks are marked as escalations and run only after focused
+    /// checks pass. Unknown tools, invalid metadata, and duplicate command-id/
+    /// argument pairs never enter the plan.
     #[must_use]
     pub fn plan_with_context(
         &self,
@@ -315,25 +356,25 @@ impl ValidationPlanner {
                     changed_file: file.path.clone(),
                     arguments: rule.render_arguments(&file.path),
                     reason: ValidationPlanReason::ChangedFileType,
+                    metadata: ValidationCommandMetadata::targeted(rule.tool_name.clone()),
+                    escalation: ValidationEscalation::Direct,
                 },
             );
         }
         for task in &context.workspace.declared_tasks {
-            if !tools.iter().any(|tool| tool.name == task.tool_name) || !task_matches(task, context)
-            {
-                continue;
-            }
-            push_unique(
+            let metadata = ValidationCommandMetadata::targeted(task.tool_name.clone());
+            push_declared_task(&mut entries, task, metadata, context, tools);
+        }
+        for command in &context.workspace.declared_commands {
+            push_declared_task(
                 &mut entries,
-                ValidationPlanEntry {
-                    tool_name: task.tool_name.clone(),
-                    command: task.command.clone(),
-                    changed_file: "<workspace>".into(),
-                    arguments: task.arguments.clone(),
-                    reason: ValidationPlanReason::WorkspaceTask,
-                },
+                &command.task,
+                command.metadata.clone(),
+                context,
+                tools,
             );
         }
+        mark_workspace_escalations(&mut entries);
         ValidationPlan { entries }
     }
 
@@ -381,23 +422,93 @@ fn task_matches(task: &DeclaredValidationTask, context: ValidationPlanningContex
     extension_matches && symbol_matches
 }
 
+fn push_declared_task(
+    entries: &mut Vec<ValidationPlanEntry>,
+    task: &DeclaredValidationTask,
+    metadata: ValidationCommandMetadata,
+    context: ValidationPlanningContext<'_>,
+    tools: &[ToolDefinition],
+) {
+    let Some(definition) = tools.iter().find(|tool| tool.name == task.tool_name) else {
+        return;
+    };
+    if !metadata.is_valid()
+        || !task_matches(task, context)
+        || (metadata.approval == ValidationApprovalClass::Host && !definition.host_approval)
+    {
+        return;
+    }
+    push_unique(
+        entries,
+        ValidationPlanEntry {
+            tool_name: task.tool_name.clone(),
+            command: task.command.clone(),
+            changed_file: "<workspace>".into(),
+            arguments: task.arguments.clone(),
+            reason: ValidationPlanReason::WorkspaceTask,
+            metadata,
+            escalation: ValidationEscalation::Direct,
+        },
+    );
+}
+
+fn mark_workspace_escalations(entries: &mut [ValidationPlanEntry]) {
+    let has_focused = entries.iter().any(|entry| entry.metadata.scope == ValidationScope::Targeted);
+    if !has_focused {
+        return;
+    }
+    for entry in entries {
+        if entry.metadata.scope == ValidationScope::Workspace {
+            entry.escalation = ValidationEscalation::AfterFocusedPass;
+        }
+    }
+}
+
 fn push_unique(entries: &mut Vec<ValidationPlanEntry>, entry: ValidationPlanEntry) {
     if !entries.iter().any(|existing| {
-        existing.tool_name == entry.tool_name && existing.arguments == entry.arguments
+        existing.metadata.command_id == entry.metadata.command_id
+            && existing.arguments == entry.arguments
     }) {
         entries.push(entry);
     }
 }
 
-/// One stored validation result: command, status, output summary, and
-/// timestamp.
+/// Maximum bytes retained from a validation command's redacted output.
+pub const VALIDATION_COMMAND_OUTPUT_MAX_BYTES: usize = 8 * 1024;
+
+/// One structured validation command result. Output is redacted and capped
+/// before recording, while command identity, attempts, policy failures, and
+/// selected tests remain available as Phase 9 completion evidence.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ValidationResult {
+    /// Stable workspace command id.
+    pub command_id: String,
     /// The command that ran.
     pub command: String,
     /// The recorded outcome.
     pub status: ValidationOutcome,
+    /// Typed failure classification when the command did not pass.
+    pub failure: Option<ValidationCommandFailure>,
+    /// Process exit status when the host supplies one; success is `0`.
+    pub exit_status: Option<i32>,
+    /// Elapsed execution time across all attempts.
+    pub elapsed_ms: u64,
+    /// Stable affected test or check identifiers.
+    pub test_ids: Vec<String>,
+    /// Net diagnostics change observed by the host, when known. Runner starts
+    /// at zero; write transactions attach revision-bound diagnostics separately.
+    pub diagnostics_delta: i64,
+    /// Whether secret-like content was redacted from output.
+    pub output_redacted: bool,
+    /// Whether output exceeded [`VALIDATION_COMMAND_OUTPUT_MAX_BYTES`].
+    pub output_truncated: bool,
+    /// Number of attempts, including initial dispatch.
+    pub attempts: u32,
+    /// Explicit transient failure reasons that triggered retries.
+    pub retry_reasons: Vec<String>,
+    /// Why broader validation could run, when applicable.
+    pub escalation: ValidationEscalation,
     /// Bounded output summary (or error text).
     pub output_summary: String,
     /// When the command finished.
@@ -427,9 +538,22 @@ impl ValidationResultStore {
         output_summary: impl Into<String>,
         task_id: Option<TaskId>,
     ) {
+        let command = command.into();
         self.results.push(ValidationResult {
-            command: command.into(),
+            command_id: command.clone(),
+            command,
             status,
+            failure: (status != ValidationOutcome::Passed)
+                .then_some(ValidationCommandFailure::CommandFailed),
+            exit_status: (status == ValidationOutcome::Passed).then_some(0),
+            elapsed_ms: 0,
+            test_ids: Vec::new(),
+            diagnostics_delta: 0,
+            output_redacted: false,
+            output_truncated: false,
+            attempts: 0,
+            retry_reasons: Vec::new(),
+            escalation: ValidationEscalation::Direct,
             output_summary: output_summary.into(),
             recorded_at: SystemTime::now(),
             task_id,
@@ -462,13 +586,27 @@ pub struct ValidationRunner {
     executor: ToolExecutor,
     events: EventRecorder,
     store: ValidationResultStore,
+    retry_policy: RetryPolicy,
 }
 
 impl ValidationRunner {
-    /// Creates a runner over the shared executor with a fresh result store.
+    /// Creates a runner over the shared executor with a fresh result store and
+    /// the bounded default transient-retry policy.
     #[must_use]
     pub fn new(executor: ToolExecutor, events: EventRecorder) -> Self {
-        Self { executor, events, store: ValidationResultStore::new() }
+        Self {
+            executor,
+            events,
+            store: ValidationResultStore::new(),
+            retry_policy: RetryPolicy::default(),
+        }
+    }
+
+    /// Replaces the explicit transient-retry policy for future commands.
+    #[must_use]
+    pub fn with_retry_policy(mut self, retry_policy: RetryPolicy) -> Self {
+        self.retry_policy = retry_policy;
+        self
     }
 
     /// The accumulated results.
@@ -502,54 +640,67 @@ impl ValidationRunner {
             tool_call_id: intent.tool_call_id.clone(),
             tool_name: intent.name.clone(),
         });
-        let executed =
-            self.executor.execute(&intent, sink, client, cancel.clone(), task, transcript).await;
-        let success = executed.as_ref().is_ok_and(|result| result.success);
+        let executed = self
+            .execute_with_retries(&intent, sink, client, cancel.clone(), task, transcript)
+            .await;
+        let success = executed.as_ref().is_ok_and(|result| result.result.success);
         self.events.record(OrchestratorEvent::ToolFinished {
             tool_call_id: intent.tool_call_id.clone(),
             tool_name: intent.name.clone(),
             success,
         });
         match executed {
-            Ok(result) => {
-                let status = if result.success {
+            Ok(executed) => {
+                let status = if executed.result.success {
                     ValidationOutcome::Passed
                 } else {
                     ValidationOutcome::Failed
                 };
-                let summary = result.summary_text();
-                record_validation_evidence(
-                    validation,
+                let failure = validation_failure_from_tool(&executed.result);
+                let (summary, output_redacted, output_truncated) =
+                    bounded_redacted_output(&executed.result.summary_text());
+                let result = self.store_result(
                     entry,
                     task_id,
                     status,
-                    summary.clone(),
+                    failure,
+                    summary,
                     elapsed_ms(started),
-                    result.error_kind == Some(crate::tools::ToolErrorKind::PermissionDenied),
+                    output_redacted,
+                    output_truncated,
+                    executed.attempts,
+                    executed.retry_reasons,
                 );
-                Ok(self.store_result(entry, task_id, status, summary))
+                record_validation_evidence(validation, entry, task_id, &result);
+                Ok(result)
             }
-            Err(error)
+            Err(error) => {
+                let failure = validation_failure_from_error(&error);
+                let (summary, output_redacted, output_truncated) =
+                    bounded_redacted_output(&error.to_string());
+                let result = self.store_result(
+                    entry,
+                    task_id,
+                    ValidationOutcome::Failed,
+                    Some(failure),
+                    summary,
+                    elapsed_ms(started),
+                    output_redacted,
+                    output_truncated,
+                    1,
+                    Vec::new(),
+                );
+                record_validation_evidence(validation, entry, task_id, &result);
                 if error.is_cancellation()
                     || matches!(
                         error,
                         OrchestratorError::BudgetExceeded(_) | OrchestratorError::Timeout(_)
-                    ) =>
-            {
-                Err(error)
-            }
-            Err(error) => {
-                let summary = error.to_string();
-                record_validation_evidence(
-                    validation,
-                    entry,
-                    task_id,
-                    ValidationOutcome::Failed,
-                    summary.clone(),
-                    elapsed_ms(started),
-                    matches!(error, OrchestratorError::PolicyDenied(_)),
-                );
-                Ok(self.store_result(entry, task_id, ValidationOutcome::Failed, summary))
+                    )
+                {
+                    Err(error)
+                } else {
+                    Ok(result)
+                }
             }
         }
     }
@@ -573,6 +724,23 @@ impl ValidationRunner {
             if *cancel.borrow() {
                 return Err(OrchestratorError::Cancellation);
             }
+            if let Some(reason) = execution_blocker(entry, plan, &results) {
+                let result = self.store_result(
+                    entry,
+                    task_id,
+                    ValidationOutcome::Skipped,
+                    Some(ValidationCommandFailure::MissingDependency),
+                    reason,
+                    0,
+                    false,
+                    false,
+                    0,
+                    Vec::new(),
+                );
+                record_validation_evidence(validation, entry, task_id, &result);
+                results.push(result);
+                continue;
+            }
             results.push(
                 self.run_entry(
                     entry,
@@ -590,17 +758,66 @@ impl ValidationRunner {
         Ok(results)
     }
 
+    async fn execute_with_retries(
+        &self,
+        intent: &ToolIntent,
+        sink: &UpdateSink,
+        client: &ClientBridge,
+        cancel: watch::Receiver<bool>,
+        task: &crate::tasks::TaskNode,
+        transcript: &[ModelMessage],
+    ) -> Result<RetriedValidationToolResult, OrchestratorError> {
+        let mut attempts = 0_u32;
+        let mut retry_reasons = Vec::new();
+        loop {
+            let result = self
+                .executor
+                .execute(intent, sink, client, cancel.clone(), task, transcript)
+                .await?;
+            attempts = attempts.saturating_add(1);
+            let Some(kind) = result.error_kind else {
+                return Ok(RetriedValidationToolResult { result, attempts, retry_reasons });
+            };
+            if result.success
+                || !self.retry_policy.is_transient(&result)
+                || attempts > self.retry_policy.max_retries as u32
+            {
+                return Ok(RetriedValidationToolResult { result, attempts, retry_reasons });
+            }
+            retry_reasons.push(kind.as_str().to_string());
+            self.retry_policy.backoff.sleep_for((attempts - 1) as usize).await;
+        }
+    }
+
     /// Records a result into both stores.
+    #[allow(clippy::too_many_arguments)]
     fn store_result(
         &mut self,
         entry: &ValidationPlanEntry,
         task_id: &TaskId,
         status: ValidationOutcome,
+        failure: Option<ValidationCommandFailure>,
         summary: String,
+        elapsed_ms: u64,
+        output_redacted: bool,
+        output_truncated: bool,
+        attempts: u32,
+        retry_reasons: Vec<String>,
     ) -> ValidationResult {
         let result = ValidationResult {
+            command_id: entry.metadata.command_id.clone(),
             command: entry.command.clone(),
             status,
+            failure,
+            exit_status: (status == ValidationOutcome::Passed).then_some(0),
+            elapsed_ms,
+            test_ids: entry.metadata.test_ids.clone(),
+            diagnostics_delta: 0,
+            output_redacted,
+            output_truncated,
+            attempts,
+            retry_reasons,
+            escalation: entry.escalation,
             output_summary: summary,
             recorded_at: SystemTime::now(),
             task_id: Some(task_id.clone()),
@@ -610,30 +827,96 @@ impl ValidationRunner {
     }
 }
 
+struct RetriedValidationToolResult {
+    result: ToolResult,
+    attempts: u32,
+    retry_reasons: Vec<String>,
+}
+
+fn validation_failure_from_tool(result: &ToolResult) -> Option<ValidationCommandFailure> {
+    (!result.success).then_some(match result.error_kind {
+        Some(ToolErrorKind::Timeout) => ValidationCommandFailure::Timeout,
+        Some(ToolErrorKind::Cancelled) => ValidationCommandFailure::Cancelled,
+        Some(ToolErrorKind::PermissionDenied) => ValidationCommandFailure::PolicyDenied,
+        Some(ToolErrorKind::InvalidArguments) => ValidationCommandFailure::InvalidArguments,
+        Some(ToolErrorKind::Backend) | None => ValidationCommandFailure::CommandFailed,
+    })
+}
+
+fn validation_failure_from_error(error: &OrchestratorError) -> ValidationCommandFailure {
+    if error.is_cancellation() {
+        ValidationCommandFailure::Cancelled
+    } else if matches!(error, OrchestratorError::Timeout(_)) {
+        ValidationCommandFailure::Timeout
+    } else if matches!(error, OrchestratorError::PolicyDenied(_)) {
+        ValidationCommandFailure::PolicyDenied
+    } else {
+        ValidationCommandFailure::UnavailableEnvironment
+    }
+}
+
+fn bounded_redacted_output(output: &str) -> (String, bool, bool) {
+    let redacted = redact(output);
+    let output_redacted = redacted != output;
+    if redacted.len() <= VALIDATION_COMMAND_OUTPUT_MAX_BYTES {
+        return (redacted, output_redacted, false);
+    }
+    let mut end = VALIDATION_COMMAND_OUTPUT_MAX_BYTES;
+    while !redacted.is_char_boundary(end) {
+        end -= 1;
+    }
+    (format!("{}… [truncated]", &redacted[..end]), output_redacted, true)
+}
+
+fn execution_blocker(
+    entry: &ValidationPlanEntry,
+    plan: &ValidationPlan,
+    completed: &[ValidationResult],
+) -> Option<String> {
+    let mut prior = plan.entries.iter().zip(completed);
+    for prerequisite in &entry.metadata.prerequisites {
+        let Some((_, result)) =
+            prior.clone().find(|(planned, _)| planned.metadata.command_id == *prerequisite)
+        else {
+            return Some(format!("missing prerequisite command: {prerequisite}"));
+        };
+        if result.status != ValidationOutcome::Passed {
+            return Some(format!("prerequisite command did not pass: {prerequisite}"));
+        }
+    }
+    if entry.escalation == ValidationEscalation::AfterFocusedPass
+        && prior.any(|(planned, result)| {
+            planned.metadata.scope == ValidationScope::Targeted
+                && result.status != ValidationOutcome::Passed
+        })
+    {
+        return Some("broader validation requires prior focused commands to pass".into());
+    }
+    None
+}
+
 fn record_validation_evidence(
     validation: &mut ValidationRecorder,
     entry: &ValidationPlanEntry,
     task_id: &TaskId,
-    outcome: ValidationOutcome,
-    detail: String,
-    elapsed_ms: u64,
-    denied: bool,
+    result: &ValidationResult,
 ) {
     validation.record_evidence(crate::final_response::ValidationRecord {
-        evidence_id: format!("validation-{task_id}"),
+        evidence_id: format!("validation-{}-{task_id}", result.command_id),
         command: entry.command.clone(),
         tool: Some(entry.tool_name.clone()),
-        outcome,
-        exit_status: (outcome == ValidationOutcome::Passed).then_some(0),
-        elapsed_ms: Some(elapsed_ms),
-        affected_tests: Vec::new(),
-        diagnostics_delta: 0,
-        output_truncated: false,
-        skip_reason: None,
+        outcome: result.status,
+        exit_status: result.exit_status,
+        elapsed_ms: Some(result.elapsed_ms),
+        affected_tests: result.test_ids.clone(),
+        diagnostics_delta: result.diagnostics_delta,
+        output_truncated: result.output_truncated,
+        skip_reason: (result.status == ValidationOutcome::Skipped)
+            .then(|| result.output_summary.clone()),
         revision: None,
         selected: false,
-        denied,
-        detail: Some(detail),
+        denied: result.failure == Some(ValidationCommandFailure::PolicyDenied),
+        detail: Some(result.output_summary.clone()),
         source_task: Some(task_id.clone()),
     });
 }
@@ -661,416 +944,5 @@ pub fn finalize_validation_tasks(
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-
-    use ee_acp_agent_server::server::OutboundEvent;
-    use ee_acp_agent_server::{ClientBridge, UpdateSink};
-    use ee_agent_protocol::SessionId;
-    use serde_json::json;
-    use tokio::sync::{mpsc, watch};
-
-    use super::*;
-    use crate::budget::BudgetTracker;
-    use crate::config::OrchestratorConfig;
-    use crate::policy::{PolicyEngine, ToolPolicy};
-    use crate::test_support::FakeTool;
-    use crate::tools::{ServerTool, SideEffectClass, ToolErrorKind, ToolRegistry, ToolResult};
-
-    fn changed_file(path: &str) -> ChangedFile {
-        ChangedFile { path: path.into(), source_task: Some(TaskId::new("task-1")) }
-    }
-
-    fn cargo_check_tool() -> Arc<FakeTool> {
-        Arc::new(FakeTool::new(
-            ToolDefinition::new("cargo_check", "compiles the Rust crate")
-                .side_effect_class(SideEffectClass::Execute),
-            ToolResult::success("checks green"),
-        ))
-    }
-
-    fn tool_definitions(tool: &Arc<FakeTool>) -> Vec<ToolDefinition> {
-        vec![tool.definition()]
-    }
-
-    #[test]
-    fn validation_planner_rust_file_infers_cargo_check() {
-        let planner = ValidationPlanner::new();
-        let tools = tool_definitions(&cargo_check_tool());
-        let plan = planner.plan(&[changed_file("src/lib.rs")], &tools);
-        assert_eq!(plan.entries.len(), 1);
-        let entry = &plan.entries[0];
-        assert_eq!(entry.tool_name, "cargo_check");
-        assert_eq!(entry.command, "cargo check");
-        assert_eq!(entry.changed_file, "src/lib.rs");
-        assert_eq!(entry.arguments, json!({ "path": "src/lib.rs" }));
-        assert_eq!(entry.reason, ValidationPlanReason::ChangedFileType);
-    }
-
-    #[test]
-    fn validation_planner_skips_unregistered_tools() {
-        let planner = ValidationPlanner::new();
-        // No tool registered at all: the plan must be empty.
-        assert!(planner.plan(&[changed_file("src/lib.rs")], &[]).is_empty());
-        // A registered-but-unrelated tool also yields an empty plan.
-        let unrelated = Arc::new(FakeTool::new(
-            ToolDefinition::new("read_file", "reads").side_effect_class(SideEffectClass::Read),
-            ToolResult::success("x"),
-        ));
-        assert!(planner.plan(&[changed_file("src/lib.rs")], &[unrelated.definition()]).is_empty());
-    }
-
-    #[test]
-    fn validation_planner_skips_unknown_file_types() {
-        let planner = ValidationPlanner::new();
-        let tools = tool_definitions(&cargo_check_tool());
-        assert!(planner.plan(&[changed_file("README.md")], &tools).is_empty());
-        assert!(planner.plan(&[changed_file("no_extension")], &tools).is_empty());
-    }
-
-    #[test]
-    fn validation_planner_deduplicates_changed_files() {
-        let planner = ValidationPlanner::new();
-        let tools = tool_definitions(&cargo_check_tool());
-        let plan = planner.plan(
-            &[changed_file("src/lib.rs"), changed_file("src/lib.rs"), changed_file("Cargo.toml")],
-            &tools,
-        );
-        assert_eq!(plan.entries.len(), 2);
-        assert_eq!(plan.entries[0].changed_file, "src/lib.rs");
-        assert_eq!(plan.entries[1].changed_file, "Cargo.toml");
-    }
-
-    #[test]
-    fn validation_planner_custom_rule_uses_template() {
-        let mut planner = ValidationPlanner::new();
-        planner.register(
-            &[".md"],
-            FileTypeRule::new("md_lint", "md lint", "lints markdown")
-                .with_argument_template(json!({ "file": "<path>", "strict": true })),
-        );
-        let md_tool = Arc::new(FakeTool::new(
-            ToolDefinition::new("md_lint", "lints markdown")
-                .side_effect_class(SideEffectClass::Execute),
-            ToolResult::success("clean"),
-        ));
-        let plan = planner.plan(&[changed_file("README.md")], &[md_tool.definition()]);
-        assert_eq!(plan.entries.len(), 1);
-        assert_eq!(plan.entries[0].arguments, json!({ "file": "README.md", "strict": true }));
-    }
-
-    #[test]
-    fn validation_planner_uses_workspace_tasks_and_changed_symbols() {
-        let planner = ValidationPlanner::new();
-        let changed_files = vec![changed_file("src/api.rs")];
-        let changed_symbols = vec!["handle_request".into()];
-        let workspace = WorkspaceValidationConfig {
-            declared_tasks: vec![
-                DeclaredValidationTask::new(
-                    "cargo_test",
-                    "cargo test --quiet",
-                    json!({ "package": "api" }),
-                )
-                .for_extensions([".rs"])
-                .for_symbols(["handle_request"]),
-                DeclaredValidationTask::new("missing", "missing", json!({})),
-            ],
-        };
-        let tools = vec![
-            cargo_check_tool().definition(),
-            ToolDefinition::new("cargo_test", "runs API tests")
-                .side_effect_class(SideEffectClass::Execute),
-        ];
-        let plan = planner.plan_with_context(
-            ValidationPlanningContext {
-                changed_files: &changed_files,
-                changed_symbols: &changed_symbols,
-                workspace: &workspace,
-            },
-            &tools,
-        );
-        assert_eq!(plan.entries.len(), 2);
-        assert_eq!(plan.entries[0].tool_name, "cargo_check");
-        assert_eq!(plan.entries[1].tool_name, "cargo_test");
-        assert_eq!(plan.entries[1].reason, ValidationPlanReason::WorkspaceTask);
-        assert_eq!(plan.entries[1].arguments, json!({ "package": "api" }));
-    }
-
-    #[test]
-    fn validation_planner_creates_pending_tasks_under_parent() {
-        let planner = ValidationPlanner::new();
-        let tools = tool_definitions(&cargo_check_tool());
-        let plan = planner.plan(&[changed_file("src/lib.rs"), changed_file("Cargo.toml")], &tools);
-        let mut graph = TaskGraph::new();
-        let root = graph.create_root("implement", "implement");
-        let ids = planner.create_tasks(&mut graph, &plan, &root.id).expect("creates tasks");
-        assert_eq!(ids, vec![TaskId::new("task-2"), TaskId::new("task-3")]);
-        for id in &ids {
-            let task = graph.get(id).expect("stored");
-            assert_eq!(task.status, TaskStatus::Pending);
-            assert_eq!(task.parent, Some(root.id.clone()));
-            assert!(task.title.starts_with("validate "));
-        }
-    }
-
-    fn plumbing() -> (UpdateSink, ClientBridge, mpsc::UnboundedReceiver<OutboundEvent>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        (
-            UpdateSink::new_for_test(SessionId::new("s-1"), tx.clone()),
-            ClientBridge::new_for_test(Duration::from_secs(5), tx),
-            rx,
-        )
-    }
-
-    /// Runner with a policy that allows execute-class tools (validation
-    /// commands are execute-class by default).
-    fn runner_with(tool: Arc<FakeTool>, config: OrchestratorConfig) -> ValidationRunner {
-        runner_with_policy(
-            tool,
-            config,
-            PolicyEngine::new(ToolPolicy { allow_execute: true, ..ToolPolicy::default() }),
-        )
-    }
-
-    fn runner_with_policy(
-        tool: Arc<FakeTool>,
-        config: OrchestratorConfig,
-        policy: PolicyEngine,
-    ) -> ValidationRunner {
-        let tools = Arc::new(Mutex::new(ToolRegistry::new()));
-        tools.lock().expect("registry poisoned").register(tool).expect("registers");
-        let budget = Arc::new(Mutex::new(BudgetTracker::new(&config)));
-        let events = EventRecorder::new();
-        ValidationRunner::new(
-            ToolExecutor::new(config, tools, budget, policy, 0, events.clone()),
-            events,
-        )
-    }
-
-    #[test]
-    fn validation_runner_records_passed_result_with_timestamp() {
-        let before = SystemTime::now();
-        let mut runner = runner_with(cargo_check_tool(), OrchestratorConfig::default());
-        let planner = ValidationPlanner::new();
-        let plan = planner.plan(&[changed_file("src/lib.rs")], &[cargo_check_tool().definition()]);
-        let mut graph = TaskGraph::new();
-        let root = graph.create_root("implement", "implement");
-        let ids = planner.create_tasks(&mut graph, &plan, &root.id).expect("creates");
-        let (sink, client, _rx) = plumbing();
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let mut validation = ValidationRecorder::new();
-
-        let result = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .expect("test runtime")
-            .block_on(runner.run_entry(
-                &plan.entries[0],
-                &ids[0],
-                &sink,
-                &client,
-                cancel_rx,
-                &root,
-                &[],
-                &mut validation,
-            ))
-            .expect("runs");
-        let after = SystemTime::now();
-
-        assert_eq!(result.command, "cargo check");
-        assert_eq!(result.status, ValidationOutcome::Passed);
-        assert_eq!(result.output_summary, "checks green");
-        assert_eq!(result.task_id, Some(TaskId::new("task-2")));
-        assert!(
-            result.recorded_at >= before && result.recorded_at <= after,
-            "timestamp falls between capture points"
-        );
-        assert_eq!(runner.store().results().len(), 1);
-        assert_eq!(runner.store().passed().len(), 1);
-        assert_eq!(validation.passed_commands(), vec!["cargo check"]);
-        let evidence = &validation.records()[0];
-        assert_eq!(evidence.evidence_id, "validation-task-2");
-        assert_eq!(evidence.tool.as_deref(), Some("cargo_check"));
-        assert_eq!(evidence.exit_status, Some(0));
-        assert!(evidence.elapsed_ms.is_some());
-        assert!(!evidence.output_truncated);
-        assert!(!evidence.selected, "host must explicitly select completion evidence");
-    }
-
-    #[test]
-    fn validation_runner_records_failed_tool_as_failed() {
-        let failing = Arc::new(FakeTool::new(
-            ToolDefinition::new("cargo_check", "compiles the Rust crate")
-                .side_effect_class(SideEffectClass::Execute),
-            ToolResult::failure(ToolErrorKind::Backend, "compile error"),
-        ));
-        let mut runner = runner_with(failing, OrchestratorConfig::default());
-        let planner = ValidationPlanner::new();
-        let plan = planner.plan(&[changed_file("src/lib.rs")], &[cargo_check_tool().definition()]);
-        let mut graph = TaskGraph::new();
-        let root = graph.create_root("implement", "implement");
-        let ids = planner.create_tasks(&mut graph, &plan, &root.id).expect("creates");
-        let (sink, client, _rx) = plumbing();
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let mut validation = ValidationRecorder::new();
-
-        let result = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .expect("test runtime")
-            .block_on(runner.run_entry(
-                &plan.entries[0],
-                &ids[0],
-                &sink,
-                &client,
-                cancel_rx,
-                &root,
-                &[],
-                &mut validation,
-            ))
-            .expect("records failure, does not abort");
-        assert_eq!(result.status, ValidationOutcome::Failed);
-        assert_eq!(runner.store().failed().len(), 1);
-        assert_eq!(validation.failed_commands(), vec!["cargo check"]);
-    }
-
-    #[test]
-    fn validation_runner_denied_tool_records_failed_without_execution() {
-        let tool = cargo_check_tool();
-        let calls = tool.call_count();
-        let mut runner = runner_with_policy(
-            tool.clone(),
-            OrchestratorConfig::default(),
-            PolicyEngine::default(),
-        );
-        let planner = ValidationPlanner::new();
-        let plan = planner.plan(&[changed_file("src/lib.rs")], &[tool.definition()]);
-        let mut graph = TaskGraph::new();
-        let root = graph.create_root("implement", "implement");
-        let ids = planner.create_tasks(&mut graph, &plan, &root.id).expect("creates");
-        let (sink, client, _rx) = plumbing();
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let mut validation = ValidationRecorder::new();
-
-        let result = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .expect("test runtime")
-            .block_on(runner.run_entry(
-                &plan.entries[0],
-                &ids[0],
-                &sink,
-                &client,
-                cancel_rx,
-                &root,
-                &[],
-                &mut validation,
-            ))
-            .expect("policy denial is recorded, not fatal");
-        assert_eq!(result.status, ValidationOutcome::Failed);
-        assert!(result.output_summary.contains("denied"));
-        assert_eq!(tool.call_count(), calls, "execute-class tool is denied before running");
-    }
-
-    #[test]
-    fn validation_runner_cancellation_propagates() {
-        let mut runner = runner_with(cargo_check_tool(), OrchestratorConfig::default());
-        let planner = ValidationPlanner::new();
-        let plan = planner.plan(&[changed_file("src/lib.rs")], &[cargo_check_tool().definition()]);
-        let mut graph = TaskGraph::new();
-        let root = graph.create_root("implement", "implement");
-        let ids = planner.create_tasks(&mut graph, &plan, &root.id).expect("creates");
-        let (sink, client, _rx) = plumbing();
-        let (_cancel_tx, cancel_rx) = watch::channel(true);
-        let mut validation = ValidationRecorder::new();
-
-        let error = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .expect("test runtime")
-            .block_on(runner.run_entry(
-                &plan.entries[0],
-                &ids[0],
-                &sink,
-                &client,
-                cancel_rx,
-                &root,
-                &[],
-                &mut validation,
-            ))
-            .expect_err("cancellation propagates");
-        assert!(error.is_cancellation());
-    }
-
-    #[test]
-    fn validation_runner_run_plan_records_all_outcomes_in_order() {
-        let mut runner = runner_with(cargo_check_tool(), OrchestratorConfig::default());
-        let planner = ValidationPlanner::new();
-        let plan = planner.plan(
-            &[changed_file("src/lib.rs"), changed_file("Cargo.toml")],
-            &[cargo_check_tool().definition()],
-        );
-        let mut graph = TaskGraph::new();
-        let root = graph.create_root("implement", "implement");
-        let ids = planner.create_tasks(&mut graph, &plan, &root.id).expect("creates");
-        let (sink, client, _rx) = plumbing();
-        let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let mut validation = ValidationRecorder::new();
-
-        let results = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .expect("test runtime")
-            .block_on(runner.run_plan(
-                &plan,
-                &ids,
-                &sink,
-                &client,
-                cancel_rx,
-                &root,
-                &[],
-                &mut validation,
-            ))
-            .expect("plan runs");
-        assert_eq!(results.len(), 2);
-        assert_eq!(results[0].command, "cargo check");
-        assert_eq!(results[1].command, "cargo check");
-        assert_eq!(results[0].task_id, Some(TaskId::new("task-2")));
-        assert_eq!(results[1].task_id, Some(TaskId::new("task-3")));
-
-        // Finalizing the validation tasks completes or fails them in place.
-        finalize_validation_tasks(&mut graph, &ids, &results).expect("finalizes");
-        assert_eq!(graph.get(&ids[0]).expect("stored").status, TaskStatus::Completed);
-        assert_eq!(graph.get(&ids[1]).expect("stored").status, TaskStatus::Completed);
-        assert_eq!(
-            graph.get(&ids[0]).expect("stored").result_summary.as_deref(),
-            Some("checks green")
-        );
-    }
-
-    #[test]
-    fn validation_runner_store_is_deterministically_ordered() {
-        let mut runner = ValidationRunner::new(
-            ToolExecutor::new(
-                OrchestratorConfig::default(),
-                Arc::new(Mutex::new(ToolRegistry::new())),
-                Arc::new(Mutex::new(BudgetTracker::new(&OrchestratorConfig::default()))),
-                PolicyEngine::default(),
-                0,
-                EventRecorder::new(),
-            ),
-            EventRecorder::new(),
-        );
-        runner.store.results.push(ValidationResult {
-            command: "cargo check".into(),
-            status: ValidationOutcome::Passed,
-            output_summary: "green".into(),
-            recorded_at: SystemTime::UNIX_EPOCH,
-            task_id: Some(TaskId::new("task-2")),
-        });
-        assert_eq!(runner.store().results().len(), 1);
-        assert_eq!(runner.store().passed().len(), 1);
-        assert!(runner.store().failed().is_empty());
-    }
-}
+#[path = "validation_tests.rs"]
+mod tests;
