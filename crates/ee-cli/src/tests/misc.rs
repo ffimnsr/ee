@@ -377,7 +377,12 @@ fn same_file_vsplit_reuses_buffer_and_keeps_content() {
     app.viewport.top_line = 0;
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE)));
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "shared vertical split insert",
+        Duration::from_secs(2),
+        |backend| backend.get_line(0) == Some("XFIRST-SPLIT-LINE"),
+    );
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
     assert_eq!(app.backend.get_line(0), Some("XFIRST-SPLIT-LINE"));
 
@@ -437,7 +442,12 @@ fn same_file_hsplit_reuses_buffer_and_keeps_content() {
     app.viewport.top_line = 0;
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE)));
-    app.backend.pump().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "shared horizontal split insert",
+        Duration::from_secs(2),
+        |backend| backend.get_line(0) == Some("YFIRST-HSPLIT-LINE"),
+    );
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
     assert_eq!(app.backend.get_line(0), Some("YFIRST-HSPLIT-LINE"));
 

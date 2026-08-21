@@ -157,6 +157,12 @@ pub struct StrategicInput {
     /// the host. Repository and tool content remains untrusted data.
     #[serde(default)]
     pub context: Option<ContextPlanningInput>,
+    /// Host-recorded transaction evidence for writes associated with this turn.
+    /// When present, it constrains completion claims until read, preview,
+    /// approval, apply, diagnostics, final-diff, and validation stages are
+    /// fresh and complete.
+    #[serde(default)]
+    pub write_transaction: Option<crate::write_transaction::WriteTransaction>,
 }
 
 /// Pure, deterministic strategy selector.
@@ -341,6 +347,9 @@ pub struct TurnResult {
     pub context_plan: Option<ContextPlan>,
     /// The structured final response.
     pub final_response: FinalResponse,
+    /// Host-recorded write transaction evidence constraining completion, when
+    /// the turn included a mutation sequence.
+    pub write_transaction: Option<crate::write_transaction::WriteTransaction>,
     /// The bounded reflection outcome (review calls, fix loops, findings).
     pub reflection: ReflectionOutcome,
 }

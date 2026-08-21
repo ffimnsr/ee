@@ -109,6 +109,9 @@
 //!   graph, diff, test, and asset excerpts with explicit trust, revision,
 //!   token-cost, selection, and omission metadata; cache reuse requires matching
 //!   session, policy, and source revisions.
+//! - [`write_transaction`] — [`WriteTransaction`]: revision-bound mutation
+//!   evidence with ordered read, preview, approval, apply, diagnostics, diff,
+//!   validation, terminal-state, interruption, and safe rollback gates.
 //! - [`memory_compaction`] — [`compact_memory`]: duplicate-fact merging and
 //!   low-value observation decay under pressure; decisions, constraints, and
 //!   validation results are always preserved.
@@ -203,6 +206,7 @@ pub mod trust;
 pub mod validation;
 pub mod workspace_scope;
 pub mod write_conflicts;
+pub mod write_transaction;
 
 // ── Primary public types ────────────────────────────────────────────────
 
@@ -348,3 +352,8 @@ pub use validation::{
 };
 pub use workspace_scope::WorkspaceScope;
 pub use write_conflicts::WriteScopeConflictDetector;
+pub use write_transaction::{
+    AppliedWrite, BufferOwnership, RollbackSafetyCheck, SourceRevision, TransactionDiagnostics,
+    TransactionFinalDiff, TransactionValidation, WriteApproval, WritePreview, WriteTransaction,
+    WriteTransactionError, WriteTransactionState,
+};

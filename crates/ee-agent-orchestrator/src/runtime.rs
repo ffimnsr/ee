@@ -730,6 +730,10 @@ impl OrchestratorRuntime {
             .context
             .as_ref()
             .map(|context| ContextPlanner.plan(context, &ContextPlannerConfig::default()));
+        // Transaction evidence is host-observed and immutable within this
+        // strategic turn. Keep it separate from model/tool prose, then use it
+        // to prevent unsupported verified completion claims below.
+        let write_transaction = input.write_transaction.clone();
         let strategy_ctx = StrategyContext {
             prompt_text,
             has_code_changes: input.has_code_changes,
@@ -776,7 +780,7 @@ impl OrchestratorRuntime {
             (reflection.review_calls > 0).then_some(reflection.findings.len()),
         )
         .score(&self.tasks.lock().expect("task graph poisoned").clone());
-        let final_response = FinalResponseBuilder {
+        let mut final_response = FinalResponseBuilder {
             changed_files,
             validation: &validation,
             // Host-provided evidence is optional; absence deliberately keeps
@@ -789,11 +793,16 @@ impl OrchestratorRuntime {
             progress: Some(&progress),
         }
         .build();
+        if let Some(transaction) = &write_transaction {
+            transaction.constrain_completion(&mut final_response.completion);
+            final_response.can_finish = final_response.completion.is_verified();
+        }
         Ok(TurnResult {
             context_plan,
             prompt_result,
             strategy: decision,
             final_response,
+            write_transaction,
             reflection,
         })
     }

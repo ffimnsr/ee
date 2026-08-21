@@ -397,19 +397,19 @@ Strengthen existing buffer-aware edits with explicit transaction evidence and sa
 
 #### Work items
 
-- [ ] Assign transaction id, expected source revision, changed paths, approval result, and post-write revision to each mutation sequence.
-- [ ] Enforce sequence: read revision, preview, approval, apply, diagnostics, final diff, selected validation, terminal state.
-- [ ] Detect stale, ambiguous, or conflicting revisions before apply; never overwrite dirty user buffers silently.
-- [ ] Record diagnostics delta and validation evidence against transaction id.
-- [ ] Reopen work as `blocked` or `unverified` after stale state or diagnostic regression instead of broad automatic repair.
-- [ ] Allow rollback only for agent-owned transaction changes with verified revisions and explicit safety checks.
-- [ ] Add integration tests for concurrent user edits, approval denial, partial multi-file failures, diagnostics regressions, and recovery after interruption.
+- [x] Assign transaction id, expected source revision, changed paths, approval result, and post-write revision to each mutation sequence.
+- [x] Enforce sequence: read revision, preview, approval, apply, diagnostics, final diff, selected validation, terminal state.
+- [x] Detect stale, ambiguous, or conflicting revisions before apply; never overwrite dirty user buffers silently.
+- [x] Record diagnostics delta and validation evidence against transaction id.
+- [x] Reopen work as `blocked` or `unverified` after stale state or diagnostic regression instead of broad automatic repair.
+- [x] Allow rollback only for agent-owned transaction changes with verified revisions and explicit safety checks.
+- [x] Add integration tests for concurrent user edits, approval denial, partial multi-file failures, diagnostics regressions, and recovery after interruption.
 
 #### Exit criteria
 
-- [ ] Every write can be traced from read revision through final verification state.
-- [ ] Conflict or stale-state failures preserve user work and return actionable structured errors.
-- [ ] Agent cannot claim final verification against pre-write diagnostics or diff state.
+- [x] Every write can be traced from read revision through final verification state.
+- [x] Conflict or stale-state failures preserve user work and return actionable structured errors.
+- [x] Agent cannot claim final verification against pre-write diagnostics or diff state.
 
 ### Phase 12: Targeted test and command intelligence
 

@@ -238,6 +238,14 @@ Each replay records a stable SHA-256 trace id, redacted relative workspace snaps
 
 `ValidationPlanner::plan_with_context` combines changed files, graph-resolved changed symbols, workspace validation configuration, declared project tasks, and registered tools. Unknown tools never enter a plan. Keep validation tools narrow: if arguments need many modes, nested objects, or optional branches, split operation into smaller focused tools instead of growing one complex schema.
 
+#### Auditable write transactions
+
+Hosts record a `WriteTransaction` for each mutation sequence and pass it through `StrategicInput.write_transaction`. Transaction evidence is serializable and includes transaction id, absolute changed paths, expected source revisions, preview summaries, approval outcome, per-path apply result, post-write path and workspace revisions, diagnostics delta, final diff, selected `ValidationRecord`, terminal state, and rollback safety evidence.
+
+`WriteTransaction` enforces fixed order: `read revision → preview → approval → apply → diagnostics → final diff → selected validation → terminal state`. Every stage after apply must match post-write workspace revision. Stale, duplicate, missing, ambiguous, or conflicting revisions block sequence with structured error code such as `stale_revision`, `ambiguous_revision`, `partial_apply`, or `diagnostic_regression`. Dirty user or unknown-owned buffers fail closed before apply; no automatic repair or replay runs after conflict, denial, partial apply, interruption, or diagnostics regression.
+
+Only blocked or unverified transactions may request rollback. `prepare_rollback` requires explicit approval, exact current post-write workspace revision, proof no later user edits exist, and every applied path marked agent-owned. `record_rollback` rechecks revision before recording completion. When a transaction accompanies strategic completion, it can only constrain a pre-existing verified completion claim; incomplete, blocked, interrupted, or rolled-back transaction evidence changes that claim to `unverified` or `blocked` and adds `transaction:<id>` provenance.
+
 #### Task-aware context planning
 
 `ContextPlanner` accepts only bounded host-supplied `ContextCandidate`s. It selects fresh project instructions, active selections, dirty buffers, diagnostics, git diffs, symbol neighbors, tests, related config/docs, memory, terminal output, and external-tool output in that fixed priority order. It never performs broad repository reads. `ContextPlannerConfig` caps item count, excerpt characters, and estimated tokens; omitted candidates identify `stale_revision`, `token_budget`, `item_limit`, or `duplicate`, so caller can explicitly drill down later.

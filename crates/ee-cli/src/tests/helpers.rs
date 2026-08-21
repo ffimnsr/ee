@@ -386,7 +386,7 @@ pub fn assert_open_to_first_render_budget(label: &str, line_builder: fn(usize) -
     // Warm one-time editor/runtime initialisation outside the measured passes.
     drop(App::from_path(None).unwrap());
 
-    let (cold_app, cold_elapsed) = timed_open_to_first_render(&path);
+    let (mut cold_app, cold_elapsed) = timed_open_to_first_render(&path);
     let mut best_warm = None;
     let mut warm_samples = Vec::with_capacity(WARM_SAMPLE_COUNT);
     for _ in 0..WARM_SAMPLE_COUNT {
@@ -396,7 +396,24 @@ pub fn assert_open_to_first_render_budget(label: &str, line_builder: fn(usize) -
             best_warm = Some(candidate);
         }
     }
-    let (warm_app, warm_elapsed) = best_warm.expect("warm pass should run");
+    let (mut warm_app, warm_elapsed) = best_warm.expect("warm pass should run");
+
+    // First-render timing intentionally stops before asynchronous xi-core
+    // notifications finish. Drain them before asserting cache shape or
+    // deleting fixture so parallel suite load cannot turn a valid open into a
+    // zero-line observation.
+    wait_until_with_backend(
+        &mut cold_app.backend,
+        "cold normal-mode line cache",
+        Duration::from_secs(5),
+        |backend| backend.lines.len() == line_count,
+    );
+    wait_until_with_backend(
+        &mut warm_app.backend,
+        "warm normal-mode line cache",
+        Duration::from_secs(5),
+        |backend| backend.lines.len() == line_count,
+    );
 
     fs::remove_file(&path).unwrap();
 
