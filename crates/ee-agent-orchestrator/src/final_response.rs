@@ -13,6 +13,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::completion::{CompletionEvidence, CompletionReport, CompletionState, derive_completion};
 use crate::memory::MemoryStore;
 use crate::tasks::{TaskGraph, TaskId, TaskStatus};
 use crate::tools::{SideEffectClass, ToolExecutionLogEntry};
@@ -32,14 +33,89 @@ pub enum ValidationOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ValidationRecord {
+    /// Stable evidence id cited by final responses.
+    #[serde(default)]
+    pub evidence_id: String,
     /// The command that ran (tool name or command line).
     pub command: String,
+    /// Tool that executed the command, when known.
+    #[serde(default)]
+    pub tool: Option<String>,
     /// The recorded outcome.
     pub outcome: ValidationOutcome,
+    /// Process exit status, when a command ran.
+    #[serde(default)]
+    pub exit_status: Option<i32>,
+    /// Elapsed execution time in milliseconds.
+    #[serde(default)]
+    pub elapsed_ms: Option<u64>,
+    /// Affected tests or checks, bounded by caller policy.
+    #[serde(default)]
+    pub affected_tests: Vec<String>,
+    /// Net diagnostics change observed after the command.
+    #[serde(default)]
+    pub diagnostics_delta: i64,
+    /// Whether command output was truncated by policy.
+    #[serde(default)]
+    pub output_truncated: bool,
+    /// Exact reason validation did not run.
+    #[serde(default)]
+    pub skip_reason: Option<String>,
+    /// Workspace or buffer revision observed by the command.
+    #[serde(default)]
+    pub revision: Option<String>,
+    /// Whether this result is selected to support completion.
+    #[serde(default)]
+    pub selected: bool,
+    /// Whether policy or approval routing denied the command.
+    #[serde(default)]
+    pub denied: bool,
     /// Bounded detail (output summary or error).
     pub detail: Option<String>,
     /// The task that ran the command, when known.
     pub source_task: Option<TaskId>,
+}
+
+impl ValidationRecord {
+    /// Creates structured validation evidence. All successful completion
+    /// claims must cite an instance recorded through this constructor or
+    /// [`ValidationRecorder::record_evidence`].
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn evidence(
+        evidence_id: impl Into<String>,
+        command: impl Into<String>,
+        outcome: ValidationOutcome,
+        tool: Option<String>,
+        exit_status: Option<i32>,
+        elapsed_ms: Option<u64>,
+        affected_tests: Vec<String>,
+        diagnostics_delta: i64,
+        output_truncated: bool,
+        skip_reason: Option<String>,
+        revision: Option<String>,
+        selected: bool,
+        denied: bool,
+        detail: Option<String>,
+    ) -> Self {
+        Self {
+            evidence_id: evidence_id.into(),
+            command: command.into(),
+            tool,
+            outcome,
+            exit_status,
+            elapsed_ms,
+            affected_tests,
+            diagnostics_delta,
+            output_truncated,
+            skip_reason,
+            revision,
+            selected,
+            denied,
+            detail,
+            source_task: None,
+        }
+    }
 }
 
 /// Ordered, append-only store of validation records for one turn.
@@ -63,12 +139,31 @@ impl ValidationRecorder {
         detail: Option<String>,
         source_task: Option<TaskId>,
     ) {
+        let evidence_id = format!("validation-{}", self.records.len() + 1);
         self.records.push(ValidationRecord {
+            evidence_id,
             command: command.into(),
+            tool: None,
             outcome,
+            exit_status: None,
+            elapsed_ms: None,
+            affected_tests: Vec::new(),
+            diagnostics_delta: 0,
+            output_truncated: false,
+            skip_reason: None,
+            revision: None,
+            selected: true,
+            denied: false,
             detail,
             source_task,
         });
+    }
+
+    /// Records structured validation evidence. Callers must supply the
+    /// observed revision and mark exactly the result intended for completion
+    /// as selected.
+    pub fn record_evidence(&mut self, record: ValidationRecord) {
+        self.records.push(record);
     }
 
     /// All records in recording order.
@@ -130,6 +225,9 @@ pub struct FinalResponse {
     pub changed_files: Vec<ChangedFile>,
     /// Recorded validation commands and outcomes.
     pub validation: Vec<ValidationRecord>,
+    /// Evidence-derived terminal completion state. Model and review prose
+    /// cannot override this report.
+    pub completion: CompletionReport,
     /// Risks the turn could not resolve.
     pub unresolved_risks: Vec<String>,
     /// Suggested follow-up work.
@@ -152,6 +250,12 @@ impl FinalResponse {
     #[must_use]
     pub fn changed_file_count(&self) -> usize {
         self.changed_files.len()
+    }
+
+    /// Explicit evidence-derived terminal state.
+    #[must_use]
+    pub const fn completion_state(&self) -> CompletionState {
+        self.completion.state
     }
 }
 
@@ -195,6 +299,9 @@ pub struct FinalResponseBuilder<'a> {
     pub changed_files: Vec<ChangedFile>,
     /// Validation outcomes recorded during the turn.
     pub validation: &'a ValidationRecorder,
+    /// Completion evidence recorded from tool results. Missing evidence keeps
+    /// the response unverified.
+    pub completion_evidence: Option<&'a CompletionEvidence>,
     /// Unresolved risks observed by the caller.
     pub unresolved_risks: Vec<String>,
     /// Follow-up suggestions observed by the caller.
@@ -228,24 +335,55 @@ impl FinalResponseBuilder<'_> {
             self.unresolved_risks.iter().map(|risk| guard.redact(risk)).collect();
         let follow_up_suggestions =
             self.follow_up_suggestions.iter().map(|suggestion| guard.redact(suggestion)).collect();
+        let completion = match self.completion_evidence {
+            Some(evidence) => {
+                derive_completion(&self.changed_files, evidence, self.validation.records())
+            }
+            None => CompletionReport {
+                state: CompletionState::Unverified,
+                blocker: Some("completion evidence was not provided".into()),
+                safe_follow_up: Some(
+                    "collect required tool evidence before claiming completion".into(),
+                ),
+                evidence_ids: Vec::new(),
+            },
+        };
+        let can_finish =
+            self.progress.is_none_or(|progress| progress.can_finish) && completion.is_verified();
         FinalResponse {
-            summary: self.build_summary(&changed_files, &guard),
+            summary: self.build_summary(&changed_files, &completion, &guard),
             changed_files,
             validation: self
                 .validation
                 .records()
                 .iter()
                 .map(|record| ValidationRecord {
+                    evidence_id: record.evidence_id.clone(),
                     command: guard.redact(&record.command),
+                    tool: record.tool.as_ref().map(|tool| guard.redact(tool)),
                     outcome: record.outcome,
+                    exit_status: record.exit_status,
+                    elapsed_ms: record.elapsed_ms,
+                    affected_tests: record
+                        .affected_tests
+                        .iter()
+                        .map(|test| guard.redact(test))
+                        .collect(),
+                    diagnostics_delta: record.diagnostics_delta,
+                    output_truncated: record.output_truncated,
+                    skip_reason: record.skip_reason.as_ref().map(|reason| guard.redact(reason)),
+                    revision: record.revision.as_ref().map(|revision| guard.redact(revision)),
+                    selected: record.selected,
+                    denied: record.denied,
                     detail: record.detail.as_ref().map(|detail| guard.redact(detail)),
                     source_task: record.source_task.clone(),
                 })
                 .collect(),
+            completion,
             unresolved_risks,
             follow_up_suggestions,
             provenance: self.provenance(&guard),
-            can_finish: self.progress.is_none_or(|progress| progress.can_finish),
+            can_finish,
         }
     }
 
@@ -263,6 +401,7 @@ impl FinalResponseBuilder<'_> {
     fn build_summary(
         &self,
         changed_files: &[ChangedFile],
+        completion: &CompletionReport,
         guard: &crate::sensitive_data::SensitiveDataGuard,
     ) -> String {
         let total = self.task_graph.len();
@@ -287,22 +426,42 @@ impl FinalResponseBuilder<'_> {
             ValidationStatus::Passed => parts.push(format!(
                 "validation passed (recorded): {}",
                 self.validation
-                    .passed_commands()
+                    .records()
                     .iter()
-                    .map(|command| guard.redact(command))
+                    .filter(|record| record.outcome == ValidationOutcome::Passed)
+                    .map(|record| format!(
+                        "{} [{}]",
+                        guard.redact(&record.command),
+                        record.evidence_id
+                    ))
                     .collect::<Vec<_>>()
                     .join(", ")
             )),
             ValidationStatus::Failed => parts.push(format!(
                 "validation failed: {}",
                 self.validation
-                    .failed_commands()
+                    .records()
                     .iter()
-                    .map(|command| guard.redact(command))
+                    .filter(|record| record.outcome == ValidationOutcome::Failed)
+                    .map(|record| format!(
+                        "{} [{}]",
+                        guard.redact(&record.command),
+                        record.evidence_id
+                    ))
                     .collect::<Vec<_>>()
                     .join(", ")
             )),
             ValidationStatus::None => {}
+        }
+        parts.push(format!("completion: {}", completion.state.as_str()));
+        if !completion.evidence_ids.is_empty() {
+            parts.push(format!("evidence: {}", completion.evidence_ids.join(", ")));
+        }
+        if let Some(blocker) = &completion.blocker {
+            parts.push(format!("completion blocker: {}", guard.redact(blocker)));
+        }
+        if let Some(follow_up) = &completion.safe_follow_up {
+            parts.push(format!("safe next step: {}", guard.redact(follow_up)));
         }
         if !self.unresolved_risks.is_empty() {
             parts.push(format!(
@@ -407,6 +566,7 @@ mod tests {
         let response = FinalResponseBuilder {
             changed_files: Vec::new(),
             validation: &validation,
+            completion_evidence: None,
             unresolved_risks: Vec::new(),
             follow_up_suggestions: Vec::new(),
             task_graph: &tasks,
@@ -444,6 +604,7 @@ mod tests {
         let response = FinalResponseBuilder {
             changed_files: changed,
             validation: &validation,
+            completion_evidence: None,
             unresolved_risks: vec!["coverage below threshold".into()],
             follow_up_suggestions: vec!["add unit tests".into()],
             task_graph: &tasks,
@@ -480,6 +641,7 @@ mod tests {
         let response = FinalResponseBuilder {
             changed_files: Vec::new(),
             validation: &validation,
+            completion_evidence: None,
             unresolved_risks: Vec::new(),
             follow_up_suggestions: Vec::new(),
             task_graph: &tasks,
@@ -550,6 +712,7 @@ mod tests {
                 source_task: Some(TaskId::new("task-1")),
             }],
             validation: &validation,
+            completion_evidence: None,
             unresolved_risks: vec!["key sk-live-1234567890 leaked".into()],
             follow_up_suggestions: vec!["rotate sk-live-1234567890".into()],
             task_graph: &tasks,
@@ -582,6 +745,7 @@ mod tests {
                 source_task: Some(TaskId::new("task-1")),
             }],
             validation: &validation,
+            completion_evidence: None,
             unresolved_risks: Vec::new(),
             follow_up_suggestions: Vec::new(),
             task_graph: &tasks,
@@ -612,6 +776,7 @@ mod tests {
         let response = FinalResponseBuilder {
             changed_files: Vec::new(),
             validation: &validation,
+            completion_evidence: None,
             unresolved_risks: Vec::new(),
             follow_up_suggestions: Vec::new(),
             task_graph: &tasks,
@@ -640,6 +805,7 @@ mod tests {
                 source_task: Some(TaskId::new("task-1")),
             }],
             validation: &validation,
+            completion_evidence: None,
             unresolved_risks: Vec::new(),
             follow_up_suggestions: Vec::new(),
             task_graph: &tasks,
@@ -667,6 +833,7 @@ mod tests {
         let response = FinalResponseBuilder {
             changed_files: Vec::new(),
             validation: &validation,
+            completion_evidence: None,
             unresolved_risks: Vec::new(),
             follow_up_suggestions: Vec::new(),
             task_graph: &tasks,
@@ -674,8 +841,68 @@ mod tests {
             progress: Some(&progress),
         }
         .build();
-        assert!(response.can_finish, "completed tasks finish");
+        assert!(!response.can_finish, "missing evidence prevents completion");
         assert!(response.summary.contains("confidence: 0.10"), "{}", response.summary);
+    }
+
+    #[test]
+    fn final_response_requires_cited_evidence_before_claiming_verified_completion() {
+        let tasks = task_graph_with_completed_task();
+        let memory = MemoryStore::new(4096);
+        let mut evidence = CompletionEvidence::new("rev-1");
+        evidence.record_changed_file_inventory(
+            crate::completion::CompletionEvidenceItem::passed(
+                "inventory-1",
+                "git diff --name-only",
+                "rev-1",
+            ),
+            ["/tmp/a.rs"],
+        );
+        evidence.record_post_write_diagnostics(crate::completion::CompletionEvidenceItem::passed(
+            "diagnostics-1",
+            "editor diagnostics",
+            "rev-1",
+        ));
+        evidence.record_final_diff_review(crate::completion::CompletionEvidenceItem::passed(
+            "diff-1",
+            "git diff --check",
+            "rev-1",
+        ));
+        let mut validation = ValidationRecorder::new();
+        validation.record_evidence(ValidationRecord::evidence(
+            "validation-1",
+            "cargo test --quiet",
+            ValidationOutcome::Passed,
+            Some("terminal".into()),
+            Some(0),
+            Some(20),
+            vec!["crate::smoke".into()],
+            0,
+            false,
+            None,
+            Some("rev-1".into()),
+            true,
+            false,
+            Some("all tests passed".into()),
+        ));
+        let response = FinalResponseBuilder {
+            changed_files: vec![ChangedFile { path: "/tmp/a.rs".into(), source_task: None }],
+            validation: &validation,
+            completion_evidence: Some(&evidence),
+            unresolved_risks: vec!["model says done".into()],
+            follow_up_suggestions: Vec::new(),
+            task_graph: &tasks,
+            memory: &memory,
+            progress: None,
+        }
+        .build();
+        assert_eq!(response.completion_state(), CompletionState::Verified);
+        assert!(response.can_finish);
+        assert!(
+            response.summary.contains("evidence: diagnostics-1, diff-1, inventory-1, validation-1")
+        );
+        assert!(response.validation[0].elapsed_ms.is_some());
+        assert_eq!(response.validation[0].affected_tests, vec!["crate::smoke"]);
     }
 
     #[test]
@@ -695,6 +922,7 @@ mod tests {
             let response = FinalResponseBuilder {
                 changed_files: Vec::new(),
                 validation: &validation,
+                completion_evidence: None,
                 unresolved_risks: Vec::new(),
                 follow_up_suggestions: Vec::new(),
                 task_graph: &tasks,

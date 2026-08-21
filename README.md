@@ -230,6 +230,14 @@ Each replay records a stable SHA-256 trace id, redacted relative workspace snaps
 
 `baseline.json` defines required-fixture regression thresholds. CI runs `cargo test --quiet -p ee-agent-orchestrator --features test-utils evaluation`; failures name fixture, score delta, and redacted trace reference. Before changing a default model, prompt, route, tool, or policy behavior, run this gate, review every failing fixture, then deliberately update versioned fixture/baseline evidence. No default change may rely on subjective comparison alone.
 
+#### Evidence-gated completion and validation
+
+`ee-agent-orchestrator` never treats model text or reflection prose as proof that work completed. `FinalResponse.completion` is one of `verified`, `partially_verified`, `blocked`, or `unverified`, derived only from `CompletionEvidence` and selected `ValidationRecord`s. A `verified` changed turn requires matching current-revision evidence IDs for changed-file inventory, post-write diagnostics, final diff review, and one selected passing validation result. Final summaries cite these IDs in `evidence:`; `can_finish` is false for every other state.
+
+`ValidationRecord` returns structured evidence: `evidence_id`, command, tool, outcome, exit status, elapsed milliseconds, affected tests, diagnostics delta, output-truncation flag, skip reason, revision, selection, denial status, detail, and source task. Validation that cannot run remains `partially_verified` with an exact blocker and safe next step. Failed, stale, or denied evidence is `blocked`; missing evidence is `unverified`.
+
+`ValidationPlanner::plan_with_context` combines changed files, graph-resolved changed symbols, workspace validation configuration, declared project tasks, and registered tools. Unknown tools never enter a plan. Keep validation tools narrow: if arguments need many modes, nested objects, or optional branches, split operation into smaller focused tools instead of growing one complex schema.
+
 #### Workspace agent trust
 
 Enable ee proxy when agent supports MCP:

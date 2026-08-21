@@ -141,13 +141,17 @@ pub struct StrategyContext {
 }
 
 /// Inputs a strategic turn needs beyond the ACP prompt itself.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct StrategicInput {
     /// Whether the session already holds unvalidated code changes.
     pub has_code_changes: bool,
     /// Whether a validation-capable tool is registered.
     pub validation_tools_available: bool,
+    /// Tool-recorded completion evidence from the host. Omit when the host
+    /// cannot provide fresh inventory, diagnostics, and diff-review facts;
+    /// the turn will then remain explicitly unverified.
+    pub completion_evidence: Option<crate::completion::CompletionEvidence>,
 }
 
 /// Pure, deterministic strategy selector.

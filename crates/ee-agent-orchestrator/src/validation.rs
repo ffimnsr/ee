@@ -12,7 +12,7 @@
 //! is empty and nothing runs.
 
 use std::collections::BTreeMap;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use ee_acp_agent_server::{ClientBridge, UpdateSink};
 use serde::{Deserialize, Serialize};
@@ -113,6 +113,101 @@ fn substitute_path(value: &serde_json::Value, path: &str) -> serde_json::Value {
     }
 }
 
+/// Why the planner selected a validation entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValidationPlanReason {
+    /// A changed file matched a registered file-type rule.
+    ChangedFileType,
+    /// A declared workspace validation task matched changed files or symbols.
+    WorkspaceTask,
+}
+
+/// One declared workspace validation task. Hosts build this from their project
+/// configuration or declared project tasks; only registered tools are planned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct DeclaredValidationTask {
+    /// Registered tool that runs this validation.
+    pub tool_name: String,
+    /// Human-readable command or task name.
+    pub command: String,
+    /// Schema-valid arguments for the registered tool.
+    pub arguments: serde_json::Value,
+    /// Changed extensions that select this task. Empty means all files.
+    #[serde(default)]
+    pub file_extensions: Vec<String>,
+    /// Changed symbol names that select this task. Empty means all symbols.
+    #[serde(default)]
+    pub symbols: Vec<String>,
+}
+
+impl DeclaredValidationTask {
+    /// Creates an unconditional declared task.
+    #[must_use]
+    pub fn new(
+        tool_name: impl Into<String>,
+        command: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
+        Self {
+            tool_name: tool_name.into(),
+            command: command.into(),
+            arguments,
+            file_extensions: Vec::new(),
+            symbols: Vec::new(),
+        }
+    }
+
+    /// Restricts this task to changed extensions.
+    #[must_use]
+    pub fn for_extensions(
+        mut self,
+        extensions: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.file_extensions = extensions.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Restricts this task to changed symbols.
+    #[must_use]
+    pub fn for_symbols(mut self, symbols: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.symbols = symbols.into_iter().map(Into::into).collect();
+        self
+    }
+}
+
+/// Workspace configuration and declared project tasks available to planning.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct WorkspaceValidationConfig {
+    /// Declared project validation tasks, in configuration order.
+    #[serde(default)]
+    pub declared_tasks: Vec<DeclaredValidationTask>,
+}
+
+/// Fresh inputs for dynamic validation planning.
+#[derive(Debug, Clone, Copy)]
+pub struct ValidationPlanningContext<'a> {
+    /// Files written during this turn.
+    pub changed_files: &'a [ChangedFile],
+    /// Changed symbols resolved by the host or code graph.
+    pub changed_symbols: &'a [String],
+    /// Workspace configuration and declared project tasks.
+    pub workspace: &'a WorkspaceValidationConfig,
+}
+
+impl<'a> ValidationPlanningContext<'a> {
+    /// Creates context with no symbol or workspace-task information.
+    #[must_use]
+    pub fn from_changed_files(changed_files: &'a [ChangedFile]) -> Self {
+        Self { changed_files, changed_symbols: &[], workspace: &EMPTY_WORKSPACE_VALIDATION_CONFIG }
+    }
+}
+
+static EMPTY_WORKSPACE_VALIDATION_CONFIG: WorkspaceValidationConfig =
+    WorkspaceValidationConfig { declared_tasks: Vec::new() };
+
 /// One planned validation execution for one changed file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -125,6 +220,8 @@ pub struct ValidationPlanEntry {
     pub changed_file: String,
     /// Rendered tool arguments.
     pub arguments: serde_json::Value,
+    /// Evidence showing why this entry was selected.
+    pub reason: ValidationPlanReason,
 }
 
 /// A deterministic validation plan: entries in changed-file order, each
@@ -175,38 +272,67 @@ impl ValidationPlanner {
         &self.rules
     }
 
-    /// Plans validation checks for the changed files: for each file (in
-    /// first-occurrence order, deduplicated by path) with a matching rule
-    /// whose tool is registered, one entry is produced.  Files without a rule
-    /// or without a registered tool are skipped, so an unregistered
-    /// validation stack yields an empty plan.
+    /// Plans validation checks from changed files using default workspace and
+    /// symbol inputs. Use [`Self::plan_with_context`] when host configuration
+    /// or graph-resolved changed symbols are available.
     #[must_use]
     pub fn plan(&self, changed_files: &[ChangedFile], tools: &[ToolDefinition]) -> ValidationPlan {
-        let mut seen = Vec::new();
+        self.plan_with_context(ValidationPlanningContext::from_changed_files(changed_files), tools)
+    }
+
+    /// Builds a deterministic plan from changed files, changed symbols,
+    /// workspace configuration, declared project tasks, and registered tools.
+    /// File-type entries keep changed-file order. Matching declared tasks then
+    /// append in workspace configuration order. Unknown tools never enter the
+    /// plan, and duplicate tool/argument pairs are eliminated.
+    #[must_use]
+    pub fn plan_with_context(
+        &self,
+        context: ValidationPlanningContext<'_>,
+        tools: &[ToolDefinition],
+    ) -> ValidationPlan {
+        let mut seen_files = Vec::new();
         let mut entries = Vec::new();
-        for file in changed_files {
-            if seen.contains(&file.path) {
+        for file in context.changed_files {
+            if seen_files.contains(&file.path) {
                 continue;
             }
-            seen.push(file.path.clone());
-            let Some(extension) = std::path::Path::new(&file.path).extension() else {
+            seen_files.push(file.path.clone());
+            let Some(extension) = file_extension(&file.path) else {
                 continue;
             };
-            let Some(rule) =
-                self.rules.get(&format!(".{}", extension.to_string_lossy().to_lowercase()))
-            else {
+            let Some(rule) = self.rules.get(&extension) else {
                 continue;
             };
-            let registered = tools.iter().any(|tool| tool.name == rule.tool_name);
-            if !registered {
+            if !tools.iter().any(|tool| tool.name == rule.tool_name) {
                 continue;
             }
-            entries.push(ValidationPlanEntry {
-                tool_name: rule.tool_name.clone(),
-                command: rule.command.clone(),
-                changed_file: file.path.clone(),
-                arguments: rule.render_arguments(&file.path),
-            });
+            push_unique(
+                &mut entries,
+                ValidationPlanEntry {
+                    tool_name: rule.tool_name.clone(),
+                    command: rule.command.clone(),
+                    changed_file: file.path.clone(),
+                    arguments: rule.render_arguments(&file.path),
+                    reason: ValidationPlanReason::ChangedFileType,
+                },
+            );
+        }
+        for task in &context.workspace.declared_tasks {
+            if !tools.iter().any(|tool| tool.name == task.tool_name) || !task_matches(task, context)
+            {
+                continue;
+            }
+            push_unique(
+                &mut entries,
+                ValidationPlanEntry {
+                    tool_name: task.tool_name.clone(),
+                    command: task.command.clone(),
+                    changed_file: "<workspace>".into(),
+                    arguments: task.arguments.clone(),
+                    reason: ValidationPlanReason::WorkspaceTask,
+                },
+            );
         }
         ValidationPlan { entries }
     }
@@ -230,6 +356,36 @@ impl ValidationPlanner {
             ids.push(task.id);
         }
         Ok(ids)
+    }
+}
+
+fn file_extension(path: &str) -> Option<String> {
+    let extension = std::path::Path::new(path).extension()?;
+    Some(format!(".{}", extension.to_string_lossy().to_ascii_lowercase()))
+}
+
+fn task_matches(task: &DeclaredValidationTask, context: ValidationPlanningContext<'_>) -> bool {
+    let extension_matches = task.file_extensions.is_empty()
+        || context.changed_files.iter().filter_map(|file| file_extension(&file.path)).any(
+            |extension| {
+                task.file_extensions
+                    .iter()
+                    .any(|expected| expected.eq_ignore_ascii_case(&extension))
+            },
+        );
+    let symbol_matches = task.symbols.is_empty()
+        || context
+            .changed_symbols
+            .iter()
+            .any(|symbol| task.symbols.iter().any(|expected| expected == symbol));
+    extension_matches && symbol_matches
+}
+
+fn push_unique(entries: &mut Vec<ValidationPlanEntry>, entry: ValidationPlanEntry) {
+    if !entries.iter().any(|existing| {
+        existing.tool_name == entry.tool_name && existing.arguments == entry.arguments
+    }) {
+        entries.push(entry);
     }
 }
 
@@ -336,6 +492,7 @@ impl ValidationRunner {
         transcript: &[ModelMessage],
         validation: &mut ValidationRecorder,
     ) -> Result<ValidationResult, OrchestratorError> {
+        let started = Instant::now();
         let intent = ToolIntent::new(
             format!("validation-{task_id}"),
             entry.tool_name.clone(),
@@ -361,11 +518,14 @@ impl ValidationRunner {
                     ValidationOutcome::Failed
                 };
                 let summary = result.summary_text();
-                validation.record(
-                    entry.command.clone(),
+                record_validation_evidence(
+                    validation,
+                    entry,
+                    task_id,
                     status,
-                    Some(summary.clone()),
-                    Some(task_id.clone()),
+                    summary.clone(),
+                    elapsed_ms(started),
+                    result.error_kind == Some(crate::tools::ToolErrorKind::PermissionDenied),
                 );
                 Ok(self.store_result(entry, task_id, status, summary))
             }
@@ -380,11 +540,14 @@ impl ValidationRunner {
             }
             Err(error) => {
                 let summary = error.to_string();
-                validation.record(
-                    entry.command.clone(),
+                record_validation_evidence(
+                    validation,
+                    entry,
+                    task_id,
                     ValidationOutcome::Failed,
-                    Some(summary.clone()),
-                    Some(task_id.clone()),
+                    summary.clone(),
+                    elapsed_ms(started),
+                    matches!(error, OrchestratorError::PolicyDenied(_)),
                 );
                 Ok(self.store_result(entry, task_id, ValidationOutcome::Failed, summary))
             }
@@ -445,6 +608,38 @@ impl ValidationRunner {
         self.store.results.push(result.clone());
         result
     }
+}
+
+fn record_validation_evidence(
+    validation: &mut ValidationRecorder,
+    entry: &ValidationPlanEntry,
+    task_id: &TaskId,
+    outcome: ValidationOutcome,
+    detail: String,
+    elapsed_ms: u64,
+    denied: bool,
+) {
+    validation.record_evidence(crate::final_response::ValidationRecord {
+        evidence_id: format!("validation-{task_id}"),
+        command: entry.command.clone(),
+        tool: Some(entry.tool_name.clone()),
+        outcome,
+        exit_status: (outcome == ValidationOutcome::Passed).then_some(0),
+        elapsed_ms: Some(elapsed_ms),
+        affected_tests: Vec::new(),
+        diagnostics_delta: 0,
+        output_truncated: false,
+        skip_reason: None,
+        revision: None,
+        selected: false,
+        denied,
+        detail: Some(detail),
+        source_task: Some(task_id.clone()),
+    });
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }
 
 /// Completes or fails validation task nodes from run outcomes.
@@ -510,6 +705,7 @@ mod tests {
         assert_eq!(entry.command, "cargo check");
         assert_eq!(entry.changed_file, "src/lib.rs");
         assert_eq!(entry.arguments, json!({ "path": "src/lib.rs" }));
+        assert_eq!(entry.reason, ValidationPlanReason::ChangedFileType);
     }
 
     #[test]
@@ -562,6 +758,43 @@ mod tests {
         let plan = planner.plan(&[changed_file("README.md")], &[md_tool.definition()]);
         assert_eq!(plan.entries.len(), 1);
         assert_eq!(plan.entries[0].arguments, json!({ "file": "README.md", "strict": true }));
+    }
+
+    #[test]
+    fn validation_planner_uses_workspace_tasks_and_changed_symbols() {
+        let planner = ValidationPlanner::new();
+        let changed_files = vec![changed_file("src/api.rs")];
+        let changed_symbols = vec!["handle_request".into()];
+        let workspace = WorkspaceValidationConfig {
+            declared_tasks: vec![
+                DeclaredValidationTask::new(
+                    "cargo_test",
+                    "cargo test --quiet",
+                    json!({ "package": "api" }),
+                )
+                .for_extensions([".rs"])
+                .for_symbols(["handle_request"]),
+                DeclaredValidationTask::new("missing", "missing", json!({})),
+            ],
+        };
+        let tools = vec![
+            cargo_check_tool().definition(),
+            ToolDefinition::new("cargo_test", "runs API tests")
+                .side_effect_class(SideEffectClass::Execute),
+        ];
+        let plan = planner.plan_with_context(
+            ValidationPlanningContext {
+                changed_files: &changed_files,
+                changed_symbols: &changed_symbols,
+                workspace: &workspace,
+            },
+            &tools,
+        );
+        assert_eq!(plan.entries.len(), 2);
+        assert_eq!(plan.entries[0].tool_name, "cargo_check");
+        assert_eq!(plan.entries[1].tool_name, "cargo_test");
+        assert_eq!(plan.entries[1].reason, ValidationPlanReason::WorkspaceTask);
+        assert_eq!(plan.entries[1].arguments, json!({ "package": "api" }));
     }
 
     #[test]
@@ -656,6 +889,13 @@ mod tests {
         assert_eq!(runner.store().results().len(), 1);
         assert_eq!(runner.store().passed().len(), 1);
         assert_eq!(validation.passed_commands(), vec!["cargo check"]);
+        let evidence = &validation.records()[0];
+        assert_eq!(evidence.evidence_id, "validation-task-2");
+        assert_eq!(evidence.tool.as_deref(), Some("cargo_check"));
+        assert_eq!(evidence.exit_status, Some(0));
+        assert!(evidence.elapsed_ms.is_some());
+        assert!(!evidence.output_truncated);
+        assert!(!evidence.selected, "host must explicitly select completion evidence");
     }
 
     #[test]

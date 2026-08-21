@@ -62,13 +62,17 @@
 //!   ACP [`AgentProvider`](ee_acp_agent_server::AgentProvider).
 //! - [`checkpoint`] — serializable session snapshots with fail-closed restore
 //!   validation, provenance reports, and deterministic id generator state.
+//! - [`completion`] — evidence-gated terminal state (`verified`,
+//!   `partially_verified`, `blocked`, or `unverified`) derived only from tool
+//!   observations and selected validation records.
 //! - [`trace`] — JSONL trace export of events with secret redaction.
 //! - [`strategy`] — deterministic turn strategies, the selector, and
 //!   strategy execution wrappers.
 //! - [`final_response`] — typed final responses built from observed state
-//!   (changed files, recorded validation, provenance).
-//! - [`validation`] — validation task planning and execution through the
-//!   shared tool executor, with timestamped result records.
+//!   (changed files, structured validation, completion evidence, provenance).
+//! - [`validation`] — validation task planning from files, symbols, workspace
+//!   declarations, and registered tools; execution routes through the shared
+//!   executor and records structured evidence.
 //! - [`reflection`] — bounded self-review after tool/edit loops: evidence
 //!   assembly, review requests, finding parsing, and task-graph conversion.
 //! - [`stuck`] — deterministic stuck detection (repeated responses, repeated
@@ -138,6 +142,7 @@ pub mod budget;
 pub mod checkpoint;
 pub mod checkpoint_store;
 pub mod compaction;
+pub mod completion;
 pub mod config;
 pub mod context_pack;
 pub mod decision_log;
@@ -206,6 +211,10 @@ pub use checkpoint_store::{CheckpointMeta, CheckpointStore};
 pub use compaction::{
     CompactTurnReport, CompactionConfig, DEFAULT_COMPACT_MAX_INPUT_BYTES, SESSION_SUMMARY_KEY,
     build_compaction_context, build_compaction_prompt,
+};
+pub use completion::{
+    CompletionEvidence, CompletionEvidenceItem, CompletionReport, CompletionState, EvidenceStatus,
+    derive_completion,
 };
 pub use config::{OrchestratorConfig, RecoveryConfig};
 pub use context_pack::{
@@ -319,8 +328,10 @@ pub use tools::{
 pub use trace::{TraceLine, export_jsonl, is_sensitive_key, redact_assignments, redact_json};
 pub use trust::{TrustLevel, trust_for_role};
 pub use validation::{
-    FileTypeRule, ValidationPlan, ValidationPlanEntry, ValidationPlanner, ValidationResult,
-    ValidationResultStore, ValidationRunner, default_file_type_rules, finalize_validation_tasks,
+    DeclaredValidationTask, FileTypeRule, ValidationPlan, ValidationPlanEntry,
+    ValidationPlanReason, ValidationPlanner, ValidationPlanningContext, ValidationResult,
+    ValidationResultStore, ValidationRunner, WorkspaceValidationConfig, default_file_type_rules,
+    finalize_validation_tasks,
 };
 pub use workspace_scope::WorkspaceScope;
 pub use write_conflicts::WriteScopeConflictDetector;

@@ -356,20 +356,20 @@ Make agent completion state derive from recorded tool evidence, never model asse
 
 #### Work items
 
-- [ ] Define explicit terminal states: `verified`, `partially_verified`, `blocked`, and `unverified`.
-- [ ] Require changed-file inventory, post-write diagnostics, final diff review, and selected validation result before marking work `verified`.
-- [ ] Build dynamic validation plans from changed files, symbols, workspace configuration, and declared project tasks.
-- [ ] Return structured validation evidence: command or tool, exit status, elapsed time, affected tests, diagnostics delta, output truncation, and skip reason.
-- [ ] Require final responses to cite evidence ids or structured results for claimed builds, tests, formatting, and diagnostics.
-- [ ] Keep `partially_verified` when validation cannot run; include exact blocker and safe user follow-up.
-- [ ] Prevent reflection/review text from overriding missing, failed, stale, or denied tool evidence.
-- [ ] Add regression tests for false-success, stale-diagnostics, skipped-validation, and failed-test completion paths.
+- [x] Define explicit terminal states: `verified`, `partially_verified`, `blocked`, and `unverified`.
+- [x] Require changed-file inventory, post-write diagnostics, final diff review, and selected validation result before marking work `verified`.
+- [x] Build dynamic validation plans from changed files, symbols, workspace configuration, and declared project tasks.
+- [x] Return structured validation evidence: command or tool, exit status, elapsed time, affected tests, diagnostics delta, output truncation, and skip reason.
+- [x] Require final responses to cite evidence ids or structured results for claimed builds, tests, formatting, and diagnostics.
+- [x] Keep `partially_verified` when validation cannot run; include exact blocker and safe user follow-up.
+- [x] Prevent reflection/review text from overriding missing, failed, stale, or denied tool evidence.
+- [x] Add regression tests for false-success, stale-diagnostics, skipped-validation, and failed-test completion paths.
 
 #### Exit criteria
 
-- [ ] Agent cannot report successful validation without matching recorded evidence.
-- [ ] Final status clearly distinguishes verified work from blocked or unverified work.
-- [ ] Failed or unavailable validation produces actionable next steps without hiding uncertainty.
+- [x] Agent cannot report successful validation without matching recorded evidence.
+- [x] Final status clearly distinguishes verified work from blocked or unverified work.
+- [x] Failed or unavailable validation produces actionable next steps without hiding uncertainty.
 
 ### Phase 10: Task-aware context planning
 

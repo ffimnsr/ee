@@ -773,6 +773,9 @@ impl OrchestratorRuntime {
         let final_response = FinalResponseBuilder {
             changed_files,
             validation: &validation,
+            // Host-provided evidence is optional; absence deliberately keeps
+            // the final response unverified rather than fabricating facts.
+            completion_evidence: input.completion_evidence.as_ref(),
             unresolved_risks: Vec::new(),
             follow_up_suggestions: Vec::new(),
             task_graph: &self.tasks.lock().expect("task graph poisoned").clone(),
