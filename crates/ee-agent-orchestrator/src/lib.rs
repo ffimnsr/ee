@@ -66,6 +66,10 @@
 //!   `partially_verified`, `blocked`, or `unverified`) derived only from tool
 //!   observations and selected validation records.
 //! - [`trace`] — JSONL trace export of events with secret redaction.
+//! - [`observability`] — disabled-by-default, in-memory privacy-safe per-turn
+//!   waterfall telemetry with version attribution, typed failures, bounded
+//!   retention, failed-run replay candidates, redacted evidence references, and
+//!   local JSONL export.
 //! - [`strategy`] — deterministic turn strategies, the selector, and
 //!   strategy execution wrappers.
 //! - [`final_response`] — typed final responses built from observed state
@@ -180,6 +184,7 @@ pub mod milestones;
 pub mod model;
 pub mod model_registry;
 pub mod model_router;
+pub mod observability;
 pub mod parallel_tools;
 pub mod plan_compiler;
 pub mod policy;
@@ -304,6 +309,14 @@ pub use model::{
 };
 pub use model_registry::{DEFAULT_MODEL_ID, ModelInfo, ModelRegistry};
 pub use model_router::{ModelRoute, ModelRouter, ModelTier, TaskKind, preferred_tier};
+pub use observability::{
+    DEFAULT_TELEMETRY_MAX_BYTES_PER_TURN, DEFAULT_TELEMETRY_MAX_EVENTS_PER_TURN,
+    DEFAULT_TELEMETRY_MAX_TURNS, OBSERVABILITY_SCHEMA_VERSION, RedactedEvidenceRef,
+    ReplayFixtureCandidate, TELEMETRY_LABEL_MAX_CHARS, TelemetryAttribution, TelemetryConfig,
+    TelemetryError, TelemetryRecorder, TelemetrySummary, TelemetryTransport, TelemetryTurnOutcome,
+    TelemetryVersionLabels, ToolFailureReason, TurnTelemetry, WaterfallEvent, WaterfallFinish,
+    WaterfallOutcome, WaterfallStage,
+};
 pub use parallel_tools::ParallelToolRunner;
 pub use plan_compiler::{PlanCompilation, PlanCompiler, PlanInput, TaskCriteria};
 pub use policy::{PolicyContext, PolicyDecision, PolicyEngine, ToolPolicy};

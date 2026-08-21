@@ -457,19 +457,19 @@ Measure reliability, safety, and efficiency without storing workspace secrets or
 
 #### Work items
 
-- [ ] Emit redacted per-turn waterfall events for model routing, tool execution, approval, retry, recovery, and validation.
-- [ ] Attribute runs to model/provider, prompt, manifest/schema, policy, and routing versions.
-- [ ] Aggregate tool failures by typed reason: invalid input, policy denial, stale state, timeout, transport failure, unavailable capability, or internal error.
-- [ ] Export local redacted JSONL or equivalent stable format for evaluation and debugging.
-- [ ] Link failed runs to replay fixture candidates and redacted evidence artifacts.
-- [ ] Track quality, latency, approvals, tool calls, model calls, and estimated cost without logging secrets, raw prompts, or raw terminal output by default.
-- [ ] Add retention limits, user controls, and tests for redaction before persistence or export.
+- [x] Emit redacted per-turn waterfall events for model routing, tool execution, approval, retry, recovery, and validation.
+- [x] Attribute runs to model/provider, prompt, manifest/schema, policy, and routing versions.
+- [x] Aggregate tool failures by typed reason: invalid input, policy denial, stale state, timeout, transport failure, unavailable capability, or internal error.
+- [x] Export local redacted JSONL or equivalent stable format for evaluation and debugging.
+- [x] Link failed runs to replay fixture candidates and redacted evidence artifacts.
+- [x] Track quality, latency, approvals, tool calls, model calls, and estimated cost without logging secrets, raw prompts, or raw terminal output by default.
+- [x] Add retention limits, user controls, and tests for redaction before persistence or export.
 
 #### Exit criteria
 
-- [ ] Maintainers can identify quality, latency, cost, and policy regressions by versioned configuration.
-- [ ] Observability artifacts remain useful for replay while preserving workspace privacy boundaries.
-- [ ] No raw secret, token, environment value, or unapproved workspace content enters telemetry by default.
+- [x] Maintainers can identify quality, latency, cost, and policy regressions by versioned configuration.
+- [x] Observability artifacts remain useful for replay while preserving workspace privacy boundaries.
+- [x] No raw secret, token, environment value, or unapproved workspace content enters telemetry by default.
 
 ## ACP v1 Optional Method Gap Closure Plan
 

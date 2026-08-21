@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::delegation_quality::DelegationEffectiveness;
+use crate::observability::{
+    TelemetryAttribution, TelemetryError, TelemetryTransport, TelemetryVersionLabels,
+};
 use crate::replay::{
     ReplayOutcome, delegate_then_answer_replay, denied_tool_replay, run_replay,
     simple_answer_replay, tool_then_answer_replay,
@@ -112,6 +115,15 @@ pub struct EvaluationProfile {
     pub provider_version: String,
     pub model_version: String,
     pub prompt_version: String,
+    /// Version of `ee_tools_manifest` supplied to the evaluated host.
+    #[serde(default = "default_manifest_version")]
+    pub manifest_version: String,
+    /// Version of schemas compiled for the evaluated candidate.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: String,
+    /// Version label for policy behavior in force during the candidate run.
+    #[serde(default = "default_policy_version")]
+    pub policy_version: String,
     pub routing_version: String,
     pub transport: EvaluationTransport,
     /// Micro-USD per input token. Integer accounting avoids float drift.
@@ -128,6 +140,40 @@ pub enum EvaluationTransport {
     Acp,
 }
 
+impl EvaluationProfile {
+    /// Converts fixture candidate labels to privacy-safe telemetry attribution.
+    /// Invalid labels fail closed before any observability record is retained.
+    pub fn telemetry_attribution(&self) -> Result<TelemetryAttribution, TelemetryError> {
+        TelemetryAttribution::new(
+            TelemetryVersionLabels {
+                provider_version: self.provider_version.clone(),
+                model_version: self.model_version.clone(),
+                prompt_version: self.prompt_version.clone(),
+                manifest_version: self.manifest_version.clone(),
+                schema_version: self.schema_version.clone(),
+                policy_version: self.policy_version.clone(),
+                routing_version: self.routing_version.clone(),
+            },
+            match self.transport {
+                EvaluationTransport::Stdio => TelemetryTransport::Stdio,
+                EvaluationTransport::Acp => TelemetryTransport::Acp,
+            },
+        )
+    }
+}
+
+fn default_manifest_version() -> String {
+    "ee-tools-manifest-v1".into()
+}
+
+fn default_schema_version() -> String {
+    "tool-schema-v1".into()
+}
+
+fn default_policy_version() -> String {
+    "policy-v1".into()
+}
+
 /// Default candidate whose baseline is checked in CI.  Changing any label
 /// changes trace fingerprints and must pass `compare_baseline` first.
 pub fn default_evaluation_profile() -> EvaluationProfile {
@@ -135,6 +181,9 @@ pub fn default_evaluation_profile() -> EvaluationProfile {
         provider_version: "deterministic-fake-v1".into(),
         model_version: "scripted-model-v1".into(),
         prompt_version: "orchestrator-prompt-v1".into(),
+        manifest_version: default_manifest_version(),
+        schema_version: default_schema_version(),
+        policy_version: default_policy_version(),
         routing_version: "single-route-v1".into(),
         transport: EvaluationTransport::Acp,
         input_cost_microusd: 1,
@@ -793,6 +842,17 @@ mod tests {
         let runs = run_suite(&fixtures, default_evaluation_profile()).await.expect("suite runs");
         let report = compare_baseline(&baseline, &runs);
         require_baseline_pass(&report).expect("default candidate must pass committed baseline");
+    }
+
+    #[test]
+    fn replay_profile_carries_full_telemetry_attribution() {
+        let profile = default_evaluation_profile();
+        let attribution = profile.telemetry_attribution().expect("attribution validates");
+        assert_eq!(attribution.provider_version, "deterministic-fake-v1");
+        assert_eq!(attribution.manifest_version, "ee-tools-manifest-v1");
+        assert_eq!(attribution.schema_version, "tool-schema-v1");
+        assert_eq!(attribution.policy_version, "policy-v1");
+        assert_eq!(attribution.transport, TelemetryTransport::Acp);
     }
 
     #[tokio::test]
