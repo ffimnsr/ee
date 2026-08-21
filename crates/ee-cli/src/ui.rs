@@ -489,7 +489,10 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         return;
     }
 
-    let expanded_composer = approval_mode_confirmation_composer_lines(app)
+    let expanded_composer = session_deletion_confirmation_composer_lines(app)
+        .or_else(|| additional_directory_confirmation_composer_lines(app))
+        .or_else(|| terminal_stop_confirmation_composer_lines(app))
+        .or_else(|| approval_mode_confirmation_composer_lines(app))
         .or_else(|| approval_composer_lines(app, inner.width as usize))
         .or_else(|| mode_selection_composer_lines(app, inner.width as usize));
     // Keep one transcript row and the footer visible. Expanded composer prompts
@@ -533,10 +536,12 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
                 continue;
             }
             let response_group = thread.response_group_for_item(item);
-            let show_tool_detail =
-                response_group.is_some_and(|group| thread.expanded_tool_details.contains(&group));
+            let show_tool_detail = thread.transcript_raw
+                || thread.transcript_detail
+                || response_group
+                    .is_some_and(|group| thread.expanded_tool_details.contains(&group));
             if let Some(group) = response_group {
-                if rendered_response_groups.insert(group) {
+                if !thread.transcript_raw && rendered_response_groups.insert(group) {
                     let (thoughts, tools) = thread.response_group_counts(group);
                     let selected = thread.selected_response_group == Some(group);
                     let collapsed = thread.collapsed_response_groups.contains(&group);
@@ -545,12 +550,14 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
                     let mut header = format!(
                         "{selected_marker}[{marker}] response: {thoughts} reasoning, {tools} tools"
                     );
+                    if let Some(summary) = thread.response_group_change_summary(group) {
+                        header.push_str(&format!(" · {summary}"));
+                    }
                     if let Some(metrics) = thread.turn_metrics.get(&group) {
                         header.push_str(&format!(" · {}", crate::app::turn_metrics_label(metrics)));
                     } else if thread.active_response_group == Some(group)
                         && let Some(started) = thread.turn_started_at
                     {
-                        // Live elapsed for the running turn.
                         header.push_str(&format!(
                             " · {}",
                             crate::app::format_duration(started.elapsed())
@@ -559,7 +566,7 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
                     lines
                         .push(Line::from(Span::styled(header, Style::default().fg(theme::FG_DIM))));
                 }
-                if thread.collapsed_response_groups.contains(&group) {
+                if !thread.transcript_raw && thread.collapsed_response_groups.contains(&group) {
                     continue;
                 }
             }
@@ -768,6 +775,84 @@ fn plan_modal_rect(area: Rect, entry_count: usize) -> Rect {
     let x = area.x + area.width.saturating_sub(width).saturating_sub(2);
     let y = area.y.saturating_add(2);
     Rect { x, y, width, height }
+}
+
+/// Builds local-session deletion confirmation rows. Provider data is never deleted.
+#[cfg(feature = "agents")]
+fn session_deletion_confirmation_composer_lines(app: &App) -> Option<(Vec<Line<'static>>, usize)> {
+    let confirmation = app.agents.session_deletion_confirmation.as_ref()?;
+    Some((
+        vec![
+            Line::from(Span::styled(
+                "delete local session transcript?",
+                Style::default().fg(theme::FG_WARNING).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                format!("  name: {}", confirmation.session_name),
+                theme_style(theme::FG_TEXT),
+            )),
+            Line::from(Span::styled(
+                format!("  session: {}", confirmation.session_id),
+                theme_style(theme::FG_TEXT),
+            )),
+            Line::from(Span::styled(
+                "  removes local transcript and reconnect metadata only; provider session remains.",
+                theme_style(theme::FG_TEXT),
+            )),
+            Line::from(Span::styled("  Enter delete · Esc cancel", theme_style(theme::FG_DIM))),
+        ],
+        0,
+    ))
+}
+
+/// Builds additional-workspace-root confirmation rows.
+#[cfg(feature = "agents")]
+fn additional_directory_confirmation_composer_lines(
+    app: &App,
+) -> Option<(Vec<Line<'static>>, usize)> {
+    let confirmation = app.agents.additional_directory_confirmation.as_ref()?;
+    Some((
+        vec![
+            Line::from(Span::styled(
+                "trust additional workspace root?",
+                Style::default().fg(theme::FG_WARNING).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                format!("  {}", confirmation.path.display()),
+                theme_style(theme::FG_TEXT),
+            )),
+            Line::from(Span::styled(
+                "  adds local access only for this Agents TUI session; current provider session stays unchanged.",
+                theme_style(theme::FG_TEXT),
+            )),
+            Line::from(Span::styled("  Enter trust · Esc cancel", theme_style(theme::FG_DIM))),
+        ],
+        0,
+    ))
+}
+
+/// Builds multi-terminal stop confirmation rows.
+#[cfg(feature = "agents")]
+fn terminal_stop_confirmation_composer_lines(app: &App) -> Option<(Vec<Line<'static>>, usize)> {
+    let confirmation = app.agents.terminal_stop_confirmation.as_ref()?;
+    Some((
+        vec![
+            Line::from(Span::styled(
+                format!("stop {} owned terminals?", confirmation.terminal_ids.len()),
+                Style::default().fg(theme::FG_WARNING).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                format!("  {}", confirmation.terminal_ids.join(", ")),
+                theme_style(theme::FG_TEXT),
+            )),
+            Line::from(Span::styled(
+                "  only registered direct children are stopped; descendants may remain.",
+                theme_style(theme::FG_TEXT),
+            )),
+            Line::from(Span::styled("  Enter stop · Esc cancel", theme_style(theme::FG_DIM))),
+        ],
+        0,
+    ))
 }
 
 /// Builds bypass-mode confirmation rows. Returns selected option row for cursor placement.
@@ -998,23 +1083,13 @@ fn agents_composer_line(app: &App, thread: &crate::app::AgentThreadUi) -> Vec<Sp
     let command_hint = draft
         .trim_start()
         .strip_prefix('/')
-        .filter(|prefix| !prefix.chars().any(char::is_whitespace))
-        .map(|prefix| {
-            crate::app::agent_slash_command_names(&thread.available_commands)
-                .into_iter()
-                .filter(|command| command.starts_with(prefix))
-                .take(3)
-                .map(|command| format!("/{command}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .filter(|matches| !matches.is_empty());
+        .is_some_and(|prefix| !prefix.chars().any(char::is_whitespace));
     let mut spans = vec![
         Span::styled("prompt> ", Style::default().fg(theme::FG_KEY).add_modifier(Modifier::BOLD)),
         Span::styled(draft.clone(), Style::default().fg(theme::FG_TEXT)),
     ];
-    if let Some(matches) = command_hint {
-        spans.push(Span::styled(format!("  Tab: {matches}"), theme_style(theme::FG_DIM)));
+    if command_hint {
+        spans.push(Span::styled("  Tab complete · /help", theme_style(theme::FG_DIM)));
     }
     spans
 }

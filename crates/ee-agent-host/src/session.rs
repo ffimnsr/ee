@@ -156,6 +156,12 @@ impl AgentThread {
         self.shared.turn.lock().expect("turn state poisoned").is_some()
     }
 
+    /// Whether this session's agent advertises additional-directory support.
+    #[must_use]
+    pub fn supports_additional_directories(&self) -> bool {
+        self.connection.supports_additional_directories()
+    }
+
     /// A deterministic snapshot of the reduced session state.
     #[must_use]
     pub fn snapshot(&self) -> SessionState {

@@ -8,6 +8,15 @@ use crate::app::{Mode, Operator};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Action {
     NoOp,
+    /// Agents-pane-local actions. These only dispatch while `mode = "agent"`.
+    AgentHistoryPrevious,
+    AgentHistoryNext,
+    AgentHistorySearchReverse,
+    AgentDraftStash,
+    AgentDraftRestore,
+    AgentDraftExternalEdit,
+    AgentToggleTranscriptDetails,
+    AgentToggleTranscriptRaw,
     Quit,
     EnterMode(Mode),
     EnterCommandMode,
@@ -736,6 +745,14 @@ pub(crate) fn window_command_hint_entries() -> Vec<KeyHintEntry> {
 fn action_hint_description(action: &Action) -> String {
     match action {
         Action::NoOp => String::from("prefix"),
+        Action::AgentHistoryPrevious => String::from("agent history previous"),
+        Action::AgentHistoryNext => String::from("agent history next"),
+        Action::AgentHistorySearchReverse => String::from("agent history reverse search"),
+        Action::AgentDraftStash => String::from("agent draft stash"),
+        Action::AgentDraftRestore => String::from("agent draft restore"),
+        Action::AgentDraftExternalEdit => String::from("agent draft external edit"),
+        Action::AgentToggleTranscriptDetails => String::from("agent transcript details"),
+        Action::AgentToggleTranscriptRaw => String::from("agent transcript raw view"),
         Action::EnterMode(mode) => format!("enter {}", mode_hint_description(*mode)),
         Action::Edit(method) => edit_hint_description(method),
         Action::PrefillCommandLine(prefix) => {
@@ -1154,6 +1171,14 @@ pub(crate) fn parse_action_spec(spec: &str) -> Result<Action, String> {
         "substitute_confirm_apply_all" => Action::SubstituteConfirmApplyAll,
         "substitute_confirm_cancel" => Action::SubstituteConfirmCancel,
         "command_palette" => Action::CommandPalette,
+        "agent_history_previous" => Action::AgentHistoryPrevious,
+        "agent_history_next" => Action::AgentHistoryNext,
+        "agent_history_search_reverse" => Action::AgentHistorySearchReverse,
+        "agent_draft_stash" => Action::AgentDraftStash,
+        "agent_draft_restore" => Action::AgentDraftRestore,
+        "agent_draft_external_edit" => Action::AgentDraftExternalEdit,
+        "agent_toggle_transcript_details" => Action::AgentToggleTranscriptDetails,
+        "agent_toggle_transcript_raw" => Action::AgentToggleTranscriptRaw,
         "goto_next_function" => Action::Edit("goto_next_function"),
         "goto_prev_function" => Action::Edit("goto_prev_function"),
         "goto_next_class" => Action::Edit("goto_next_class"),
@@ -1355,6 +1380,14 @@ pub(crate) fn format_binding_mode(mode: Mode) -> &'static str {
 pub(crate) fn format_action_spec(action: &Action) -> String {
     match action {
         Action::NoOp => String::from("no_op"),
+        Action::AgentHistoryPrevious => String::from("agent_history_previous"),
+        Action::AgentHistoryNext => String::from("agent_history_next"),
+        Action::AgentHistorySearchReverse => String::from("agent_history_search_reverse"),
+        Action::AgentDraftStash => String::from("agent_draft_stash"),
+        Action::AgentDraftRestore => String::from("agent_draft_restore"),
+        Action::AgentDraftExternalEdit => String::from("agent_draft_external_edit"),
+        Action::AgentToggleTranscriptDetails => String::from("agent_toggle_transcript_details"),
+        Action::AgentToggleTranscriptRaw => String::from("agent_toggle_transcript_raw"),
         Action::Quit => String::from("quit"),
         Action::EnterMode(mode) => format!("enter_mode:{}", format_mode_spec(*mode)),
         Action::EnterCommandMode => String::from("enter_command_mode"),
@@ -1638,6 +1671,7 @@ fn parse_binding_mode_spec(spec: &str) -> Option<Mode> {
         "picker" => Some(Mode::Picker),
         "quickfix" => Some(Mode::Quickfix),
         "location_list" | "locationlist" | "location" => Some(Mode::LocationList),
+        "agent" | "agents" => Some(Mode::Agent),
         _ => None,
     })
 }

@@ -3697,3 +3697,216 @@ Rules:
 - `cargo test --quiet -p ee-agent-host` passes.
 - `cargo test --quiet -p ee-mcp` passes.
 - Automated matrix tests prove no repository-controlled configuration, unclassified tool, destructive operation, external path, sensitive value, expired rule, exhausted rule, or scope mismatch bypasses approval.
+
+## Agents TUI Harness Parity Plan
+
+Bring Agents TUI closer to documented Claude Code and Codex CLI harness workflows without pretending EE owns provider-specific state. Local commands stay slash-prefixed. Agent-advertised ACP commands remain discoverable and are sent as ordinary `session/prompt` text.
+
+Sources reviewed: Claude Code interactive-mode and command reference; Codex CLI reference and slash-command reference. Provider/version/plan-specific commands are not parity requirements.
+
+Rules:
+
+- [x] Keep Agents TUI commands slash-prefixed; `:` remains editor command syntax, never Agents TUI syntax.
+- [x] Merge local commands with ACP `available_commands`; do not duplicate or shadow an agent-advertised command without a documented EE-owned semantic.
+- [x] Keep user-selected context snapshots session-local, bounded, redacted, and outside persisted transcripts and exports.
+- [x] Treat `/approval bypass` as UI approval auto-resolution only; never bypass ACP capability gates, native write validation, workspace/path policy, terminal ownership, redaction, or agent-side permissions.
+- [ ] Do not fake provider-owned model, billing, sandbox, cloud, plugin, memory, or MCP-server mutations as EE-local features.
+- [ ] Preserve fail-closed behavior for every session, workspace, transcript, clipboard, and process operation.
+
+### Phase 1: Local command baseline and discoverability
+
+Complete low-risk, provider-independent commands that operate on existing local session and workspace state.
+
+#### Work items
+
+- [x] Add local session control commands: `/sessions`, `/export`, `/stop`, `/resume`, `/discard`, `/reconnect`, `/next`, `/prev`, `/clear`, `/layout`, `/thoughts`, `/config`, `/mcp`, `/approval`, `/context`, and `/mode`.
+- [x] Add `/context add <workspace-relative-path>`, `/context remove <path>`, `/context clear`, and listing behavior.
+  - [x] Snapshot selected regular UTF-8 files at attachment time, preferring unsaved open-buffer content.
+  - [x] Reject absolute paths, protected paths, secret vault paths, non-files, oversized files, aggregate-limit overflow, and canonical/symlink escapes outside primary workspace.
+  - [x] Redact configured secret values before prompt attachment.
+  - [x] Do not include snapshot content in transcript notices or markdown export.
+- [x] Add `/help`.
+  - [x] List local commands, aliases, short usage, and safety-sensitive behavior.
+  - [x] List agent-advertised commands separately and label them provider-owned.
+  - [x] Replace footer command-hint clutter with concise discoverability through `/help` and slash completion.
+- [x] Add `/status`.
+  - [x] Show session id/name, agent identity, connection state, current mode, approval mode, context-file count/bytes, and MCP summary.
+  - [x] Show only agent-advertised configuration/capacity values; omit unavailable provider data rather than guessing.
+- [x] Add `/diff`.
+  - [x] Render bounded staged, unstaged, and untracked workspace changes using existing SCM/editor integration.
+  - [x] Redact sensitive data and preserve existing diff/output caps.
+  - [x] Do not execute Git commands when existing SCM data can answer request.
+- [x] Add `/copy [N]`.
+  - [x] Copy latest completed assistant response, or Nth prior completed response, to clipboard.
+  - [x] Return a local capability error when clipboard access is unavailable.
+  - [x] Never copy hidden context-file snapshots, redacted raw tool data, or unapproved secret content.
+- [x] Add `/rename <name>`.
+  - [x] Sanitize control/invisible characters, reject empty result, and cap length.
+  - [x] Persist only through session metadata already supported by active session store/protocol.
+
+#### Exit criteria
+
+- [x] User can discover commands, inspect local session state, inspect current diff, copy a safe completed response, and name a session without provider-specific behavior.
+- [x] Local command list stays concise while ACP command list remains available and distinguishable.
+
+### Phase 2: Session lifecycle parity
+
+Add explicit saved-session operations. Keep pending-turn cancellation, archival, and permanent deletion distinct.
+
+#### Work items
+
+- [x] Add `/new` as alias for `/new_thread`.
+  - [x] Start a fresh conversation/session according to existing agent lifecycle behavior.
+  - [x] Preserve old `/new_thread` spelling unless deliberate compatibility removal is approved.
+- [x] Define and document `/clear` semantics.
+  - [x] Clear visible transcript only when current implementation already guarantees conversation state remains intact.
+  - [x] Use `/new` for a fresh conversation/context; never silently conflate visual clear with session reset.
+- [x] Add `/archive`.
+  - [x] Hide current saved session while preserving transcript and exportability.
+  - [x] Require turn to be idle or explicitly cancelled before archive.
+- [x] Add `/delete`.
+  - [x] Require explicit irreversible-action confirmation containing session identity/name.
+  - [x] Delete local transcript and descendant/fork metadata only when ownership and storage semantics are clear.
+  - [x] Keep provider-side deletion capability-gated; never claim remote transcript deletion without ACP support.
+- [x] Define `/fork` and `/branch` seeded-session semantics without pretending ACP supports clone.
+  - [x] `/fork` creates independent fresh ACP session seeded with bounded, redacted visible parent messages; parent stays active.
+  - [x] `/branch` creates same seeded session and switches to it; `/sessions` can return to parent.
+  - [x] Keep context-file attachment snapshots isolated per child session.
+  - [x] Never claim provider-side session cloning or remote transcript mutation.
+- [x] Add `/archive`, `/delete`, `/fork`, and `/branch` transcript ownership and confirmation coverage.
+
+#### Exit criteria
+
+- [x] Users can intentionally start, resume, rename, archive, delete, and branch local sessions without ambiguous loss of transcript or provider state.
+- [x] Pending work, archive, discard, and permanent delete have separate user-visible semantics and confirmations.
+
+### Phase 3: Workspace context and process observability
+
+Bring high-value terminal harness workflows into Agents TUI while preserving primary-workspace policy and agent/session ownership.
+
+#### Work items
+
+- [x] Extend `/context` with `/context status`.
+  - [x] Show attached display paths, snapshot sizes, aggregate bytes, configured caps, and session-only retention scope.
+  - [x] Show model-context capacity only if agent advertises trustworthy values.
+- [x] Add `/mention <workspace-relative-path>` and composer `@path` completion.
+  - [x] Reuse `/context add` canonicalization, open-buffer precedence, protected-path filtering, redaction, and snapshot caps.
+  - [x] Make explicit whether mention attaches once to next prompt or remains selected for session.
+- [x] Add `/add-dir <path>`.
+  - [x] Restrict to canonical directories accepted by workspace/trust policy.
+  - [x] Obtain explicit trust/approval before granting new root access.
+  - [x] Send additional directories only when agent advertises ACP additional-directory capability.
+  - [x] Do not discover arbitrary configuration from added roots unless policy explicitly permits it.
+- [x] Evaluate `/cd <path>` after `/add-dir` semantics are stable.
+  - [x] Defer `/cd`: changing primary workspace remains session/workspace migration, not path assignment.
+  - [x] Keep root, instruction, attachment, terminal, and persisted-session revalidation as prerequisite for future migration work.
+- [x] Add `/tasks` and `/ps`.
+  - [x] List agent-owned background terminals and, where supported, subagent tasks with state, bounded output tail, and ownership-safe ids.
+  - [x] Do not reveal or control user terminals or another agent/session's terminals.
+- [x] Extend `/stop` semantics.
+  - [x] Keep current prompt cancellation behavior explicit.
+  - [x] Add separate bounded stop action for agent-owned background terminals when present; require confirmation for multiple processes.
+
+#### Exit criteria
+
+- [x] User can attach workspace context and inspect owned background work without exposing protected files, secrets, external roots, or unrelated terminal state.
+- [x] Every extra-directory and terminal action is capability-gated, approval-aware, and ownership-scoped.
+
+### Phase 4: Transcript and composer harness UX
+
+Close non-command terminal workflow gaps found in Claude Code and Codex CLI research.
+
+#### Work items
+
+- [x] Add prompt history navigation and duplicate-collapse behavior.
+- [x] Add reverse prompt-history search through `Ctrl-R`.
+  - [x] Preserve legacy response-collapse behavior while a response group is selected; bind `agent_history_search_reverse` in `mode = "agent"` for an unconditional custom shortcut.
+- [x] Add queued follow-up prompts and slash commands while agent turn is active.
+  - [x] Clearly distinguish queued follow-up from immediate interrupt/cancel.
+  - [x] Allow user to inspect, edit, reorder where safe, or remove queued entries before dispatch.
+- [x] Add transcript detail toggle.
+  - [x] Show timestamp, agent identity when available, tool status, sanitized input/output summaries, diffs, terminal references, and locations.
+  - [x] Keep raw sensitive tool data hidden unless explicit safe disclosure policy permits it.
+- [x] Add per-turn changed-file/diff summary using existing tool-call evidence; SCM-wide changes remain available through `/diff`.
+- [x] Add raw/scrollback-friendly transcript mode and open/export transcript action.
+- [x] Add draft stash/restore and external-editor flow for long prompts when platform support exists.
+  - [x] External editor uses `VISUAL` or `EDITOR` only when configured as one executable without shell arguments; draft file is private, bounded, cleaned up, and never auto-submitted.
+- [x] Add keyboard shortcut help and configurable keybinding groundwork before introducing provider-specific shortcuts.
+
+#### Exit criteria
+
+- [x] Users can safely review active work, reuse earlier prompts, queue follow-ups, and inspect bounded tool evidence without manually scraping terminal output.
+- [x] Transcript UX preserves current redaction and export guarantees.
+
+### Phase 5: Local workflows and diagnostics
+
+Add optional EE-owned workflows built from existing editor/SCM capabilities. Do not claim proprietary agent engines.
+
+#### Work items
+
+- [x] Add `/init`.
+  - [x] Offer to generate an `AGENTS.md` scaffold using normal file-write approval.
+  - [x] Never overwrite existing project instructions without explicit preview and approval.
+- [x] Add `/review [target]`.
+  - [x] Build bounded local review context from existing changed-file, diagnostics, diff, and test metadata tools.
+  - [x] Send transparent review prompt to active agent; label result as agent-generated review, not native provider review engine.
+- [x] Add `/security-review [target]`.
+  - [x] Use explicit security-review prompt and existing evidence sources.
+  - [x] Preserve no-network default and avoid scanning secrets into transcript.
+- [x] Add `/doctor`.
+  - [x] Diagnose Agents TUI feature gate, configured agent command, ACP handshake/capabilities, session storage, MCP proxy, workspace identity, and redaction policy.
+  - [x] Report findings before mutations; require confirmation for reconnect, reset, or configuration repair.
+- [x] Review `/export` compatibility.
+  - [x] Keep current ordered Markdown transcript export with timestamps and tool-call inputs/outputs.
+  - [x] Maintain secret redaction and exclude attached context-file bodies.
+
+#### Exit criteria
+
+- [x] Users can initialize repository guidance, request bounded review, diagnose harness configuration, and export auditable transcript evidence through local workflows.
+- [x] Local workflows clearly state which steps rely on provider response versus editor-owned evidence.
+
+### Phase 6: Provider and ACP-dependent features
+
+Track these separately. Implement only through documented ACP capability/configuration surfaces or explicit provider ownership; do not invent wire methods or client-side simulations.
+
+#### Work items
+
+- [x] Evaluate real conversation compaction before adding `/compact [focus]`.
+  - [x] No documented ACP compaction operation changes model-visible history; `/compact` forwards only when agent advertises provider-owned command, never as UI transcript hide.
+  - [x] EE performs no local compaction, so rules, plans, context snapshots, approval state, and evidence provenance remain intact.
+- [x] Evaluate `/subtask`, `/background`, and `/side`/`/btw` only after explicit execution model exists.
+  - [x] No explicit ACP execution model advertises isolation, inherited context, write ownership, cancellation, retention, or budget semantics; commands fail closed unless provider advertises them.
+  - [x] EE creates no provider-independent subtask execution; root session remains only EE-owned write path.
+- [x] Surface `/model`, `/effort`, `/fast`, `/personality`, and provider plan modes only from advertised ACP configuration options or provider commands.
+- [x] Surface richer `/permissions`, sandbox profiles, and approval presets only when ownership between EE and provider is explicit.
+  - [x] Keep EE `/approval default|autopilot|bypass` session-local and bounded to local approval auto-resolution.
+- [x] Surface `/mcp` reconnect/enable/disable only for MCP servers EE owns; delegate provider-owned server actions to agent-advertised commands.
+- [x] Do not implement provider-specific `/skills`, `/plugins`, `/hooks`, `/usage`, billing, cloud, remote-control, web-search, app handoff, or account commands as generic EE features.
+
+#### Exit criteria
+
+- [x] Every provider-dependent command is capability-gated, accurately labeled, and leaves no false impression that EE changed provider state.
+- [x] Missing capability yields clear local guidance instead of fallback protocol calls or fake UI state.
+
+### Phase 7: Validation and compatibility matrix
+
+Prove local command behavior across supported agents and disconnected/reconnected sessions.
+
+#### Work items
+
+- [x] Add unit tests for slash-command inventory, aliases, completion order, parsing, and help/status output.
+- [x] Add regression tests for `/context`, `/mention`, and `/add-dir` path containment, symlink escape, protected files, secret redaction, unsaved-buffer snapshots, byte caps, remove/clear, resume, fork, and export exclusion.
+- [x] Add session lifecycle tests for new, clear, rename, archive, delete confirmation, fork/branch, reconnect, and capability absence.
+- [x] Add terminal ownership tests for `/tasks`, `/ps`, and background stop.
+- [x] Add transcript tests for redacted detail rendering, clipboard selection, export ordering, and queued prompts.
+- [x] Add capability-matrix fixtures: minimal ACP agent, session-only agent, additional-directory agent, config-options agent, and unavailable/disconnected agent.
+- [x] Run `cargo fmt --check`.
+- [x] Run `cargo clippy -p ee-cli --features agents --all-targets -- -D warnings`.
+- [x] Run `cargo test --quiet -p ee-cli --features agents`.
+- [x] Run `git --no-pager diff --check`.
+
+#### Exit criteria
+
+- [x] Every local command has deterministic behavior, bounded output, explicit safety semantics, and focused regression coverage.
+- [x] Provider-specific command availability depends only on live advertised capabilities/configuration.
+- [x] No command, transcript, export, clipboard, or context attachment leaks secret values, protected-file content, or unrelated session data.

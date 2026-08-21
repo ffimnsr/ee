@@ -132,6 +132,12 @@ const CONFIG_TEMPLATE: &str = r#"# ee configuration
 # enabled = false
 # default_agent = "assistant"
 #
+# # Agent local shortcut example. Agent actions only run while Agents TUI owns focus.
+# [[keymap.bindings]]
+# mode = "agent"
+# key = "ctrl+r"
+# action = "agent_history_search_reverse"
+#
 # [agents.servers.assistant]
 # command = "agent-command"
 # args = ["--stdio"]

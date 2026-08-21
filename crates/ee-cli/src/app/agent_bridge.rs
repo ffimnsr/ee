@@ -332,13 +332,42 @@ fn exit_status_of(status: &std::process::ExitStatus) -> TerminalExitStatus {
         .signal(signal_of(status))
 }
 
+/// Agent/session identity used for local terminal ownership checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalOwner {
+    pub(crate) agent_id: String,
+    pub(crate) session_id: String,
+}
+
+/// Bounded local display record for one currently tracked agent terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OwnedTerminalSummary {
+    pub(crate) terminal_id: String,
+    pub(crate) command: String,
+    pub(crate) args: Vec<String>,
+    pub(crate) cwd: Option<PathBuf>,
+    pub(crate) running: bool,
+    pub(crate) exit_status: Option<TerminalExitStatus>,
+    pub(crate) elapsed_ms: u64,
+    pub(crate) output_tail: String,
+    pub(crate) output_total_bytes: u64,
+    pub(crate) output_truncated: bool,
+}
+
+/// Result of nonblocking local stop request for one owned terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OwnedTerminalStop {
+    StopRequested,
+    AlreadyExited,
+}
+
 /// One tracked agent terminal: child process, bounded output, exit status.
 #[derive(Debug)]
 pub(crate) struct AgentTerminalTrack {
     #[allow(dead_code)]
     pub(crate) terminal_id: String,
     #[allow(dead_code)]
-    pub(crate) owner_session_id: String,
+    pub(crate) owner: TerminalOwner,
     #[allow(dead_code)]
     pub(crate) command: String,
     #[allow(dead_code)]
@@ -375,6 +404,7 @@ impl AgentTerminals {
     pub(crate) fn spawn(
         &self,
         request: &CreateTerminalRequest,
+        owner_agent_id: Option<&str>,
     ) -> Result<CreateTerminalResponse, AgentError> {
         if request.command.trim().is_empty() {
             return Err(AgentError::invalid_params("terminal command must not be empty"));
@@ -421,7 +451,10 @@ impl AgentTerminals {
 
         let track = AgentTerminalTrack {
             terminal_id: terminal_id.clone(),
-            owner_session_id: request.session_id.0.to_string(),
+            owner: TerminalOwner {
+                agent_id: owner_agent_id.unwrap_or("proxy").to_string(),
+                session_id: request.session_id.0.to_string(),
+            },
             command: request.command.clone(),
             args: request.args.clone(),
             cwd: request.cwd.clone(),
@@ -564,11 +597,69 @@ impl AgentTerminals {
         track: &AgentTerminalTrack,
         session_id: &SessionId,
     ) -> Result<(), AgentError> {
-        if track.owner_session_id == session_id.0.as_ref() {
+        if track.owner.session_id == session_id.0.as_ref() {
             Ok(())
         } else {
             Err(AgentError::invalid_params("terminal does not belong to this session"))
         }
+    }
+
+    /// Lists only active terminals owned by exact agent/session identity.
+    /// Output remains byte-bounded and terminal environment is never exposed.
+    pub(crate) fn list_owned(
+        &self,
+        owner: &TerminalOwner,
+        tail_bytes: usize,
+    ) -> Vec<OwnedTerminalSummary> {
+        let mut registry = self.inner.lock().expect("terminals poisoned");
+        let mut terminals = registry
+            .active
+            .values_mut()
+            .filter(|track| &track.owner == owner)
+            .map(|track| {
+                self.refresh_exit(track);
+                let snapshot = Self::output_snapshot_for_track(track);
+                let output_tail = tail_at_char_boundary(&snapshot.combined_output, tail_bytes);
+                OwnedTerminalSummary {
+                    terminal_id: track.terminal_id.clone(),
+                    command: track.command.clone(),
+                    args: track.args.clone(),
+                    cwd: track.cwd.clone(),
+                    running: snapshot.running,
+                    exit_status: snapshot.exit_status,
+                    elapsed_ms: snapshot.elapsed_ms,
+                    output_tail,
+                    output_total_bytes: snapshot.total_bytes,
+                    output_truncated: snapshot.truncated,
+                }
+            })
+            .collect::<Vec<_>>();
+        terminals.sort_by(|left, right| left.terminal_id.cmp(&right.terminal_id));
+        terminals
+    }
+
+    /// Requests stop for one exact-owned direct child without waiting or joining readers.
+    /// Descendant process trees are outside this bounded local operation.
+    pub(crate) fn stop_owned(
+        &self,
+        owner: &TerminalOwner,
+        terminal_id: &str,
+    ) -> Result<OwnedTerminalStop, AgentError> {
+        let mut registry = self.inner.lock().expect("terminals poisoned");
+        let Some(track) = registry.active.get_mut(terminal_id) else {
+            return Err(AgentError::invalid_params("unknown terminal"));
+        };
+        if &track.owner != owner {
+            return Err(AgentError::invalid_params(
+                "terminal does not belong to active agent session",
+            ));
+        }
+        self.refresh_exit(track);
+        let Some(child) = track.child.as_mut() else {
+            return Ok(OwnedTerminalStop::AlreadyExited);
+        };
+        child.kill().map_err(|error| AgentError::Io(format!("terminal stop failed: {error}")))?;
+        Ok(OwnedTerminalStop::StopRequested)
     }
 
     fn kill_track(&self, track: &mut AgentTerminalTrack) -> Result<(), AgentError> {
@@ -656,6 +747,17 @@ impl AgentTerminals {
     pub(crate) fn tracked_count(&self) -> usize {
         self.inner.lock().expect("terminals poisoned").active.len()
     }
+}
+
+fn tail_at_char_boundary(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut start = text.len().saturating_sub(max_bytes);
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("[tail]\n{}", &text[start..])
 }
 
 fn spawn_output_reader(
@@ -2683,7 +2785,7 @@ impl App {
 
     /// Whether the path is the configured host-local secret-store vault
     /// (never covered by persistent read trust).
-    fn is_secret_store_path(&self, path: &Path) -> bool {
+    pub(super) fn is_secret_store_path(&self, path: &Path) -> bool {
         let Ok(vault) = crate::secrets::default_vault_path() else {
             return false;
         };
@@ -2711,6 +2813,7 @@ impl App {
                             Ok(rule_id) => self.spawn_trusted_terminal(
                                 &request,
                                 &session_id,
+                                prompt.agent_id.as_deref(),
                                 Some(rule_id),
                                 prompt.reply,
                             ),
@@ -2820,7 +2923,13 @@ impl App {
                 );
             }
             ApprovalKind::TerminalCreate { request } => {
-                self.spawn_trusted_terminal(&request, &prompt.session_id, None, prompt.reply);
+                self.spawn_trusted_terminal(
+                    &request,
+                    &prompt.session_id,
+                    prompt.agent_id.as_deref(),
+                    None,
+                    prompt.reply,
+                );
             }
         }
     }
@@ -2832,9 +2941,13 @@ impl App {
         let session_id = prompt.session_id.clone();
         match &prompt.kind {
             ApprovalKind::TerminalCreate { .. } => match prompt.kind {
-                ApprovalKind::TerminalCreate { request } => {
-                    self.spawn_trusted_terminal(&request, &session_id, Some(rule_id), prompt.reply)
-                }
+                ApprovalKind::TerminalCreate { request } => self.spawn_trusted_terminal(
+                    &request,
+                    &session_id,
+                    prompt.agent_id.as_deref(),
+                    Some(rule_id),
+                    prompt.reply,
+                ),
                 _ => unreachable!(),
             },
             ApprovalKind::Write { .. } | ApprovalKind::WriteBatch { .. } => {
@@ -3162,10 +3275,11 @@ impl App {
         &mut self,
         request: &CreateTerminalRequest,
         session_id: &str,
+        agent_id: Option<&str>,
         rule_id: Option<String>,
         reply: oneshot::Sender<ClientRequestResult>,
     ) {
-        let result = self.agents.terminals.spawn(request);
+        let result = self.agents.terminals.spawn(request, agent_id);
         if result.is_ok()
             && let Some(rule_id) = rule_id
         {
@@ -4412,7 +4526,7 @@ impl App {
             .map_err(|error| AgentError::HandlerError(error.to_string()))
     }
 
-    fn proxy_review_context(&mut self) -> Result<serde_json::Value, AgentError> {
+    pub(crate) fn proxy_review_context(&mut self) -> Result<serde_json::Value, AgentError> {
         let changed_files = self.proxy_changed_files_result()?;
         let changed_paths =
             changed_files.files.iter().map(|entry| entry.path.as_str()).collect::<BTreeSet<_>>();

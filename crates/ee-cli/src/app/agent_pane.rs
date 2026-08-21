@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::policy::is_protected_relative_path;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ee_agent_host::events::{
     AgentConnectionState, PermissionRequestInfo, RecoverableInfo, ThreadCloseReason, TurnMetrics,
@@ -36,6 +37,7 @@ use ee_agent_protocol::{
     SessionConfigValueId, SessionId, SessionModeId, SessionUpdate, TextContent, ToolCallContent,
     ToolCallLocation, ToolCallStatus, ToolKind,
 };
+use ignore::WalkBuilder;
 use tokio::runtime::Builder as TokioBuilder;
 use tokio::sync::mpsc as tokio_mpsc;
 use url::Url;
@@ -63,6 +65,12 @@ pub(crate) const AGENT_CONTEXT_MAX_FILES: usize = 8;
 pub(crate) const AGENT_CONTEXT_MAX_FILE_BYTES: usize = 64 * 1024;
 /// Maximum bytes captured from all explicitly attached context files.
 pub(crate) const AGENT_CONTEXT_MAX_TOTAL_BYTES: usize = 128 * 1024;
+/// Maximum explicit extra workspace roots granted in one Agents TUI process.
+const AGENT_ADDITIONAL_ROOT_MAX: usize = 8;
+/// Maximum terminal output tail rendered by `/ps` and `/tasks`.
+const AGENT_TERMINAL_OUTPUT_TAIL_BYTES: usize = 4 * 1024;
+/// Maximum agent-owned terminals targeted by one `/stop all` request.
+const AGENT_TERMINAL_STOP_ALL_MAX: usize = 16;
 
 // ── Pane layout ──────────────────────────────────────────────────────────────
 
@@ -100,6 +108,28 @@ pub(crate) enum MessageRenderKind {
 
 /// Stable local identifier for reasoning and tool calls from one agent turn.
 pub(crate) type ResponseGroupId = u64;
+
+const AGENT_PROMPT_HISTORY_MAX: usize = 200;
+const AGENT_PROMPT_QUEUE_MAX: usize = 16;
+const AGENT_REVIEW_CONTEXT_MAX_BYTES: usize = 32 * 1024;
+
+/// One locally queued follow-up. It is never an ACP-side queue: EE dispatches
+/// it only after current turn reaches a terminal ready state.
+#[derive(Debug, Clone)]
+pub(crate) struct QueuedPrompt {
+    pub(crate) text: String,
+    /// One-turn snapshots travel with their queued prompt and never enter
+    /// transcript, export, history, or another session.
+    pub(crate) next_prompt_context_files: Vec<AgentContextFile>,
+}
+
+/// Frontend handoff request for editing one draft outside the TUI. The terminal
+/// owning loop consumes it; this pane never spawns an interactive process.
+#[derive(Debug, Clone)]
+pub(crate) struct ExternalEditorRequest {
+    pub(crate) session_id: Option<String>,
+    pub(crate) draft: String,
+}
 
 /// One line in the IRC-style scrollback.
 #[derive(Debug, Clone)]
@@ -178,6 +208,8 @@ pub(crate) struct AgentThreadUi {
     pub(crate) index: usize,
     pub(crate) agent_id: String,
     pub(crate) session_id: String,
+    /// Parent session for locally seeded forks. Never sent as an ACP mutation.
+    pub(crate) fork_parent_session_id: Option<String>,
     /// Nick shown in the transcript (`you` is reserved for the user).
     pub(crate) nick: String,
     pub(crate) display_name: String,
@@ -193,6 +225,20 @@ pub(crate) struct AgentThreadUi {
     pub(crate) optimistic_message: Option<usize>,
     /// Per-thread composer draft (preserved across switches).
     pub(crate) draft: String,
+    /// Submitted plain prompt text. Context snapshots are intentionally absent.
+    pub(crate) prompt_history: Vec<String>,
+    /// Selected history item while navigating/searching.
+    pub(crate) prompt_history_cursor: Option<usize>,
+    /// Draft preserved before history navigation so Down can restore it.
+    pub(crate) prompt_history_restore_draft: Option<String>,
+    /// Local follow-ups waiting for current agent turn to finish.
+    pub(crate) queued_prompts: VecDeque<QueuedPrompt>,
+    /// Explicit user stash for a long composer draft. Session-local only.
+    pub(crate) stashed_draft: Option<String>,
+    /// Scrollback mode suppresses response-group UI and shows safe tool detail.
+    pub(crate) transcript_raw: bool,
+    /// Show sanitized tool summaries for every response group.
+    pub(crate) transcript_detail: bool,
     /// Scroll offset from the top of the transcript.
     pub(crate) scroll: usize,
     /// When true new content keeps the view pinned to the newest line.
@@ -231,8 +277,13 @@ pub(crate) struct AgentThreadUi {
     pub(crate) last_prompt: Option<Vec<ContentBlock>>,
     /// Explicit, bounded file snapshots included with future turns in this session.
     pub(crate) context_files: Vec<AgentContextFile>,
+    /// Bounded file snapshots attached to only next submitted prompt.
+    /// Never persisted, exported, or copied to child sessions.
+    pub(crate) next_prompt_context_files: Vec<AgentContextFile>,
     /// Slash commands currently advertised by the agent.
     pub(crate) available_commands: Vec<AvailableCommand>,
+    /// User-selected local name, persisted with the reconnect record.
+    pub(crate) session_name: Option<String>,
     /// Session title from `session_info_update`, when present.
     pub(crate) session_title: Option<String>,
     /// Session metadata timestamp from `session_info_update`, when present.
@@ -515,6 +566,49 @@ impl AgentThreadUi {
             self.transcript.remove(0);
         }
     }
+
+    fn record_prompt_history(&mut self, prompt: &str) {
+        self.prompt_history_cursor = None;
+        self.prompt_history_restore_draft = None;
+        if self.prompt_history.last().is_some_and(|previous| previous == prompt) {
+            return;
+        }
+        self.prompt_history.push(prompt.to_string());
+        if self.prompt_history.len() > AGENT_PROMPT_HISTORY_MAX {
+            self.prompt_history.remove(0);
+        }
+    }
+
+    pub(crate) fn response_group_change_summary(&self, group: ResponseGroupId) -> Option<String> {
+        let mut paths = Vec::new();
+        for item in &self.transcript {
+            let TranscriptItem::ToolCall { detail, response_group, .. } = item else { continue };
+            if *response_group != group {
+                continue;
+            }
+            for part in detail.split(" · ") {
+                let path = part
+                    .strip_prefix("content: diff: new file ")
+                    .or_else(|| part.strip_prefix("content: diff: "));
+                if let Some(path) = path.filter(|path| !path.is_empty())
+                    && !paths.iter().any(|existing| existing == path)
+                {
+                    paths.push(path.to_string());
+                }
+            }
+        }
+        (!paths.is_empty()).then(|| {
+            let overflow = paths.len().saturating_sub(4);
+            let mut summary = format!(
+                "changes: {}",
+                paths.iter().take(4).cloned().collect::<Vec<_>>().join(", ")
+            );
+            if overflow > 0 {
+                summary.push_str(&format!(" +{overflow}"));
+            }
+            summary
+        })
+    }
 }
 
 // ── Permission prompt ────────────────────────────────────────────────────────
@@ -543,6 +637,28 @@ pub(crate) struct ModeSelectionPrompt {
 pub(crate) struct ApprovalModeConfirmation {
     pub(crate) thread_index: usize,
     pub(crate) session_id: String,
+}
+
+/// Explicit confirmation before removing local session state. This never deletes provider data.
+#[derive(Debug)]
+pub(crate) struct SessionDeletionConfirmation {
+    pub(crate) thread_index: usize,
+    pub(crate) session_id: String,
+    pub(crate) session_name: String,
+}
+
+/// Explicit confirmation before granting an external workspace root to agent tools.
+#[derive(Debug)]
+pub(crate) struct AdditionalDirectoryConfirmation {
+    pub(crate) path: PathBuf,
+}
+
+/// Explicit confirmation before stopping more than one agent-owned terminal.
+#[derive(Debug)]
+pub(crate) struct TerminalStopConfirmation {
+    pub(crate) agent_id: String,
+    pub(crate) session_id: String,
+    pub(crate) terminal_ids: Vec<String>,
 }
 
 // ── Elicitation prompt ───────────────────────────────────────────────────────
@@ -1196,6 +1312,15 @@ pub(crate) struct PendingSession {
     pub(crate) reply: std_mpsc::Receiver<Result<AgentThread, String>>,
 }
 
+/// One fresh ACP session seeded from redacted visible parent messages.
+#[derive(Debug)]
+struct PendingFork {
+    parent_session_id: String,
+    seed: Vec<ContentBlock>,
+    activate_child: bool,
+    restore_reconnect_record: Option<PersistedAgentSession>,
+}
+
 /// Client-persisted reconnect record: the last agent session of a workspace
 /// plus the text of its last prompt (for the resend path after a restart).
 /// Lives under the platform state directory, keyed by canonical workspace
@@ -1210,24 +1335,38 @@ struct PersistedAgentSession {
     /// The last submitted prompt text, kept while a turn is recoverable so
     /// the resend path works after a restart.
     last_prompt: Option<String>,
+    /// User-selected local session name. Absent in records written before Phase 1.
+    #[serde(default)]
+    session_name: Option<String>,
 }
 
 /// All agents-pane UI state; `Default` is the closed, inert startup state.
 pub(crate) struct AgentPaneState {
     pub(crate) layout: AgentPaneLayout,
     pub(crate) threads: Vec<AgentThreadUi>,
+    /// Locally hidden threads. Kept in memory so transcript can be restored/exported.
+    pub(crate) archived_threads: Vec<AgentThreadUi>,
     pub(crate) active_thread: Option<usize>,
     pub(crate) next_thread_index: usize,
     /// Whether streamed `agent_thought_chunk` messages are shown in transcript.
     pub(crate) show_thoughts: bool,
     pub(crate) pending_session: Option<PendingSession>,
+    /// Fresh child session awaiting redacted local transcript seed dispatch.
+    pending_fork: Option<PendingFork>,
     /// Composer text typed before a session exists or while session startup fails.
     pub(crate) pending_draft: String,
+    /// External editor request consumed only by terminal-owning main loop.
+    pending_external_editor: Option<ExternalEditorRequest>,
     pub(crate) pending_cancel: Option<std_mpsc::Receiver<Result<(), String>>>,
     pub(crate) pending_thread_action: Option<std_mpsc::Receiver<Result<String, String>>>,
     pub(crate) permission: Option<PermissionPrompt>,
     pub(crate) mode_selection: Option<ModeSelectionPrompt>,
     pub(crate) approval_mode_confirmation: Option<ApprovalModeConfirmation>,
+    pub(crate) session_deletion_confirmation: Option<SessionDeletionConfirmation>,
+    pub(crate) additional_directory_confirmation: Option<AdditionalDirectoryConfirmation>,
+    pub(crate) terminal_stop_confirmation: Option<TerminalStopConfirmation>,
+    /// Explicit user-approved extra roots. Session-local and never persisted.
+    pub(crate) additional_workspace_roots: BTreeSet<PathBuf>,
     pub(crate) elicitation: Option<ElicitationPrompt>,
     /// Bridge approval queue (file writes, terminal creates); the front one
     /// is shown and answered first.
@@ -1288,16 +1427,23 @@ impl Default for AgentPaneState {
         Self {
             layout: AgentPaneLayout::Closed,
             threads: Vec::new(),
+            archived_threads: Vec::new(),
             active_thread: None,
             next_thread_index: 0,
             show_thoughts: true,
             pending_session: None,
+            pending_fork: None,
             pending_draft: String::new(),
+            pending_external_editor: None,
             pending_cancel: None,
             pending_thread_action: None,
             permission: None,
             mode_selection: None,
             approval_mode_confirmation: None,
+            session_deletion_confirmation: None,
+            additional_directory_confirmation: None,
+            terminal_stop_confirmation: None,
+            additional_workspace_roots: BTreeSet::new(),
             elicitation: None,
             approvals: VecDeque::new(),
             error: None,
@@ -1415,6 +1561,7 @@ impl App {
                             thread.display_name = thread_display_name(
                                 thread.index,
                                 &thread.agent_id,
+                                thread.session_name.as_deref(),
                                 thread.session_title.as_deref(),
                             );
                         }
@@ -1496,8 +1643,12 @@ impl App {
                         .push_system(format!("turn completed (stop: {stop_reason:?})"));
                     self.notify_unread(index);
                 }
-                // The turn is no longer resumable; drop the persisted prompt.
+                // The turn is no longer resumable; drop the persisted prompt before
+                // optionally recording the newly dispatched queued follow-up.
                 self.update_persisted_last_prompt(None);
+                if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
+                    self.dispatch_next_queued_prompt(index);
+                }
             }
             AgentEvent::TurnCancelled { session_id, metrics } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
@@ -1511,6 +1662,9 @@ impl App {
                     self.notify_unread(index);
                 }
                 self.update_persisted_last_prompt(None);
+                if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
+                    self.dispatch_next_queued_prompt(index);
+                }
             }
             AgentEvent::TurnFailed { session_id, error, metrics } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
@@ -1524,6 +1678,9 @@ impl App {
                     self.notify_unread(index);
                 }
                 self.update_persisted_last_prompt(None);
+                if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
+                    self.dispatch_next_queued_prompt(index);
+                }
             }
             AgentEvent::TurnPausedRecoverable { session_id, metrics, recoverable } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
@@ -1900,12 +2057,21 @@ impl App {
             snapshot.session_info.as_ref().and_then(|info| info.title.value().cloned());
         let session_updated_at =
             snapshot.session_info.as_ref().and_then(|info| info.updated_at.value().cloned());
+        let persisted =
+            self.load_persisted_agent_session().filter(|record| record.session_id == session_id);
+        let session_name = persisted.as_ref().and_then(|record| record.session_name.clone());
         self.agents.threads.push(AgentThreadUi {
             index,
             agent_id: agent_id.to_string(),
             session_id: session_id.clone(),
+            fork_parent_session_id: None,
             nick,
-            display_name: thread_display_name(index, agent_id, session_title.as_deref()),
+            display_name: thread_display_name(
+                index,
+                agent_id,
+                session_name.as_deref(),
+                session_title.as_deref(),
+            ),
             state: if ready { ThreadUiState::Ready } else { ThreadUiState::Starting },
             unread: 0,
             activity: false,
@@ -1913,6 +2079,13 @@ impl App {
             transcript: Vec::new(),
             optimistic_message: None,
             draft: std::mem::take(&mut self.agents.pending_draft),
+            prompt_history: Vec::new(),
+            prompt_history_cursor: None,
+            prompt_history_restore_draft: None,
+            queued_prompts: VecDeque::new(),
+            stashed_draft: None,
+            transcript_raw: false,
+            transcript_detail: false,
             scroll: 0,
             stick_to_bottom: true,
             usage: None,
@@ -1931,7 +2104,9 @@ impl App {
             pending_recovery: None,
             last_prompt: None,
             context_files: Vec::new(),
+            next_prompt_context_files: Vec::new(),
             available_commands: snapshot.available_commands,
+            session_name: session_name.clone(),
             session_title,
             session_updated_at,
         });
@@ -1945,14 +2120,12 @@ impl App {
         // Persist the client-side reconnect record for this workspace; the
         // last prompt carries over only when this is the same session
         // (reconnect), so a paused turn stays resumable after a restart.
-        let last_prompt = self
-            .load_persisted_agent_session()
-            .filter(|record| record.session_id == session_id)
-            .and_then(|record| record.last_prompt);
+        let last_prompt = persisted.and_then(|record| record.last_prompt);
         self.save_persisted_agent_session(Some(&PersistedAgentSession {
             agent_id: agent_id.to_string(),
             session_id: session_id.clone(),
             last_prompt,
+            session_name,
         }));
     }
 
@@ -1990,8 +2163,12 @@ impl App {
         };
         thread.session_title = title;
         thread.session_updated_at = updated_at;
-        thread.display_name =
-            thread_display_name(thread.index, &thread.agent_id, thread.session_title.as_deref());
+        thread.display_name = thread_display_name(
+            thread.index,
+            &thread.agent_id,
+            thread.session_name.as_deref(),
+            thread.session_title.as_deref(),
+        );
     }
 
     /// Polls a pending new-session reply.
@@ -2022,9 +2199,31 @@ impl App {
                         agent_id,
                         session_id: session_id.clone().expect("rebound session id"),
                         last_prompt,
+                        session_name: self.agents.threads[index].session_name.clone(),
                     }));
                 } else {
                     self.register_session_thread(&agent_id, thread);
+                    if let Some(fork) = self.agents.pending_fork.take() {
+                        let child = self.agents.threads.len() - 1;
+                        self.agents.threads[child].fork_parent_session_id =
+                            Some(fork.parent_session_id.clone());
+                        self.agents.threads[child].push_system(format!(
+                            "seeded local fork from session {}",
+                            fork.parent_session_id
+                        ));
+                        let child_thread = self.agents.threads[child].host.clone();
+                        if let Some(host) = &self.agents.host {
+                            host.send_prompt(child_thread, fork.seed);
+                        }
+                        if !fork.activate_child
+                            && let Some(parent) = self.agents.thread_index(&fork.parent_session_id)
+                        {
+                            self.agents.active_thread = Some(parent);
+                        }
+                        if let Some(record) = fork.restore_reconnect_record {
+                            self.save_persisted_agent_session(Some(&record));
+                        }
+                    }
                 }
                 if let Some(session_id) = session_id {
                     // Reconnect: apply the conversation replay updates that
@@ -2049,6 +2248,7 @@ impl App {
                 }
             }
             Ok(Err(message)) => {
+                self.agents.pending_fork = None;
                 let pending = self.agents.pending_session.take().expect("pending session present");
                 if let Some(session_id) = pending.session_id {
                     self.agents.pending_replay.remove(&session_id);
@@ -2063,6 +2263,7 @@ impl App {
             Err(std_mpsc::TryRecvError::Empty) => {}
             Err(std_mpsc::TryRecvError::Disconnected) => {
                 self.agents.pending_session = None;
+                self.agents.pending_fork = None;
                 self.agents.pending_replay.clear();
                 self.agents.error = Some(String::from("agent host stopped"));
             }
@@ -2258,11 +2459,15 @@ fn plan_entry_priority_label(priority: PlanEntryPriority) -> &'static str {
     }
 }
 
-fn thread_display_name(index: usize, agent_id: &str, session_title: Option<&str>) -> String {
-    match session_title.filter(|title| !title.trim().is_empty()) {
-        Some(title) => format!("{}.{}", index + 1, title),
-        None => format!("{}.{}", index + 1, agent_id),
-    }
+fn thread_display_name(
+    index: usize,
+    agent_id: &str,
+    session_name: Option<&str>,
+    session_title: Option<&str>,
+) -> String {
+    let label =
+        session_name.or(session_title).filter(|title| !title.trim().is_empty()).unwrap_or(agent_id);
+    format!("{}.{}", index + 1, label)
 }
 
 /// Formats a duration compactly: `1.2s`, `45s`, or `3m 12s`.
@@ -2399,14 +2604,20 @@ fn split_slash_command(draft: &str) -> (Option<String>, String) {
 fn prompt_blocks_with_context(
     prompt_text: &str,
     context_files: &[AgentContextFile],
+    next_prompt_context_files: &[AgentContextFile],
 ) -> Vec<ContentBlock> {
     let mut blocks = vec![ContentBlock::Text(TextContent::new(prompt_text))];
-    blocks.extend(context_files.iter().map(|file| {
-        ContentBlock::Text(TextContent::new(format!(
-            "User-selected context file: `{}`\n--- file snapshot ---\n{}\n--- end file snapshot ---",
-            file.relative_path, file.content
-        )))
-    }));
+    for (scope, files) in [
+        ("User-selected context file", context_files),
+        ("One-turn user mention", next_prompt_context_files),
+    ] {
+        blocks.extend(files.iter().map(|file| {
+            ContentBlock::Text(TextContent::new(format!(
+                "{scope}: `{}`\n--- file snapshot ---\n{}\n--- end file snapshot ---",
+                file.relative_path, file.content
+            )))
+        }));
+    }
     blocks
 }
 
@@ -2433,7 +2644,21 @@ const LOCAL_AGENT_SLASH_COMMANDS: &[&str] = &[
     "q",
     "quit_full",
     "qf",
+    "help",
+    "status",
+    "doctor",
+    "init",
+    "review",
+    "security-review",
+    "diff",
+    "copy",
+    "rename",
+    "new",
     "new_thread",
+    "archive",
+    "delete",
+    "fork",
+    "branch",
     "sessions",
     "export",
     "stop",
@@ -2449,8 +2674,174 @@ const LOCAL_AGENT_SLASH_COMMANDS: &[&str] = &[
     "mcp",
     "approval",
     "context",
+    "mention",
+    "add-dir",
+    "tasks",
+    "ps",
     "mode",
+    "queue",
+    "details",
+    "transcript",
+    "draft",
+    "keys",
 ];
+
+/// Provider-owned configuration aliases accepted only when the active session
+/// explicitly advertises an ACP option with the matching id.
+const PROVIDER_CONFIG_ALIASES: &[&str] = &["model", "effort", "fast", "personality"];
+
+/// Provider-owned workflow commands. EE does not emulate these; an unadvertised
+/// command stops locally with guidance instead of becoming an ordinary prompt.
+const PROVIDER_OWNED_SLASH_COMMANDS: &[&str] = &[
+    "compact",
+    "subtask",
+    "background",
+    "side",
+    "btw",
+    "permissions",
+    "skills",
+    "plugins",
+    "hooks",
+    "usage",
+    "billing",
+    "cloud",
+    "remote-control",
+    "web-search",
+    "app",
+];
+
+const LOCAL_AGENT_SLASH_HELP: &[(&str, &str)] = &[
+    ("/help", "show local commands and provider commands"),
+    ("/status", "show local session state"),
+    ("/doctor", "read-only Agents TUI health report"),
+    ("/init", "ask agent to preview safe AGENTS.md scaffold"),
+    ("/review [target]", "send bounded EE evidence for agent-generated review"),
+    ("/security-review [target]", "send bounded EE evidence for security review"),
+    ("/diff", "open bounded workspace diff"),
+    ("/copy [N]", "copy Nth completed assistant response"),
+    ("/rename <name>", "set persisted local session name"),
+    ("/new, /new_thread", "start a fresh provider session"),
+    ("/clear", "clear visible local scrollback; provider context stays"),
+    ("/archive", "hide idle local session; use /archive list|restore <N>"),
+    ("/delete", "confirm local transcript deletion; provider session stays"),
+    ("/fork", "create non-active seeded session from redacted visible transcript"),
+    ("/branch", "create and switch to seeded session"),
+    ("/sessions", "switch session"),
+    ("/export", "write redacted Markdown transcript"),
+    ("/stop [terminal-id|all]", "cancel turn or stop owned direct-child terminal"),
+    ("/resume | /discard", "resolve paused turn"),
+    ("/reconnect", "reconnect persisted session"),
+    ("/next | /prev", "cycle active sessions"),
+    ("/layout", "right|bottom|full"),
+    ("/thoughts", "on|off|toggle"),
+    ("/config", "show or change advertised options"),
+    ("/mcp", "show local MCP state"),
+    ("/approval", "default|autopilot|bypass; bypass keeps validation"),
+    ("/context", "list|status|add|remove|clear session snapshots"),
+    ("/mention <path>", "attach redacted file snapshot to next prompt only"),
+    ("/add-dir <path>", "confirm extra root for capable agent sessions"),
+    ("/tasks | /ps", "list owned background terminals; subagent tasks when supported"),
+    ("/mode", "select agent-advertised mode"),
+    ("/queue", "list|edit|move|remove|clear queued follow-ups"),
+    ("/details", "on|off|toggle sanitized transcript tool detail"),
+    ("/transcript", "raw|grouped|toggle|open|export local transcript"),
+    ("/draft", "restore|clear long prompt draft; Ctrl-S stash, Ctrl-Shift-E edit"),
+    ("/keys", "show Agents TUI keyboard shortcuts"),
+    ("/quit, /q", "close Agents pane"),
+    ("/quit_full, /qf", "exit EE"),
+];
+
+fn owned_terminal_summary_line(
+    summary: &super::agent_bridge::OwnedTerminalSummary,
+    secrets: &[String],
+) -> String {
+    let command = if summary.args.is_empty() {
+        summary.command.clone()
+    } else {
+        format!("{} {}", summary.command, summary.args.join(" "))
+    };
+    let state = if summary.running { "running" } else { "exited" };
+    let cwd = summary
+        .cwd
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| String::from("(default)"));
+    let tail = ee_agent_host::redact::redact_secret_values(&summary.output_tail, secrets);
+    let truncation = if summary.output_truncated { " truncated" } else { "" };
+    format!(
+        "{} {state} {} · cwd:{} · output:{} bytes{truncation}{}",
+        summary.terminal_id,
+        command,
+        cwd,
+        summary.output_total_bytes,
+        if tail.trim().is_empty() { String::new() } else { format!("\n  tail: {tail}") },
+    )
+}
+
+fn thread_state_label(state: ThreadUiState) -> &'static str {
+    match state {
+        ThreadUiState::Starting => "starting",
+        ThreadUiState::Ready => "ready",
+        ThreadUiState::Running => "running",
+        ThreadUiState::PausedRecoverable => "paused",
+        ThreadUiState::Closed => "closed",
+        ThreadUiState::Failed => "failed",
+    }
+}
+
+fn fork_seed(thread: &AgentThreadUi, secrets: &[String]) -> Vec<ContentBlock> {
+    const FORK_SEED_MAX_BYTES: usize = 48 * 1024;
+    let mut transcript = String::from(
+        "This is a locally seeded fork. Treat following redacted visible messages as prior context; it is not provider-side session cloning.\n\n",
+    );
+    for item in &thread.transcript {
+        let TranscriptItem::Message { nick, text, kind, .. } = item else { continue };
+        let role = match kind {
+            MessageRenderKind::User => "User",
+            MessageRenderKind::Assistant => "Assistant",
+            MessageRenderKind::Thought => continue,
+        };
+        transcript.push_str(&format!("## {role} ({nick})\n{text}\n\n"));
+    }
+    let mut transcript = ee_agent_host::redact::redact_secret_values(&transcript, secrets);
+    if transcript.len() > FORK_SEED_MAX_BYTES {
+        let mut end = FORK_SEED_MAX_BYTES;
+        while !transcript.is_char_boundary(end) {
+            end -= 1;
+        }
+        transcript.truncate(end);
+        transcript.push_str("\n\n[local fork seed truncated]\n");
+    }
+    vec![ContentBlock::Text(TextContent::new(transcript))]
+}
+
+fn sanitize_session_name(raw: &str) -> Option<String> {
+    const MAX_SESSION_NAME_CHARS: usize = 80;
+    let mut name = raw
+        .chars()
+        .filter(|character| {
+            !character.is_control()
+                && !matches!(
+                    character,
+                    '\u{00AD}'
+                        | '\u{034F}'
+                        | '\u{061C}'
+                        | '\u{115F}'..='\u{1160}'
+                        | '\u{17B4}'..='\u{17B5}'
+                        | '\u{180E}'
+                        | '\u{200B}'..='\u{200F}'
+                        | '\u{202A}'..='\u{202E}'
+                        | '\u{2060}'..='\u{206F}'
+                        | '\u{3164}'
+                        | '\u{FE00}'..='\u{FE0F}'
+                        | '\u{FEFF}'
+                        | '\u{FFA0}'
+                )
+        })
+        .collect::<String>();
+    name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!name.is_empty()).then(|| name.chars().take(MAX_SESSION_NAME_CHARS).collect())
+}
 
 /// Lists local and agent-advertised slash commands without duplicate names.
 pub(crate) fn agent_slash_command_names(commands: &[AvailableCommand]) -> Vec<&str> {
@@ -2722,6 +3113,397 @@ impl App {
         self.backend.status_message = Some(String::from("cancelling turn…"));
     }
 
+    fn active_terminal_owner(&self) -> Option<super::agent_bridge::TerminalOwner> {
+        let active = self.agents.active_thread_index()?;
+        let thread = self.agents.threads.get(active)?;
+        Some(super::agent_bridge::TerminalOwner {
+            agent_id: thread.agent_id.clone(),
+            session_id: thread.session_id.clone(),
+        })
+    }
+
+    fn agents_list_owned_terminals(&mut self) {
+        let Some(owner) = self.active_terminal_owner() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let secrets = self.agents_secret_values();
+        let terminals = self.agents.terminals.list_owned(&owner, AGENT_TERMINAL_OUTPUT_TAIL_BYTES);
+        let summary = if terminals.is_empty() {
+            String::from("owned terminals: none")
+        } else {
+            format!(
+                "owned terminals:\n{}",
+                terminals
+                    .iter()
+                    .map(|terminal| owned_terminal_summary_line(terminal, &secrets))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        };
+        if let Some(active) = self.agents.active_thread_index() {
+            self.agents.threads[active].push_system(summary.clone());
+        }
+        self.backend.status_message = Some(summary);
+    }
+
+    fn agents_list_owned_tasks(&mut self) {
+        self.agents_list_owned_terminals();
+        let suffix =
+            "subagent tasks: unavailable; current ACP host advertises no task-list capability";
+        if let Some(active) = self.agents.active_thread_index() {
+            self.agents.threads[active].push_system(suffix);
+        }
+        let current = self.backend.status_message.take().unwrap_or_default();
+        self.backend.status_message = Some(format!("{current}\n{suffix}"));
+    }
+
+    fn stop_owned_terminals(&mut self, owner: &super::agent_bridge::TerminalOwner, ids: &[String]) {
+        let mut results = Vec::new();
+        for terminal_id in ids {
+            let result = match self.agents.terminals.stop_owned(owner, terminal_id) {
+                Ok(super::agent_bridge::OwnedTerminalStop::StopRequested) => {
+                    format!("terminal stop requested: {terminal_id} (direct child only)")
+                }
+                Ok(super::agent_bridge::OwnedTerminalStop::AlreadyExited) => {
+                    format!("terminal already exited: {terminal_id}")
+                }
+                Err(error) => format!("terminal stop rejected for {terminal_id}: {error}"),
+            };
+            results.push(result);
+        }
+        let summary = results.join(" · ");
+        if let Some(active) = self.agents.active_thread_index() {
+            self.agents.threads[active].push_system(summary.clone());
+        }
+        self.backend.status_message = Some(summary);
+    }
+
+    fn agents_queue_command(&mut self, args: &str) {
+        let secrets = self.agents_secret_values();
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let thread = &mut self.agents.threads[active];
+        let mut parts = args.splitn(3, char::is_whitespace);
+        match (parts.next().unwrap_or_default(), parts.next(), parts.next()) {
+            ("" | "list", None, None) => {
+                let entries = thread
+                    .queued_prompts
+                    .iter()
+                    .enumerate()
+                    .map(|(index, prompt)| {
+                        format!(
+                            "{}: {}",
+                            index + 1,
+                            ee_agent_host::redact::redact_secret_values(&prompt.text, &secrets)
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                self.backend.status_message = Some(if entries.is_empty() {
+                    String::from("queued follow-ups: none")
+                } else {
+                    format!(
+                        "queued follow-ups (dispatch after current turn): {}",
+                        entries.join(" · ")
+                    )
+                });
+            }
+            ("remove", Some(raw_index), None) => match raw_index.parse::<usize>() {
+                Ok(index) if index > 0 && index <= thread.queued_prompts.len() => {
+                    thread.queued_prompts.remove(index - 1);
+                    self.backend.status_message = Some(format!("queued follow-up {index} removed"));
+                }
+                _ => self.backend.status_message = Some(String::from("usage: /queue remove <N>")),
+            },
+            ("edit", Some(raw_index), Some(text)) if !text.trim().is_empty() => {
+                match raw_index.parse::<usize>() {
+                    Ok(index) if index > 0 && index <= thread.queued_prompts.len() => {
+                        thread.queued_prompts[index - 1].text = text.trim_end().to_string();
+                        self.backend.status_message =
+                            Some(format!("queued follow-up {index} updated"));
+                    }
+                    _ => {
+                        self.backend.status_message =
+                            Some(String::from("usage: /queue edit <N> <prompt>"))
+                    }
+                }
+            }
+            ("move", Some(raw_index), Some(raw_target)) => {
+                let parsed = raw_index.parse::<usize>().ok();
+                let target = raw_target.trim().parse::<usize>().ok();
+                match (parsed, target) {
+                    (Some(index), Some(target))
+                        if index > 0
+                            && index <= thread.queued_prompts.len()
+                            && target > 0
+                            && target <= thread.queued_prompts.len() =>
+                    {
+                        let prompt =
+                            thread.queued_prompts.remove(index - 1).expect("validated queue index");
+                        thread.queued_prompts.insert(target - 1, prompt);
+                        self.backend.status_message =
+                            Some(format!("queued follow-up {index} moved to {target}"));
+                    }
+                    _ => {
+                        self.backend.status_message =
+                            Some(String::from("usage: /queue move <N> <position>"))
+                    }
+                }
+            }
+            ("clear", None, None) => {
+                let count = thread.queued_prompts.len();
+                thread.queued_prompts.clear();
+                self.backend.status_message = Some(format!("cleared {count} queued follow-ups"));
+            }
+            _ => {
+                self.backend.status_message = Some(String::from(
+                    "usage: /queue [list|edit <N> <prompt>|move <N> <position>|remove <N>|clear]",
+                ));
+            }
+        }
+    }
+
+    fn agents_set_transcript_detail(&mut self, args: &str) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let thread = &mut self.agents.threads[active];
+        match args {
+            "" | "toggle" => thread.transcript_detail = !thread.transcript_detail,
+            "on" => thread.transcript_detail = true,
+            "off" => thread.transcript_detail = false,
+            _ => {
+                self.backend.status_message = Some(String::from("usage: /details [on|off|toggle]"));
+                return;
+            }
+        }
+        self.backend.status_message = Some(format!(
+            "sanitized transcript tool details {}",
+            if thread.transcript_detail { "shown" } else { "hidden" }
+        ));
+    }
+
+    fn agents_transcript_command(&mut self, args: &str) {
+        match args {
+            "open" => self.agents_open_exported_transcript(),
+            "export" => self.agents_export_transcript(),
+            "" | "toggle" | "raw" | "grouped" => {
+                let Some(active) = self.agents.active_thread_index() else {
+                    self.backend.status_message = Some(String::from("no active agent session"));
+                    return;
+                };
+                let thread = &mut self.agents.threads[active];
+                match args {
+                    "raw" => thread.transcript_raw = true,
+                    "grouped" => thread.transcript_raw = false,
+                    "" | "toggle" => thread.transcript_raw = !thread.transcript_raw,
+                    _ => unreachable!(),
+                }
+                self.backend.status_message = Some(format!(
+                    "transcript view: {} (safe local scrollback)",
+                    if thread.transcript_raw { "raw" } else { "grouped" }
+                ));
+            }
+            _ => {
+                self.backend.status_message =
+                    Some(String::from("usage: /transcript [raw|grouped|toggle|open|export]"));
+            }
+        }
+    }
+
+    fn agents_draft_command(&mut self, args: &str) {
+        if matches!(args, "edit" | "stash") {
+            self.backend.status_message = Some(String::from(
+                "use Ctrl-S to stash current draft or Ctrl-Shift-E to edit it externally",
+            ));
+            return;
+        }
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        match args {
+            "restore" => self.agents_restore_draft(),
+            "clear" => {
+                self.agents.threads[active].stashed_draft = None;
+                self.backend.status_message = Some(String::from("stashed draft cleared"));
+            }
+            _ => {
+                self.backend.status_message = Some(String::from(
+                    "usage: /draft restore|clear (Ctrl-S stash, Ctrl-Shift-E edit)",
+                ))
+            }
+        }
+    }
+
+    fn agents_stash_draft(&mut self) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let thread = &mut self.agents.threads[active];
+        if thread.draft.trim().is_empty() {
+            self.backend.status_message = Some(String::from("draft is empty"));
+            return;
+        }
+        thread.stashed_draft = Some(std::mem::take(&mut thread.draft));
+        thread.prompt_history_cursor = None;
+        thread.prompt_history_restore_draft = None;
+        self.backend.status_message = Some(String::from("draft stashed locally"));
+    }
+
+    fn agents_restore_draft(&mut self) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let thread = &mut self.agents.threads[active];
+        match thread.stashed_draft.take() {
+            Some(draft) => {
+                thread.draft = draft;
+                thread.prompt_history_cursor = None;
+                thread.prompt_history_restore_draft = None;
+                self.backend.status_message = Some(String::from("draft restored locally"));
+            }
+            None => self.backend.status_message = Some(String::from("no stashed draft")),
+        }
+    }
+
+    fn request_agent_external_editor(&mut self) {
+        if self.agents.pending_external_editor.is_some() {
+            self.backend.status_message =
+                Some(String::from("external draft editor is already pending"));
+            return;
+        }
+        let request = match self.agents.active_thread_index() {
+            Some(active) => {
+                let thread = &self.agents.threads[active];
+                ExternalEditorRequest {
+                    session_id: Some(thread.session_id.clone()),
+                    draft: thread.draft.clone(),
+                }
+            }
+            None => {
+                ExternalEditorRequest { session_id: None, draft: self.agents.pending_draft.clone() }
+            }
+        };
+        self.agents.pending_external_editor = Some(request);
+        self.backend.status_message =
+            Some(String::from("opening external draft editor; prompt will not send automatically"));
+    }
+
+    /// Consumed by terminal-owning loop after input dispatch. Never call from an
+    /// ACP worker: interactive child processes need foreground terminal access.
+    pub(crate) fn take_agent_external_editor_request(&mut self) -> Option<ExternalEditorRequest> {
+        self.agents.pending_external_editor.take()
+    }
+
+    /// Replaces only draft target captured before handoff. A switched/deleted
+    /// session cannot receive another session's prompt text.
+    pub(crate) fn apply_agent_external_editor_result(
+        &mut self,
+        request: ExternalEditorRequest,
+        result: Result<String, String>,
+    ) {
+        match result {
+            Ok(draft) => {
+                let applied = match request.session_id {
+                    Some(session_id) => self
+                        .agents
+                        .thread_index(&session_id)
+                        .and_then(|index| self.agents.threads.get_mut(index))
+                        .map(|thread| {
+                            thread.draft = draft;
+                            thread.prompt_history_cursor = None;
+                            thread.prompt_history_restore_draft = None;
+                        })
+                        .is_some(),
+                    None => {
+                        self.agents.pending_draft = draft;
+                        true
+                    }
+                };
+                self.backend.status_message = Some(if applied {
+                    String::from(
+                        "draft updated from external editor; review then press Enter to send",
+                    )
+                } else {
+                    String::from(
+                        "external draft editor finished, but original session no longer exists",
+                    )
+                });
+            }
+            Err(error) => {
+                self.backend.status_message =
+                    Some(format!("external draft editor unavailable: {error}"));
+            }
+        }
+    }
+
+    fn agents_show_key_help(&mut self) {
+        self.backend.status_message = Some(String::from(
+            "Agents keys: ↑/↓ history · Ctrl-R reverse history search · Ctrl-Shift-R response collapse · Enter send/queue · Alt-Enter newline · Ctrl-U clear draft · Ctrl-S stash · Ctrl-O restore · Ctrl-Shift-E external edit · Ctrl-G plan · Ctrl-E selected tool detail · Ctrl-←/→ response group · PgUp/PgDn/Home/End scroll · Tab slash/@ completion. Configure mode=agent bindings in [keymap].",
+        ));
+    }
+
+    fn agents_stop_command(&mut self, args: &str) {
+        if args.is_empty() {
+            self.agents_stop_turn();
+            return;
+        }
+        let Some(owner) = self.active_terminal_owner() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        if args == "all" {
+            let ids = self
+                .agents
+                .terminals
+                .list_owned(&owner, 0)
+                .into_iter()
+                .filter(|terminal| terminal.running)
+                .map(|terminal| terminal.terminal_id)
+                .take(AGENT_TERMINAL_STOP_ALL_MAX)
+                .collect::<Vec<_>>();
+            match ids.len() {
+                0 => {
+                    self.backend.status_message =
+                        Some(String::from("no owned running terminals to stop"))
+                }
+                1 => self.stop_owned_terminals(&owner, &ids),
+                _ => {
+                    self.agents.terminal_stop_confirmation = Some(TerminalStopConfirmation {
+                        agent_id: owner.agent_id,
+                        session_id: owner.session_id,
+                        terminal_ids: ids,
+                    });
+                    self.backend.status_message =
+                        Some(String::from("confirm stopping owned terminals"));
+                }
+            }
+            return;
+        }
+        if args.contains(char::is_whitespace) {
+            self.backend.status_message = Some(String::from("usage: /stop [terminal-id|all]"));
+            return;
+        }
+        self.stop_owned_terminals(&owner, &[args.to_string()]);
+    }
+
+    fn confirm_stop_owned_terminals(&mut self) {
+        let Some(confirmation) = self.agents.terminal_stop_confirmation.take() else {
+            return;
+        };
+        let owner = super::agent_bridge::TerminalOwner {
+            agent_id: confirmation.agent_id,
+            session_id: confirmation.session_id,
+        };
+        self.stop_owned_terminals(&owner, &confirmation.terminal_ids);
+    }
+
     /// `:agents_new` — start a fresh session and switch to it.
     pub(super) fn agents_new_session(&mut self) {
         if !self.config.agents.enabled {
@@ -2801,6 +3583,52 @@ impl App {
         }
     }
 
+    fn agents_open_exported_transcript(&mut self) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session to export"));
+            return;
+        };
+        let secrets = self.agents_secret_values();
+        let (session_id, markdown) = {
+            let thread = &self.agents.threads[active];
+            (
+                thread.session_id.clone(),
+                format_agent_transcript_markdown(thread, SystemTime::now(), &secrets),
+            )
+        };
+        let result = self.agent_export_dir().and_then(|directory| {
+            write_agent_transcript_export(&directory, &session_id, &markdown)
+        });
+        match result {
+            Ok(path) => match self.backend.open_buffer(Some(path.clone())) {
+                Ok(buffer_id) => {
+                    if let Err(error) = self.backend.switch_to_id(buffer_id) {
+                        self.backend.status_message = Some(format!(
+                            "transcript exported but could not select buffer: {error}"
+                        ));
+                    } else {
+                        self.agents.threads[active]
+                            .push_system(format!("transcript opened: {}", path.display()));
+                        self.backend.status_message = Some(format!(
+                            "transcript opened in editor: {}; close Agents pane to review",
+                            path.display()
+                        ));
+                    }
+                }
+                Err(error) => {
+                    self.backend.status_message = Some(format!(
+                        "transcript exported but could not open in editor: {} ({error})",
+                        path.display()
+                    ));
+                }
+            },
+            Err(error) => {
+                self.backend.status_message =
+                    Some(format!("agent transcript export failed: {error}"));
+            }
+        }
+    }
+
     /// `:agents_clear` — clear the active thread's local scrollback.
     pub(super) fn agents_clear_scrollback(&mut self) {
         let Some(active) = self.agents.active_thread_index() else {
@@ -2817,7 +3645,196 @@ impl App {
         thread.optimistic_message = None;
         thread.scroll = 0;
         thread.stick_to_bottom = true;
-        self.backend.status_message = Some(String::from("agents scrollback cleared"));
+        self.backend.status_message =
+            Some(String::from("visible scrollback cleared; provider conversation remains intact"));
+    }
+
+    fn agents_thread_is_idle(&self, index: usize) -> bool {
+        self.agents.threads.get(index).is_some_and(|thread| {
+            thread.state == ThreadUiState::Ready
+                && !thread.host.is_turn_running()
+                && thread.pending_recovery.is_none()
+        }) && self.agents.permission.is_none()
+            && self.agents.mode_selection.is_none()
+            && self.agents.approval_mode_confirmation.is_none()
+            && self.agents.session_deletion_confirmation.is_none()
+            && self.agents.elicitation.is_none()
+            && self.agents.approvals.is_empty()
+    }
+
+    /// Starts a fresh provider session seeded with redacted visible parent messages.
+    /// This is deliberately not presented as an ACP/provider-side clone.
+    fn agents_fork_session(&mut self, activate_child: bool) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session to fork"));
+            return;
+        };
+        if !self.agents_thread_is_idle(active) || self.agents.pending_session.is_some() {
+            self.backend.status_message = Some(String::from(
+                "session must be idle before fork; stop and resolve pending work first",
+            ));
+            return;
+        }
+        let parent = &self.agents.threads[active];
+        let parent_session_id = parent.session_id.clone();
+        let agent_id = parent.agent_id.clone();
+        let seed = fork_seed(parent, &self.agents_secret_values());
+        let restore_reconnect_record =
+            (!activate_child).then(|| self.load_persisted_agent_session()).flatten();
+        self.ensure_agents_host();
+        self.start_mcp_servers();
+        self.start_session(agent_id);
+        self.agents.pending_fork =
+            Some(PendingFork { parent_session_id, seed, activate_child, restore_reconnect_record });
+        self.backend.status_message = Some(String::from(if activate_child {
+            "starting seeded branch session…"
+        } else {
+            "starting seeded fork session…"
+        }));
+    }
+
+    fn agents_archive_current_session(&mut self) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        if !self.agents_thread_is_idle(active) {
+            self.backend.status_message = Some(String::from(
+                "session must be idle before archive; stop and resolve pending work first",
+            ));
+            return;
+        }
+        let thread = self.agents.threads.remove(active);
+        let session_id = thread.session_id.clone();
+        let label = thread
+            .session_name
+            .as_deref()
+            .or(thread.session_title.as_deref())
+            .unwrap_or(&session_id)
+            .to_string();
+        self.agents.archived_threads.push(thread);
+        self.agents.active_thread =
+            (!self.agents.threads.is_empty()).then_some(active.min(self.agents.threads.len() - 1));
+        if self.load_persisted_agent_session().is_some_and(|record| record.session_id == session_id)
+        {
+            self.save_persisted_agent_session(None);
+        }
+        self.backend.status_message = Some(format!(
+            "session archived locally: {label}; restore with /archive restore {}",
+            self.agents.archived_threads.len()
+        ));
+    }
+
+    fn agents_list_archived_sessions(&mut self) {
+        let listing = if self.agents.archived_threads.is_empty() {
+            String::from("archived sessions: none")
+        } else {
+            let entries = self
+                .agents
+                .archived_threads
+                .iter()
+                .enumerate()
+                .map(|(index, thread)| {
+                    let label = thread
+                        .session_name
+                        .as_deref()
+                        .or(thread.session_title.as_deref())
+                        .unwrap_or(&thread.session_id);
+                    format!("{}: {} ({})", index + 1, label, thread.session_id)
+                })
+                .collect::<Vec<_>>()
+                .join(" · ");
+            format!("archived sessions: {entries}; /archive restore <N> restores locally")
+        };
+        self.backend.status_message = Some(listing);
+    }
+
+    fn agents_restore_archived_session(&mut self, raw_index: &str) {
+        let Ok(index) = raw_index.parse::<usize>() else {
+            self.backend.status_message =
+                Some(String::from("usage: /archive restore <positive number>"));
+            return;
+        };
+        let Some(index) =
+            index.checked_sub(1).filter(|index| *index < self.agents.archived_threads.len())
+        else {
+            self.backend.status_message = Some(String::from("archived session not found"));
+            return;
+        };
+        let thread = self.agents.archived_threads.remove(index);
+        let label = thread.display_name.clone();
+        self.agents.threads.push(thread);
+        self.agents.active_thread = Some(self.agents.threads.len() - 1);
+        self.backend.status_message = Some(format!("session restored locally: {label}"));
+    }
+
+    fn agents_archive_command(&mut self, args: &str) {
+        let mut parts = args.split_whitespace();
+        match (parts.next(), parts.next(), parts.next()) {
+            (None, _, _) => self.agents_archive_current_session(),
+            (Some("list"), None, _) => self.agents_list_archived_sessions(),
+            (Some("restore"), Some(index), None) => self.agents_restore_archived_session(index),
+            _ => {
+                self.backend.status_message =
+                    Some(String::from("usage: /archive [list|restore <N>]"))
+            }
+        }
+    }
+
+    fn request_delete_current_session(&mut self) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        if !self.agents_thread_is_idle(active) {
+            self.backend.status_message = Some(String::from(
+                "session must be idle before delete; stop and resolve pending work first",
+            ));
+            return;
+        }
+        let thread = &self.agents.threads[active];
+        let session_name = thread
+            .session_name
+            .as_deref()
+            .or(thread.session_title.as_deref())
+            .unwrap_or("unnamed")
+            .to_string();
+        self.agents.session_deletion_confirmation = Some(SessionDeletionConfirmation {
+            thread_index: active,
+            session_id: thread.session_id.clone(),
+            session_name,
+        });
+        self.backend.status_message = Some(String::from("confirm local session deletion"));
+    }
+
+    fn confirm_delete_current_session(&mut self) {
+        let Some(confirmation) = self.agents.session_deletion_confirmation.take() else {
+            return;
+        };
+        let Some(thread) = self.agents.threads.get(confirmation.thread_index) else {
+            self.backend.status_message =
+                Some(String::from("session changed before delete confirmation"));
+            return;
+        };
+        if thread.session_id != confirmation.session_id {
+            self.backend.status_message =
+                Some(String::from("session changed before delete confirmation"));
+            return;
+        }
+        let removed = self.agents.threads.remove(confirmation.thread_index);
+        self.agents.approval_modes.remove(&removed.session_id);
+        if self
+            .load_persisted_agent_session()
+            .is_some_and(|record| record.session_id == removed.session_id)
+        {
+            self.save_persisted_agent_session(None);
+        }
+        self.agents.active_thread = (!self.agents.threads.is_empty())
+            .then_some(confirmation.thread_index.min(self.agents.threads.len() - 1));
+        self.backend.status_message = Some(format!(
+            "local transcript deleted for {} ({}); provider session unchanged",
+            confirmation.session_name, confirmation.session_id
+        ));
     }
 
     /// `:agents_layout <right|bottom|full>`.
@@ -2890,6 +3907,8 @@ impl App {
             drop(host);
         }
         self.agents.threads.clear();
+        self.agents.archived_threads.clear();
+        self.agents.pending_fork = None;
         self.agents.approval_policy = super::agent_bridge::ApprovalPolicy::default();
         self.agents.approval_modes.clear();
         self.agents.usage_ledger = crate::policy::UsageLedger::default();
@@ -3186,6 +4205,7 @@ impl App {
                 roots.push(parent.to_path_buf());
             }
         }
+        roots.extend(self.agents.additional_workspace_roots.iter().cloned());
         roots.sort();
         roots.dedup();
         roots
@@ -3327,6 +4347,69 @@ impl App {
         }
         let summary = options.iter().map(config_option_summary).collect::<Vec<_>>().join(" · ");
         self.backend.status_message = Some(summary);
+    }
+
+    /// Mutates only an ACP configuration option explicitly advertised by the
+    /// active provider session. Alias names deliberately match option ids; EE
+    /// never guesses provider model, effort, or personality semantics.
+    fn agents_set_provider_config_alias(&mut self, alias: &str, raw_value: &str) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let options = self.agents.threads[active].host.config_options();
+        let Some(option) = options.into_iter().find(|option| option.id.0.as_ref() == alias) else {
+            self.backend.status_message = Some(format!(
+                "provider config /{alias} unavailable: agent did not advertise config option {alias}; use /config"
+            ));
+            return;
+        };
+
+        if raw_value.is_empty() {
+            if let SessionConfigKind::Boolean(current) = &option.kind {
+                self.queue_thread_config_option_change(
+                    active,
+                    option.id.clone(),
+                    SessionConfigOptionValue::boolean(!current.current_value),
+                );
+            } else {
+                self.backend.status_message = Some(format!(
+                    "provider config /{alias} currently {}; usage: /{alias} <value>",
+                    config_option_summary(&option)
+                ));
+            }
+            return;
+        }
+
+        let value = match parse_config_option_value(&option, raw_value) {
+            Ok(value) => value,
+            Err(message) => {
+                self.backend.status_message = Some(message);
+                return;
+            }
+        };
+        self.queue_thread_config_option_change(active, option.id.clone(), value);
+    }
+
+    /// Returns true when a known provider-owned command must be consumed
+    /// locally. Advertised provider commands return false and continue through
+    /// normal ACP prompt forwarding unchanged.
+    fn agents_require_advertised_provider_command(&mut self, command: &str) -> bool {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return true;
+        };
+        if self.agents.threads[active]
+            .available_commands
+            .iter()
+            .any(|available| available.name == command)
+        {
+            return false;
+        }
+        self.backend.status_message = Some(format!(
+            "provider command /{command} unavailable: agent did not advertise it; use /help for provider commands"
+        ));
+        true
     }
 
     fn agents_set_config_option_command(&mut self, tail: &str) {
@@ -3511,6 +4594,372 @@ impl App {
         self.set_active_tool_approval_mode(super::agent_bridge::ToolApprovalMode::Bypass);
     }
 
+    fn agents_show_help(&mut self) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let secrets = self.agents_secret_values();
+        let provider_commands = self.agents.threads[active]
+            .available_commands
+            .iter()
+            .map(|command| {
+                let description =
+                    ee_agent_host::redact::redact_secret_values(&command.description, &secrets);
+                if description.is_empty() {
+                    format!("/{}", command.name)
+                } else {
+                    format!("/{} — {description}", command.name)
+                }
+            })
+            .collect::<Vec<_>>();
+        let local = LOCAL_AGENT_SLASH_HELP
+            .iter()
+            .map(|(command, usage)| format!("{command} — {usage}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let provider_config = PROVIDER_CONFIG_ALIASES
+            .iter()
+            .copied()
+            .filter(|alias| {
+                self.agents.threads[active]
+                    .host
+                    .config_options()
+                    .iter()
+                    .any(|option| option.id.0.as_ref() == *alias)
+            })
+            .map(|alias| format!("/{alias} [value] — advertised provider config"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let provider = if provider_commands.is_empty() {
+            String::from("(none advertised)")
+        } else {
+            provider_commands.join("\n")
+        };
+        let provider_config = if provider_config.is_empty() {
+            String::from("(none advertised; use /config to inspect ACP options)")
+        } else {
+            provider_config
+        };
+        self.agents.threads[active].push_system(format!(
+            "Local slash commands:\n{local}\n\nCapability-gated provider config:\n{provider_config}\n\nProvider-owned slash commands (sent to agent):\n{provider}"
+        ));
+        self.backend.status_message = Some(String::from("slash help added to transcript"));
+    }
+
+    fn agents_show_status(&mut self) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let thread = &self.agents.threads[active];
+        let snapshot = thread.host.snapshot();
+        let mode = snapshot
+            .current_mode
+            .map_or_else(|| String::from("unavailable"), |mode| mode.0.to_string());
+        let approval =
+            self.agents.approval_modes.get(&thread.session_id).copied().unwrap_or_default().label();
+        let context_bytes =
+            thread.context_files.iter().map(|file| file.content.len()).sum::<usize>();
+        let name = thread
+            .session_name
+            .as_deref()
+            .or(thread.session_title.as_deref())
+            .unwrap_or("(unnamed)");
+        let summary = format!(
+            "session:{} name:{} agent:{} connection:{} mode:{} approval:{} context:{}/{} bytes mcp:{} configured provider-commands:{}",
+            thread.session_id,
+            name,
+            thread.agent_id,
+            thread_state_label(thread.state),
+            mode,
+            approval,
+            thread.context_files.len(),
+            context_bytes,
+            self.config.mcp.servers.len(),
+            thread.available_commands.len(),
+        );
+        self.agents.threads[active].push_system(summary.clone());
+        self.backend.status_message = Some(summary);
+    }
+
+    /// Read-only local diagnostics. It never reconnects, resets, repairs, or starts services.
+    fn agents_doctor(&mut self) {
+        let secrets = self.agents_secret_values();
+        let workspace = std::fs::canonicalize(&self.working_dir)
+            .unwrap_or_else(|_| self.working_dir.clone())
+            .display()
+            .to_string();
+        let configured_agents = self
+            .config
+            .agents
+            .servers
+            .iter()
+            .map(|(id, server)| {
+                let command = if server.args.is_empty() {
+                    server.command.clone()
+                } else {
+                    format!("{} {}", server.command, server.args.join(" "))
+                };
+                format!("{id}: {}", ee_agent_host::redact::redact_secret_values(&command, &secrets))
+            })
+            .collect::<Vec<_>>();
+        let persisted = self.load_persisted_agent_session();
+        let mut lines = vec![
+            String::from("Agents TUI doctor (read-only)"),
+            format!("feature: {}", self.agents_status_message()),
+            format!(
+                "workspace: {}",
+                ee_agent_host::redact::redact_secret_values(&workspace, &secrets)
+            ),
+            if configured_agents.is_empty() {
+                String::from("configured agent command: none")
+            } else {
+                format!("configured agent command: {}", configured_agents.join("; "))
+            },
+            format!(
+                "MCP configuration: {} server(s), proxy:{}",
+                self.config.mcp.servers.len(),
+                if self.config.mcp.proxy.enabled { "enabled" } else { "disabled" }
+            ),
+            match persisted {
+                Some(record) => format!(
+                    "session storage: workspace-keyed reconnect record for {} ({})",
+                    record.agent_id, record.session_id
+                ),
+                None => String::from("session storage: no persisted reconnect record"),
+            },
+            String::from(
+                "redaction: secret-like JSON keys and configured secret values are redacted; context snapshots stay session-local",
+            ),
+        ];
+        if let Some(active) = self.agents.active_thread_index() {
+            let thread = &self.agents.threads[active];
+            let snapshot = thread.host.snapshot();
+            let mode = snapshot
+                .current_mode
+                .map_or_else(|| String::from("unavailable"), |mode| mode.0.to_string());
+            lines.push(format!(
+                "ACP session: {} agent:{} connection:{} mode:{} advertised-commands:{} config-options:{}",
+                thread.session_id,
+                thread.agent_id,
+                thread_state_label(thread.state),
+                mode,
+                thread.available_commands.len(),
+                snapshot.config_options.len(),
+            ));
+        } else {
+            lines.push(String::from("ACP session: no active session; handshake unavailable"));
+        }
+        if let Some(error) = &self.agents.error {
+            lines.push(format!(
+                "agent error: {}",
+                ee_agent_host::redact::redact_secret_values(error, &secrets)
+            ));
+        }
+        lines.extend(
+            self.mcp_health_lines()
+                .into_iter()
+                .map(|line| ee_agent_host::redact::redact_secret_values(&line, &secrets)),
+        );
+        let report = lines.join("\n");
+        if let Some(active) = self.agents.active_thread_index() {
+            self.agents.threads[active].push_system(report.clone());
+        }
+        self.backend.status_message =
+            Some(String::from("Agents TUI doctor report added to transcript"));
+    }
+
+    /// Asks active agent to inspect existing instructions and optionally propose a safe scaffold.
+    fn agents_submit_init_workflow(&mut self) {
+        self.agents_send_local_workflow(
+            String::from("EE local /init request sent; agent response is provider-generated."),
+            String::from(
+                "EE-local /init workflow. Inspect existing project instructions with `ee_project_instructions` before proposing changes. If an AGENTS.md or equivalent already exists, show a concise preview/diff only; do not overwrite it. If no project instruction exists, offer a compact AGENTS.md scaffold tailored to this workspace. Create it only through `ee_create_text_file`, which must receive normal file-write approval. Never use a shell write, overwrite, or bypass approval. Clearly label advice as agent-generated, not an EE-native initialization engine.",
+            ),
+        );
+    }
+
+    /// Sends bounded, redacted local review evidence to current agent without persisting or rendering body.
+    fn agents_submit_review_workflow(&mut self, target: &str, security: bool) {
+        let target = target.trim();
+        if target.len() > 1024 || target.chars().any(char::is_control) {
+            self.backend.status_message =
+                Some(String::from("review target must be printable and at most 1024 bytes"));
+            return;
+        }
+        let secrets = self.agents_secret_values();
+        let target = if target.is_empty() {
+            String::from("current workspace changes")
+        } else {
+            ee_agent_host::redact::redact_secret_values(target, &secrets)
+        };
+        let evidence = match self.proxy_review_context() {
+            Ok(value) => value,
+            Err(error) => {
+                self.backend.status_message =
+                    Some(format!("local review evidence unavailable: {error}"));
+                return;
+            }
+        };
+        let evidence = ee_agent_host::redact::redact_json(&evidence);
+        let mut evidence = match serde_json::to_string_pretty(&evidence) {
+            Ok(value) => ee_agent_host::redact::redact_secret_values(&value, &secrets),
+            Err(error) => {
+                self.backend.status_message =
+                    Some(format!("local review evidence unavailable: {error}"));
+                return;
+            }
+        };
+        if evidence.len() > AGENT_REVIEW_CONTEXT_MAX_BYTES {
+            let mut end = AGENT_REVIEW_CONTEXT_MAX_BYTES;
+            while !evidence.is_char_boundary(end) {
+                end -= 1;
+            }
+            evidence.truncate(end);
+            evidence.push_str("\n[EE local review evidence truncated]");
+        }
+        let focus = if security {
+            "Review for security defects: authorization and approval boundaries, workspace/path containment, command and terminal ownership, secret exposure, MCP capability gates, unsafe input handling, and fail-open behavior. Do not use network access. Do not inspect protected paths or request raw secret values."
+        } else {
+            "Review for correctness, regressions, missing tests, diagnostics, and risky changes. Use bounded diff drill-down only for relevant changed files."
+        };
+        let kind = if security { "security review" } else { "code review" };
+        let instruction = format!(
+            "EE-local {kind} workflow for target: {target}.\n{focus}\nThis evidence comes from EE changed-file, diagnostics, symbol, and test-metadata tools. It is bounded and redacted; treat omissions as unknown. Do not claim a native provider review engine.\n\nBounded EE evidence:\n{evidence}"
+        );
+        self.agents_send_local_workflow(
+            format!("EE local {kind} request sent; result will be agent-generated."),
+            instruction,
+        );
+    }
+
+    /// Dispatches workflow prompt only for ready session. Local evidence never enters persistence or transcript body.
+    fn agents_send_local_workflow(&mut self, display_text: String, instruction: String) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message =
+                Some(String::from("no active agent session; start one with /new"));
+            return;
+        };
+        match self.agents.threads[active].state {
+            ThreadUiState::Ready => {}
+            ThreadUiState::Running => {
+                self.backend.status_message = Some(String::from(
+                    "agent turn is running; wait for it to finish before starting local workflow",
+                ));
+                return;
+            }
+            ThreadUiState::PausedRecoverable => {
+                self.backend.status_message =
+                    Some(String::from("a turn is paused; use /resume or /discard first"));
+                return;
+            }
+            _ => {
+                self.backend.status_message =
+                    Some(String::from("agent session is not ready; cannot start local workflow"));
+                return;
+            }
+        }
+        let blocks = {
+            let thread = &self.agents.threads[active];
+            prompt_blocks_with_context(&instruction, &thread.context_files, &[])
+        };
+        self.send_agent_prompt_blocks(active, display_text, blocks, None);
+    }
+
+    fn agents_copy_assistant_response(&mut self, args: &str) {
+        let position = match args {
+            "" => 1,
+            value => match value.parse::<usize>() {
+                Ok(position) if position > 0 => position,
+                _ => {
+                    self.backend.status_message =
+                        Some(String::from("usage: /copy [positive response number]"));
+                    return;
+                }
+            },
+        };
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let thread = &self.agents.threads[active];
+        let mut groups = BTreeSet::new();
+        for item in &thread.transcript {
+            if let TranscriptItem::Message {
+                kind: MessageRenderKind::Assistant,
+                response_group: Some(group),
+                ..
+            } = item
+                && thread.active_response_group != Some(*group)
+            {
+                groups.insert(*group);
+            }
+        }
+        let Some(group) = groups.into_iter().rev().nth(position - 1) else {
+            self.backend.status_message =
+                Some(String::from("no completed assistant response to copy"));
+            return;
+        };
+        let text = thread
+            .transcript
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Message {
+                    text,
+                    kind: MessageRenderKind::Assistant,
+                    response_group: Some(item_group),
+                    ..
+                } if *item_group == group => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        if text.trim().is_empty() {
+            self.backend.status_message =
+                Some(String::from("no completed assistant response to copy"));
+            return;
+        }
+        let text = ee_agent_host::redact::redact_secret_values(&text, &self.agents_secret_values());
+        match crate::registers::write_system_clipboard(&text) {
+            Ok(()) => {
+                self.backend.status_message = Some(format!("copied assistant response {position}"));
+            }
+            Err(error) => self.backend.status_message = Some(error),
+        }
+    }
+
+    fn agents_rename_session(&mut self, raw_name: &str) {
+        let Some(name) = sanitize_session_name(raw_name) else {
+            self.backend.status_message =
+                Some(String::from("session name must contain visible text"));
+            return;
+        };
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let session_id = self.agents.threads[active].session_id.clone();
+        let Some(mut record) =
+            self.load_persisted_agent_session().filter(|record| record.session_id == session_id)
+        else {
+            self.backend.status_message =
+                Some(String::from("session metadata is unavailable; cannot rename"));
+            return;
+        };
+        record.session_name = Some(name.clone());
+        self.save_persisted_agent_session(Some(&record));
+        let thread = &mut self.agents.threads[active];
+        thread.session_name = Some(name.clone());
+        thread.display_name = thread_display_name(
+            thread.index,
+            &thread.agent_id,
+            thread.session_name.as_deref(),
+            thread.session_title.as_deref(),
+        );
+        thread.push_system(format!("session renamed: {name}"));
+        self.backend.status_message = Some(format!("session renamed: {name}"));
+    }
+
     fn agents_list_context_files(&mut self) {
         let Some(active) = self.agents.active_thread_index() else {
             self.backend.status_message = Some(String::from("no active agent session"));
@@ -3607,16 +5056,176 @@ impl App {
         self.backend.status_message = Some(notice);
     }
 
+    fn agents_context_status(&mut self) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let thread = &self.agents.threads[active];
+        let session_bytes =
+            thread.context_files.iter().map(|file| file.content.len()).sum::<usize>();
+        let mention_bytes =
+            thread.next_prompt_context_files.iter().map(|file| file.content.len()).sum::<usize>();
+        let paths = thread
+            .context_files
+            .iter()
+            .map(|file| format!("{} ({} bytes)", file.relative_path, file.content.len()))
+            .collect::<Vec<_>>();
+        let mentions = thread
+            .next_prompt_context_files
+            .iter()
+            .map(|file| format!("{} ({} bytes)", file.relative_path, file.content.len()))
+            .collect::<Vec<_>>();
+        let summary = format!(
+            "context scope=session-only; selected:[{}]; one-turn mentions:[{}]; totals:{} session + {} one-turn / {} bytes; caps:{} files, {} bytes/file, {} bytes total",
+            if paths.is_empty() { String::from("none") } else { paths.join(", ") },
+            if mentions.is_empty() { String::from("none") } else { mentions.join(", ") },
+            session_bytes,
+            mention_bytes,
+            AGENT_CONTEXT_MAX_TOTAL_BYTES,
+            AGENT_CONTEXT_MAX_FILES,
+            AGENT_CONTEXT_MAX_FILE_BYTES,
+            AGENT_CONTEXT_MAX_TOTAL_BYTES,
+        );
+        self.agents.threads[active].push_system(summary.clone());
+        self.backend.status_message = Some(summary);
+    }
+
+    /// Adds a bounded, redacted snapshot to exactly the next submitted prompt.
+    fn agents_mention_context_file(&mut self, path: &str) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let (canonical, relative_path, content) =
+            match self.agent_context_file_snapshot(Path::new(path), AGENT_CONTEXT_MAX_FILE_BYTES) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    self.backend.status_message = Some(error);
+                    return;
+                }
+            };
+        let content_len = content.len();
+        let thread = &mut self.agents.threads[active];
+        let existing =
+            thread.next_prompt_context_files.iter().position(|file| file.path == canonical);
+        let total = thread
+            .context_files
+            .iter()
+            .chain(thread.next_prompt_context_files.iter())
+            .enumerate()
+            .filter(|(index, _)| {
+                *index < thread.context_files.len()
+                    || Some(*index - thread.context_files.len()) != existing
+            })
+            .map(|(_, file)| file.content.len())
+            .sum::<usize>();
+        if total.saturating_add(content_len) > AGENT_CONTEXT_MAX_TOTAL_BYTES {
+            self.backend.status_message = Some(format!(
+                "context snapshots exceed {AGENT_CONTEXT_MAX_TOTAL_BYTES} byte total limit"
+            ));
+            return;
+        }
+        if existing.is_none()
+            && thread.context_files.len() + thread.next_prompt_context_files.len()
+                >= AGENT_CONTEXT_MAX_FILES
+        {
+            self.backend.status_message =
+                Some(format!("context file limit reached ({AGENT_CONTEXT_MAX_FILES})"));
+            return;
+        }
+        let mention =
+            AgentContextFile { path: canonical, relative_path: relative_path.clone(), content };
+        if let Some(existing) = existing {
+            thread.next_prompt_context_files[existing] = mention;
+        } else {
+            thread.next_prompt_context_files.push(mention);
+        }
+        let notice =
+            format!("mention attached for next prompt only: {relative_path} ({content_len} bytes)");
+        thread.push_system(notice.clone());
+        self.backend.status_message = Some(notice);
+    }
+
+    fn request_additional_workspace_directory(&mut self, raw_path: &str) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        if !self.agents.threads[active].host.supports_additional_directories() {
+            self.backend.status_message =
+                Some(String::from("agent does not advertise additional-directory capability"));
+            return;
+        }
+        let path = Path::new(raw_path);
+        let candidate =
+            if path.is_absolute() { path.to_path_buf() } else { self.working_dir.join(path) };
+        let canonical = match std::fs::canonicalize(&candidate) {
+            Ok(path) => path,
+            Err(error) => {
+                self.backend.status_message = Some(format!(
+                    "cannot access additional directory {}: {error}",
+                    candidate.display()
+                ));
+                return;
+            }
+        };
+        if !canonical.is_dir() {
+            self.backend.status_message =
+                Some(format!("additional root is not a directory: {}", canonical.display()));
+            return;
+        }
+        if self.is_secret_store_path(&canonical) {
+            self.backend.status_message = Some(String::from("additional root is protected"));
+            return;
+        }
+        if canonical
+            == std::fs::canonicalize(&self.working_dir).unwrap_or_else(|_| self.working_dir.clone())
+        {
+            self.backend.status_message =
+                Some(String::from("directory is already primary workspace root"));
+            return;
+        }
+        if self.agents.additional_workspace_roots.contains(&canonical) {
+            self.backend.status_message = Some(format!(
+                "additional root already trusted for this session: {}",
+                canonical.display()
+            ));
+            return;
+        }
+        if self.agents.additional_workspace_roots.len() >= AGENT_ADDITIONAL_ROOT_MAX {
+            self.backend.status_message =
+                Some(format!("additional root limit reached ({AGENT_ADDITIONAL_ROOT_MAX})"));
+            return;
+        }
+        self.agents.additional_directory_confirmation =
+            Some(AdditionalDirectoryConfirmation { path: canonical.clone() });
+        self.backend.status_message =
+            Some(format!("confirm additional workspace root: {}", canonical.display()));
+    }
+
+    fn confirm_additional_workspace_directory(&mut self) {
+        let Some(confirmation) = self.agents.additional_directory_confirmation.take() else {
+            return;
+        };
+        self.agents.additional_workspace_roots.insert(confirmation.path.clone());
+        self.backend.status_message = Some(format!(
+            "additional root trusted for this Agents TUI session: {}; current provider session unchanged; /new uses it when supported",
+            confirmation.path.display()
+        ));
+    }
+
     fn agents_context_command(&mut self, args: &str) {
         let mut parts = args.splitn(2, char::is_whitespace);
         match (parts.next().unwrap_or_default(), parts.next().unwrap_or_default().trim()) {
             ("", _) => self.agents_list_context_files(),
+            ("status", "") => self.agents_context_status(),
             ("add", path) if !path.is_empty() => self.agents_add_context_file(path),
             ("remove", path) if !path.is_empty() => self.agents_remove_context_file(path),
             ("clear", "") => self.agents_clear_context_files(),
             _ => {
                 self.backend.status_message =
-                    Some(String::from("usage: /context [add <path>|remove <path>|clear]"));
+                    Some(String::from("usage: /context [status|add <path>|remove <path>|clear]"));
             }
         }
     }
@@ -3628,6 +5237,46 @@ impl App {
         };
         let args = args.trim();
         let handled = match command.as_str() {
+            "help" if args.is_empty() => {
+                self.agents_show_help();
+                true
+            }
+            "status" if args.is_empty() => {
+                self.agents_show_status();
+                true
+            }
+            "doctor" if args.is_empty() => {
+                self.agents_doctor();
+                true
+            }
+            "init" if args.is_empty() => {
+                self.agents_submit_init_workflow();
+                true
+            }
+            "review" => {
+                self.agents_submit_review_workflow(args, false);
+                true
+            }
+            "security-review" => {
+                self.agents_submit_review_workflow(args, true);
+                true
+            }
+            "diff" if args.is_empty() => {
+                self.open_workspace_git_diff();
+                true
+            }
+            "copy" => {
+                self.agents_copy_assistant_response(args);
+                true
+            }
+            "rename" if !args.is_empty() => {
+                self.agents_rename_session(args);
+                true
+            }
+            "rename" => {
+                self.backend.status_message = Some(String::from("usage: /rename <name>"));
+                true
+            }
             "sessions" if args.is_empty() => {
                 self.open_agents_thread_picker();
                 true
@@ -3636,14 +5285,31 @@ impl App {
                 self.agents_export_transcript();
                 true
             }
-            "new_thread" if args.is_empty() => {
+            "new" | "new_thread" if args.is_empty() => {
                 self.agents_new_session();
                 true
             }
-            "stop" if args.is_empty() => {
-                self.agents_stop_turn();
+            "archive" => {
+                self.agents_archive_command(args);
                 true
             }
+            "fork" if args.is_empty() => {
+                self.agents_fork_session(false);
+                true
+            }
+            "branch" if args.is_empty() => {
+                self.agents_fork_session(true);
+                true
+            }
+            "delete" if args.is_empty() => {
+                self.request_delete_current_session();
+                true
+            }
+            "delete" => {
+                self.backend.status_message = Some(String::from("usage: /delete"));
+                true
+            }
+
             "resume" if args.is_empty() => {
                 self.resume_paused_turn();
                 true
@@ -3723,6 +5389,66 @@ impl App {
                 self.agents_context_command(args);
                 true
             }
+            "mention" if !args.is_empty() => {
+                self.agents_mention_context_file(args);
+                true
+            }
+            "mention" => {
+                self.backend.status_message =
+                    Some(String::from("usage: /mention <workspace-relative-path>"));
+                true
+            }
+            "add-dir" if !args.is_empty() => {
+                self.request_additional_workspace_directory(args);
+                true
+            }
+            "add-dir" => {
+                self.backend.status_message = Some(String::from("usage: /add-dir <path>"));
+                true
+            }
+            "tasks" if args.is_empty() => {
+                self.agents_list_owned_tasks();
+                true
+            }
+            "ps" if args.is_empty() => {
+                self.agents_list_owned_terminals();
+                true
+            }
+            "stop" => {
+                self.agents_stop_command(args);
+                true
+            }
+            "queue" => {
+                self.agents_queue_command(args);
+                true
+            }
+            "details" => {
+                self.agents_set_transcript_detail(args);
+                true
+            }
+            "transcript" => {
+                self.agents_transcript_command(args);
+                true
+            }
+            "draft" => {
+                self.agents_draft_command(args);
+                true
+            }
+            "keys" if args.is_empty() => {
+                self.agents_show_key_help();
+                true
+            }
+            "keys" => {
+                self.backend.status_message = Some(String::from("usage: /keys"));
+                true
+            }
+            command if PROVIDER_CONFIG_ALIASES.contains(&command) => {
+                self.agents_set_provider_config_alias(command, args);
+                true
+            }
+            command if PROVIDER_OWNED_SLASH_COMMANDS.contains(&command) => {
+                self.agents_require_advertised_provider_command(command)
+            }
             "approval" => {
                 match args {
                     "" => match self.active_tool_approval_mode() {
@@ -3790,13 +5516,13 @@ impl App {
             self.agents_set_mode(active, &args);
             return;
         }
-        let thread = &mut self.agents.threads[active];
-        if thread.state == ThreadUiState::Running {
-            self.agents.error = Some(String::from("a turn is already running"));
+        let prompt_text = draft.trim_end().to_string();
+        if self.agents.threads[active].state == ThreadUiState::Running {
+            self.enqueue_agent_follow_up(active, prompt_text);
             return;
         }
-        if !matches!(thread.state, ThreadUiState::Ready) {
-            self.agents.error = Some(match thread.state {
+        if !matches!(self.agents.threads[active].state, ThreadUiState::Ready) {
+            self.agents.error = Some(match self.agents.threads[active].state {
                 ThreadUiState::PausedRecoverable => {
                     String::from("a turn is paused and recoverable; use /resume or /discard")
                 }
@@ -3804,17 +5530,91 @@ impl App {
             });
             return;
         }
-        thread.draft.clear();
-        let prompt_text = draft.trim_end().to_string();
-        // Persist the prompt so a restart mid-turn can resume by re-sending it.
-        self.update_persisted_last_prompt(Some(&prompt_text));
+        let next_context = {
+            let thread = &mut self.agents.threads[active];
+            thread.draft.clear();
+            thread.record_prompt_history(&prompt_text);
+            std::mem::take(&mut thread.next_prompt_context_files)
+        };
+        self.send_agent_prompt(active, prompt_text, next_context);
+    }
+
+    fn enqueue_agent_follow_up(&mut self, active: usize, prompt_text: String) {
         let thread = &mut self.agents.threads[active];
-        thread.push_message("you", &prompt_text, MessageRenderKind::User, None, None);
-        thread.optimistic_message = Some(thread.transcript.len().saturating_sub(1));
+        if thread.queued_prompts.len() >= AGENT_PROMPT_QUEUE_MAX {
+            self.backend.status_message = Some(format!(
+                "queued follow-up limit reached ({AGENT_PROMPT_QUEUE_MAX}); edit or remove entries with /queue"
+            ));
+            return;
+        }
+        let next_prompt_context_files = std::mem::take(&mut thread.next_prompt_context_files);
+        thread.draft.clear();
+        thread.record_prompt_history(&prompt_text);
+        thread
+            .queued_prompts
+            .push_back(QueuedPrompt { text: prompt_text, next_prompt_context_files });
+        self.backend.status_message = Some(format!(
+            "follow-up queued ({}/{}); /stop cancels current turn, /queue edits pending prompts",
+            thread.queued_prompts.len(),
+            AGENT_PROMPT_QUEUE_MAX
+        ));
+    }
+
+    fn dispatch_next_queued_prompt(&mut self, active: usize) {
+        let Some(queued) = self
+            .agents
+            .threads
+            .get_mut(active)
+            .and_then(|thread| thread.queued_prompts.pop_front())
+        else {
+            return;
+        };
+        let remaining = self.agents.threads[active].queued_prompts.len();
+        self.send_agent_prompt(active, queued.text, queued.next_prompt_context_files);
+        self.backend.status_message =
+            Some(format!("dispatching queued follow-up ({remaining} remaining)"));
+    }
+
+    fn send_agent_prompt(
+        &mut self,
+        active: usize,
+        prompt_text: String,
+        next_prompt_context_files: Vec<AgentContextFile>,
+    ) {
+        let blocks = {
+            let thread = &self.agents.threads[active];
+            prompt_blocks_with_context(
+                &prompt_text,
+                &thread.context_files,
+                &next_prompt_context_files,
+            )
+        };
+        self.send_agent_prompt_blocks(active, prompt_text.clone(), blocks, Some(&prompt_text));
+    }
+
+    /// Sends a local workflow prompt without persisting its bounded evidence or rendering it verbatim.
+    fn send_agent_prompt_blocks(
+        &mut self,
+        active: usize,
+        display_text: String,
+        blocks: Vec<ContentBlock>,
+        persisted_prompt: Option<&str>,
+    ) {
+        if let Some(prompt) = persisted_prompt {
+            self.update_persisted_last_prompt(Some(prompt));
+        }
+        let thread_handle = {
+            let thread = &mut self.agents.threads[active];
+            thread.state = ThreadUiState::Running;
+            thread.turn_started_at = Some(Instant::now());
+            thread.active_response_group = None;
+            thread.push_message("you", &display_text, MessageRenderKind::User, None, None);
+            thread.optimistic_message = Some(thread.transcript.len().saturating_sub(1));
+            thread.last_prompt = Some(blocks.clone());
+            thread.host.clone()
+        };
         let host = self.agents.host.as_ref().expect("host present");
-        let blocks = prompt_blocks_with_context(&prompt_text, &thread.context_files);
-        thread.last_prompt = Some(blocks.clone());
-        host.send_prompt(thread.host.clone(), blocks);
+        host.send_prompt(thread_handle, blocks);
     }
 
     /// Resumes the paused turn: re-sends the exact prompt blocks that started
@@ -3966,10 +5766,36 @@ impl App {
     /// Appends text to the active thread's draft, or to the startup draft before a session exists.
     pub(super) fn agents_append_draft(&mut self, text: &str) {
         if let Some(active) = self.agents.active_thread_index() {
-            self.agents.threads[active].draft.push_str(text);
+            let thread = &mut self.agents.threads[active];
+            thread.prompt_history_cursor = None;
+            thread.prompt_history_restore_draft = None;
+            thread.draft.push_str(text);
         } else {
             self.agents.pending_draft.push_str(text);
         }
+    }
+
+    /// Dispatches explicit `mode = "agent"` keymap actions before built-in
+    /// composer keys. Other editor actions never leak into Agents TUI.
+    pub(super) fn handle_agent_keybinding_action(&mut self, action: crate::keymap::Action) -> bool {
+        match action {
+            crate::keymap::Action::AgentHistoryPrevious => self.agents_navigate_prompt_history(-1),
+            crate::keymap::Action::AgentHistoryNext => self.agents_navigate_prompt_history(1),
+            crate::keymap::Action::AgentHistorySearchReverse => {
+                self.agents_reverse_prompt_history_search()
+            }
+            crate::keymap::Action::AgentDraftStash => self.agents_stash_draft(),
+            crate::keymap::Action::AgentDraftRestore => self.agents_restore_draft(),
+            crate::keymap::Action::AgentDraftExternalEdit => self.request_agent_external_editor(),
+            crate::keymap::Action::AgentToggleTranscriptDetails => {
+                self.agents_set_transcript_detail("toggle")
+            }
+            crate::keymap::Action::AgentToggleTranscriptRaw => {
+                self.agents_transcript_command("toggle")
+            }
+            _ => return false,
+        }
+        true
     }
 
     /// Key handling while `Mode::Agent` is active.
@@ -4013,6 +5839,54 @@ impl App {
                 self.backend.status_message = Some(String::from("plan closed"));
             }
             return;
+        }
+
+        // Local transcript deletion is irreversible in this process. Provider data remains untouched.
+        if self.agents.session_deletion_confirmation.is_some() {
+            match key.code {
+                KeyCode::Enter => {
+                    self.confirm_delete_current_session();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.agents.session_deletion_confirmation = None;
+                    self.backend.status_message =
+                        Some(String::from("local session deletion cancelled"));
+                    return;
+                }
+                _ => return,
+            }
+        }
+
+        if self.agents.additional_directory_confirmation.is_some() {
+            match key.code {
+                KeyCode::Enter => {
+                    self.confirm_additional_workspace_directory();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.agents.additional_directory_confirmation = None;
+                    self.backend.status_message =
+                        Some(String::from("additional workspace root cancelled"));
+                    return;
+                }
+                _ => return,
+            }
+        }
+
+        if self.agents.terminal_stop_confirmation.is_some() {
+            match key.code {
+                KeyCode::Enter => {
+                    self.confirm_stop_owned_terminals();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.agents.terminal_stop_confirmation = None;
+                    self.backend.status_message = Some(String::from("terminal stop cancelled"));
+                    return;
+                }
+                _ => return,
+            }
         }
 
         // Bypass mode needs an explicit confirmation because it removes approval
@@ -4200,8 +6074,22 @@ impl App {
                         'p' => self.agents_switch_thread(-1),
                         't' => self.open_agents_thread_picker(),
                         'g' => self.agents_toggle_plan(),
-                        'r' => self.agents_toggle_selected_response_group(),
+                        'r' if key.modifiers.contains(KeyModifiers::SHIFT)
+                            || self
+                                .agents
+                                .active_thread_index()
+                                .and_then(|index| self.agents.threads.get(index))
+                                .is_some_and(|thread| thread.selected_response_group.is_some()) =>
+                        {
+                            self.agents_toggle_selected_response_group()
+                        }
+                        'r' => self.agents_reverse_prompt_history_search(),
+                        'e' if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                            self.request_agent_external_editor()
+                        }
                         'e' => self.agents_toggle_selected_tool_details(),
+                        's' => self.agents_stash_draft(),
+                        'o' => self.agents_restore_draft(),
                         'u' => self.agents_clear_draft(),
                         _ => {}
                     }
@@ -4222,13 +6110,17 @@ impl App {
                     self.submit_prompt();
                 }
             }
-            KeyCode::Tab if !self.cycle_slash_command(1) => {
+            KeyCode::Tab
+                if !self.cycle_slash_command(1) && !self.agents_complete_mention_path() =>
+            {
                 self.agents_append_draft("\t");
             }
             KeyCode::BackTab => {
                 let _ = self.cycle_slash_command(-1);
             }
             KeyCode::Backspace => self.agents_draft_backspace(),
+            KeyCode::Up => self.agents_navigate_prompt_history(-1),
+            KeyCode::Down => self.agents_navigate_prompt_history(1),
             KeyCode::Esc => {}
             KeyCode::PageUp => self.agents_scroll(-(AGENTS_SCROLL_PAGE as isize)),
             KeyCode::PageDown => self.agents_scroll(AGENTS_SCROLL_PAGE as isize),
@@ -4357,15 +6249,147 @@ impl App {
     /// Clears the composer draft (Ctrl-U).
     fn agents_clear_draft(&mut self) {
         if let Some(active) = self.agents.active_thread_index() {
-            self.agents.threads[active].draft.clear();
+            let thread = &mut self.agents.threads[active];
+            thread.draft.clear();
+            thread.prompt_history_cursor = None;
+            thread.prompt_history_restore_draft = None;
         } else {
             self.agents.pending_draft.clear();
         }
     }
 
+    fn agents_navigate_prompt_history(&mut self, delta: isize) {
+        let Some(active) = self.agents.active_thread_index() else {
+            return;
+        };
+        let thread = &mut self.agents.threads[active];
+        if thread.prompt_history.is_empty() {
+            self.backend.status_message = Some(String::from("prompt history is empty"));
+            return;
+        }
+        let next = match thread.prompt_history_cursor {
+            None if delta < 0 => {
+                thread.prompt_history_restore_draft = Some(thread.draft.clone());
+                Some(thread.prompt_history.len() - 1)
+            }
+            None => None,
+            Some(current) => {
+                let candidate = current as isize + delta;
+                if candidate < 0 {
+                    Some(0)
+                } else if candidate >= thread.prompt_history.len() as isize {
+                    thread.draft = thread.prompt_history_restore_draft.take().unwrap_or_default();
+                    None
+                } else {
+                    Some(candidate as usize)
+                }
+            }
+        };
+        thread.prompt_history_cursor = next;
+        if let Some(index) = next {
+            thread.draft = thread.prompt_history[index].clone();
+        }
+    }
+
+    fn agents_reverse_prompt_history_search(&mut self) {
+        let Some(active) = self.agents.active_thread_index() else {
+            return;
+        };
+        let thread = &mut self.agents.threads[active];
+        let query = thread.draft.clone();
+        let upper_bound = thread.prompt_history_cursor.unwrap_or(thread.prompt_history.len());
+        let found = thread.prompt_history[..upper_bound]
+            .iter()
+            .rposition(|entry| query.is_empty() || entry.contains(&query));
+        match found {
+            Some(index) => {
+                if thread.prompt_history_cursor.is_none() {
+                    thread.prompt_history_restore_draft = Some(query);
+                }
+                thread.prompt_history_cursor = Some(index);
+                thread.draft = thread.prompt_history[index].clone();
+                self.backend.status_message =
+                    Some(format!("history search: {}/{}", index + 1, thread.prompt_history.len()));
+            }
+            None => {
+                self.backend.status_message = Some(String::from("no earlier prompt-history match"))
+            }
+        }
+    }
+
+    /// Completes one trailing `@workspace/path` token when exactly one safe
+    /// workspace file matches. Completion never reads or attaches file content.
+    fn agents_complete_mention_path(&mut self) -> bool {
+        const MENTION_COMPLETION_SCAN_MAX: usize = 1_024;
+        let draft = self
+            .agents
+            .active_thread_index()
+            .and_then(|active| self.agents.threads.get(active).map(|thread| thread.draft.clone()))
+            .unwrap_or_else(|| self.agents.pending_draft.clone());
+        let token_start =
+            draft.rfind(char::is_whitespace).map_or(0, |index| index.saturating_add(1));
+        let Some(partial) = draft.get(token_start..).and_then(|token| token.strip_prefix('@'))
+        else {
+            return false;
+        };
+        if partial.is_empty() || partial.contains(['\\', '\n', '\r']) {
+            return false;
+        }
+        let Ok(root) = std::fs::canonicalize(&self.working_dir) else {
+            return false;
+        };
+        let mut matches = Vec::new();
+        for entry in WalkBuilder::new(&root)
+            .max_depth(Some(12))
+            .standard_filters(true)
+            .build()
+            .filter_map(Result::ok)
+            .take(MENTION_COMPLETION_SCAN_MAX)
+        {
+            if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+                continue;
+            }
+            let Ok(relative) = entry.path().strip_prefix(&root) else {
+                continue;
+            };
+            let relative = relative
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            if relative.is_empty()
+                || !relative.starts_with(partial)
+                || is_protected_relative_path(&relative)
+                || self.is_secret_store_path(entry.path())
+            {
+                continue;
+            }
+            matches.push(relative);
+            if matches.len() > 1 {
+                break;
+            }
+        }
+        let Some(completed) = (matches.len() == 1).then(|| matches.remove(0)) else {
+            if matches.len() > 1 {
+                self.backend.status_message = Some(String::from("mention completion is ambiguous"));
+            }
+            return false;
+        };
+        let replacement = format!("@{completed}");
+        if let Some(active) = self.agents.active_thread_index() {
+            self.agents.threads[active].draft.replace_range(token_start.., &replacement);
+        } else {
+            self.agents.pending_draft.replace_range(token_start.., &replacement);
+        }
+        self.backend.status_message = Some(format!("mention path completed: {completed}"));
+        true
+    }
+
     fn agents_draft_backspace(&mut self) {
         if let Some(active) = self.agents.active_thread_index() {
             let thread = &mut self.agents.threads[active];
+            thread.prompt_history_cursor = None;
+            thread.prompt_history_restore_draft = None;
             thread.draft.pop();
         } else {
             self.agents.pending_draft.pop();
@@ -4528,7 +6552,21 @@ mod tests {
                 "q",
                 "quit_full",
                 "qf",
+                "help",
+                "status",
+                "doctor",
+                "init",
+                "review",
+                "security-review",
+                "diff",
+                "copy",
+                "rename",
+                "new",
                 "new_thread",
+                "archive",
+                "delete",
+                "fork",
+                "branch",
                 "sessions",
                 "export",
                 "stop",
@@ -4544,7 +6582,16 @@ mod tests {
                 "mcp",
                 "approval",
                 "context",
+                "mention",
+                "add-dir",
+                "tasks",
+                "ps",
                 "mode",
+                "queue",
+                "details",
+                "transcript",
+                "draft",
+                "keys",
                 "compact",
             ]
         );

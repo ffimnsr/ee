@@ -688,7 +688,7 @@ fn terminal_kill_resolves_wait_for_exit() {
 
 #[test]
 fn terminal_snapshot_reports_running_and_monotonic_elapsed_ms() {
-    use crate::app::AgentTerminals;
+    use crate::app::{AgentTerminals, OwnedTerminalStop, TerminalOwner};
     use ee_agent_protocol::{CreateTerminalRequest, KillTerminalRequest, SessionId, TerminalId};
 
     let terminals = AgentTerminals::default();
@@ -696,6 +696,7 @@ fn terminal_snapshot_reports_running_and_monotonic_elapsed_ms() {
         .spawn(
             &CreateTerminalRequest::new(SessionId::new("s1"), "sleep")
                 .args(vec![String::from("30")]),
+            Some("test-agent"),
         )
         .expect("terminal spawns");
     let terminal_id = TerminalId::new(created.terminal_id.0.to_string());
@@ -713,6 +714,13 @@ fn terminal_snapshot_reports_running_and_monotonic_elapsed_ms() {
         "elapsedMs must be monotonic: {} then {}",
         first.elapsed_ms,
         second.elapsed_ms
+    );
+
+    let owner =
+        TerminalOwner { agent_id: String::from("test-agent"), session_id: String::from("s1") };
+    assert_eq!(
+        terminals.stop_owned(&owner, terminal_id.0.as_ref()).expect("owned stop succeeds"),
+        OwnedTerminalStop::StopRequested
     );
 
     terminals
@@ -777,8 +785,18 @@ fn terminal_ids_are_session_owned() {
     let terminals = crate::app::AgentTerminals::default();
     let request = ee_agent_protocol::CreateTerminalRequest::new("s1", "sh")
         .args(vec![String::from("-c"), String::from("printf ok")]);
-    let created = terminals.spawn(&request).expect("terminal spawns");
+    let created = terminals.spawn(&request, Some("test-agent")).expect("terminal spawns");
     let terminal_id = created.terminal_id.0.to_string();
+    let owner = crate::app::TerminalOwner {
+        agent_id: String::from("test-agent"),
+        session_id: String::from("s1"),
+    };
+    let foreign_agent = crate::app::TerminalOwner {
+        agent_id: String::from("other-agent"),
+        session_id: String::from("s1"),
+    };
+    assert_eq!(terminals.list_owned(&owner, 128).len(), 1);
+    assert!(terminals.list_owned(&foreign_agent, 128).is_empty());
 
     let denied =
         terminals.output(&ee_agent_protocol::TerminalOutputRequest::new("s2", terminal_id.clone()));

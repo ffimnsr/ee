@@ -1,6 +1,10 @@
 use std::fmt::Write as _;
+#[cfg(feature = "agents")]
+use std::fs::{self, OpenOptions};
 use std::io::{self, IsTerminal as _, Read, Stdout, Write};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "agents")]
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
@@ -1922,6 +1926,128 @@ fn run(app: &mut App, shutdown: Arc<AtomicBool>) -> io::Result<()> {
     result
 }
 
+#[cfg(feature = "agents")]
+fn external_editor_command() -> Result<String, String> {
+    let value = std::env::var("VISUAL")
+        .ok()
+        .or_else(|| std::env::var("EDITOR").ok())
+        .ok_or_else(|| String::from("set VISUAL or EDITOR to a single executable name"))?;
+    let command = value.trim();
+    if command.is_empty()
+        || command.chars().any(char::is_whitespace)
+        || command.contains([';', '|', '&', '>', '<', '`', '$'])
+    {
+        return Err(String::from(
+            "VISUAL/EDITOR must be one executable name without shell arguments",
+        ));
+    }
+    Ok(command.to_string())
+}
+
+#[cfg(feature = "agents")]
+fn external_draft_path() -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!("ee-agent-draft-{}-{nonce}.md", std::process::id()))
+}
+
+/// Runs user-configured external editor only while EE TUI has released its
+/// foreground terminal. No shell is involved; return text remains local until
+/// user explicitly submits composer.
+#[cfg(feature = "agents")]
+fn edit_agent_draft_externally(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    draft: &str,
+) -> Result<String, String> {
+    const MAX_DRAFT_EDITOR_BYTES: usize = 256 * 1024;
+    if draft.len() > MAX_DRAFT_EDITOR_BYTES {
+        return Err(format!(
+            "draft exceeds external-editor limit ({MAX_DRAFT_EDITOR_BYTES} bytes)"
+        ));
+    }
+    let command = external_editor_command()?;
+    let path = external_draft_path();
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .map_err(|error| format!("cannot create private draft file: {error}"))?;
+    if let Err(error) = file.write_all(draft.as_bytes()) {
+        let _ = fs::remove_file(&path);
+        return Err(format!("cannot write private draft file: {error}"));
+    }
+    if let Err(error) = file.sync_all() {
+        let _ = fs::remove_file(&path);
+        return Err(format!("cannot prepare private draft file: {error}"));
+    }
+    drop(file);
+
+    let suspend = (|| -> io::Result<()> {
+        terminal.show_cursor()?;
+        disable_raw_mode()?;
+        execute!(
+            terminal.backend_mut(),
+            DisableBracketedPaste,
+            DisableMouseCapture,
+            LeaveAlternateScreen
+        )?;
+        Ok(())
+    })();
+    if let Err(error) = suspend {
+        // Best-effort restore even when halfway through terminal suspension.
+        let _ = execute!(
+            terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        );
+        let _ = enable_raw_mode();
+        let _ = terminal.clear();
+        let _ = fs::remove_file(&path);
+        return Err(format!("cannot release terminal for editor: {error}"));
+    }
+
+    let editor_result = Command::new(&command).arg(&path).status();
+    let content_result = match &editor_result {
+        Ok(status) if status.success() => fs::read(&path)
+            .map_err(|error| format!("cannot read edited draft: {error}"))
+            .and_then(|bytes| {
+                if bytes.len() > MAX_DRAFT_EDITOR_BYTES {
+                    Err(format!("edited draft exceeds limit ({MAX_DRAFT_EDITOR_BYTES} bytes)"))
+                } else {
+                    String::from_utf8(bytes)
+                        .map_err(|_| String::from("edited draft is not valid UTF-8"))
+                }
+            }),
+        Ok(status) => Err(format!("external editor exited with {status}")),
+        Err(error) => Err(format!("cannot launch `{command}`: {error}")),
+    };
+    let _ = fs::remove_file(&path);
+
+    let restore = (|| -> io::Result<()> {
+        execute!(
+            terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )?;
+        enable_raw_mode()?;
+        terminal.clear()?;
+        Ok(())
+    })();
+    if let Err(error) = restore {
+        return Err(format!("external editor finished, but terminal restore failed: {error}"));
+    }
+    content_result
+}
+
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut App,
@@ -1984,6 +2110,15 @@ fn run_app(
                     break;
                 }
             }
+        }
+
+        // Interactive external editor must run in terminal-owning loop, after
+        // all input dispatch but before next draw. It never submits prompt.
+        #[cfg(feature = "agents")]
+        if let Some(request) = app.take_agent_external_editor_request() {
+            let result = edit_agent_draft_externally(terminal, &request.draft);
+            app.apply_agent_external_editor_result(request, result);
+            terminal.clear()?;
         }
 
         // Apply backend responses from just-handled input before drawing, after

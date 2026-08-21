@@ -58,6 +58,36 @@ action = "request_hover"
 }
 
 #[test]
+fn configured_keymap_parses_agent_local_actions() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(".ee.toml"),
+        r#"
+[[keymap.bindings]]
+mode = "agent"
+key = "ctrl+r"
+action = "agent_history_search_reverse"
+"#,
+    )
+    .unwrap();
+
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    env::set_current_dir(temp.path()).unwrap();
+    let app = App::from_path(None).unwrap();
+
+    assert_eq!(
+        app.key_bindings.get(&BindingKey {
+            mode: Mode::Agent,
+            key: KeyCode::Char('r'),
+            modifiers: KeyModifiers::CONTROL,
+            prefix: None,
+        }),
+        Some(&Action::AgentHistorySearchReverse)
+    );
+}
+
+#[test]
 fn configured_keymap_can_unbind_insert_ctrl_shortcuts() {
     let temp = tempfile::tempdir().unwrap();
     fs::write(

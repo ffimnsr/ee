@@ -187,9 +187,11 @@ impl RegisterStore {
             }
             Some(RegisterName::BlackHole) => {}
             Some(RegisterName::Search) => self.search.clear(),
-            Some(RegisterName::Clipboard) => write_clipboard(ClipboardSelection::Clipboard, ""),
+            Some(RegisterName::Clipboard) => {
+                let _ = write_clipboard(ClipboardSelection::Clipboard, "");
+            }
             Some(RegisterName::PrimaryClipboard) => {
-                write_clipboard(ClipboardSelection::Primary, "")
+                let _ = write_clipboard(ClipboardSelection::Primary, "");
             }
         }
     }
@@ -213,18 +215,20 @@ fn read_clipboard(selection: ClipboardSelection) -> String {
         .unwrap_or_default()
 }
 
-fn write_clipboard(selection: ClipboardSelection, text: &str) {
+fn write_clipboard(selection: ClipboardSelection, text: &str) -> bool {
     #[cfg(test)]
     if test_clipboard_write(selection, text) {
-        return;
+        return true;
     }
 
     // OSC 52: write to the terminal emulator clipboard.  Works over SSH without
     // needing xclip/xsel on the remote host.  Terminals that do not support
     // OSC 52 simply ignore the escape sequence, so this is always safe to emit.
-    if selection == ClipboardSelection::Clipboard {
-        write_clipboard_osc52(text);
-    }
+    let mut written = if selection == ClipboardSelection::Clipboard {
+        write_clipboard_osc52(text)
+    } else {
+        false
+    };
 
     // Also try xclip / xsel for X11/Wayland local sessions.
     let selection_arg = clipboard_selection_arg(selection);
@@ -238,9 +242,18 @@ fn write_clipboard(selection: ClipboardSelection, text: &str) {
         let _ = stdin.write_all(text.as_bytes());
         child.wait().map(|s| s.success()).unwrap_or(false)
     };
-    if !try_write("xclip", &["-selection", selection_arg]) {
-        let _ = try_write("xsel", &[clipboard_xsel_arg(selection), "--input"]);
+    written |= try_write("xclip", &["-selection", selection_arg]);
+    if !written {
+        written = try_write("xsel", &[clipboard_xsel_arg(selection), "--input"]);
     }
+    written
+}
+
+/// Writes to the system clipboard and reports whether a local transport accepted it.
+pub(crate) fn write_system_clipboard(text: &str) -> Result<(), String> {
+    write_clipboard(ClipboardSelection::Clipboard, text)
+        .then_some(())
+        .ok_or_else(|| String::from("system clipboard unavailable"))
 }
 
 fn clipboard_selection_arg(selection: ClipboardSelection) -> &'static str {
@@ -262,7 +275,7 @@ fn clipboard_xsel_arg(selection: ClipboardSelection) -> &'static str {
 /// The escape sequence is `ESC ] 52 ; c ; <base64> BEL`.  The `c` parameter
 /// selects the clipboard selection; most terminal emulators map it to the
 /// system clipboard.  Terminals that do not support OSC 52 silently ignore it.
-fn write_clipboard_osc52(text: &str) {
+fn write_clipboard_osc52(text: &str) -> bool {
     use std::io::Write as _;
     let encoded = base64_encode(text.as_bytes());
     // Write directly to /dev/tty when available so the sequence is not
@@ -274,8 +287,7 @@ fn write_clipboard_osc52(text: &str) {
             Box::new(std::io::stdout())
         };
     // ESC ] 52 ; c ; <base64> BEL
-    let _ = write!(out, "\x1b]52;c;{}\x07", encoded);
-    let _ = out.flush();
+    write!(out, "\x1b]52;c;{}\x07", encoded).is_ok() && out.flush().is_ok()
 }
 
 /// Minimal base64 encoder — avoids adding the `base64` crate dependency.

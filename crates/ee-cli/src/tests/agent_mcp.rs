@@ -1603,7 +1603,7 @@ fn shutdown_cancels_hung_turn_kills_terminals_and_stops_hosts() {
         "sleep",
     );
     request.args = vec![String::from("30")];
-    let spawned = app.agents.terminals.spawn(&request).expect("terminal spawns");
+    let spawned = app.agents.terminals.spawn(&request, Some("fake")).expect("terminal spawns");
     assert_eq!(app.agents.terminals.tracked_count(), 1);
 
     // Shutdown must complete within a bounded window despite the hung agent.

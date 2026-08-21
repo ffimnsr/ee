@@ -59,16 +59,16 @@ pub(crate) use state::{
 #[cfg(all(feature = "agents", test))]
 #[allow(unused_imports)]
 pub(crate) use agent_bridge::{
-    ActionLogEntry, AgentTerminals, ApprovalChoice, PERSISTENT_TERMINAL_MAX_USES,
-    PERSISTENT_TERMINAL_OPTION_LABEL, PERSISTENT_WRITE_MAX_USES, PreparedWrite, ToolApprovalMode,
-    WriteExpectation, WriteReplyKind,
+    ActionLogEntry, AgentTerminals, ApprovalChoice, OwnedTerminalStop,
+    PERSISTENT_TERMINAL_MAX_USES, PERSISTENT_TERMINAL_OPTION_LABEL, PERSISTENT_WRITE_MAX_USES,
+    PreparedWrite, TerminalOwner, ToolApprovalMode, WriteExpectation, WriteReplyKind,
 };
 
 #[cfg(feature = "agents")]
 pub(crate) use agent_pane::{
     AGENTS_NICK_COL_WIDTH, AGENTS_PANE_BOTTOM_HEIGHT, AGENTS_PANE_RIGHT_WIDTH, AgentPaneLayout,
-    AgentThreadUi, MessageRenderKind, ThreadUiState, TranscriptItem, agent_slash_command_names,
-    format_duration, turn_metrics_label, wrap_text,
+    AgentThreadUi, MessageRenderKind, ThreadUiState, TranscriptItem, format_duration,
+    turn_metrics_label, wrap_text,
 };
 
 const SWIFT_MOTION_LABELS: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
@@ -156,6 +156,11 @@ impl App {
         // Focused agents pane owns all keys (feature `agents`).
         #[cfg(feature = "agents")]
         if self.agents_focused() {
+            if let Some(action) = self.lookup_action(key, Mode::Agent, None)
+                && self.handle_agent_keybinding_action(action)
+            {
+                return;
+            }
             self.handle_agent_key(key);
             return;
         }
@@ -582,6 +587,14 @@ impl App {
     fn dispatch(&mut self, action: Action, _key: KeyEvent) {
         match &action {
             Action::NoOp
+            | Action::AgentHistoryPrevious
+            | Action::AgentHistoryNext
+            | Action::AgentHistorySearchReverse
+            | Action::AgentDraftStash
+            | Action::AgentDraftRestore
+            | Action::AgentDraftExternalEdit
+            | Action::AgentToggleTranscriptDetails
+            | Action::AgentToggleTranscriptRaw
             | Action::SetPrefix(_)
             | Action::PendingCharFind { .. }
             | Action::SetOperator(_)
@@ -593,7 +606,15 @@ impl App {
         }
 
         match action {
-            Action::NoOp => {}
+            Action::NoOp
+            | Action::AgentHistoryPrevious
+            | Action::AgentHistoryNext
+            | Action::AgentHistorySearchReverse
+            | Action::AgentDraftStash
+            | Action::AgentDraftRestore
+            | Action::AgentDraftExternalEdit
+            | Action::AgentToggleTranscriptDetails
+            | Action::AgentToggleTranscriptRaw => {}
             Action::Quit => self.should_quit = true,
             Action::EnterMode(mode) => {
                 if mode == Mode::Normal {
@@ -3892,6 +3913,110 @@ impl App {
                 self.backend.status_message = Some(format!("shell failed: {err}"));
             }
         }
+    }
+
+    /// Opens bounded staged, unstaged, and untracked changes for Agents TUI.
+    /// Uses libgit2 only; protected paths never contribute diff content.
+    #[cfg(feature = "agents")]
+    pub(super) fn open_workspace_git_diff(&mut self) {
+        let root = match std::fs::canonicalize(&self.working_dir) {
+            Ok(root) => root,
+            Err(error) => {
+                self.backend.status_message = Some(format!("workspace diff unavailable: {error}"));
+                return;
+            }
+        };
+        let repository = match git::GitRepository::discover(&root) {
+            Ok(Some(repository)) => repository,
+            Ok(None) => {
+                self.backend.status_message =
+                    Some(String::from("workspace diff unavailable: not a Git repository"));
+                return;
+            }
+            Err(error) => {
+                self.backend.status_message = Some(format!("workspace diff unavailable: {error}"));
+                return;
+            }
+        };
+        let limits = git::GitReadLimits::default();
+        let report = match repository.status(limits) {
+            Ok(report) => report,
+            Err(error) => {
+                self.backend.status_message = Some(format!("workspace diff unavailable: {error}"));
+                return;
+            }
+        };
+        let protected = |path: &std::path::PathBuf| {
+            crate::policy::is_protected_relative_path(&path.to_string_lossy())
+        };
+        let staged_protected = report.staged.iter().any(protected);
+        let unstaged_protected = report.unstaged.iter().any(protected);
+        let secrets = self.agents_secret_values();
+        let mut output = format!(
+            "# Workspace diff\n\nRepository: {}\nBranch: {}\n\n",
+            report.repo_root.display(),
+            report.branch.as_deref().unwrap_or("(detached)")
+        );
+        output.push_str("## Staged\n\n");
+        if staged_protected {
+            output.push_str("Diff omitted: protected path changed.\n\n");
+        } else {
+            match repository.staged_diff(limits) {
+                Ok(diff) if diff.text.trim().is_empty() => {
+                    output.push_str("(no staged changes)\n\n")
+                }
+                Ok(diff) => {
+                    output.push_str(&ee_agent_host::redact::redact_secret_values(
+                        &diff.text, &secrets,
+                    ));
+                    if diff.truncated {
+                        output.push_str("\n[staged diff truncated]\n");
+                    }
+                    output.push('\n');
+                }
+                Err(error) => output.push_str(&format!("staged diff unavailable: {error}\n\n")),
+            }
+        }
+        output.push_str("## Unstaged\n\n");
+        if unstaged_protected {
+            output.push_str("Diff omitted: protected path changed.\n\n");
+        } else {
+            match repository.unstaged_diff(limits) {
+                Ok(diff) if diff.text.trim().is_empty() => {
+                    output.push_str("(no unstaged changes)\n\n")
+                }
+                Ok(diff) => {
+                    output.push_str(&ee_agent_host::redact::redact_secret_values(
+                        &diff.text, &secrets,
+                    ));
+                    if diff.truncated {
+                        output.push_str("\n[unstaged diff truncated]\n");
+                    }
+                    output.push('\n');
+                }
+                Err(error) => output.push_str(&format!("unstaged diff unavailable: {error}\n\n")),
+            }
+        }
+        output.push_str("## Untracked\n\n");
+        if report.untracked.is_empty() {
+            output.push_str("(no untracked files)\n");
+        } else {
+            for path in &report.untracked {
+                if protected(path) {
+                    output.push_str("- [protected path omitted]\n");
+                } else {
+                    output.push_str(&format!("- {}\n", path.display()));
+                }
+            }
+        }
+        if report.truncated {
+            output.push_str(&format!(
+                "\n[status truncated: {} files omitted]\n",
+                report.omitted_file_count
+            ));
+        }
+        self.open_generated_buffer("agent workspace diff", &output);
+        self.backend.status_message = Some(String::from("workspace diff opened"));
     }
 
     fn open_git_diff_view(&mut self, current_hunk_only: bool) {

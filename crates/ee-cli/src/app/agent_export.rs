@@ -80,6 +80,9 @@ pub(super) fn format_agent_transcript_markdown(
     let mut output = String::from("# Agent session transcript\n\n");
     output.push_str(&format!("- Session: `{}`\n", thread.session_id));
     output.push_str(&format!("- Agent: `{}`\n", thread.agent_id));
+    if let Some(name) = &thread.session_name {
+        output.push_str(&format!("- Name: {}\n", redacted_export_text(name, secrets)));
+    }
     if let Some(title) = &thread.session_title {
         output.push_str(&format!("- Title: {}\n", redacted_export_text(title, secrets)));
     }
