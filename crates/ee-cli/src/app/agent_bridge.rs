@@ -1219,6 +1219,29 @@ enum ApprovalKind {
     },
 }
 
+/// Session-local tool approval behavior selected from the agents TUI.
+///
+/// This controls only whether the UI approval dialog is shown. It never
+/// bypasses request validation, workspace boundaries, revision checks, or ACP
+/// permission and elicitation prompts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ToolApprovalMode {
+    #[default]
+    Default,
+    Autopilot,
+    Bypass,
+}
+
+impl ToolApprovalMode {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Autopilot => "autopilot",
+            Self::Bypass => "bypass",
+        }
+    }
+}
+
 /// One approval decision the user can pick (Phase 2 policy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ApprovalChoice {
@@ -2186,7 +2209,7 @@ impl App {
         // a fixed registry entry is evaluated as its profile when the exact
         // command grant did not cover it.  The narrower exact grant always
         // wins; the profile grant fills the gap.
-        let mut audited_operation = operation;
+        let mut audited_operation = operation.clone();
         if matches!(decision.outcome, TrustOutcome::Prompt)
             && matches!(
                 decision.reason,
@@ -2260,12 +2283,55 @@ impl App {
             }
             _ => {}
         }
+        let approval_mode =
+            self.agents.approval_modes.get(&session_id).copied().unwrap_or_default();
+        if self.tool_approval_mode_allows(approval_mode, &prompt, &operation) {
+            let summary = format!("tool auto-approved ({})", approval_mode.label());
+            if let Some(thread_index) = thread_index
+                && let Some(thread) = self.agents.threads.get_mut(thread_index)
+            {
+                thread.push_system(summary.clone());
+            }
+            self.backend.status_message = Some(summary);
+            self.resolve_approval(prompt, ApprovalChoice::AllowOnce);
+            return;
+        }
         self.agents.approvals.push_back(prompt);
         self.backend.status_message = Some(if self.agents.layout == AgentPaneLayout::Closed {
             String::from("agent approval required (open :agents)")
         } else {
             String::from("agent approval required")
         });
+    }
+
+    /// Whether a pending bridge operation is eligible for the active local
+    /// approval mode. Invalid or unnormalizable operations always stay on the
+    /// explicit approval path.
+    fn tool_approval_mode_allows(
+        &self,
+        mode: ToolApprovalMode,
+        prompt: &ApprovalPrompt,
+        operation: &TrustOperation,
+    ) -> bool {
+        if operation.is_unknown() {
+            return false;
+        }
+        match mode {
+            ToolApprovalMode::Default => false,
+            ToolApprovalMode::Autopilot => match &prompt.kind {
+                ApprovalKind::Write { .. } | ApprovalKind::WriteBatch { .. } => {
+                    prompt.mcp.is_none()
+                        && matches!(
+                            operation.category,
+                            TrustCategory::WriteCreate | TrustCategory::WriteModify
+                        )
+                }
+                ApprovalKind::TerminalCreate { request } => {
+                    self.profile_id_for_request(request).is_some()
+                }
+            },
+            ToolApprovalMode::Bypass => true,
+        }
     }
 
     /// Normalizes one pending approval into the shared policy operation

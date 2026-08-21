@@ -60,8 +60,8 @@ pub(crate) use state::{
 #[allow(unused_imports)]
 pub(crate) use agent_bridge::{
     ActionLogEntry, AgentTerminals, ApprovalChoice, PERSISTENT_TERMINAL_MAX_USES,
-    PERSISTENT_TERMINAL_OPTION_LABEL, PERSISTENT_WRITE_MAX_USES, PreparedWrite, WriteExpectation,
-    WriteReplyKind,
+    PERSISTENT_TERMINAL_OPTION_LABEL, PERSISTENT_WRITE_MAX_USES, PreparedWrite, ToolApprovalMode,
+    WriteExpectation, WriteReplyKind,
 };
 
 #[cfg(feature = "agents")]

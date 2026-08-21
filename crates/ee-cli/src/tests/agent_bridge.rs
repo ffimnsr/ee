@@ -414,6 +414,28 @@ fn write_approval_updates_buffer_and_saves_file() {
 }
 
 #[test]
+fn approval_modes_auto_approve_validated_native_writes() {
+    for mode in [crate::app::ToolApprovalMode::Autopilot, crate::app::ToolApprovalMode::Bypass] {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join(format!("{}/target.txt", mode.label()));
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "original\n").unwrap();
+        let path = file.to_string_lossy().to_string();
+        let script = base_script().emit(write_text_file(103, "s1", &path, "changed\n"));
+        let (mut app, fake) = agents_app_in(&temp, script);
+        app.agents.approval_modes.insert(String::from("s1"), mode);
+
+        open_pane_and_wait_ready(&mut app);
+        wait_until(&mut app, "write answered", |_| fake.agent().response_with_id(103).is_some());
+
+        let response = fake.agent().response_with_id(103).expect("write response");
+        assert!(response.get("result").is_some(), "mode={} response={response}", mode.label());
+        assert!(app.agents.approvals.is_empty(), "mode={} must not queue approval", mode.label());
+        assert_eq!(fs::read_to_string(&file).unwrap(), "changed\n");
+    }
+}
+
+#[test]
 fn write_in_non_active_workspace_root_fails_before_approval() {
     let temp = tempfile::tempdir().unwrap();
     let other = tempfile::tempdir().unwrap();
@@ -478,6 +500,20 @@ fn concurrent_user_edit_merges_into_agent_write() {
 }
 
 // ── terminal bridge ──────────────────────────────────────────────────────────
+
+#[test]
+fn bypass_mode_keeps_invalid_terminal_requests_on_approval_path() {
+    let script =
+        base_script().emit(terminal_create(102, "s1", "sh", json!(["-c", "echo hi"]), json!({})));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    app.agents.approval_modes.insert(String::from("s1"), crate::app::ToolApprovalMode::Bypass);
+
+    open_pane_and_wait_ready(&mut app);
+    wait_until(&mut app, "invalid terminal approval appears", |app| {
+        app.agents.approvals.front().is_some()
+    });
+    assert_eq!(app.agents.terminals.tracked_count(), 0);
+}
 
 #[test]
 fn terminal_denial_does_not_spawn_process() {

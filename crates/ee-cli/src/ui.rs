@@ -489,7 +489,8 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         return;
     }
 
-    let expanded_composer = approval_composer_lines(app, inner.width as usize)
+    let expanded_composer = approval_mode_confirmation_composer_lines(app)
+        .or_else(|| approval_composer_lines(app, inner.width as usize))
         .or_else(|| mode_selection_composer_lines(app, inner.width as usize));
     // Keep one transcript row and the footer visible. Expanded composer prompts
     // consume remaining space so every choice stays readable.
@@ -767,6 +768,30 @@ fn plan_modal_rect(area: Rect, entry_count: usize) -> Rect {
     let x = area.x + area.width.saturating_sub(width).saturating_sub(2);
     let y = area.y.saturating_add(2);
     Rect { x, y, width, height }
+}
+
+/// Builds bypass-mode confirmation rows. Returns selected option row for cursor placement.
+#[cfg(feature = "agents")]
+fn approval_mode_confirmation_composer_lines(app: &App) -> Option<(Vec<Line<'static>>, usize)> {
+    app.agents.approval_mode_confirmation.as_ref()?;
+    Some((
+        vec![
+            Line::from(Span::styled(
+                "enable bypass tool approvals?",
+                Style::default().fg(theme::FG_WARNING).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "  validated writes and terminal commands will run without approval dialogs for this session.",
+                theme_style(theme::FG_TEXT),
+            )),
+            Line::from(Span::styled(
+                "  workspace, secret, revision, and command validation remain enforced.",
+                theme_style(theme::FG_TEXT),
+            )),
+            Line::from(Span::styled("  Enter enable · Esc cancel", theme_style(theme::FG_DIM))),
+        ],
+        0,
+    ))
 }
 
 /// Builds expanded approval rows. Returns selected option row for cursor placement.

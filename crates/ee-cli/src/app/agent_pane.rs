@@ -519,6 +519,13 @@ pub(crate) struct ModeSelectionPrompt {
     pub(crate) selected: usize,
 }
 
+/// Explicit confirmation required before enabling session-local bypass mode.
+#[derive(Debug)]
+pub(crate) struct ApprovalModeConfirmation {
+    pub(crate) thread_index: usize,
+    pub(crate) session_id: String,
+}
+
 // ── Elicitation prompt ───────────────────────────────────────────────────────
 
 /// One form field rendered as a TUI widget.
@@ -1201,6 +1208,7 @@ pub(crate) struct AgentPaneState {
     pub(crate) pending_thread_action: Option<std_mpsc::Receiver<Result<String, String>>>,
     pub(crate) permission: Option<PermissionPrompt>,
     pub(crate) mode_selection: Option<ModeSelectionPrompt>,
+    pub(crate) approval_mode_confirmation: Option<ApprovalModeConfirmation>,
     pub(crate) elicitation: Option<ElicitationPrompt>,
     /// Bridge approval queue (file writes, terminal creates); the front one
     /// is shown and answered first.
@@ -1224,6 +1232,9 @@ pub(crate) struct AgentPaneState {
     pub(crate) action_log: Vec<super::agent_bridge::ActionLogEntry>,
     /// Session-scoped approval policy (Phase 7).
     pub(crate) approval_policy: super::agent_bridge::ApprovalPolicy,
+    /// Session-local approval-dialog behavior. Entries die with their session
+    /// and never persist to workspace or user configuration.
+    pub(crate) approval_modes: BTreeMap<String, super::agent_bridge::ToolApprovalMode>,
     /// Session-local successful-use counters for persistent rules; rows die
     /// with the session (Phase 2 command trust).
     pub(crate) usage_ledger: crate::policy::UsageLedger,
@@ -1267,6 +1278,7 @@ impl Default for AgentPaneState {
             pending_thread_action: None,
             permission: None,
             mode_selection: None,
+            approval_mode_confirmation: None,
             elicitation: None,
             approvals: VecDeque::new(),
             error: None,
@@ -1279,6 +1291,7 @@ impl Default for AgentPaneState {
             terminals: super::agent_bridge::AgentTerminals::default(),
             action_log: Vec::new(),
             approval_policy: super::agent_bridge::ApprovalPolicy::default(),
+            approval_modes: BTreeMap::new(),
             usage_ledger: crate::policy::UsageLedger::default(),
             mcp: super::agents_mcp::McpPaneState::default(),
             resolved_secret_values: Vec::new(),
@@ -1408,6 +1421,15 @@ impl App {
                 // Session-scoped approval policy and usage counters die with
                 // the session; persistent host-local rules remain.
                 self.agents.approval_policy.invalidate_session(session_id.0.as_ref());
+                self.agents.approval_modes.remove(session_id.0.as_ref());
+                if self
+                    .agents
+                    .approval_mode_confirmation
+                    .as_ref()
+                    .is_some_and(|confirmation| confirmation.session_id == session_id.0.as_ref())
+                {
+                    self.agents.approval_mode_confirmation = None;
+                }
                 self.agents.usage_ledger.invalidate_session(session_id.0.as_ref());
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     let text = match reason {
@@ -2391,6 +2413,7 @@ const LOCAL_AGENT_SLASH_COMMANDS: &[&str] = &[
     "thoughts",
     "config",
     "mcp",
+    "approval",
     "mode",
 ];
 
@@ -2820,6 +2843,7 @@ impl App {
         //    dropping the reply senders makes the host resolve them.
         self.agents.approvals.clear();
         self.agents.mode_selection = None;
+        self.agents.approval_mode_confirmation = None;
         self.agents.elicitation = None;
         self.agents.permission = None;
         // 3. Kill agent-owned terminals.
@@ -2832,6 +2856,7 @@ impl App {
         }
         self.agents.threads.clear();
         self.agents.approval_policy = super::agent_bridge::ApprovalPolicy::default();
+        self.agents.approval_modes.clear();
         self.agents.usage_ledger = crate::policy::UsageLedger::default();
     }
 
@@ -3400,6 +3425,57 @@ impl App {
         false
     }
 
+    fn active_tool_approval_mode(&self) -> Option<super::agent_bridge::ToolApprovalMode> {
+        let active = self.agents.active_thread_index()?;
+        let session_id = &self.agents.threads[active].session_id;
+        Some(self.agents.approval_modes.get(session_id).copied().unwrap_or_default())
+    }
+
+    fn set_active_tool_approval_mode(&mut self, mode: super::agent_bridge::ToolApprovalMode) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        let session_id = self.agents.threads[active].session_id.clone();
+        if mode == super::agent_bridge::ToolApprovalMode::Default {
+            self.agents.approval_modes.remove(&session_id);
+        } else {
+            self.agents.approval_modes.insert(session_id, mode);
+        }
+        let summary = format!("tool approvals: {}", mode.label());
+        self.agents.threads[active].push_system(summary.clone());
+        self.backend.status_message = Some(summary);
+    }
+
+    fn request_bypass_tool_approvals(&mut self) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        self.agents.approval_mode_confirmation = Some(ApprovalModeConfirmation {
+            thread_index: active,
+            session_id: self.agents.threads[active].session_id.clone(),
+        });
+        self.backend.status_message = Some(String::from("confirm bypass tool approvals"));
+    }
+
+    fn confirm_bypass_tool_approvals(&mut self) {
+        let Some(confirmation) = self.agents.approval_mode_confirmation.take() else {
+            return;
+        };
+        let Some(thread) = self.agents.threads.get(confirmation.thread_index) else {
+            self.backend.status_message =
+                Some(String::from("agent session closed before bypass confirmation"));
+            return;
+        };
+        if thread.session_id != confirmation.session_id {
+            self.backend.status_message =
+                Some(String::from("agent session changed before bypass confirmation"));
+            return;
+        }
+        self.set_active_tool_approval_mode(super::agent_bridge::ToolApprovalMode::Bypass);
+    }
+
     /// Applies pane-local slash commands before forwarding prompt text to the agent.
     fn submit_agents_local_slash_command(&mut self, draft: &str) -> bool {
         let (Some(command), args) = split_slash_command(draft) else {
@@ -3498,6 +3574,32 @@ impl App {
                 }
                 true
             }
+            "approval" => {
+                match args {
+                    "" => match self.active_tool_approval_mode() {
+                        Some(mode) => {
+                            self.backend.status_message =
+                                Some(format!("tool approvals: {}", mode.label()));
+                        }
+                        None => {
+                            self.backend.status_message =
+                                Some(String::from("no active agent session"))
+                        }
+                    },
+                    "default" => self.set_active_tool_approval_mode(
+                        super::agent_bridge::ToolApprovalMode::Default,
+                    ),
+                    "autopilot" => self.set_active_tool_approval_mode(
+                        super::agent_bridge::ToolApprovalMode::Autopilot,
+                    ),
+                    "bypass" => self.request_bypass_tool_approvals(),
+                    _ => {
+                        self.backend.status_message =
+                            Some(String::from("usage: /approval [default|autopilot|bypass]"));
+                    }
+                }
+                true
+            }
             _ => false,
         };
         if handled {
@@ -3510,6 +3612,7 @@ impl App {
     fn submit_prompt(&mut self) {
         if self.agents.permission.is_some()
             || self.agents.mode_selection.is_some()
+            || self.agents.approval_mode_confirmation.is_some()
             || self.agents.elicitation.is_some()
             || !self.agents.approvals.is_empty()
         {
@@ -3761,6 +3864,24 @@ impl App {
                 self.backend.status_message = Some(String::from("plan closed"));
             }
             return;
+        }
+
+        // Bypass mode needs an explicit confirmation because it removes approval
+        // dialogs for every validated bridge tool call in this session.
+        if self.agents.approval_mode_confirmation.is_some() {
+            match key.code {
+                KeyCode::Enter => {
+                    self.confirm_bypass_tool_approvals();
+                    return;
+                }
+                KeyCode::Esc => {
+                    self.agents.approval_mode_confirmation = None;
+                    self.backend.status_message =
+                        Some(String::from("bypass tool approvals cancelled"));
+                    return;
+                }
+                _ => return,
+            }
         }
 
         // Bridge approvals render above permissions in the composer. Up/down selects
@@ -4272,6 +4393,7 @@ mod tests {
                 "thoughts",
                 "config",
                 "mcp",
+                "approval",
                 "mode",
                 "compact",
             ]

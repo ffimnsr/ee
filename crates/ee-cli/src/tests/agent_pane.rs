@@ -383,6 +383,54 @@ fn local_slash_commands_control_agent_tui_without_forwarding_prompts() {
 }
 
 #[test]
+fn approval_slash_command_scopes_modes_to_active_session_and_confirms_bypass() {
+    let (mut app, _temp, _fake) = fake_agents_app(base_script());
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "/approval");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.backend.status_message.as_deref(), Some("tool approvals: default"));
+
+    type_text(&mut app, "/approval autopilot");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.agents.approval_modes.get("s1").map(|mode| mode.label()), Some("autopilot"));
+
+    type_text(&mut app, "/approval bypass");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(app.agents.approval_mode_confirmation.is_some(), "bypass needs confirmation");
+
+    let backend = TestBackend::new(100, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rendered: Vec<String> = (0..20)
+        .map(|y| {
+            (0..100).map(|x| terminal.backend().buffer().cell((x, y)).unwrap().symbol()).collect()
+        })
+        .collect();
+    assert!(
+        rendered.iter().any(|row| row.contains("enable bypass tool approvals")),
+        "confirmation missing: {rendered:#?}"
+    );
+
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(app.agents.approval_mode_confirmation.is_none());
+    assert_eq!(
+        app.agents.approval_modes.get("s1").map(|mode| mode.label()),
+        Some("autopilot"),
+        "cancelling bypass preserves prior mode"
+    );
+
+    type_text(&mut app, "/approval bypass");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.agents.approval_modes.get("s1").map(|mode| mode.label()), Some("bypass"));
+
+    type_text(&mut app, "/approval default");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(!app.agents.approval_modes.contains_key("s1"), "default removes session override");
+}
+
+#[test]
 fn draft_typed_before_session_ready_carries_into_first_thread() {
     let (mut app, _temp, _fake) = fake_agents_app(base_script());
 
@@ -1649,6 +1697,10 @@ fn permission_prompt_selection_resolves_host_request() {
         .respond(json!({ "stopReason": "end_turn" }));
     let (mut app, _temp, fake) = fake_agents_app(script);
     open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "/approval bypass");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
     type_text(&mut app, "run");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
