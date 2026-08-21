@@ -437,19 +437,19 @@ Use subagents only when independent work produces more value than coordination c
 
 #### Work items
 
-- [ ] Estimate expected information gain, token/cost budget, and write-conflict risk before delegation.
-- [ ] Restrict parallel work to independent scopes; assign one write owner per file or module.
-- [ ] Define role-specific response schema: findings, cited evidence, confidence, rejected alternatives, and recommended next action.
-- [ ] Require verifier roles to reject uncited claims and separate observed facts from inference.
-- [ ] Require root agent to reconcile contradictory findings before selecting plan or applying edits.
-- [ ] Enforce bounded recursion, per-subagent budget, cancellation propagation, and deterministic quarantine for failed delegates.
-- [ ] Record delegation effectiveness in replay metrics: useful findings, duplicate work, conflicts, latency, and cost.
+- [x] Estimate expected information gain, token/cost budget, and write-conflict risk before delegation.
+- [x] Restrict parallel work to independent scopes; assign one write owner per file or module.
+- [x] Define role-specific response schema: findings, cited evidence, confidence, rejected alternatives, and recommended next action.
+- [x] Require verifier roles to reject uncited claims and separate observed facts from inference.
+- [x] Require root agent to reconcile contradictory findings before selecting plan or applying edits.
+- [x] Enforce bounded recursion, per-subagent budget, cancellation propagation, and deterministic quarantine for failed delegates.
+- [x] Record delegation effectiveness in replay metrics: useful findings, duplicate work, conflicts, latency, and cost.
 
 #### Exit criteria
 
-- [ ] Parallel delegation cannot produce overlapping unattended writes.
-- [ ] Final agent conclusions identify supporting evidence and resolved disagreements.
-- [ ] Evaluation data can show when a subagent role improves or degrades task quality.
+- [x] Parallel delegation cannot produce overlapping unattended writes.
+- [x] Final agent conclusions identify supporting evidence and resolved disagreements.
+- [x] Evaluation data can show when a subagent role improves or degrades task quality.
 
 ### Phase 14: Privacy-safe harness observability
 

@@ -13,6 +13,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::delegation_quality::DelegationEffectiveness;
 use crate::replay::{
     ReplayOutcome, delegate_then_answer_replay, denied_tool_replay, run_replay,
     simple_answer_replay, tool_then_answer_replay,
@@ -169,6 +170,10 @@ pub struct FixtureScore {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub estimated_cost_microusd: u64,
+    /// Counter-only role metrics for delegation quality; no workspace content,
+    /// prompts, paths, or child summaries are retained here.
+    #[serde(default)]
+    pub delegation_effectiveness: DelegationEffectiveness,
     /// 0..=100 acceptance score; integer avoids platform float differences.
     pub total: u8,
 }
@@ -334,6 +339,11 @@ pub async fn run_fixture(
         input_tokens: fixture.input_tokens,
         output_tokens: fixture.output_tokens,
         estimated_cost_microusd,
+        delegation_effectiveness: delegation_effectiveness(
+            &outcome,
+            fixture.latency_ms,
+            estimated_cost_microusd,
+        ),
         total,
     };
     if score.model_calls != fixture.expected.model_calls
@@ -516,6 +526,45 @@ fn policy_denials(outcome: &ReplayOutcome) -> u64 {
             matches!(event, crate::events::OrchestratorEvent::ToolFinished { success: false, .. })
         })
         .count() as u64
+}
+
+fn delegation_effectiveness(
+    outcome: &ReplayOutcome,
+    latency_ms: u64,
+    estimated_cost_microusd: u64,
+) -> DelegationEffectiveness {
+    let successful_children = outcome
+        .events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                crate::events::OrchestratorEvent::SubagentFinished { success: true, .. }
+            )
+        })
+        .count() as u64;
+    let failed_children = outcome
+        .events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                crate::events::OrchestratorEvent::SubagentFinished { success: false, .. }
+            )
+        })
+        .count() as u64;
+    let mut metrics = DelegationEffectiveness::default();
+    if successful_children + failed_children > 0 {
+        metrics.record(
+            "worker",
+            successful_children,
+            0,
+            failed_children,
+            latency_ms,
+            estimated_cost_microusd,
+        );
+    }
+    metrics
 }
 
 fn acceptance_score(completed: bool, validation: bool, violations: u64, recovery: bool) -> u8 {
@@ -715,6 +764,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delegated_fixture_records_counter_only_role_effectiveness() {
+        let fixture = required_fixture_suite()
+            .expect("fixtures load")
+            .into_iter()
+            .find(|fixture| fixture.id == "multi_file_interrupted_recovery")
+            .expect("delegated fixture exists");
+        let run = run_fixture(&fixture, default_evaluation_profile()).await.expect("fixture runs");
+        let role = run
+            .score
+            .delegation_effectiveness
+            .by_role
+            .get("worker")
+            .expect("delegated replay records a role");
+        assert_eq!(role.useful_findings, 1);
+        assert_eq!(role.duplicate_work, 0);
+        assert_eq!(role.write_conflicts, 0);
+        assert_eq!(
+            run.score.delegation_effectiveness.quality_impact("worker"),
+            crate::delegation_quality::DelegationQualityImpact::Improved
+        );
+    }
+
+    #[tokio::test]
     async fn checked_in_baseline_gates_default_profile() {
         let fixtures = required_fixture_suite().expect("fixtures load");
         let baseline = required_fixture_baseline().expect("baseline loads");
@@ -832,6 +904,7 @@ mod tests {
             input_tokens: 0,
             output_tokens: 0,
             estimated_cost_microusd: 0,
+            delegation_effectiveness: DelegationEffectiveness::default(),
             total,
         }
     }

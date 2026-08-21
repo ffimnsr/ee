@@ -138,6 +138,9 @@
 //! - [`decision_log`] — the bounded [`DecisionLog`]: strategy, tool policy,
 //!   routing, and delegation decisions with stable reason codes, redacted
 //!   details, and no chain-of-thought.
+//! - [`delegation_quality`] — root-owned delegation preflight estimates,
+//!   independent write-owner checks, cited role reports, conflict reconciliation,
+//!   and counter-only role effectiveness metrics.
 //! - [`replay`] — deterministic replay scripts over fake model/tools (feature
 //!   `test-utils`).
 //! - [`evaluation`] — versioned hermetic task fixtures, redacted evidence,
@@ -158,6 +161,7 @@ pub mod config;
 pub mod context_pack;
 pub mod context_planner;
 pub mod decision_log;
+pub mod delegation_quality;
 pub mod destructive_policy;
 pub mod dialects;
 pub mod error;
@@ -252,6 +256,14 @@ pub use context_planner::{
 pub use decision_log::{
     DECISION_DETAIL_MAX_CHARS, DEFAULT_MAX_DECISION_LOG_ENTRIES, DecisionEntry, DecisionKind,
     DecisionLog,
+};
+pub use delegation_quality::{
+    DELEGATION_QUALITY_SCHEMA_VERSION, DelegationBudget, DelegationEffectiveness,
+    DelegationEstimate, DelegationPreflight, DelegationPreflightResult, DelegationProposal,
+    DelegationQualityImpact, FindingConfidence, FindingEvidence, FindingKind, ReconciledFinding,
+    ReconciliationState, RejectedDelegation, ReportEvidence, ReportVerification,
+    RoleDelegationEffectiveness, RootResolution, RootSynthesis, SubagentFinding, SubagentReport,
+    SubagentReportVerifier, VerifiedSubagentReport, WriteConflictRisk,
 };
 pub use destructive_policy::SideEffectSubclass;
 pub use dialects::{ToolCallDialect, normalize_tool_calls};

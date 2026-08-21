@@ -5,9 +5,9 @@
 //! function bounded by the configured parallelism, collects the child
 //! summaries in deterministic task order, merges completed summaries into the
 //! parent transcript, and marks the parent task blocked when a required child
-//! fails.  When a [`WriteScopeConflictDetector`] is attached, overlapping
-//! intended write scopes of concurrent children are rejected before any
-//! spawn; locks are released when the child finishes or is cancelled.
+//! fails. A [`WriteScopeConflictDetector`] is active by default, so overlapping
+//! intended write scopes of concurrent children are rejected before any spawn;
+//! locks are released when the child finishes or is cancelled.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -41,10 +41,14 @@ impl FanOutFanInCoordinator {
     /// over the shared task graph.
     #[must_use]
     pub fn new(max_parallel: usize, tasks: Arc<Mutex<TaskGraph>>) -> Self {
-        Self { max_parallel, tasks, write_conflicts: None }
+        Self {
+            max_parallel,
+            tasks,
+            write_conflicts: Some(Arc::new(Mutex::new(WriteScopeConflictDetector::new()))),
+        }
     }
 
-    /// Attaches a write-scope conflict detector; when present, children whose
+    /// Replaces the default write-scope conflict detector. Children whose
     /// intended write scopes overlap are rejected before spawn.
     #[must_use]
     pub fn with_write_conflicts(
