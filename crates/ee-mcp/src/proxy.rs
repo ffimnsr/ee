@@ -19,6 +19,7 @@ use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, DiscoverResult,
     ErrorCode, ErrorData, Implementation, InitializeRequestParams, InitializeResult, JsonObject,
     ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, Tool,
+    ToolAnnotations,
 };
 use rmcp::service::{MaybeSendFuture, RequestContext, RoleServer};
 use serde::{Deserialize, Serialize};
@@ -822,6 +823,7 @@ impl EeMcpProxy {
             .into_iter()
             .filter(|tool| crate::governance(tool.name.as_ref()).is_some())
             .filter(|tool| self.is_supported(tool.name.as_ref()))
+            .map(with_read_only_annotation)
             .collect()
     }
 
@@ -1853,6 +1855,14 @@ fn backend_error_result(error: ProxyToolError) -> CallToolResponse {
         error.message
     };
     complete(CallToolResult::error(vec![ContentBlock::text(message)]))
+}
+
+/// Adds standard MCP read-only metadata from the canonical governance record.
+fn with_read_only_annotation(tool: Tool) -> Tool {
+    let is_read_only = crate::governance(tool.name.as_ref()).is_some_and(|governance| {
+        matches!(governance.side_effect, crate::classify::SideEffectClass::Read)
+    });
+    if is_read_only { tool.with_annotations(ToolAnnotations::new().read_only(true)) } else { tool }
 }
 
 /// Converts a `serde_json::json!` literal into a tool input schema object.
@@ -3103,6 +3113,20 @@ mod tests {
             );
             assert_eq!(entry.output_caps[0].kind, governance.output_cap_kind);
             assert_eq!(entry.output_caps[0].max, governance.output_cap);
+            if matches!(governance.side_effect, crate::classify::SideEffectClass::Read) {
+                assert_eq!(
+                    tool.annotations.as_ref().and_then(|annotations| annotations.read_only_hint),
+                    Some(true),
+                    "{} must advertise readOnlyHint",
+                    tool.name
+                );
+            } else {
+                assert!(
+                    tool.annotations.is_none(),
+                    "{} must not advertise readOnlyHint",
+                    tool.name
+                );
+            }
         }
     }
 

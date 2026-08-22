@@ -148,7 +148,7 @@ fn mode_policy(base: &PolicyEngine, mode: &SessionModeId) -> Result<PolicyEngine
     let mut policy: ToolPolicy = base.policy().clone();
     match mode.to_string().as_str() {
         ASK_MODE_ID => {
-            policy.allow_read = false;
+            policy.allow_read = true;
             policy.allow_write = false;
             policy.allow_execute = false;
             policy.allow_delegate = false;
@@ -171,7 +171,9 @@ fn mode_policy(base: &PolicyEngine, mode: &SessionModeId) -> Result<PolicyEngine
 
 fn mode_system_context(system_context: String, mode: &SessionModeId) -> String {
     let instruction = match mode.to_string().as_str() {
-        ASK_MODE_ID => "Agent mode: ask. Answer directly. Do not invoke tools or make changes.",
+        ASK_MODE_ID => {
+            "Agent mode: ask. Answer directly; use read-only tools when needed. Do not modify files, run commands, or delegate."
+        }
         PLAN_MODE_ID => {
             "Agent mode: plan. Investigate with read-only tools, then return an actionable plan. Do not modify files, run commands, or delegate."
         }
@@ -1836,12 +1838,11 @@ mod tests {
 
         let (mode, policy) = provider.session_mode_policy(&session_id.to_string()).expect("state");
         assert_eq!(mode, SessionModeId::new(ASK_MODE_ID));
-        for class in [
-            SideEffectClass::Read,
-            SideEffectClass::Write,
-            SideEffectClass::Execute,
-            SideEffectClass::Delegate,
-        ] {
+        assert!(
+            policy.check(&tool(SideEffectClass::Read), Default::default()).allow,
+            "ask allows reads"
+        );
+        for class in [SideEffectClass::Write, SideEffectClass::Execute, SideEffectClass::Delegate] {
             assert!(!policy.check(&tool(class), Default::default()).allow, "ask denies {class:?}");
         }
         assert!(

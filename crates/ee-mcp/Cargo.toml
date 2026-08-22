@@ -15,8 +15,8 @@ rmcp = { workspace = true, features = ["server"] }
 serde.workspace = true
 serde_json.workspace = true
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
-tokio = { version = "1.52.1", features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "process", "net"] }
-tokio-util = { version = "0.7.18", features = ["rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time", "io-util", "process", "net"] }
+tokio-util = { workspace = true, features = ["rt"] }
 http = "1"
 url = "2"
 thiserror = "2"

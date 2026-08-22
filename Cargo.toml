@@ -59,14 +59,15 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 schemars = { version = "1.0", features = ["derive"] }
 semver = "1.0"
 signal-hook = "0.3"
+similar = "3.2.0"
 serde = "1.0.228"
 serde_json = "1.0.149"
 seccompiler = "0.5.0"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.20"
 tempfile = "3"
-tokio = { version = "1.52.1", features = ["macros", "rt", "sync", "time"] }
-tokio-util = { version = "0.7.18", features = ["compat"] }
+tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "time"] }
+tokio-util = { version = "0.7.19", features = ["compat"] }
 toml = "0.8"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
@@ -90,7 +91,8 @@ tree-sitter-scala = "0.26.0"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-yaml = "0.7.2"
 unicode-segmentation = "1.13.2"
-unicode-width = "0.2"
+# Ratatui 0.29 requires exactly 0.2.0; upgrade this with Ratatui.
+unicode-width = "=0.2.0"
 url = "2.5.8"
 wasmtime = { version = "44.0.0", default-features = false, features = ["cranelift", "runtime", "std", "wat"] }
 # Secrets store (ISSUES.md "Host-Bound Encrypted Secrets Store", phases 1-6).
@@ -98,9 +100,9 @@ wasmtime = { version = "44.0.0", default-features = false, features = ["cranelif
 # to crate dependencies as the implementation lands.
 base64 = "0.22"
 chacha20poly1305 = "0.10.1"
-# Select OS credential stores. Without a Linux backend, `keyring` falls back
-# to in-process mock storage and vault keys disappear after `ee` exits.
-keyring = { version = "3.6", features = ["apple-native", "linux-native", "windows-native"] }
+# Keyring v4 `v1` facade uses native stores plus persistent Zbus Secret Service
+# on Linux; kernel-keyring entries are cleared at reboot.
+keyring = { version = "4.1.6", default-features = false, features = ["v1"] }
 sha2 = "0.10.9"
 zeroize = "1.8.2"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
