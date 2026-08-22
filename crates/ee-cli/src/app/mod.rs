@@ -4239,7 +4239,7 @@ impl App {
 
     fn end_record(&mut self) {
         self.recording = false;
-        let cmds = self.recorded_commands.drain(..).collect();
+        let cmds = std::mem::take(&mut self.recorded_commands);
         self.last_change = Some(LastChange::Commands(cmds));
     }
 
@@ -4489,7 +4489,7 @@ impl App {
         // The key that triggered stop_macro_record ('q') was already pushed to
         // macro_buffer by handle_event; remove it.
         self.macro_buffer.pop();
-        let keys = self.macro_buffer.drain(..).collect();
+        let keys = std::mem::take(&mut self.macro_buffer);
         self.macros.insert(c, keys);
         self.last_macro = Some(c);
         self.backend.status_message = None;

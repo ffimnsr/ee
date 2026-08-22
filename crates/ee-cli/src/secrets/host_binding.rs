@@ -239,6 +239,8 @@ fn read_windows_machine_guid() -> Result<Vec<u8>, SecretStoreError> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use crate::secrets::test_support::StoredKeychain;
     use crate::secrets::{SecretStore, keychain::encode_hex32};

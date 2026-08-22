@@ -129,10 +129,8 @@ pub(crate) fn decode_hex32(text: &[u8]) -> Option<[u8; 32]> {
         return None;
     }
     let mut bytes = [0u8; 32];
-    for (i, pair) in text.chunks_exact(2).enumerate() {
-        let hi = hex_value(pair[0])?;
-        let lo = hex_value(pair[1])?;
-        bytes[i] = (hi << 4) | lo;
+    for (i, &[hi, lo]) in text.as_chunks::<2>().0.iter().enumerate() {
+        bytes[i] = (hex_value(hi)? << 4) | hex_value(lo)?;
     }
     Some(bytes)
 }
