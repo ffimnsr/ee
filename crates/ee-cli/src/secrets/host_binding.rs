@@ -6,6 +6,7 @@
 //! machine identifier) is stored in vault metadata; domain separation is
 //! applied before hashing.
 
+#[cfg(target_os = "linux")]
 use std::path::Path;
 
 use sha2::{Digest as _, Sha256};
@@ -180,14 +181,14 @@ fn read_macos_hardware_uuid() -> Result<Vec<u8>, SecretStoreError> {
     let name = b"hw.uuid\0".as_ptr().cast::<libc::c_char>();
     let mut size: libc::size_t = 0;
     // First call queries the required buffer size.
-    if unsafe { libc::sysctlbyname(name, std::ptr::null_mut(), &mut size, std::ptr::null(), 0) }
+    if unsafe { libc::sysctlbyname(name, std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) }
         != 0
     {
         return Err(SecretStoreError::HostBindingUnavailable);
     }
     let mut buffer = vec![0u8; size];
     if unsafe {
-        libc::sysctlbyname(name, buffer.as_mut_ptr().cast(), &mut size, std::ptr::null(), 0)
+        libc::sysctlbyname(name, buffer.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0)
     } != 0
     {
         return Err(SecretStoreError::HostBindingUnavailable);

@@ -562,7 +562,7 @@ async fn serve_client<T, E, A>(
     transport: T,
 ) -> Result<
     RunningService<RoleClient, OrchestratorClientHandler>,
-    rmcp::service::ClientInitializeError,
+    Box<rmcp::service::ClientInitializeError>,
 >
 where
     T: rmcp::transport::IntoTransport<RoleClient, E, A>,
@@ -576,6 +576,7 @@ where
             },
         )
         .await
+        .map_err(Box::new)
 }
 
 /// Spawns the stdio MCP server child process (rmcp child-process transport).
