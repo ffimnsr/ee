@@ -675,11 +675,10 @@ impl StreamAccumulator {
                     "OpenRouter stream tool call missing function name".to_string(),
                 )
             })?;
-            let arguments = serde_json::from_str::<Value>(&call.arguments).map_err(|error| {
-                ProviderError::BackendFailure(format!(
-                    "OpenRouter stream tool call arguments were not JSON: {error}"
-                ))
-            })?;
+            // Keep the call identity so the tool loop can feed an invalid-input
+            // observation back to the model. `Null` is never a valid tool argument
+            // object, so validation fails before any tool side effect can occur.
+            let arguments = serde_json::from_str::<Value>(&call.arguments).unwrap_or(Value::Null);
             tool_calls.push(OpenRouterToolCall { id, name, arguments });
         }
         let raw_tool_calls: Vec<Value> = tool_calls
@@ -904,6 +903,25 @@ mod tests {
             message.raw["tool_calls"][0]["function"]["arguments"],
             "{\"path\":\"Cargo.toml\"}"
         );
+    }
+
+    #[test]
+    fn stream_accumulator_recovers_malformed_tool_arguments_as_invalid_input() {
+        let mut accumulator = StreamAccumulator::default();
+        accumulator
+            .apply(&json!({ "choices": [{ "delta": {
+                "tool_calls": [{ "index": 0, "id": "call_1", "function": {
+                    "name": "tool_read_file", "arguments": "{\"path\":\"Cargo"
+                } }]
+            }, "finish_reason": "tool_calls" }] }))
+            .unwrap();
+
+        let message = accumulator.finish().unwrap();
+        assert_eq!(message.tool_calls.len(), 1);
+        assert_eq!(message.tool_calls[0].id, "call_1");
+        assert_eq!(message.tool_calls[0].name, "tool_read_file");
+        assert_eq!(message.tool_calls[0].arguments, Value::Null);
+        assert_eq!(message.raw["tool_calls"][0]["function"]["arguments"], "null");
     }
 
     #[test]

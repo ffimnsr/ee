@@ -468,6 +468,109 @@ fn transcript_lines(
     lines
 }
 
+#[cfg(feature = "agents")]
+fn agents_composer_height(app: &App, area: Rect) -> u16 {
+    session_deletion_confirmation_composer_lines(app)
+        .or_else(|| additional_directory_confirmation_composer_lines(app))
+        .or_else(|| terminal_stop_confirmation_composer_lines(app))
+        .or_else(|| approval_mode_confirmation_composer_lines(app))
+        .or_else(|| approval_composer_lines(app, area.width as usize))
+        .or_else(|| mode_selection_composer_lines(app, area.width as usize))
+        .map(|(lines, _)| lines.len().min(area.height.saturating_sub(2) as usize) as u16)
+        .unwrap_or(1)
+        .max(1)
+}
+
+#[cfg(feature = "agents")]
+fn agents_pane_rows(app: &App, area: Rect) -> std::rc::Rc<[Rect]> {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(agents_composer_height(app, area)),
+        ])
+        .split(area)
+}
+
+#[cfg(feature = "agents")]
+fn agent_transcript_lines(
+    app: &App,
+    thread: &crate::app::AgentThreadUi,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let mut rendered_response_groups = std::collections::BTreeSet::new();
+    for item in &thread.transcript {
+        if matches!(item, crate::app::TranscriptItem::Message { text, .. } if text.trim().is_empty())
+        {
+            continue;
+        }
+        if !app.agents.show_thoughts
+            && matches!(
+                item,
+                crate::app::TranscriptItem::Message {
+                    kind: crate::app::MessageRenderKind::Thought,
+                    ..
+                }
+            )
+        {
+            continue;
+        }
+        let response_group = thread.response_group_for_item(item);
+        let show_tool_detail = thread.transcript_raw
+            || thread.transcript_detail
+            || response_group.is_some_and(|group| thread.expanded_tool_details.contains(&group));
+        if let Some(group) = response_group {
+            if !thread.transcript_raw && rendered_response_groups.insert(group) {
+                let (thoughts, tools) = thread.response_group_counts(group);
+                let selected = thread.selected_response_group == Some(group);
+                let collapsed = thread.collapsed_response_groups.contains(&group);
+                let marker = if collapsed { "+" } else { "−" };
+                let selected_marker = if selected { "> " } else { "  " };
+                let mut header = format!(
+                    "{selected_marker}[{marker}] response: {thoughts} reasoning, {tools} tools"
+                );
+                if let Some(summary) = thread.response_group_change_summary(group) {
+                    header.push_str(&format!(" · {summary}"));
+                }
+                if let Some(metrics) = thread.turn_metrics.get(&group) {
+                    header.push_str(&format!(" · {}", crate::app::turn_metrics_label(metrics)));
+                } else if thread.active_response_group == Some(group)
+                    && let Some(started) = thread.turn_started_at
+                {
+                    header.push_str(&format!(
+                        " · {}",
+                        crate::app::format_duration(started.elapsed())
+                    ));
+                }
+                lines.push(Line::from(Span::styled(header, Style::default().fg(theme::FG_DIM))));
+            }
+            if !thread.transcript_raw && thread.collapsed_response_groups.contains(&group) {
+                continue;
+            }
+        }
+        lines.extend(transcript_lines(item, width, show_tool_detail));
+    }
+    lines
+}
+
+/// Maximum visual-row offset for active agent transcript within `area`.
+#[cfg(feature = "agents")]
+pub(crate) fn agents_transcript_scroll_max(app: &App, area: Rect) -> usize {
+    let Some(active_index) = app.agents.active_thread else {
+        return 0;
+    };
+    let transcript_area = agents_pane_rows(app, area)[0];
+    let line_count = agent_transcript_lines(
+        app,
+        &app.agents.threads[active_index],
+        transcript_area.width.saturating_sub(1) as usize,
+    )
+    .len();
+    line_count.saturating_sub(transcript_area.height as usize)
+}
+
 /// Renders agents pane: transcript scrollback, status footer, and composer line.
 #[cfg(feature = "agents")]
 fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
@@ -497,19 +600,7 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         .or_else(|| mode_selection_composer_lines(app, inner.width as usize));
     // Keep one transcript row and the footer visible. Expanded composer prompts
     // consume remaining space so every choice stays readable.
-    let composer_height = expanded_composer
-        .as_ref()
-        .map(|(lines, _)| lines.len().min(inner.height.saturating_sub(2) as usize) as u16)
-        .unwrap_or(1)
-        .max(1);
-    let rows = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(composer_height),
-        ])
-        .split(inner);
+    let rows = agents_pane_rows(app, inner);
     let transcript_area = rows[0];
     let footer_area = rows[1];
     let composer_area = rows[2];
@@ -517,71 +608,11 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     // Transcript scrollback.
     let composer = if let Some(active_index) = app.agents.active_thread {
         let thread = &app.agents.threads[active_index];
-        let mut lines = Vec::new();
-        let mut rendered_response_groups = std::collections::BTreeSet::new();
-        for item in &thread.transcript {
-            if matches!(item, crate::app::TranscriptItem::Message { text, .. } if text.trim().is_empty())
-            {
-                continue;
-            }
-            if !app.agents.show_thoughts
-                && matches!(
-                    item,
-                    crate::app::TranscriptItem::Message {
-                        kind: crate::app::MessageRenderKind::Thought,
-                        ..
-                    }
-                )
-            {
-                continue;
-            }
-            let response_group = thread.response_group_for_item(item);
-            let show_tool_detail = thread.transcript_raw
-                || thread.transcript_detail
-                || response_group
-                    .is_some_and(|group| thread.expanded_tool_details.contains(&group));
-            if let Some(group) = response_group {
-                if !thread.transcript_raw && rendered_response_groups.insert(group) {
-                    let (thoughts, tools) = thread.response_group_counts(group);
-                    let selected = thread.selected_response_group == Some(group);
-                    let collapsed = thread.collapsed_response_groups.contains(&group);
-                    let marker = if collapsed { "+" } else { "−" };
-                    let selected_marker = if selected { "> " } else { "  " };
-                    let mut header = format!(
-                        "{selected_marker}[{marker}] response: {thoughts} reasoning, {tools} tools"
-                    );
-                    if let Some(summary) = thread.response_group_change_summary(group) {
-                        header.push_str(&format!(" · {summary}"));
-                    }
-                    if let Some(metrics) = thread.turn_metrics.get(&group) {
-                        header.push_str(&format!(" · {}", crate::app::turn_metrics_label(metrics)));
-                    } else if thread.active_response_group == Some(group)
-                        && let Some(started) = thread.turn_started_at
-                    {
-                        header.push_str(&format!(
-                            " · {}",
-                            crate::app::format_duration(started.elapsed())
-                        ));
-                    }
-                    lines
-                        .push(Line::from(Span::styled(header, Style::default().fg(theme::FG_DIM))));
-                }
-                if !thread.transcript_raw && thread.collapsed_response_groups.contains(&group) {
-                    continue;
-                }
-            }
-            lines.extend(transcript_lines(
-                item,
-                transcript_area.width.saturating_sub(1) as usize,
-                show_tool_detail,
-            ));
-        }
+        let lines =
+            agent_transcript_lines(app, thread, transcript_area.width.saturating_sub(1) as usize);
         let visible_height = transcript_area.height as usize;
-        let top = if thread.stick_to_bottom {
-            lines.len().saturating_sub(visible_height)
-        } else {
-            thread.scroll.min(lines.len().saturating_sub(visible_height))
-        };
+        let max_scroll = lines.len().saturating_sub(visible_height);
+        let top = if thread.stick_to_bottom { max_scroll } else { thread.scroll.min(max_scroll) };
         let mut window: Vec<Line<'static>> =
             lines.into_iter().skip(top).take(visible_height).collect();
         if thread.stick_to_bottom && window.len() < visible_height {

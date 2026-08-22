@@ -2324,6 +2324,47 @@ fn agent_transcript_discards_blank_rendered_lines() {
 }
 
 #[test]
+fn long_agent_responses_scroll_by_visual_rows() {
+    let response = "wrapped response ".repeat(200);
+    let script = base_script()
+        .wait_for("session/prompt")
+        .emit(wire::session_update("s1", wire::agent_message_chunk("m1", &response)))
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, _fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+    run_ex(&mut app, "agents_layout full");
+
+    type_text(&mut app, "go");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "long assistant response lands", |app| {
+        app.agents.threads[0]
+            .message_pairs()
+            .iter()
+            .any(|(nick, text)| nick == "fake" && text == &response)
+    });
+
+    let pane = crate::ui::agents_pane_rect_for(
+        ratatui::layout::Rect { x: 0, y: 0, width: 40, height: 12 },
+        &app,
+    )
+    .expect("full agents pane");
+    let max_scroll = crate::ui::agents_transcript_scroll_max(&app, pane);
+    let transcript_item_max = app.agents.threads[0].transcript.len().saturating_sub(1);
+    assert!(
+        max_scroll > transcript_item_max,
+        "long wrapped response needs more visual scroll rows than transcript items"
+    );
+
+    let thread = &mut app.agents.threads[0];
+    thread.scroll_by(1, max_scroll);
+    assert_eq!(thread.scroll, 1, "one scroll step advances one rendered row");
+    assert!(!thread.stick_to_bottom, "scrolling up unpins the view");
+    thread.scroll_to(usize::MAX, max_scroll);
+    assert_eq!(thread.scroll, max_scroll, "scroll stays within visual-row bounds");
+    assert!(thread.stick_to_bottom, "last rendered row re-pins the view");
+}
+
+#[test]
 fn scrollback_pins_to_bottom_until_user_scrolls_up() {
     let script = base_script()
         .wait_for("session/prompt")

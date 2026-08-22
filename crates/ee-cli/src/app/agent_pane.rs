@@ -38,6 +38,7 @@ use ee_agent_protocol::{
     ToolCallLocation, ToolCallStatus, ToolKind,
 };
 use ignore::WalkBuilder;
+use ratatui::layout::Rect;
 use tokio::runtime::Builder as TokioBuilder;
 use tokio::sync::mpsc as tokio_mpsc;
 use url::Url;
@@ -239,7 +240,7 @@ pub(crate) struct AgentThreadUi {
     pub(crate) transcript_raw: bool,
     /// Show sanitized tool summaries for every response group.
     pub(crate) transcript_detail: bool,
-    /// Scroll offset from the top of the transcript.
+    /// Visual-row offset from the top of rendered transcript.
     pub(crate) scroll: usize,
     /// When true new content keeps the view pinned to the newest line.
     pub(crate) stick_to_bottom: bool,
@@ -334,6 +335,20 @@ impl AgentThreadUi {
     #[allow(dead_code)]
     pub(crate) fn plan_entries(&self) -> Vec<(String, char)> {
         self.current_plan.clone()
+    }
+
+    /// Moves within transcript visual rows, clamped to rendered scroll bounds.
+    pub(crate) fn scroll_by(&mut self, delta: isize, max_scroll: usize) {
+        self.scroll = (self.scroll as isize + delta).clamp(0, max_scroll as isize) as usize;
+        // Keep the user's explicit upward-scroll intent even when transcript
+        // currently fits viewport; later streamed rows must not pull view down.
+        self.stick_to_bottom = delta >= 0 && self.scroll == max_scroll;
+    }
+
+    /// Moves to a transcript visual row, clamped to rendered scroll bounds.
+    pub(crate) fn scroll_to(&mut self, offset: usize, max_scroll: usize) {
+        self.scroll = offset.min(max_scroll);
+        self.stick_to_bottom = self.scroll == max_scroll;
     }
 
     /// Slash command names currently advertised by the agent.
@@ -6193,6 +6208,23 @@ impl App {
         }
     }
 
+    /// Returns active transcript's maximum visual-row offset for current terminal layout.
+    fn agents_transcript_scroll_max(&self) -> usize {
+        let fallback = self
+            .agents
+            .active_thread_index()
+            .map(|active| self.agents.threads[active].transcript.len().saturating_sub(1))
+            .unwrap_or(0);
+        let Ok((width, height)) = crossterm::terminal::size() else {
+            return fallback;
+        };
+        let area = Rect { x: 0, y: 0, width, height };
+        let Some(pane) = crate::ui::agents_pane_rect_for(area, self) else {
+            return fallback;
+        };
+        crate::ui::agents_transcript_scroll_max(self, pane)
+    }
+
     /// Moves the local mode selection by `delta`.
     fn move_mode_selection(&mut self, delta: isize) {
         if let Some(prompt) = &mut self.agents.mode_selection {
@@ -6217,32 +6249,27 @@ impl App {
         }
     }
 
-    /// Scrolls the active transcript by `delta` lines (negative = up).
+    /// Scrolls the active transcript by visual rows (`delta`: negative = up).
     pub(super) fn agents_scroll(&mut self, delta: isize) {
-        let Some(active) = self.agents.active_thread_index() else {
-            return;
-        };
-        let thread = &mut self.agents.threads[active];
-        let max = thread.transcript.len().saturating_sub(1);
-        thread.scroll = (thread.scroll as isize + delta).clamp(0, max as isize) as usize;
-        thread.stick_to_bottom = thread.scroll == max || thread.transcript.is_empty();
-    }
-
-    /// Jumps to a fixed transcript offset.
-    fn agents_scroll_to(&mut self, offset: usize) {
+        let max_scroll = self.agents_transcript_scroll_max();
         if let Some(active) = self.agents.active_thread_index() {
-            let thread = &mut self.agents.threads[active];
-            thread.scroll = offset.min(thread.transcript.len().saturating_sub(1));
-            thread.stick_to_bottom = false;
+            self.agents.threads[active].scroll_by(delta, max_scroll);
         }
     }
 
-    /// Pins the transcript to the newest line.
-    fn agents_scroll_to_bottom(&mut self) {
+    /// Jumps to a fixed visual-row offset.
+    fn agents_scroll_to(&mut self, offset: usize) {
+        let max_scroll = self.agents_transcript_scroll_max();
         if let Some(active) = self.agents.active_thread_index() {
-            let thread = &mut self.agents.threads[active];
-            thread.scroll = thread.transcript.len().saturating_sub(1);
-            thread.stick_to_bottom = true;
+            self.agents.threads[active].scroll_to(offset, max_scroll);
+        }
+    }
+
+    /// Pins transcript to newest rendered row.
+    fn agents_scroll_to_bottom(&mut self) {
+        let max_scroll = self.agents_transcript_scroll_max();
+        if let Some(active) = self.agents.active_thread_index() {
+            self.agents.threads[active].scroll_to(max_scroll, max_scroll);
         }
     }
 

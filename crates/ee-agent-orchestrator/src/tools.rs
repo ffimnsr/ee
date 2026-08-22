@@ -1427,6 +1427,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tool_executor_rejects_non_object_arguments_without_execution() {
+        let (sink, bridge, mut rx) = plumbing();
+        let (tools, _budget, executor) = harness(OrchestratorConfig::default());
+        tools
+            .lock()
+            .expect("registry")
+            .register_builtins(&SessionId::new("s-1"))
+            .expect("builtins");
+
+        let intent = ToolIntent::new("tc-1", "read_file", serde_json::Value::Null);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let result = executor
+            .execute(&intent, &sink, &bridge, cancel_rx, &task_fixture(), &[])
+            .await
+            .expect("executes");
+
+        assert_eq!(result.error_kind, Some(ToolErrorKind::InvalidArguments));
+        assert_eq!(result.text_output, "tool arguments must be a JSON object");
+        let SessionUpdate::ToolCallUpdate(failed) = next_update(&mut rx).await else {
+            panic!("expected failed tool update");
+        };
+        assert_eq!(failed.fields.status, Some(ToolCallStatus::Failed));
+        assert!(rx.try_recv().is_err(), "no client request may be sent for invalid arguments");
+    }
+
+    #[tokio::test]
     async fn tool_executor_denies_write_tool_by_default_policy() {
         let (sink, bridge, mut rx) = plumbing();
         let (tools, _budget, executor) = harness(OrchestratorConfig::default());
