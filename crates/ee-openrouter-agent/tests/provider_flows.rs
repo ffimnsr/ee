@@ -312,6 +312,61 @@ async fn tool_loop_turn_usage_aggregates_across_rounds() {
     harness.shutdown(task).await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn near_limit_tool_round_compacts_before_the_next_model_round() {
+    let mut near_limit_tool_call = tool_call_response("call_1", "/tmp/notes.txt");
+    near_limit_tool_call["usage"] = json!({ "prompt_tokens": 80, "completion_tokens": 1 });
+    let mock = MockOpenRouter::start(vec![
+        near_limit_tool_call,
+        answer_response("SESSION SUMMARY"),
+        answer_response("done"),
+    ]);
+    let mut config = test_config(&mock);
+    config.context_window = 100;
+    config.auto_compact_threshold_percent = 80;
+    let provider = OpenRouterProvider::new(config).unwrap();
+    let (harness, task) = Harness::spawn(provider).await;
+    let session_id = new_session(&harness, 1).await;
+
+    harness.send(request(2, "session/prompt", prompt_params(&session_id, "read notes")));
+    // Near-limit usage, tool in-progress update, then the client-bridge read.
+    let frames = harness.next_frames(3).await;
+    assert_eq!(update_of(&frames[0])["sessionUpdate"], "usage_update");
+    let fs_request = &frames[2];
+    harness.send(respond_to(fs_request, Ok(json!({ "content": "file contents" }))));
+
+    // Tool completion, compaction status, final answer, then prompt response.
+    let frames = harness.next_frames(4).await;
+    assert_eq!(update_of(&frames[0])["status"], "completed");
+    assert!(
+        update_of(&frames[1])["content"]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("Session automatically compacted")),
+        "{:?}",
+        update_of(&frames[1])
+    );
+    assert_eq!(update_of(&frames[2])["content"]["text"], "done");
+    assert_eq!(request_result(frames[3].clone())["stopReason"], "end_turn");
+
+    let bodies = mock.request_bodies();
+    assert_eq!(bodies.len(), 3, "tool round, compaction, final model round");
+    assert!(bodies[1].get("tools").is_none(), "compaction must not expose tools");
+    let final_messages = bodies[2]["messages"].as_array().expect("messages array");
+    assert!(
+        final_messages[1]["content"]
+            .as_str()
+            .is_some_and(|text| text.contains("Session summary:\nSESSION SUMMARY")),
+        "summary survives into the active turn: {final_messages:?}"
+    );
+    assert!(
+        final_messages.iter().any(|message| message.get("tool_calls").is_some())
+            && final_messages.iter().any(|message| message["role"] == "tool"),
+        "tool call/result pair survives compaction: {final_messages:?}"
+    );
+
+    harness.shutdown(task).await;
+}
+
 // ── File reads through the ClientBridge ──────────────────────────────────
 
 #[tokio::test(flavor = "current_thread")]
@@ -493,10 +548,9 @@ async fn compact_noop_small_history_never_calls_the_model() {
 }
 
 #[tokio::test]
-async fn auto_compact_runs_before_the_next_prompt_after_near_limit_usage() {
+async fn near_limit_completed_turn_does_not_auto_compact_before_next_prompt() {
     let mock = MockOpenRouter::start(vec![
         answer_response_with_usage("first answer", 80, 10),
-        answer_response("SESSION SUMMARY"),
         answer_response("second answer"),
     ]);
     let mut config = test_config(&mock);
@@ -512,31 +566,22 @@ async fn auto_compact_runs_before_the_next_prompt_after_near_limit_usage() {
     assert_eq!(update_of(&frames[1])["sessionUpdate"], "usage_update");
     assert_eq!(request_result(frames[2].clone())["stopReason"], "end_turn");
 
-    // The stored history has only two messages, below the manual minimum of
-    // four. Reported near-limit usage still forces safe automatic compaction.
+    // Automatic compaction belongs only to an active tool loop. Between user
+    // prompts, the user can explicitly choose `/compact` instead.
     harness.send(request(3, "session/prompt", prompt_params(&session_id, "second question")));
-    let frames = harness.next_frames(3).await;
-    let status = update_of(&frames[0]);
-    assert!(
-        status["content"]["text"]
-            .as_str()
-            .is_some_and(|text| text.contains("Session automatically compacted")),
-        "{status}"
-    );
-    assert_eq!(update_of(&frames[1])["content"]["text"], "second answer");
-    assert_eq!(request_result(frames[2].clone())["stopReason"], "end_turn");
+    let frames = harness.next_frames(2).await;
+    assert_eq!(update_of(&frames[0])["content"]["text"], "second answer");
+    assert_eq!(request_result(frames[1].clone())["stopReason"], "end_turn");
 
     let bodies = mock.request_bodies();
-    assert_eq!(bodies.len(), 3, "normal turn, automatic compaction, next turn");
-    assert!(bodies[1].get("tools").is_none(), "automatic compaction has no tools");
-    let next_messages = bodies[2]["messages"].as_array().expect("messages array");
+    assert_eq!(bodies.len(), 2, "next user prompt must not trigger compaction");
+    let next_messages = bodies[1]["messages"].as_array().expect("messages array");
     assert!(
-        next_messages[1]["content"]
+        next_messages.iter().all(|message| !message["content"]
             .as_str()
-            .is_some_and(|text| text.contains("Session summary:\nSESSION SUMMARY")),
-        "next request receives the automatic summary: {next_messages:?}"
+            .is_some_and(|text| text.contains("Session summary:"))),
+        "no automatic summary between user turns: {next_messages:?}"
     );
-    assert_eq!(next_messages.last().expect("new user prompt")["content"], "second question");
 
     harness.shutdown(task).await;
 }

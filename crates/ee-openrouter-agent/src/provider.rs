@@ -46,9 +46,6 @@ pub(crate) struct SessionData {
     pub(crate) cwd: Option<String>,
     /// Message history fed to the OpenRouter request body.
     pub(crate) messages: Vec<Value>,
-    /// Input-token count OpenRouter reported for the last completed request.
-    /// Unknown usage remains unknown and never triggers automatic compaction.
-    pub(crate) last_input_tokens: Option<u64>,
 }
 
 /// Owned state for one prompt turn (cloned out of the provider so the boxed
@@ -110,7 +107,7 @@ impl AgentProvider for OpenRouterProvider {
         Box::pin(async move {
             sessions.lock().expect("openrouter sessions poisoned").insert(
                 session_id.to_string(),
-                SessionData { cwd: Some(cwd), messages: Vec::new(), last_input_tokens: None },
+                SessionData { cwd: Some(cwd), messages: Vec::new() },
             );
             Ok(SessionInit::new(session_id).commands(vec![compact_available_command()]))
         })
@@ -179,30 +176,21 @@ async fn run_prompt(
         return run_compact(&turn, ctx, sink, cancel, instructions, false).await;
     }
     let session_key = ctx.session_id.to_string();
-    let last_input_tokens = turn
-        .sessions
-        .lock()
-        .expect("openrouter sessions poisoned")
-        .get(&session_key)
-        .and_then(|session| session.last_input_tokens);
-    if should_auto_compact(&turn.config, last_input_tokens) {
-        run_compact(&turn, ctx.clone(), sink.clone(), cancel.clone(), None, true).await?;
-    }
     let Some(api_key) = turn.config.api_key.clone() else {
         return Err(ProviderError::BackendFailure(
             "OPENROUTER_API_KEY is not set; export it before starting ee".into(),
         ));
     };
 
-    let history = turn
+    let mut turn_history = turn
         .sessions
         .lock()
         .expect("openrouter sessions poisoned")
         .get(&session_key)
-        .map(|session| session.messages.clone());
-    let mut messages =
-        openrouter_messages(&turn.config, history.as_deref().unwrap_or_default(), &prompt_text);
-    let mut pending_history = vec![json!({ "role": "user", "content": prompt_text })];
+        .map(|session| session.messages.clone())
+        .unwrap_or_default();
+    turn_history.push(json!({ "role": "user", "content": prompt_text }));
+    let mut messages = openrouter_messages(&turn.config, &turn_history, "");
     // Per-turn token usage, aggregated across every model round of the tool
     // loop; unknown rounds are skipped, never counted as zero.
     let mut turn_usage = OpenRouterUsage::default();
@@ -246,12 +234,11 @@ async fn run_prompt(
         emit_context_usage(&sink, answer.usage, turn.config.context_window);
 
         if answer.tool_calls.is_empty() {
-            pending_history.push(json!({ "role": "assistant", "content": answer.content }));
+            turn_history.push(json!({ "role": "assistant", "content": answer.content }));
             if let Some(session) =
                 turn.sessions.lock().expect("openrouter sessions poisoned").get_mut(&session_key)
             {
-                session.messages.extend(pending_history);
-                session.last_input_tokens = answer.usage.and_then(|usage| usage.input_tokens);
+                session.messages = turn_history;
             }
             return Ok(prompt_response_with_usage(StopReason::EndTurn, turn_usage));
         }
@@ -263,7 +250,7 @@ async fn run_prompt(
         }
 
         messages.push(answer.raw.clone());
-        pending_history.push(answer.raw);
+        turn_history.push(answer.raw);
         let cwd = turn
             .sessions
             .lock()
@@ -279,7 +266,15 @@ async fn run_prompt(
                 "content": result,
             });
             messages.push(tool_message.clone());
-            pending_history.push(tool_message);
+            turn_history.push(tool_message);
+        }
+        if should_auto_compact(&turn.config, answer.usage.and_then(|usage| usage.input_tokens)) {
+            let compacted = compact_history(&turn, turn_history, cancel.clone(), None).await?;
+            emit_context_usage(&sink, compacted.usage, turn.config.context_window);
+            merge_openrouter_usage(&mut turn_usage, compacted.usage);
+            emit_compaction_status(&turn, &sink, &compacted, true)?;
+            turn_history = compacted.history;
+            messages = openrouter_messages(&turn.config, &turn_history, "");
         }
     }
     unreachable!("tool loop returns inside bounded range")
@@ -290,21 +285,108 @@ async fn run_prompt(
 fn openrouter_messages(config: &Config, history: &[Value], prompt_text: &str) -> Vec<Value> {
     let mut messages = vec![json!({ "role": "system", "content": config.system_prompt })];
     messages.extend_from_slice(history);
-    messages.push(json!({ "role": "user", "content": prompt_text }));
+    if !prompt_text.is_empty() {
+        messages.push(json!({ "role": "user", "content": prompt_text }));
+    }
     messages
+}
+
+/// A compacted replacement history plus user-visible accounting data.
+struct CompactedHistory {
+    history: Vec<Value>,
+    history_message_count: usize,
+    usage: Option<OpenRouterUsage>,
+    trimmed: usize,
+    tail_count: usize,
+    before_bytes: usize,
+    after_bytes: usize,
+}
+
+/// Compacts arbitrary provider-owned history. Both explicit `/compact` turns
+/// and near-limit tool loops use this path, so tool-call/tool-result retention,
+/// redaction, cancellation, and input bounds stay identical.
+async fn compact_history(
+    turn: &PromptTurn,
+    mut history: Vec<Value>,
+    cancel: watch::Receiver<bool>,
+    instructions: Option<&str>,
+) -> Result<CompactedHistory, ProviderError> {
+    let Some(api_key) = turn.config.api_key.clone() else {
+        return Err(ProviderError::BackendFailure(
+            "OPENROUTER_API_KEY is not set; export it before starting ee".into(),
+        ));
+    };
+    if *cancel.borrow() {
+        return Err(ProviderError::Cancellation);
+    }
+
+    let compaction_text = build_compaction_prompt(instructions);
+    // Bound the whole `messages` member of the request: system prompt and
+    // compaction prompt stay, oldest history messages drop first.
+    let overhead =
+        messages_serialized_bytes(&openrouter_messages(&turn.config, &[], &compaction_text));
+    let budget = turn.config.compact_max_input_bytes.saturating_sub(overhead);
+    let trimmed = trim_history_to_budget(&mut history, budget);
+    let messages = openrouter_messages(&turn.config, &history, &compaction_text)
+        .into_iter()
+        .map(|message| redact_message(&message))
+        .collect::<Vec<_>>();
+
+    // No tools during compaction; one bounded, cancellable round trip.
+    let answer = call_openrouter(&turn.http, &turn.config, &api_key, &messages, &[]).await?;
+    if *cancel.borrow() {
+        return Err(ProviderError::Cancellation);
+    }
+    let guard = SensitiveDataGuard::new();
+    let summary = answer.content.trim();
+    if summary.is_empty() {
+        return Err(ProviderError::BackendFailure(
+            "OpenRouter returned an empty compaction summary; history unchanged".into(),
+        ));
+    }
+
+    let mut replacement = vec![
+        json!({ "role": "user", "content": format!("Session summary:\n{}", guard.redact(summary)) }),
+    ];
+    let tail = retained_tail(&history, turn.config.compact_retained_tail);
+    let tail_count = tail.len();
+    replacement.extend(tail);
+    Ok(CompactedHistory {
+        history_message_count: history.len(),
+        before_bytes: messages_serialized_bytes(&history),
+        after_bytes: messages_serialized_bytes(&replacement),
+        history: replacement,
+        usage: answer.usage,
+        trimmed,
+        tail_count,
+    })
+}
+
+/// Sends a redacted status update for manual or automatic compaction.
+fn emit_compaction_status(
+    turn: &PromptTurn,
+    sink: &UpdateSink,
+    compacted: &CompactedHistory,
+    automatic: bool,
+) -> Result<(), ProviderError> {
+    let message_id = next_message_id(&turn.next_message, "message");
+    let status = format!(
+        "Session {}compacted: {} messages ({} bytes) -> summary + {} tail messages ({} bytes); trimmed {} oldest message(s) for the input bound.",
+        if automatic { "automatically " } else { "" },
+        compacted.history_message_count,
+        compacted.before_bytes,
+        compacted.tail_count,
+        compacted.after_bytes,
+        compacted.trimmed,
+    );
+    sink.agent_message_chunk(message_id, SensitiveDataGuard::new().redact(&status)).map_err(
+        |error| ProviderError::BackendFailure(format!("failed to emit compaction status: {error}")),
+    )
 }
 
 /// Runs one `/compact` turn: ask the configured model for a continuation
 /// summary of the stored history, then replace the history with the summary
 /// plus a pair-consistent recent tail.
-///
-/// Manual compaction is a no-op below [`Config::compact_min_messages`].
-/// Automatic compaction bypasses that message-count guard because OpenRouter
-/// already reported a near-limit context. The serialized history is trimmed
-/// to [`Config::compact_max_input_bytes`] (oldest first, tool pairs kept
-/// consistent), the model call carries no tools, and cancellation is observed
-/// before and after the call. Every message sent to the model and every status
-/// text emitted is redacted; an empty summary rejects without touching history.
 async fn run_compact(
     turn: &PromptTurn,
     ctx: PromptContext,
@@ -337,71 +419,16 @@ async fn run_compact(
         )?;
         return Ok(PromptResponse::new(StopReason::EndTurn));
     }
-    let Some(api_key) = turn.config.api_key.clone() else {
-        return Err(ProviderError::BackendFailure(
-            "OPENROUTER_API_KEY is not set; export it before starting ee".into(),
-        ));
-    };
-    if *cancel.borrow() {
-        return Err(ProviderError::Cancellation);
-    }
 
-    let mut history = history;
-    let compaction_text = build_compaction_prompt(instructions.as_deref());
-    // Bound the whole `messages` member of the request: system prompt and
-    // compaction prompt stay, oldest history messages drop first.
-    let overhead =
-        messages_serialized_bytes(&openrouter_messages(&turn.config, &[], &compaction_text));
-    let budget = turn.config.compact_max_input_bytes.saturating_sub(overhead);
-    let trimmed = trim_history_to_budget(&mut history, budget);
-    let messages = openrouter_messages(&turn.config, &history, &compaction_text)
-        .into_iter()
-        .map(|message| redact_message(&message))
-        .collect::<Vec<_>>();
-
-    // No tools during compaction; one bounded, cancellable round trip.
-    let answer = call_openrouter(&turn.http, &turn.config, &api_key, &messages, &[]).await?;
-    emit_context_usage(&sink, answer.usage, turn.config.context_window);
-    if *cancel.borrow() {
-        return Err(ProviderError::Cancellation);
-    }
-    let guard = SensitiveDataGuard::new();
-    let summary = answer.content.trim();
-    if summary.is_empty() {
-        return Err(ProviderError::BackendFailure(
-            "OpenRouter returned an empty compaction summary; history unchanged".into(),
-        ));
-    }
-
-    // Replace provider-owned history with the summary plus a safe recent
-    // tail; the system prompt is re-added per request, so it is not stored.
-    let mut replacement = vec![
-        json!({ "role": "user", "content": format!("Session summary:\n{}", guard.redact(summary)) }),
-    ];
-    let tail = retained_tail(&history, turn.config.compact_retained_tail);
-    let tail_count = tail.len();
-    replacement.extend(tail);
-    let before_bytes = messages_serialized_bytes(&history);
-    let after_bytes = messages_serialized_bytes(&replacement);
+    let compacted = compact_history(turn, history, cancel, instructions.as_deref()).await?;
+    emit_context_usage(&sink, compacted.usage, turn.config.context_window);
     if let Some(session) =
         turn.sessions.lock().expect("openrouter sessions poisoned").get_mut(&session_key)
     {
-        session.messages = replacement;
-        session.last_input_tokens = None;
+        session.messages = compacted.history.clone();
     }
-
-    let message_id = next_message_id(&turn.next_message, "message");
-    let status = format!(
-        "Session {}compacted: {} messages ({} bytes) -> summary + {tail_count} tail messages ({} bytes); trimmed {trimmed} oldest message(s) for the input bound.",
-        if automatic { "automatically " } else { "" },
-        history.len(),
-        before_bytes,
-        after_bytes,
-    );
-    sink.agent_message_chunk(message_id, guard.redact(&status)).map_err(|error| {
-        ProviderError::BackendFailure(format!("failed to emit compaction status: {error}"))
-    })?;
-    Ok(prompt_response_with_usage(StopReason::EndTurn, answer.usage.unwrap_or_default()))
+    emit_compaction_status(turn, &sink, &compacted, automatic)?;
+    Ok(prompt_response_with_usage(StopReason::EndTurn, compacted.usage.unwrap_or_default()))
 }
 
 /// Concatenates the text content blocks of a prompt.
@@ -419,9 +446,9 @@ fn next_message_id(next: &AtomicU64, kind: &str) -> String {
     format!("openrouter-{kind}-{}", next.fetch_add(1, Ordering::Relaxed))
 }
 
-fn should_auto_compact(config: &Config, last_input_tokens: Option<u64>) -> bool {
+fn should_auto_compact(config: &Config, input_tokens: Option<u64>) -> bool {
     matches!(
-        (config.auto_compact_threshold_tokens(), last_input_tokens),
+        (config.auto_compact_threshold_tokens(), input_tokens),
         (Some(threshold), Some(input_tokens)) if input_tokens >= threshold
     )
 }
@@ -631,7 +658,6 @@ mod tests {
                     json!({ "role": "user", "content": "c" }),
                     json!({ "role": "assistant", "content": "d" }),
                 ],
-                last_input_tokens: None,
             },
         );
 
