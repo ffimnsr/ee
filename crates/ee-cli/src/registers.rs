@@ -249,7 +249,11 @@ fn write_clipboard(selection: ClipboardSelection, text: &str) -> bool {
     written
 }
 
-/// Writes to the system clipboard and reports whether a local transport accepted it.
+/// Writes to system clipboard for Agents TUI copy actions.
+///
+/// Only Agents builds use this public-in-crate wrapper; regular editor builds
+/// continue using register-backed clipboard writes directly.
+#[cfg(feature = "agents")]
 pub(crate) fn write_system_clipboard(text: &str) -> Result<(), String> {
     write_clipboard(ClipboardSelection::Clipboard, text)
         .then_some(())
