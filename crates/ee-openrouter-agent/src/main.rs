@@ -116,6 +116,7 @@ mod tests {
             compact_retained_tail: 2,
             compact_max_input_bytes: 65_536,
             context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
+            auto_compact_threshold_percent: 80,
             max_iterations: 16,
             retry_max_attempts: 0,
             retry_base_delay: Duration::from_millis(1),

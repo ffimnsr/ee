@@ -1486,6 +1486,13 @@ fn usage_update_renders_context_window_right_aligned_above_composer() {
         footer_row.contains("10k/100k tokens"),
         "footer row above the composer must carry the context usage: {rendered:#?}"
     );
+    assert!(
+        (0..120).all(|x| {
+            rows.cell((x, (composer_row - 1) as u16)).unwrap().bg
+                == crate::theme::ui::BG_AGENT_STATUS
+        }),
+        "usage footer must paint its full row background: {rendered:#?}"
+    );
     let label = "10k/100k tokens";
     // Byte offsets shift for multi-byte glyphs; compare in character columns.
     let label_end = footer_row

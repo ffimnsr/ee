@@ -46,6 +46,9 @@ pub(crate) struct SessionData {
     pub(crate) cwd: Option<String>,
     /// Message history fed to the OpenRouter request body.
     pub(crate) messages: Vec<Value>,
+    /// Input-token count OpenRouter reported for the last completed request.
+    /// Unknown usage remains unknown and never triggers automatic compaction.
+    pub(crate) last_input_tokens: Option<u64>,
 }
 
 /// Owned state for one prompt turn (cloned out of the provider so the boxed
@@ -107,7 +110,7 @@ impl AgentProvider for OpenRouterProvider {
         Box::pin(async move {
             sessions.lock().expect("openrouter sessions poisoned").insert(
                 session_id.to_string(),
-                SessionData { cwd: Some(cwd), messages: Vec::new() },
+                SessionData { cwd: Some(cwd), messages: Vec::new(), last_input_tokens: None },
             );
             Ok(SessionInit::new(session_id).commands(vec![compact_available_command()]))
         })
@@ -173,7 +176,17 @@ async fn run_prompt(
     if is_compact_command(&prompt_text) {
         let instructions =
             parse_slash_command(&prompt_text).and_then(|command| command.instructions);
-        return run_compact(turn, ctx, sink, cancel, instructions).await;
+        return run_compact(&turn, ctx, sink, cancel, instructions, false).await;
+    }
+    let session_key = ctx.session_id.to_string();
+    let last_input_tokens = turn
+        .sessions
+        .lock()
+        .expect("openrouter sessions poisoned")
+        .get(&session_key)
+        .and_then(|session| session.last_input_tokens);
+    if should_auto_compact(&turn.config, last_input_tokens) {
+        run_compact(&turn, ctx.clone(), sink.clone(), cancel.clone(), None, true).await?;
     }
     let Some(api_key) = turn.config.api_key.clone() else {
         return Err(ProviderError::BackendFailure(
@@ -181,7 +194,6 @@ async fn run_prompt(
         ));
     };
 
-    let session_key = ctx.session_id.to_string();
     let history = turn
         .sessions
         .lock()
@@ -239,6 +251,7 @@ async fn run_prompt(
                 turn.sessions.lock().expect("openrouter sessions poisoned").get_mut(&session_key)
             {
                 session.messages.extend(pending_history);
+                session.last_input_tokens = answer.usage.and_then(|usage| usage.input_tokens);
             }
             return Ok(prompt_response_with_usage(StopReason::EndTurn, turn_usage));
         }
@@ -285,19 +298,20 @@ fn openrouter_messages(config: &Config, history: &[Value], prompt_text: &str) ->
 /// summary of the stored history, then replace the history with the summary
 /// plus a pair-consistent recent tail.
 ///
-/// Bounds: histories below [`Config::compact_min_messages`] are a no-op
-/// (no model call), the serialized history included in the request is
-/// trimmed to [`Config::compact_max_input_bytes`] (oldest first, tool
-/// pairs kept consistent), the model call carries no tools, and
-/// cancellation is observed before and after the call.  Every message sent
-/// to the model and every status text emitted is redacted; an empty summary
-/// rejects without touching the stored history.
+/// Manual compaction is a no-op below [`Config::compact_min_messages`].
+/// Automatic compaction bypasses that message-count guard because OpenRouter
+/// already reported a near-limit context. The serialized history is trimmed
+/// to [`Config::compact_max_input_bytes`] (oldest first, tool pairs kept
+/// consistent), the model call carries no tools, and cancellation is observed
+/// before and after the call. Every message sent to the model and every status
+/// text emitted is redacted; an empty summary rejects without touching history.
 async fn run_compact(
-    turn: PromptTurn,
+    turn: &PromptTurn,
     ctx: PromptContext,
     sink: UpdateSink,
     cancel: watch::Receiver<bool>,
     instructions: Option<String>,
+    automatic: bool,
 ) -> Result<PromptResult, ProviderError> {
     let session_key = ctx.session_id.to_string();
     let history = turn
@@ -308,7 +322,7 @@ async fn run_compact(
         .map(|session| session.messages.clone())
         .unwrap_or_default();
     let min_messages = turn.config.compact_min_messages;
-    if history.len() < min_messages {
+    if !automatic && history.len() < min_messages {
         let message_id = next_message_id(&turn.next_message, "message");
         let text = format!(
             "Session history is small ({} message{}); no compaction needed. `/compact` runs once the history reaches {} messages.",
@@ -373,11 +387,13 @@ async fn run_compact(
         turn.sessions.lock().expect("openrouter sessions poisoned").get_mut(&session_key)
     {
         session.messages = replacement;
+        session.last_input_tokens = None;
     }
 
     let message_id = next_message_id(&turn.next_message, "message");
     let status = format!(
-        "Session compacted: {} messages ({} bytes) -> summary + {tail_count} tail messages ({} bytes); trimmed {trimmed} oldest message(s) for the input bound.",
+        "Session {}compacted: {} messages ({} bytes) -> summary + {tail_count} tail messages ({} bytes); trimmed {trimmed} oldest message(s) for the input bound.",
+        if automatic { "automatically " } else { "" },
         history.len(),
         before_bytes,
         after_bytes,
@@ -401,6 +417,13 @@ pub(crate) fn extract_prompt_text(prompt: &[ContentBlock]) -> String {
 
 fn next_message_id(next: &AtomicU64, kind: &str) -> String {
     format!("openrouter-{kind}-{}", next.fetch_add(1, Ordering::Relaxed))
+}
+
+fn should_auto_compact(config: &Config, last_input_tokens: Option<u64>) -> bool {
+    matches!(
+        (config.auto_compact_threshold_tokens(), last_input_tokens),
+        (Some(threshold), Some(input_tokens)) if input_tokens >= threshold
+    )
 }
 
 /// Reports the current context-window usage through the ACP `usage_update`
@@ -472,6 +495,7 @@ mod tests {
             compact_min_messages: 4,
             compact_retained_tail: 2,
             compact_max_input_bytes: 65_536,
+            auto_compact_threshold_percent: 80,
             retry_max_attempts: crate::config::DEFAULT_RETRY_MAX_ATTEMPTS,
             retry_base_delay: std::time::Duration::from_millis(
                 crate::config::DEFAULT_RETRY_BASE_DELAY_MS,
@@ -607,6 +631,7 @@ mod tests {
                     json!({ "role": "user", "content": "c" }),
                     json!({ "role": "assistant", "content": "d" }),
                 ],
+                last_input_tokens: None,
             },
         );
 

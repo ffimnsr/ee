@@ -734,6 +734,7 @@ mod tests {
             compact_min_messages: 4,
             compact_retained_tail: 2,
             compact_max_input_bytes: 65_536,
+            auto_compact_threshold_percent: 80,
             retry_max_attempts: crate::config::DEFAULT_RETRY_MAX_ATTEMPTS,
             retry_base_delay: std::time::Duration::from_millis(
                 crate::config::DEFAULT_RETRY_BASE_DELAY_MS,

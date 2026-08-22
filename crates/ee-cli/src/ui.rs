@@ -636,6 +636,10 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         let usage_label = thread.usage.as_deref().unwrap_or_default();
         let usage_width = usage_label.width().min(footer_area.width as usize) as u16;
         let footer_line = Line::from(Span::styled(footer_text, footer_style));
+        frame.render_widget(
+            Block::default().style(Style::default().bg(theme::BG_AGENT_STATUS)),
+            footer_area,
+        );
         if usage_width == 0 {
             frame.render_widget(
                 Paragraph::new(footer_line).style(Style::default().bg(theme::BG_AGENT_STATUS)),

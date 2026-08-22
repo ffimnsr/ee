@@ -26,6 +26,9 @@ pub const DEFAULT_COMPACT_MAX_INPUT_BYTES: usize = 64 * 1024;
 /// Default model context-window size in tokens, used for the ACP
 /// `usage_update` context-window denominator.
 pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
+/// Default percentage of the context window that triggers automatic session
+/// compaction after OpenRouter reports a near-limit request.
+pub const DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT: u8 = 80;
 /// Default maximum transient/429 retries per model call.
 pub const DEFAULT_RETRY_MAX_ATTEMPTS: u32 = 2;
 /// Default initial retry backoff: 500 ms.
@@ -37,6 +40,15 @@ fn parse_positive_usize(value: &str) -> Result<usize, String> {
     let value = value.parse::<usize>().map_err(|_| String::from("must be a positive integer"))?;
     if value == 0 {
         return Err(String::from("must be at least 1"));
+    }
+    Ok(value)
+}
+
+fn parse_percentage(value: &str) -> Result<u8, String> {
+    let value =
+        value.parse::<u8>().map_err(|_| String::from("must be an integer from 0 through 100"))?;
+    if value > 100 {
+        return Err(String::from("must be an integer from 0 through 100"));
     }
     Ok(value)
 }
@@ -79,6 +91,15 @@ pub struct Args {
     /// Model context-window size in tokens (reported as `usage_update.size`).
     #[arg(long, env = "OPENROUTER_CONTEXT_WINDOW", default_value_t = DEFAULT_CONTEXT_WINDOW_TOKENS)]
     context_window: u64,
+    /// Percentage of the context window that triggers automatic compaction after
+    /// a reported near-limit request. Zero disables automatic compaction.
+    #[arg(
+        long,
+        env = "OPENROUTER_AUTO_COMPACT_THRESHOLD_PERCENT",
+        default_value_t = DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
+        value_parser = parse_percentage,
+    )]
+    auto_compact_threshold_percent: u8,
     /// Maximum model–tool iterations and model calls per orchestrated turn.
     #[arg(
         long,
@@ -148,6 +169,9 @@ pub struct Config {
     pub compact_max_input_bytes: usize,
     /// Model context-window size in tokens; the ACP `usage_update.size`.
     pub context_window: u64,
+    /// Percentage of the context window that triggers automatic compaction after
+    /// a reported near-limit request. Zero disables automatic compaction.
+    pub auto_compact_threshold_percent: u8,
     /// Shared maximum for model–tool iterations and model calls per turn.
     pub max_iterations: usize,
     /// Maximum transient/429 retries per model call before failing the turn.
@@ -180,12 +204,25 @@ impl Config {
             compact_retained_tail: args.compact_retained_tail,
             compact_max_input_bytes: args.compact_max_input_bytes,
             context_window: args.context_window,
+            auto_compact_threshold_percent: args.auto_compact_threshold_percent,
             max_iterations: args.max_iterations,
             retry_max_attempts: args.retry_max_attempts,
             retry_base_delay: Duration::from_millis(args.retry_base_delay_ms),
             retry_max_delay: Duration::from_millis(args.retry_max_delay_ms),
             checkpoint_dir: args.checkpoint_dir,
         }
+    }
+
+    /// Returns the reported input-token threshold for automatic compaction.
+    /// Zero-percent configuration disables the feature.
+    #[must_use]
+    pub fn auto_compact_threshold_tokens(&self) -> Option<u64> {
+        (self.auto_compact_threshold_percent > 0).then(|| {
+            self.context_window
+                .saturating_mul(u64::from(self.auto_compact_threshold_percent))
+                .saturating_div(100)
+                .max(1)
+        })
     }
 
     /// Looks a variable up in the process environment first, then in the
@@ -259,6 +296,7 @@ mod tests {
             compact_retained_tail: DEFAULT_COMPACT_RETAINED_TAIL,
             compact_max_input_bytes: DEFAULT_COMPACT_MAX_INPUT_BYTES,
             context_window: DEFAULT_CONTEXT_WINDOW_TOKENS,
+            auto_compact_threshold_percent: DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT,
             max_iterations: ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS,
             retry_max_attempts: DEFAULT_RETRY_MAX_ATTEMPTS,
             retry_base_delay_ms: DEFAULT_RETRY_BASE_DELAY_MS,
@@ -284,6 +322,11 @@ mod tests {
         assert_eq!(config.compact_retained_tail, DEFAULT_COMPACT_RETAINED_TAIL);
         assert_eq!(config.compact_max_input_bytes, DEFAULT_COMPACT_MAX_INPUT_BYTES);
         assert_eq!(config.context_window, DEFAULT_CONTEXT_WINDOW_TOKENS);
+        assert_eq!(config.auto_compact_threshold_percent, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT);
+        assert_eq!(
+            config.auto_compact_threshold_tokens(),
+            Some(DEFAULT_CONTEXT_WINDOW_TOKENS * 80 / 100)
+        );
         assert_eq!(
             config.max_iterations,
             ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS

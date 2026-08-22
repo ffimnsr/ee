@@ -386,6 +386,7 @@ mod tests {
             compact_min_messages: 4,
             compact_retained_tail: 2,
             compact_max_input_bytes: 65_536,
+            auto_compact_threshold_percent: 80,
             retry_max_attempts: crate::config::DEFAULT_RETRY_MAX_ATTEMPTS,
             retry_base_delay: std::time::Duration::from_millis(
                 crate::config::DEFAULT_RETRY_BASE_DELAY_MS,
@@ -838,6 +839,15 @@ mod tests {
         })
     }
 
+    async fn set_write_mode(handle: &Harness, session_id: &str, request_id: i64) {
+        handle.send(request(
+            request_id,
+            "session/set_mode",
+            json!({ "sessionId": session_id, "modeId": "write" }),
+        ));
+        assert_eq!(request_result(handle.next_frames(1).await.remove(0)), json!({}));
+    }
+
     /// Drains the MCP diagnostics thought updates emitted at prompt start
     /// (Phase 12) until the summary `mcp-diagnostics` message is seen.
     /// Every frame here is a thought chunk (diagnostics precede the plan
@@ -1061,8 +1071,9 @@ mod tests {
             OpenRouterModelAdapter::with_completion(test_config(), scripted_client(script.clone()));
         let (handle, task) = spawn_server(adapter, OrchestratorConfig::default());
         let session_id = new_session(&handle, 1).await;
+        set_write_mode(&handle, &session_id, 2).await;
 
-        handle.send(request(2, "session/prompt", prompt_params(&session_id, "run echo")));
+        handle.send(request(3, "session/prompt", prompt_params(&session_id, "run echo")));
         drain_mcp_diagnostics(&handle).await;
         let frames = handle.next_frames(4).await;
         let RawJsonRpcMessage::Request(terminal_request) = &frames[3] else {
@@ -1089,7 +1100,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn orchestrated_mode_executes_delegate_task_by_default() {
+    async fn orchestrated_mode_executes_delegate_task_in_write_mode() {
         let script = ScriptedCompletion::new(vec![
             response_with_tool_args("call_1", "delegate_task", json!({ "prompt": "inspect" })),
             response_with_text("child answer"),
@@ -1099,8 +1110,9 @@ mod tests {
             OpenRouterModelAdapter::with_completion(test_config(), scripted_client(script.clone()));
         let (handle, task) = spawn_server(adapter, OrchestratorConfig::default());
         let session_id = new_session(&handle, 1).await;
+        set_write_mode(&handle, &session_id, 2).await;
 
-        handle.send(request(2, "session/prompt", prompt_params(&session_id, "delegate")));
+        handle.send(request(3, "session/prompt", prompt_params(&session_id, "delegate")));
         drain_mcp_diagnostics(&handle).await;
         let frames = handle.next_frames(6).await;
         let completed_update = raw_params_to_value(match &frames[3] {
@@ -1385,6 +1397,7 @@ mod tests {
             OpenRouterModelAdapter::with_completion(test_config(), scripted_client(script));
         let (handle, task) = spawn_server(adapter, OrchestratorConfig::default());
         let session_id = new_session_with_mcp(&handle, 1, ee_proxy_acp_mcp_servers()).await;
+        set_write_mode(&handle, &session_id, 2).await;
 
         let mut runner = PromptMcpRunner::standard_ee_answers(json!([
             ee_tool("ee_overwrite_text_file"),
@@ -1398,7 +1411,7 @@ mod tests {
             }),
         );
 
-        handle.send(request(2, "session/prompt", prompt_params(&session_id, "overwrite the file")));
+        handle.send(request(3, "session/prompt", prompt_params(&session_id, "overwrite the file")));
         let (_thoughts, stop_reason) = runner.run(&handle).await;
         assert_eq!(stop_reason, "end_turn", "host approval dispatch does not crash the turn");
 
