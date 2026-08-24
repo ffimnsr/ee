@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.2 - 2026-08-24
+
+### Fixes
+
+- ci failures caused by git fixture and scala scm (`88d13a39`)
+- update agent flaky test (`aba9327c`)
+
+
 ## 0.11.1 - 2026-08-24
 
 ### Features
