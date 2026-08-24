@@ -1680,12 +1680,18 @@ fn runtime_loader_builds_runtime_assets_from_fetched_sources() {
     let temp_dir = TempDir::new().unwrap();
     let source_root = temp_dir.path().join("sources");
     let output_root = temp_dir.path().join("runtime");
+    let cache_home = temp_dir.path().join("cache");
+    fs::create_dir_all(&cache_home).unwrap();
     let original_host = env::var_os("HOST");
     let original_target = env::var_os("TARGET");
+    let original_home = env::var_os("HOME");
+    let original_xdg_cache_home = env::var_os("XDG_CACHE_HOME");
 
     unsafe {
         env::remove_var("HOST");
         env::remove_var("TARGET");
+        env::set_var("HOME", temp_dir.path());
+        env::set_var("XDG_CACHE_HOME", &cache_home);
     }
 
     let built = loader.build_runtime_assets(
@@ -1707,6 +1713,16 @@ fn runtime_loader_builds_runtime_assets_from_fetched_sources() {
             env::set_var("TARGET", value);
         } else {
             env::remove_var("TARGET");
+        }
+        if let Some(value) = original_home {
+            env::set_var("HOME", value);
+        } else {
+            env::remove_var("HOME");
+        }
+        if let Some(value) = original_xdg_cache_home {
+            env::set_var("XDG_CACHE_HOME", value);
+        } else {
+            env::remove_var("XDG_CACHE_HOME");
         }
     }
 
@@ -1772,6 +1788,8 @@ fn create_demo_git_repo(temp_dir: &TempDir) -> (PathBuf, String, String, String)
     run_git_fixture(temp_dir.path(), &["init", "demo-repo"]);
     run_git_fixture(&repo, &["config", "user.name", "EE Tests"]);
     run_git_fixture(&repo, &["config", "user.email", "ee-tests@example.com"]);
+    run_git_fixture(&repo, &["config", "commit.gpgsign", "false"]);
+    run_git_fixture(&repo, &["config", "tag.gpgsign", "false"]);
     fs::create_dir_all(repo.join("src")).unwrap();
     fs::create_dir_all(repo.join("queries")).unwrap();
 

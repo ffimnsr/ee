@@ -195,7 +195,6 @@
 [
   "as"
   "derives"
-  "end"
   "extends"
 ;; `forSome` existential types not implemented yet
 ;; `macro` not implemented yet
