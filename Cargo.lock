@@ -1247,7 +1247,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ee-acp-agent-server"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "ee-acp-agent-server",
  "ee-agent-protocol",
@@ -1260,7 +1260,7 @@ dependencies = [
 
 [[package]]
 name = "ee-agent-host"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "ee-acp-agent-server",
  "ee-agent-host",
@@ -1278,7 +1278,7 @@ dependencies = [
 
 [[package]]
 name = "ee-agent-orchestrator"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "ee-acp-agent-server",
  "ee-agent-orchestrator",
@@ -1297,7 +1297,7 @@ dependencies = [
 
 [[package]]
 name = "ee-agent-protocol"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "agent-client-protocol",
  "serde",
@@ -1306,7 +1306,7 @@ dependencies = [
 
 [[package]]
 name = "ee-cli"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "ee-mcp"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "http",
  "reqwest 0.13.4",
@@ -1367,7 +1367,7 @@ dependencies = [
 
 [[package]]
 name = "ee-openrouter-agent"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "clap",
  "dirs",
@@ -1382,7 +1382,7 @@ dependencies = [
 
 [[package]]
 name = "ee-ts-test-grammars"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "tree-sitter",
  "tree-sitter-bash",
@@ -1408,7 +1408,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-core"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "chrono",
  "dirs",
@@ -1422,7 +1422,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-core-lib"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "bytecount",
  "cc",
@@ -1459,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-lsp-lib"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "chrono",
  "ee-xi-core-lib",
@@ -1479,7 +1479,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-plugin-derive"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1488,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-plugin-lib"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "bytecount",
  "ee-xi-core-lib",
@@ -1507,7 +1507,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-rope"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "bytecount",
  "criterion",
@@ -1523,7 +1523,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-rpc"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "jsonrpc-lite",
  "log",
@@ -1536,7 +1536,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-unicode"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "criterion",
 ]

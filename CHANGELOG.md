@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.11.1 - 2026-08-24
+
+### Features
+
+- update source for doc test (`c845bfb8`)
+
+
+### Fixes
+
+- remaining docs test on rust source (`fca45138`)
+
+
 ## 0.11.0 - 2026-08-24
 
 ### Features
