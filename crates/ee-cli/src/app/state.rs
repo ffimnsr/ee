@@ -83,6 +83,20 @@ pub(crate) struct HoverPopup {
     pub(crate) content: String,
 }
 
+const TOAST_TIMEOUT: Duration = Duration::from_secs(4);
+
+#[derive(Debug, Clone)]
+pub(crate) struct Toast {
+    message: String,
+    shown_at: Instant,
+}
+
+impl Toast {
+    fn is_visible(&self) -> bool {
+        self.shown_at.elapsed() < TOAST_TIMEOUT
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct Viewport {
     pub(crate) top_line: usize,
@@ -316,6 +330,10 @@ pub(crate) struct App {
     pub(crate) search_backward: bool,
     /// Active hover popup for the focused editor surface.
     pub(crate) hover_popup: Option<HoverPopup>,
+    /// Current transient notification rendered as a floating toast.
+    toast: Option<Toast>,
+    /// Last backend status observed by [`Self::sync_status_toast`].
+    last_status_message: Option<String>,
     /// Cached git state keyed by buffer id.
     pub(crate) source_control: HashMap<crate::buffer::BufferId, crate::git::GitBufferCache>,
     /// Noncritical startup work that should run only after first frame lands.
@@ -429,6 +447,8 @@ impl App {
             search_pattern: None,
             search_backward: false,
             hover_popup: None,
+            toast: None,
+            last_status_message: None,
             source_control: HashMap::new(),
             startup_deferred_work_pending: true,
             last_input_at: Instant::now(),
@@ -444,5 +464,24 @@ impl App {
             redraw_requested: false,
             render_metrics: crate::render_metrics::RenderMetrics::new(),
         })
+    }
+
+    /// Mirrors newly reported backend status into a time-limited toast.
+    ///
+    /// Status remains on the buffer so confirmation prompts and tests retain
+    /// their existing behavior. Normal-mode UI renders it only as a toast.
+    pub(crate) fn sync_status_toast(&mut self) {
+        let status = self.backend.status_message.as_deref();
+        if self.last_status_message.as_deref() == status {
+            return;
+        }
+
+        self.last_status_message = status.map(str::to_owned);
+        self.toast =
+            status.map(|message| Toast { message: message.to_owned(), shown_at: Instant::now() });
+    }
+
+    pub(crate) fn toast_message(&self) -> Option<&str> {
+        self.toast.as_ref().filter(|toast| toast.is_visible()).map(|toast| toast.message.as_str())
     }
 }

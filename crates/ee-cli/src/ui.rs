@@ -322,6 +322,8 @@ pub(crate) fn ui(frame: &mut ratatui::Frame<'_>, app: &App) {
     if app.picker.is_some() {
         render_picker(frame, area, app);
     }
+
+    render_toast(frame, area, app);
 }
 
 // ── Agents pane (feature `agents`) ────────────────────────────────────────────
@@ -2353,20 +2355,16 @@ fn render_prompt(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     }
 
     let prompt = match app.mode {
-        Mode::Normal => Line::from(match app.backend.status_message.as_deref() {
-            Some(message) => message.to_owned(),
-            None => "normal | i insert | v visual | : command | :help discovery".to_owned(),
-        }),
-        Mode::Insert => Line::from("insert | esc normal"),
-        Mode::Visual => {
-            Line::from("visual | hjkl/move selects | d/y/c operators | v/esc normal | : command")
-        }
-        Mode::VisualLine => {
-            Line::from("visual-line | j/k extends | d/y/c operators | V/esc normal")
-        }
-        Mode::VisualBlock => {
-            Line::from("visual-block | hjkl extends block | d/y I/A operators | Ctrl-V/esc normal")
-        }
+        Mode::Normal => Line::default(),
+        Mode::Insert
+        | Mode::Visual
+        | Mode::VisualLine
+        | Mode::VisualBlock
+        | Mode::Picker
+        | Mode::Quickfix
+        | Mode::LocationList
+        | Mode::OperatorPending
+        | Mode::Agent => Line::default(),
         Mode::CommandLine => {
             Line::from(vec![Span::raw(":"), Span::raw(app.command_buffer.as_str())])
         }
@@ -2374,9 +2372,7 @@ fn render_prompt(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             let prefix = if app.search_backward { "?" } else { "/" };
             Line::from(vec![Span::raw(prefix), Span::raw(app.command_buffer.as_str())])
         }
-        Mode::Picker => Line::from("picker | enter confirm | esc close | type filter"),
-        Mode::Quickfix => Line::from("quickfix | enter jump | q close | j/k move"),
-        Mode::LocationList => Line::from("location-list | enter jump | q close | j/k move"),
+
         Mode::SubstituteConfirm => Line::from(match app.backend.status_message.as_deref() {
             Some(msg) => msg.to_owned(),
             None => "substitute — replace? [y]es [n]o [a]ll [q]uit".to_owned(),
@@ -2385,26 +2381,6 @@ fn render_prompt(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             Some(msg) => msg.to_owned(),
             None => "permission denied — retry with elevated save? [y]es [n]o".to_owned(),
         }),
-        #[cfg(feature = "agents")]
-        Mode::Agent => Line::from(
-            "agents | type prompt · Enter send · Esc stop/back · PgUp/PgDn scroll · Ctrl-N/P thread",
-        ),
-        #[cfg(not(feature = "agents"))]
-        Mode::Agent => Line::from("agents pane (compiled without agents feature)"),
-        Mode::OperatorPending => Line::from(
-            match app.input_state.pending_operator {
-                Some(crate::app::Operator::Delete) => "-- DELETE (motion / text-obj) --",
-                Some(crate::app::Operator::Change) => "-- CHANGE (motion / text-obj) --",
-                Some(crate::app::Operator::Yank) => "-- YANK (motion / text-obj) --",
-                Some(crate::app::Operator::Indent) => "-- INDENT (motion) --",
-                Some(crate::app::Operator::Outdent) => "-- OUTDENT (motion) --",
-                Some(crate::app::Operator::Uppercase) => "-- UPPERCASE (motion) --",
-                Some(crate::app::Operator::Lowercase) => "-- LOWERCASE (motion) --",
-                Some(crate::app::Operator::CaseToggle) => "-- CASE TOGGLE (motion) --",
-                None => "-- OPERATOR PENDING --",
-            }
-            .to_owned(),
-        ),
     };
 
     frame.render_widget(
@@ -2906,6 +2882,57 @@ fn render_picker(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     );
 }
 
+fn toast_rect(area: Rect, message: &str) -> Option<Rect> {
+    const MAX_WIDTH: u16 = 52;
+    const MAX_CONTENT_HEIGHT: u16 = 3;
+    const MARGIN: u16 = 1;
+
+    let width = area.width.saturating_sub(MARGIN * 2).min(MAX_WIDTH);
+    if width < 12 || area.height < 4 {
+        return None;
+    }
+
+    let content_width = usize::from(width.saturating_sub(2)).max(1);
+    let content_lines = message
+        .lines()
+        .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(content_width))
+        .sum::<usize>()
+        .max(1)
+        .min(usize::from(MAX_CONTENT_HEIGHT));
+    let height =
+        (content_lines as u16).saturating_add(2).min(area.height.saturating_sub(MARGIN * 2));
+    if height < 3 {
+        return None;
+    }
+
+    Some(Rect {
+        x: area.right().saturating_sub(width + MARGIN),
+        y: area.y.saturating_add(MARGIN),
+        width,
+        height,
+    })
+}
+
+fn render_toast(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
+    let Some(message) = app.toast_message() else { return };
+    let Some(rect) = toast_rect(area, message) else { return };
+
+    frame.render_widget(Clear, rect);
+    frame.render_widget(
+        Paragraph::new(message)
+            .block(
+                Block::default()
+                    .title(" notification ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme::BORDER_MUTED))
+                    .style(Style::default().bg(theme::BG_CHROME)),
+            )
+            .style(Style::default().fg(theme::FG_MUTED).bg(theme::BG_CHROME))
+            .wrap(Wrap { trim: false }),
+        rect,
+    );
+}
+
 fn render_hover_popup(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let Some(popup) = &app.hover_popup else { return };
     let popup_w = ((area.width as f32 * 0.65) as u16).max(24).min(area.width);
@@ -3088,6 +3115,67 @@ mod tests {
         };
 
         assert_eq!(annotation_marker_for_line(&buf, 0), Some(('T', theme::FG_MARKER_HINT)));
+    }
+
+    #[test]
+    fn status_messages_render_as_top_right_toasts_not_prompt_text() {
+        let mut app = App::from_path(None).unwrap();
+        app.backend.status_message = Some(String::from("saved /tmp/example.rs"));
+        app.sync_status_toast();
+
+        let width = 80;
+        let height = 10;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| ui(frame, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let toast_row =
+            (0..width).map(|x| buffer.cell((x, 2)).unwrap().symbol()).collect::<String>();
+        let prompt_row =
+            (0..width).map(|x| buffer.cell((x, height - 1)).unwrap().symbol()).collect::<String>();
+
+        assert!(toast_row.contains("saved /tmp/example.rs"), "toast row: {toast_row:?}");
+        assert!(prompt_row.trim().is_empty(), "prompt row: {prompt_row:?}");
+        assert_eq!(buffer.cell((28, 2)).unwrap().bg, theme::BG_CHROME);
+    }
+
+    #[test]
+    fn static_mode_prompts_are_blank() {
+        let mut app = App::from_path(None).unwrap();
+        let modes = [
+            Mode::Insert,
+            Mode::Visual,
+            Mode::VisualLine,
+            Mode::VisualBlock,
+            Mode::Picker,
+            Mode::Quickfix,
+            Mode::LocationList,
+            Mode::OperatorPending,
+            Mode::Agent,
+        ];
+
+        for mode in modes {
+            app.mode = mode;
+            let backend = TestBackend::new(80, 10);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| ui(frame, &app)).unwrap();
+            let prompt_row = (0..80)
+                .map(|x| terminal.backend().buffer().cell((x, 9)).unwrap().symbol())
+                .collect::<String>();
+
+            assert!(prompt_row.trim().is_empty(), "{mode:?} prompt: {prompt_row:?}");
+        }
+    }
+
+    #[test]
+    fn toast_rect_is_top_right_and_bounded() {
+        let area = Rect { x: 10, y: 4, width: 120, height: 40 };
+        let rect = toast_rect(area, "saved /tmp/example.rs").expect("space for toast");
+
+        assert_eq!(rect.x, 77);
+        assert_eq!(rect.y, 5);
+        assert_eq!(rect.width, 52);
+        assert_eq!(rect.height, 3);
     }
 
     #[test]
