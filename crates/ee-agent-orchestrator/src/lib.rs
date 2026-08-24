@@ -145,11 +145,11 @@
 //! - [`delegation_quality`] — root-owned delegation preflight estimates,
 //!   independent write-owner checks, cited role reports, conflict reconciliation,
 //!   and counter-only role effectiveness metrics.
-//! - [`replay`] — deterministic replay scripts over fake model/tools (feature
+//! - `replay` — deterministic replay scripts over fake model/tools (feature
 //!   `test-utils`).
-//! - [`evaluation`] — versioned hermetic task fixtures, redacted evidence,
+//! - `evaluation` — versioned hermetic task fixtures, redacted evidence,
 //!   scorecards, and baseline regression gates (feature `test-utils`).
-//! - [`test_support`] — deterministic fakes (feature `test-utils`).
+//! - `test_support` — deterministic fakes (feature `test-utils`).
 //!
 //! Phase 1 scope: crate skeleton, config, errors, deterministic state
 //! containers, and a runtime that runs one bounded turn with a fake model
