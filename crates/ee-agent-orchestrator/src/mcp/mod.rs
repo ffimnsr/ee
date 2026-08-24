@@ -4,7 +4,7 @@
 //! The host appends the ee MCP proxy to `session/new` — ACP-native
 //! `McpServer::Acp` when the agent advertises `mcp_capabilities.acp`, the
 //! stdio fallback otherwise.  This module gives the orchestrator provider a
-//! per-prompt [`McpSessionManager`] that:
+//! per-prompt `McpSessionManager` that:
 //!
 //! - connects each advertised server (ACP-native through the framework
 //!   `ClientBridge` `mcp/*` methods; stdio through an rmcp child-process
@@ -26,7 +26,7 @@
 //! from every event, log, diagnostic, schema, and transcript surface.
 //!
 //! Transport policy: the official `rmcp` SDK is the only MCP wire
-//! implementation.  The ACP bridge ([`acp_transport`]) is transport
+//! implementation.  The ACP bridge (`acp_transport`) is transport
 //! plumbing only — it maps the SDK's ACP `mcp/*` types onto rmcp's
 //! `Transport<RoleClient>` trait, mirroring the host's server-side bridge in
 //! `ee-agent-host`; no ACP or MCP wire structs are handrolled.

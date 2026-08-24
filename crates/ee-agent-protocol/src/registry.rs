@@ -9,13 +9,13 @@
 //! Directions mirror the SDK routing enums:
 //!
 //! - [`ClientRequestMethod`] — client→agent requests, mirroring
-//!   [`schema::v1::ClientRequest`].
+//!   [`crate::ClientRequest`].
 //! - [`AgentRequestMethod`] — agent→client requests, mirroring
-//!   [`schema::v1::AgentRequest`].
+//!   [`crate::AgentRequest`].
 //! - [`ClientNotificationMethod`] — client→agent notifications, mirroring
-//!   [`schema::v1::ClientNotification`].
+//!   [`crate::ClientNotification`].
 //! - [`AgentNotificationMethod`] — agent→client notifications, mirroring
-//!   [`schema::v1::AgentNotification`].
+//!   [`crate::AgentNotification`].
 //!
 //! Known SDK gap (documented in tests): the SDK routing enums are untagged
 //! and cannot validate params per method — empty-params variants such as
@@ -126,7 +126,7 @@ fn invalid_params(method: &str, params_type: &str, reason: impl std::fmt::Displa
 
 /// Every request the client can send to an ACP v1 agent.
 ///
-/// Mirrors the SDK's [`schema::v1::ClientRequest`] enum, restricted to the
+/// Mirrors the SDK's [`crate::ClientRequest`] enum, restricted to the
 /// methods `ee` implements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClientRequestMethod {
@@ -276,7 +276,7 @@ impl ClientRequestMethod {
 
 /// Every request an ACP v1 agent can send to the client.
 ///
-/// Mirrors the SDK's [`schema::v1::AgentRequest`] enum, restricted to the
+/// Mirrors the SDK's [`crate::AgentRequest`] enum, restricted to the
 /// methods `ee` implements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AgentRequestMethod {
@@ -423,7 +423,7 @@ fn validate_elicitation_mode(mode: &ElicitationMode) -> std::result::Result<(), 
 
 /// Every notification the client can send to an ACP v1 agent.
 ///
-/// Mirrors the SDK's [`schema::v1::ClientNotification`] enum, restricted to
+/// Mirrors the SDK's [`crate::ClientNotification`] enum, restricted to
 /// the notifications `ee` implements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClientNotificationMethod {
@@ -465,7 +465,7 @@ impl ClientNotificationMethod {
 
 /// Every notification an ACP v1 agent can send to the client.
 ///
-/// Mirrors the SDK's [`schema::v1::AgentNotification`] enum, restricted to
+/// Mirrors the SDK's [`crate::AgentNotification`] enum, restricted to
 /// the notifications `ee` implements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AgentNotificationMethod {

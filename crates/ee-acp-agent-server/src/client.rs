@@ -7,11 +7,11 @@
 //! - Requests flow through the server's FIFO outbound channel, so they share
 //!   the single transport writer path with updates and prompt responses.
 //! - The client's response is routed back by the server run loop through
-//!   [`PendingRequests::handle_response`], which resolves the matching
-//!   pending oneshot by request id.
+//!   `PendingRequests::handle_response`, which resolves the matching pending
+//!   oneshot by request id.
 //! - Pending entries are removed on a matching response, on timeout, on
-//!   write failure, when the owning prompt ends ([`OwnerCleanup`]), and when
-//!   the transport closes ([`PendingRequests::fail_all`]) — a request never
+//!   write failure, when the owning prompt ends (`OwnerCleanup`), and when
+//!   the transport closes (`PendingRequests::fail_all`) — a request never
 //!   outlives its prompt, a timeout, or the connection.
 
 use std::sync::{Arc, Mutex};
@@ -239,7 +239,7 @@ impl ClientBridge {
     ///
     /// The pending entry is always removed: on a matching response, on
     /// timeout, on write failure, or when the owning prompt ends via
-    /// [`OwnerCleanup`].
+    /// `OwnerCleanup`.
     async fn send_request(&self, method: &str, params: Value) -> Result<Value, ProviderError> {
         let id = self.inner.ids.lock().expect("request id generator poisoned").next_id();
         let (sender, receiver) = oneshot::channel();

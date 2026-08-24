@@ -1,10 +1,10 @@
 //! Subagent delegation: logical in-process workers.
 //!
-//! Subagents are not OS processes; they are reduced [`LoopEngine`] runs over
+//! Subagents are not OS processes; they are reduced `LoopEngine` runs over
 //! the shared tool registry, with a scoped role (name, instructions, allowed
 //! tool classes, iteration cap, optional model selection), a child task node
 //! in the task graph, and a bounded summary returned to the parent.  The
-//! [`SubagentManager`] enforces the configured depth and parallelism limits,
+//! `SubagentManager` enforces the configured depth and parallelism limits,
 //! propagates cancellation from parent to children, and merges child memory
 //! items (never sensitive ones) into the parent store — after the child
 //! summary's citations were verified against its execution evidence, and

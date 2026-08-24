@@ -25,7 +25,7 @@ pub fn protocol_version_supported(version: ProtocolVersion) -> bool {
 ///
 /// # Errors
 ///
-/// Returns [`Error`] with code [`ErrorCode::InvalidParams`] when `requested`
+/// Returns [`Error`] with code [`crate::ErrorCode::InvalidParams] when `requested`
 /// is not ACP v1.
 pub fn negotiate_protocol_version(
     requested: ProtocolVersion,

@@ -27,8 +27,8 @@ fn invalid_params(message: impl Into<String>) -> Error {
 ///
 /// # Errors
 ///
-/// Returns [`Error`] with code [`ErrorCode::InvalidParams`] for relative or
-/// empty paths.
+/// Returns [`Error`] with code [`crate::ErrorCode::InvalidParams`] for
+/// relative or empty paths.
 pub fn require_absolute_path(path: &Path) -> std::result::Result<(), Error> {
     if path.is_absolute() {
         Ok(())
@@ -44,8 +44,8 @@ pub fn require_absolute_path(path: &Path) -> std::result::Result<(), Error> {
 ///
 /// # Errors
 ///
-/// Returns [`Error`] with code [`ErrorCode::InvalidParams`] for relative or
-/// empty paths.
+/// Returns [`Error`] with code [`crate::ErrorCode::InvalidParams`] for
+/// relative or empty paths.
 pub fn require_absolute_path_str(path: &str) -> std::result::Result<(), Error> {
     require_absolute_path(Path::new(path))
 }
@@ -56,7 +56,8 @@ pub fn require_absolute_path_str(path: &str) -> std::result::Result<(), Error> {
 ///
 /// # Errors
 ///
-/// Returns [`Error`] with code [`ErrorCode::InvalidParams`] when `line == 0`.
+/// Returns [`Error`] with code [`crate::ErrorCode::InvalidParams`] when
+/// `line == 0`.
 pub fn require_one_based_line(line: u32) -> std::result::Result<(), Error> {
     if line >= 1 {
         Ok(())
@@ -69,8 +70,8 @@ pub fn require_one_based_line(line: u32) -> std::result::Result<(), Error> {
 ///
 /// # Errors
 ///
-/// Returns [`Error`] with code [`ErrorCode::InvalidParams`] on the first
-/// violation.
+/// Returns [`Error`] with code [`crate::ErrorCode::InvalidParams`] on the
+/// first violation.
 pub fn validate_read_text_file(request: &ReadTextFileRequest) -> std::result::Result<(), Error> {
     require_absolute_path(&request.path)?;
     if let Some(line) = request.line {
@@ -83,8 +84,8 @@ pub fn validate_read_text_file(request: &ReadTextFileRequest) -> std::result::Re
 ///
 /// # Errors
 ///
-/// Returns [`Error`] with code [`ErrorCode::InvalidParams`] when the path is
-/// relative.
+/// Returns [`Error`] with code [`crate::ErrorCode::InvalidParams`] when the
+/// path is relative.
 pub fn validate_write_text_file(request: &WriteTextFileRequest) -> std::result::Result<(), Error> {
     require_absolute_path(&request.path)
 }
@@ -93,8 +94,8 @@ pub fn validate_write_text_file(request: &WriteTextFileRequest) -> std::result::
 ///
 /// # Errors
 ///
-/// Returns [`Error`] with code [`ErrorCode::InvalidParams`] when `cwd` is
-/// relative.
+/// Returns [`Error`] with code [`crate::ErrorCode::InvalidParams`] when
+/// `cwd` is relative.
 pub fn validate_terminal_create(request: &CreateTerminalRequest) -> std::result::Result<(), Error> {
     if let Some(cwd) = &request.cwd {
         require_absolute_path(cwd)?;

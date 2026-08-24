@@ -3,7 +3,7 @@
 //! [`AcpTransport`] is the byte boundary between the framework and the
 //! outside world.  [`StdioTransport`] speaks newline-delimited JSON-RPC over
 //! stdin/stdout with a hard `max_frame_bytes` cap enforced *before*
-//! parsing; EOF is a clean shutdown.  [`MemoryTransport`] (feature
+//! parsing; EOF is a clean shutdown.  `MemoryTransport` (feature
 //! `test-utils`) is an in-process queue transport so tests never need to
 //! spawn real subprocesses.
 //!

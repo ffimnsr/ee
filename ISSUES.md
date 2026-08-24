@@ -3910,3 +3910,214 @@ Prove local command behavior across supported agents and disconnected/reconnecte
 - [x] Every local command has deterministic behavior, bounded output, explicit safety semantics, and focused regression coverage.
 - [x] Provider-specific command availability depends only on live advertised capabilities/configuration.
 - [x] No command, transcript, export, clipboard, or context attachment leaks secret values, protected-file content, or unrelated session data.
+
+## OpenCode Go and Zen ACP Agent Plan
+
+Add an `ee-opencode-agent` ACP stdio binary backed by `ee-agent-orchestrator`. It must support OpenCode Zen and OpenCode Go as separate service surfaces, selecting protocol from exact `(surface, model)` routing data rather than assuming every model speaks one OpenAI-shaped API.
+
+Sources reviewed: [OpenCode Go](https://opencode.ai/docs/go/) and [OpenCode Zen](https://opencode.ai/docs/zen/) (2026-08-24).
+
+Current documented endpoint roots:
+
+- Zen: `https://opencode.ai/zen/v1`.
+- Go: `https://opencode.ai/zen/go/v1`.
+- OpenAI Responses dialect: `/responses`.
+- Anthropic Messages dialect: `/messages`.
+- OpenAI-compatible Chat Completions dialect: `/chat/completions`.
+- Model metadata lists live at `/models` under each root; metadata discovery must not silently override an unrecognized model's protocol routing.
+
+Rules:
+
+- [ ] Use `OPENCODE_API_KEY` only for `Authorization: Bearer`; never log, persist, include in setup output, transcript, checkpoint, diagnostic, or error detail.
+- [ ] Require explicit `OPENCODE_SURFACE=zen|go` and `OPENCODE_MODEL`; do not choose a billable model, surface, or protocol by an implicit default.
+- [ ] Route only an exact supported `(surface, model)` catalog entry. Unknown, retired, and mismatched entries fail closed before any request writes credentials.
+- [ ] Keep endpoint construction internal: no unrestricted `OPENCODE_API_URL` override that could disclose an OpenCode credential to an arbitrary origin. Test transport injection remains available without environment endpoint overrides.
+- [ ] Reuse `ee-acp-agent-server`, `ee-agent-orchestrator`, existing MCP bridge, trust policy, recovery, cancellation, streaming, and setup-manifest conventions. Do not add a second ACP loop, tool executor, session store, or simple provider mode.
+- [ ] Consolidate generic OpenAI Chat Completions behavior now shared by OpenRouter and OpenCode. Provider-specific headers and response quirks stay outside shared code.
+- [ ] Treat OpenAI Responses, Anthropic Messages, and OpenAI-compatible Chat Completions as distinct request/response/streaming codecs. Never route by model-name prefix or attempt one dialect after another with same request.
+- [ ] Exclude currently documented Google Generative Language endpoint models from this plan. Surface clear unsupported-model guidance; add Google dialect only through separate protocol and security review.
+
+### Phase 1: Model-surface contract and exact routing catalog
+
+Goal: define stable, auditable OpenCode surface/model routing before HTTP implementation.
+
+#### Work items
+
+- [ ] Add `crates/ee-opencode-agent` to `ee/Cargo.toml` workspace members and workspace dependency aliases.
+  - [ ] Create `crates/ee-opencode-agent/Cargo.toml` using existing workspace dependencies only: `clap`, `dirs`, `ee-acp-agent-server`, `ee-agent-orchestrator`, `ee-agent-protocol`, `reqwest`, `serde_json`, and `tokio`.
+  - [ ] Create `src/lib.rs`, `src/config.rs`, `src/routes.rs`, `src/main.rs`, and protocol-codec modules with minimal public surface.
+- [ ] Define exact routing types in `src/routes.rs`.
+  - [ ] Add `OpenCodeSurface::{Zen, Go}`.
+  - [ ] Add `OpenCodeDialect::{OpenAiResponses, AnthropicMessages, OpenAiChatCompletions}`.
+  - [ ] Add `OpenCodeRoute { surface, model_id, dialect, endpoint }`, where endpoint is constructed only from trusted constants.
+  - [ ] Implement `resolve_route(surface, model_id) -> Result<OpenCodeRoute, ConfigError>` using exact string matches and deterministic error text.
+  - [ ] Keep route table data-driven, one entry per currently documented supported model; no prefix/wildcard fallback.
+- [ ] Populate and test current documented route groups.
+  - [ ] Zen Responses entries cover documented GPT, Grok, and Muse models.
+  - [ ] Zen Messages entries cover documented Claude and Qwen models.
+  - [ ] Zen Chat Completions entries cover documented DeepSeek, MiniMax, GLM, Kimi, Big Pickle, and free OpenAI-compatible models.
+  - [ ] Go Responses entries cover Grok 4.5, GPT 5.6 Luna, and Muse Spark 1.2 Contributor.
+  - [ ] Go Messages entries cover documented MiniMax and Qwen models.
+  - [ ] Go Chat Completions entries cover documented GLM, Kimi, LongCat, DeepSeek, MiMo, Hy3, and Ox Alpha models.
+  - [ ] Explicitly reject currently documented Gemini models with message that Google dialect is not yet supported.
+- [ ] Add route-table unit tests.
+  - [ ] Test representative Zen and Go models resolve to distinct endpoint roots even when model id is shared.
+  - [ ] Test one model from each dialect resolves to exact documented endpoint.
+  - [ ] Test unknown model, cross-surface model, unsupported Google model, empty model, and malformed surface fail before HTTP client construction.
+  - [ ] Test route table has no duplicate `(surface, model_id)` entries.
+
+#### Exit criteria
+
+- [ ] Every supported model resolves through an exact surface-specific route.
+- [ ] No unknown model can cause outbound request or credential-header construction.
+- [ ] Tests lock current Go/Zen endpoint separation and three-dialect mapping.
+
+### Phase 2: Extract shared OpenAI Chat Completions adapter
+
+Goal: remove duplicated chat-completions transport and normalized-orchestrator mapping before adding OpenCode codecs.
+
+#### Work items
+
+- [ ] Create focused shared library module/crate for OpenAI-compatible Chat Completions, named for protocol rather than OpenRouter.
+  - [ ] Move generic request construction, tool-schema conversion, transcript conversion, response/usage parsing, SSE framing, streaming accumulation, retry boundary, and `ModelAdapter` conversion from `ee-openrouter-agent` into shared code.
+  - [ ] Parameterize endpoint, bearer-token source, provider display/error label, timeout, retry policy, system prompt, optional request extensions, and safe custom headers.
+  - [ ] Keep OpenRouter-only `HTTP-Referer`, `X-Title`, reasoning-effort shaping, environment names, and error wording in `ee-openrouter-agent` adapter configuration.
+  - [ ] Preserve no-retry-after-first-output rule for streaming requests.
+  - [ ] Preserve cancellation through `tokio::select!`, unknown-token handling, bounded retry/backoff, and normalized tool-call ids.
+- [ ] Refactor `ee-openrouter-agent` to consume shared Chat Completions adapter with behavior preserved.
+  - [ ] Keep `OPENROUTER_*` variables, defaults, setup manifest, OpenRouter agent identity, recovery policy, and existing test coverage intact.
+  - [ ] Remove moved duplicate parsing/SSE code only after shared tests cover every retained behavior.
+- [ ] Add shared adapter fixture and injected-transport tests.
+  - [ ] Test buffered and SSE text/reasoning/tool-call decoding, fragmented UTF-8, multiple SSE events, malformed tool arguments, and usage extraction.
+  - [ ] Test `401`/`403` never retry, transient/`429` retry before output only, and `Retry-After` remains bounded.
+  - [ ] Test request headers exclude secrets from typed errors and diagnostics.
+
+#### Exit criteria
+
+- [ ] `ee-openrouter-agent` has no private duplicate OpenAI-compatible codec or SSE decoder.
+- [ ] Shared adapter remains provider-neutral and accepts no arbitrary credential-bearing URL.
+- [ ] Existing OpenRouter behavior passes regression tests after extraction.
+
+### Phase 3: OpenCode Responses and Messages codecs
+
+Goal: implement protocol-correct OpenAI Responses and Anthropic Messages adapters against normalized orchestrator types.
+
+#### Work items
+
+- [ ] Add `responses.rs` for OpenAI Responses dialect.
+  - [ ] Convert normalized system/user/assistant/tool transcript into `input` items without losing tool-call identity.
+  - [ ] Convert orchestrator tool definitions into Responses function-tool schema.
+  - [ ] Decode buffered text, reasoning when supplied, function calls, completion state, and input/output usage into `ModelResponse`.
+  - [ ] Decode supported Responses SSE events, including output-text deltas, reasoning deltas when supplied, function-call argument deltas, completion, failure, and usage events.
+  - [ ] Accumulate streamed function arguments before returning a tool intent; reject incomplete/malformed calls before tool execution.
+- [ ] Add `messages.rs` for Anthropic Messages dialect.
+  - [ ] Move system content to top-level `system`; encode remaining transcript as Messages content blocks.
+  - [ ] Convert tool definitions to `{ name, description, input_schema }` and tool observations to correlated `tool_result` blocks.
+  - [ ] Decode `text`, `thinking`, `tool_use`, `stop_reason`, and reported usage into `ModelResponse`.
+  - [ ] Decode Messages SSE lifecycle/content-block events in arrival order; accumulate partial JSON tool input before creating tool intent.
+  - [ ] Map `tool_use` to incomplete orchestrator response and normal end-turn stop to completed response; length/error stops remain non-completed or typed errors as appropriate.
+- [ ] Share provider-neutral safeguards across all three adapters.
+  - [ ] Enforce HTTPS trusted OpenCode origin, JSON content type, bounded response/error body parsing, cancellation, timeout, bounded retry, and secret-redacted error messages.
+  - [ ] Do not retry a request after a streaming text, reasoning, or tool delta reaches the orchestrator sink.
+  - [ ] Keep usage fields unknown when endpoint omits them; never synthesize zero token use.
+- [ ] Add codec fixture suites with no live account or network dependency.
+  - [ ] Request fixtures assert exact endpoint-specific bodies for transcript, tool definitions, and tool observations.
+  - [ ] Buffered and fragmented-SSE fixtures cover text-only, reasoning, one/multiple tool calls, tool result continuation, malformed payload, terminal API error, cancellation, and usage omission/presence.
+  - [ ] Fixture tests prove a request encoded for one dialect cannot be accepted by another dialect's decoder.
+
+#### Exit criteria
+
+- [ ] Responses, Messages, and Chat Completions each map normalized tool turns and streamed output without cross-dialect assumptions.
+- [ ] Every supported OpenCode route has fixture-backed request and response coverage.
+- [ ] Codecs fail closed on malformed protocol data before side-effecting tool execution.
+
+### Phase 4: OpenCode orchestrated agent binary and configuration
+
+Goal: expose one production ACP agent which selects correct OpenCode adapter from safe route/config resolution.
+
+#### Work items
+
+- [ ] Implement `ee-opencode-agent` configuration and `--ee-config` setup manifest.
+  - [ ] Add required secret `OPENCODE_API_KEY` marked secret.
+  - [ ] Add required `OPENCODE_SURFACE` and `OPENCODE_MODEL` inputs with clear Zen/Go labels and exact-model guidance.
+  - [ ] Add validated `OPENCODE_TIMEOUT_MS`, `OPENCODE_SYSTEM_PROMPT`, `OPENCODE_MAX_ITERATIONS`, context-window, retry, and checkpoint knobs matching established agent semantics where appropriate.
+  - [ ] Load `.env` through reused non-mutating parser; process environment wins; empty values are unset.
+  - [ ] Never expose API key or raw Authorization header through config debug/display output.
+- [ ] Implement `OpenCodeModelAdapter` dispatcher.
+  - [ ] Resolve route before building HTTP client or model request.
+  - [ ] Build only dialect adapter selected by `OpenCodeRoute`.
+  - [ ] Implement `ModelAdapter::complete` and `complete_streaming` through selected codec, preserving orchestrator cancellation and `StreamSink` update ordering.
+  - [ ] Report adapter errors with surface/model/dialect context but no credential, raw request body, or unbounded provider error body.
+- [ ] Implement `main.rs` production path.
+  - [ ] Parse args and emit setup manifest without loading credentials or making network calls.
+  - [ ] Resolve configuration, construct `OpenCodeModelAdapter`, and run `OrchestratorProvider` via `AcpAgentServer` over stdio.
+  - [ ] Use durable session state outside workspace under existing ee local-data convention.
+  - [ ] Reuse established OpenRouter orchestrated tool policy unless policy ownership intentionally changes; no new bypass/write privileges.
+  - [ ] Keep agent identity `ee-opencode-agent`, title `OpenCode`, and concise stderr-only process errors.
+- [ ] Add ACP integration tests using framework memory transport.
+  - [ ] Test initialize, session/new, prompt, streamed answer/thought updates, normalized tool call, tool result continuation, cancellation, and session close.
+  - [ ] Test route/config errors return framework-shaped error without writing an HTTP request.
+
+#### Exit criteria
+
+- [ ] User can configure one explicit Go or Zen model and launch standard ACP agent flow.
+- [ ] Binary always runs orchestrated production path; no parallel simple provider/tool loop exists.
+- [ ] Agent applies same ACP/MCP/trust/cancellation boundaries as OpenRouter agent.
+
+### Phase 5: Discovery, UX, documentation, and model lifecycle
+
+Goal: make provider setup understandable while keeping live catalog changes safe.
+
+#### Work items
+
+- [ ] Integrate `ee-opencode-agent --ee-config` into existing agent discovery/setup path.
+  - [ ] Present OpenCode as one provider with explicit surface selection, not as an alias for OpenRouter or a generic OpenAI provider.
+  - [ ] Describe Zen pay-as-you-go and Go subscription/usage-limit behavior as provider-owned; EE must not claim billing, balance, usage, or account management capability.
+  - [ ] Display model ids exactly as required by agent config, without OpenCode TUI-only `opencode/` or `opencode-go/` aliases unless route catalog deliberately supports and normalizes them before resolution.
+- [ ] Add documentation for model routing and secret handling.
+  - [ ] Document Go root `https://opencode.ai/zen/go/v1` and Zen root `https://opencode.ai/zen/v1`.
+  - [ ] Document Responses, Messages, and Chat Completions model classes with representative model ids, plus unsupported Google-dialect behavior.
+  - [ ] Document model availability changes: update exact route table and fixtures from upstream docs; do not rely on model-name heuristics or untrusted live metadata.
+  - [ ] Document OpenCode privacy/retention statements as upstream policy, link source, and avoid claiming EE changes it.
+- [ ] Add bounded optional model-metadata discovery only after static routing works.
+  - [ ] Fetch `/models` only on explicit local discovery action, using resolved trusted surface root and normal timeout/error caps.
+  - [ ] Treat fetched metadata as display-only; unknown metadata cannot select endpoint/dialect or alter static route table.
+  - [ ] Redact/omit credentials and upstream payload fields from transcript/logs; cache only bounded non-secret display fields if caching is added.
+- [ ] Add regression tests for setup manifest, alias normalization/rejection, provider labels, docs examples, discovery failure, and no-billing/no-account UI claims.
+
+#### Exit criteria
+
+- [ ] Setup clearly distinguishes Go from Zen and tells user why models reach different endpoint dialects.
+- [ ] Live catalog discovery cannot change outbound routing or expand trust boundary.
+- [ ] Documentation identifies supported routes, explicit exclusions, and credential safety guarantees.
+
+### Phase 6: Validation, compatibility, and release gate
+
+Goal: prove route selection, codecs, agent integration, and extracted shared code remain correct without live paid API traffic.
+
+#### Work items
+
+- [ ] Run focused formatting and lint checks.
+  - [ ] `cargo fmt --check`
+  - [ ] `cargo clippy --quiet -p ee-opencode-agent --all-targets --all-features -- -D warnings`
+  - [ ] `cargo clippy --quiet -p ee-openrouter-agent --all-targets --all-features -- -D warnings`
+  - [ ] Run shared adapter crate clippy command with `--all-targets --all-features -- -D warnings`.
+- [ ] Run focused quiet tests.
+  - [ ] `cargo test --quiet -p ee-opencode-agent`
+  - [ ] `cargo test --quiet -p ee-openrouter-agent`
+  - [ ] Run shared adapter crate test command.
+  - [ ] Run `cargo test --quiet -p ee-agent-orchestrator` when normalized adapter contracts change.
+  - [ ] Run `cargo test --quiet -p ee-acp-agent-server` when ACP integration fixtures change.
+- [ ] Run compatibility/security checks.
+  - [ ] Test all route rows resolve to exact trusted HTTPS endpoint and correct dialect.
+  - [ ] Test unknown/model-surface mismatch, unsupported Google, malformed endpoint metadata, missing key, and invalid header values fail without request dispatch.
+  - [ ] Test all recorded errors, checkpoints, update payloads, setup manifests, and diagnostics omit secret value.
+  - [ ] Test MCP tool policy, cancellation, stream ordering, retry-after-output prevention, recovery, and session close behavior through each dialect's scripted fixture.
+  - [ ] Run `git --no-pager diff --check`.
+  - [ ] Run `./scripts/test-workspace-summary.sh` after focused package validation.
+
+#### Exit criteria
+
+- [ ] All supported Go and Zen model routes have deterministic offline request/response/stream regression coverage.
+- [ ] OpenRouter remains behavior-compatible after shared Chat Completions extraction.
+- [ ] No validation requires or performs live OpenCode account, balance, billing, or paid model call.

@@ -1,8 +1,8 @@
 //! Orchestrated OpenRouter mode: OpenRouter as a model adapter.
 //!
 //! [`OpenRouterModelAdapter`] implements
-//! [`ModelAdapter`](ee_agent_orchestrator::ModelAdapter), so
-//! `ee-openrouter-agent` can run through [`OrchestratorProvider`](ee_agent_orchestrator::OrchestratorProvider):
+//! [`ModelAdapter`], so `ee-openrouter-agent` can run through
+//! `ee_agent_orchestrator::OrchestratorProvider`:
 //! the orchestrator owns the bounded model–tool loop, the task graph, memory,
 //! budgets, and policy gates, while OpenRouter only answers chat-completions
 //! round trips.

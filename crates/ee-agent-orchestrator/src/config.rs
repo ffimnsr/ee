@@ -45,7 +45,7 @@ pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 /// When disabled (the default), turns keep today's fail-fast behavior: a
 /// deadline or transient failure is an ordinary error.  When enabled, the
 /// runtime captures durable checkpoints at turn milestones, deadline and
-/// timeout interruptions become [`TurnOutcome::Interrupted`], and a resumed
+/// timeout interruptions become `TurnOutcome::Interrupted`, and a resumed
 /// turn restarts only the wall-clock slice while retaining cumulative budget
 /// counters, completed tool results, and the task/memory stores.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1967,7 +1967,7 @@ impl rmcp::ServerHandler for EeMcpProxy {
         std::future::ready(Ok(ListToolsResult::with_all_items(self.tools())))
     }
 
-    /// Dispatches a tool call to the backend; see [`EeMcpProxy::dispatch_tool`].
+    /// Dispatches a tool call to the backend via `EeMcpProxy::dispatch_tool`.
     fn call_tool(
         &self,
         request: CallToolRequestParams,

@@ -38,9 +38,9 @@ use crate::transport::{AcpTransport, JsonRpcFrame, StdioTransport};
 /// One item on the server's FIFO outbound channel, produced by prompt tasks
 /// and drained by the run loop.
 ///
-/// Public so the `test-utils` constructors of [`UpdateSink`]
-/// (crate::updates::UpdateSink) and [`ClientBridge`](crate::client::ClientBridge)
-/// can expose channels that capture these events without a running server;
+/// Public so the `test-utils` constructors of [`crate::updates::UpdateSink`]
+/// and [`crate::client::ClientBridge`] can expose channels that capture these
+/// events without a running server;
 /// consumers never construct this enum themselves.
 #[derive(Debug)]
 pub enum OutboundEvent {

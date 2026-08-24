@@ -10,7 +10,7 @@
 
 use super::{OperationIdentity, TransportKind, TrustCategory, TrustOperation, WorkspaceIdentity};
 
-/// Validated exact MCP invocation, matched field-for-field by [`McpRule`]
+/// Validated exact MCP invocation, matched field-for-field by `McpRule`
 /// (see `super::rules`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct McpInvocation {

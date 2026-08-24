@@ -708,10 +708,10 @@ impl OrchestratorRuntime {
             .await
     }
 
-    /// Runs one strategic turn: selects a [`TurnStrategy`] from observed
+    /// Runs one strategic turn: selects a `TurnStrategy` from observed
     /// context, records the decision as an event, executes the strategy
     /// wrapper, and returns the ACP result together with the typed
-    /// [`FinalResponse`].  Strategy execution never bypasses the configured
+    /// `FinalResponse`.  Strategy execution never bypasses the configured
     /// budget, policy, or cancellation gates.
     pub async fn run_turn_strategic(
         &self,

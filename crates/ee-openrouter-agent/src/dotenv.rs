@@ -19,7 +19,7 @@ pub fn load_dotenv(path: &Path) -> io::Result<BTreeMap<String, String>> {
 
 /// Parses `KEY=VALUE` lines: comments and blank lines are skipped, an
 /// `export ` prefix is accepted, invalid names are skipped, and values are
-/// unquoted ([`unquote_dotenv_value`]).
+/// unquoted (`unquote_dotenv_value`).
 pub fn parse_dotenv(text: &str) -> BTreeMap<String, String> {
     let mut values = BTreeMap::new();
     for raw_line in text.lines() {

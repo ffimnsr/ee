@@ -2,7 +2,7 @@
 //!
 //! The official ACP Rust SDK (`agent-client-protocol = 2.x`, feature
 //! `unstable_mcp_over_acp`) provides the MCP-over-ACP wire types in its
-//! **v1** schema module: [`McpServer::Acp`] session metadata entries,
+//! **v1** schema module: [`crate::McpServer::Acp`] session metadata entries,
 //! `mcp/connect`, `mcp/message`, and `mcp/disconnect` requests, and the
 //! runtime-agnostic [`McpServer`] / [`McpServerConnect`] serving machinery.
 //! These types are not ACP v2-only: they live in `schema::v1` and are gated
@@ -26,7 +26,7 @@
 //! `ee-agent-host` keeps a minimal in-process transport adapter (documented
 //! in `ee-agent-host/src/mcp_over_acp.rs`) that bridges the SDK's
 //! MCP-over-ACP requests into the existing `rmcp`-based
-//! [`ee_mcp::EeMcpProxy`] server surface.  The bridge reuses the SDK's wire
+//! `ee_mcp::EeMcpProxy` server surface.  The bridge reuses the SDK's wire
 //! types below and the `rmcp` server loop; no ACP/MCP wire structs are
 //! handrolled.
 //!

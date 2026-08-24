@@ -132,7 +132,7 @@
 //! - [`rate_limit`] — provider-level concurrency and per-window limits shared
 //!   across subagents, with deadline-aware fail-fast queuing.
 //! - [`streaming`] — streamed text/reasoning chunks merged into consistent
-//!   transcript messages and forwarded through [`UpdateSink`] as they arrive.
+//!   transcript messages and forwarded through `UpdateSink` as they arrive.
 //! - [`dialects`] — OpenAI/OpenRouter, Anthropic, and local JSON tool-call
 //!   dialect normalization into [`ToolIntent`] values, fail-closed on
 //!   malformed payloads.

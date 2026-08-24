@@ -41,6 +41,28 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
+  docs:
+    name: Documentation check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ee-rust-${{ runner.os }}
+          cache-on-failure: "true"
+
+      - name: Check documentation
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
+
   format:
     name: Format check
     runs-on: ubuntu-latest

@@ -2,7 +2,7 @@
 //!
 //! [`OrchestratorError`] is the single error type of the orchestrator loop;
 //! the conversion into
-//! [`ProviderError`](ee_acp_agent_server::ProviderError) lets an
+//! [`ProviderError`] lets an
 //! orchestrator-backed provider surface failures through the framework's
 //! JSON-RPC error shaping (policy denials become permission errors,
 //! cancellation stays cancellation, everything else is a backend failure).

@@ -65,7 +65,7 @@ impl RecoverableFault {
 
 /// Structured recoverable-turn payload carried in a JSON-RPC error `data`
 /// field (key `"recoverable"`) and inside
-/// [`ProviderError::Recoverable`](crate::ProviderError).
+/// `ProviderError::Recoverable`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RecoverableError {

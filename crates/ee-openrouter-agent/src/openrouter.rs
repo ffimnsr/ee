@@ -1,7 +1,7 @@
 //! OpenRouter HTTP request/response and Server-Sent Events mapping.
 //!
 //! Buffered calls remain available for compacting session history. Normal agent
-//! turns use [`call_openrouter_streaming`] so text and reasoning deltas reach
+//! turns use `call_openrouter_streaming` so text and reasoning deltas reach
 //! the ACP client while OpenRouter is still generating them.
 
 use std::collections::BTreeMap;

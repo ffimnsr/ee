@@ -72,7 +72,7 @@ impl SessionUpdateOrder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error`] with code [`ErrorCode::InvalidParams`] when a
+    /// Returns [`Error`] with code [`crate::ErrorCode::InvalidParams`] when a
     /// `tool_call_update` references an unknown `toolCallId` and lacks the
     /// fields needed to construct the tool call.
     pub fn register_update(&mut self, update: &SessionUpdate) -> std::result::Result<(), Error> {

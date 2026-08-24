@@ -16,7 +16,7 @@
 //! - Secret values are never positional CLI arguments, config plaintext
 //!   expansions, log fields, debug output, or error interpolation.
 //!   Plaintext-bearing methods are crate-private and expose values only as
-//!   [`Zeroizing`] buffers.
+//!   `Zeroizing` buffers.
 //! - References are exact `secret://<name>` strings: no interpolation,
 //!   concatenation, environment expansion, percent-decoding, or recursion.
 //! - Parsing, rendering, and store construction never touch a real keychain,

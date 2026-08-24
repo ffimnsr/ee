@@ -3,7 +3,7 @@
 //! Everything here either wraps an [`rmcp`] error (transport, handshake,
 //! protocol) or represents ee policy enforcement (version pinning,
 //! capability rejection, invalid primitive shapes).  No JSON-RPC-level error
-//! types are duplicated: protocol errors are [`rmcp::Error`].
+//! types are duplicated: protocol errors come from `rmcp`.
 
 use rmcp::service::{ClientInitializeError, ServiceError};
 

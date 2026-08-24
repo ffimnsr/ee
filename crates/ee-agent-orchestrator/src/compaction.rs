@@ -3,7 +3,7 @@
 //! `/compact` turns (agent-advertised slash commands arriving as ordinary
 //! `session/prompt` text) run a single model call over a provenance-rich,
 //! byte-bounded context and store the result as model-derived session
-//! memory.  Deterministic [`compact_memory`] runs first and stays the only
+//! memory.  Deterministic `compact_memory` runs first and stays the only
 //! mechanism that removes structured memory; the LLM summary is purely
 //! additive and can never delete decisions, constraints, or validation
 //! results.  The compaction model call is made without tools and is bounded

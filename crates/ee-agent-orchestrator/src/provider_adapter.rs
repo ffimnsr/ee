@@ -1,5 +1,5 @@
 //! ACP provider adapter: wraps [`OrchestratorRuntime`] behind the framework's
-//! [`AgentProvider`](ee_acp_agent_server::AgentProvider) trait.
+//! [`AgentProvider`] trait.
 //!
 //! Agent binaries can serve ACP either framework-only (provider implements
 //! [`AgentProvider`] directly) or orchestration-backed: build an

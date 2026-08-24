@@ -1,4 +1,4 @@
-//! OpenRouter ACP v1 agent provider built on [`ee-acp-agent-server`].
+//! OpenRouter ACP v1 agent provider built on `ee-acp-agent-server`.
 //!
 //! [`provider::OpenRouterProvider`] carries the business logic (session
 //! history, prompt turns, the bounded tool loop) while the framework owns

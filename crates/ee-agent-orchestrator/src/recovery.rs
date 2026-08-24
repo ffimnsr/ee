@@ -5,7 +5,7 @@
 //! a [`RecoverableInterruption`] instead of a fatal error: completed work is
 //! durable in a checkpoint and the same session may resume.  Interruptions
 //! map onto the wire type
-//! [`RecoverableError`](ee_agent_protocol::RecoverableError) so hosts can
+//! [`RecoverableError`] so hosts can
 //! offer Resume/Discard without parsing error strings.
 
 use std::time::Duration;
