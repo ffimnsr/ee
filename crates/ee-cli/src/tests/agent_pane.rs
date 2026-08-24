@@ -3159,6 +3159,9 @@ fn steer_prioritizes_message_and_queue_runs_follow_up_after_turn_finishes() {
     wait_until(&mut app, "turn running", |app| {
         app.agents.threads[0].state == ThreadUiState::Running
     });
+    wait_until(&mut app, "original prompt sent", |_| {
+        fake.agent().requests_by_method("session/prompt").len() == 1
+    });
 
     type_text(&mut app, "/queue follow up after steer");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
