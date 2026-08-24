@@ -5,7 +5,9 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::time::Instant;
 
-use git2::{Diff, DiffFormat, DiffOptions, ErrorCode, Repository, Status, StatusOptions};
+#[cfg(any(feature = "agents", test))]
+use git2::DiffOptions;
+use git2::{Diff, DiffFormat, ErrorCode, Repository, Status, StatusOptions};
 use similar::{ChangeTag, TextDiff};
 
 pub(crate) const DEFAULT_GIT_STATUS_FILE_LIMIT: usize = 512;
@@ -33,7 +35,6 @@ pub(crate) struct GitRepository {
     root: PathBuf,
 }
 
-#[allow(dead_code)] // `staged_diff` stays library-backed for a future optional MCP tool.
 impl GitRepository {
     /// Discovers repository containing `path`. A non-repository path returns `Ok(None)`.
     pub(crate) fn discover(path: &Path) -> Result<Option<Self>, git2::Error> {
@@ -112,11 +113,13 @@ impl GitRepository {
         Ok(report)
     }
 
+    #[cfg(any(feature = "agents", test))]
     pub(crate) fn unstaged_diff(&self, limits: GitReadLimits) -> Result<GitDiff, git2::Error> {
         self.unstaged_diff_for_relative_path(None, limits)
     }
 
     /// Produces an unstaged diff for one repository-relative path.
+    #[cfg(any(feature = "agents", test))]
     pub(crate) fn unstaged_diff_for_path(
         &self,
         path: &Path,
@@ -126,6 +129,7 @@ impl GitRepository {
         self.unstaged_diff_for_relative_path(Some(&path), limits)
     }
 
+    #[cfg(any(feature = "agents", test))]
     pub(crate) fn staged_diff(&self, limits: GitReadLimits) -> Result<GitDiff, git2::Error> {
         let repository = self.open()?;
         let index = repository.index()?;
@@ -138,6 +142,7 @@ impl GitRepository {
         Repository::open(&self.root)
     }
 
+    #[cfg(any(feature = "agents", test))]
     fn unstaged_diff_for_relative_path(
         &self,
         path: Option<&Path>,

@@ -472,6 +472,7 @@ async fn mcp_over_acp_connect_and_tools_list_round_trip() {
             "ee_terminal_release",
             "ee_git_status",
             "ee_git_diff",
+            "ee_git_diff_staged",
             "ee_git_diff_file",
             "ee_changed_files",
             "ee_review_context",
@@ -480,6 +481,7 @@ async fn mcp_over_acp_connect_and_tools_list_round_trip() {
             "ee_read_notes",
             "ee_read_note",
             "ee_file_dependency_map",
+            "ee_symbol_dependency_map",
             "ee_tools_manifest",
             "ee_diagnostics",
         ]

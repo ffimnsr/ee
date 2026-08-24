@@ -224,12 +224,6 @@ impl AgentThread {
                 blocks: prompt.clone(),
             });
         }
-        let _ = self
-            .shared
-            .events
-            .send(AgentEvent::TurnStarted { session_id: self.session_id.clone() });
-        *self.shared.turn_started.lock().expect("turn state poisoned") = Some(Instant::now());
-
         let (cancel_tx, cancel_rx) = watch::channel(false);
         {
             let mut turn = self.shared.turn.lock().expect("turn state poisoned");
@@ -238,6 +232,11 @@ impl AgentThread {
             }
             *turn = Some(cancel_tx);
         }
+        *self.shared.turn_started.lock().expect("turn state poisoned") = Some(Instant::now());
+        let _ = self
+            .shared
+            .events
+            .send(AgentEvent::TurnStarted { session_id: self.session_id.clone() });
 
         let result = self.connection.send_prompt(self.session_id.clone(), prompt, cancel_rx).await;
         self.finish_turn();

@@ -52,6 +52,7 @@ use crate::model::ModelAdapter;
 use crate::policy::{PolicyEngine, ToolPolicy};
 use crate::recovery::TurnOutcome;
 use crate::runtime::OrchestratorRuntime;
+use crate::session_store::SessionStateStore;
 use crate::tasks::TaskGraph;
 
 /// Default implementation name advertised in `initialize` responses.
@@ -73,6 +74,11 @@ pub struct OrchestratorProviderConfig {
     /// side-effect classification overrides for session-advertised MCP
     /// servers.
     pub mcp: McpToolPolicy,
+    /// Optional root for durable normal-session snapshots. This is separate
+    /// from recovery checkpoints, which represent interrupted turns only.
+    pub session_state_dir: Option<std::path::PathBuf>,
+    /// Maximum serialized bytes retained for one normal-session snapshot.
+    pub max_session_state_bytes: usize,
 }
 
 impl Default for OrchestratorProviderConfig {
@@ -85,6 +91,8 @@ impl Default for OrchestratorProviderConfig {
             )
             .title(DEFAULT_IMPLEMENTATION_TITLE),
             mcp: McpToolPolicy::default(),
+            session_state_dir: None,
+            max_session_state_bytes: crate::config::DEFAULT_MAX_CHECKPOINT_BYTES,
         }
     }
 }
@@ -93,6 +101,8 @@ impl Default for OrchestratorProviderConfig {
 struct SessionRuntime {
     runtime: Arc<OrchestratorRuntime>,
     system_context: String,
+    /// Workspace used to scope durable state and avoid cross-workspace loads.
+    workspace: std::path::PathBuf,
     /// Current ACP mode, kept in provider state so its policy and prompt
     /// instructions remain aligned with framework session state.
     mode: SessionModeId,
@@ -126,6 +136,7 @@ const CONVERSATION_MAX_MESSAGES: usize = 256;
 const ASK_MODE_ID: &str = "ask";
 const WRITE_MODE_ID: &str = "write";
 const PLAN_MODE_ID: &str = "plan";
+const PLAN_PAYLOAD_MARKER: &str = "<!-- ee-plan";
 
 fn default_session_mode() -> SessionModeId {
     SessionModeId::new(ASK_MODE_ID)
@@ -175,7 +186,33 @@ fn mode_system_context(system_context: String, mode: &SessionModeId) -> String {
             "Agent mode: ask. Answer directly; use read-only tools when needed. Do not modify files, run commands, or delegate."
         }
         PLAN_MODE_ID => {
-            "Agent mode: plan. Investigate with read-only tools, then return an actionable plan. Do not modify files, run commands, or delegate."
+            r#"Agent mode: plan. Investigate with read-only tools when needed, then return a concrete implementation plan, not a general explanation or a promise to investigate later.
+
+Format final response exactly with these sections:
+## Plan
+1. `<file or symbol>` — exact change, reason, dependency/order, and observable success criterion.
+2. Continue one numbered item per independently actionable step.
+## Validation
+- Name exact tests, checks, or manual verification for the completed implementation; say why validation cannot run when none applies.
+## Open questions
+- List only blockers that require a user decision; otherwise write `None`.
+
+Every plan step must name affected files or symbols when known, describe an executable change, and state how completion is verified. Do not claim implementation is complete. Do not modify files, run commands, or delegate.
+
+After `## Open questions`, include exactly one machine-readable payload. Keep it synchronized with `## Plan` and use this exact shape:
+<!-- ee-plan
+[
+  {
+    "title": "short task title",
+    "action": "exact implementation action",
+    "scope": "affected file or symbol",
+    "expected_result": "observable completed state",
+    "verification": "specific test, check, or manual verification",
+    "depends_on": ["prior task title or #index"]
+  }
+]
+-->
+The payload must contain at least one task. It is hidden from rendered Markdown and becomes the ACP task plan."#
         }
         WRITE_MODE_ID => {
             "Agent mode: write. Implement task with allowed tools. Existing host approval gates remain required for writes and execution."
@@ -183,6 +220,31 @@ fn mode_system_context(system_context: String, mode: &SessionModeId) -> String {
         _ => "Agent mode: unknown. Do not invoke tools or make changes.",
     };
     format!("{system_context}\n\n{instruction}")
+}
+
+fn parse_plan_items(response: &str) -> Result<Vec<crate::plan_compiler::PlanInput>, ProviderError> {
+    let (_, payload) = response.split_once(PLAN_PAYLOAD_MARKER).ok_or_else(|| {
+        ProviderError::BackendFailure(
+            "plan mode response omitted required <!-- ee-plan ... --> payload".to_string(),
+        )
+    })?;
+    let (payload, _) = payload.split_once("-->").ok_or_else(|| {
+        ProviderError::BackendFailure(
+            "plan mode payload is missing its closing --> marker".to_string(),
+        )
+    })?;
+    let items: Vec<crate::plan_compiler::PlanInput> = serde_json::from_str(payload.trim())
+        .map_err(|error| {
+            ProviderError::BackendFailure(format!(
+                "plan mode payload is not valid plan JSON: {error}"
+            ))
+        })?;
+    if items.is_empty() {
+        return Err(ProviderError::BackendFailure(
+            "plan mode payload must contain at least one task".to_string(),
+        ));
+    }
+    Ok(items)
 }
 
 /// Serialized orchestrator state kept when a session closes so a later
@@ -210,6 +272,7 @@ pub struct OrchestratorProvider<M> {
     policy: PolicyEngine,
     sessions: Arc<Mutex<HashMap<String, SessionRuntime>>>,
     persisted: Arc<Mutex<HashMap<String, PersistedSession>>>,
+    session_store: Arc<SessionStateStore>,
     next_session: Arc<AtomicU64>,
 }
 
@@ -221,6 +284,7 @@ impl<M> Clone for OrchestratorProvider<M> {
             policy: self.policy.clone(),
             sessions: self.sessions.clone(),
             persisted: self.persisted.clone(),
+            session_store: self.session_store.clone(),
             next_session: self.next_session.clone(),
         }
     }
@@ -240,12 +304,17 @@ impl<M: ModelAdapter> OrchestratorProvider<M> {
         model: Arc<M>,
         policy: PolicyEngine,
     ) -> Self {
+        let session_store = Arc::new(SessionStateStore::new(
+            config.session_state_dir.clone(),
+            config.max_session_state_bytes,
+        ));
         Self {
             config,
             model,
             policy,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             persisted: Arc::new(Mutex::new(HashMap::new())),
+            session_store,
             next_session: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -391,6 +460,31 @@ fn record_user_message(
     }
 }
 
+/// Appends streamed agent text to one replay message. Providers may emit tiny
+/// deltas (even one character each); persisting each delta as a distinct ACP
+/// message makes restored TUI history render one row per fragment.
+fn record_agent_message(
+    conversation: &Arc<Mutex<Vec<ConversationMessage>>>,
+    text: impl AsRef<str>,
+) {
+    let text = text.as_ref();
+    if text.is_empty() {
+        return;
+    }
+    let mut log = conversation.lock().expect("conversation poisoned");
+    if let Some(last) = log.last_mut()
+        && last.role == ConversationRole::Agent
+    {
+        last.text.push_str(text);
+        return;
+    }
+    log.push(ConversationMessage { role: ConversationRole::Agent, text: text.to_string() });
+    if log.len() > CONVERSATION_MAX_MESSAGES {
+        let overflow = log.len() - CONVERSATION_MAX_MESSAGES;
+        log.drain(..overflow);
+    }
+}
+
 /// Streams a recorded conversation to the client as `user_message_chunk` /
 /// `agent_message_chunk` updates, in order, with deterministic replay ids
 /// (ACP v1 `session/load` conversation replay).  With no sink (or nothing
@@ -493,12 +587,17 @@ fn initial_commands(recovery_enabled: bool) -> Vec<ee_agent_protocol::AvailableC
 }
 
 /// Next session number: the in-process counter, raised past every session id
-/// that survives in the durable checkpoint store (cross-restart collision
-/// guard so a reconnected `session-1` is never shadowed by a fresh one).
-fn next_session_number(next_session: &AtomicU64, recovery: &crate::config::RecoveryConfig) -> u64 {
+/// that survives in normal-session storage or the recovery checkpoint store.
+/// This prevents a restarted provider from shadowing `session-1`.
+fn next_session_number(
+    next_session: &AtomicU64,
+    recovery: &crate::config::RecoveryConfig,
+    durable_session_ids: Vec<String>,
+) -> u64 {
     let base = CheckpointStore::new(recovery)
         .session_ids()
         .into_iter()
+        .chain(durable_session_ids)
         .filter_map(|id| {
             id.strip_prefix(&format!("{SESSION_ID_PREFIX}-"))
                 .and_then(|suffix| suffix.parse::<u64>().ok())
@@ -511,6 +610,53 @@ fn next_session_number(next_session: &AtomicU64, recovery: &crate::config::Recov
     let number = previous.max(base);
     next_session.fetch_max(number + 1, Ordering::Relaxed);
     number
+}
+
+fn session_snapshot(session: &SessionRuntime) -> PersistedSession {
+    PersistedSession {
+        tasks: session.runtime.tasks(),
+        memory: session.runtime.memory(),
+        mode: session.mode.clone(),
+        conversation: normalize_conversation(
+            session.conversation.lock().expect("conversation poisoned").clone(),
+        ),
+    }
+}
+
+/// Merges legacy per-delta records while preserving user/agent turn order.
+/// Snapshots written before adjacent agent chunks were coalesced are repaired
+/// on their next load and subsequent save.
+fn normalize_conversation(conversation: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
+    let mut normalized: Vec<ConversationMessage> = Vec::with_capacity(conversation.len());
+    for message in conversation {
+        if message.role == ConversationRole::Agent
+            && let Some(last) = normalized.last_mut()
+            && last.role == ConversationRole::Agent
+        {
+            last.text.push_str(&message.text);
+        } else {
+            normalized.push(message);
+        }
+    }
+    normalized
+}
+
+fn persist_session_snapshot(
+    store: &SessionStateStore,
+    implementation_name: &str,
+    session_id: &SessionId,
+    sessions: &Arc<Mutex<HashMap<String, SessionRuntime>>>,
+) -> Result<(), ProviderError> {
+    let (workspace, state) = {
+        let sessions = sessions.lock().expect("adapter sessions poisoned");
+        let session = sessions.get(&session_id.to_string()).ok_or_else(|| {
+            ProviderError::BackendFailure(format!("no orchestrator state for session {session_id}"))
+        })?;
+        (session.workspace.clone(), session_snapshot(session))
+    };
+    store
+        .save(implementation_name, &workspace, &session_id.to_string(), &state)
+        .map_err(ProviderError::from)
 }
 
 fn workspace_system_context(
@@ -570,13 +716,18 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
         let model = self.model.clone();
         let policy = self.policy.clone();
         let sessions = self.sessions.clone();
+        let session_store = self.session_store.clone();
+        let implementation = self.config.implementation.clone();
         let next_session = self.next_session.clone();
         let recovery_enabled = config.recovery.enabled;
         Box::pin(async move {
             // Monotonic id per process, raised past ids that survive in the
-            // durable checkpoint store so a reconnected session is never
-            // shadowed by a fresh one after a restart.
-            let number = next_session_number(&next_session, &config.recovery);
+            // durable stores so a reconnected session is never shadowed by a
+            // fresh one after a restart.
+            let durable_session_ids = session_store
+                .session_ids(&implementation.name, &ctx.cwd)
+                .map_err(ProviderError::from)?;
+            let number = next_session_number(&next_session, &config.recovery, durable_session_ids);
             let session_id = SessionId::new(format!("{SESSION_ID_PREFIX}-{number}"));
             let system_context = workspace_system_context(&ctx.cwd, &ctx.additional_directories);
             let mode = default_session_mode();
@@ -589,16 +740,26 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
             runtime.register_builtins(&session_id).map_err(|error| {
                 ProviderError::BackendFailure(format!("failed to register built-in tools: {error}"))
             })?;
-            sessions.lock().expect("adapter sessions poisoned").insert(
-                session_id.to_string(),
-                SessionRuntime {
-                    runtime,
-                    system_context,
-                    mode: mode.clone(),
-                    mcp_servers,
-                    conversation: Arc::new(Mutex::new(Vec::new())),
-                },
-            );
+            let entry = SessionRuntime {
+                runtime,
+                system_context,
+                workspace: ctx.cwd.clone(),
+                mode: mode.clone(),
+                mcp_servers,
+                conversation: Arc::new(Mutex::new(Vec::new())),
+            };
+            session_store
+                .save(
+                    &implementation.name,
+                    &entry.workspace,
+                    &session_id.to_string(),
+                    &session_snapshot(&entry),
+                )
+                .map_err(ProviderError::from)?;
+            sessions
+                .lock()
+                .expect("adapter sessions poisoned")
+                .insert(session_id.to_string(), entry);
             Ok(SessionInit::new(session_id)
                 .commands(initial_commands(recovery_enabled))
                 .modes(session_modes(mode)))
@@ -615,6 +776,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
         let policy = self.policy.clone();
         let sessions = self.sessions.clone();
         let persisted = self.persisted.clone();
+        let session_store = self.session_store.clone();
         let session_id = ctx.session_id.clone();
         let recovery_enabled = config.recovery.enabled;
         Box::pin(async move {
@@ -637,6 +799,12 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                 .lock()
                 .expect("adapter persisted poisoned")
                 .remove(&session_id.to_string());
+            let state = match state {
+                Some(state) => Some(state),
+                None => session_store
+                    .load(&implementation.name, &ctx.cwd, &session_id.to_string())
+                    .map_err(ProviderError::from)?,
+            };
             let (runtime, conversation, mode) = match state {
                 Some(state) => {
                     let mode = state.mode;
@@ -648,7 +816,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                             state.tasks,
                             state.memory,
                         )),
-                        state.conversation,
+                        normalize_conversation(state.conversation),
                         mode,
                     )
                 }
@@ -692,6 +860,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                 SessionRuntime {
                     runtime,
                     system_context,
+                    workspace: ctx.cwd.clone(),
                     mode: mode.clone(),
                     mcp_servers,
                     conversation: Arc::new(Mutex::new(conversation)),
@@ -764,6 +933,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                     SessionRuntime {
                         runtime,
                         system_context,
+                        workspace: ctx.cwd.clone(),
                         mode: mode.clone(),
                         mcp_servers,
                         conversation: Arc::new(Mutex::new(Vec::new())),
@@ -786,6 +956,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
     ) -> ProviderFuture<Result<PromptResult, ProviderError>> {
         let session_id = ctx.session_id.clone();
         let sessions = self.sessions.clone();
+        let session_store = self.session_store.clone();
         let mcp_policy = self.config.mcp.clone();
         let implementation_name = self.config.implementation.name.clone();
         Box::pin(async move {
@@ -823,10 +994,17 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
             let is_compact = parse_slash_command(&prompt_text)
                 .is_some_and(|command| command.name == COMPACT_COMMAND_NAME);
             if is_compact {
-                return runtime
+                let result = runtime
                     .run_turn_with_system_context(ctx, sink, client, cancel, system_context)
                     .await
-                    .map_err(ProviderError::from);
+                    .map_err(ProviderError::from)?;
+                persist_session_snapshot(
+                    &session_store,
+                    &implementation_name,
+                    &session_id,
+                    &sessions,
+                )?;
+                return Ok(result);
             }
             // `/discard` rejects a paused turn's pending checkpoint: the
             // interrupted work is dropped instead of resumed.  Only valid
@@ -849,11 +1027,21 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
             let resume_command = recovery.enabled && is_resume_command(&prompt_text);
             if !has_pending {
                 record_user_message(&conversation, prompt_text);
+                // Persist prompt receipt before model work so an abrupt host
+                // shutdown never loses the user's last message.
+                persist_session_snapshot(
+                    &session_store,
+                    &implementation_name,
+                    &session_id,
+                    &sessions,
+                )?;
             }
             // Record the client-visible conversation for `session/load`
             // replay: user prompts here, agent text chunks through a sink
             // observer.
             let recording_conversation = conversation.clone();
+            let plan_output = Arc::new(Mutex::new(String::new()));
+            let recorded_plan_output = plan_output.clone();
             let sink = sink.with_observer(Arc::new(move |update| {
                 if let SessionUpdate::AgentMessageChunk(chunk) = update {
                     let text = match &chunk.content {
@@ -861,15 +1049,12 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                         _ => String::new(),
                     };
                     if !text.is_empty() {
-                        let mut log = recording_conversation.lock().expect("conversation poisoned");
-                        log.push(ConversationMessage { role: ConversationRole::Agent, text });
-                        if log.len() > CONVERSATION_MAX_MESSAGES {
-                            let overflow = log.len() - CONVERSATION_MAX_MESSAGES;
-                            log.drain(..overflow);
-                        }
+                        record_agent_message(&recording_conversation, &text);
+                        recorded_plan_output.lock().expect("plan output poisoned").push_str(&text);
                     }
                 }
             }));
+            let plan_sink = sink.clone();
             // Phase 12: bridge the session's MCP servers into the tool
             // registry for this prompt.  The manager is per prompt (the
             // `ClientBridge` is per prompt), while the validated descriptors
@@ -900,7 +1085,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                 McpTurnCleanup { runtime: runtime.clone(), manager: Some(manager), registered };
             // The framework's cancellation watch flips on `session/cancel`
             // and `session/close`; run_turn observes it and stops promptly.
-            let provider_name = implementation_name;
+            let provider_name = implementation_name.clone();
             // Auto-resume needs the prompt inputs after the first run consumed
             // them; clone once up front.
             let resume_ctx = ctx.clone();
@@ -964,26 +1149,82 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                 }
                 Err(error) => Err(ProviderError::from(error)),
             };
+            let result = if mode.to_string() == PLAN_MODE_ID {
+                match result {
+                    Ok(prompt_result) => {
+                        let plan_output = plan_output.lock().expect("plan output poisoned").clone();
+                        let plan_result = parse_plan_items(&plan_output).and_then(|items| {
+                            let entries = runtime
+                                .install_plan(&items)
+                                .map_err(|error| {
+                                    ProviderError::BackendFailure(format!(
+                                        "plan mode rejected: {error}"
+                                    ))
+                                })?
+                                .plan_entries();
+                            plan_sink.plan_replace(entries).map_err(|error| {
+                                ProviderError::BackendFailure(format!(
+                                    "plan emission failed: {error}"
+                                ))
+                            })
+                        });
+                        plan_result.map(|()| prompt_result)
+                    }
+                    Err(error) => Err(error),
+                }
+            } else {
+                result
+            };
             cleanup.finish().await;
-            result
+            match result {
+                Ok(prompt_result) => {
+                    persist_session_snapshot(
+                        &session_store,
+                        &implementation_name,
+                        &session_id,
+                        &sessions,
+                    )?;
+                    Ok(prompt_result)
+                }
+                Err(error) => {
+                    // Preserve conversation/task state best-effort while
+                    // retaining the original turn failure for the client.
+                    let _ = persist_session_snapshot(
+                        &session_store,
+                        &implementation_name,
+                        &session_id,
+                        &sessions,
+                    );
+                    Err(error)
+                }
+            }
         })
     }
 
     fn set_mode(&self, ctx: SetModeContext) -> ProviderFuture<Result<(), ProviderError>> {
         let sessions = self.sessions.clone();
+        let session_store = self.session_store.clone();
+        let implementation_name = self.config.implementation.name.clone();
         let base_policy = self.policy.clone();
         Box::pin(async move {
             let policy = mode_policy(&base_policy, &ctx.mode_id)?;
-            let mut sessions = sessions.lock().expect("adapter sessions poisoned");
-            let Some(session) = sessions.get_mut(&ctx.session_id.to_string()) else {
-                return Err(ProviderError::InvalidRequest(format!(
-                    "unknown orchestrator session: {}",
-                    ctx.session_id
-                )));
-            };
-            session.runtime.set_policy(policy);
-            session.mode = ctx.mode_id;
-            Ok(())
+            {
+                let mut sessions = sessions.lock().expect("adapter sessions poisoned");
+                let Some(session) = sessions.get_mut(&ctx.session_id.to_string()) else {
+                    return Err(ProviderError::InvalidRequest(format!(
+                        "unknown orchestrator session: {}",
+                        ctx.session_id
+                    )));
+                };
+                session.runtime.set_policy(policy);
+                session.mode = ctx.mode_id.clone();
+            }
+            persist_session_snapshot(
+                &session_store,
+                &implementation_name,
+                &ctx.session_id,
+                &sessions,
+            )
         })
     }
 
@@ -997,6 +1238,8 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
     fn close_session(&self, session_id: SessionId) -> ProviderFuture<Result<(), ProviderError>> {
         let sessions = self.sessions.clone();
         let persisted = self.persisted.clone();
+        let session_store = self.session_store.clone();
+        let implementation_name = self.config.implementation.name.clone();
         Box::pin(async move {
             // The framework awaits the active prompt's cleanup (bounded)
             // before invoking this hook, so serializing the stores is safe.
@@ -1010,17 +1253,16 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
             // checkpoints are deleted (the interrupted work is abandoned
             // unless the host loads the persisted state below).
             runtime.runtime.checkpoint_store().delete_session(&session_id.to_string());
-            let conversation = runtime.conversation.lock().expect("conversation poisoned").clone();
-            persisted.lock().expect("adapter persisted poisoned").insert(
-                session_id.to_string(),
-                PersistedSession {
-                    tasks: runtime.runtime.tasks(),
-                    memory: runtime.runtime.memory(),
-                    mode: runtime.mode,
-                    conversation,
-                },
-            );
-            Ok(())
+            let state = session_snapshot(&runtime);
+            // Keep the in-process copy for existing callers, then flush the
+            // same snapshot so closing the editor cannot erase this thread.
+            persisted
+                .lock()
+                .expect("adapter persisted poisoned")
+                .insert(session_id.to_string(), state.clone());
+            session_store
+                .save(&implementation_name, &runtime.workspace, &session_id.to_string(), &state)
+                .map_err(ProviderError::from)
         })
     }
 }
@@ -1044,6 +1286,45 @@ mod tests {
     use crate::config::RecoveryConfig;
     use crate::model::{ModelAdapter, ModelError, ModelFuture, ModelRequest, ModelResponse};
     use crate::test_support::FakeModel;
+
+    const PLAN_PAYLOAD: &str = r#"<!-- ee-plan
+[
+  {
+    "title": "Inspect implementation",
+    "action": "inspect relevant implementation details",
+    "scope": "workspace",
+    "expected_result": "implementation approach is identified",
+    "verification": "review the affected code paths",
+    "depends_on": []
+  }
+]
+-->"#;
+
+    #[test]
+    fn streamed_agent_chunks_replay_as_one_message_per_turn() {
+        let conversation = Arc::new(Mutex::new(Vec::new()));
+        record_user_message(&conversation, "hello");
+        record_agent_message(&conversation, "Hel");
+        record_agent_message(&conversation, "lo");
+        record_user_message(&conversation, "next");
+        record_agent_message(&conversation, "Done");
+
+        assert_eq!(
+            *conversation.lock().expect("conversation"),
+            vec![
+                ConversationMessage { role: ConversationRole::User, text: "hello".to_string() },
+                ConversationMessage { role: ConversationRole::Agent, text: "Hello".to_string() },
+                ConversationMessage { role: ConversationRole::User, text: "next".to_string() },
+                ConversationMessage { role: ConversationRole::Agent, text: "Done".to_string() },
+            ]
+        );
+    }
+
+    fn plan_response(text: &str) -> String {
+        format!(
+            "{text}\n\n## Plan\n1. Inspect implementation\n\n## Validation\n- Review the affected code paths.\n\n## Open questions\n- None\n\n{PLAN_PAYLOAD}"
+        )
+    }
 
     /// Model that parks in real time before answering, with per-call delays
     /// so a deterministic first-call hang triggers the outer turn timeout
@@ -1545,6 +1826,75 @@ mod tests {
         handle_b.shutdown(task_b).await;
     }
 
+    #[tokio::test]
+    async fn provider_adapter_load_after_process_restart_restores_durable_session() {
+        let state_dir = tempfile::TempDir::new().expect("session state dir");
+        let workspace = tempfile::TempDir::new().expect("workspace");
+        let workspace = workspace.path().to_string_lossy().into_owned();
+        let provider_a = OrchestratorProvider::new(
+            OrchestratorProviderConfig {
+                session_state_dir: Some(state_dir.path().to_path_buf()),
+                ..OrchestratorProviderConfig::default()
+            },
+            Arc::new(FakeModel::new(vec![ModelResponse::new().text("done").completed()])),
+        );
+        let (handle_a, task_a) = spawn_server(provider_a);
+        handle_a.send(request(1, "session/new", session_new_params(&workspace)));
+        let session_id = request_result(handle_a.next_frame().await)["sessionId"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+        let _ = handle_a.next_frame().await; // available commands update
+        handle_a.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
+        let result = request_result(next_response_frame(&handle_a).await);
+        assert_eq!(result["stopReason"], "end_turn");
+        // EOF drops provider A without ACP `session/close`, mirroring
+        // `/quit_full` stopping its child agent process.
+        handle_a.shutdown(task_a).await;
+
+        let provider_b = OrchestratorProvider::new(
+            OrchestratorProviderConfig {
+                session_state_dir: Some(state_dir.path().to_path_buf()),
+                ..OrchestratorProviderConfig::default()
+            },
+            Arc::new(FakeModel::new(Vec::new())),
+        );
+        let (handle_b, task_b) = spawn_server(provider_b);
+        handle_b.send(request(1, "session/new", session_new_params(&workspace)));
+        let new_session = request_result(handle_b.next_frame().await);
+        assert_eq!(new_session["sessionId"], "session-2");
+        let _ = handle_b.next_frame().await; // available commands update
+        handle_b.send(request(
+            2,
+            "session/load",
+            json!({ "sessionId": session_id, "cwd": workspace, "mcpServers": [] }),
+        ));
+        let mut replayed = Vec::new();
+        let mut response = None;
+        for _ in 0..10 {
+            let frame = handle_b.next_frame_real().await;
+            match &frame {
+                RawJsonRpcMessage::Notification(update) => {
+                    let params = raw_params_to_value(update.params.clone());
+                    let kind = params["update"]["sessionUpdate"].as_str();
+                    if matches!(kind, Some("user_message_chunk") | Some("agent_message_chunk")) {
+                        replayed.push(params["update"]["content"]["text"].clone());
+                    }
+                }
+                RawJsonRpcMessage::Response(_) => {
+                    response = Some(frame);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let result = request_result(response.expect("load response"));
+        assert_eq!(result["modes"]["currentModeId"], ASK_MODE_ID);
+        assert!(replayed.contains(&json!("hello")), "replayed: {replayed:?}");
+        assert!(replayed.contains(&json!("done")), "replayed: {replayed:?}");
+        handle_b.shutdown(task_b).await;
+    }
+
     /// Waits (real time) for the next response frame, skipping update
     /// notifications.  Parks on a timer so the server task always gets
     /// scheduled.
@@ -1921,9 +2271,12 @@ mod tests {
 
     #[tokio::test]
     async fn provider_adapter_prompt_includes_workspace_system_context() {
-        let model = Arc::new(FakeModel::new(vec![ModelResponse::new().text("ok").completed()]));
+        let model = Arc::new(FakeModel::new(vec![
+            ModelResponse::new().text(plan_response("ok")).completed(),
+        ]));
         let provider =
             OrchestratorProvider::new(OrchestratorProviderConfig::default(), model.clone());
+        let probe = provider.clone();
         let (handle, task) = spawn_server(provider);
 
         handle.send(request(
@@ -1953,8 +2306,8 @@ mod tests {
         assert_eq!(request_result(handle.next_frame().await), json!({}));
         handle.send(request(3, "session/prompt", prompt_params(&session_id, "read .ee.toml")));
         drain_mcp_diagnostics(&handle).await;
-        let frames = handle.next_frames(3).await;
-        assert_eq!(request_result(frames[2].clone())["stopReason"], "end_turn");
+        let frames = handle.next_frames(4).await;
+        assert_eq!(request_result(frames[3].clone())["stopReason"], "end_turn");
 
         let requests = model.requests();
         let context = requests[0].transcript[0].text_content();
@@ -1963,6 +2316,18 @@ mod tests {
         assert!(context.contains("require absolute paths"), "{context}");
         assert!(context.contains("Resolve relative paths"), "{context}");
         assert!(context.contains("Agent mode: plan"), "{context}");
+        assert!(context.contains("concrete implementation plan"), "{context}");
+        assert!(context.contains("## Plan"), "{context}");
+        assert!(context.contains("## Validation"), "{context}");
+        assert!(context.contains("## Open questions"), "{context}");
+        assert!(context.contains("file or symbol"), "{context}");
+        assert!(context.contains("observable success criterion"), "{context}");
+        assert!(context.contains(PLAN_PAYLOAD_MARKER), "{context}");
+
+        let tasks = probe.session_state(&session_id).expect("session state").0.list();
+        assert_eq!(tasks.len(), 2, "compiled plan replaces prompt-only root");
+        assert_eq!(tasks[0].title, "plan");
+        assert_eq!(tasks[1].title, "Inspect implementation");
 
         handle.shutdown(task).await;
     }
@@ -1975,7 +2340,7 @@ mod tests {
                 "read_file",
                 json!({ "path": "/tmp/notes.txt" }),
             )]),
-            ModelResponse::new().text("read it").completed(),
+            ModelResponse::new().text(plan_response("read it")).completed(),
         ]));
         let provider = OrchestratorProvider::new(OrchestratorProviderConfig::default(), model);
         let (handle, task) = spawn_server(provider);
@@ -2002,12 +2367,12 @@ mod tests {
 
         // Answer the bridge call; the loop appends the observation and asks
         // the model again, streaming the completed tool-call update, then the
-        // assistant update, then the response.
+        // assistant update, concrete plan replacement, then the response.
         handle.send(RawJsonRpcMessage::response(
             fs_request.id.clone(),
             Ok(json!({ "content": "file contents" })),
         ));
-        let frames = handle.next_frames(3).await;
+        let frames = handle.next_frames(4).await;
         assert_eq!(
             raw_params_to_value(match &frames[0] {
                 RawJsonRpcMessage::Notification(update) => update.params.clone(),
@@ -2025,7 +2390,13 @@ mod tests {
             message_params.to_string().contains("read it"),
             "message chunk carries the assistant text: {message_params}"
         );
-        let result = request_result(frames[2].clone());
+        let plan = raw_params_to_value(match &frames[2] {
+            RawJsonRpcMessage::Notification(update) => update.params.clone(),
+            other => panic!("expected concrete plan update, got {other:?}"),
+        });
+        assert_eq!(plan["update"]["sessionUpdate"], "plan");
+        assert_eq!(plan["update"]["entries"][1]["content"], "Inspect implementation");
+        let result = request_result(frames[3].clone());
         assert_eq!(result["stopReason"], "end_turn");
 
         handle.shutdown(task).await;
@@ -2396,7 +2767,7 @@ mod tests {
                 "ee_workspace_roots",
                 json!({}),
             )]),
-            ModelResponse::new().text("roots listed").completed(),
+            ModelResponse::new().text(plan_response("roots listed")).completed(),
         ]));
         let provider =
             OrchestratorProvider::new(OrchestratorProviderConfig::default(), model.clone());

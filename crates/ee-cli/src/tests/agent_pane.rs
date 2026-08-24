@@ -78,19 +78,26 @@ enabled = true
 command = "unused"
 "#;
 
-/// Builds an `App` with agents enabled in a temp workspace and installs the
-/// fake agent for the `fake` server id.
-fn fake_agents_app(script: FakeAgentScript) -> (App, tempfile::TempDir, ScriptedFake) {
-    let temp = tempfile::tempdir().unwrap();
-    fs::write(temp.path().join(".ee.toml"), AGENTS_TOML).unwrap();
+/// Builds an `App` in an existing workspace and installs the fake agent for
+/// the `fake` server id. Reusing the directory simulates a full TUI restart.
+fn fake_agents_app_in(workspace: &std::path::Path, script: FakeAgentScript) -> (App, ScriptedFake) {
+    fs::write(workspace.join(".ee.toml"), AGENTS_TOML).unwrap();
     let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
     let _cwd_restore = CurrentDirGuard::capture();
-    std::env::set_current_dir(temp.path()).unwrap();
+    std::env::set_current_dir(workspace).unwrap();
     let mut app = App::from_path(None).unwrap();
     drop(_cwd_restore);
     drop(_cwd_lock);
     let fake = ScriptedFake::new(script);
     app.agents.test_fake_transports.insert(String::from("fake"), Arc::new(fake.clone()));
+    (app, fake)
+}
+
+/// Builds an `App` with agents enabled in a temp workspace and installs the
+/// fake agent for the `fake` server id.
+fn fake_agents_app(script: FakeAgentScript) -> (App, tempfile::TempDir, ScriptedFake) {
+    let temp = tempfile::tempdir().unwrap();
+    let (app, fake) = fake_agents_app_in(temp.path(), script);
     (app, temp, fake)
 }
 
@@ -1257,6 +1264,77 @@ fn agents_reconnect_loads_persisted_session_and_replays_conversation() {
         })
     });
     assert_eq!(restored.as_deref(), Some("hello agent"));
+}
+
+#[test]
+fn workspace_restart_restores_all_agent_threads_on_pane_open() {
+    let workspace = tempfile::tempdir().unwrap();
+    let state_dir = tempfile::tempdir().unwrap();
+    let first_script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s2" }));
+    let (mut first_app, _first_fake) = fake_agents_app_in(workspace.path(), first_script);
+    first_app.agents.test_session_state_base = Some(state_dir.path().to_path_buf());
+    open_pane_and_wait_ready(&mut first_app);
+    type_text(&mut first_app, "/new_thread");
+    press(&mut first_app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut first_app, "second workspace thread ready", |app| {
+        app.agents.threads.len() == 2 && app.agents.threads[1].state == ThreadUiState::Ready
+    });
+    assert_eq!(first_app.agents.active_thread, Some(1));
+    first_app.shutdown_agents();
+    drop(first_app);
+
+    let restarted_script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({
+            "protocolVersion": 1,
+            "agentCapabilities": { "loadSession": true }
+        }))
+        .wait_for("session/load")
+        .emit(wire::session_update("s1", wire::agent_message_chunk("s1-message", "first replay")))
+        .respond(json!({}))
+        .wait_for("session/load")
+        .emit(wire::session_update("s2", wire::agent_message_chunk("s2-message", "second replay")))
+        .respond(json!({}));
+    let (mut restarted_app, restarted_fake) =
+        fake_agents_app_in(workspace.path(), restarted_script);
+    restarted_app.agents.test_session_state_base = Some(state_dir.path().to_path_buf());
+
+    // Opening a fresh TUI pane restores workspace threads. It must not need
+    // `/reconnect`, and it must not create a replacement `session/new`.
+    run_ex(&mut restarted_app, "agents");
+    wait_until(&mut restarted_app, "workspace threads restored", |app| {
+        app.agents.threads.len() == 2
+            && app.agents.threads.iter().all(|thread| thread.state == ThreadUiState::Ready)
+            && app.agents.threads[0].transcript.iter().any(|item| {
+                matches!(item, TranscriptItem::Message { text, .. } if text == "first replay")
+            })
+            && app.agents.threads[1].transcript.iter().any(|item| {
+                matches!(item, TranscriptItem::Message { text, .. } if text == "second replay")
+            })
+    });
+
+    assert_eq!(
+        restarted_app
+            .agents
+            .threads
+            .iter()
+            .map(|thread| thread.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["s1", "s2"]
+    );
+    assert_eq!(restarted_app.agents.active_thread, Some(1));
+    let loads = restarted_fake.agent().requests_by_method("session/load");
+    assert_eq!(loads.len(), 2);
+    assert_eq!(loads[0]["params"]["sessionId"], "s1");
+    assert_eq!(loads[1]["params"]["sessionId"], "s2");
+    assert!(restarted_fake.agent().requests_by_method("session/new").is_empty());
+    assert!(restarted_fake.agent().requests_by_method("session/resume").is_empty());
 }
 
 #[test]
@@ -3062,6 +3140,42 @@ fn agents_stop_cancels_running_turn_and_updates_status() {
         app.agents.threads[0].system_notices().iter().any(|notice| notice == "turn cancelled")
     });
     assert_eq!(app.agents.threads[0].state, ThreadUiState::Ready);
+}
+
+#[test]
+fn steer_prioritizes_message_and_queue_runs_follow_up_after_turn_finishes() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .wait_for("session/cancel")
+        .wait_for("session/prompt")
+        .respond(json!({ "stopReason": "end_turn" }))
+        .wait_for("session/prompt")
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+
+    type_text(&mut app, "original task");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "turn running", |app| {
+        app.agents.threads[0].state == ThreadUiState::Running
+    });
+
+    type_text(&mut app, "/queue follow up after steer");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    type_text(&mut app, "/steer use additional user context");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.agents.threads[0].queued_prompts.len(), 2);
+    assert_eq!(app.agents.threads[0].queued_prompts[0].text, "use additional user context");
+    assert_eq!(app.agents.threads[0].queued_prompts[1].text, "follow up after steer");
+
+    wait_until(&mut app, "steered and queued prompts complete", |app| {
+        app.agents.threads[0].state == ThreadUiState::Ready
+            && fake.agent().requests_by_method("session/prompt").len() == 3
+    });
+    let prompts = fake.agent().requests_by_method("session/prompt");
+    assert_eq!(prompts[0]["params"]["prompt"][0]["text"], "original task");
+    assert_eq!(prompts[1]["params"]["prompt"][0]["text"], "use additional user context");
+    assert_eq!(prompts[2]["params"]["prompt"][0]["text"], "follow up after steer");
 }
 
 #[test]

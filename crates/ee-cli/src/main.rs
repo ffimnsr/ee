@@ -30,6 +30,8 @@ use xi_core_lib::text_store::{ByteRange, TextChunkResult, TextStore};
 use xi_core_lib::vlf::store::VlfStore;
 use xi_core_lib::{plugin_manifest, plugins::PluginCatalog};
 
+#[cfg(feature = "agents")]
+mod agent_setup;
 mod app;
 mod backend;
 mod buffer;
@@ -331,6 +333,11 @@ impl ConfigScopeArgs {
 
 #[derive(Debug, Subcommand)]
 enum ConfigCommands {
+    /// Run interactive configuration wizards
+    Setup {
+        #[command(subcommand)]
+        command: ConfigSetupCommands,
+    },
     /// Create a fully commented config template; default target is ./.ee.toml
     Init {
         /// Create user XDG config at ~/.config/ee/config.toml
@@ -355,6 +362,12 @@ enum ConfigCommands {
         /// TOML value literal. Bare words become strings.
         value: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigSetupCommands {
+    /// Discover and configure an installed ACP agent server
+    Agent,
 }
 
 #[derive(Debug, Subcommand)]
@@ -877,6 +890,20 @@ fn cmd_config_set(scope: config::ConfigScope, key: &str, value: &str) {
             std::process::exit(1);
         }
     }
+}
+
+#[cfg(feature = "agents")]
+fn cmd_config_setup_agent() {
+    if let Err(error) = agent_setup::run() {
+        eprintln!("agent setup failed: {error}");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(not(feature = "agents"))]
+fn cmd_config_setup_agent() {
+    eprintln!("agent setup unavailable: rebuild ee with `--features agents`");
+    std::process::exit(1);
 }
 
 fn cmd_plugins_list() {
@@ -1757,6 +1784,9 @@ fn main() -> io::Result<()> {
             match command {
                 DoCommands::Doctor => cmd_doctor(cli.config.as_ref()),
                 DoCommands::Config { command } => match command {
+                    ConfigCommands::Setup { command: ConfigSetupCommands::Agent } => {
+                        cmd_config_setup_agent()
+                    }
                     ConfigCommands::Init { global } => cmd_config_init(if global {
                         config::ConfigScope::Global
                     } else {

@@ -60,6 +60,15 @@ const STANDARD_ERRORS: &[&str] = &[
     "backend_failure",
     "output_truncated",
 ];
+const DEPENDENCY_INDEX_ERRORS: &[&str] = &[
+    "invalid_arguments",
+    "unsupported_tool",
+    "permission_denied",
+    "dependency_index_unavailable",
+    "dependency_index_stale",
+    "backend_failure",
+    "output_truncated",
+];
 const WRITE_ERRORS: &[&str] = &[
     "invalid_arguments",
     "unsupported_tool",
@@ -93,6 +102,21 @@ const fn read(
         output_cap: cap,
         redaction_rules: DEFAULT_REDACTION,
         error_classes: STANDARD_ERRORS,
+        deprecated: false,
+        replacement: None,
+    }
+}
+
+const fn dependency_index_read() -> ToolGovernance {
+    ToolGovernance {
+        side_effect: SideEffectClass::Read,
+        approval: "none",
+        transports: ALL_TRANSPORTS,
+        required_capabilities: DEPENDENCY_INDEX_CAPABILITY,
+        output_cap_kind: "result_items",
+        output_cap: 500,
+        redaction_rules: DEFAULT_REDACTION,
+        error_classes: DEPENDENCY_INDEX_ERRORS,
         deprecated: false,
         replacement: None,
     }
@@ -158,8 +182,11 @@ pub fn governance(tool: &str) -> Option<ToolGovernance> {
         | "ee_list_code_actions"
         | "ee_preview_rename_symbol" => read(LSP_CAPABILITY, "result_items", 500),
         "ee_git_status" => read(GIT_CAPABILITY, "result_items", 500),
-        "ee_git_diff" | "ee_git_diff_file" => read(GIT_CAPABILITY, "bytes", 256 * 1024),
+        "ee_git_diff" | "ee_git_diff_staged" | "ee_git_diff_file" => {
+            read(GIT_CAPABILITY, "bytes", 256 * 1024)
+        }
         "ee_file_dependency_map" => read(DEPENDENCY_INDEX_CAPABILITY, "result_items", 500),
+        "ee_symbol_dependency_map" => dependency_index_read(),
         "ee_terminal_output"
         | "ee_terminal_output_since"
         | "ee_terminal_wait"
@@ -234,6 +261,7 @@ pub const STABLE_TOOL_NAMES: &[&str] = &[
     "ee_terminal_release",
     "ee_git_status",
     "ee_git_diff",
+    "ee_git_diff_staged",
     "ee_git_diff_file",
     "ee_changed_files",
     "ee_review_context",
@@ -242,6 +270,7 @@ pub const STABLE_TOOL_NAMES: &[&str] = &[
     "ee_read_notes",
     "ee_read_note",
     "ee_file_dependency_map",
+    "ee_symbol_dependency_map",
     "ee_tools_manifest",
     "ee_diagnostics",
 ];

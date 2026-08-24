@@ -34,6 +34,7 @@ use crate::model::{
     ModelAdapter, ModelMessage, ModelRequest, ModelRole, Transcript, prompt_result_with_usage,
 };
 use crate::model_registry::{DEFAULT_MODEL_ID, ModelRegistry};
+use crate::plan_compiler::{PlanCompiler, PlanInput};
 use crate::policy::PolicyEngine;
 use crate::progress::ProgressTracker;
 use crate::recovery::{RecoverableInterruption, TurnOutcome, session_timeout_expired};
@@ -294,6 +295,19 @@ impl OrchestratorRuntime {
     #[must_use]
     pub fn tasks(&self) -> TaskGraph {
         self.tasks.lock().expect("task graph poisoned").clone()
+    }
+
+    /// Validates and installs a concrete model plan as the session task graph.
+    ///
+    /// The replacement is atomic: a rejected plan leaves the prior graph
+    /// untouched. Registered tool names validate `tool:<name>` actions before
+    /// the graph becomes visible to the ACP client.
+    pub fn install_plan(&self, items: &[PlanInput]) -> Result<TaskGraph, OrchestratorError> {
+        let known_tools = self.tool_names();
+        let compilation = PlanCompiler::new().compile(items, &known_tools)?;
+        let graph = compilation.graph;
+        *self.tasks.lock().expect("task graph poisoned") = graph.clone();
+        Ok(graph)
     }
 
     /// Snapshot of the current budget state, for checkpointing and tests.

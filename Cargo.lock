@@ -1305,6 +1305,7 @@ name = "ee-openrouter-agent"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "dirs",
  "ee-acp-agent-server",
  "ee-agent-orchestrator",
  "ee-agent-protocol",

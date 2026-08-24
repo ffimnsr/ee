@@ -1691,6 +1691,44 @@
       "example": {}
     },
     {
+      "name": "ee_git_diff_staged",
+      "schemaVersion": 1,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "sideEffect": "read",
+      "approval": "none",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ],
+      "requiredCapabilities": [
+        "git"
+      ],
+      "outputCaps": [
+        {
+          "kind": "bytes",
+          "max": 262144
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "deprecated": false,
+      "replacement": null,
+      "example": {}
+    },
+    {
       "name": "ee_git_diff_file",
       "schemaVersion": 1,
       "inputSchema": {
@@ -2020,6 +2058,67 @@
       "deprecated": false,
       "replacement": null,
       "example": {
+        "path": "/workspace/example.rs"
+      }
+    },
+    {
+      "name": "ee_symbol_dependency_map",
+      "schemaVersion": 1,
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "character": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "line": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "line",
+          "character"
+        ],
+        "type": "object"
+      },
+      "sideEffect": "read",
+      "approval": "none",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ],
+      "requiredCapabilities": [
+        "dependency_index"
+      ],
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "dependency_index_unavailable",
+        "dependency_index_stale",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "deprecated": false,
+      "replacement": null,
+      "example": {
+        "character": 1,
+        "line": 1,
         "path": "/workspace/example.rs"
       }
     },

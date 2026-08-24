@@ -1333,13 +1333,9 @@ struct PendingFork {
     parent_session_id: String,
     seed: Vec<ContentBlock>,
     activate_child: bool,
-    restore_reconnect_record: Option<PersistedAgentSession>,
 }
 
-/// Client-persisted reconnect record: the last agent session of a workspace
-/// plus the text of its last prompt (for the resend path after a restart).
-/// Lives under the platform state directory, keyed by canonical workspace
-/// path, so a restarted TUI can reconnect to the same agent session.
+/// One client-persisted session within a workspace thread list.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct PersistedAgentSession {
     /// Agent server id the session belongs to.
@@ -1355,6 +1351,55 @@ struct PersistedAgentSession {
     session_name: Option<String>,
 }
 
+/// Ordered client-side session registry for one canonical workspace.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct PersistedAgentWorkspace {
+    /// Versioned separately from editor session state so agent metadata can
+    /// evolve without invalidating buffer/tab restoration.
+    #[serde(default = "persisted_agent_workspace_version")]
+    version: u32,
+    /// Session selected when this workspace was last closed.
+    #[serde(default)]
+    active_session_id: Option<String>,
+    /// Open, non-archived session threads in display order.
+    #[serde(default)]
+    sessions: Vec<PersistedAgentSession>,
+}
+
+const fn persisted_agent_workspace_version() -> u32 {
+    1
+}
+
+/// Transitional read format for the former one-session-per-workspace record.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(untagged)]
+enum PersistedAgentWorkspaceDocument {
+    Legacy(PersistedAgentSession),
+    Workspace(PersistedAgentWorkspace),
+}
+
+impl PersistedAgentWorkspaceDocument {
+    fn into_workspace(self) -> PersistedAgentWorkspace {
+        match self {
+            Self::Legacy(session) => PersistedAgentWorkspace {
+                version: persisted_agent_workspace_version(),
+                active_session_id: Some(session.session_id.clone()),
+                sessions: vec![session],
+            },
+            Self::Workspace(workspace) => workspace,
+        }
+    }
+}
+
+/// Sequential startup restoration state. One ACP connection processes loads in
+/// order, preserving per-connection request ordering and replay buffering.
+#[derive(Debug)]
+struct WorkspaceRestore {
+    active_session_id: Option<String>,
+    sessions: VecDeque<PersistedAgentSession>,
+    failed: bool,
+}
+
 /// All agents-pane UI state; `Default` is the closed, inert startup state.
 pub(crate) struct AgentPaneState {
     pub(crate) layout: AgentPaneLayout,
@@ -1368,6 +1413,8 @@ pub(crate) struct AgentPaneState {
     pub(crate) pending_session: Option<PendingSession>,
     /// Fresh child session awaiting redacted local transcript seed dispatch.
     pending_fork: Option<PendingFork>,
+    /// Workspace threads waiting for sequential ACP session restoration.
+    workspace_restore: Option<WorkspaceRestore>,
     /// Composer text typed before a session exists or while session startup fails.
     pub(crate) pending_draft: String,
     /// External editor request consumed only by terminal-owning main loop.
@@ -1448,6 +1495,7 @@ impl Default for AgentPaneState {
             show_thoughts: true,
             pending_session: None,
             pending_fork: None,
+            workspace_restore: None,
             pending_draft: String::new(),
             pending_external_editor: None,
             pending_cancel: None,
@@ -1660,7 +1708,7 @@ impl App {
                 }
                 // The turn is no longer resumable; drop the persisted prompt before
                 // optionally recording the newly dispatched queued follow-up.
-                self.update_persisted_last_prompt(None);
+                self.update_persisted_last_prompt(session_id.0.as_ref(), None);
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.dispatch_next_queued_prompt(index);
                 }
@@ -1676,7 +1724,7 @@ impl App {
                     self.agents.threads[index].push_system(String::from("turn cancelled"));
                     self.notify_unread(index);
                 }
-                self.update_persisted_last_prompt(None);
+                self.update_persisted_last_prompt(session_id.0.as_ref(), None);
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.dispatch_next_queued_prompt(index);
                 }
@@ -1692,7 +1740,7 @@ impl App {
                     self.agents.threads[index].push_system(format!("turn failed: {error}"));
                     self.notify_unread(index);
                 }
-                self.update_persisted_last_prompt(None);
+                self.update_persisted_last_prompt(session_id.0.as_ref(), None);
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.dispatch_next_queued_prompt(index);
                 }
@@ -2072,8 +2120,9 @@ impl App {
             snapshot.session_info.as_ref().and_then(|info| info.title.value().cloned());
         let session_updated_at =
             snapshot.session_info.as_ref().and_then(|info| info.updated_at.value().cloned());
-        let persisted =
-            self.load_persisted_agent_session().filter(|record| record.session_id == session_id);
+        let persisted = self.load_persisted_agent_workspace().and_then(|workspace| {
+            workspace.sessions.into_iter().find(|record| record.session_id == session_id)
+        });
         let session_name = persisted.as_ref().and_then(|record| record.session_name.clone());
         self.agents.threads.push(AgentThreadUi {
             index,
@@ -2125,23 +2174,22 @@ impl App {
             session_title,
             session_updated_at,
         });
-        self.agents.active_thread = Some(self.agents.threads.len() - 1);
+        let restored_active = self
+            .agents
+            .workspace_restore
+            .as_ref()
+            .and_then(|restore| restore.active_session_id.as_deref())
+            == Some(session_id.as_str());
+        if self.agents.workspace_restore.is_none() || restored_active {
+            self.agents.active_thread = Some(self.agents.threads.len() - 1);
+        }
         self.agents.error = None;
         self.agents
             .threads
             .last_mut()
             .expect("thread pushed")
             .push_system(format!("session started ({session_id})"));
-        // Persist the client-side reconnect record for this workspace; the
-        // last prompt carries over only when this is the same session
-        // (reconnect), so a paused turn stays resumable after a restart.
-        let last_prompt = persisted.and_then(|record| record.last_prompt);
-        self.save_persisted_agent_session(Some(&PersistedAgentSession {
-            agent_id: agent_id.to_string(),
-            session_id: session_id.clone(),
-            last_prompt,
-            session_name,
-        }));
+        self.persist_agent_workspace();
     }
 
     /// Bumps unread/activity for a thread unless it is focused.
@@ -2206,16 +2254,16 @@ impl App {
                     self.agents.threads[index].state = ThreadUiState::Ready;
                     self.agents.threads[index].push_system(String::from("session reconnected"));
                     self.sync_thread_snapshot_fields(index);
-                    self.agents.active_thread = Some(index);
-                    // Keep the persisted last prompt (resend path).
-                    let last_prompt =
-                        self.load_persisted_agent_session().and_then(|record| record.last_prompt);
-                    self.save_persisted_agent_session(Some(&PersistedAgentSession {
-                        agent_id,
-                        session_id: session_id.clone().expect("rebound session id"),
-                        last_prompt,
-                        session_name: self.agents.threads[index].session_name.clone(),
-                    }));
+                    let restored_active = self
+                        .agents
+                        .workspace_restore
+                        .as_ref()
+                        .and_then(|restore| restore.active_session_id.as_deref())
+                        == session_id.as_deref();
+                    if self.agents.workspace_restore.is_none() || restored_active {
+                        self.agents.active_thread = Some(index);
+                    }
+                    self.persist_agent_workspace();
                 } else {
                     self.register_session_thread(&agent_id, thread);
                     if let Some(fork) = self.agents.pending_fork.take() {
@@ -2235,9 +2283,7 @@ impl App {
                         {
                             self.agents.active_thread = Some(parent);
                         }
-                        if let Some(record) = fork.restore_reconnect_record {
-                            self.save_persisted_agent_session(Some(&record));
-                        }
+                        self.persist_agent_workspace();
                     }
                 }
                 if let Some(session_id) = session_id {
@@ -2253,8 +2299,14 @@ impl App {
                             self.apply_session_update(index.0, &update);
                         }
                     }
-                    if let Some(record) = self.load_persisted_agent_session()
-                        && let Some(text) = record.last_prompt
+                    if let Some(text) =
+                        self.load_persisted_agent_workspace().and_then(|workspace| {
+                            workspace
+                                .sessions
+                                .into_iter()
+                                .find(|record| record.session_id == session_id)
+                                .and_then(|record| record.last_prompt)
+                        })
                         && let Some(index) = self.agents.thread_index(&session_id)
                     {
                         self.agents.threads[index].last_prompt =
@@ -2264,6 +2316,9 @@ impl App {
             }
             Ok(Err(message)) => {
                 self.agents.pending_fork = None;
+                if let Some(restore) = self.agents.workspace_restore.as_mut() {
+                    restore.failed = true;
+                }
                 let pending = self.agents.pending_session.take().expect("pending session present");
                 if let Some(session_id) = pending.session_id {
                     self.agents.pending_replay.remove(&session_id);
@@ -2279,9 +2334,15 @@ impl App {
             Err(std_mpsc::TryRecvError::Disconnected) => {
                 self.agents.pending_session = None;
                 self.agents.pending_fork = None;
+                if let Some(restore) = self.agents.workspace_restore.as_mut() {
+                    restore.failed = true;
+                }
                 self.agents.pending_replay.clear();
                 self.agents.error = Some(String::from("agent host stopped"));
             }
+        }
+        if self.agents.pending_session.is_none() && self.agents.workspace_restore.is_some() {
+            self.start_next_workspace_restore();
         }
     }
 
@@ -2616,6 +2677,13 @@ fn split_slash_command(draft: &str) -> (Option<String>, String) {
     (name, rest)
 }
 
+fn queue_command_is_management(args: &str) -> bool {
+    matches!(
+        args.split_whitespace().next(),
+        None | Some("list" | "edit" | "move" | "remove" | "clear")
+    )
+}
+
 fn prompt_blocks_with_context(
     prompt_text: &str,
     context_files: &[AgentContextFile],
@@ -2677,6 +2745,7 @@ const LOCAL_AGENT_SLASH_COMMANDS: &[&str] = &[
     "sessions",
     "export",
     "stop",
+    "steer",
     "resume",
     "discard",
     "reconnect",
@@ -2744,6 +2813,7 @@ const LOCAL_AGENT_SLASH_HELP: &[(&str, &str)] = &[
     ("/sessions", "switch session"),
     ("/export", "write redacted Markdown transcript"),
     ("/stop [terminal-id|all]", "cancel turn or stop owned direct-child terminal"),
+    ("/steer <message>", "cancel active turn; run steer message next"),
     ("/resume | /discard", "resolve paused turn"),
     ("/reconnect", "reconnect persisted session"),
     ("/next | /prev", "cycle active sessions"),
@@ -2757,7 +2827,7 @@ const LOCAL_AGENT_SLASH_HELP: &[(&str, &str)] = &[
     ("/add-dir <path>", "confirm extra root for capable agent sessions"),
     ("/tasks | /ps", "list owned background terminals; subagent tasks when supported"),
     ("/mode", "select agent-advertised mode"),
-    ("/queue", "list|edit|move|remove|clear queued follow-ups"),
+    ("/queue <message>", "run message after current turn; /queue list manages follow-ups"),
     ("/details", "on|off|toggle sanitized transcript tool detail"),
     ("/transcript", "raw|grouped|toggle|open|export local transcript"),
     ("/draft", "restore|clear long prompt draft; Ctrl-S stash, Ctrl-Shift-E edit"),
@@ -3071,7 +3141,14 @@ impl App {
         self.ensure_agents_host();
         // MCP health/prompt browsing start lazily when the pane opens.
         self.start_mcp_servers();
-        if self.agents.active_thread.is_none() && self.agents.pending_session.is_none() {
+        let restoring = self.agents.active_thread.is_none()
+            && self.agents.pending_session.is_none()
+            && self.agents.workspace_restore.is_none()
+            && self.start_workspace_restore();
+        if self.agents.active_thread.is_none()
+            && self.agents.pending_session.is_none()
+            && self.agents.workspace_restore.is_none()
+        {
             let Some(agent_id) = self.default_agent_id() else {
                 let message =
                     String::from("no agent configured (set `agents.default_agent` or add servers)");
@@ -3082,10 +3159,12 @@ impl App {
             self.start_session(agent_id);
         }
         if opening {
-            self.backend.status_message = Some(if self.agents.active_thread.is_some() {
-                "agents pane opened".to_string()
+            self.backend.status_message = Some(if restoring {
+                String::from("agents pane opened (restoring workspace sessions…)")
+            } else if self.agents.active_thread.is_some() {
+                String::from("agents pane opened")
             } else {
-                "agents pane opened (starting session…)".to_string()
+                String::from("agents pane opened (starting session…)")
             });
         }
         true
@@ -3274,8 +3353,74 @@ impl App {
             }
             _ => {
                 self.backend.status_message = Some(String::from(
-                    "usage: /queue [list|edit <N> <prompt>|move <N> <position>|remove <N>|clear]",
+                    "usage: /queue <message> | /queue [list|edit <N> <prompt>|move <N> <position>|remove <N>|clear]",
                 ));
+            }
+        }
+    }
+
+    /// Queues an explicit follow-up while a turn runs, or sends it immediately once ready.
+    fn agents_queue_prompt_command(&mut self, args: &str) {
+        let prompt_text = args.trim_end().to_string();
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        match self.agents.threads[active].state {
+            ThreadUiState::Running => self.enqueue_agent_follow_up(active, prompt_text),
+            ThreadUiState::Ready => {
+                self.send_ready_agent_prompt(active, prompt_text);
+                self.backend.status_message =
+                    Some(String::from("queued prompt dispatched immediately"));
+            }
+            ThreadUiState::PausedRecoverable => {
+                self.backend.status_message =
+                    Some(String::from("a turn is paused; use /resume or /discard before queueing"));
+            }
+            _ => {
+                self.backend.status_message =
+                    Some(String::from("agent session is not ready; cannot queue prompt"));
+            }
+        }
+    }
+
+    /// Cancels a running ACP turn and dispatches this steer message before older follow-ups.
+    fn agents_steer_command(&mut self, args: &str) {
+        let prompt_text = args.trim_end().to_string();
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        match self.agents.threads[active].state {
+            ThreadUiState::Running => {
+                let Some(queued_count) = self.queue_agent_prompt(active, prompt_text, true) else {
+                    return;
+                };
+                let thread = self.agents.threads[active].host.clone();
+                if thread.is_turn_running() {
+                    let host = self.agents.host.as_ref().expect("host present");
+                    self.agents.pending_cancel = Some(host.cancel(thread));
+                    self.backend.status_message = Some(format!(
+                        "steering active turn; cancelling now, steer message dispatches next ({queued_count} queued)"
+                    ));
+                } else {
+                    self.backend.status_message = Some(format!(
+                        "steer message queued first ({queued_count} queued); current turn is starting"
+                    ));
+                }
+            }
+            ThreadUiState::Ready => {
+                self.send_ready_agent_prompt(active, prompt_text);
+                self.backend.status_message =
+                    Some(String::from("steer message dispatched immediately"));
+            }
+            ThreadUiState::PausedRecoverable => {
+                self.backend.status_message =
+                    Some(String::from("a turn is paused; use /resume or /discard before steering"));
+            }
+            _ => {
+                self.backend.status_message =
+                    Some(String::from("agent session is not ready; cannot steer"));
             }
         }
     }
@@ -3694,13 +3839,10 @@ impl App {
         let parent_session_id = parent.session_id.clone();
         let agent_id = parent.agent_id.clone();
         let seed = fork_seed(parent, &self.agents_secret_values());
-        let restore_reconnect_record =
-            (!activate_child).then(|| self.load_persisted_agent_session()).flatten();
         self.ensure_agents_host();
         self.start_mcp_servers();
         self.start_session(agent_id);
-        self.agents.pending_fork =
-            Some(PendingFork { parent_session_id, seed, activate_child, restore_reconnect_record });
+        self.agents.pending_fork = Some(PendingFork { parent_session_id, seed, activate_child });
         self.backend.status_message = Some(String::from(if activate_child {
             "starting seeded branch session…"
         } else {
@@ -3730,10 +3872,7 @@ impl App {
         self.agents.archived_threads.push(thread);
         self.agents.active_thread =
             (!self.agents.threads.is_empty()).then_some(active.min(self.agents.threads.len() - 1));
-        if self.load_persisted_agent_session().is_some_and(|record| record.session_id == session_id)
-        {
-            self.save_persisted_agent_session(None);
-        }
+        self.persist_agent_workspace();
         self.backend.status_message = Some(format!(
             "session archived locally: {label}; restore with /archive restore {}",
             self.agents.archived_threads.len()
@@ -3780,6 +3919,7 @@ impl App {
         let label = thread.display_name.clone();
         self.agents.threads.push(thread);
         self.agents.active_thread = Some(self.agents.threads.len() - 1);
+        self.persist_agent_workspace();
         self.backend.status_message = Some(format!("session restored locally: {label}"));
     }
 
@@ -3838,14 +3978,9 @@ impl App {
         }
         let removed = self.agents.threads.remove(confirmation.thread_index);
         self.agents.approval_modes.remove(&removed.session_id);
-        if self
-            .load_persisted_agent_session()
-            .is_some_and(|record| record.session_id == removed.session_id)
-        {
-            self.save_persisted_agent_session(None);
-        }
         self.agents.active_thread = (!self.agents.threads.is_empty())
             .then_some(confirmation.thread_index.min(self.agents.threads.len() - 1));
+        self.persist_agent_workspace();
         self.backend.status_message = Some(format!(
             "local transcript deleted for {} ({}); provider session unchanged",
             confirmation.session_name, confirmation.session_id
@@ -3981,6 +4116,7 @@ impl App {
             thread.unread = 0;
             thread.activity = false;
         }
+        self.persist_agent_workspace();
         self.enter_agent_focus();
     }
 
@@ -4115,21 +4251,82 @@ impl App {
         self.agents.pending_session = Some(PendingSession { agent_id, session_id: None, reply });
     }
 
-    /// Reconnects the persisted session of this workspace after an agent/
-    /// process restart: `session/load` when the agent advertises it (the
-    /// conversation replays into the thread), else `session/resume`.  The
-    /// persisted last prompt is restored for the resend path.
+    /// Reconnects selected session from this workspace's persisted thread list.
     pub(super) fn agents_reconnect(&mut self) {
         if self.agents.pending_session.is_some() {
             self.agents.error =
                 Some(String::from("a session start or reconnect is already in progress"));
             return;
         }
-        let Some(record) = self.load_persisted_agent_session() else {
+        let Some(workspace) = self.load_persisted_agent_workspace() else {
             self.agents.error =
                 Some(String::from("no persisted agent session for this workspace to reconnect"));
             return;
         };
+        let selected_id = self
+            .agents
+            .active_thread_index()
+            .and_then(|index| self.agents.threads.get(index))
+            .map(|thread| thread.session_id.as_str())
+            .or(workspace.active_session_id.as_deref());
+        let Some(record) = selected_id
+            .and_then(|session_id| {
+                workspace.sessions.iter().find(|record| record.session_id == session_id)
+            })
+            .or_else(|| workspace.sessions.first())
+            .cloned()
+        else {
+            self.agents.error =
+                Some(String::from("no persisted agent session for this workspace to reconnect"));
+            return;
+        };
+        self.request_persisted_agent_reconnect(record);
+    }
+
+    /// Starts restoring every persisted workspace thread. Returns `true` when
+    /// at least one session was queued instead of creating a fresh session.
+    fn start_workspace_restore(&mut self) -> bool {
+        let Some(workspace) = self.load_persisted_agent_workspace() else {
+            return false;
+        };
+        if workspace.sessions.is_empty() {
+            return false;
+        }
+        self.agents.workspace_restore = Some(WorkspaceRestore {
+            active_session_id: workspace.active_session_id,
+            sessions: workspace.sessions.into(),
+            failed: false,
+        });
+        self.start_next_workspace_restore();
+        true
+    }
+
+    /// Sends one queued restoration request. ACP connection ordering requires
+    /// that only one `session/load` or `session/resume` is active at a time.
+    fn start_next_workspace_restore(&mut self) {
+        let next =
+            self.agents.workspace_restore.as_mut().and_then(|restore| restore.sessions.pop_front());
+        if let Some(record) = next {
+            self.request_persisted_agent_reconnect(record);
+            return;
+        }
+        let Some(restore) = self.agents.workspace_restore.take() else {
+            return;
+        };
+        if self.agents.active_thread.is_none() {
+            self.agents.active_thread = restore
+                .active_session_id
+                .as_deref()
+                .and_then(|session_id| self.agents.thread_index(session_id))
+                .or_else(|| (!self.agents.threads.is_empty()).then_some(0));
+        }
+        if !restore.failed {
+            self.persist_agent_workspace();
+        }
+    }
+
+    /// Enqueues one reconnect through the existing load-then-resume pipeline.
+    fn request_persisted_agent_reconnect(&mut self, record: PersistedAgentSession) {
         self.ensure_agents_host();
         let Some(host) = &self.agents.host else {
             return;
@@ -4167,28 +4364,36 @@ impl App {
         crate::logs::state_dir().map(|dir| dir.join("agent-sessions.json"))
     }
 
-    /// Loads the persisted session record for the primary workspace.
-    fn load_persisted_agent_session(&self) -> Option<PersistedAgentSession> {
+    /// Loads persisted ordered threads for the primary workspace. Legacy
+    /// one-session documents remain readable and migrate on their next write.
+    fn load_persisted_agent_workspace(&self) -> Option<PersistedAgentWorkspace> {
         let path = self.agents_session_record_path()?;
-        let documents: HashMap<String, PersistedAgentSession> =
+        let documents: HashMap<String, serde_json::Value> =
             serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-        documents.get(&self.primary_workspace_identity().as_string()).cloned()
+        let document = documents.get(&self.primary_workspace_identity().as_string())?.clone();
+        serde_json::from_value::<PersistedAgentWorkspaceDocument>(document)
+            .ok()
+            .map(PersistedAgentWorkspaceDocument::into_workspace)
     }
 
-    /// Persists (or removes) the session record for the primary workspace.
-    fn save_persisted_agent_session(&self, record: Option<&PersistedAgentSession>) {
+    /// Writes one complete workspace thread registry atomically at the
+    /// document level, preserving records for every other workspace.
+    fn save_persisted_agent_workspace(&self, workspace: Option<&PersistedAgentWorkspace>) {
         let Some(path) = self.agents_session_record_path() else {
             return;
         };
-        let mut documents: HashMap<String, PersistedAgentSession> = std::fs::read_to_string(&path)
+        let mut documents: HashMap<String, serde_json::Value> = std::fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
         let key = self.primary_workspace_identity().as_string();
-        match record {
-            Some(record) => {
-                documents.insert(key, record.clone());
-            }
+        match workspace {
+            Some(workspace) => match serde_json::to_value(workspace) {
+                Ok(value) => {
+                    documents.insert(key, value);
+                }
+                Err(_) => return,
+            },
             None => {
                 documents.remove(&key);
             }
@@ -4201,13 +4406,63 @@ impl App {
         }
     }
 
-    /// Updates the persisted record's last prompt (or clears it).
-    fn update_persisted_last_prompt(&self, last_prompt: Option<&str>) {
-        let Some(mut record) = self.load_persisted_agent_session() else {
+    /// Persists current open-thread ordering, local names, selected thread,
+    /// and per-thread recoverable prompts. Archived/deleted local threads are
+    /// intentionally omitted so they do not reopen after process restart.
+    fn persist_agent_workspace(&self) {
+        // Keep queued restore records intact until every ACP load completes.
+        // Otherwise registering the first restored thread would erase peers
+        // that have not yet been attempted.
+        if self.agents.workspace_restore.is_some() {
+            return;
+        }
+        let existing = self.load_persisted_agent_workspace().unwrap_or_default();
+        let sessions = self
+            .agents
+            .threads
+            .iter()
+            .map(|thread| PersistedAgentSession {
+                agent_id: thread.agent_id.clone(),
+                session_id: thread.session_id.clone(),
+                last_prompt: existing
+                    .sessions
+                    .iter()
+                    .find(|record| record.session_id == thread.session_id)
+                    .and_then(|record| record.last_prompt.clone()),
+                session_name: thread.session_name.clone(),
+            })
+            .collect();
+        let active_session_id = self
+            .agents
+            .workspace_restore
+            .as_ref()
+            .and_then(|restore| restore.active_session_id.clone())
+            .or_else(|| {
+                self.agents
+                    .active_thread_index()
+                    .and_then(|index| self.agents.threads.get(index))
+                    .map(|thread| thread.session_id.clone())
+            });
+        self.save_persisted_agent_workspace(Some(&PersistedAgentWorkspace {
+            version: persisted_agent_workspace_version(),
+            active_session_id,
+            sessions,
+        }));
+    }
+
+    /// Updates a persisted thread's recoverable prompt without disturbing
+    /// other workspace sessions.
+    fn update_persisted_last_prompt(&self, session_id: &str, last_prompt: Option<&str>) {
+        let Some(mut workspace) = self.load_persisted_agent_workspace() else {
+            return;
+        };
+        let Some(record) =
+            workspace.sessions.iter_mut().find(|record| record.session_id == session_id)
+        else {
             return;
         };
         record.last_prompt = last_prompt.map(str::to_string);
-        self.save_persisted_agent_session(Some(&record));
+        self.save_persisted_agent_workspace(Some(&workspace));
     }
 
     /// Absolute workspace roots forwarded as ACP session context.
@@ -4719,7 +4974,7 @@ impl App {
                 format!("{id}: {}", ee_agent_host::redact::redact_secret_values(&command, &secrets))
             })
             .collect::<Vec<_>>();
-        let persisted = self.load_persisted_agent_session();
+        let persisted = self.load_persisted_agent_workspace();
         let mut lines = vec![
             String::from("Agents TUI doctor (read-only)"),
             format!("feature: {}", self.agents_status_message()),
@@ -4738,11 +4993,12 @@ impl App {
                 if self.config.mcp.proxy.enabled { "enabled" } else { "disabled" }
             ),
             match persisted {
-                Some(record) => format!(
-                    "session storage: workspace-keyed reconnect record for {} ({})",
-                    record.agent_id, record.session_id
+                Some(workspace) => format!(
+                    "session storage: {} workspace thread(s), active:{}",
+                    workspace.sessions.len(),
+                    workspace.active_session_id.as_deref().unwrap_or("none")
                 ),
-                None => String::from("session storage: no persisted reconnect record"),
+                None => String::from("session storage: no persisted workspace threads"),
             },
             String::from(
                 "redaction: secret-like JSON keys and configured secret values are redacted; context snapshots stay session-local",
@@ -4953,16 +5209,6 @@ impl App {
             self.backend.status_message = Some(String::from("no active agent session"));
             return;
         };
-        let session_id = self.agents.threads[active].session_id.clone();
-        let Some(mut record) =
-            self.load_persisted_agent_session().filter(|record| record.session_id == session_id)
-        else {
-            self.backend.status_message =
-                Some(String::from("session metadata is unavailable; cannot rename"));
-            return;
-        };
-        record.session_name = Some(name.clone());
-        self.save_persisted_agent_session(Some(&record));
         let thread = &mut self.agents.threads[active];
         thread.session_name = Some(name.clone());
         thread.display_name = thread_display_name(
@@ -4972,6 +5218,7 @@ impl App {
             thread.session_title.as_deref(),
         );
         thread.push_system(format!("session renamed: {name}"));
+        self.persist_agent_workspace();
         self.backend.status_message = Some(format!("session renamed: {name}"));
     }
 
@@ -5433,6 +5680,22 @@ impl App {
                 self.agents_stop_command(args);
                 true
             }
+            "steer" if !args.is_empty() => {
+                self.agents_steer_command(args);
+                true
+            }
+            "steer" => {
+                self.backend.status_message = Some(String::from("usage: /steer <message>"));
+                true
+            }
+            "queue" if queue_command_is_management(args) => {
+                self.agents_queue_command(args);
+                true
+            }
+            "queue" if !args.is_empty() => {
+                self.agents_queue_prompt_command(args);
+                true
+            }
             "queue" => {
                 self.agents_queue_command(args);
                 true
@@ -5545,6 +5808,10 @@ impl App {
             });
             return;
         }
+        self.send_ready_agent_prompt(active, prompt_text);
+    }
+
+    fn send_ready_agent_prompt(&mut self, active: usize, prompt_text: String) {
         let next_context = {
             let thread = &mut self.agents.threads[active];
             thread.draft.clear();
@@ -5555,24 +5822,37 @@ impl App {
     }
 
     fn enqueue_agent_follow_up(&mut self, active: usize, prompt_text: String) {
+        let Some(queued_count) = self.queue_agent_prompt(active, prompt_text, false) else {
+            return;
+        };
+        self.backend.status_message = Some(format!(
+            "follow-up queued ({queued_count}/{AGENT_PROMPT_QUEUE_MAX}); /stop cancels current turn, /queue edits pending prompts"
+        ));
+    }
+
+    fn queue_agent_prompt(
+        &mut self,
+        active: usize,
+        prompt_text: String,
+        priority: bool,
+    ) -> Option<usize> {
         let thread = &mut self.agents.threads[active];
         if thread.queued_prompts.len() >= AGENT_PROMPT_QUEUE_MAX {
             self.backend.status_message = Some(format!(
                 "queued follow-up limit reached ({AGENT_PROMPT_QUEUE_MAX}); edit or remove entries with /queue"
             ));
-            return;
+            return None;
         }
         let next_prompt_context_files = std::mem::take(&mut thread.next_prompt_context_files);
         thread.draft.clear();
         thread.record_prompt_history(&prompt_text);
-        thread
-            .queued_prompts
-            .push_back(QueuedPrompt { text: prompt_text, next_prompt_context_files });
-        self.backend.status_message = Some(format!(
-            "follow-up queued ({}/{}); /stop cancels current turn, /queue edits pending prompts",
-            thread.queued_prompts.len(),
-            AGENT_PROMPT_QUEUE_MAX
-        ));
+        let prompt = QueuedPrompt { text: prompt_text, next_prompt_context_files };
+        if priority {
+            thread.queued_prompts.push_front(prompt);
+        } else {
+            thread.queued_prompts.push_back(prompt);
+        }
+        Some(thread.queued_prompts.len())
     }
 
     fn dispatch_next_queued_prompt(&mut self, active: usize) {
@@ -5615,8 +5895,10 @@ impl App {
         blocks: Vec<ContentBlock>,
         persisted_prompt: Option<&str>,
     ) {
-        if let Some(prompt) = persisted_prompt {
-            self.update_persisted_last_prompt(Some(prompt));
+        if let Some(prompt) = persisted_prompt
+            && let Some(thread) = self.agents.threads.get(active)
+        {
+            self.update_persisted_last_prompt(&thread.session_id, Some(prompt));
         }
         let thread_handle = {
             let thread = &mut self.agents.threads[active];
@@ -6528,7 +6810,17 @@ mod tests {
         assert_eq!(AgentPaneLayout::parse("bottom"), Some(AgentPaneLayout::Bottom));
         assert_eq!(AgentPaneLayout::parse("full"), Some(AgentPaneLayout::Full));
         assert_eq!(AgentPaneLayout::parse("left"), None);
-        assert_eq!(AgentPaneLayout::parse(""), None);
+    }
+
+    #[test]
+    fn queue_management_forms_do_not_consume_prompt_messages() {
+        assert!(queue_command_is_management(""));
+        assert!(queue_command_is_management("list"));
+        assert!(queue_command_is_management("edit 1 revised prompt"));
+        assert!(queue_command_is_management("move 2 1"));
+        assert!(queue_command_is_management("remove 1"));
+        assert!(queue_command_is_management("clear"));
+        assert!(!queue_command_is_management("review changed files"));
     }
 
     fn compact_command() -> AvailableCommand {
@@ -6597,6 +6889,7 @@ mod tests {
                 "sessions",
                 "export",
                 "stop",
+                "steer",
                 "resume",
                 "discard",
                 "reconnect",

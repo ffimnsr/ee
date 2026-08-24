@@ -1066,6 +1066,34 @@ impl BufferManager {
         Ok(())
     }
 
+    /// Query core-owned Tree-sitter dependency facts for one open buffer.
+    #[cfg(feature = "agents")]
+    pub(crate) fn symbol_dependency_map(
+        &mut self,
+        id: BufferId,
+        path: String,
+        line: u32,
+        character: u32,
+        language_id: String,
+    ) -> io::Result<Value> {
+        let view_id = self
+            .bufs
+            .iter()
+            .find(|buf| buf.id == id)
+            .map(|buf| buf.view_id.clone())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "buffer not found"))?;
+        self.send_request(
+            "symbol_dependency_map",
+            json!({
+                "view_id": view_id,
+                "path": path,
+                "line": line,
+                "character": character,
+                "language_id": language_id,
+            }),
+        )
+    }
+
     pub(crate) fn buffer_pristine(&mut self, id: BufferId) -> io::Result<bool> {
         let view_id = self
             .bufs

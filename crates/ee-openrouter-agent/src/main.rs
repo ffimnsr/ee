@@ -2,14 +2,14 @@
 //! (simple or orchestrated), and let the framework own the ACP protocol loop.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
 use ee_acp_agent_server::{AcpAgentServer, AcpAgentServerConfig};
 use ee_agent_orchestrator::{OrchestratorConfig, OrchestratorProvider, OrchestratorProviderConfig};
 use ee_agent_protocol::Implementation;
-use ee_openrouter_agent::config::{Args, Config};
+use ee_openrouter_agent::config::{Args, Config, setup_manifest};
 use ee_openrouter_agent::dotenv::load_dotenv;
 use ee_openrouter_agent::orchestrated::{OpenRouterModelAdapter, openrouter_orchestrated_policy};
 use ee_openrouter_agent::provider::OpenRouterProvider;
@@ -17,6 +17,17 @@ use ee_openrouter_agent::provider::OpenRouterProvider;
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args = Args::parse();
+    if args.ee_config {
+        match serde_json::to_string(&setup_manifest()) {
+            Ok(manifest) => println!("{manifest}"),
+            Err(error) => {
+                eprintln!("ee-openrouter-agent: failed to serialize setup manifest: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     let dotenv = match load_dotenv(Path::new(".env")) {
         Ok(values) => values,
         Err(error) => {
@@ -68,6 +79,7 @@ async fn run_orchestrated(
         implementation: Implementation::new("ee-openrouter-agent", env!("CARGO_PKG_VERSION"))
             .title("OpenRouter"),
         orchestrator: orchestrator_config(&config),
+        session_state_dir: Some(default_session_state_dir()?),
         ..OrchestratorProviderConfig::default()
     };
     let provider = OrchestratorProvider::with_policy(
@@ -79,6 +91,14 @@ async fn run_orchestrated(
         .run_stdio()
         .await
         .map_err(|error| error.to_string())
+}
+
+/// Per-user durable storage for normal ACP sessions. Kept outside workspaces
+/// so conversation snapshots never alter project files or repository state.
+fn default_session_state_dir() -> Result<PathBuf, String> {
+    dirs::data_local_dir().map(|directory| directory.join("ee").join("agent-sessions")).ok_or_else(
+        || "could not determine local data directory for agent session state".to_string(),
+    )
 }
 
 fn orchestrator_config(config: &Config) -> OrchestratorConfig {

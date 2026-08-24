@@ -77,8 +77,10 @@ pub use proxy::{
     PlannedFileEdit, PlannedTextEdit, ProjectInstructionSource, ProjectInstructionsResult,
     ProxyToolError, ReferenceEntry, ReferencesResult, RenamePreviewResult, ReviewContextResult,
     SearchFilesAllResult, SearchFilesResult, SearchTextResult, SessionNoteResult,
-    SessionNotesResult, TerminalOutputChunk, TerminalOutputResult, TerminalWaitResult, TextEdit,
-    TextMatch, TextRange, ToolManifestEntry, ToolOutputCap, ToolsManifestResult,
+    SessionNotesResult, SymbolDependencyLocation, SymbolDependencyMapResult,
+    SymbolDependencyModuleHint, SymbolDependencyRelatedFile, SymbolDependencyRelation,
+    SymbolDependencyTotals, TerminalOutputChunk, TerminalOutputResult, TerminalWaitResult,
+    TextEdit, TextMatch, TextRange, ToolManifestEntry, ToolOutputCap, ToolsManifestResult,
     WorkspaceEditResult, WorkspaceRootsResult,
 };
 pub use registry::{

@@ -347,6 +347,7 @@ fn mcp_safe_read_profile_covers_every_pinned_manifest_read_tool() {
         "ee_terminal_wait_long",
         "ee_git_status",
         "ee_git_diff",
+        "ee_git_diff_staged",
         "ee_git_diff_file",
         "ee_changed_files",
         "ee_review_context",

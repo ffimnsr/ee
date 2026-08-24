@@ -671,6 +671,7 @@ pub(crate) enum ProxyCall {
     },
     GitStatus,
     GitDiff,
+    GitDiffStaged,
     GitDiffFile {
         path: String,
     },
@@ -687,6 +688,11 @@ pub(crate) enum ProxyCall {
     },
     FileDependencyMap {
         path: String,
+    },
+    SymbolDependencyMap {
+        path: String,
+        line: u32,
+        character: u32,
     },
     ReadTextFile {
         path: String,
@@ -802,6 +808,7 @@ pub(crate) enum ProxyToolCall {
     RenameSymbol { path: String, line: u32, character: u32, new_name: String },
     GitStatus,
     GitDiff,
+    GitDiffStaged,
     GitDiffFile { path: String },
     ChangedFiles,
     ReviewContext,
@@ -810,6 +817,7 @@ pub(crate) enum ProxyToolCall {
     ReadNotes { scope: String },
     ReadNote { scope: String, key: String },
     FileDependencyMap { path: String },
+    SymbolDependencyMap { path: String, line: u32, character: u32 },
     Read(ReadTextFileRequest),
     Write(WriteTextFileRequest),
     Terminal(CreateTerminalRequest),
@@ -931,6 +939,7 @@ async fn proxy_call_to_bridge(
         }
         ProxyCall::GitStatus => ProxyToolCall::GitStatus,
         ProxyCall::GitDiff => ProxyToolCall::GitDiff,
+        ProxyCall::GitDiffStaged => ProxyToolCall::GitDiffStaged,
         ProxyCall::GitDiffFile { path } => ProxyToolCall::GitDiffFile { path },
         ProxyCall::ChangedFiles => ProxyToolCall::ChangedFiles,
         ProxyCall::ReviewContext => ProxyToolCall::ReviewContext,
@@ -941,6 +950,9 @@ async fn proxy_call_to_bridge(
         ProxyCall::ReadNotes => ProxyToolCall::ReadNotes { scope: scope.to_owned() },
         ProxyCall::ReadNote { key } => ProxyToolCall::ReadNote { scope: scope.to_owned(), key },
         ProxyCall::FileDependencyMap { path } => ProxyToolCall::FileDependencyMap { path },
+        ProxyCall::SymbolDependencyMap { path, line, character } => {
+            ProxyToolCall::SymbolDependencyMap { path, line, character }
+        }
         ProxyCall::ReadTextFile { path, line, limit } => {
             let mut request = ReadTextFileRequest::new(session_id, path);
             request.line = line;
@@ -1464,6 +1476,10 @@ impl ee_mcp::EeProxyBackend for SocketProxyBackend {
         proxy_value(&self.call_value(ProxyCall::GitDiff), "git_diff")
     }
 
+    fn git_diff_staged(&self) -> Result<ee_mcp::GitDiffResult, ee_mcp::ProxyToolError> {
+        proxy_value(&self.call_value(ProxyCall::GitDiffStaged), "git_diff_staged")
+    }
+
     fn git_diff_file(&self, path: String) -> Result<ee_mcp::GitDiffResult, ee_mcp::ProxyToolError> {
         proxy_value(&self.call_value(ProxyCall::GitDiffFile { path }), "git_diff_file")
     }
@@ -1503,6 +1519,18 @@ impl ee_mcp::EeProxyBackend for SocketProxyBackend {
         path: String,
     ) -> Result<ee_mcp::FileDependencyMapResult, ee_mcp::ProxyToolError> {
         proxy_value(&self.call_value(ProxyCall::FileDependencyMap { path }), "file_dependency_map")
+    }
+
+    fn symbol_dependency_map(
+        &self,
+        path: String,
+        line: u32,
+        character: u32,
+    ) -> Result<ee_mcp::SymbolDependencyMapResult, ee_mcp::ProxyToolError> {
+        proxy_value(
+            &self.call_value(ProxyCall::SymbolDependencyMap { path, line, character }),
+            "symbol_dependency_map",
+        )
     }
 
     fn read_text_file(

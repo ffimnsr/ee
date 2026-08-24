@@ -230,9 +230,9 @@ Add read-only source-control tools that support review and final self-checks wit
 - [x] Add `ee_git_diff_file`.
   - [x] Accept `path` only.
   - [x] Return bounded unstaged unified diff for one file.
-- [ ] Add `ee_git_diff_staged` only if staged diff is needed.
-  - [ ] Accept no arguments.
-  - [ ] Return bounded staged unified diff.
+- [x] Add `ee_git_diff_staged` only if staged diff is needed.
+  - [x] Accept no arguments.
+  - [x] Return bounded staged unified diff.
 - [x] Add `ee_changed_files`.
   - [x] Return editor/SCM changed files with dirty-buffer state and saved state.
 - [x] Add `ee_review_context`.
@@ -272,11 +272,11 @@ Expose project guidance and bounded session context so agents follow repo rules 
   - [x] Accept `path` only.
   - [x] Return known file dependency edges when an index exists.
   - [x] Fail gracefully when no graph/index is available.
-- [ ] Add `ee_symbol_dependency_map` for bounded symbol-scoped graph lookup.
-  - [ ] Accept `path`, `line`, and `character` only.
-  - [ ] Return resolved symbol, definition, callers, callees, implementations, tests, ownership/module hints, and capped related files.
-  - [ ] Return graph freshness, graph version, result totals, and truncation metadata.
-  - [ ] Fail closed with a typed unavailable/stale-index error when graph lookup cannot produce trustworthy results.
+- [x] Add `ee_symbol_dependency_map` for bounded symbol-scoped graph lookup.
+  - [x] Accept `path`, `line`, and `character` only.
+  - [x] Return resolved symbol, definition, callers, callees, implementations, tests, ownership/module hints, and capped related files.
+  - [x] Return graph freshness, graph version, result totals, and truncation metadata.
+  - [x] Fail closed with a typed unavailable/stale-index error when graph lookup cannot produce trustworthy results.
 
 #### Implementation notes
 

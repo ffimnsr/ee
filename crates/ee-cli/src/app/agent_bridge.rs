@@ -1111,6 +1111,14 @@ impl ClientRequestHandler for BridgeUiHandler {
                     })
                     .await
                 }
+                ClientRequest::ProxyGitDiffStaged => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: super::agents_mcp::ProxyToolCall::GitDiffStaged,
+                        reply,
+                    })
+                    .await
+                }
                 ClientRequest::ProxyGitDiffFile { path } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
                         route: ProxyRoute::AcpNative,
@@ -1171,6 +1179,18 @@ impl ClientRequestHandler for BridgeUiHandler {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
                         route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::FileDependencyMap { path },
+                        reply,
+                    })
+                    .await
+                }
+                ClientRequest::ProxySymbolDependencyMap { path, line, character } => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: super::agents_mcp::ProxyToolCall::SymbolDependencyMap {
+                            path,
+                            line,
+                            character,
+                        },
                         reply,
                     })
                     .await
@@ -2056,6 +2076,10 @@ impl App {
             super::agents_mcp::ProxyToolCall::GitDiff => {
                 let _ = reply.send(self.proxy_git_diff().map(ClientRequestResponse::ProxyValue));
             }
+            super::agents_mcp::ProxyToolCall::GitDiffStaged => {
+                let _ =
+                    reply.send(self.proxy_git_diff_staged().map(ClientRequestResponse::ProxyValue));
+            }
             super::agents_mcp::ProxyToolCall::GitDiffFile { path } => {
                 let _ = reply.send(
                     self.proxy_git_diff_file(Path::new(&path))
@@ -2105,6 +2129,10 @@ impl App {
             }
             super::agents_mcp::ProxyToolCall::FileDependencyMap { path } => {
                 let result = self.proxy_file_dependency_map(Path::new(&path));
+                let _ = reply.send(result.map(ClientRequestResponse::ProxyValue));
+            }
+            super::agents_mcp::ProxyToolCall::SymbolDependencyMap { path, line, character } => {
+                let result = self.proxy_symbol_dependency_map(Path::new(&path), line, character);
                 let _ = reply.send(result.map(ClientRequestResponse::ProxyValue));
             }
             super::agents_mcp::ProxyToolCall::Read(request) => {
@@ -4419,6 +4447,16 @@ impl App {
         self.proxy_git_diff_value(diff)
     }
 
+    fn proxy_git_diff_staged(&self) -> Result<serde_json::Value, AgentError> {
+        let diff = self
+            .proxy_git_repository()?
+            .staged_diff(crate::git::GitReadLimits::default())
+            .map_err(|error| {
+            AgentError::HandlerError(format!("Git staged diff failed: {error}"))
+        })?;
+        self.proxy_git_diff_value(diff)
+    }
+
     fn proxy_git_diff_file(&self, path: &Path) -> Result<serde_json::Value, AgentError> {
         if !path.is_absolute() {
             return Err(AgentError::invalid_params("path must be absolute"));
@@ -4987,6 +5025,42 @@ impl App {
                 let _ = reply.send(Err(error));
             }
         }
+    }
+
+    fn proxy_symbol_dependency_map(
+        &mut self,
+        path: &Path,
+        line: u32,
+        character: u32,
+    ) -> Result<serde_json::Value, AgentError> {
+        if !path.is_absolute() {
+            return Err(AgentError::invalid_params("path must be absolute"));
+        }
+        let canonical = std::fs::canonicalize(path).map_err(|error| {
+            AgentError::Io(format!("cannot resolve symbol-dependency path: {error}"))
+        })?;
+        if !self.path_in_workspace(&canonical) {
+            return Err(AgentError::invalid_params("path outside allowed workspace"));
+        }
+        let buffer_id = self.ensure_proxy_buffer(&canonical)?;
+        let buffer =
+            self.backend.all_bufs().iter().find(|buffer| buffer.id == buffer_id).ok_or_else(
+                || AgentError::HandlerError("opened buffer is unavailable".to_string()),
+            )?;
+        let language_id = self.buffer_language_id(buffer).ok_or_else(|| {
+            AgentError::HandlerError(
+                "dependency_index_unavailable: buffer language is unavailable".to_string(),
+            )
+        })?;
+        self.backend
+            .symbol_dependency_map(
+                buffer_id,
+                canonical.display().to_string(),
+                line,
+                character,
+                language_id,
+            )
+            .map_err(|error| AgentError::HandlerError(error.to_string()))
     }
 
     fn proxy_file_dependency_map(&self, path: &Path) -> Result<serde_json::Value, AgentError> {

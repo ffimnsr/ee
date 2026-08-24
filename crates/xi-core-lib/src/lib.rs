@@ -58,6 +58,7 @@ pub mod recorder;
 pub mod runtime_loader;
 pub mod selection;
 pub mod styles;
+pub mod symbol_index;
 pub mod syntax;
 pub mod tabs;
 pub mod text_store;

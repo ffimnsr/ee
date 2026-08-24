@@ -457,8 +457,13 @@ fn transcript_lines(
             }
         }
         TranscriptItem::System { text, .. } => {
-            lines
-                .push(Line::from(vec![Span::styled("-!- ", dim), Span::styled(text.clone(), dim)]));
+            let notice_width = width.saturating_sub(4).max(4);
+            for (index, segment) in
+                crate::app::wrap_text(text, notice_width).into_iter().enumerate()
+            {
+                let prefix = if index == 0 { "-!- " } else { "    " };
+                lines.push(Line::from(vec![Span::styled(prefix, dim), Span::styled(segment, dim)]));
+            }
         }
         TranscriptItem::Stderr { text, .. } => {
             lines.push(Line::from(vec![
@@ -2991,6 +2996,23 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    #[cfg(feature = "agents")]
+    #[test]
+    fn agents_system_notices_wrap_inside_transcript_width() {
+        let item = crate::app::TranscriptItem::System {
+            text: String::from(
+                "commands: /compact — Summarize session history, /discard — Discard paused work",
+            ),
+            at: std::time::SystemTime::UNIX_EPOCH,
+        };
+
+        let lines = transcript_lines(&item, 24, false);
+        assert!(lines.len() > 1, "long notice must wrap");
+        assert!(lines.iter().all(|line| line.width() <= 24));
+        assert_eq!(lines[0].spans[0].content, "-!- ");
+        assert_eq!(lines[1].spans[0].content, "    ");
+    }
 
     #[test]
     fn apply_annotation_overlay_styles_target_range() {

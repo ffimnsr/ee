@@ -117,6 +117,7 @@ impl HandlerCapabilities {
             | "_ee/terminal_output"
             | "_ee/git_status"
             | "_ee/git_diff"
+            | "_ee/git_diff_staged"
             | "_ee/git_diff_file"
             | "_ee/changed_files"
             | "_ee/review_context"
@@ -124,7 +125,8 @@ impl HandlerCapabilities {
             | "_ee/save_note"
             | "_ee/read_notes"
             | "_ee/read_note"
-            | "_ee/file_dependency_map" => self.proxy_discovery,
+            | "_ee/file_dependency_map"
+            | "_ee/symbol_dependency_map" => self.proxy_discovery,
             _ => false,
         }
     }
@@ -239,6 +241,7 @@ pub enum ClientRequest {
     },
     ProxyGitStatus,
     ProxyGitDiff,
+    ProxyGitDiffStaged,
     ProxyGitDiffFile {
         path: String,
     },
@@ -259,6 +262,11 @@ pub enum ClientRequest {
     },
     ProxyFileDependencyMap {
         path: String,
+    },
+    ProxySymbolDependencyMap {
+        path: String,
+        line: u32,
+        character: u32,
     },
     /// Internal MCP proxy request. Unlike ACP `terminal/output`, returns the
     /// proxy's structured terminal-output schema in `ProxyValue`.
@@ -304,6 +312,7 @@ impl ClientRequest {
             Self::ProxyRenameSymbol { .. } => "_ee/rename_symbol",
             Self::ProxyGitStatus => "_ee/git_status",
             Self::ProxyGitDiff => "_ee/git_diff",
+            Self::ProxyGitDiffStaged => "_ee/git_diff_staged",
             Self::ProxyGitDiffFile { .. } => "_ee/git_diff_file",
             Self::ProxyChangedFiles => "_ee/changed_files",
             Self::ProxyReviewContext => "_ee/review_context",
@@ -312,6 +321,7 @@ impl ClientRequest {
             Self::ProxyReadNotes { .. } => "_ee/read_notes",
             Self::ProxyReadNote { .. } => "_ee/read_note",
             Self::ProxyFileDependencyMap { .. } => "_ee/file_dependency_map",
+            Self::ProxySymbolDependencyMap { .. } => "_ee/symbol_dependency_map",
             Self::ProxyTerminalOutput(_) => "_ee/terminal_output",
             Self::ReadTextFile(_) => FS_READ_TEXT_FILE_METHOD_NAME,
             Self::WriteTextFile(_) => FS_WRITE_TEXT_FILE_METHOD_NAME,
@@ -356,6 +366,7 @@ impl ClientRequest {
             | Self::ProxyRenameSymbol { .. }
             | Self::ProxyGitStatus
             | Self::ProxyGitDiff
+            | Self::ProxyGitDiffStaged
             | Self::ProxyGitDiffFile { .. }
             | Self::ProxyChangedFiles
             | Self::ProxyReviewContext
@@ -363,7 +374,8 @@ impl ClientRequest {
             | Self::ProxySaveNote { .. }
             | Self::ProxyReadNotes { .. }
             | Self::ProxyReadNote { .. }
-            | Self::ProxyFileDependencyMap { .. } => None,
+            | Self::ProxyFileDependencyMap { .. }
+            | Self::ProxySymbolDependencyMap { .. } => None,
             Self::ProxyTerminalOutput(request) => Some(&request.session_id),
             Self::ReadTextFile(request) => Some(&request.session_id),
             Self::WriteTextFile(request) => Some(&request.session_id),
@@ -543,6 +555,7 @@ mod tests {
             "_ee/open_buffers",
             "_ee/git_status",
             "_ee/git_diff",
+            "_ee/git_diff_staged",
             "_ee/git_diff_file",
             "_ee/changed_files",
             "_ee/review_context",
@@ -621,6 +634,11 @@ mod tests {
         assert_eq!(git_status.method(), "_ee/git_status");
         assert_eq!(git_status.session_id(), None);
         assert!(HandlerCapabilities::all().supports(git_status.method()));
+
+        let git_diff_staged = ClientRequest::ProxyGitDiffStaged;
+        assert_eq!(git_diff_staged.method(), "_ee/git_diff_staged");
+        assert_eq!(git_diff_staged.session_id(), None);
+        assert!(HandlerCapabilities::all().supports(git_diff_staged.method()));
 
         let git_diff_file = ClientRequest::ProxyGitDiffFile { path: String::from("/tmp/x") };
         assert_eq!(git_diff_file.method(), "_ee/git_diff_file");

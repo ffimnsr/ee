@@ -201,6 +201,7 @@ pub mod retries;
 pub mod runtime;
 pub mod semantic_memory;
 pub mod sensitive_data;
+pub mod session_store;
 pub mod strategy;
 pub mod streaming;
 pub mod stuck;

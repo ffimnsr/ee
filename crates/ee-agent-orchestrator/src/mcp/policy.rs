@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn git_tools_are_classified_as_reads() {
-        for name in ["ee_git_status", "ee_git_diff", "ee_git_diff_file"] {
+        for name in ["ee_git_status", "ee_git_diff", "ee_git_diff_staged", "ee_git_diff_file"] {
             let spec = classify_tool("ee", name, &policy());
             assert_eq!(spec.class, SideEffectClass::Read, "{name}");
             assert_eq!(spec.subclass, None, "{name}");

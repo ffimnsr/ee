@@ -431,6 +431,9 @@ impl CoreState {
                 self.do_fold_ranges_preview(view_id, start_line, end_line)
             }
             SelectCharsPreview { view_id, count } => self.do_select_chars_preview(view_id, count),
+            SymbolDependencyMap { view_id, line, character, language_id, path } => {
+                self.do_symbol_dependency_map(view_id, line, character, &language_id, path)
+            }
         }
     }
 
@@ -464,6 +467,39 @@ impl CoreState {
             "\r" => "Line endings normalized to CR.",
             _ => "Line endings updated.",
         });
+    }
+
+    fn do_symbol_dependency_map(
+        &mut self,
+        view_id: ViewId,
+        line: u32,
+        character: u32,
+        language_id: &str,
+        path: String,
+    ) -> Result<Value, RemoteError> {
+        let buffer_id = self
+            .views
+            .get(&view_id)
+            .map(|view| view.borrow().get_buffer_id())
+            .ok_or_else(|| RemoteError::custom(404, "missing view", None))?;
+        let editor = self
+            .editors
+            .get(&buffer_id)
+            .ok_or_else(|| RemoteError::custom(404, "missing editor", None))?;
+        let editor = editor.borrow();
+        let revision = editor.get_head_rev_token();
+        let snapshot = editor.text_store_snapshot();
+        let result = crate::symbol_index::symbol_dependency_map(
+            &snapshot,
+            revision,
+            path,
+            line,
+            character,
+            language_id,
+        )
+        .map_err(|error| RemoteError::custom(409, error.message(), None))?;
+        serde_json::to_value(result)
+            .map_err(|error| RemoteError::custom(500, error.to_string(), None))
     }
 
     fn do_select_chars_preview(

@@ -9,6 +9,7 @@ description = "OpenRouter ACP agent provider built on the ee-acp-agent-server fr
 
 [dependencies]
 clap.workspace = true
+dirs.workspace = true
 ee-acp-agent-server.workspace = true
 ee-agent-orchestrator.workspace = true
 ee-agent-protocol.workspace = true

@@ -29,6 +29,7 @@ pub mod mcp_over_acp;
 pub mod ordering;
 pub mod recovery;
 pub mod registry;
+pub mod setup;
 pub mod slash_command;
 pub mod validate;
 pub mod version;

@@ -9,6 +9,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{ArgAction, Parser, builder::BoolishValueParser};
+use ee_agent_protocol::setup::{
+    SETUP_MANIFEST_SCHEMA_VERSION, SetupAgent, SetupEnvVar, SetupInput, SetupInputConfig,
+    SetupManifest,
+};
 
 /// Default OpenRouter chat-completions endpoint.
 pub const DEFAULT_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -36,6 +40,40 @@ pub const DEFAULT_RETRY_BASE_DELAY_MS: u64 = 500;
 /// Default retry backoff cap: 30 seconds.
 pub const DEFAULT_RETRY_MAX_DELAY_MS: u64 = 30_000;
 
+/// Builds the setup manifest emitted by `ee-openrouter-agent --ee-config`.
+#[must_use]
+pub fn setup_manifest() -> SetupManifest {
+    SetupManifest {
+        schema_version: SETUP_MANIFEST_SCHEMA_VERSION,
+        agent: SetupAgent {
+            id: String::from("openrouter"),
+            display_name: String::from("OpenRouter"),
+        },
+        env_vars: vec![SetupEnvVar {
+            name: String::from("OPENROUTER_API_KEY"),
+            required: true,
+            secret: true,
+            description: String::from("OpenRouter API key."),
+        }],
+        inputs: vec![
+            SetupInput {
+                key: String::from("model"),
+                label: String::from("Model"),
+                default: Some(String::from(DEFAULT_MODEL)),
+                config: SetupInputConfig { env: String::from("OPENROUTER_MODEL") },
+            },
+            SetupInput {
+                key: String::from("max_iterations"),
+                label: String::from("Maximum iterations"),
+                default: Some(
+                    ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS.to_string(),
+                ),
+                config: SetupInputConfig { env: String::from("OPENROUTER_MAX_ITERATIONS") },
+            },
+        ],
+    }
+}
+
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
     let value = value.parse::<usize>().map_err(|_| String::from("must be a positive integer"))?;
     if value == 0 {
@@ -58,6 +96,9 @@ fn parse_percentage(value: &str) -> Result<u8, String> {
 #[derive(Debug, Parser)]
 #[command(version, about = "ACP stdio bridge for OpenRouter chat completions")]
 pub struct Args {
+    /// Print ee setup manifest JSON and exit without starting the agent.
+    #[arg(long)]
+    pub ee_config: bool,
     /// OpenRouter model id, e.g. deepseek/deepseek-v4-flash-0731.
     #[arg(long, env = "OPENROUTER_MODEL", default_value = DEFAULT_MODEL)]
     model: String,
@@ -284,6 +325,7 @@ mod tests {
 
     fn args() -> Args {
         Args {
+            ee_config: false,
             model: String::from("test/model"),
             api_url: String::from(DEFAULT_API_URL),
             site_url: None,
@@ -336,6 +378,36 @@ mod tests {
         assert_eq!(config.retry_max_delay, Duration::from_millis(DEFAULT_RETRY_MAX_DELAY_MS));
         assert!(config.checkpoint_dir.is_none());
         assert!(config.api_key.is_none());
+    }
+
+    #[test]
+    fn setup_manifest_advertises_required_values_and_defaults() {
+        let manifest = setup_manifest();
+
+        assert_eq!(manifest.schema_version, SETUP_MANIFEST_SCHEMA_VERSION);
+        assert_eq!(manifest.agent.id, "openrouter");
+        assert_eq!(manifest.agent.display_name, "OpenRouter");
+        assert_eq!(manifest.env_vars.len(), 1);
+        assert_eq!(manifest.env_vars[0].name, "OPENROUTER_API_KEY");
+        assert!(manifest.env_vars[0].required);
+        assert!(manifest.env_vars[0].secret);
+        assert_eq!(manifest.inputs[0].key, "model");
+        assert_eq!(manifest.inputs[0].default.as_deref(), Some(DEFAULT_MODEL));
+        assert_eq!(manifest.inputs[0].config.env, "OPENROUTER_MODEL");
+        assert_eq!(manifest.inputs[1].key, "max_iterations");
+        assert_eq!(
+            manifest.inputs[1].default.as_deref(),
+            Some(ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS.to_string().as_str())
+        );
+        assert_eq!(manifest.inputs[1].config.env, "OPENROUTER_MAX_ITERATIONS");
+    }
+
+    #[test]
+    fn ee_config_flag_parses() {
+        let parsed = Args::try_parse_from(["ee-openrouter-agent", "--ee-config"])
+            .expect("setup manifest flag parses");
+
+        assert!(parsed.ee_config);
     }
 
     #[test]

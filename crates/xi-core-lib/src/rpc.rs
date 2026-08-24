@@ -291,6 +291,18 @@ pub enum CoreRequest {
         view_id: ViewId,
         count: usize,
     },
+    /// Bounded Tree-sitter dependency map for one editor-owned buffer snapshot.
+    SymbolDependencyMap {
+        view_id: ViewId,
+        /// One-based logical source line.
+        line: u32,
+        /// Zero-based UTF-16 code-unit offset within `line`.
+        character: u32,
+        /// Frontend-resolved language identity; core never guesses from disk paths.
+        language_id: String,
+        /// Canonical absolute workspace path, only returned as metadata.
+        path: String,
+    },
 }
 
 /// A helper type, which extracts the `view_id` field from edit

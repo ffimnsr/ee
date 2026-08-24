@@ -2172,6 +2172,81 @@ pub(crate) fn set_config_value(
     set_config_value_with_env(scope, key, raw_value, &ConfigEnvironment::from_process())
 }
 
+#[cfg(feature = "agents")]
+/// Writes one complete agent-server definition to the user config layer.
+///
+/// Agent setup is deliberately global: workspace config must never receive
+/// machine-local executable paths or encrypted secret references.
+pub(crate) fn configure_global_agent_server(
+    agent_id: &str,
+    command: &Path,
+    env_values: &BTreeMap<String, String>,
+) -> Result<PathBuf, String> {
+    configure_global_agent_server_with_env(
+        agent_id,
+        command,
+        env_values,
+        &ConfigEnvironment::from_process(),
+    )
+}
+
+#[cfg(feature = "agents")]
+fn configure_global_agent_server_with_env(
+    agent_id: &str,
+    command: &Path,
+    env_values: &BTreeMap<String, String>,
+    env: &ConfigEnvironment,
+) -> Result<PathBuf, String> {
+    let command =
+        command.to_str().ok_or_else(|| String::from("agent executable path is not valid UTF-8"))?;
+    let path = config_path_for_scope_with_env(ConfigScope::Global, env)?;
+    let mut document = parse_config_document(&path)?;
+    let root = ensure_table(&mut document)?;
+    let agents = match root
+        .entry(String::from("agents"))
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+    {
+        toml::Value::Table(table) => table,
+        _ => return Err(String::from("config key `agents` already exists and is not table")),
+    };
+    agents.insert(String::from("enabled"), toml::Value::Boolean(true));
+    agents.insert(String::from("default_agent"), toml::Value::String(agent_id.to_owned()));
+    let servers = match agents
+        .entry(String::from("servers"))
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+    {
+        toml::Value::Table(table) => table,
+        _ => {
+            return Err(String::from(
+                "config key `agents.servers` already exists and is not table",
+            ));
+        }
+    };
+    let mut server = toml::map::Map::new();
+    server.insert(String::from("command"), toml::Value::String(command.to_owned()));
+    server.insert(String::from("args"), toml::Value::Array(Vec::new()));
+    server.insert(
+        String::from("env"),
+        toml::Value::Table(
+            env_values
+                .iter()
+                .map(|(name, value)| (name.clone(), toml::Value::String(value.clone())))
+                .collect(),
+        ),
+    );
+    servers.insert(agent_id.to_owned(), toml::Value::Table(server));
+
+    let text = toml::to_string_pretty(&document)
+        .map_err(|error| format!("cannot serialize config {}: {error}", path.display()))?;
+    validate_config_contents(&path, &text)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Cannot create {}: {error}", parent.display()))?;
+    }
+    fs::write(&path, text).map_err(|error| format!("Cannot write {}: {error}", path.display()))?;
+    Ok(path)
+}
+
 fn init_config_with_env(scope: ConfigScope, env: &ConfigEnvironment) -> Result<PathBuf, String> {
     let path = config_path_for_scope_with_env(scope, env)?;
     if let Some(parent) = path.parent() {
@@ -4325,5 +4400,60 @@ enabled = true
 
         assert!(text.contains("enabled = false"));
         assert!(!text.contains("[mcp]"));
+    }
+
+    #[cfg(feature = "agents")]
+    #[test]
+    fn agent_setup_writes_complete_server_to_global_config_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_config_environment(temp.path());
+        let config_dir = env.config_dir.as_ref().expect("test config directory");
+        std::fs::create_dir_all(config_dir.join("ee")).unwrap();
+        std::fs::write(
+            config_dir.join("ee").join("config.toml"),
+            "wrap_lines = true\n[agents.servers.existing]\ncommand = \"existing-agent\"\n",
+        )
+        .unwrap();
+        let values = BTreeMap::from([
+            (
+                String::from("OPENROUTER_API_KEY"),
+                String::from("secret://agent.openrouter.OPENROUTER_API_KEY"),
+            ),
+            (String::from("OPENROUTER_MODEL"), String::from("example/model")),
+            (String::from("OPENROUTER_MAX_ITERATIONS"), String::from("32")),
+        ]);
+
+        let path = configure_global_agent_server_with_env(
+            "openrouter",
+            Path::new("/home/example/.local/bin/ee-openrouter-agent"),
+            &values,
+            &env,
+        )
+        .expect("configure global agent");
+        let document: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        assert_eq!(path, config_dir.join("ee").join("config.toml"));
+        assert!(!env.cwd.join(".ee.toml").exists());
+        assert_eq!(document["wrap_lines"].as_bool(), Some(true));
+        assert_eq!(document["agents"]["enabled"].as_bool(), Some(true));
+        assert_eq!(document["agents"]["default_agent"].as_str(), Some("openrouter"));
+        assert_eq!(
+            document["agents"]["servers"]["openrouter"]["command"].as_str(),
+            Some("/home/example/.local/bin/ee-openrouter-agent")
+        );
+        assert_eq!(
+            document["agents"]["servers"]["openrouter"]["env"]["OPENROUTER_API_KEY"].as_str(),
+            Some("secret://agent.openrouter.OPENROUTER_API_KEY")
+        );
+        assert_eq!(
+            document["agents"]["servers"]["openrouter"]["env"]["OPENROUTER_MAX_ITERATIONS"]
+                .as_str(),
+            Some("32")
+        );
+        assert_eq!(
+            document["agents"]["servers"]["existing"]["command"].as_str(),
+            Some("existing-agent")
+        );
     }
 }

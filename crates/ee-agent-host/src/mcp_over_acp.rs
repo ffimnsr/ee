@@ -57,8 +57,8 @@ use ee_mcp::{
     GitStatusResult, ListDirectoryAllResult, ListDirectoryResult, OpenBuffersResult,
     ProjectInstructionsResult, ProxyToolError, ReferencesResult, RenamePreviewResult,
     ReviewContextResult, SearchFilesAllResult, SearchFilesResult, SearchTextResult,
-    SessionNoteResult, SessionNotesResult, TerminalOutputResult, TerminalWaitResult, TextEdit,
-    WorkspaceEditResult, WorkspaceRootsResult,
+    SessionNoteResult, SessionNotesResult, SymbolDependencyMapResult, TerminalOutputResult,
+    TerminalWaitResult, TextEdit, WorkspaceEditResult, WorkspaceRootsResult,
 };
 use rmcp::model::{JsonRpcMessage, RequestId, ServerNotification, ServerRequest, ServerResult};
 use rmcp::service::{RoleServer, RxJsonRpcMessage, TxJsonRpcMessage};
@@ -655,6 +655,10 @@ impl EeProxyBackend for HostProxyBackend {
         proxy_value(self.call(ClientRequest::ProxyGitDiff)?, "git_diff")
     }
 
+    fn git_diff_staged(&self) -> Result<GitDiffResult, ProxyToolError> {
+        proxy_value(self.call(ClientRequest::ProxyGitDiffStaged)?, "git_diff_staged")
+    }
+
     fn git_diff_file(&self, path: String) -> Result<GitDiffResult, ProxyToolError> {
         proxy_value(self.call(ClientRequest::ProxyGitDiffFile { path })?, "git_diff_file")
     }
@@ -696,6 +700,18 @@ impl EeProxyBackend for HostProxyBackend {
         proxy_value(
             self.call(ClientRequest::ProxyFileDependencyMap { path })?,
             "file_dependency_map",
+        )
+    }
+
+    fn symbol_dependency_map(
+        &self,
+        path: String,
+        line: u32,
+        character: u32,
+    ) -> Result<SymbolDependencyMapResult, ProxyToolError> {
+        proxy_value(
+            self.call(ClientRequest::ProxySymbolDependencyMap { path, line, character })?,
+            "symbol_dependency_map",
         )
     }
 

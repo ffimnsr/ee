@@ -51,6 +51,7 @@ pub(crate) const EE_MCP_SAFE_READ_TOOLS: &[&str] = &[
     "ee_terminal_wait_long",
     "ee_git_status",
     "ee_git_diff",
+    "ee_git_diff_staged",
     "ee_git_diff_file",
     "ee_changed_files",
     "ee_review_context",
@@ -59,6 +60,7 @@ pub(crate) const EE_MCP_SAFE_READ_TOOLS: &[&str] = &[
     "ee_read_notes",
     "ee_read_note",
     "ee_file_dependency_map",
+    "ee_symbol_dependency_map",
     "ee_diagnostics",
 ];
 

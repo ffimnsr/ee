@@ -266,6 +266,14 @@ pub trait EeProxyBackend: Send + Sync + 'static {
         })
     }
 
+    /// Returns bounded staged unified diff for active workspace context.
+    fn git_diff_staged(&self) -> Result<GitDiffResult, ProxyToolError> {
+        Err(ProxyToolError {
+            message: String::from("Git staged diff is unavailable in this proxy mode"),
+            is_permission_denied: false,
+        })
+    }
+
     /// Returns bounded unstaged unified diff for one absolute workspace file.
     fn git_diff_file(&self, path: String) -> Result<GitDiffResult, ProxyToolError> {
         let _ = path;
@@ -317,6 +325,22 @@ pub trait EeProxyBackend: Send + Sync + 'static {
     fn file_dependency_map(&self, path: String) -> Result<FileDependencyMapResult, ProxyToolError> {
         let _ = path;
         unavailable_proxy_tool("File dependency map")
+    }
+
+    /// Returns bounded Tree-sitter dependency facts for one symbol position.
+    fn symbol_dependency_map(
+        &self,
+        path: String,
+        line: u32,
+        character: u32,
+    ) -> Result<SymbolDependencyMapResult, ProxyToolError> {
+        let _ = (path, line, character);
+        Err(ProxyToolError {
+            message: String::from(
+                "dependency_index_unavailable: symbol dependency map unavailable in this proxy mode",
+            ),
+            is_permission_denied: false,
+        })
     }
 
     /// Optional exact supported-tool profile. `None` means every stable tool is supported.
@@ -722,6 +746,80 @@ pub struct FileDependencyMapResult {
     pub outgoing: Vec<FileDependencyEdge>,
     pub incoming: Vec<FileDependencyEdge>,
     pub truncated: bool,
+}
+
+/// One source span in a Tree-sitter dependency map.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SymbolDependencyLocation {
+    pub name: String,
+    pub kind: String,
+    pub path: String,
+    pub line: u32,
+    pub character: u32,
+    pub end_line: u32,
+    pub end_character: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SymbolDependencyRelation {
+    pub symbol: SymbolDependencyLocation,
+    pub relation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SymbolDependencyModuleHint {
+    pub name: String,
+    pub kind: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SymbolDependencyRelatedFile {
+    pub path: String,
+    pub relation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SymbolDependencyTotals {
+    pub callers: u32,
+    pub callees: u32,
+    pub implementations: u32,
+    pub tests: u32,
+    pub module_hints: u32,
+    pub related_files: u32,
+    pub omitted_callers: u32,
+    pub omitted_callees: u32,
+    pub omitted_implementations: u32,
+    pub omitted_tests: u32,
+    pub omitted_module_hints: u32,
+    pub omitted_related_files: u32,
+}
+
+/// Bounded syntax-only symbol graph result. `freshness` is always `fresh` on success.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SymbolDependencyMapResult {
+    pub path: String,
+    pub line: u32,
+    pub character: u32,
+    pub symbol: SymbolDependencyLocation,
+    pub definition: SymbolDependencyLocation,
+    pub callers: Vec<SymbolDependencyRelation>,
+    pub callees: Vec<SymbolDependencyRelation>,
+    pub implementations: Vec<SymbolDependencyRelation>,
+    pub tests: Vec<SymbolDependencyLocation>,
+    pub module_hints: Vec<SymbolDependencyModuleHint>,
+    pub related_files: Vec<SymbolDependencyRelatedFile>,
+    pub totals: SymbolDependencyTotals,
+    pub truncated: bool,
+    pub freshness: String,
+    pub graph_version: String,
+    pub indexed_at: Option<String>,
 }
 
 /// Bounded read-only context for final review. `test_suggestions` never execute automatically.
@@ -1245,6 +1343,13 @@ impl EeMcpProxy {
                 ),
             ),
             Tool::new(
+                "ee_git_diff_staged",
+                "Return bounded read-only staged unified diff for active workspace repository with truncation metadata.",
+                schema(
+                    json!({ "type": "object", "properties": {}, "additionalProperties": false }),
+                ),
+            ),
+            Tool::new(
                 "ee_git_diff_file",
                 "Return bounded read-only unstaged unified diff for one absolute workspace file with truncation metadata.",
                 schema(json!({
@@ -1309,6 +1414,20 @@ impl EeMcpProxy {
                     "type": "object",
                     "properties": { "path": { "type": "string" } },
                     "required": ["path"],
+                    "additionalProperties": false,
+                })),
+            ),
+            Tool::new(
+                "ee_symbol_dependency_map",
+                "Return bounded fresh Tree-sitter symbol dependency facts for one absolute workspace position. Fails closed when index is unavailable or stale.",
+                schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "line": { "type": "integer", "minimum": 1 },
+                        "character": { "type": "integer", "minimum": 0 }
+                    },
+                    "required": ["path", "line", "character"],
                     "additionalProperties": false,
                 })),
             ),
@@ -1709,6 +1828,11 @@ impl EeMcpProxy {
                 .git_diff()
                 .map(|result| complete(CallToolResult::structured(json!(result))))
                 .unwrap_or_else(backend_error_result)),
+            "ee_git_diff_staged" => Ok(self
+                .backend
+                .git_diff_staged()
+                .map(|result| complete(CallToolResult::structured(json!(result))))
+                .unwrap_or_else(backend_error_result)),
             "ee_git_diff_file" => {
                 let arguments = require_arguments(request)?;
                 let path = require_string(arguments, "path")?;
@@ -1765,6 +1889,21 @@ impl EeMcpProxy {
                 Ok(self
                     .backend
                     .file_dependency_map(path.to_owned())
+                    .map(|result| complete(CallToolResult::structured(json!(result))))
+                    .unwrap_or_else(backend_error_result))
+            }
+            "ee_symbol_dependency_map" => {
+                let arguments = require_arguments(request)?;
+                require_exact_argument_keys(arguments, &["path", "line", "character"])?;
+                let path = require_string(arguments, "path")?;
+                require_absolute(path)?;
+                let line = require_positive_u32(arguments, "line")?;
+                let character = optional_u32(arguments, "character")?.ok_or_else(|| {
+                    ErrorData::invalid_params("missing argument 'character'", None)
+                })?;
+                Ok(self
+                    .backend
+                    .symbol_dependency_map(path.to_owned(), line, character)
                     .map(|result| complete(CallToolResult::structured(json!(result))))
                     .unwrap_or_else(backend_error_result))
             }
@@ -1854,7 +1993,13 @@ fn backend_error_result(error: ProxyToolError) -> CallToolResponse {
     } else {
         error.message
     };
-    complete(CallToolResult::error(vec![ContentBlock::text(message)]))
+    let content = match message.split_once(": ") {
+        Some((code @ ("dependency_index_unavailable" | "dependency_index_stale"), detail)) => {
+            json!({ "code": code, "message": detail }).to_string()
+        }
+        _ => message,
+    };
+    complete(CallToolResult::error(vec![ContentBlock::text(content)]))
 }
 
 /// Adds standard MCP read-only metadata from the canonical governance record.
@@ -1953,6 +2098,14 @@ fn require_arguments(request: &CallToolRequestParams) -> Result<&JsonObject, Err
         .arguments
         .as_ref()
         .ok_or_else(|| ErrorData::invalid_params("missing tool arguments", None))
+}
+
+/// Rejects unknown argument keys for a strict tool contract.
+fn require_exact_argument_keys(arguments: &JsonObject, allowed: &[&str]) -> Result<(), ErrorData> {
+    if let Some(key) = arguments.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(ErrorData::invalid_params(format!("unexpected argument '{key}'"), None));
+    }
+    Ok(())
 }
 
 /// Validates the serialized size of one tool argument object.
@@ -2602,6 +2755,16 @@ mod tests {
             })
         }
 
+        fn git_diff_staged(&self) -> Result<GitDiffResult, ProxyToolError> {
+            self.record(String::from("git_diff_staged"));
+            Ok(GitDiffResult {
+                diff: String::from("diff --git a/staged.rs b/staged.rs\n"),
+                bytes_returned: 38,
+                byte_limit: 1024,
+                truncated: false,
+            })
+        }
+
         fn git_diff_file(&self, path: String) -> Result<GitDiffResult, ProxyToolError> {
             self.record(format!("git_diff_file:{path}"));
             Ok(GitDiffResult {
@@ -3220,6 +3383,18 @@ mod tests {
             ("ee_apply_patch", json!({ "path": "/abs/work/a.rs", "edits": "not-an-array" })),
             ("ee_terminal_create", json!({ "command": 1 })),
             ("ee_terminal_create", json!({ "command": "pwd", "args": [1] })),
+            (
+                "ee_symbol_dependency_map",
+                json!({ "path": "relative.rs", "line": 1, "character": 0 }),
+            ),
+            (
+                "ee_symbol_dependency_map",
+                json!({ "path": "/abs/work/a.rs", "line": 0, "character": 0 }),
+            ),
+            (
+                "ee_symbol_dependency_map",
+                json!({ "path": "/abs/work/a.rs", "line": 1, "character": 0, "extra": true }),
+            ),
         ];
         for (name, value) in cases {
             let backend = Arc::new(ScriptedBackend::default());
@@ -3227,6 +3402,14 @@ mod tests {
             assert!(EeMcpProxy::new(backend.clone()).dispatch_tool(&request).is_err(), "{name}");
             assert!(backend.calls().is_empty(), "{name} must not reach backend");
         }
+    }
+
+    #[test]
+    fn unavailable_symbol_index_uses_typed_error_code() {
+        let error = ScriptedBackend::default()
+            .symbol_dependency_map(String::from("/abs/work/a.rs"), 1, 0)
+            .expect_err("default backend has no symbol index");
+        assert!(error.message.starts_with("dependency_index_unavailable: "));
     }
 
     #[test]
@@ -3289,6 +3472,20 @@ mod tests {
         .expect("status call failed");
         assert_eq!(status.structured_content.expect("status content")["branch"], json!("main"));
 
+        let staged_diff = tokio::time::timeout(
+            REQUEST_TIMEOUT,
+            client.call_tool(CallToolRequestParams::new("ee_git_diff_staged")),
+        )
+        .await
+        .expect("staged diff timed out")
+        .expect("staged diff call failed");
+        assert!(
+            staged_diff.structured_content.expect("staged diff content")["diff"]
+                .as_str()
+                .expect("staged diff text")
+                .contains("staged.rs")
+        );
+
         let diff = tokio::time::timeout(
             REQUEST_TIMEOUT,
             client.call_tool(
@@ -3332,6 +3529,7 @@ mod tests {
             backend.calls(),
             vec![
                 "git_status",
+                "git_diff_staged",
                 "git_diff_file:/abs/work/src/main.rs",
                 "changed_files",
                 "review_context",
