@@ -1,5 +1,85 @@
 # Changelog
 
+## 0.11.0 - 2026-08-24
+
+### Features
+
+- refactor app monolithic test to module (`a01bd1cd`)
+- modularize runtime_loader (`7220ac51`)
+- modularize event context (`3f818a09`)
+- remove the restoration of session upon launching editor (`29fb9da3`)
+- add logs dir on doctor subcommand (`1f10bab0`)
+- fix the terminal runner (`54cdcff1`)
+- add fixes to tests and runtime loader (`b8088306`)
+- add new query dirs (`96b9b4af`)
+- fix queries and do doctor ouput (`a32ba1d9`)
+- fix the ci error problems (`39614b13`)
+- add full ACP and MCP to ee editor (`aeb164e9`)
+- complete the ACP agents mode (`21746010`)
+- update gap on agent enter (`37289854`)
+- cleanup and follow ACP spec (`73612515`)
+- add llm agents (`56b47fe9`)
+- add new orchestration framework (`9c052d57`)
+- update agent tui and default to orchestrator (`656a5a37`)
+- add new issues and agent slash command (`73c23086`)
+- add compact and secrets (`d1da779e`)
+- update the toolset of agent (`35793c95`)
+- add trust settings to agent mode (`54be5a20`)
+- stabilize the agents tui (`856830dd`)
+- add sse streaming to openrouter (`f249c1ce`)
+- update orchestrator and terminal timeout (`1caef1b6`)
+- harden mcp and agent services making it resilient (`6aab7661`)
+- second pass for resilence of agent (`d1c71828`)
+- add new mcp tools (`d071cd07`)
+- add config init subcommand (`293a9027`)
+- update install script to install openrouter agent (`a9ed44b2`)
+- add profile trust (`d93ec8ef`)
+- update orchestrator tool policy (`98d86608`)
+- add proper color on footer (`1abb279d`)
+- update tools manifest and replayable llm harness (`cbad0572`)
+- add evidence gated completion for tasks (`e8be3cbc`)
+- add task aware context planning (`15fb93ae`)
+- add auditable write transactions (`8622e96f`)
+- add command intelligence and targeted tests (`1f3df6c2`)
+- improve subagent delegation (`acf5527e`)
+- privacy observability redaction (`99148389`)
+- add proper set modes (`09c2c380`)
+- add missing commands on agents tui (`cc62df94`)
+- add approval slash command (`befd9703`)
+- add new context slash command (`eb8b4f24`)
+- add missing slash commands (`3eff340d`)
+- update clipboard lint warning (`df96034f`)
+- update provider ask to read and deps (`5b3d6e0e`)
+- add auto-compact when agent is working (`6974c75c`)
+- update autocompact to run on agent loop only (`aeb048e0`)
+- update malformed tools retry (`a034ecde`)
+- update state and add toast (`85fcd254`)
+- add new setup agent and fixes on the toast (`5b37dc1d`)
+
+
+### Fixes
+
+- modify xi-lsp-plugin and fix errors (`f70fc6f4`)
+- update the bug on status and git commands that causes git lock (`3e1ed342`)
+- handle macos and lint errors (`440861a5`)
+- lint errors and macos build (`1c2dffe7`)
+
+
+### Documentation
+
+- update issues for new todos (`1a8f3365`)
+
+
+### Tests
+
+- update failing test and modify deps (`49c011aa`)
+
+
+### Maintenance
+
+- add task runner update (`0177db8c`)
+
+
 ## 0.10.1 - 2026-07-08
 
 ### Features
