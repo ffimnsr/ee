@@ -25,6 +25,7 @@ pub mod process;
 pub mod redact;
 pub mod reducer;
 pub mod session;
+pub mod web_context;
 
 #[cfg(feature = "test-utils")]
 pub mod fake;
@@ -51,6 +52,12 @@ pub use reducer::{
     MessageKind, ReducedMessage, SessionState, ToolCallState, UsageInfo, apply_update,
 };
 pub use session::AgentThread;
+pub use web_context::{
+    AgentWebContextConfig, BrowserRunRetryPolicy, ReqwestWebTransport, WebContextConfigError,
+    WebContextError, WebContextErrorCode, WebContextLimits, WebContextService, WebFetchRequest,
+    WebFetchResponse, WebSearchProvenance, WebSearchRequest, WebSearchResponse, WebSearchResult,
+    WebTransport, WebTransportRequest, WebTransportResponse,
+};
 
 /// ACP version the host speaks.
 pub const ACP_VERSION: &str = ee_agent_protocol::SUPPORTED_ACP_VERSION;

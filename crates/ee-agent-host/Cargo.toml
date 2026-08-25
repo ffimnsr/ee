@@ -17,13 +17,18 @@ test-utils = []
 [dependencies]
 ee-agent-protocol.workspace = true
 ee-mcp.workspace = true
+base64.workspace = true
 futures.workspace = true
 rmcp = { workspace = true, features = ["server"] }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["io-std", "io-util", "process", "time"] }
-tokio-util = { workspace = true, features = ["compat"] }
+sha2.workspace = true
+tokio = { workspace = true, features = ["io-std", "io-util", "process", "time", "net"] }
+tokio-util = { workspace = true, features = ["compat", "rt"] }
 tracing.workspace = true
+url.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 ee-acp-agent-server = { workspace = true, features = ["test-utils"] }

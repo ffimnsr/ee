@@ -445,6 +445,14 @@ async fn mcp_over_acp_connect_and_tools_list_round_trip() {
             "ee_search_text",
             "ee_search_text_regex",
             "ee_search_text_in_files",
+            "ee_web_search",
+            "ee_fetch_url",
+            "ee_browser_run_content",
+            "ee_browser_run_screenshot",
+            "ee_browser_run_markdown",
+            "ee_browser_run_scrape",
+            "ee_browser_run_json",
+            "ee_browser_run_links",
             "ee_replace_text",
             "ee_apply_patch",
             "ee_create_text_file",
@@ -504,7 +512,7 @@ async fn mcp_over_acp_manifest_round_trips_complete_governance_metadata() {
         .expect("session starts");
 
     let manifest = await_response(&fake, 202).await;
-    assert_eq!(manifest["result"]["structuredContent"]["manifestVersion"], json!(1));
+    assert_eq!(manifest["result"]["structuredContent"]["manifestVersion"], json!(3));
     let tools =
         manifest["result"]["structuredContent"]["tools"].as_array().expect("manifest tool list");
     assert!(!tools.is_empty());

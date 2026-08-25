@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::app::{AgentThreadUi, MessageRenderKind, TranscriptItem};
+use ee_agent_protocol::ToolKind;
 
 fn transcript_item_time(item: &TranscriptItem) -> SystemTime {
     match item {
@@ -67,6 +68,25 @@ fn append_raw_json_section(
     output.push('\n');
 }
 
+fn append_tool_payload_sections(
+    output: &mut String,
+    kind: Option<ToolKind>,
+    raw_input: Option<&serde_json::Value>,
+    raw_output: Option<&serde_json::Value>,
+    secrets: &[String],
+) {
+    if matches!(kind, Some(ToolKind::Fetch)) {
+        output.push_str("#### External content\n\n");
+        output.push_str("- Tool kind: `fetch`\n");
+        output.push_str("- Trust: untrusted remote content\n");
+        output.push_str("- Raw fetch input/output: omitted from export.\n\n");
+        return;
+    }
+
+    append_raw_json_section(output, "Input", raw_input, secrets);
+    append_raw_json_section(output, "Output", raw_output, secrets);
+}
+
 /// Renders a locally retained session transcript in timestamp order.
 pub(super) fn format_agent_transcript_markdown(
     thread: &AgentThreadUi,
@@ -103,21 +123,23 @@ pub(super) fn format_agent_transcript_markdown(
                 output.push_str("\n\n");
             }
             TranscriptItem::ToolCall { id, title, status, detail, .. } => {
-                output.push_str(&format!(
-                    "### {timestamp} · Tool: {}\n\n- ID: `{id}`\n- Status: `{status}`\n- Detail: {}\n\n",
-                    redacted_export_text(title, secrets),
-                    redacted_export_text(detail, secrets),
-                ));
                 let tool = snapshot.tool_calls.get(id);
-                append_raw_json_section(
+                let is_fetch = matches!(tool, Some(tool) if tool.kind == ToolKind::Fetch);
+                if is_fetch {
+                    output.push_str(&format!(
+                        "### {timestamp} · Tool: fetch\n\n- ID: `{id}`\n- Status: `{status}`\n\n"
+                    ));
+                } else {
+                    output.push_str(&format!(
+                        "### {timestamp} · Tool: {}\n\n- ID: `{id}`\n- Status: `{status}`\n- Detail: {}\n\n",
+                        redacted_export_text(title, secrets),
+                        redacted_export_text(detail, secrets),
+                    ));
+                }
+                append_tool_payload_sections(
                     &mut output,
-                    "Input",
+                    tool.map(|tool| tool.kind),
                     tool.and_then(|tool| tool.raw_input.as_ref()),
-                    secrets,
-                );
-                append_raw_json_section(
-                    &mut output,
-                    "Output",
                     tool.and_then(|tool| tool.raw_output.as_ref()),
                     secrets,
                 );
@@ -240,4 +262,55 @@ pub(super) fn write_agent_transcript_export(
         }
     }
     Err(io::Error::new(io::ErrorKind::AlreadyExists, "unable to allocate export filename"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn fetch_payloads_are_omitted_from_export() {
+        let raw_input = json!({
+            "url": "https://example.test/search?query=private-query",
+            "body": "private-request-body",
+        });
+        let raw_output = json!({"body": "private-response-body"});
+        let mut output = String::new();
+
+        append_tool_payload_sections(
+            &mut output,
+            Some(ToolKind::Fetch),
+            Some(&raw_input),
+            Some(&raw_output),
+            &[],
+        );
+
+        assert!(output.contains("Tool kind: `fetch`"));
+        assert!(output.contains("Trust: untrusted remote content"));
+        assert!(output.contains("Raw fetch input/output: omitted from export."));
+        assert!(!output.contains("private-query"));
+        assert!(!output.contains("private-request-body"));
+        assert!(!output.contains("private-response-body"));
+    }
+
+    #[test]
+    fn non_fetch_payloads_remain_in_export() {
+        let raw_input = json!({"command": "cargo test"});
+        let raw_output = json!({"stdout": "test result: ok"});
+        let mut output = String::new();
+
+        append_tool_payload_sections(
+            &mut output,
+            Some(ToolKind::Execute),
+            Some(&raw_input),
+            Some(&raw_output),
+            &[],
+        );
+
+        assert!(output.contains("#### Input"));
+        assert!(output.contains("cargo test"));
+        assert!(output.contains("#### Output"));
+        assert!(output.contains("test result: ok"));
+    }
 }

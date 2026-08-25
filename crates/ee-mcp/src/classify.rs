@@ -118,8 +118,8 @@ mod tests {
     }
 
     #[test]
-    fn manifest_schema_version_is_one() {
-        assert_eq!(EE_TOOL_SCHEMA_VERSION, 1);
+    fn manifest_schema_version_is_three() {
+        assert_eq!(EE_TOOL_SCHEMA_VERSION, 3);
     }
 
     #[test]

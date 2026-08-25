@@ -11,7 +11,7 @@ use crate::classify::SideEffectClass;
 ///
 /// Bump only when adding a compatible manifest field or tool. An incompatible
 /// argument or result change must use a new tool name instead.
-pub const EE_TOOL_SCHEMA_VERSION: u64 = 1;
+pub const EE_TOOL_SCHEMA_VERSION: u64 = 3;
 
 /// MCP routes over which one tool is implemented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +53,23 @@ const LSP_CAPABILITY: &[&str] = &["language_server"];
 const TERMINAL_CAPABILITY: &[&str] = &["terminal"];
 const GIT_CAPABILITY: &[&str] = &["git"];
 const DEPENDENCY_INDEX_CAPABILITY: &[&str] = &["dependency_index"];
+/// Web retrieval requires host web support and explicit outbound-network policy.
+const WEB_CONTEXT_CAPABILITY: &[&str] = &["web_context", "ExternalNetwork"];
+
+/// Exact stable failures returned by remote web-context tools.
+pub const WEB_CONTEXT_ERROR_CLASSES: &[&str] = &[
+    "web_disabled",
+    "web_search_unavailable",
+    "network_approval_required",
+    "url_rejected",
+    "dns_rejected",
+    "redirect_rejected",
+    "unsupported_content_type",
+    "response_too_large",
+    "network_timeout",
+    "network_failure",
+];
+
 const STANDARD_ERRORS: &[&str] = &[
     "invalid_arguments",
     "unsupported_tool",
@@ -87,6 +104,15 @@ const TERMINAL_ERRORS: &[&str] = &[
 const DEFAULT_REDACTION: &[&str] = &["secret_like_values", "sensitive_diagnostics"];
 const TERMINAL_REDACTION: &[&str] =
     &["secret_like_environment_values", "secret_like_environment_keys", "sensitive_diagnostics"];
+/// Remote responses are data, never instructions. The session-local cache retains
+/// normalized public fields only and expires entries after 60 seconds.
+const WEB_CONTEXT_REDACTION: &[&str] = &[
+    "secret_like_values",
+    "sensitive_diagnostics",
+    "external_content_untrusted",
+    "external_content_not_instructions",
+    "session_local_cache_normalized_public_fields_only_60_seconds",
+];
 
 const fn read(
     capabilities: &'static [&'static str],
@@ -102,6 +128,23 @@ const fn read(
         output_cap: cap,
         redaction_rules: DEFAULT_REDACTION,
         error_classes: STANDARD_ERRORS,
+        deprecated: false,
+        replacement: None,
+    }
+}
+
+const fn web_context_read(cap_kind: &'static str, cap: u64) -> ToolGovernance {
+    ToolGovernance {
+        side_effect: SideEffectClass::Read,
+        // Remote reads disclose agent input to an external service and always
+        // require host approval through the external-network policy path.
+        approval: "required",
+        transports: ALL_TRANSPORTS,
+        required_capabilities: WEB_CONTEXT_CAPABILITY,
+        output_cap_kind: cap_kind,
+        output_cap: cap,
+        redaction_rules: WEB_CONTEXT_REDACTION,
+        error_classes: WEB_CONTEXT_ERROR_CLASSES,
         deprecated: false,
         replacement: None,
     }
@@ -173,6 +216,14 @@ pub fn governance(tool: &str) -> Option<ToolGovernance> {
         "ee_search_text" | "ee_search_text_regex" | "ee_search_text_in_files" => {
             read(NO_CAPABILITIES, "result_items", 200)
         }
+        "ee_web_search"
+        | "ee_fetch_url"
+        | "ee_browser_run_content"
+        | "ee_browser_run_screenshot"
+        | "ee_browser_run_markdown"
+        | "ee_browser_run_scrape"
+        | "ee_browser_run_json"
+        | "ee_browser_run_links" => web_context_read("response_bytes", 1024 * 1024),
         "ee_read_buffer" | "ee_read_text_file" => read(NO_CAPABILITIES, "bytes", 1024 * 1024),
         "ee_read_buffer_lines" => read(NO_CAPABILITIES, "result_items", 500),
         "ee_get_diagnostics"
@@ -234,6 +285,14 @@ pub const STABLE_TOOL_NAMES: &[&str] = &[
     "ee_search_text",
     "ee_search_text_regex",
     "ee_search_text_in_files",
+    "ee_web_search",
+    "ee_fetch_url",
+    "ee_browser_run_content",
+    "ee_browser_run_screenshot",
+    "ee_browser_run_markdown",
+    "ee_browser_run_scrape",
+    "ee_browser_run_json",
+    "ee_browser_run_links",
     "ee_replace_text",
     "ee_apply_patch",
     "ee_create_text_file",
@@ -294,5 +353,63 @@ mod tests {
         assert!(stdio.contains(&"ee_terminal_create"));
         assert!(!stdio.contains(&"ee_terminal_output"));
         assert!(!stdio.contains(&"ee_terminal_kill"));
+    }
+
+    #[test]
+    fn web_context_tools_require_external_network_approval_on_all_transports() {
+        for tool in [
+            "ee_web_search",
+            "ee_fetch_url",
+            "ee_browser_run_content",
+            "ee_browser_run_screenshot",
+            "ee_browser_run_markdown",
+            "ee_browser_run_scrape",
+            "ee_browser_run_json",
+            "ee_browser_run_links",
+        ] {
+            let entry = governance(tool).expect("web tool has governance");
+            assert_eq!(entry.side_effect, SideEffectClass::Read);
+            assert_eq!(entry.approval, "required");
+            assert_eq!(entry.transports, ALL_TRANSPORTS);
+            assert_eq!(entry.required_capabilities, WEB_CONTEXT_CAPABILITY);
+            assert_eq!(entry.output_cap_kind, "response_bytes");
+            assert_eq!(entry.output_cap, 1024 * 1024);
+            assert_eq!(entry.redaction_rules, WEB_CONTEXT_REDACTION);
+            assert_eq!(entry.error_classes, WEB_CONTEXT_ERROR_CLASSES);
+        }
+    }
+
+    #[test]
+    fn web_context_metadata_declares_network_cache_and_untrusted_content_rules() {
+        assert_eq!(WEB_CONTEXT_CAPABILITY, ["web_context", "ExternalNetwork"]);
+        assert_eq!(
+            WEB_CONTEXT_REDACTION,
+            [
+                "secret_like_values",
+                "sensitive_diagnostics",
+                "external_content_untrusted",
+                "external_content_not_instructions",
+                "session_local_cache_normalized_public_fields_only_60_seconds",
+            ]
+        );
+    }
+
+    #[test]
+    fn web_context_error_classes_are_stable_and_complete() {
+        assert_eq!(
+            WEB_CONTEXT_ERROR_CLASSES,
+            [
+                "web_disabled",
+                "web_search_unavailable",
+                "network_approval_required",
+                "url_rejected",
+                "dns_rejected",
+                "redirect_rejected",
+                "unsupported_content_type",
+                "response_too_large",
+                "network_timeout",
+                "network_failure",
+            ]
+        );
     }
 }

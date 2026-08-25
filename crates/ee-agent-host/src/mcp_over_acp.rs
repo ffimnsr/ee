@@ -52,13 +52,14 @@ use ee_agent_protocol::{
     WaitForTerminalExitRequest,
 };
 use ee_mcp::{
-    ChangedFilesResult, CodeActionsResult, DiagnosticsResult, DocumentSymbolsResult,
-    EditTextResult, EeMcpProxy, EeProxyBackend, FileDependencyMapResult, GitDiffResult,
-    GitStatusResult, ListDirectoryAllResult, ListDirectoryResult, OpenBuffersResult,
-    ProjectInstructionsResult, ProxyToolError, ReferencesResult, RenamePreviewResult,
-    ReviewContextResult, SearchFilesAllResult, SearchFilesResult, SearchTextResult,
-    SessionNoteResult, SessionNotesResult, SymbolDependencyMapResult, TerminalOutputResult,
-    TerminalWaitResult, TextEdit, WorkspaceEditResult, WorkspaceRootsResult,
+    BrowserRunRequest, BrowserRunResult, ChangedFilesResult, CodeActionsResult, DiagnosticsResult,
+    DocumentSymbolsResult, EditTextResult, EeMcpProxy, EeProxyBackend, FetchUrlRequest,
+    FetchUrlResult, FileDependencyMapResult, GitDiffResult, GitStatusResult,
+    ListDirectoryAllResult, ListDirectoryResult, OpenBuffersResult, ProjectInstructionsResult,
+    ProxyToolError, ReferencesResult, RenamePreviewResult, ReviewContextResult,
+    SearchFilesAllResult, SearchFilesResult, SearchTextResult, SessionNoteResult,
+    SessionNotesResult, SymbolDependencyMapResult, TerminalOutputResult, TerminalWaitResult,
+    TextEdit, WebSearchRequest, WebSearchResult, WorkspaceEditResult, WorkspaceRootsResult,
 };
 use rmcp::model::{JsonRpcMessage, RequestId, ServerNotification, ServerRequest, ServerResult};
 use rmcp::service::{RoleServer, RxJsonRpcMessage, TxJsonRpcMessage};
@@ -216,6 +217,33 @@ impl HostProxyBackend {
 impl EeProxyBackend for HostProxyBackend {
     fn supported_tools(&self) -> Option<Vec<String>> {
         self.supported_tools.clone()
+    }
+
+    fn web_search(&self, request: WebSearchRequest) -> Result<WebSearchResult, ProxyToolError> {
+        proxy_value(
+            self.call(ClientRequest::ProxyWebSearch {
+                query: request.query,
+                scope: self.scope.clone(),
+            })?,
+            "web_search",
+        )
+    }
+
+    fn fetch_url(&self, request: FetchUrlRequest) -> Result<FetchUrlResult, ProxyToolError> {
+        proxy_value(
+            self.call(ClientRequest::ProxyFetchUrl {
+                url: request.url,
+                scope: self.scope.clone(),
+            })?,
+            "fetch_url",
+        )
+    }
+
+    fn browser_run(&self, request: BrowserRunRequest) -> Result<BrowserRunResult, ProxyToolError> {
+        proxy_value(
+            self.call(ClientRequest::ProxyBrowserRun { request, scope: self.scope.clone() })?,
+            "browser_run",
+        )
     }
 
     fn workspace_roots(&self) -> Result<WorkspaceRootsResult, ProxyToolError> {
@@ -1297,20 +1325,20 @@ impl McpOverAcpRegistry {
         request: DisconnectMcpRequest,
         responder: Responder<DisconnectMcpResponse>,
     ) -> Result<(), RpcError> {
-        if self
+        let connection = self
             .connections
             .lock()
             .expect("mcp connections poisoned")
-            .remove(&request.connection_id)
-            .is_none()
-        {
+            .remove(&request.connection_id);
+        let Some(connection) = connection else {
             return responder.respond_with_error(RpcError::invalid_params().data(
                 serde_json::json!({
                     "reason": "unknown MCP connection",
                     "connectionId": request.connection_id,
                 }),
             ));
-        }
+        };
+        connection.close();
         responder.respond(DisconnectMcpResponse::new())
     }
 

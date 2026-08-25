@@ -1452,6 +1452,12 @@ pub(crate) struct AgentPaneState {
     pub(crate) action_log: Vec<super::agent_bridge::ActionLogEntry>,
     /// Session-scoped approval policy (Phase 7).
     pub(crate) approval_policy: super::agent_bridge::ApprovalPolicy,
+    /// Lazy service instance. Its bounded cache dies with this pane/session scope.
+    pub(crate) web_context_service:
+        Option<Arc<ee_agent_host::WebContextService<ee_agent_host::ReqwestWebTransport>>>,
+    /// Trusted semantic config used to build `web_context_service`; a mismatch
+    /// discards cached remote text and session grants before rebuilding.
+    pub(crate) web_context_config_fingerprint: Option<String>,
     /// Session-local approval-dialog behavior. Entries die with their session
     /// and never persist to workspace or user configuration.
     pub(crate) approval_modes: BTreeMap<String, super::agent_bridge::ToolApprovalMode>,
@@ -1519,6 +1525,8 @@ impl Default for AgentPaneState {
             terminals: super::agent_bridge::AgentTerminals::default(),
             action_log: Vec::new(),
             approval_policy: super::agent_bridge::ApprovalPolicy::default(),
+            web_context_service: None,
+            web_context_config_fingerprint: None,
             approval_modes: BTreeMap::new(),
             usage_ledger: crate::policy::UsageLedger::default(),
             mcp: super::agents_mcp::McpPaneState::default(),
@@ -2088,6 +2096,23 @@ impl App {
         );
     }
 
+    /// Records one local proxy web lifecycle row. Detail is compact provenance
+    /// metadata only; remote request/query/body never enters transcript state.
+    pub(super) fn record_web_lifecycle(
+        &mut self,
+        id: &str,
+        title: &str,
+        status: &str,
+        detail: &str,
+    ) {
+        let Some(active) = self.agents.active_thread_index() else {
+            return;
+        };
+        let thread = &mut self.agents.threads[active];
+        let group = thread.ensure_response_group();
+        thread.push_tool_call(id, title, status, detail, group);
+    }
+
     fn sync_tool_call_notice(&mut self, thread_index: usize, tool_call_id: &str) {
         let Some(thread) = self.agents.threads.get_mut(thread_index) else {
             return;
@@ -2481,6 +2506,14 @@ fn tool_call_location_summary(location: &ToolCallLocation) -> String {
 }
 
 fn tool_call_detail_from_state(tool_call: &ToolCallState) -> String {
+    if tool_call.kind == ToolKind::Fetch {
+        // ACP may carry remote request/response bytes in generic content or raw
+        // fields. Keep lifecycle visible without treating that content as local
+        // transcript, planner, or export data.
+        return String::from(
+            "kind: fetch · external content: untrusted · remote payload withheld · use source provenance from tool result",
+        );
+    }
     let mut sections = vec![format!("kind: {}", tool_kind_label(tool_call.kind))];
 
     if !tool_call.content.is_empty() {
@@ -3977,6 +4010,20 @@ impl App {
             return;
         }
         let removed = self.agents.threads.remove(confirmation.thread_index);
+        // Service cache is pane-owned today; clear all entries when any session
+        // closes rather than retain cross-session external content.
+        if let Some(service) = &self.agents.web_context_service {
+            service.clear_cache();
+        }
+        // Proxy connections currently share pane ownership. Clear both route
+        // scopes when any owning agent session closes; never retain host grants.
+        for route in
+            [super::agents_mcp::ProxyRoute::Stdio, super::agents_mcp::ProxyRoute::AcpNative]
+        {
+            self.agents
+                .approval_policy
+                .invalidate_session(&format!("proxy-network:{}", route.transport_identity()));
+        }
         self.agents.approval_modes.remove(&removed.session_id);
         self.agents.active_thread = (!self.agents.threads.is_empty())
             .then_some(confirmation.thread_index.min(self.agents.threads.len() - 1));
@@ -4058,6 +4105,8 @@ impl App {
         }
         self.agents.threads.clear();
         self.agents.archived_threads.clear();
+        self.agents.web_context_service = None;
+        self.agents.web_context_config_fingerprint = None;
         self.agents.pending_fork = None;
         self.agents.approval_policy = super::agent_bridge::ApprovalPolicy::default();
         self.agents.approval_modes.clear();
@@ -4218,9 +4267,9 @@ impl App {
         self.agents.host = Some(AgentHostBridge::new(manager, events_rx));
     }
 
-    /// Builds the secrets store used for launch-time reference resolution.
+    /// Builds the secrets store used by lazy agent-launch and web-search reference resolution.
     /// Tests inject a fake store; production uses the real default.
-    fn build_agents_secret_store(&mut self) -> Option<crate::secrets::SecretStore> {
+    pub(super) fn build_agents_secret_store(&mut self) -> Option<crate::secrets::SecretStore> {
         #[cfg(test)]
         {
             self.agents.test_secret_store.take()

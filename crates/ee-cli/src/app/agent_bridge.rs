@@ -44,7 +44,9 @@ use ee_agent_protocol::{
 use globset::Glob;
 use ignore::WalkBuilder;
 use similar::TextDiff;
+use tokio::runtime::Builder as TokioBuilder;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 
 use super::*;
 
@@ -119,6 +121,27 @@ const PROXY_SEARCH_REGEX_MAX_PATTERN_BYTES: usize = 4096;
 /// Max wall time spent in one regex search before fail-closed timeout.
 const PROXY_SEARCH_REGEX_TIMEOUT: Duration = Duration::from_secs(2);
 static NEXT_TERMINAL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static NEXT_WEB_LIFECYCLE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn web_context_agent_error(error: ee_agent_host::WebContextError) -> AgentError {
+    AgentError::HandlerError(format!("{}: {}", error.code.as_str(), error.message))
+}
+
+fn web_context_config_agent_error(error: ee_agent_host::WebContextConfigError) -> AgentError {
+    AgentError::HandlerError(format!("web_search_invalid_configuration: {error}"))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+
+    let digest = sha2::Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    hex
+}
 
 // ── Secret handling ──────────────────────────────────────────────────────────
 
@@ -814,6 +837,11 @@ pub(crate) enum BridgeUiMessage {
         route: super::agents_mcp::ProxyRoute,
         reply: oneshot::Sender<ClientRequestResult>,
     },
+    /// Stdio proxy connection ended. Network grants and pending approvals are
+    /// connection-scoped and must not survive a socket lifetime.
+    ProxyConnectionClosed {
+        scope: String,
+    },
 }
 
 async fn forward_and_await(
@@ -926,6 +954,42 @@ impl ClientRequestHandler for BridgeUiHandler {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
                         route: ProxyRoute::AcpNative,
                         call: super::agents_mcp::ProxyToolCall::SearchTextRegex { pattern },
+                        reply,
+                    })
+                    .await
+                }
+                ClientRequest::ProxyWebSearch { query, scope } => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: super::agents_mcp::ProxyToolCall::WebSearch {
+                            query,
+                            approval_scope: scope,
+                            cancellation: CancellationToken::new(),
+                        },
+                        reply,
+                    })
+                    .await
+                }
+                ClientRequest::ProxyFetchUrl { url, scope } => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: super::agents_mcp::ProxyToolCall::FetchUrl {
+                            url,
+                            approval_scope: scope,
+                            cancellation: CancellationToken::new(),
+                        },
+                        reply,
+                    })
+                    .await
+                }
+                ClientRequest::ProxyBrowserRun { request, scope } => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: super::agents_mcp::ProxyToolCall::BrowserRun {
+                            request,
+                            approval_scope: scope,
+                            cancellation: CancellationToken::new(),
+                        },
                         reply,
                     })
                     .await
@@ -1322,6 +1386,23 @@ struct ProxyWriteSpec {
     prepared: PreparedWrite,
 }
 
+enum WebApprovalCall {
+    Search { query: String },
+    Fetch { url: String },
+    BrowserRun { request: ee_mcp::BrowserRunRequest },
+}
+
+impl std::fmt::Debug for WebApprovalCall {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let action = match self {
+            Self::Search { .. } => "search",
+            Self::Fetch { .. } => "fetch",
+            Self::BrowserRun { request } => request.action.as_str(),
+        };
+        formatter.debug_tuple("WebApprovalCall").field(&action).finish()
+    }
+}
+
 #[derive(Debug)]
 enum ApprovalKind {
     Write {
@@ -1338,6 +1419,18 @@ enum ApprovalKind {
     },
     TerminalCreate {
         request: CreateTerminalRequest,
+    },
+    /// External network approval carries only host/route in visible or
+    /// persisted session state. Query and URL remain private call payloads.
+    Network {
+        route: ProxyRoute,
+        /// Canonical host at original tool invocation.
+        requested_host: String,
+        /// Canonical host about to receive the current request/redirect.
+        current_host: String,
+        call: WebApprovalCall,
+        approved_hosts: BTreeSet<String>,
+        cancellation: CancellationToken,
     },
 }
 
@@ -1432,6 +1525,14 @@ fn approval_fingerprint(kind: &ApprovalKind) -> String {
                 .collect::<Vec<_>>()
                 .join("\u{1f}");
             format!("terminal:{command}")
+        }
+        ApprovalKind::Network { route, current_host, call, .. } => {
+            let action = match call {
+                WebApprovalCall::Search { .. } => "search",
+                WebApprovalCall::Fetch { .. } => "fetch",
+                WebApprovalCall::BrowserRun { request } => request.action.as_str(),
+            };
+            format!("network:{}:{action}:{current_host}", route.transport_identity())
         }
     }
 }
@@ -1572,6 +1673,56 @@ impl ApprovalPrompt {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn web(
+        route: ProxyRoute,
+        network_session_id: String,
+        requested_host: String,
+        current_host: String,
+        provider_label: Option<&str>,
+        call: WebApprovalCall,
+        approved_hosts: BTreeSet<String>,
+        cancellation: CancellationToken,
+        reply: oneshot::Sender<ClientRequestResult>,
+    ) -> Self {
+        let action = match &call {
+            WebApprovalCall::Search { .. } => "web search",
+            WebApprovalCall::Fetch { .. } => "fetch URL",
+            WebApprovalCall::BrowserRun { request } => match request.action {
+                ee_mcp::BrowserRunAction::Content => "Browser Run content",
+                ee_mcp::BrowserRunAction::Screenshot => "Browser Run screenshot",
+                ee_mcp::BrowserRunAction::Markdown => "Browser Run markdown",
+                ee_mcp::BrowserRunAction::Scrape => "Browser Run scrape",
+                ee_mcp::BrowserRunAction::Json => "Browser Run JSON extraction",
+                ee_mcp::BrowserRunAction::Links => "Browser Run links",
+            },
+        };
+        Self {
+            thread_index: None,
+            // Network grants bind both transport and opaque connection scope.
+            // A later stdio or ACP connection cannot reuse this decision.
+            session_id: network_session_id,
+            agent_id: None,
+            title: format!("network/{action}"),
+            detail: match provider_label {
+                Some(provider) => format!("provider: {provider} · host: {current_host}"),
+                None => format!("host: {current_host}"),
+            },
+            options: approval_options(None),
+            selected: 0,
+            kind: ApprovalKind::Network {
+                route,
+                requested_host,
+                current_host,
+                call,
+                approved_hosts,
+                cancellation,
+            },
+            mcp: None,
+            reply,
+        }
+    }
+
     fn terminal(
         thread_index: Option<usize>,
         agent_id: Option<String>,
@@ -1694,6 +1845,21 @@ pub(crate) enum ActionLogEntry {
         category: TrustCategory,
         reason: DecisionReason,
         remaining_uses: Option<u64>,
+        session_id: String,
+    },
+    /// External provenance only. Retains final canonical source URL, never a
+    /// separate request body, response text, headers, credentials, or search query.
+    ExternalSource {
+        action: String,
+        host: String,
+        url: String,
+        retrieved_at: String,
+        sha256: Option<String>,
+        byte_count: usize,
+        result_count: usize,
+        cached: bool,
+        truncated: bool,
+        provenance: String,
         session_id: String,
     },
 }
@@ -1937,6 +2103,9 @@ impl App {
                 BridgeUiMessage::ProxyTool { call, route, reply } => {
                     self.handle_proxy_tool(call, route, reply);
                 }
+                BridgeUiMessage::ProxyConnectionClosed { scope } => {
+                    self.clear_proxy_network_scope(&scope);
+                }
             }
         }
     }
@@ -1986,6 +2155,37 @@ impl App {
             super::agents_mcp::ProxyToolCall::SearchTextRegex { pattern } => {
                 let _ = reply.send(
                     self.proxy_search_text_regex(&pattern).map(ClientRequestResponse::ProxyValue),
+                );
+            }
+            super::agents_mcp::ProxyToolCall::WebSearch { query, approval_scope, cancellation } => {
+                self.queue_web_approval(
+                    route,
+                    approval_scope,
+                    WebApprovalCall::Search { query },
+                    cancellation,
+                    reply,
+                );
+            }
+            super::agents_mcp::ProxyToolCall::FetchUrl { url, approval_scope, cancellation } => {
+                self.queue_web_approval(
+                    route,
+                    approval_scope,
+                    WebApprovalCall::Fetch { url },
+                    cancellation,
+                    reply,
+                );
+            }
+            super::agents_mcp::ProxyToolCall::BrowserRun {
+                request,
+                approval_scope,
+                cancellation,
+            } => {
+                self.queue_web_approval(
+                    route,
+                    approval_scope,
+                    WebApprovalCall::BrowserRun { request },
+                    cancellation,
+                    reply,
                 );
             }
             super::agents_mcp::ProxyToolCall::SearchTextInFiles { query, file_glob } => {
@@ -2326,6 +2526,120 @@ impl App {
         Ok((content, bytes))
     }
 
+    /// Queues or dispatches one network tool call. Trusted global hosts bypass
+    /// UI; all other hosts require an isolated route-and-host session decision.
+    fn queue_web_approval(
+        &mut self,
+        route: ProxyRoute,
+        approval_scope: String,
+        call: WebApprovalCall,
+        cancellation: CancellationToken,
+        reply: oneshot::Sender<ClientRequestResult>,
+    ) {
+        let (host, provider_label) = {
+            let service = match self.web_context_service() {
+                Ok(service) => service,
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+            };
+            match &call {
+                WebApprovalCall::Search { .. } => (
+                    service.search_initial_host(),
+                    Some(service.search_provider_approval_label().to_owned()),
+                ),
+                WebApprovalCall::Fetch { url } => (
+                    service
+                        .fetch_initial_host(&ee_agent_host::WebFetchRequest { url: url.clone() }),
+                    None,
+                ),
+                WebApprovalCall::BrowserRun { request } => (
+                    service.browser_run_initial_host(request),
+                    Some(String::from("Cloudflare Browser Run")),
+                ),
+            }
+        };
+        let host = match host {
+            Ok(host) => host,
+            Err(error) => {
+                let _ = reply.send(Err(web_context_agent_error(error)));
+                return;
+            }
+        };
+        let preapproved =
+            self.web_context_service().is_ok_and(|service| service.is_preapproved_host(&host));
+        let network_session_id =
+            format!("proxy-network:{}:{approval_scope}", route.transport_identity());
+        if preapproved {
+            self.dispatch_web_call(
+                route,
+                network_session_id,
+                host,
+                call,
+                BTreeSet::new(),
+                cancellation,
+                reply,
+            );
+        } else {
+            self.request_web_approval(ApprovalPrompt::web(
+                route,
+                network_session_id,
+                host.clone(),
+                host,
+                provider_label.as_deref(),
+                call,
+                BTreeSet::new(),
+                cancellation,
+                reply,
+            ));
+        }
+    }
+
+    /// Network approvals intentionally bypass generic MCP trust, persistent
+    /// rules, and autopilot. Only route + canonical host participate.
+    fn request_web_approval(&mut self, prompt: ApprovalPrompt) {
+        let fingerprint = approval_fingerprint(&prompt.kind);
+        match self.agents.approval_policy.lookup(&prompt.session_id, &fingerprint) {
+            Some(SessionChoice::Allow) => {
+                self.resolve_approval(prompt, ApprovalChoice::AllowSession)
+            }
+            Some(SessionChoice::Deny) => self.resolve_approval(prompt, ApprovalChoice::DenySession),
+            None => {
+                if let ApprovalKind::Network { current_host, call, .. } = &prompt.kind {
+                    let action = match call {
+                        WebApprovalCall::Search { .. } => "search",
+                        WebApprovalCall::Fetch { .. } => "fetch",
+                        WebApprovalCall::BrowserRun { request } => request.action.as_str(),
+                    };
+                    self.record_web_failure(action, current_host, "approval required");
+                }
+                self.agents.approvals.push_back(prompt);
+                self.backend.status_message = Some(String::from("network approval required"));
+            }
+        }
+    }
+
+    fn clear_proxy_network_scope(&mut self, scope: &str) {
+        let prefix = format!("proxy-network:{}:{scope}", ProxyRoute::Stdio.transport_identity());
+        self.agents.approval_policy.invalidate_session(&prefix);
+        // Dropping each sender makes any caller resolve as cancelled. Sending
+        // from `retain` would require moving out of a borrowed prompt.
+        self.agents.approvals.retain(|prompt| prompt.session_id != prefix);
+    }
+
+    fn record_web_failure(&mut self, action: &str, host: &str, status: &str) {
+        let lifecycle_id = NEXT_WEB_LIFECYCLE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.record_web_lifecycle(
+            &format!("web-{lifecycle_id}"),
+            &format!("web/{action}"),
+            status,
+            &format!(
+                "kind: fetch · host: {host} · outcome: {status} · trust: untrusted external content"
+            ),
+        );
+    }
+
     /// Queues an approval prompt (front of the queue wins) and notifies,
     /// unless the shared policy (session state first, then persistent
     /// rules) already resolves it without UI.
@@ -2446,6 +2760,9 @@ impl App {
         if operation.is_unknown() {
             return false;
         }
+        if matches!(prompt.kind, ApprovalKind::Network { .. }) {
+            return false;
+        }
         match mode {
             ToolApprovalMode::Default => false,
             ToolApprovalMode::Autopilot => match &prompt.kind {
@@ -2459,6 +2776,7 @@ impl App {
                 ApprovalKind::TerminalCreate { request } => {
                     self.profile_id_for_request(request).is_some()
                 }
+                ApprovalKind::Network { .. } => false,
             },
             ToolApprovalMode::Bypass => true,
         }
@@ -2500,6 +2818,8 @@ impl App {
                     .unwrap_or(OperationIdentity::Unknown);
                 (TrustCategory::Execute, identity)
             }
+            // Web approvals are never eligible for generic trust matching.
+            ApprovalKind::Network { .. } => (TrustCategory::Unknown, OperationIdentity::Unknown),
         };
         TrustOperation {
             workspace,
@@ -2824,6 +3144,12 @@ impl App {
 
     /// Resolves one approval with the chosen policy decision.
     fn resolve_approval(&mut self, prompt: ApprovalPrompt, choice: ApprovalChoice) {
+        // A disconnected proxy client has dropped its receiver. Do not record
+        // approval state or dispatch a side effect without a live requester.
+        if prompt.reply.is_closed() {
+            return;
+        }
+
         let fingerprint = approval_fingerprint(&prompt.kind);
         if let Some(decision) = session_decision(choice) {
             self.agents.approval_policy.record(&prompt.session_id, &fingerprint, decision);
@@ -2864,6 +3190,11 @@ impl App {
                     }
                     _ => unreachable!(),
                 },
+                ApprovalKind::Network { .. } => {
+                    let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
+                        reason: String::from("persistent network approval is not supported"),
+                    }));
+                }
                 ApprovalKind::Write { .. } | ApprovalKind::WriteBatch { .. } => {
                     if prompt.mcp.is_none() {
                         // Phase 5: bounded native create/modify writes derive
@@ -2908,6 +3239,13 @@ impl App {
         }
         let allow = choice.allows();
         if !allow {
+            if let ApprovalKind::Network { current_host, call, .. } = &prompt.kind {
+                let action = match call {
+                    WebApprovalCall::Search { .. } => "search",
+                    WebApprovalCall::Fetch { .. } => "fetch",
+                };
+                self.record_web_failure(action, current_host, "denied");
+            }
             let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
                 reason: String::from("user denied the operation"),
             }));
@@ -2959,6 +3297,25 @@ impl App {
                     prompt.reply,
                 );
             }
+            ApprovalKind::Network {
+                route,
+                requested_host,
+                current_host,
+                call,
+                mut approved_hosts,
+                cancellation,
+            } => {
+                approved_hosts.insert(current_host);
+                self.dispatch_web_call(
+                    route,
+                    prompt.session_id,
+                    requested_host,
+                    call,
+                    approved_hosts,
+                    cancellation,
+                    prompt.reply,
+                );
+            }
         }
     }
 
@@ -2980,6 +3337,11 @@ impl App {
             },
             ApprovalKind::Write { .. } | ApprovalKind::WriteBatch { .. } => {
                 self.dispatch_write_prompt(prompt, Some(rule_id));
+            }
+            ApprovalKind::Network { .. } => {
+                let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
+                    reason: String::from("persistent network approval is not supported"),
+                }));
             }
         }
     }
@@ -4399,6 +4761,413 @@ impl App {
             .ok_or_else(|| {
                 AgentError::HandlerError(String::from("active workspace is not a Git repository"))
             })
+    }
+
+    fn web_context_service(
+        &mut self,
+    ) -> Result<Arc<ee_agent_host::WebContextService<ee_agent_host::ReqwestWebTransport>>, AgentError>
+    {
+        // Config is frontend-resolved and secret-redacted in `Debug`. A changed
+        // semantic configuration must not reuse prior remote cache entries or
+        // session network approvals.
+        let fingerprint = self.config.agents.web_context.semantic_fingerprint();
+        if self.agents.web_context_service.is_some()
+            && self.agents.web_context_config_fingerprint.as_deref() != Some(fingerprint.as_str())
+        {
+            self.agents.web_context_service = None;
+            self.agents.web_context_config_fingerprint = None;
+            self.agents.approval_policy = ApprovalPolicy::default();
+        }
+        if self.agents.web_context_service.is_none() {
+            let mut config = self.config.agents.web_context.clone();
+            if config.enabled
+                && let Some(reference) = config.provider_secret_reference.take()
+            {
+                let reference =
+                    crate::secrets::SecretReference::parse(&reference).map_err(|_| {
+                        AgentError::HandlerError(String::from(
+                            "invalid agents.web_context.provider_secret_reference",
+                        ))
+                    })?;
+                let store = self.build_agents_secret_store().ok_or_else(|| {
+                    AgentError::HandlerError(String::from(
+                        "web search authorization unavailable: secrets store unavailable",
+                    ))
+                })?;
+                let secret = store.get(reference.name()).map_err(|_| {
+                    AgentError::HandlerError(String::from(
+                        "web search authorization unavailable: provider secret could not be resolved",
+                    ))
+                })?;
+                self.agents.resolved_secret_values.push(secret.to_string());
+                config = config.with_search_authorization(secret);
+            }
+            if config.enabled
+                && let Some(reference) = config.browser_run_api_token_reference.take()
+            {
+                let reference =
+                    crate::secrets::SecretReference::parse(&reference).map_err(|_| {
+                        AgentError::HandlerError(String::from(
+                            "invalid agents.web_context.browser_run_api_token_reference",
+                        ))
+                    })?;
+                let store = self.build_agents_secret_store().ok_or_else(|| {
+                    AgentError::HandlerError(String::from(
+                        "Browser Run authorization unavailable: secrets store unavailable",
+                    ))
+                })?;
+                let secret = store.get(reference.name()).map_err(|_| {
+                    AgentError::HandlerError(String::from(
+                        "Browser Run authorization unavailable: API token could not be resolved",
+                    ))
+                })?;
+                self.agents.resolved_secret_values.push(secret.to_string());
+                config = config.with_browser_run_api_token(secret);
+            }
+            let limits = config.limits.clone();
+            let transport = ee_agent_host::ReqwestWebTransport::new(&limits)
+                .map_err(web_context_agent_error)?;
+            let service = ee_agent_host::WebContextService::new(config, transport)
+                .map_err(web_context_config_agent_error)?;
+            self.agents.web_context_service = Some(Arc::new(service));
+            self.agents.web_context_config_fingerprint = Some(fingerprint);
+        }
+        self.agents.web_context_service.clone().ok_or_else(|| {
+            AgentError::HandlerError(String::from("web context service unavailable"))
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_web_call(
+        &mut self,
+        route: ProxyRoute,
+        network_session_id: String,
+        requested_host: String,
+        call: WebApprovalCall,
+        approved_hosts: BTreeSet<String>,
+        cancellation: CancellationToken,
+        reply: oneshot::Sender<ClientRequestResult>,
+    ) {
+        match call {
+            WebApprovalCall::Search { query } => {
+                let service = match self.web_context_service() {
+                    Ok(service) => service,
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return;
+                    }
+                };
+                let provider_label = service.search_provider_approval_label();
+                let response = TokioBuilder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("web context runtime")
+                    .block_on(service.search_with_approved_hosts_and_cancellation(
+                        ee_agent_host::WebSearchRequest { query: query.clone() },
+                        &approved_hosts,
+                        &cancellation,
+                    ));
+                if cancellation.is_cancelled() || reply.is_closed() {
+                    return;
+                }
+                match response {
+                    Ok(response) => {
+                        let source_url = service
+                            .search_initial_host()
+                            .map(|host| format!("https://{host}/"))
+                            .unwrap_or_else(|_| String::from("https://search.invalid/"));
+                        let retrieved_at = i64::try_from(response.provenance.retrieved_at_unix_ms)
+                            .ok()
+                            .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+                            .map(|time| time.to_rfc3339())
+                            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+                        let provenance = response.provenance.identity();
+                        self.record_web_source(
+                            &network_session_id,
+                            "search",
+                            source_url,
+                            retrieved_at,
+                            None,
+                            0,
+                            response.results.len(),
+                            response.cached,
+                            response.truncated,
+                            provenance,
+                        );
+                        let _ = reply.send(
+                            Self::web_search_value(query, response)
+                                .map(ClientRequestResponse::ProxyValue),
+                        );
+                    }
+                    Err(error)
+                        if error.code
+                            == ee_agent_host::WebContextErrorCode::NetworkApprovalRequired =>
+                    {
+                        let Some(host) = error.host else {
+                            let _ = reply.send(Err(web_context_agent_error(error)));
+                            return;
+                        };
+                        self.request_web_approval(ApprovalPrompt::web(
+                            route,
+                            network_session_id,
+                            requested_host,
+                            host,
+                            Some(provider_label),
+                            WebApprovalCall::Search { query },
+                            approved_hosts,
+                            cancellation,
+                            reply,
+                        ));
+                    }
+                    Err(error) => {
+                        let host = error.host.as_deref().unwrap_or("configured search");
+                        self.record_web_failure("search", host, error.code.as_str());
+                        let _ = reply.send(Err(web_context_agent_error(error)));
+                    }
+                }
+            }
+            WebApprovalCall::Fetch { url } => {
+                let response = match self.web_context_service() {
+                    Ok(service) => TokioBuilder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("web context runtime")
+                        .block_on(service.fetch_with_approved_hosts_and_cancellation(
+                            ee_agent_host::WebFetchRequest { url: url.clone() },
+                            &approved_hosts,
+                            &cancellation,
+                        )),
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return;
+                    }
+                };
+                if cancellation.is_cancelled() || reply.is_closed() {
+                    return;
+                }
+                match response {
+                    Ok(response) => {
+                        let sha256 = sha256_hex(response.text.as_bytes());
+                        let retrieved_at = i64::try_from(response.retrieved_at_unix_ms)
+                            .ok()
+                            .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
+                            .map(|time| time.to_rfc3339())
+                            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+                        self.record_web_source(
+                            &network_session_id,
+                            "fetch",
+                            response.final_url.clone(),
+                            retrieved_at.clone(),
+                            Some(sha256.clone()),
+                            response.text.len(),
+                            1,
+                            response.cached,
+                            response.truncated,
+                            response.final_url.clone(),
+                        );
+                        let _ = reply.send(
+                            Self::web_fetch_value(response, sha256, retrieved_at)
+                                .map(ClientRequestResponse::ProxyValue),
+                        );
+                    }
+                    Err(error)
+                        if error.code
+                            == ee_agent_host::WebContextErrorCode::NetworkApprovalRequired =>
+                    {
+                        let Some(host) = error.host else {
+                            let _ = reply.send(Err(web_context_agent_error(error)));
+                            return;
+                        };
+                        self.request_web_approval(ApprovalPrompt::web(
+                            route,
+                            network_session_id,
+                            requested_host,
+                            host,
+                            None,
+                            WebApprovalCall::Fetch { url },
+                            approved_hosts,
+                            cancellation,
+                            reply,
+                        ));
+                    }
+                    Err(error) => {
+                        let host = error.host.as_deref().unwrap_or("requested host");
+                        self.record_web_failure("fetch", host, error.code.as_str());
+                        let _ = reply.send(Err(web_context_agent_error(error)));
+                    }
+                }
+            }
+            WebApprovalCall::BrowserRun { request } => {
+                let action = request.action.as_str();
+                let response = match self.web_context_service() {
+                    Ok(service) => TokioBuilder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("web context runtime")
+                        .block_on(service.browser_run_with_approved_hosts_and_cancellation(
+                            request.clone(),
+                            &approved_hosts,
+                            &cancellation,
+                        )),
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                        return;
+                    }
+                };
+                if cancellation.is_cancelled() || reply.is_closed() {
+                    return;
+                }
+                match response {
+                    Ok(response) => {
+                        let byte_count =
+                            serde_json::to_vec(&response.result).map_or(0, |result| result.len());
+                        let retrieved_at = chrono::Utc::now().to_rfc3339();
+                        self.record_web_source(
+                            &network_session_id,
+                            action,
+                            response.requested_url.clone(),
+                            retrieved_at,
+                            None,
+                            byte_count,
+                            1,
+                            false,
+                            response.truncated,
+                            String::from("cloudflare_browser_run"),
+                        );
+                        let _ = reply.send(
+                            serde_json::to_value(response)
+                                .map(ClientRequestResponse::ProxyValue)
+                                .map_err(|error| AgentError::HandlerError(error.to_string())),
+                        );
+                    }
+                    Err(error)
+                        if error.code
+                            == ee_agent_host::WebContextErrorCode::NetworkApprovalRequired =>
+                    {
+                        let Some(host) = error.host else {
+                            let _ = reply.send(Err(web_context_agent_error(error)));
+                            return;
+                        };
+                        self.request_web_approval(ApprovalPrompt::web(
+                            route,
+                            network_session_id,
+                            requested_host,
+                            host,
+                            Some("Cloudflare Browser Run"),
+                            WebApprovalCall::BrowserRun { request },
+                            approved_hosts,
+                            cancellation,
+                            reply,
+                        ));
+                    }
+                    Err(error) => {
+                        let host = error.host.as_deref().unwrap_or("requested host");
+                        self.record_web_failure(action, host, error.code.as_str());
+                        let _ = reply.send(Err(web_context_agent_error(error)));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Retains one compact source record and lifecycle row without copying
+    /// untrusted remote bytes or agent-supplied query text into local state.
+    #[allow(clippy::too_many_arguments)]
+    fn record_web_source(
+        &mut self,
+        network_session_id: &str,
+        action: &str,
+        url: String,
+        retrieved_at: String,
+        sha256: Option<String>,
+        byte_count: usize,
+        result_count: usize,
+        cached: bool,
+        truncated: bool,
+        provenance: String,
+    ) {
+        let host = ee_agent_host::web_context::validate_https_url(&url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_else(|| String::from("unknown"));
+        let session_id = network_session_id.to_owned();
+        self.agents.action_log.push(ActionLogEntry::ExternalSource {
+            action: action.to_owned(),
+            host: host.clone(),
+            url: url.clone(),
+            retrieved_at: retrieved_at.clone(),
+            sha256: sha256.clone(),
+            byte_count,
+            result_count,
+            cached,
+            truncated,
+            provenance: provenance.clone(),
+            session_id,
+        });
+        let lifecycle_id = NEXT_WEB_LIFECYCLE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let cache_state = if cached { "cached" } else { "fresh" };
+        let detail = match action {
+            "search" => format!(
+                "kind: search · host: {host} · results: {result_count} · cache: {cache_state} · provenance: {provenance} · trust: untrusted external content"
+            ),
+            _ => format!(
+                "kind: fetch · host: {host} · url: {url} · bytes: {byte_count} · cache: {cache_state} · SHA-256: {} · retrieved: {retrieved_at} · truncated: {truncated} · trust: untrusted external content",
+                sha256.as_deref().unwrap_or("none")
+            ),
+        };
+        self.record_web_lifecycle(
+            &format!("web-{lifecycle_id}"),
+            &format!("web/{action}"),
+            "completed",
+            &detail,
+        );
+    }
+
+    fn web_search_value(
+        query: String,
+        response: ee_agent_host::WebSearchResponse,
+    ) -> Result<serde_json::Value, AgentError> {
+        let result = ee_mcp::WebSearchResult {
+            query,
+            results: response
+                .results
+                .into_iter()
+                .map(|entry| ee_mcp::WebSearchEntry {
+                    title: entry.title,
+                    url: entry.url,
+                    host: entry.host,
+                    snippet: entry.snippet,
+                    rank: entry.rank as u32,
+                })
+                .collect(),
+            provenance: response.provenance.identity(),
+            trust: String::from("untrusted_external_content"),
+            cached: response.cached,
+            truncated: response.truncated,
+        };
+        serde_json::to_value(result).map_err(|error| AgentError::HandlerError(error.to_string()))
+    }
+
+    fn web_fetch_value(
+        response: ee_agent_host::WebFetchResponse,
+        sha256: String,
+        retrieved_at: String,
+    ) -> Result<serde_json::Value, AgentError> {
+        let result = ee_mcp::FetchUrlResult {
+            requested_url: response.requested_url,
+            url: response.final_url.clone(),
+            title: response.title,
+            content_type: response.content_type,
+            sha256,
+            text: response.text,
+            retrieved_at,
+            links: Vec::new(),
+            provenance: response.final_url,
+            trust: String::from("untrusted_external_content"),
+            cached: response.cached,
+            truncated: response.truncated,
+        };
+        serde_json::to_value(result).map_err(|error| AgentError::HandlerError(error.to_string()))
     }
 
     fn proxy_git_status(&self) -> Result<serde_json::Value, AgentError> {
@@ -5954,6 +6723,186 @@ mod tests {
         request.args = vec![String::from("test")];
         let terminal = approval_fingerprint(&ApprovalKind::TerminalCreate { request });
         assert_ne!(write, terminal);
+    }
+
+    #[test]
+    fn network_approval_exposes_only_route_and_canonical_host() {
+        let query = "private search query";
+        let url = "https://docs.example/private/path?token=super-secret";
+        let (reply, _receiver) = oneshot::channel();
+        let prompt = ApprovalPrompt::web(
+            ProxyRoute::Stdio,
+            String::from("proxy-network:stdio:ee --mcp-proxy:test"),
+            String::from("docs.example"),
+            String::from("docs.example"),
+            None,
+            WebApprovalCall::Fetch { url: String::from(url) },
+            BTreeSet::new(),
+            CancellationToken::new(),
+            reply,
+        );
+        let rendered = format!("{prompt:?}");
+        assert_eq!(prompt.title, "network/fetch URL");
+        assert_eq!(prompt.detail, "host: docs.example");
+        assert!(!rendered.contains(query));
+        assert!(!rendered.contains(url));
+        assert!(!rendered.contains("super-secret"));
+        assert_eq!(prompt.options.len(), 4);
+        assert!(
+            prompt.options.iter().all(|(_, choice)| *choice != ApprovalChoice::AllowPersistent)
+        );
+    }
+
+    #[test]
+    fn network_redirect_prompt_keeps_requested_host_but_scopes_grant_to_current_host() {
+        let (reply, _receiver) = oneshot::channel();
+        let prompt = ApprovalPrompt::web(
+            ProxyRoute::Stdio,
+            String::from("proxy-network:stdio:ee --mcp-proxy:test"),
+            String::from("origin.example"),
+            String::from("redirect.example"),
+            Some("Exa"),
+            WebApprovalCall::Search { query: String::from("private") },
+            BTreeSet::from([String::from("origin.example")]),
+            CancellationToken::new(),
+            reply,
+        );
+        assert_eq!(prompt.detail, "provider: Exa · host: redirect.example");
+        let rendered = format!("{prompt:?}");
+        assert!(!rendered.contains("private"));
+        assert_eq!(
+            approval_fingerprint(&prompt.kind),
+            "network:stdio:ee --mcp-proxy:search:redirect.example"
+        );
+        match &prompt.kind {
+            ApprovalKind::Network { requested_host, current_host, approved_hosts, .. } => {
+                assert_eq!(requested_host, "origin.example");
+                assert_eq!(current_host, "redirect.example");
+                assert!(approved_hosts.contains("origin.example"));
+                assert!(!approved_hosts.contains("redirect.example"));
+            }
+            _ => panic!("expected network prompt"),
+        }
+    }
+
+    #[test]
+    fn network_search_and_fetch_grants_are_scoped_to_their_actions() {
+        let (search_reply, _search_receiver) = oneshot::channel();
+        let search = ApprovalPrompt::web(
+            ProxyRoute::Stdio,
+            String::from("proxy-network:stdio:ee --mcp-proxy:test"),
+            String::from("api.exa.ai"),
+            String::from("api.exa.ai"),
+            Some("Exa"),
+            WebApprovalCall::Search { query: String::from("private") },
+            BTreeSet::new(),
+            CancellationToken::new(),
+            search_reply,
+        );
+        let (fetch_reply, _fetch_receiver) = oneshot::channel();
+        let fetch = ApprovalPrompt::web(
+            ProxyRoute::Stdio,
+            String::from("proxy-network:stdio:ee --mcp-proxy:test"),
+            String::from("api.exa.ai"),
+            String::from("api.exa.ai"),
+            None,
+            WebApprovalCall::Fetch { url: String::from("https://api.exa.ai/source") },
+            BTreeSet::new(),
+            CancellationToken::new(),
+            fetch_reply,
+        );
+
+        assert_ne!(approval_fingerprint(&search.kind), approval_fingerprint(&fetch.kind));
+    }
+
+    #[test]
+    fn network_session_fingerprints_are_route_and_connection_scoped() {
+        let make_prompt = |route, scope: &str| {
+            let (reply, _receiver) = oneshot::channel();
+            ApprovalPrompt::web(
+                route,
+                format!("proxy-network:{}:{scope}", route.transport_identity()),
+                String::from("docs.example"),
+                String::from("docs.example"),
+                Some("Exa"),
+                WebApprovalCall::Search { query: String::from("must stay private") },
+                BTreeSet::new(),
+                CancellationToken::new(),
+                reply,
+            )
+        };
+        let stdio = make_prompt(ProxyRoute::Stdio, "connection-a");
+        let second_stdio = make_prompt(ProxyRoute::Stdio, "connection-b");
+        let acp = make_prompt(ProxyRoute::AcpNative, "connection-a");
+        let stdio_fingerprint = approval_fingerprint(&stdio.kind);
+        let acp_fingerprint = approval_fingerprint(&acp.kind);
+        assert_ne!(stdio_fingerprint, acp_fingerprint);
+        assert_ne!(stdio.session_id, second_stdio.session_id);
+        assert!(!stdio_fingerprint.contains("must stay private"));
+        assert!(!acp_fingerprint.contains("must stay private"));
+
+        let mut policy = ApprovalPolicy::default();
+        policy.record(&stdio.session_id, &stdio_fingerprint, SessionChoice::Allow);
+        assert_eq!(
+            policy.lookup(&acp.session_id, &acp_fingerprint),
+            None,
+            "stdio host decision must not apply to ACP-native route"
+        );
+        assert_eq!(
+            policy.lookup(&second_stdio.session_id, &stdio_fingerprint),
+            None,
+            "one stdio connection must not reuse another connection's network grant"
+        );
+    }
+
+    #[test]
+    fn web_value_conversions_preserve_provenance_and_untrusted_markers() {
+        let search = App::web_search_value(
+            String::from("Rust MCP"),
+            ee_agent_host::WebSearchResponse {
+                results: vec![ee_agent_host::WebSearchResult {
+                    title: String::from("Docs"),
+                    url: String::from("https://docs.example/search"),
+                    host: String::from("docs.example"),
+                    snippet: String::from("MCP reference"),
+                    rank: 1,
+                }],
+                provenance: ee_agent_host::WebSearchProvenance {
+                    provider: ee_agent_host::web_context::WebSearchProvider::Exa,
+                    adapter: String::from("v1"),
+                    retrieved_at_unix_ms: 1,
+                },
+                truncated: false,
+                cached: true,
+            },
+        )
+        .expect("search response converts");
+        assert_eq!(search["provenance"], "exa:v1");
+        assert_eq!(search["trust"], "untrusted_external_content");
+        assert_eq!(search["results"][0]["rank"], 1);
+        assert_eq!(search["cached"], true);
+
+        let fetch = App::web_fetch_value(
+            ee_agent_host::WebFetchResponse {
+                requested_url: String::from("https://docs.example/start"),
+                final_url: String::from("https://docs.example/final"),
+                title: Some(String::from("Docs")),
+                content_type: String::from("text/html"),
+                text: String::from("untrusted response"),
+                retrieved_at_unix_ms: 1,
+                truncated: true,
+                redirects: 1,
+                cached: false,
+            },
+            String::from("sha256"),
+            String::from("2026-08-25T00:00:00Z"),
+        )
+        .expect("fetch response converts");
+        assert_eq!(fetch["requestedUrl"], "https://docs.example/start");
+        assert_eq!(fetch["url"], "https://docs.example/final");
+        assert_eq!(fetch["provenance"], "https://docs.example/final");
+        assert_eq!(fetch["trust"], "untrusted_external_content");
+        assert_eq!(fetch["truncated"], true);
     }
 
     #[test]

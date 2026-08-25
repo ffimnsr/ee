@@ -21,6 +21,15 @@ use std::cell::Cell;
 #[cfg(test)]
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
+#[cfg(any(feature = "agents", test))]
+use ee_agent_host::{
+    AgentWebContextConfig, WebContextLimits,
+    web_context::{
+        BraveFreshness, BraveLlmContextOptions, BraveSafeSearchMode, BraveThresholdMode,
+        ExaSearchMode, ExaSearchOptions, TavilySearchDepth, TavilySearchOptions, WebSearchProvider,
+        WebSearchProviderOptions,
+    },
+};
 use globset::GlobBuilder;
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
@@ -38,6 +47,15 @@ use xi_lsp_lib::{
 use crate::keymap::{self, KeymapOperation, KeymapSettings, SequenceBinding};
 
 const SYSTEM_CONFIG_PATH: &str = "/etc/ee/config.toml";
+// Raw config validation also runs in builds without the optional agents host.
+// Keep these synchronized with the public host provider caps.
+const MAX_EXA_RESULTS: usize = 50;
+const MAX_TAVILY_RESULTS: usize = 50;
+const MAX_TAVILY_CHUNKS_PER_SOURCE: usize = 3;
+const MAX_BRAVE_RESULTS: usize = 20;
+const MAX_BRAVE_TOKENS: usize = 10_000;
+const MAX_BRAVE_URLS: usize = 20;
+const MAX_BRAVE_SNIPPETS: usize = 20;
 pub(crate) const LSP_PLUGIN_NAME: &str = "xi-lsp-plugin";
 
 const CONFIG_TEMPLATE: &str = r#"# ee configuration
@@ -131,6 +149,30 @@ const CONFIG_TEMPLATE: &str = r#"# ee configuration
 # [agents]
 # enabled = false
 # default_agent = "assistant"
+#
+# # Web context is disabled by default. Put this only in user-global config;
+# # workspace .ee.toml files may disable or tighten it, never enable/widen it.
+# # [agents.web_context]
+# # enabled = false
+# # backend = "searxng" # or "exa", "brave_llm_context", "tavily"
+# # endpoint = "https://search.example/search" # required only for SearXNG
+# # provider_secret_reference = "secret://web-search-api-key"
+# # browser_run_account_id = "0123456789abcdef0123456789abcdef"
+# # browser_run_api_token_reference = "secret://cloudflare-browser-run-token"
+# # browser_run_max_attempts = 3
+# # browser_run_base_delay_ms = 500
+# # browser_run_max_delay_ms = 10000
+# # hosts = ["search.example"] # optional preapproval; search/fetch/browser grants stay separate
+# # [agents.web_context.exa]
+# # search_mode = "auto"
+# # max_results = 10
+# # [agents.web_context.limits]
+# # max_response_bytes = 1048576
+# # max_text_bytes = 262144
+# # max_search_results = 10
+# # max_redirects = 3
+# # request_timeout_ms = 30000
+# # max_concurrent_requests = 2
 #
 # # Agent local shortcut example. Agent actions only run while Agents TUI owns focus.
 # [[keymap.bindings]]
@@ -406,6 +448,10 @@ pub(crate) struct AgentsSettings {
     pub enabled: bool,
     pub default_agent: Option<String>,
     pub servers: BTreeMap<String, AgentServerSettings>,
+    /// Trusted web retrieval policy. This exists only in agents-enabled builds;
+    /// raw config remains parseable in every build so schema validation is stable.
+    #[cfg(any(feature = "agents", test))]
+    pub web_context: AgentWebContextConfig,
 }
 
 /// One agent environment value with its config-layer provenance (phase 5).
@@ -1080,6 +1126,207 @@ pub(crate) struct AgentsToml {
     pub default_agent: Option<String>,
     #[serde(default)]
     pub servers: BTreeMap<String, AgentServerToml>,
+    /// Trusted configuration for optional agent web retrieval. Only user-global
+    /// config can grant access; workspace files can only disable or restrict it.
+    pub web_context: Option<AgentWebContextToml>,
+}
+
+/// Raw `[agents.web_context]` definition. A user-global opaque provider secret
+/// reference is resolved only when web search service construction needs it.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AgentWebContextToml {
+    /// Enables optional web retrieval. Defaults to `false`.
+    pub enabled: Option<bool>,
+    /// Selected trusted search provider.
+    pub backend: Option<WebContextBackendToml>,
+    /// HTTPS endpoint for SearXNG only.
+    #[serde(alias = "search_endpoint")]
+    pub endpoint: Option<String>,
+    /// Exact hosts preapproved by user-global configuration.
+    #[serde(alias = "preapproved_hosts")]
+    pub hosts: Option<BTreeSet<String>>,
+    /// Bounded response, text, search-result, redirect, timeout, and concurrency limits.
+    pub limits: Option<WebContextLimitsToml>,
+    /// Exact `secret://<name>` reference accepted only from user-global config.
+    /// It remains opaque until lazy web-search service construction.
+    pub provider_secret_reference: Option<String>,
+    /// Cloudflare account id for Browser Run. Browser Run stays disabled unless
+    /// this and `browser_run_api_token_reference` are configured user-globally.
+    pub browser_run_account_id: Option<String>,
+    /// Exact `secret://<name>` reference for Cloudflare Browser Run API token.
+    pub browser_run_api_token_reference: Option<String>,
+    /// Total Browser Run attempts, including initial request. Defaults to 3; max 5.
+    pub browser_run_max_attempts: Option<u8>,
+    /// Exponential fallback delay before first retry. Defaults to 500 ms.
+    pub browser_run_base_delay_ms: Option<u64>,
+    /// Cap for Retry-After and exponential retry delay. Defaults to 10_000 ms.
+    pub browser_run_max_delay_ms: Option<u64>,
+    /// Exa-specific search options. Valid only when `backend = "exa"`.
+    pub exa: Option<ExaSearchOptionsToml>,
+    /// Brave LLM Context-specific search options. Valid only when
+    /// `backend = "brave_llm_context"`.
+    pub brave_llm_context: Option<BraveLlmContextOptionsToml>,
+    /// Tavily-specific search options. Valid only when `backend = "tavily"`.
+    pub tavily: Option<TavilySearchOptionsToml>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WebContextBackendToml {
+    #[default]
+    Searxng,
+    Exa,
+    BraveLlmContext,
+    Tavily,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExaSearchOptionsToml {
+    /// Maximum results. Defaults to bounded host result limit.
+    pub max_results: Option<usize>,
+    /// Exa search mode. Defaults to `auto`; result highlights remain enabled by adapter policy.
+    pub search_mode: Option<ExaSearchModeToml>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExaSearchModeToml {
+    #[default]
+    Auto,
+    Neural,
+    Fast,
+}
+
+#[cfg(any(feature = "agents", test))]
+impl From<ExaSearchModeToml> for ExaSearchMode {
+    fn from(value: ExaSearchModeToml) -> Self {
+        match value {
+            ExaSearchModeToml::Auto => Self::Auto,
+            ExaSearchModeToml::Neural => Self::Neural,
+            ExaSearchModeToml::Fast => Self::Fast,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TavilySearchOptionsToml {
+    /// Maximum results. Defaults to bounded host result limit.
+    pub max_results: Option<usize>,
+    /// Chunks per source. Defaults to `3` and cannot exceed it.
+    pub chunks_per_source: Option<usize>,
+    /// Search depth. Defaults to `advanced`.
+    pub search_depth: Option<TavilySearchDepthToml>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TavilySearchDepthToml {
+    #[default]
+    Basic,
+    Advanced,
+}
+
+#[cfg(any(feature = "agents", test))]
+impl From<TavilySearchDepthToml> for TavilySearchDepth {
+    fn from(value: TavilySearchDepthToml) -> Self {
+        match value {
+            TavilySearchDepthToml::Basic => Self::Basic,
+            TavilySearchDepthToml::Advanced => Self::Advanced,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BraveLlmContextOptionsToml {
+    /// Bounded cited result count.
+    pub max_results: Option<usize>,
+    /// Bounded grounding token budget, clamped to host text limit.
+    pub max_tokens: Option<usize>,
+    /// Bounded cited URL count.
+    pub max_urls: Option<usize>,
+    /// Bounded grounding snippet count.
+    pub max_snippets: Option<usize>,
+    pub threshold_mode: Option<BraveThresholdModeToml>,
+    pub freshness: Option<BraveFreshnessToml>,
+    /// Safe-search mode. Local recall is deliberately unavailable.
+    pub safe_search: Option<BraveSafeSearchModeToml>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BraveThresholdModeToml {
+    #[default]
+    Balanced,
+    Strict,
+}
+
+#[cfg(any(feature = "agents", test))]
+impl From<BraveThresholdModeToml> for BraveThresholdMode {
+    fn from(value: BraveThresholdModeToml) -> Self {
+        match value {
+            BraveThresholdModeToml::Balanced => Self::Balanced,
+            BraveThresholdModeToml::Strict => Self::Strict,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BraveFreshnessToml {
+    #[default]
+    Any,
+    Day,
+    Week,
+    Month,
+}
+
+#[cfg(any(feature = "agents", test))]
+impl From<BraveFreshnessToml> for BraveFreshness {
+    fn from(value: BraveFreshnessToml) -> Self {
+        match value {
+            BraveFreshnessToml::Any => Self::Any,
+            BraveFreshnessToml::Day => Self::Day,
+            BraveFreshnessToml::Week => Self::Week,
+            BraveFreshnessToml::Month => Self::Month,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BraveSafeSearchModeToml {
+    Off,
+    #[default]
+    Moderate,
+    Strict,
+}
+
+#[cfg(any(feature = "agents", test))]
+impl From<BraveSafeSearchModeToml> for BraveSafeSearchMode {
+    fn from(value: BraveSafeSearchModeToml) -> Self {
+        match value {
+            BraveSafeSearchModeToml::Off => Self::Off,
+            BraveSafeSearchModeToml::Moderate => Self::Moderate,
+            BraveSafeSearchModeToml::Strict => Self::Strict,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WebContextLimitsToml {
+    pub max_response_bytes: Option<usize>,
+    pub max_text_bytes: Option<usize>,
+    pub max_search_results: Option<usize>,
+    pub max_redirects: Option<usize>,
+    /// Total request timeout in milliseconds.
+    pub request_timeout_ms: Option<u64>,
+    /// Maximum simultaneous web requests.
+    pub max_concurrent_requests: Option<usize>,
 }
 
 /// Raw `[agents.servers.<id>]` definition.
@@ -1618,6 +1865,676 @@ fn merge_agent_server(
     })
 }
 
+fn validate_agent_web_context_config(web_context: &AgentWebContextToml) -> Result<(), String> {
+    if let Some(reference) = &web_context.provider_secret_reference {
+        crate::secrets::SecretReference::parse(reference).map_err(|_| {
+            String::from("invalid secret reference in agents.web_context.provider_secret_reference")
+        })?;
+    }
+    if let Some(reference) = &web_context.browser_run_api_token_reference {
+        crate::secrets::SecretReference::parse(reference).map_err(|_| {
+            String::from(
+                "invalid secret reference in agents.web_context.browser_run_api_token_reference",
+            )
+        })?;
+    }
+    if let Some(account_id) = &web_context.browser_run_account_id
+        && !(account_id.len() == 32 && account_id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err(String::from(
+            "agents.web_context.browser_run_account_id must be a 32-character hexadecimal Cloudflare account id",
+        ));
+    }
+    let max_attempts = web_context.browser_run_max_attempts.unwrap_or(3);
+    let base_delay_ms = web_context.browser_run_base_delay_ms.unwrap_or(500);
+    let max_delay_ms = web_context.browser_run_max_delay_ms.unwrap_or(10_000);
+    if max_attempts == 0 || max_attempts > 5 {
+        return Err(String::from(
+            "agents.web_context.browser_run_max_attempts must be 1 through 5",
+        ));
+    }
+    if base_delay_ms == 0
+        || base_delay_ms > 30_000
+        || max_delay_ms == 0
+        || max_delay_ms > 30_000
+        || base_delay_ms > max_delay_ms
+    {
+        return Err(String::from(
+            "Browser Run retry delay values must be within 1 through 30000 ms and base must not exceed max",
+        ));
+    }
+
+    match web_context.backend {
+        Some(WebContextBackendToml::Searxng)
+            if web_context
+                .endpoint
+                .as_deref()
+                .is_none_or(|endpoint| endpoint.trim().is_empty()) =>
+        {
+            return Err(String::from(
+                "agents.web_context.endpoint is required when backend is searxng",
+            ));
+        }
+        Some(
+            WebContextBackendToml::Exa
+            | WebContextBackendToml::BraveLlmContext
+            | WebContextBackendToml::Tavily,
+        ) if web_context.endpoint.is_some() => {
+            return Err(String::from(
+                "agents.web_context.endpoint is only permitted when backend is searxng",
+            ));
+        }
+        None if web_context.endpoint.is_some() => {
+            return Err(String::from(
+                "agents.web_context.endpoint is only permitted when backend is searxng",
+            ));
+        }
+        _ => {}
+    }
+
+    validate_web_context_provider_options(
+        "exa",
+        web_context.exa.is_some(),
+        web_context.backend,
+        WebContextBackendToml::Exa,
+    )?;
+    validate_web_context_provider_options(
+        "brave_llm_context",
+        web_context.brave_llm_context.is_some(),
+        web_context.backend,
+        WebContextBackendToml::BraveLlmContext,
+    )?;
+    validate_web_context_provider_options(
+        "tavily",
+        web_context.tavily.is_some(),
+        web_context.backend,
+        WebContextBackendToml::Tavily,
+    )?;
+    if let Some(exa) = &web_context.exa {
+        validate_web_context_provider_limit("exa.max_results", exa.max_results, MAX_EXA_RESULTS)?;
+    }
+    if let Some(tavily) = &web_context.tavily {
+        validate_web_context_provider_limit(
+            "tavily.max_results",
+            tavily.max_results,
+            MAX_TAVILY_RESULTS,
+        )?;
+        validate_web_context_provider_limit(
+            "tavily.chunks_per_source",
+            tavily.chunks_per_source,
+            MAX_TAVILY_CHUNKS_PER_SOURCE,
+        )?;
+    }
+    if let Some(brave) = &web_context.brave_llm_context {
+        validate_web_context_provider_limit(
+            "brave_llm_context.max_results",
+            brave.max_results,
+            MAX_BRAVE_RESULTS,
+        )?;
+        validate_web_context_provider_limit(
+            "brave_llm_context.max_tokens",
+            brave.max_tokens,
+            MAX_BRAVE_TOKENS,
+        )?;
+        validate_web_context_provider_limit(
+            "brave_llm_context.max_urls",
+            brave.max_urls,
+            MAX_BRAVE_URLS,
+        )?;
+        validate_web_context_provider_limit(
+            "brave_llm_context.max_snippets",
+            brave.max_snippets,
+            MAX_BRAVE_SNIPPETS,
+        )?;
+    }
+
+    if let Some(limits) = &web_context.limits {
+        validate_web_context_raw_limit("request_timeout_ms", limits.request_timeout_ms)?;
+        validate_web_context_raw_limit(
+            "max_concurrent_requests",
+            limits.max_concurrent_requests.map(|value| value as u64),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_web_context_provider_options(
+    name: &str,
+    configured: bool,
+    backend: Option<WebContextBackendToml>,
+    expected_backend: WebContextBackendToml,
+) -> Result<(), String> {
+    if configured && backend != Some(expected_backend) {
+        return Err(format!(
+            "agents.web_context.{name} is only permitted when backend is {}",
+            web_context_backend_name(expected_backend),
+        ));
+    }
+    Ok(())
+}
+
+fn web_context_backend_name(backend: WebContextBackendToml) -> &'static str {
+    match backend {
+        WebContextBackendToml::Searxng => "searxng",
+        WebContextBackendToml::Exa => "exa",
+        WebContextBackendToml::BraveLlmContext => "brave_llm_context",
+        WebContextBackendToml::Tavily => "tavily",
+    }
+}
+
+fn validate_web_context_raw_limit(name: &str, value: Option<u64>) -> Result<(), String> {
+    if value == Some(0) {
+        return Err(format!("agents.web_context.limits.{name} must be greater than zero"));
+    }
+    Ok(())
+}
+
+fn validate_web_context_provider_limit(
+    name: &str,
+    value: Option<usize>,
+    maximum: usize,
+) -> Result<(), String> {
+    if value.is_some_and(|value| value == 0 || value > maximum) {
+        return Err(format!("agents.web_context.{name} must be within supported bounds"));
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "agents", test))]
+fn resolve_agent_web_context_with_env(
+    file_path: Option<&Path>,
+    env: &ConfigEnvironment,
+) -> AgentWebContextConfig {
+    let mut config = AgentWebContextConfig::default();
+
+    if let Some(web_context) = user_global_agent_web_context_toml(env)
+        && let Err(err) = merge_user_global_web_context(&mut config, &web_context)
+    {
+        eprintln!("ee: warning: invalid user-global agents.web_context config: {err}");
+    }
+
+    for layer in discover_config_layers_with_env(env, file_path)
+        .layers
+        .into_iter()
+        .filter(|layer| matches!(layer.kind, ConfigLayerKind::Ancestor))
+    {
+        let Some(patch) = parse_ee_toml(&layer.path) else {
+            continue;
+        };
+        let Some(web_context) = patch.agents.and_then(|agents| agents.web_context) else {
+            continue;
+        };
+        restrict_workspace_web_context(&mut config, &web_context, &layer.path);
+    }
+
+    config
+}
+
+#[cfg(any(feature = "agents", test))]
+fn user_global_agent_web_context_toml(env: &ConfigEnvironment) -> Option<AgentWebContextToml> {
+    let user_config = env
+        .xdg_user_config_path()
+        .filter(|path| probe_config_file(path).exists)
+        .or_else(|| env.legacy_user_config_path().filter(|path| probe_config_file(path).exists))?;
+    parse_ee_toml(&user_config)?.agents?.web_context
+}
+
+#[cfg(any(feature = "agents", test))]
+fn merge_user_global_web_context(
+    config: &mut AgentWebContextConfig,
+    patch: &AgentWebContextToml,
+) -> Result<(), String> {
+    validate_agent_web_context_config(patch)?;
+
+    let mut limits = config.limits.clone();
+    apply_user_global_web_context_limits(&mut limits, patch.limits.as_ref())?;
+
+    if let Some(enabled) = patch.enabled {
+        config.enabled = enabled;
+    }
+    if let Some(backend) = patch.backend {
+        config.provider = web_search_provider(backend);
+        config.provider_options = web_search_provider_options(backend, patch);
+        config.search_endpoint = patch.endpoint.clone();
+    }
+    if let Some(hosts) = &patch.hosts {
+        config.preapproved_hosts = hosts.clone();
+    }
+    if let Some(reference) = &patch.provider_secret_reference {
+        config.provider_secret_reference = Some(reference.clone());
+    }
+    if let Some(account_id) = &patch.browser_run_account_id {
+        config.browser_run_account_id = Some(account_id.clone());
+    }
+    if let Some(reference) = &patch.browser_run_api_token_reference {
+        config.browser_run_api_token_reference = Some(reference.clone());
+    }
+    if let Some(max_attempts) = patch.browser_run_max_attempts {
+        config.browser_run_retry.max_attempts = max_attempts;
+    }
+    if let Some(base_delay_ms) = patch.browser_run_base_delay_ms {
+        config.browser_run_retry.base_delay_ms = base_delay_ms;
+    }
+    if let Some(max_delay_ms) = patch.browser_run_max_delay_ms {
+        config.browser_run_retry.max_delay_ms = max_delay_ms;
+    }
+    config.limits = limits;
+    Ok(())
+}
+
+#[cfg(any(feature = "agents", test))]
+fn web_search_provider(backend: WebContextBackendToml) -> WebSearchProvider {
+    match backend {
+        WebContextBackendToml::Searxng => WebSearchProvider::Searxng,
+        WebContextBackendToml::Exa => WebSearchProvider::Exa,
+        WebContextBackendToml::BraveLlmContext => WebSearchProvider::BraveLlmContext,
+        WebContextBackendToml::Tavily => WebSearchProvider::Tavily,
+    }
+}
+
+#[cfg(any(feature = "agents", test))]
+fn web_search_provider_options(
+    backend: WebContextBackendToml,
+    patch: &AgentWebContextToml,
+) -> WebSearchProviderOptions {
+    match backend {
+        WebContextBackendToml::Searxng => WebSearchProviderOptions::Searxng,
+        WebContextBackendToml::Exa => {
+            let mut options = ExaSearchOptions::default();
+            if let Some(exa) = &patch.exa {
+                if let Some(max_results) = exa.max_results {
+                    options.max_results = max_results;
+                }
+                if let Some(search_mode) = exa.search_mode {
+                    options.search_mode = search_mode.into();
+                }
+            }
+            WebSearchProviderOptions::Exa(options)
+        }
+        WebContextBackendToml::BraveLlmContext => {
+            let mut options = BraveLlmContextOptions::default();
+            if let Some(brave) = &patch.brave_llm_context {
+                if let Some(max_results) = brave.max_results {
+                    options.max_results = max_results;
+                }
+                if let Some(max_tokens) = brave.max_tokens {
+                    options.max_tokens = max_tokens;
+                }
+                if let Some(max_urls) = brave.max_urls {
+                    options.max_urls = max_urls;
+                }
+                if let Some(max_snippets) = brave.max_snippets {
+                    options.max_snippets = max_snippets;
+                }
+                if let Some(threshold_mode) = brave.threshold_mode {
+                    options.threshold_mode = threshold_mode.into();
+                }
+                if let Some(freshness) = brave.freshness {
+                    options.freshness = freshness.into();
+                }
+                if let Some(safe_search) = brave.safe_search {
+                    options.safe_search = safe_search.into();
+                }
+            }
+            WebSearchProviderOptions::BraveLlmContext(options)
+        }
+        WebContextBackendToml::Tavily => {
+            let mut options = TavilySearchOptions::default();
+            if let Some(tavily) = &patch.tavily {
+                if let Some(max_results) = tavily.max_results {
+                    options.max_results = max_results;
+                }
+                if let Some(chunks_per_source) = tavily.chunks_per_source {
+                    options.chunks_per_source = chunks_per_source;
+                }
+                if let Some(search_depth) = tavily.search_depth {
+                    options.search_depth = search_depth.into();
+                }
+            }
+            WebSearchProviderOptions::Tavily(options)
+        }
+    }
+}
+
+#[cfg(any(feature = "agents", test))]
+fn apply_user_global_web_context_limits(
+    limits: &mut WebContextLimits,
+    patch: Option<&WebContextLimitsToml>,
+) -> Result<(), String> {
+    let Some(patch) = patch else {
+        return Ok(());
+    };
+
+    if let Some(value) = patch.max_response_bytes {
+        validate_web_context_limit(
+            "max_response_bytes",
+            value,
+            ee_agent_host::web_context::MAX_RESPONSE_BYTES,
+            false,
+        )?;
+        limits.max_response_bytes = value;
+    }
+    if let Some(value) = patch.max_text_bytes {
+        validate_web_context_limit(
+            "max_text_bytes",
+            value,
+            ee_agent_host::web_context::MAX_TEXT_BYTES,
+            false,
+        )?;
+        limits.max_text_bytes = value;
+    }
+    if let Some(value) = patch.max_search_results {
+        validate_web_context_limit(
+            "max_search_results",
+            value,
+            ee_agent_host::web_context::MAX_SEARCH_RESULTS,
+            false,
+        )?;
+        limits.max_search_results = value;
+    }
+    if let Some(value) = patch.max_redirects {
+        validate_web_context_limit(
+            "max_redirects",
+            value,
+            ee_agent_host::web_context::MAX_REDIRECTS,
+            true,
+        )?;
+        limits.max_redirects = value;
+    }
+    if let Some(value) = patch.request_timeout_ms {
+        if value == 0 || value > ee_agent_host::web_context::MAX_REQUEST_TIMEOUT_MS {
+            return Err(String::from("request_timeout_ms must be within supported bounds"));
+        }
+        limits.request_timeout_ms = value;
+    }
+    if let Some(value) = patch.max_concurrent_requests {
+        validate_web_context_limit(
+            "max_concurrent_requests",
+            value,
+            ee_agent_host::web_context::MAX_CONCURRENT_REQUESTS,
+            false,
+        )?;
+        limits.max_concurrent_requests = value;
+    }
+
+    if limits.max_text_bytes > limits.max_response_bytes {
+        limits.max_text_bytes = limits.max_response_bytes;
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "agents", test))]
+fn validate_web_context_limit(
+    name: &str,
+    value: usize,
+    maximum: usize,
+    zero_allowed: bool,
+) -> Result<(), String> {
+    if (!zero_allowed && value == 0) || value > maximum {
+        return Err(format!("{name} must be within supported bounds"));
+    }
+    Ok(())
+}
+
+#[cfg(any(feature = "agents", test))]
+fn restrict_workspace_web_context(
+    config: &mut AgentWebContextConfig,
+    patch: &AgentWebContextToml,
+    path: &Path,
+) {
+    if patch.enabled == Some(true) {
+        eprintln!(
+            "ee: warning: ignoring agents.web_context.enabled = true in workspace config {}",
+            path.display()
+        );
+    }
+    if patch.enabled == Some(false) {
+        config.enabled = false;
+    }
+    if patch.backend.is_some() {
+        eprintln!(
+            "ee: warning: ignoring agents.web_context.backend in workspace config {}",
+            path.display()
+        );
+    }
+    if patch.exa.is_some() || patch.brave_llm_context.is_some() || patch.tavily.is_some() {
+        eprintln!(
+            "ee: warning: ignoring agents.web_context provider options in workspace config {}",
+            path.display()
+        );
+    }
+    if patch.endpoint.is_some() {
+        eprintln!(
+            "ee: warning: ignoring agents.web_context.endpoint in workspace config {}",
+            path.display()
+        );
+    }
+    if patch.provider_secret_reference.is_some() {
+        eprintln!(
+            "ee: warning: ignoring agents.web_context.provider_secret_reference outside user-global config in {}",
+            path.display()
+        );
+    }
+    if patch.browser_run_account_id.is_some()
+        || patch.browser_run_api_token_reference.is_some()
+        || patch.browser_run_max_attempts.is_some()
+        || patch.browser_run_base_delay_ms.is_some()
+        || patch.browser_run_max_delay_ms.is_some()
+    {
+        eprintln!(
+            "ee: warning: ignoring agents.web_context Browser Run configuration outside user-global config in {}",
+            path.display()
+        );
+    }
+    if let Some(hosts) = &patch.hosts {
+        if !hosts.is_subset(&config.preapproved_hosts) {
+            eprintln!(
+                "ee: warning: ignoring workspace agents.web_context hosts not approved by user-global config in {}",
+                path.display()
+            );
+        }
+        config.preapproved_hosts = config.preapproved_hosts.intersection(hosts).cloned().collect();
+    }
+    restrict_workspace_web_context_limits(&mut config.limits, patch.limits.as_ref(), path);
+}
+
+#[cfg(any(feature = "agents", test))]
+fn restrict_workspace_web_context_limits(
+    limits: &mut WebContextLimits,
+    patch: Option<&WebContextLimitsToml>,
+    path: &Path,
+) {
+    let Some(patch) = patch else {
+        return;
+    };
+
+    restrict_web_context_limit(
+        "max_response_bytes",
+        &mut limits.max_response_bytes,
+        patch.max_response_bytes,
+        false,
+        path,
+    );
+    restrict_web_context_limit(
+        "max_text_bytes",
+        &mut limits.max_text_bytes,
+        patch.max_text_bytes,
+        false,
+        path,
+    );
+    restrict_web_context_limit(
+        "max_search_results",
+        &mut limits.max_search_results,
+        patch.max_search_results,
+        false,
+        path,
+    );
+    restrict_web_context_limit(
+        "max_redirects",
+        &mut limits.max_redirects,
+        patch.max_redirects,
+        true,
+        path,
+    );
+    restrict_web_context_u64_limit(
+        "request_timeout_ms",
+        &mut limits.request_timeout_ms,
+        patch.request_timeout_ms,
+        path,
+    );
+    restrict_web_context_limit(
+        "max_concurrent_requests",
+        &mut limits.max_concurrent_requests,
+        patch.max_concurrent_requests,
+        false,
+        path,
+    );
+    limits.max_text_bytes = limits.max_text_bytes.min(limits.max_response_bytes);
+}
+
+#[cfg(any(feature = "agents", test))]
+fn restrict_web_context_limit(
+    name: &str,
+    current: &mut usize,
+    requested: Option<usize>,
+    zero_allowed: bool,
+    path: &Path,
+) {
+    let Some(requested) = requested else {
+        return;
+    };
+    if !zero_allowed && requested == 0 {
+        eprintln!(
+            "ee: warning: ignoring invalid workspace agents.web_context.limits.{name} in {}",
+            path.display()
+        );
+    } else if requested > *current {
+        eprintln!(
+            "ee: warning: ignoring widening workspace agents.web_context.limits.{name} in {}",
+            path.display()
+        );
+    } else {
+        *current = requested;
+    }
+}
+
+#[cfg(any(feature = "agents", test))]
+fn restrict_web_context_u64_limit(
+    name: &str,
+    current: &mut u64,
+    requested: Option<u64>,
+    path: &Path,
+) {
+    let Some(requested) = requested else {
+        return;
+    };
+    if requested == 0 {
+        eprintln!(
+            "ee: warning: ignoring invalid workspace agents.web_context.limits.{name} in {}",
+            path.display()
+        );
+    } else if requested > *current {
+        eprintln!(
+            "ee: warning: ignoring widening workspace agents.web_context.limits.{name} in {}",
+            path.display()
+        );
+    } else {
+        *current = requested;
+    }
+}
+
+#[cfg(any(feature = "agents", test))]
+fn agent_web_context_settings_to_toml(
+    web_context: &AgentWebContextConfig,
+) -> Option<AgentWebContextToml> {
+    if web_context == &AgentWebContextConfig::default() {
+        return None;
+    }
+    let backend = match web_context.provider {
+        WebSearchProvider::Searxng => WebContextBackendToml::Searxng,
+        WebSearchProvider::Exa => WebContextBackendToml::Exa,
+        WebSearchProvider::BraveLlmContext => WebContextBackendToml::BraveLlmContext,
+        WebSearchProvider::Tavily => WebContextBackendToml::Tavily,
+    };
+    let (exa, brave_llm_context, tavily) = match &web_context.provider_options {
+        WebSearchProviderOptions::Searxng => (None, None, None),
+        WebSearchProviderOptions::Exa(options) => (
+            Some(ExaSearchOptionsToml {
+                max_results: Some(options.max_results),
+                search_mode: Some(match options.search_mode {
+                    ExaSearchMode::Auto => ExaSearchModeToml::Auto,
+                    ExaSearchMode::Neural => ExaSearchModeToml::Neural,
+                    ExaSearchMode::Fast => ExaSearchModeToml::Fast,
+                }),
+            }),
+            None,
+            None,
+        ),
+        WebSearchProviderOptions::BraveLlmContext(options) => (
+            None,
+            Some(BraveLlmContextOptionsToml {
+                max_results: Some(options.max_results),
+                max_tokens: Some(options.max_tokens),
+                max_urls: Some(options.max_urls),
+                max_snippets: Some(options.max_snippets),
+                threshold_mode: Some(match options.threshold_mode {
+                    BraveThresholdMode::Balanced => BraveThresholdModeToml::Balanced,
+                    BraveThresholdMode::Strict => BraveThresholdModeToml::Strict,
+                }),
+                freshness: Some(match options.freshness {
+                    BraveFreshness::Any => BraveFreshnessToml::Any,
+                    BraveFreshness::Day => BraveFreshnessToml::Day,
+                    BraveFreshness::Week => BraveFreshnessToml::Week,
+                    BraveFreshness::Month => BraveFreshnessToml::Month,
+                }),
+                safe_search: Some(match options.safe_search {
+                    BraveSafeSearchMode::Off => BraveSafeSearchModeToml::Off,
+                    BraveSafeSearchMode::Moderate => BraveSafeSearchModeToml::Moderate,
+                    BraveSafeSearchMode::Strict => BraveSafeSearchModeToml::Strict,
+                }),
+            }),
+            None,
+        ),
+        WebSearchProviderOptions::Tavily(options) => (
+            None,
+            None,
+            Some(TavilySearchOptionsToml {
+                max_results: Some(options.max_results),
+                chunks_per_source: Some(options.chunks_per_source),
+                search_depth: Some(match options.search_depth {
+                    TavilySearchDepth::Basic => TavilySearchDepthToml::Basic,
+                    TavilySearchDepth::Advanced => TavilySearchDepthToml::Advanced,
+                }),
+            }),
+        ),
+    };
+    Some(AgentWebContextToml {
+        enabled: Some(web_context.enabled),
+        backend: Some(backend),
+        endpoint: (backend == WebContextBackendToml::Searxng)
+            .then(|| web_context.search_endpoint.clone())
+            .flatten(),
+        hosts: Some(web_context.preapproved_hosts.clone()),
+        limits: Some(WebContextLimitsToml {
+            max_response_bytes: Some(web_context.limits.max_response_bytes),
+            max_text_bytes: Some(web_context.limits.max_text_bytes),
+            max_search_results: Some(web_context.limits.max_search_results),
+            max_redirects: Some(web_context.limits.max_redirects),
+            request_timeout_ms: Some(web_context.limits.request_timeout_ms),
+            max_concurrent_requests: Some(web_context.limits.max_concurrent_requests),
+        }),
+        provider_secret_reference: web_context.provider_secret_reference.clone(),
+        browser_run_account_id: web_context.browser_run_account_id.clone(),
+        browser_run_api_token_reference: web_context.browser_run_api_token_reference.clone(),
+        browser_run_max_attempts: Some(web_context.browser_run_retry.max_attempts),
+        browser_run_base_delay_ms: Some(web_context.browser_run_retry.base_delay_ms),
+        browser_run_max_delay_ms: Some(web_context.browser_run_retry.max_delay_ms),
+        exa,
+        brave_llm_context,
+        tavily,
+    })
+}
+
 fn resolve_mcp_server(id: &str, server: &McpServerToml) -> Result<McpServerSettings, String> {
     if id.trim().is_empty() {
         return Err(String::from("mcp server id must not be empty"));
@@ -1768,6 +2685,10 @@ fn load_config_with_env(file_path: Option<&Path>, env: &ConfigEnvironment) -> Ed
     }
 
     settings.lsp = lsp.finalize();
+    #[cfg(any(feature = "agents", test))]
+    {
+        settings.agents.web_context = resolve_agent_web_context_with_env(file_path, env);
+    }
     settings.finalize_agents();
 
     settings
@@ -1847,6 +2768,16 @@ fn agents_settings_to_toml(agents: &AgentsSettings) -> Option<AgentsToml> {
     Some(AgentsToml {
         enabled: Some(agents.enabled),
         default_agent: agents.default_agent.clone(),
+        web_context: {
+            #[cfg(any(feature = "agents", test))]
+            {
+                agent_web_context_settings_to_toml(&agents.web_context)
+            }
+            #[cfg(not(any(feature = "agents", test)))]
+            {
+                None
+            }
+        },
         servers: agents
             .servers
             .iter()
@@ -2097,6 +3028,9 @@ fn validate_config_contents(path: &Path, contents: &str) -> Result<(), String> {
 fn validate_agents_mcp_config(parsed: &EeToml) -> Result<(), String> {
     let mut effective_ids = BTreeSet::new();
     if let Some(agents) = &parsed.agents {
+        if let Some(web_context) = &agents.web_context {
+            validate_agent_web_context_config(web_context)?;
+        }
         for (id, server) in &agents.servers {
             // Validation checks shape and reference grammar only; layer
             // provenance and required effective fields are enforced during
@@ -3868,6 +4802,11 @@ description = "find files"
         assert!(contents.contains("# [lsp.servers.example]"));
         assert!(contents.contains("# [languages.example.grammar.source.crate]"));
         assert!(contents.contains("# [agents.servers.assistant]"));
+        assert!(
+            contents
+                .contains("backend = \"searxng\" # or \"exa\", \"brave_llm_context\", \"tavily\"")
+        );
+        assert!(contents.contains("provider_secret_reference = \"secret://web-search-api-key\""));
         assert!(contents.contains("# [mcp.servers.example]"));
 
         let error = init_config_with_env(ConfigScope::Local, &env).unwrap_err();
@@ -3928,6 +4867,381 @@ command = "other-agent"
         assert_eq!(helper.env.get("EE_AGENT_MODE").map(|v| v.raw.as_str()), Some("1"));
         assert_eq!(helper.cwd.as_deref(), Some(Path::new("/tmp/agent")));
         assert_eq!(settings.agents.servers.len(), 2);
+    }
+
+    // ── Agent web context trusted config (phase 1) ───────────────────────────
+
+    #[test]
+    fn agent_web_context_is_disabled_by_default() {
+        assert!(!EditorSettings::default().agents.web_context.enabled);
+
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_config_environment(temp.path());
+        std::fs::create_dir_all(&env.cwd).unwrap();
+        let settings = load_config_with_env(None, &env);
+        assert!(!settings.agents.web_context.enabled);
+    }
+
+    #[test]
+    fn agent_web_context_exa_uses_defaults_and_user_global_options() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_config_environment(temp.path());
+        std::fs::create_dir_all(&env.cwd).unwrap();
+        write_config_layer(
+            &env,
+            ConfigLayerKind::UserXdg,
+            r#"
+[agents.web_context]
+enabled = true
+backend = "exa"
+provider_secret_reference = "secret://exa-api-key"
+
+[agents.web_context.exa]
+max_results = 7
+search_mode = "neural"
+"#,
+        );
+
+        let settings = load_for(&env);
+        let web = &settings.agents.web_context;
+        assert!(web.enabled);
+        assert_eq!(web.provider, WebSearchProvider::Exa);
+        let WebSearchProviderOptions::Exa(options) = &web.provider_options else {
+            panic!("expected Exa provider options");
+        };
+        assert_eq!(options.max_results, 7);
+        assert_eq!(options.search_mode, ExaSearchMode::Neural);
+        assert!(web.search_endpoint.is_none());
+        assert_eq!(web.provider_secret_reference.as_deref(), Some("secret://exa-api-key"));
+
+        let defaults = AgentWebContextConfig::default();
+        assert_eq!(defaults.provider, WebSearchProvider::Searxng);
+        assert_eq!(defaults.provider_options, WebSearchProviderOptions::Searxng);
+    }
+
+    #[test]
+    fn agent_web_context_provider_defaults_and_excluded_options_are_stable() {
+        assert_eq!(web_search_provider(WebContextBackendToml::Searxng), WebSearchProvider::Searxng);
+        assert_eq!(web_search_provider(WebContextBackendToml::Exa), WebSearchProvider::Exa);
+        assert_eq!(
+            web_search_provider(WebContextBackendToml::BraveLlmContext),
+            WebSearchProvider::BraveLlmContext
+        );
+        assert_eq!(web_search_provider(WebContextBackendToml::Tavily), WebSearchProvider::Tavily);
+
+        let tavily: EeToml = toml::from_str(
+            "[agents.web_context]\nbackend = \"tavily\"\n\n[agents.web_context.tavily]\n",
+        )
+        .unwrap();
+        let tavily = tavily.agents.unwrap().web_context.unwrap();
+        assert_eq!(
+            web_search_provider_options(WebContextBackendToml::Tavily, &tavily),
+            WebSearchProviderOptions::Tavily(TavilySearchOptions::default())
+        );
+
+        let brave: EeToml = toml::from_str(
+            "[agents.web_context]\nbackend = \"brave_llm_context\"\n\n[agents.web_context.brave_llm_context]\n",
+        )
+        .unwrap();
+        let brave = brave.agents.unwrap().web_context.unwrap();
+        assert_eq!(
+            web_search_provider_options(WebContextBackendToml::BraveLlmContext, &brave),
+            WebSearchProviderOptions::BraveLlmContext(BraveLlmContextOptions::default())
+        );
+
+        for excluded in [
+            "[agents.web_context]\nbackend = \"brave_llm_context\"\n\n[agents.web_context.brave_llm_context]\nenable_local = true\n",
+            "[agents.web_context]\nbackend = \"tavily\"\n\n[agents.web_context.tavily]\nresearch = true\n",
+            "[agents.web_context]\nbackend = \"exa\"\n\n[agents.web_context.exa]\ndomains = [\"example.com\"]\n",
+        ] {
+            assert!(
+                toml::from_str::<EeToml>(excluded).is_err(),
+                "excluded option parsed: {excluded}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_web_context_provider_limits_fail_config_validation() {
+        assert_eq!(MAX_EXA_RESULTS, ee_agent_host::web_context::MAX_EXA_RESULTS);
+        assert_eq!(MAX_TAVILY_RESULTS, ee_agent_host::web_context::MAX_TAVILY_RESULTS);
+        assert_eq!(
+            MAX_TAVILY_CHUNKS_PER_SOURCE,
+            ee_agent_host::web_context::MAX_TAVILY_CHUNKS_PER_SOURCE
+        );
+        assert_eq!(MAX_BRAVE_RESULTS, ee_agent_host::web_context::MAX_BRAVE_RESULTS);
+        assert_eq!(MAX_BRAVE_TOKENS, ee_agent_host::web_context::MAX_BRAVE_TOKENS);
+        assert_eq!(MAX_BRAVE_URLS, ee_agent_host::web_context::MAX_BRAVE_URLS);
+        assert_eq!(MAX_BRAVE_SNIPPETS, ee_agent_host::web_context::MAX_BRAVE_SNIPPETS);
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        for (field, config) in [
+            (
+                "exa.max_results",
+                "[agents.web_context]\nbackend = \"exa\"\n\n[agents.web_context.exa]\nmax_results = 0\n",
+            ),
+            (
+                "tavily.chunks_per_source",
+                "[agents.web_context]\nbackend = \"tavily\"\n\n[agents.web_context.tavily]\nchunks_per_source = 4\n",
+            ),
+            (
+                "brave_llm_context.max_tokens",
+                "[agents.web_context]\nbackend = \"brave_llm_context\"\n\n[agents.web_context.brave_llm_context]\nmax_tokens = 10001\n",
+            ),
+        ] {
+            std::fs::write(&path, config).unwrap();
+            let error = validate_config_file(&path).unwrap_err();
+            assert!(error.contains(field), "{error}");
+        }
+    }
+
+    #[test]
+    fn agent_web_context_rejects_vendor_endpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[agents.web_context]\nbackend = \"tavily\"\nendpoint = \"https://search.example\"\n",
+        )
+        .unwrap();
+
+        let error = validate_config_file(&path).unwrap_err();
+        assert!(error.contains("endpoint is only permitted when backend is searxng"));
+
+        std::fs::write(&path, "[agents.web_context]\nbackend = \"searxng\"\n").unwrap();
+        let error = validate_config_file(&path).unwrap_err();
+        assert!(error.contains("endpoint is required when backend is searxng"));
+    }
+
+    #[test]
+    fn agent_web_context_uses_user_global_config_across_workspace_root_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_config_environment(temp.path());
+        let file = env.cwd.join("project").join("main.rs");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        write_config_layer(
+            &env,
+            ConfigLayerKind::UserXdg,
+            r#"
+[agents.web_context]
+enabled = true
+backend = "searxng"
+endpoint = "https://search.example/search"
+hosts = ["search.example", "docs.example"]
+
+[agents.web_context.limits]
+max_response_bytes = 8192
+max_text_bytes = 4096
+max_search_results = 12
+max_redirects = 2
+request_timeout_ms = 30000
+max_concurrent_requests = 4
+"#,
+        );
+        std::fs::write(
+            env.cwd.join(".ee.toml"),
+            r#"
+root = true
+
+[agents.web_context]
+hosts = ["docs.example"]
+
+[agents.web_context.limits]
+max_text_bytes = 2048
+"#,
+        )
+        .unwrap();
+
+        let settings = load_config_with_env(Some(&file), &env);
+        let web = &settings.agents.web_context;
+        assert!(web.enabled);
+        assert_eq!(web.search_endpoint.as_deref(), Some("https://search.example/search"));
+        assert_eq!(web.preapproved_hosts, BTreeSet::from([String::from("docs.example")]));
+        assert_eq!(web.limits.max_response_bytes, 8192);
+        assert_eq!(web.limits.max_text_bytes, 2048);
+        assert_eq!(web.limits.max_search_results, 12);
+        assert_eq!(web.limits.max_redirects, 2);
+        assert_eq!(web.limits.request_timeout_ms, 30_000);
+        assert_eq!(web.limits.max_concurrent_requests, 4);
+        assert!(web.provider_secret_reference.is_none());
+
+        let rendered =
+            toml::to_string_pretty(&resolved_config_with_env(Some(&file), &env)).unwrap();
+        assert!(!rendered.contains("provider_secret_reference"));
+    }
+
+    #[test]
+    fn agent_web_context_workspace_cannot_widen_or_enable_untrusted_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_config_environment(temp.path());
+        std::fs::create_dir_all(&env.cwd).unwrap();
+        write_config_layer(
+            &env,
+            ConfigLayerKind::UserXdg,
+            r#"
+[agents.web_context]
+enabled = true
+backend = "searxng"
+endpoint = "https://search.example/search"
+hosts = ["search.example", "docs.example"]
+
+[agents.web_context.limits]
+max_response_bytes = 8192
+max_text_bytes = 4096
+max_search_results = 12
+max_redirects = 2
+"#,
+        );
+        write_config_layer(
+            &env,
+            ConfigLayerKind::Ancestor,
+            r#"
+[agents.web_context]
+enabled = true
+backend = "searxng"
+endpoint = "https://untrusted.example/search"
+hosts = ["docs.example", "untrusted.example"]
+provider_secret_reference = "secret://workspace-provider"
+
+[agents.web_context.limits]
+max_response_bytes = 16384
+max_text_bytes = 2048
+max_search_results = 20
+max_redirects = 3
+"#,
+        );
+
+        let settings = load_config_with_env(None, &env);
+        let web = &settings.agents.web_context;
+        assert!(web.enabled);
+        assert_eq!(web.search_endpoint.as_deref(), Some("https://search.example/search"));
+        assert_eq!(web.preapproved_hosts, BTreeSet::from([String::from("docs.example")]));
+        assert_eq!(web.limits.max_response_bytes, 8192);
+        assert_eq!(web.limits.max_text_bytes, 2048);
+        assert_eq!(web.limits.max_search_results, 12);
+        assert_eq!(web.limits.max_redirects, 2);
+        assert!(web.provider_secret_reference.is_none());
+        assert_eq!(web.provider, WebSearchProvider::Searxng);
+        assert_eq!(web.provider_options, WebSearchProviderOptions::Searxng);
+    }
+
+    #[test]
+    fn agent_web_context_workspace_cannot_change_provider_or_semantic_options() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_config_environment(temp.path());
+        std::fs::create_dir_all(&env.cwd).unwrap();
+        write_config_layer(
+            &env,
+            ConfigLayerKind::UserXdg,
+            r#"
+[agents.web_context]
+enabled = true
+backend = "exa"
+
+[agents.web_context.exa]
+max_results = 7
+search_mode = "neural"
+"#,
+        );
+        write_config_layer(
+            &env,
+            ConfigLayerKind::Ancestor,
+            r#"
+[agents.web_context]
+backend = "tavily"
+
+[agents.web_context.tavily]
+max_results = 99
+chunks_per_source = 9
+search_depth = "advanced"
+"#,
+        );
+
+        let web = &load_for(&env).agents.web_context;
+        assert_eq!(web.provider, WebSearchProvider::Exa);
+        let WebSearchProviderOptions::Exa(options) = &web.provider_options else {
+            panic!("expected Exa provider options");
+        };
+        assert_eq!(options.max_results, 7);
+        assert_eq!(options.search_mode, ExaSearchMode::Neural);
+    }
+
+    #[test]
+    fn agent_web_context_provider_reference_from_xdg_is_preserved() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_config_environment(temp.path());
+        std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+        write_config_layer(
+            &env,
+            ConfigLayerKind::UserXdg,
+            "[agents.web_context]\nprovider_secret_reference = \"secret://web-provider\"\n",
+        );
+
+        let settings = load_for(&env);
+        assert_eq!(
+            settings.agents.web_context.provider_secret_reference.as_deref(),
+            Some("secret://web-provider")
+        );
+        let rendered = toml::to_string_pretty(&resolved_config_with_env(None, &env)).unwrap();
+        assert!(rendered.contains("secret://web-provider"));
+    }
+
+    #[test]
+    fn agent_web_context_provider_reference_from_system_or_workspace_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_config_environment(temp.path());
+        std::fs::create_dir_all(env.cwd.as_path()).unwrap();
+        let reference =
+            "[agents.web_context]\nprovider_secret_reference = \"secret://web-provider\"\n";
+        write_config_layer(&env, ConfigLayerKind::System, reference);
+        write_config_layer(&env, ConfigLayerKind::Ancestor, reference);
+
+        let settings = load_for(&env);
+        assert!(settings.agents.web_context.provider_secret_reference.is_none());
+    }
+
+    #[test]
+    fn agent_web_context_rejects_malformed_provider_reference_without_echoing_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[agents.web_context]\nprovider_secret_reference = \"secret://bad name\"\n",
+        )
+        .unwrap();
+
+        let error = validate_config_file(&path).unwrap_err();
+        assert!(error.contains("agents.web_context.provider_secret_reference"));
+        assert!(!error.contains("bad name"));
+    }
+
+    #[test]
+    fn agent_web_context_raw_request_limits_require_nonzero_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[agents.web_context.limits]\nrequest_timeout_ms = 30000\nmax_concurrent_requests = 4\n",
+        )
+        .unwrap();
+        validate_config_file(&path).unwrap();
+
+        std::fs::write(
+            &path,
+            "[agents.web_context.limits]\nrequest_timeout_ms = 0\nmax_concurrent_requests = 0\n",
+        )
+        .unwrap();
+        let error = validate_config_file(&path).unwrap_err();
+        assert!(error.contains("agents.web_context.limits.request_timeout_ms"));
+
+        std::fs::write(
+            &path,
+            "[agents.web_context.limits]\nrequest_timeout_ms = 1\nmax_concurrent_requests = 0\n",
+        )
+        .unwrap();
+        let error = validate_config_file(&path).unwrap_err();
+        assert!(error.contains("agents.web_context.limits.max_concurrent_requests"));
     }
 
     // ── Agent env secret references (phase 5) ────────────────────────────────
@@ -4325,6 +5639,28 @@ headers = { Authorization = "Bearer token" }
         assert!(
             !env_schema.as_object().unwrap().contains_key("pattern"),
             "reference syntax does not narrow the config shape"
+        );
+
+        let web_context = defs.get("AgentWebContextToml").unwrap();
+        let web_properties = web_context.get("properties").and_then(Value::as_object).unwrap();
+        for field in ["backend", "provider_secret_reference", "exa", "brave_llm_context", "tavily"]
+        {
+            assert!(web_properties.contains_key(field), "missing web-context schema field {field}");
+        }
+        assert!(!web_properties.contains_key("endpoint_override"));
+        let backends = defs
+            .get("WebContextBackendToml")
+            .and_then(|value| value.get("enum"))
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(
+            backends,
+            &[
+                Value::String(String::from("searxng")),
+                Value::String(String::from("exa")),
+                Value::String(String::from("brave_llm_context")),
+                Value::String(String::from("tavily")),
+            ]
         );
     }
 

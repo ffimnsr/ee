@@ -90,6 +90,22 @@ pub(crate) fn is_ee_proxy_tool(tool_name: &str) -> bool {
 }
 
 fn ee_proxy_classification(tool_name: &str) -> Option<McpToolClassSpec> {
+    if matches!(
+        tool_name,
+        "ee_web_search"
+            | "ee_fetch_url"
+            | "ee_browser_run_content"
+            | "ee_browser_run_screenshot"
+            | "ee_browser_run_markdown"
+            | "ee_browser_run_scrape"
+            | "ee_browser_run_json"
+            | "ee_browser_run_links"
+    ) {
+        return Some(McpToolClassSpec {
+            class: SideEffectClass::Read,
+            subclass: Some(SideEffectSubclass::ExternalNetwork),
+        });
+    }
     let spec = match ee_mcp::side_effect_class(tool_name) {
         EeProxySideEffectClass::Read => READ,
         EeProxySideEffectClass::Write
@@ -119,6 +135,24 @@ mod tests {
 
     fn policy() -> McpToolPolicy {
         McpToolPolicy::default()
+    }
+
+    #[test]
+    fn web_context_tools_are_network_gated_reads() {
+        for name in [
+            "ee_web_search",
+            "ee_fetch_url",
+            "ee_browser_run_content",
+            "ee_browser_run_screenshot",
+            "ee_browser_run_markdown",
+            "ee_browser_run_scrape",
+            "ee_browser_run_json",
+            "ee_browser_run_links",
+        ] {
+            let spec = classify_tool("ee", name, &policy());
+            assert_eq!(spec.class, SideEffectClass::Read, "{name}");
+            assert_eq!(spec.subclass, Some(SideEffectSubclass::ExternalNetwork), "{name}");
+        }
     }
 
     #[test]

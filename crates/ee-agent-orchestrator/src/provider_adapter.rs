@@ -2840,6 +2840,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn provider_adapter_denies_network_gated_ee_web_fetch_before_acp_dispatch() {
+        let model = Arc::new(FakeModel::new(vec![
+            ModelResponse::new().tool_intents(vec![crate::tools::ToolIntent::new(
+                "tc-1",
+                "ee_fetch_url",
+                json!({ "url": "https://docs.example/start" }),
+            )]),
+            ModelResponse::new().text(plan_response("source fetched")).completed(),
+        ]));
+        let provider =
+            OrchestratorProvider::new(OrchestratorProviderConfig::default(), model.clone());
+        let (handle, task) = spawn_server(provider);
+        let session_id = mcp_new_session(&handle, 1, ee_proxy_acp_mcp_servers()).await;
+        let _ = handle.next_frame().await; // initial available-commands update
+
+        let mut runner = PromptMcpRunner::standard_ee_answers(json!([ee_tool("ee_fetch_url")]));
+        runner.answer_call(
+            "ee_fetch_url",
+            json!({
+                "resultType": "complete",
+                "content": [{
+                    "type": "text",
+                    "text": "source: https://docs.example/final; trust: untrusted_external_content"
+                }],
+                "structuredContent": {
+                    "requestedUrl": "https://docs.example/start",
+                    "url": "https://docs.example/final",
+                    "provenance": "https://docs.example/final",
+                    "trust": "untrusted_external_content"
+                },
+            }),
+        );
+
+        handle.send(request(
+            2,
+            "session/set_mode",
+            json!({ "sessionId": session_id, "modeId": PLAN_MODE_ID }),
+        ));
+        assert_eq!(request_result(handle.next_frame().await), json!({}));
+        handle.send(request(3, "session/prompt", prompt_params(&session_id, "fetch docs")));
+        let (_thoughts, stop_reason) = runner.run(&handle).await;
+        assert_eq!(stop_reason, "end_turn");
+
+        let requests = model.requests();
+        assert!(
+            requests[0].tools.iter().any(|tool| tool.name == "ee_fetch_url"),
+            "web fetch is exposed to the model: {:?}",
+            requests[0].tools
+        );
+        let log = runner.log();
+        assert!(
+            !log.iter().any(|line| line.contains("tools/call") && line.contains("ee_fetch_url")),
+            "external-network fetch must be denied before it reaches ACP tools/call: {log:?}"
+        );
+        let transcript: String = requests[1]
+            .transcript
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .map(|block| match block {
+                crate::model::ModelContent::Text(text) => text.clone(),
+                crate::model::ModelContent::ToolResult { result, .. } => result.summary_text(),
+                _ => String::new(),
+            })
+            .collect();
+        assert!(transcript.contains("policy"), "{transcript}");
+
+        handle.shutdown(task).await;
+    }
+
+    #[tokio::test]
     async fn provider_adapter_dispatches_ee_write_tool_to_host_approval() {
         let model = Arc::new(FakeModel::new(vec![
             ModelResponse::new().tool_intents(vec![crate::tools::ToolIntent::new(

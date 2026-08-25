@@ -660,6 +660,17 @@
             "$ref": "#/$defs/AgentServerToml"
           },
           "default": {}
+        },
+        "web_context": {
+          "description": "Trusted configuration for optional agent web retrieval. Only user-global\nconfig can grant access; workspace files can only disable or restrict it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentWebContextToml"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -701,6 +712,380 @@
         }
       },
       "additionalProperties": false
+    },
+    "AgentWebContextToml": {
+      "description": "Raw `[agents.web_context]` definition. A user-global opaque provider secret\nreference is resolved only when web search service construction needs it.",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enables optional web retrieval. Defaults to `false`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "backend": {
+          "description": "Selected trusted search provider.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WebContextBackendToml"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "endpoint": {
+          "description": "HTTPS endpoint for SearXNG only.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hosts": {
+          "description": "Exact hosts preapproved by user-global configuration.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "uniqueItems": true,
+          "items": {
+            "type": "string"
+          }
+        },
+        "limits": {
+          "description": "Bounded response, text, search-result, redirect, timeout, and concurrency limits.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WebContextLimitsToml"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provider_secret_reference": {
+          "description": "Exact `secret://<name>` reference accepted only from user-global config.\nIt remains opaque until lazy web-search service construction.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "browser_run_account_id": {
+          "description": "Cloudflare account id for Browser Run. Browser Run stays disabled unless\nthis and `browser_run_api_token_reference` are configured user-globally.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "browser_run_api_token_reference": {
+          "description": "Exact `secret://<name>` reference for Cloudflare Browser Run API token.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "browser_run_max_attempts": {
+          "description": "Total Browser Run attempts, including initial request. Defaults to 3; max 5.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "browser_run_base_delay_ms": {
+          "description": "Exponential fallback delay before first retry. Defaults to 500 ms.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "browser_run_max_delay_ms": {
+          "description": "Cap for Retry-After and exponential retry delay. Defaults to 10_000 ms.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "exa": {
+          "description": "Exa-specific search options. Valid only when `backend = \"exa\"`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExaSearchOptionsToml"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "brave_llm_context": {
+          "description": "Brave LLM Context-specific search options. Valid only when\n`backend = \"brave_llm_context\"`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BraveLlmContextOptionsToml"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tavily": {
+          "description": "Tavily-specific search options. Valid only when `backend = \"tavily\"`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TavilySearchOptionsToml"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "WebContextBackendToml": {
+      "type": "string",
+      "enum": [
+        "searxng",
+        "exa",
+        "brave_llm_context",
+        "tavily"
+      ]
+    },
+    "WebContextLimitsToml": {
+      "type": "object",
+      "properties": {
+        "max_response_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_text_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_search_results": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_redirects": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "request_timeout_ms": {
+          "description": "Total request timeout in milliseconds.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "max_concurrent_requests": {
+          "description": "Maximum simultaneous web requests.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "ExaSearchOptionsToml": {
+      "type": "object",
+      "properties": {
+        "max_results": {
+          "description": "Maximum results. Defaults to bounded host result limit.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "search_mode": {
+          "description": "Exa search mode. Defaults to `auto`; result highlights remain enabled by adapter policy.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExaSearchModeToml"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ExaSearchModeToml": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "neural",
+        "fast"
+      ]
+    },
+    "BraveLlmContextOptionsToml": {
+      "type": "object",
+      "properties": {
+        "max_results": {
+          "description": "Bounded cited result count.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_tokens": {
+          "description": "Bounded grounding token budget, clamped to host text limit.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_urls": {
+          "description": "Bounded cited URL count.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_snippets": {
+          "description": "Bounded grounding snippet count.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "threshold_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BraveThresholdModeToml"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "freshness": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BraveFreshnessToml"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "safe_search": {
+          "description": "Safe-search mode. Local recall is deliberately unavailable.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BraveSafeSearchModeToml"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "BraveThresholdModeToml": {
+      "type": "string",
+      "enum": [
+        "balanced",
+        "strict"
+      ]
+    },
+    "BraveFreshnessToml": {
+      "type": "string",
+      "enum": [
+        "any",
+        "day",
+        "week",
+        "month"
+      ]
+    },
+    "BraveSafeSearchModeToml": {
+      "type": "string",
+      "enum": [
+        "off",
+        "moderate",
+        "strict"
+      ]
+    },
+    "TavilySearchOptionsToml": {
+      "type": "object",
+      "properties": {
+        "max_results": {
+          "description": "Maximum results. Defaults to bounded host result limit.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "chunks_per_source": {
+          "description": "Chunks per source. Defaults to `3` and cannot exceed it.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "search_depth": {
+          "description": "Search depth. Defaults to `advanced`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TavilySearchDepthToml"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "TavilySearchDepthToml": {
+      "type": "string",
+      "enum": [
+        "basic",
+        "advanced"
+      ]
     },
     "McpToml": {
       "type": "object",

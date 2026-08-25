@@ -126,7 +126,10 @@ impl HandlerCapabilities {
             | "_ee/read_notes"
             | "_ee/read_note"
             | "_ee/file_dependency_map"
-            | "_ee/symbol_dependency_map" => self.proxy_discovery,
+            | "_ee/symbol_dependency_map"
+            | "_ee/web_search"
+            | "_ee/fetch_url"
+            | "_ee/browser_run" => self.proxy_discovery,
             _ => false,
         }
     }
@@ -268,6 +271,21 @@ pub enum ClientRequest {
         line: u32,
         character: u32,
     },
+    ProxyWebSearch {
+        query: String,
+        /// Opaque MCP logical-connection identity; never agent controlled.
+        scope: String,
+    },
+    ProxyFetchUrl {
+        url: String,
+        /// Opaque MCP logical-connection identity; never agent controlled.
+        scope: String,
+    },
+    ProxyBrowserRun {
+        request: ee_mcp::BrowserRunRequest,
+        /// Opaque MCP logical-connection identity; never agent controlled.
+        scope: String,
+    },
     /// Internal MCP proxy request. Unlike ACP `terminal/output`, returns the
     /// proxy's structured terminal-output schema in `ProxyValue`.
     ProxyTerminalOutput(TerminalOutputRequest),
@@ -322,6 +340,9 @@ impl ClientRequest {
             Self::ProxyReadNote { .. } => "_ee/read_note",
             Self::ProxyFileDependencyMap { .. } => "_ee/file_dependency_map",
             Self::ProxySymbolDependencyMap { .. } => "_ee/symbol_dependency_map",
+            Self::ProxyWebSearch { .. } => "_ee/web_search",
+            Self::ProxyFetchUrl { .. } => "_ee/fetch_url",
+            Self::ProxyBrowserRun { .. } => "_ee/browser_run",
             Self::ProxyTerminalOutput(_) => "_ee/terminal_output",
             Self::ReadTextFile(_) => FS_READ_TEXT_FILE_METHOD_NAME,
             Self::WriteTextFile(_) => FS_WRITE_TEXT_FILE_METHOD_NAME,
@@ -375,7 +396,10 @@ impl ClientRequest {
             | Self::ProxyReadNotes { .. }
             | Self::ProxyReadNote { .. }
             | Self::ProxyFileDependencyMap { .. }
-            | Self::ProxySymbolDependencyMap { .. } => None,
+            | Self::ProxySymbolDependencyMap { .. }
+            | Self::ProxyWebSearch { .. }
+            | Self::ProxyFetchUrl { .. }
+            | Self::ProxyBrowserRun { .. } => None,
             Self::ProxyTerminalOutput(request) => Some(&request.session_id),
             Self::ReadTextFile(request) => Some(&request.session_id),
             Self::WriteTextFile(request) => Some(&request.session_id),

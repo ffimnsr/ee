@@ -12,7 +12,10 @@
 //! closed until the subagent phase.  Every loop decision is recorded as an
 //! [`OrchestratorEvent`] so tests can assert the exact decision sequence.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 use ee_acp_agent_server::{ClientBridge, PromptContext, PromptResult, UpdateSink};
 use ee_agent_protocol::{SessionUpdate, StopReason, UsageUpdate};
@@ -30,6 +33,7 @@ use crate::events::{EventRecorder, OrchestratorEvent};
 use crate::memory::MemoryStore;
 use crate::model::{ModelAdapter, ModelRequest, ModelUsage, Transcript, prompt_result_with_usage};
 use crate::model_registry::ModelInfo;
+use crate::parallel_tools::ParallelToolRunner;
 use crate::streaming::run_streaming_response;
 use crate::stuck::StuckDetector;
 use crate::tasks::{TaskGraph, TaskNode};
@@ -337,6 +341,7 @@ impl LoopEngine {
         // Per-turn token usage aggregated across every model call; rounds
         // with unknown usage are skipped, never counted as zero.
         let mut turn_usage = ModelUsage::new();
+        let mut observed_web_sources = HashSet::new();
 
         loop {
             if *cancel.borrow() {
@@ -469,68 +474,48 @@ impl LoopEngine {
             } else {
                 response.tool_intents
             };
-            for intent in intents {
-                self.events.record(OrchestratorEvent::ToolStarted {
-                    tool_call_id: intent.tool_call_id.clone(),
-                    tool_name: intent.name.clone(),
+            let parallel_read_wave = self.options.read_first
+                && intents.len() > 1
+                && intents.iter().all(|intent| {
+                    self.tools
+                        .lock()
+                        .expect("tool registry poisoned")
+                        .get(&intent.name)
+                        .is_some_and(|tool| {
+                            tool.definition().side_effect_class == SideEffectClass::Read
+                        })
                 });
-                let class = self
-                    .tools
-                    .lock()
-                    .expect("tool registry poisoned")
-                    .get(&intent.name)
-                    .map(|tool| tool.definition().side_effect_class);
-                // Resumed turns never replay a completed write/execute/delegate
-                // call with identical arguments: the stored summary is reused
-                // and the operation is not re-run (idempotency guard).
-                let reuse = self.try_reuse_completed(&intent, class, track, transcript);
-                let reused = reuse.is_some();
-                let executed = match reuse {
-                    Some(result) => Ok(result),
-                    None => {
-                        track.lock().expect("recovery track poisoned").in_flight =
-                            Some(InFlightOperation {
-                                tool_call_id: intent.tool_call_id.clone(),
-                                tool_name: intent.name.clone(),
-                                started_at_millis: current_unix_millis(),
-                            });
-                        let executed = self
-                            .executor
-                            .execute(
-                                &intent,
-                                sink,
-                                client,
-                                cancel.clone(),
-                                task,
-                                transcript.messages(),
-                            )
-                            .await;
-                        track.lock().expect("recovery track poisoned").in_flight = None;
-                        executed
+            if parallel_read_wave {
+                // The runner retains model order in its output while scheduling only
+                // independent read waves concurrently. Host web-service limits remain
+                // the final gate for approved remote requests.
+                let runner = ParallelToolRunner::new(
+                    self.executor.clone(),
+                    self.tools.clone(),
+                    2,
+                    self.events.clone(),
+                );
+                let outcomes = runner
+                    .run_batch(&intents, sink, client, cancel.clone(), task, transcript.messages())
+                    .await;
+                for (intent, executed) in intents.into_iter().zip(outcomes) {
+                    let class = Some(SideEffectClass::Read);
+                    if let Some(log) = &self.options.execution_log {
+                        let (success, summary) = match &executed {
+                            Ok(result) => (result.success, result.summary_text()),
+                            Err(_) => (false, String::new()),
+                        };
+                        log.lock().expect("execution log poisoned").push(ToolExecutionLogEntry {
+                            tool_call_id: intent.tool_call_id.clone(),
+                            tool_name: intent.name.clone(),
+                            side_effect_class: class,
+                            arguments: intent.arguments.clone(),
+                            success,
+                            summary,
+                        });
                     }
-                };
-                let success = executed.as_ref().is_ok_and(|result| result.success);
-                self.events.record(OrchestratorEvent::ToolFinished {
-                    tool_call_id: intent.tool_call_id.clone(),
-                    tool_name: intent.name.clone(),
-                    success,
-                });
-                if !reused && let Some(log) = &self.options.execution_log {
-                    let (success, summary) = match &executed {
-                        Ok(result) => (result.success, result.summary_text()),
-                        Err(_) => (false, String::new()),
-                    };
-                    log.lock().expect("execution log poisoned").push(ToolExecutionLogEntry {
-                        tool_call_id: intent.tool_call_id.clone(),
-                        tool_name: intent.name.clone(),
-                        side_effect_class: class,
-                        arguments: intent.arguments.clone(),
-                        success,
-                        summary,
-                    });
-                }
-                let result = executed?;
-                if !reused {
+                    let result =
+                        compact_repeated_web_fetch(&intent, executed?, &mut observed_web_sources);
                     track.lock().expect("recovery track poisoned").completed_tools.push(
                         CompletedToolCall {
                             tool_call_id: intent.tool_call_id.clone(),
@@ -538,15 +523,96 @@ impl LoopEngine {
                             arguments: intent.arguments.clone(),
                             success: result.success,
                             summary: result.summary_text(),
-                            side_effect_class: class.unwrap_or(SideEffectClass::Read),
+                            side_effect_class: SideEffectClass::Read,
                         },
                     );
+                    if let Some(reason) = detector.observe_tool_call(&intent, class, &result) {
+                        return Err(OrchestratorError::Stuck(reason.to_string()));
+                    }
+                    transcript.push_tool_result(intent.tool_call_id.clone(), result);
+                    self.capture_checkpoint(transcript, track, task, false).await;
                 }
-                if let Some(reason) = detector.observe_tool_call(&intent, class, &result) {
-                    return Err(OrchestratorError::Stuck(reason.to_string()));
+            } else {
+                for intent in intents {
+                    self.events.record(OrchestratorEvent::ToolStarted {
+                        tool_call_id: intent.tool_call_id.clone(),
+                        tool_name: intent.name.clone(),
+                    });
+                    let class = self
+                        .tools
+                        .lock()
+                        .expect("tool registry poisoned")
+                        .get(&intent.name)
+                        .map(|tool| tool.definition().side_effect_class);
+                    // Resumed turns never replay a completed write/execute/delegate
+                    // call with identical arguments: the stored summary is reused
+                    // and the operation is not re-run (idempotency guard).
+                    let reuse = self.try_reuse_completed(&intent, class, track, transcript);
+                    let reused = reuse.is_some();
+                    let executed = match reuse {
+                        Some(result) => Ok(result),
+                        None => {
+                            track.lock().expect("recovery track poisoned").in_flight =
+                                Some(InFlightOperation {
+                                    tool_call_id: intent.tool_call_id.clone(),
+                                    tool_name: intent.name.clone(),
+                                    started_at_millis: current_unix_millis(),
+                                });
+                            let executed = self
+                                .executor
+                                .execute(
+                                    &intent,
+                                    sink,
+                                    client,
+                                    cancel.clone(),
+                                    task,
+                                    transcript.messages(),
+                                )
+                                .await;
+                            track.lock().expect("recovery track poisoned").in_flight = None;
+                            executed
+                        }
+                    };
+                    let success = executed.as_ref().is_ok_and(|result| result.success);
+                    self.events.record(OrchestratorEvent::ToolFinished {
+                        tool_call_id: intent.tool_call_id.clone(),
+                        tool_name: intent.name.clone(),
+                        success,
+                    });
+                    if !reused && let Some(log) = &self.options.execution_log {
+                        let (success, summary) = match &executed {
+                            Ok(result) => (result.success, result.summary_text()),
+                            Err(_) => (false, String::new()),
+                        };
+                        log.lock().expect("execution log poisoned").push(ToolExecutionLogEntry {
+                            tool_call_id: intent.tool_call_id.clone(),
+                            tool_name: intent.name.clone(),
+                            side_effect_class: class,
+                            arguments: intent.arguments.clone(),
+                            success,
+                            summary,
+                        });
+                    }
+                    let result =
+                        compact_repeated_web_fetch(&intent, executed?, &mut observed_web_sources);
+                    if !reused {
+                        track.lock().expect("recovery track poisoned").completed_tools.push(
+                            CompletedToolCall {
+                                tool_call_id: intent.tool_call_id.clone(),
+                                tool_name: intent.name.clone(),
+                                arguments: intent.arguments.clone(),
+                                success: result.success,
+                                summary: result.summary_text(),
+                                side_effect_class: class.unwrap_or(SideEffectClass::Read),
+                            },
+                        );
+                    }
+                    if let Some(reason) = detector.observe_tool_call(&intent, class, &result) {
+                        return Err(OrchestratorError::Stuck(reason.to_string()));
+                    }
+                    transcript.push_tool_result(intent.tool_call_id.clone(), result);
+                    self.capture_checkpoint(transcript, track, task, false).await;
                 }
-                transcript.push_tool_result(intent.tool_call_id.clone(), result);
-                self.capture_checkpoint(transcript, track, task, false).await;
             }
             let graph = graph_handle
                 .as_ref()
@@ -691,6 +757,50 @@ fn read_first_order(intents: Vec<ToolIntent>, tools: &Arc<Mutex<ToolRegistry>>) 
     reads
 }
 
+/// Replaces a repeated successful web fetch with compact source metadata. The
+/// first matching source remains in the transcript; later observations retain
+/// citation evidence without injecting the same untrusted body again.
+fn compact_repeated_web_fetch(
+    intent: &ToolIntent,
+    result: ToolResult,
+    observed_sources: &mut HashSet<String>,
+) -> ToolResult {
+    if intent.name != "ee_fetch_url" || !result.success {
+        return result;
+    }
+    let value = result
+        .structured_output
+        .as_ref()
+        .cloned()
+        .or_else(|| serde_json::from_str::<serde_json::Value>(&result.text_output).ok());
+    let Some(value) = value else { return result };
+    let Some(url) = value.get("url").and_then(serde_json::Value::as_str) else { return result };
+    let Some(sha256) = value.get("sha256").and_then(serde_json::Value::as_str) else {
+        return result;
+    };
+    if value.get("trust").and_then(serde_json::Value::as_str) != Some("untrusted_external_content")
+    {
+        return result;
+    }
+    let source_id = format!("{url}#{sha256}");
+    if observed_sources.insert(source_id.clone()) {
+        return result;
+    }
+    let source = serde_json::json!({
+        "url": url,
+        "sha256": sha256,
+        "retrieved_at": value.get("retrieved_at").cloned().unwrap_or(serde_json::Value::Null),
+        "cached": value.get("cached").cloned().unwrap_or(serde_json::Value::Bool(false)),
+        "truncated": value.get("truncated").cloned().unwrap_or(serde_json::Value::Bool(false)),
+        "trust": "untrusted_external_content",
+        "content_reused": true,
+    });
+    ToolResult::success_structured(
+        format!("untrusted external source reused: {source_id}; refer to earlier fetched evidence"),
+        source,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -720,6 +830,35 @@ mod tests {
 
     fn task() -> TaskNode {
         TaskNode::new(TaskId::new("task-1"), "hello world", "hello world")
+    }
+
+    #[test]
+    fn repeated_web_fetch_keeps_only_compact_source_record() {
+        let intent = ToolIntent::new(
+            "call-1",
+            "ee_fetch_url",
+            json!({"url":"https://docs.example/reference"}),
+        );
+        let result = ToolResult::success_structured(
+            "untrusted body that must not repeat",
+            json!({
+                "url": "https://docs.example/reference",
+                "sha256": "abc123",
+                "retrieved_at": "2026-08-25T00:00:00Z",
+                "cached": true,
+                "truncated": false,
+                "trust": "untrusted_external_content",
+                "text": "untrusted body that must not repeat",
+            }),
+        );
+        let mut sources = HashSet::new();
+        let first = compact_repeated_web_fetch(&intent, result.clone(), &mut sources);
+        let second = compact_repeated_web_fetch(&intent, result, &mut sources);
+
+        assert_eq!(first.text_output, "untrusted body that must not repeat");
+        assert!(!second.text_output.contains("untrusted body that must not repeat"));
+        assert_eq!(second.structured_output.unwrap()["content_reused"], true);
+        assert_eq!(sources.len(), 1);
     }
 
     fn plumbing() -> (UpdateSink, ClientBridge, mpsc::UnboundedReceiver<OutboundEvent>) {

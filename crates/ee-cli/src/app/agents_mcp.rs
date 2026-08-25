@@ -603,6 +603,15 @@ pub(crate) enum ProxyCall {
     SearchTextRegex {
         pattern: String,
     },
+    WebSearch {
+        query: String,
+    },
+    FetchUrl {
+        url: String,
+    },
+    BrowserRun {
+        request: ee_mcp::BrowserRunRequest,
+    },
     SearchTextInFiles {
         query: String,
         file_glob: String,
@@ -783,41 +792,134 @@ async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
 #[derive(Debug)]
 pub(crate) enum ProxyToolCall {
     WorkspaceRoots,
-    ListDirectory { path: String },
-    ListDirectoryAll { path: String },
-    SearchFiles { pattern: String },
-    SearchFilesAll { pattern: String },
-    SearchText { query: String },
-    SearchTextRegex { pattern: String },
-    SearchTextInFiles { query: String, file_glob: String },
-    ReplaceText { path: String, old_text: String, new_text: String },
-    ApplyPatch { path: String, edits: Vec<ee_agent_host::ProxyTextEdit> },
-    CreateTextFile { path: String, content: String },
-    OverwriteTextFile { path: String, content: String },
-    ReadBuffer { path: String },
-    ReadBufferLines { path: String, line: u32, limit: u32 },
+    ListDirectory {
+        path: String,
+    },
+    ListDirectoryAll {
+        path: String,
+    },
+    SearchFiles {
+        pattern: String,
+    },
+    SearchFilesAll {
+        pattern: String,
+    },
+    SearchText {
+        query: String,
+    },
+    SearchTextRegex {
+        pattern: String,
+    },
+    WebSearch {
+        query: String,
+        approval_scope: String,
+        cancellation: tokio_util::sync::CancellationToken,
+    },
+    FetchUrl {
+        url: String,
+        approval_scope: String,
+        cancellation: tokio_util::sync::CancellationToken,
+    },
+    BrowserRun {
+        request: ee_mcp::BrowserRunRequest,
+        approval_scope: String,
+        cancellation: tokio_util::sync::CancellationToken,
+    },
+    SearchTextInFiles {
+        query: String,
+        file_glob: String,
+    },
+    ReplaceText {
+        path: String,
+        old_text: String,
+        new_text: String,
+    },
+    ApplyPatch {
+        path: String,
+        edits: Vec<ee_agent_host::ProxyTextEdit>,
+    },
+    CreateTextFile {
+        path: String,
+        content: String,
+    },
+    OverwriteTextFile {
+        path: String,
+        content: String,
+    },
+    ReadBuffer {
+        path: String,
+    },
+    ReadBufferLines {
+        path: String,
+        line: u32,
+        limit: u32,
+    },
     OpenBuffers,
     GetDiagnostics,
-    GetFileDiagnostics { path: String },
-    DocumentSymbols { path: String },
-    References { path: String, line: u32, character: u32 },
-    ListCodeActions { path: String, line: u32, character: u32 },
-    ApplyCodeAction { path: String, action_id: String },
-    FormatFile { path: String },
-    PreviewRenameSymbol { path: String, line: u32, character: u32, new_name: String },
-    RenameSymbol { path: String, line: u32, character: u32, new_name: String },
+    GetFileDiagnostics {
+        path: String,
+    },
+    DocumentSymbols {
+        path: String,
+    },
+    References {
+        path: String,
+        line: u32,
+        character: u32,
+    },
+    ListCodeActions {
+        path: String,
+        line: u32,
+        character: u32,
+    },
+    ApplyCodeAction {
+        path: String,
+        action_id: String,
+    },
+    FormatFile {
+        path: String,
+    },
+    PreviewRenameSymbol {
+        path: String,
+        line: u32,
+        character: u32,
+        new_name: String,
+    },
+    RenameSymbol {
+        path: String,
+        line: u32,
+        character: u32,
+        new_name: String,
+    },
     GitStatus,
     GitDiff,
     GitDiffStaged,
-    GitDiffFile { path: String },
+    GitDiffFile {
+        path: String,
+    },
     ChangedFiles,
     ReviewContext,
     ProjectInstructions,
-    SaveNote { scope: String, key: String, content: String },
-    ReadNotes { scope: String },
-    ReadNote { scope: String, key: String },
-    FileDependencyMap { path: String },
-    SymbolDependencyMap { path: String, line: u32, character: u32 },
+    SaveNote {
+        scope: String,
+        key: String,
+        content: String,
+    },
+    ReadNotes {
+        scope: String,
+    },
+    ReadNote {
+        scope: String,
+        key: String,
+    },
+    FileDependencyMap {
+        path: String,
+    },
+    SymbolDependencyMap {
+        path: String,
+        line: u32,
+        character: u32,
+    },
     Read(ReadTextFileRequest),
     Write(WriteTextFileRequest),
     Terminal(CreateTerminalRequest),
@@ -832,6 +934,19 @@ async fn serve_proxy_connection(
     bridge_tx: std_mpsc::Sender<BridgeUiMessage>,
 ) {
     use tokio::io::AsyncWriteExt;
+
+    struct ConnectionScopeGuard {
+        scope: String,
+        bridge_tx: std_mpsc::Sender<BridgeUiMessage>,
+    }
+
+    impl Drop for ConnectionScopeGuard {
+        fn drop(&mut self) {
+            let _ = self
+                .bridge_tx
+                .send(BridgeUiMessage::ProxyConnectionClosed { scope: self.scope.clone() });
+        }
+    }
     let (read_half, mut write_half) = stream.split();
     let mut reader = tokio::io::BufReader::new(read_half);
     let Ok(Some(first)) = read_bounded_line(&mut reader, PROXY_TOKEN_MAX_BYTES).await else {
@@ -843,6 +958,8 @@ async fn serve_proxy_connection(
     }
     static NEXT_PROXY_SESSION: AtomicU64 = AtomicU64::new(0);
     let scope = format!("proxy-{}", NEXT_PROXY_SESSION.fetch_add(1, Ordering::Relaxed));
+    let _connection_scope =
+        ConnectionScopeGuard { scope: scope.clone(), bridge_tx: bridge_tx.clone() };
     loop {
         let Ok(Some(line)) = read_bounded_line(&mut reader, PROXY_MAX_FRAME_BYTES).await else {
             return;
@@ -859,7 +976,24 @@ async fn serve_proxy_connection(
         };
         let params = request.get("params").cloned().unwrap_or_else(|| serde_json::json!({}));
         let reply = match serde_json::from_value::<ProxyCall>(params) {
-            Ok(call) => proxy_call_to_bridge(call, &scope, &bridge_tx).await,
+            Ok(call) => {
+                let cancellation = tokio_util::sync::CancellationToken::new();
+                match start_proxy_call_to_bridge(call, &scope, cancellation.clone(), &bridge_tx) {
+                    Ok(mut reply_rx) => {
+                        tokio::select! {
+                            biased;
+                            // Socket EOF or a pipelined frame cancels the pending call.
+                            // Dropping `reply_rx` lets the approval path fail closed.
+                            _ = read_bounded_line(&mut reader, PROXY_MAX_FRAME_BYTES) => {
+                                cancellation.cancel();
+                                return;
+                            }
+                            result = &mut reply_rx => proxy_reply_from_bridge(result),
+                        }
+                    }
+                    Err(reply) => reply,
+                }
+            }
             Err(_) => ProxyReply::Err {
                 error: ProxyErrorBody {
                     message: String::from("invalid proxy call"),
@@ -874,14 +1008,12 @@ async fn serve_proxy_connection(
     }
 }
 
-/// Routes one proxy tool call through the same bridge/approval paths as ACP
-/// client methods.  File reads are served directly; writes and terminal
-/// creates queue an approval prompt.
-async fn proxy_call_to_bridge(
+fn start_proxy_call_to_bridge(
     call: ProxyCall,
     scope: &str,
+    cancellation: tokio_util::sync::CancellationToken,
     bridge_tx: &std_mpsc::Sender<BridgeUiMessage>,
-) -> ProxyReply {
+) -> Result<oneshot::Receiver<ClientRequestResult>, ProxyReply> {
     let session_id = SessionId::new("proxy");
     let call = match call {
         ProxyCall::WorkspaceRoots => ProxyToolCall::WorkspaceRoots,
@@ -891,6 +1023,15 @@ async fn proxy_call_to_bridge(
         ProxyCall::SearchFilesAll { pattern } => ProxyToolCall::SearchFilesAll { pattern },
         ProxyCall::SearchText { query } => ProxyToolCall::SearchText { query },
         ProxyCall::SearchTextRegex { pattern } => ProxyToolCall::SearchTextRegex { pattern },
+        ProxyCall::WebSearch { query } => {
+            ProxyToolCall::WebSearch { query, approval_scope: scope.to_owned(), cancellation }
+        }
+        ProxyCall::FetchUrl { url } => {
+            ProxyToolCall::FetchUrl { url, approval_scope: scope.to_owned(), cancellation }
+        }
+        ProxyCall::BrowserRun { request } => {
+            ProxyToolCall::BrowserRun { request, approval_scope: scope.to_owned(), cancellation }
+        }
         ProxyCall::SearchTextInFiles { query, file_glob } => {
             ProxyToolCall::SearchTextInFiles { query, file_glob }
         }
@@ -979,14 +1120,20 @@ async fn proxy_call_to_bridge(
         .send(BridgeUiMessage::ProxyTool { call, route: ProxyRoute::Stdio, reply: reply_tx })
         .is_err()
     {
-        return ProxyReply::Err {
+        return Err(ProxyReply::Err {
             error: ProxyErrorBody {
                 message: String::from("editor is shutting down"),
                 denied: false,
             },
-        };
+        });
     }
-    match reply_rx.await {
+    Ok(reply_rx)
+}
+
+fn proxy_reply_from_bridge(
+    result: Result<ClientRequestResult, oneshot::error::RecvError>,
+) -> ProxyReply {
+    match result {
         Ok(result) => ProxyReply::from_client_result(result),
         Err(_) => ProxyReply::Err {
             error: ProxyErrorBody {
@@ -1115,6 +1262,27 @@ fn proxy_value<T: serde::de::DeserializeOwned>(
 }
 
 impl ee_mcp::EeProxyBackend for SocketProxyBackend {
+    fn web_search(
+        &self,
+        request: ee_mcp::WebSearchRequest,
+    ) -> Result<ee_mcp::WebSearchResult, ee_mcp::ProxyToolError> {
+        proxy_value(&self.call_value(ProxyCall::WebSearch { query: request.query }), "web_search")
+    }
+
+    fn fetch_url(
+        &self,
+        request: ee_mcp::FetchUrlRequest,
+    ) -> Result<ee_mcp::FetchUrlResult, ee_mcp::ProxyToolError> {
+        proxy_value(&self.call_value(ProxyCall::FetchUrl { url: request.url }), "fetch_url")
+    }
+
+    fn browser_run(
+        &self,
+        request: ee_mcp::BrowserRunRequest,
+    ) -> Result<ee_mcp::BrowserRunResult, ee_mcp::ProxyToolError> {
+        proxy_value(&self.call_value(ProxyCall::BrowserRun { request }), "browser_run")
+    }
+
     fn workspace_roots(&self) -> Result<ee_mcp::WorkspaceRootsResult, ee_mcp::ProxyToolError> {
         serde_json::from_value(
             self.call_value(ProxyCall::WorkspaceRoots).map_err(|message| {
@@ -2174,4 +2342,125 @@ fn proxy_token() -> String {
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
     format!("ee-proxy-{}-{nonce:x}", std::process::id())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn proxy_disconnect_cancels_pending_network_approval() {
+        let (server, mut client) =
+            tokio::net::UnixStream::pair().expect("create proxy socket pair");
+        let (bridge_tx, bridge_rx) = std::sync::mpsc::channel();
+        let serving =
+            tokio::spawn(serve_proxy_connection(server, String::from("token"), bridge_tx));
+        let request = serde_json::json!({
+            "id": 1,
+            "params": { "method": "web_search", "query": "Rust MCP" },
+        });
+        client
+            .write_all(format!("token\n{request}\n").as_bytes())
+            .await
+            .expect("send proxy network request");
+
+        let message = bridge_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("network request reaches the editor bridge");
+        let BridgeUiMessage::ProxyTool { call, route, reply } = message else {
+            panic!("network request must use ProxyTool bridge message");
+        };
+        let ProxyToolCall::WebSearch { cancellation, .. } = call else {
+            panic!("network request must preserve cancellation token");
+        };
+        assert!(matches!(route, ProxyRoute::Stdio));
+
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !reply.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("proxy disconnect closes pending bridge reply");
+        tokio::time::timeout(Duration::from_secs(1), cancellation.cancelled())
+            .await
+            .expect("proxy disconnect cancels in-flight web request");
+        serving.await.expect("proxy connection task completes");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn web_proxy_calls_keep_payloads_and_stdio_route() {
+        let (bridge_tx, bridge_rx) = std::sync::mpsc::channel();
+
+        for (request, expected) in [
+            (
+                ProxyCall::WebSearch { query: String::from("Rust MCP") },
+                ProxyToolCall::WebSearch {
+                    query: String::from("Rust MCP"),
+                    approval_scope: String::from("scope"),
+                    cancellation: tokio_util::sync::CancellationToken::new(),
+                },
+            ),
+            (
+                ProxyCall::FetchUrl { url: String::from("https://example.com/docs") },
+                ProxyToolCall::FetchUrl {
+                    url: String::from("https://example.com/docs"),
+                    approval_scope: String::from("scope"),
+                    cancellation: tokio_util::sync::CancellationToken::new(),
+                },
+            ),
+        ] {
+            let sender = bridge_tx.clone();
+            let pending = tokio::spawn(async move {
+                match start_proxy_call_to_bridge(
+                    request,
+                    "scope",
+                    tokio_util::sync::CancellationToken::new(),
+                    &sender,
+                ) {
+                    Ok(reply_rx) => proxy_reply_from_bridge(reply_rx.await),
+                    Err(reply) => reply,
+                }
+            });
+            let message = bridge_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("web proxy call reaches the editor bridge");
+
+            let BridgeUiMessage::ProxyTool { call, route, reply } = message else {
+                panic!("web proxy call must use ProxyTool bridge message");
+            };
+            assert!(matches!(route, ProxyRoute::Stdio));
+            match (call, expected) {
+                (
+                    ProxyToolCall::WebSearch {
+                        query: actual, approval_scope: actual_scope, ..
+                    },
+                    ProxyToolCall::WebSearch {
+                        query: wanted, approval_scope: wanted_scope, ..
+                    },
+                ) => {
+                    assert_eq!(actual, wanted);
+                    assert_eq!(actual_scope, wanted_scope);
+                }
+                (
+                    ProxyToolCall::FetchUrl { url: actual, approval_scope: actual_scope, .. },
+                    ProxyToolCall::FetchUrl { url: wanted, approval_scope: wanted_scope, .. },
+                ) => {
+                    assert_eq!(actual, wanted);
+                    assert_eq!(actual_scope, wanted_scope);
+                }
+                _ => panic!("web proxy call changed its bridge payload"),
+            }
+
+            drop(reply);
+            let reply = pending.await.expect("web proxy bridge task completes");
+            assert!(
+                matches!(reply, ProxyReply::Err { error } if error.message == "approval channel closed")
+            );
+        }
+    }
 }

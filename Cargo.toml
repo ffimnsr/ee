@@ -55,7 +55,7 @@ jsonschema = "0.30"
 rand = "0.9"
 ratatui = "0.29"
 regex = "1.12.3"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip", "brotli", "deflate", "zstd"] }
 schemars = { version = "1.0", features = ["derive"] }
 semver = "1.0"
 signal-hook = "0.3"
@@ -66,7 +66,7 @@ seccompiler = "0.5.0"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.20"
 tempfile = "3"
-tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "time", "net"] }
 tokio-util = { version = "0.7.19", features = ["compat"] }
 toml = "1.1.4"
 tree-sitter = "0.26"

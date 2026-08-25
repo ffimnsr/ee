@@ -69,19 +69,20 @@ pub use events::{McpEvent, McpServerState};
 pub use handler::{EeClientHandler, ElicitationBroker};
 pub use manager::{McpClientManager, McpSubscription, NamespacedPrimitive};
 pub use proxy::{
-    ChangedFileEntry, ChangedFilesResult, CodeActionEntry, CodeActionsResult, DiagnosticEntry,
-    DiagnosticsResult, DirectoryEntry, DirectoryEntryAll, DocumentSymbolEntry,
-    DocumentSymbolsResult, EditTextResult, EeMcpProxy, EeProxyBackend, FileDependencyEdge,
-    FileDependencyMapResult, FileMatch, GitDiffResult, GitStatusResult, ListDirectoryAllResult,
-    ListDirectoryResult, MAX_TOOL_ARGUMENT_BYTES, OpenBufferEntry, OpenBuffersResult,
-    PlannedFileEdit, PlannedTextEdit, ProjectInstructionSource, ProjectInstructionsResult,
-    ProxyToolError, ReferenceEntry, ReferencesResult, RenamePreviewResult, ReviewContextResult,
-    SearchFilesAllResult, SearchFilesResult, SearchTextResult, SessionNoteResult,
-    SessionNotesResult, SymbolDependencyLocation, SymbolDependencyMapResult,
-    SymbolDependencyModuleHint, SymbolDependencyRelatedFile, SymbolDependencyRelation,
-    SymbolDependencyTotals, TerminalOutputChunk, TerminalOutputResult, TerminalWaitResult,
-    TextEdit, TextMatch, TextRange, ToolManifestEntry, ToolOutputCap, ToolsManifestResult,
-    WorkspaceEditResult, WorkspaceRootsResult,
+    BrowserRunAction, BrowserRunRequest, BrowserRunResult, ChangedFileEntry, ChangedFilesResult,
+    CodeActionEntry, CodeActionsResult, DiagnosticEntry, DiagnosticsResult, DirectoryEntry,
+    DirectoryEntryAll, DocumentSymbolEntry, DocumentSymbolsResult, EditTextResult, EeMcpProxy,
+    EeProxyBackend, FetchUrlRequest, FetchUrlResult, FileDependencyEdge, FileDependencyMapResult,
+    FileMatch, GitDiffResult, GitStatusResult, ListDirectoryAllResult, ListDirectoryResult,
+    MAX_TOOL_ARGUMENT_BYTES, OpenBufferEntry, OpenBuffersResult, PlannedFileEdit, PlannedTextEdit,
+    ProjectInstructionSource, ProjectInstructionsResult, ProxyToolError, ReferenceEntry,
+    ReferencesResult, RenamePreviewResult, ReviewContextResult, SearchFilesAllResult,
+    SearchFilesResult, SearchTextResult, SessionNoteResult, SessionNotesResult,
+    SymbolDependencyLocation, SymbolDependencyMapResult, SymbolDependencyModuleHint,
+    SymbolDependencyRelatedFile, SymbolDependencyRelation, SymbolDependencyTotals,
+    TerminalOutputChunk, TerminalOutputResult, TerminalWaitResult, TextEdit, TextMatch, TextRange,
+    ToolManifestEntry, ToolOutputCap, ToolsManifestResult, WebSearchEntry, WebSearchRequest,
+    WebSearchResult, WebToolError, WebToolErrorCode, WorkspaceEditResult, WorkspaceRootsResult,
 };
 pub use registry::{
     NamespacedPrompt, NamespacedResource, NamespacedTool, PrimitiveRegistry, PrimitiveSummary,

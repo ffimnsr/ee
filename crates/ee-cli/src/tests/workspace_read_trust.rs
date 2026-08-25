@@ -88,7 +88,7 @@ fn mcp_read_rule(
         server: "ee".to_string(),
         transport_identity: "stdio:ee --mcp-proxy".to_string(),
         tool: "ee_read_text_file".to_string(),
-        tool_schema_version: 1,
+        tool_schema_version: crate::policy::EE_MCP_SAFE_READ_TOOL_SCHEMA_VERSION,
         path_prefix: PathPrefix::parse(prefix).expect("valid prefix"),
         max_bytes,
     })
@@ -104,7 +104,7 @@ fn mcp_read_profile_rule(
         scope: scope(workspace),
         server: "ee".to_string(),
         transport_identity: transport_identity.to_string(),
-        tool_schema_version: ee_mcp::EE_TOOL_SCHEMA_VERSION,
+        tool_schema_version: crate::policy::EE_MCP_SAFE_READ_TOOL_SCHEMA_VERSION,
         profile: crate::policy::EE_MCP_SAFE_READ_PROFILE.to_string(),
     })
 }
@@ -125,7 +125,7 @@ fn mcp_read_op(
             server: "ee".to_string(),
             transport_identity: transport_identity.to_string(),
             tool: tool.to_string(),
-            tool_schema_version: 1,
+            tool_schema_version: crate::policy::EE_MCP_SAFE_READ_TOOL_SCHEMA_VERSION,
             relative_path: relative.to_string(),
             byte_count,
         },
@@ -233,7 +233,7 @@ fn mcp_read_rule_requires_gate_and_exact_tool_identity() {
                     server: "ee".to_string(),
                     transport_identity: "stdio:ee --mcp-proxy".to_string(),
                     tool: "ee_read_text_file".to_string(),
-                    tool_schema_version: 2,
+                    tool_schema_version: crate::policy::EE_MCP_SAFE_READ_TOOL_SCHEMA_VERSION + 1,
                     relative_path: "src/main.rs".to_string(),
                     byte_count: Some(1024),
                 },
@@ -277,7 +277,7 @@ fn mcp_safe_read_profile_is_exactly_scoped_and_never_matches_write_or_unknown_to
             server: "ee".to_string(),
             transport_identity: "stdio:ee --mcp-proxy".to_string(),
             tool: "ee_git_status".to_string(),
-            tool_schema_version: ee_mcp::EE_TOOL_SCHEMA_VERSION,
+            tool_schema_version: crate::policy::EE_MCP_SAFE_READ_TOOL_SCHEMA_VERSION,
             arguments_json: "{}".to_string(),
         },
     };
@@ -371,7 +371,10 @@ fn mcp_safe_read_profile_covers_every_pinned_manifest_read_tool() {
         );
     }
 
-    for tool in ["ee_apply_patch", "ee_terminal_create", "ee_unknown"] {
+    // External-network reads never inherit local workspace read grants.
+    for tool in
+        ["ee_web_search", "ee_fetch_url", "ee_apply_patch", "ee_terminal_create", "ee_unknown"]
+    {
         let operation = mcp_read_op(ws, "stdio:ee --mcp-proxy", tool, "src/main.rs", Some(42));
         assert_eq!(
             decide(&operation, std::slice::from_ref(&rule), true).outcome,

@@ -4121,3 +4121,235 @@ Goal: prove route selection, codecs, agent integration, and extracted shared cod
 - [ ] All supported Go and Zen model routes have deterministic offline request/response/stream regression coverage.
 - [ ] OpenRouter remains behavior-compatible after shared Chat Completions extraction.
 - [ ] No validation requires or performs live OpenCode account, balance, billing, or paid model call.
+
+## Agent Internet Context and Remote Documentation Plan
+
+Goal: give agent shell fast, cited access to public search results and remote documentation/source text without turning terminal execution into a network escape hatch.
+
+### Current-state analysis
+
+- `ee do agent shell` opens existing agents pane through `App::open_agents_shell` in `crates/ee-cli/src/app/agents.rs`.
+- All agent-facing editor tools already flow through `crates/ee-mcp/src/proxy.rs`, then proxy socket/ACP bridge code in `crates/ee-cli/src/app/agents_mcp.rs`, and finally `App::handle_proxy_tool` in `crates/ee-cli/src/app/agent_bridge.rs`.
+- Existing tools already cover local file discovery, text search, buffer-aware reads, LSP context, Git context, and terminal lifecycle. No native web search or URL fetch tool exists.
+- Orchestrated agents already bridge configured MCP tools, cache successful read results per turn, run independent read-only tools in parallel, and treat external MCP tools conservatively.
+- `reqwest` already exists in workspace dependencies. `SideEffectSubclass::ExternalNetwork` already exists and is denied by default. Reuse both; do not add a shell-based `curl`, browser automation, or unaudited external MCP workaround.
+
+### Product decision
+
+Add exactly two opt-in MCP proxy tools. Keep remote content read-only and ephemeral.
+
+- [x] Add `ee_web_search`.
+  - [x] Accept `query` only.
+  - [x] Return bounded result records: title, canonical HTTPS URL, host, short provider snippet, rank, and cache/freshness metadata.
+  - [x] Use only configured search backend; default disabled and return typed `web_search_unavailable` when none exists.
+  - [x] Return URLs only. Agent must call `ee_fetch_url` for source text.
+- [x] Add `ee_fetch_url`.
+  - [x] Accept `url` only.
+  - [x] Fetch public remote text, documentation, API references, Markdown, plaintext, JSON, YAML, and source files; never write downloaded bytes to workspace.
+  - [x] Return requested/final canonical URL, title when available, content type, source text, SHA-256, retrieval time, truncation/cached state, and extracted links only when bounded.
+  - [x] Reject binary/media/archive content. Persisting fetched material requires existing approved file-write tools.
+- [x] Do not add one overloaded research tool, URL mode flag, arbitrary headers, request body, cookies, or a raw download tool. Search and fetch stay separate so model calls, permissions, cache keys, and audit records remain obvious.
+
+### Phase 1: Trusted configuration and public contracts
+
+- [x] Add frontend-resolved `AgentWebContextConfig`; pass resolved semantic values to host/service code so `xi-core-lib` stays config-agnostic and `ee-cli` remains presentation/approval owner.
+  - [x] Default `enabled = false`.
+  - [x] Permit only user-global config to enable web access, choose search backend endpoint, define trusted/preapproved hosts, set byte/result/redirect/time limits, and reference any provider secret.
+  - [x] Reject workspace, ancestor, and project config attempts to enable web access, add hosts, select endpoint, or reference web-provider credentials. Lower-trust project config may only disable/restrict an already enabled service.
+  - [x] Resolve provider secrets only at launch using existing secret-reference/redaction path. Never expose endpoint credentials, headers, or resolved values to model transcript, tool schema, cache, event, diagnostic, or approval UI.
+- [x] Add typed request/result/error models in `ee-mcp` for search and fetch. Extend `EeProxyBackend`, `ProxyCall`, `ProxyToolCall`, `SocketProxyBackend`, `EeMcpProxy::all_tools`, tool manifest, and stable-name registry together.
+- [x] Add `web_context` capability and stable errors: `web_disabled`, `web_search_unavailable`, `network_approval_required`, `url_rejected`, `dns_rejected`, `redirect_rejected`, `unsupported_content_type`, `response_too_large`, `network_timeout`, and `network_failure`.
+- [x] Keep schemas flat and versioned. Bump manifest version only for compatible new-tool additions; never alter existing schemas.
+
+### Phase 2: Safe remote retrieval service
+
+- [x] Implement reusable host/service-side `WebContextService`; UI only sends intent, renders tool state, and collects approvals.
+  - [x] Reuse workspace `reqwest` with rustls. No shell command execution and no JavaScript/browser runtime in initial scope.
+  - [x] Support HTTPS `GET` only. Reject HTTP, `file:`, `data:`, `javascript:`, user-info URLs, fragments used as fetch targets, non-default ports, and malformed or non-UTF-8 URLs.
+  - [x] Resolve and validate DNS before connection; reject loopback, unspecified, multicast, link-local, private, carrier-grade NAT, unique-local IPv6, and other non-public ranges. Revalidate every redirect and connected peer to prevent DNS-rebinding and SSRF.
+  - [x] Follow at most three redirects. Every redirect re-enters URL, host, DNS, and approval policy; cross-host redirects never inherit consent.
+  - [x] Use fixed safe request headers, no cookie jar, no ambient proxy credentials, no authorization forwarding, no arbitrary headers, no POST, and no upload body.
+  - [x] Enforce connect, first-byte, total-request, redirect, decompressed-byte, extracted-text, result-count, and concurrency limits. Stop reading immediately at cap.
+  - [x] Accept explicit text-like MIME types only. Parse HTML to readable title/body with scripts, styles, forms, hidden content, and dangerous URLs removed. Return text as untrusted external content, never instructions.
+  - [x] Implement configured SearXNG-compatible JSON search adapter first. Keep a trait boundary for later provider adapters, but do not make live provider choice agent-controlled.
+
+### Phase 3: Policy, approval, provenance, and UI
+
+- [x] Classify both tools as read-scheduled but `ExternalNetwork` destructive subclass in `crates/ee-agent-orchestrator/src/mcp/policy.rs`; default policy denies them until explicit network policy grants access.
+- [x] Extend `crates/ee-mcp/src/tool_governance.rs` manifest metadata so web tools declare network capability, `ExternalNetwork` requirement, response byte caps, cache behavior, and external-content redaction/trust rules.
+- [x] Extend host approval model with a network request kind containing action, requested host, resolved/final host, and no response body or credential. Offer allow-once and allow-for-session per host; allow preapproval only from user-global trusted-host config. Do not create unlimited persistent grants from agent or workspace input.
+- [x] Show fetch/search lifecycle with MCP `fetch` kind in agent pane: canonical host/URL, result count or bytes, cached/fresh state, denial/error, and source provenance. Approval text must not render full query, fetched body, secret values, or unrelated headers.
+- [x] Preserve external-content trust separation in planner, transcript, notes, checkpoints, reflection, and final response. Source records must retain URL, retrieval time, hash, and truncation state so final answer can cite actual fetched evidence.
+
+### Phase 4: Fast context behavior and cache
+
+- [x] Add bounded session-local LRU cache above existing turn cache.
+  - [x] Key fetch entries by normalized final URL plus accepted representation; key search entries by normalized query plus configured backend identity.
+  - [x] Store only redacted, bounded text and metadata. Never cache credentials, cookies, headers, binary bytes, or response bodies rejected by policy.
+  - [x] Use short TTLs, per-entry and total-byte caps, stale markers, and conditional revalidation (`ETag`/`Last-Modified`) only when response metadata permits it.
+  - [x] Keep existing per-turn `ToolResultCache` behavior; invalidate no workspace cache on remote reads, but clear remote session cache on agent/session close or configuration/policy change.
+- [x] Update `ResearchThenEdit` strategy guidance: use cached `ee_web_search` for unknown external APIs/libraries, fetch only most relevant authoritative URLs, then inspect local code before edits. Never auto-search merely because a turn begins; user prompt/tool policy must cause outbound data sharing.
+- [x] Permit independent approved search/fetch calls through existing read-only parallel tool scheduler, bounded by web-service concurrency and turn budget.
+- [x] Include compact source records, not duplicate full bodies, in later model calls. Prefer content hash and cached citation when same URL was already fetched this turn.
+
+### Phase 5: Test and documentation gate
+
+- [x] Add deterministic fake HTTP/DNS/search adapters; all unit and integration tests stay offline.
+  - [x] Cover disabled config, missing backend, global-only enablement, secret redaction, host allow/deny, one-time/session grants, and cross-host redirect reapproval.
+  - [x] Cover URL parser rejection, HTTP rejection, private/loopback IPv4 and IPv6 rejection, DNS rebinding, redirect cap, timeout/cancellation, MIME rejection, compressed/decompressed byte caps, malformed HTML/JSON, and bounded error bodies.
+  - [x] Cover SearXNG request/response fixtures, search result normalization, canonical URL dedupe, source provenance, HTML extraction, and no-cookie/no-header-forwarding behavior.
+  - [x] Cover cache hit/miss, TTL expiry, conditional revalidation, cache eviction, config/policy invalidation, and no secret/body leakage.
+  - [x] Cover MCP tool discovery/manifest, schema validation, proxy socket dispatch, ACP dispatch, orchestrator external-network classification, policy denial, host approval, cancellation, and agent-pane rendering.
+- [x] Document config, exact trust boundary, outbound data disclosure, approved host behavior, cache retention, supported MIME types, source citations, and why remote downloads never write files automatically.
+- [x] Run `cargo fmt --check`, focused quiet package tests, and clippy with `-D warnings` for changed crates. Run `./scripts/test-workspace-summary.sh` before release.
+
+### Exit criteria
+
+- [x] Enabled agent can search configured public index and fetch trusted public documentation/source through `ee_web_search` and `ee_fetch_url` without terminal probing.
+- [x] Disabled, unconfigured, non-HTTPS, private-network, oversized, binary, redirected-to-unapproved, timed-out, or policy-denied requests fail closed with typed, redacted errors.
+- [x] Every external source delivered to model includes immutable provenance and explicit untrusted-external-content labeling.
+- [x] Repeated research within a session uses bounded cache/revalidation and avoids duplicate model/tool latency without silently performing new outbound requests.
+- [x] No tool can use fetched bytes to write workspace files, invoke a shell, send credentials, access private network targets, or bypass existing policy/approval paths.
+
+## Agent Web Search Provider Expansion: Exa, Brave, and Tavily
+
+Extend `ee_web_search` with three user-configured, credentialed providers while preserving the existing two-tool boundary: `ee_web_search` discovers bounded sources; `ee_fetch_url` retrieves source text through existing SSRF, approval, cache, provenance, and untrusted-content controls. This plan adds no model-controlled provider choice, arbitrary endpoint, arbitrary header, direct provider extraction/crawl/research tool, browser, shell, or remote MCP shortcut.
+
+Sources reviewed: [Exa Search API for coding agents](https://exa.ai/docs/reference/search-api-guide-for-coding-agents), [Exa Search best practices](https://exa.ai/docs/reference/search-best-practices), [Tavily Agents](https://docs.tavily.com/agents), [Brave Web Search](https://api-dashboard.search.brave.com/documentation/services/web-search), and [Brave LLM Context](https://api-dashboard.search.brave.com/documentation/services/llm-context) (2026-08-25).
+
+Rules:
+
+- [ ] Keep `ee_web_search` input unchanged: `query` only. Provider, credentials, endpoint selection, result/token limits, domain controls, location, freshness, and search depth remain trusted user-global configuration, never agent arguments.
+- [ ] Preserve SearXNG behavior and existing normalized `WebSearchResponse`/`WebSearchResult` output shape. New provider details must not leak into tool schemas, model-facing arguments, errors, cache keys, transcripts, approvals, or diagnostics except bounded provider identity/provenance.
+- [ ] Require exact known HTTPS origins for vendor providers: Exa `https://api.exa.ai/search`, Tavily `https://api.tavily.com/search`, and Brave `https://api.search.brave.com/res/v1/llm/context`. Do not accept arbitrary vendor endpoint overrides or redirects.
+- [ ] Use Brave LLM Context, not Brave Web Search, for agent retrieval. Normalize its cited grounding snippets into search results; do not expose its local-recall/location headers until separate privacy and product review.
+- [ ] Use provider-specific authentication only on that provider's first-party request: Exa and Tavily `Authorization: Bearer <secret>`; Brave `X-Subscription-Token: <secret>`. Never forward credentials to `ee_fetch_url`, redirects, result URLs, cache, logs, approval UI, errors, or model context.
+- [ ] Treat Exa highlights, Tavily result content, and Brave grounding snippets as untrusted provider-returned external content. Bound every individual snippet and aggregate output before normalizing.
+- [ ] Keep user-global-only authority: workspace/ancestor config may disable web context or reduce limits but cannot select/widen provider settings, add provider credentials, enable richer modes, add domains, enable Brave local recall, or change fixed provider origins.
+- [ ] Preserve fail-closed behavior: missing/invalid secret, unsupported provider configuration, malformed response, unexpected content type, non-2xx response, timeout, rate limit, cancellation, response cap, or provider-origin redirect returns typed redacted error and writes no cache entry.
+
+### Phase 1: Provider-neutral contract and trusted configuration
+
+Goal: replace SearXNG-only semantic configuration with an explicit provider selector and validated provider-specific options, without widening agent-controlled surface.
+
+#### Work items
+
+- [x] Define provider-neutral host configuration in `crates/ee-agent-host/src/web_context.rs`.
+  - [x] Add `WebSearchProvider::{Searxng, Exa, BraveLlmContext, Tavily}` and store it in `AgentWebContextConfig` instead of encoding provider identity only in `search_endpoint`.
+  - [x] Keep `search_endpoint` available only for `Searxng`; reject it for Exa, Brave, and Tavily so credentials cannot be sent to arbitrary origins.
+  - [x] Replace bearer-only `SearchAuthorization` with a redacted credential type that can construct a provider-owned request header without exposing secret bytes through `Debug`, equality, cache identity, errors, or provenance.
+  - [x] Add typed semantic options: Exa search mode and result count; Tavily search depth, result count, and chunks per source; Brave result count, token/url/snippet budgets, threshold mode, freshness, and safe-search mode.
+  - [x] Enforce provider-specific lower and upper bounds before any request. Clamp configured results to existing `WebContextLimits::max_search_results`; clamp provider content budgets to existing response/text limits.
+  - [x] Keep request-level `WebSearchRequest` as `{ query }`; reject blank and overlong normalized queries before cache lookup or transport use.
+- [x] Extend trusted raw config in `crates/ee-cli/src/config.rs` and regenerate `schemas/ee-config.schema.json`.
+  - [x] Extend `WebContextBackendToml` with `searxng`, `exa`, `brave_llm_context`, and `tavily`; use stable snake-case serialization and `deny_unknown_fields` for nested provider options.
+  - [x] Split SearXNG endpoint settings from provider semantic settings. Require `endpoint` only for `searxng`; select vendor endpoints from application constants for Exa, Brave, and Tavily.
+  - [x] Retain one opaque `provider_secret_reference` field for selected provider credentials; validate exact `secret://<name>` syntax only in user-global config and resolve lazily through existing secret store/redaction path.
+  - [x] Document safe defaults: Exa `type = "auto"`, `contents.highlights = true`, bounded `numResults`; Tavily `search_depth = "advanced"`, `chunks_per_source = 3`, bounded `max_results`; Brave LLM Context with bounded standard token/url/result limits and no local recall.
+  - [x] Update `resolve_agent_web_context_with_env`, `merge_user_global_web_context`, `restrict_workspace_web_context`, config display serialization, semantic-change comparison, and lazy service rebuild so provider/option changes clear session cache and session host grants.
+- [x] Add typed configuration errors.
+  - [x] Return redacted `web_search_unavailable` for no selected/configured backend; return a distinct invalid-configuration error for provider/options/secret mismatch before network dispatch.
+  - [x] Do not include query text, secret-reference text, endpoint query fragments, raw response body, or authentication header name/value in user-visible error details.
+
+#### Exit criteria
+
+- [x] Every selected provider has a single trusted, validated configuration path and fixed origin.
+- [x] Workspace config cannot select a provider, disclose a provider secret, or expand provider output/network scope.
+- [x] Existing SearXNG settings keep resolving through `WebSearchProvider::Searxng` with unchanged `ee_web_search` schema and normalized result contract.
+
+### Phase 2: Shared provider adapter boundary and request safety
+
+Goal: isolate request construction and response decoding per provider while retaining one service, one policy path, one concurrency cap, and one cache.
+
+#### Work items
+
+- [x] Introduce an internal provider adapter boundary in `crates/ee-agent-host/src/web_context.rs` or focused sibling module.
+  - [x] Define provider request builder and response normalizer interfaces returning `WebSearchResponse`/`WebSearchResult`; keep adapter choice fixed when `WebContextService` is constructed.
+  - [x] Reuse `WebContextService::get_checked`, DNS/connected-peer validation, cancellation, total timeout, concurrency permits, strict MIME validation, response-size caps, and redirect policy for every provider request.
+  - [x] Require direct first-party responses for Exa, Tavily, and Brave; reject any redirect rather than following it with provider credentials.
+  - [x] Build cache identity from provider kind, fixed origin/version, normalized query digest, and semantic options digest. Never include plaintext query, credential, headers, or raw provider response in a key.
+  - [x] Keep current conditional revalidation only where provider response semantics support it; absence of validators must remain a normal cache miss/retry path.
+- [x] Implement Exa adapter.
+  - [x] Send `POST https://api.exa.ai/search` with JSON content type and exact bearer authorization.
+  - [x] Send bounded `query`, configured `type`, bounded `numResults`, and `contents.highlights = true`; do not request `text`, `summary`, deep synthesis, streaming, subpages, output schema, custom system prompt, user location, or agent-provided domain filters in initial scope.
+  - [x] Parse `results[].title`, `results[].url`, and bounded `results[].highlights`; use first bounded highlight as normalized snippet and retain canonical result URL only after strict HTTPS normalization/deduplication.
+  - [x] Ignore unknown fields including `costDollars`, generated `output`, images, and raw page text; reject malformed required result fields without partial success.
+- [x] Implement Tavily adapter.
+  - [x] Send `POST https://api.tavily.com/search` with JSON content type and exact bearer authorization.
+  - [x] Send bounded `query`, configured `search_depth`, `chunks_per_source`, and `max_results`; keep `include_answer`, Extract, Crawl, Map, Research, MCP, CLI/keyless, x402, and site-wide traversal out of scope.
+  - [x] Parse title, URL, and bounded content/raw-content field according to current Search response schema; normalize source URL/title/snippet and deduplicate canonical HTTPS URLs.
+  - [x] Do not consume Tavily's result answer as authoritative synthesis; `ee_web_search` returns sources, agent may use existing `ee_fetch_url` for primary text.
+- [x] Implement Brave LLM Context adapter.
+  - [x] Send `POST https://api.search.brave.com/res/v1/llm/context` with JSON content type and exact `X-Subscription-Token` authorization.
+  - [x] Send bounded `q`, `count`, `maximum_number_of_urls`, `maximum_number_of_tokens`, `maximum_number_of_snippets`, `maximum_number_of_tokens_per_url`, `maximum_number_of_snippets_per_url`, configured threshold/freshness/safe-search values, and `enable_local = false`.
+  - [x] Do not use `/res/v1/web/search`, Answers, Goggles, inline goggle definitions, custom source URLs, or location headers in initial scope.
+  - [x] Parse `grounding.generic`, optional non-local map/POI only if safely present, and `sources`; flatten bounded snippets by canonical source URL into one normalized result per URL, preferring source metadata title/hostname when valid.
+  - [x] Reject malformed mixed JSON snippets, missing usable source URL, or result payloads exceeding configured aggregate bounds; an empty grounding collection returns an empty successful result set.
+
+#### Exit criteria
+
+- [x] All providers use same cancellation, timeout, SSRF, response-limit, cache, and error path as SearXNG.
+- [x] Provider credentials are attached only to exact first-party request and cannot reach source fetches or redirects.
+- [x] `ee_web_search` returns stable normalized source records independent of upstream vendor response shape.
+
+### Phase 3: Provenance, approval, cache, and agent integration
+
+Goal: make provider-backed search visible, policy-bound, and safe through existing MCP, host approval, orchestrator, and pane flows.
+
+#### Work items
+
+- [x] Extend bounded search provenance.
+  - [x] Add provider id and fixed API-version/adapter id to search response provenance and cache metadata, alongside existing retrieval time, cache state, canonical source URL, host, rank, and snippet truncation state.
+  - [x] Redact provider request URLs, query terms, secret references, response identifiers, query-bearing source URL parameters, and upstream request ids from model-visible/tool-pane provenance.
+  - [x] Preserve source provenance across turn-cache reuse, session cache reuse, checkpoints, final citations, and `ee_fetch_url` follow-up without duplicating full provider snippets.
+- [x] Update frontend dispatch and approval paths.
+  - [x] Update `crates/ee-cli/src/app/agent_bridge.rs` lazy `web_context_service` construction to resolve selected provider secret and rebuild when provider semantic config changes.
+  - [x] Continue classifying `ee_web_search` as `ExternalNetwork`; provider initial host enters existing per-host approval/preapproval path before request dispatch.
+  - [x] Ensure approval labels identify only provider name and canonical host, not query, token budget, headers, secret reference, source contents, or result URL parameters.
+  - [x] Keep `ee_fetch_url` approval distinct from provider-search approval. A grant for `api.exa.ai`, `api.tavily.com`, or `api.search.brave.com` must not grant source-site fetch access.
+- [x] Update MCP governance and agent guidance.
+  - [x] Keep `ee_web_search` manifest name, schema version, side-effect class, and tool description stable; add provider-neutral output/provenance documentation only if manifest output metadata has a compatible extension path.
+  - [x] Update `ResearchThenEdit` guidance: use configured provider search only when external research is needed; inspect source URLs with `ee_fetch_url`; prefer official/primary sources; treat snippets as untrusted discovery evidence.
+  - [x] Do not auto-fallback between providers after rate limit, auth failure, empty results, or network failure. Configuration chooses one provider; failures stay explicit and do not silently send queries to another vendor.
+
+#### Exit criteria
+
+- [x] Every provider request has existing external-network approval evidence and bounded redacted lifecycle display.
+- [x] Search cache keys and provenance distinguish providers/options without retaining secrets or raw queries.
+- [x] Provider failures cannot cause undisclosed fallback or broaden approved source hosts.
+
+### Phase 4: Offline test matrix and documentation
+
+Goal: lock provider contracts, privacy boundaries, compatibility, and user configuration with deterministic fixtures only.
+
+#### Work items
+
+- [x] Add host/service fixture tests in `crates/ee-agent-host/src/web_context.rs` or focused provider modules.
+  - [x] Test exact Exa, Tavily, and Brave method, fixed URL, content type, allowed JSON fields, required credential header, no cookie/proxy/ambient authorization, and no credential on fetch/redirect requests.
+  - [x] Test representative successful response normalization: Exa highlights; Tavily bounded result content; Brave `grounding.generic` plus `sources` metadata; canonical HTTPS dedupe; empty results; rank ordering; per-snippet and aggregate truncation.
+  - [x] Test malformed JSON, missing/invalid URL, duplicate/cross-scheme URL, invalid text MIME, oversized body, unexpected redirect, non-2xx/auth/rate-limit/server failures, timeout, cancellation, DNS rejection, connected-peer rejection, and no cache insertion on every failure class.
+  - [x] Test no provider cache collision for identical query/options across SearXNG, Exa, Tavily, and Brave; test semantic-option/config change clears cache and session-scoped provider host grants.
+  - [x] Test debug/error/provenance/cache output excludes seeded bearer tokens, Brave subscription token, query strings, upstream request ids, and provider response fields outside normalized bounds.
+- [x] Add config, schema, proxy, and policy tests.
+  - [x] Test user-global provider selection, fixed-origin validation, required endpoint only for SearXNG, secret-reference validation, safe option defaults/bounds, serialization, schema generation, and existing SearXNG compatibility.
+  - [x] Test ancestor/workspace attempts to enable, switch provider, set vendor endpoint, add provider credential, widen result/token limits, enable local recall, or add domain/goggle controls are ignored/restricted with safe diagnostics.
+  - [x] Test MCP stdio proxy and ACP-native routes dispatch all providers through unchanged `ee_web_search` schema, host approval, cancellation, manifest, and `ExternalNetwork` policy behavior.
+  - [x] Test no implicit fallback: provider auth/rate-limit/empty-result failures do not emit a request for any other provider.
+- [x] Update user-facing documentation and configuration examples.
+  - [x] Document provider selection, exact first-party hosts, user-global-only config, secret-store setup, request data sent to each provider, result/snippet retention, cache TTL, source-fetch follow-up, and approval behavior.
+  - [x] Document defaults and tradeoffs: Exa `auto` plus highlights; Tavily advanced agent search plus chunks; Brave LLM Context token-bounded grounding; Brave Web Search intentionally excluded because it targets human-facing results.
+  - [x] State initial exclusions: Tavily Extract/Crawl/Map/Research/MCP/CLI/keyless/x402; Exa deep synthesis/streaming/full text/output schemas; Brave Answers/Web Search/Goggles/location/local recall; arbitrary provider endpoints, headers, bodies, cookies, and agent-selected filters.
+- [x] Run focused validation.
+  - [x] Run `cargo fmt --check`.
+  - [x] Run `cargo clippy --quiet -p ee-agent-host -p ee-cli -p ee-mcp --all-targets --all-features -- -D warnings`.
+  - [x] Run `cargo test --quiet -p ee-agent-host web_context`.
+  - [x] Run `cargo test --quiet -p ee-cli agent_web_context`.
+  - [x] Run `cargo test --quiet -p ee-mcp`.
+  - [x] Run `./scripts/test-workspace-summary.sh` after focused package validation.
+  - [x] Run `git --no-pager diff --check`.
+
+#### Exit criteria
+
+- [x] All Exa, Tavily, and Brave LLM Context integration tests run against deterministic local fakes; no test requires a vendor account, credential, or outbound request.
+- [x] Tests prove credential isolation, fixed-origin enforcement, no cross-provider fallback, user-global-only authority, bounded output, and existing SSRF/approval/cancellation guarantees.
+- [x] Documentation gives secure copyable setup for each provider and clearly separates search discovery from source fetch.
