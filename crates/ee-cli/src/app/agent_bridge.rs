@@ -3243,6 +3243,7 @@ impl App {
                 let action = match call {
                     WebApprovalCall::Search { .. } => "search",
                     WebApprovalCall::Fetch { .. } => "fetch",
+                    WebApprovalCall::BrowserRun { request } => request.action.as_str(),
                 };
                 self.record_web_failure(action, current_host, "denied");
             }
