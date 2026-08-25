@@ -1,8 +1,9 @@
 use std::fs;
+use std::hint::black_box;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use ee_cli::perf::{measure_open_to_first_render, measure_vlf_page_down};
 use ee_cli::vlf_bench_support::{

@@ -155,9 +155,9 @@ jobs:
           shared-key: ee-rust-${{ runner.os }}
           cache-on-failure: "true"
 
-      - name: Install Linux musl tools
+      - name: Install Linux musl build tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        run: sudo apt-get update && sudo apt-get install -y build-essential musl-tools perl
 
       - name: Derive reproducible build timestamp
         shell: bash
@@ -165,6 +165,11 @@ jobs:
 
       - name: Build release binaries
         run: |
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+            export CC_x86_64_unknown_linux_musl=musl-gcc
+          fi
+
           cargo build --locked --release -p ee-cli --features agents --target ${{ matrix.target }}
           cargo build --locked --release -p ee-openrouter-agent --target ${{ matrix.target }}
           cargo build --locked --release -p ee-xi-lsp-lib --bin xi-lsp-plugin --target ${{ matrix.target }}

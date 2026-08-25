@@ -1,4 +1,6 @@
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+use std::hint::black_box;
+
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use xi_rope::RopeBuilder;
 
 const TARGET_BYTES_20_MIB: usize = 20 * 1024 * 1024;

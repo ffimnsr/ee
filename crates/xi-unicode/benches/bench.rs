@@ -11,8 +11,10 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use std::cmp::max;
+use std::hint::black_box;
+
+use criterion::{Criterion, criterion_group, criterion_main};
 use xi_unicode::LineBreakIterator;
 use xi_unicode::linebreak_property;
 use xi_unicode::linebreak_property_str;
