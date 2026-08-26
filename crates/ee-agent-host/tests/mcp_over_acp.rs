@@ -302,7 +302,7 @@ async fn mcp_over_acp_session_new_uses_stdio_fallback_without_acp_capability() {
 }
 
 #[tokio::test]
-async fn mcp_over_acp_session_new_omits_ee_proxy_without_proxy_config() {
+async fn mcp_over_acp_session_new_uses_native_proxy_without_stdio_fallback_config() {
     let script = FakeAgentScript::new()
         .wait_for("initialize")
         .respond(json!({
@@ -318,14 +318,17 @@ async fn mcp_over_acp_session_new_omits_ee_proxy_without_proxy_config() {
         .await
         .expect("session starts");
 
-    assert_eq!(thread.proxy_mode(), EeProxyMode::Disabled);
+    assert_eq!(thread.proxy_mode(), EeProxyMode::AcpNative);
     let session_new = fake.requests_by_method("session/new");
-    let servers = session_new[0].get("params").and_then(|p| p.get("mcpServers"));
-    let servers = servers.and_then(Value::as_array).cloned().unwrap_or_default();
-    assert!(
-        servers.iter().all(|entry| entry.get("name").and_then(Value::as_str) != Some("ee")),
-        "no ee proxy entry expected: {servers:?}"
-    );
+    let servers = session_new[0]
+        .get("params")
+        .and_then(|p| p.get("mcpServers"))
+        .and_then(Value::as_array)
+        .expect("native ee MCP server advertised");
+    assert!(servers.iter().any(|entry| {
+        entry.get("name").and_then(Value::as_str) == Some("ee")
+            && entry.get("type").and_then(Value::as_str) == Some("acp")
+    }));
     host.connection.close().await;
     fake.join(TEST_TIMEOUT).await;
 }

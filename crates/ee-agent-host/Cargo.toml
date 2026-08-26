@@ -33,4 +33,7 @@ zeroize.workspace = true
 [dev-dependencies]
 ee-acp-agent-server = { workspace = true, features = ["test-utils"] }
 ee-agent-host = { path = ".", features = ["test-utils"] }
+# Test-only direction: live OpenRouter-orchestrated ACP provider exercised through host transport.
+ee-agent-orchestrator = { path = "../ee-agent-orchestrator", features = ["test-utils"] }
+ee-openrouter-agent = { path = "../ee-openrouter-agent", features = ["test-utils"] }
 tempfile.workspace = true

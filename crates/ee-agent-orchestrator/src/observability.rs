@@ -12,6 +12,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::completion::CompletionState;
 use crate::sensitive_data::{is_secret_like, redact};
 use crate::tools::ToolErrorKind;
 
@@ -49,6 +50,16 @@ impl Default for TelemetryConfig {
             max_events_per_turn: DEFAULT_TELEMETRY_MAX_EVENTS_PER_TURN,
             max_bytes_per_turn: DEFAULT_TELEMETRY_MAX_BYTES_PER_TURN,
         }
+    }
+}
+
+impl TelemetryConfig {
+    /// Enables or disables memory-only local telemetry while preserving bounded
+    /// default retention. This never enables network delivery or persistence.
+    #[must_use]
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
     }
 }
 
@@ -219,6 +230,10 @@ pub struct TelemetrySummary {
     pub quality_score: Option<u8>,
     pub latency_ms: u64,
     pub approval_count: u64,
+    pub retry_count: u64,
+    pub repair_count: u64,
+    pub recovery_count: u64,
+    pub validation_count: u64,
     pub tool_calls: u64,
     pub model_calls: u64,
     pub estimated_cost_microusd: u64,
@@ -312,6 +327,10 @@ pub struct TurnTelemetry {
     pub turn_id: String,
     pub attribution: TelemetryAttribution,
     pub outcome: TelemetryTurnOutcome,
+    /// Host-derived terminal completion state, when the provider reached one.
+    /// This is never inferred from model prose or ACP `stopReason`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_state: Option<CompletionState>,
     pub waterfall: Vec<WaterfallEvent>,
     pub summary: TelemetrySummary,
     /// True when retention caps dropped waterfall events.
@@ -428,6 +447,7 @@ impl TelemetryRecorder {
             turn_id: turn_id.clone(),
             attribution,
             outcome: TelemetryTurnOutcome::Succeeded,
+            terminal_state: None,
             waterfall: Vec::new(),
             summary: TelemetrySummary::default(),
             truncated: false,
@@ -485,6 +505,27 @@ impl TelemetryRecorder {
         replay_fixture_candidate: Option<ReplayFixtureCandidate>,
         evidence_artifacts: Vec<RedactedEvidenceRef>,
     ) -> Result<Option<TurnTelemetry>, TelemetryError> {
+        self.finish_turn_with_terminal_state(
+            turn_id,
+            outcome,
+            None,
+            summary,
+            replay_fixture_candidate,
+            evidence_artifacts,
+        )
+    }
+
+    /// Completes a turn while retaining an explicitly host-derived completion
+    /// state. `None` means no terminal evidence was available.
+    pub fn finish_turn_with_terminal_state(
+        &mut self,
+        turn_id: &str,
+        outcome: TelemetryTurnOutcome,
+        terminal_state: Option<CompletionState>,
+        summary: TelemetrySummary,
+        replay_fixture_candidate: Option<ReplayFixtureCandidate>,
+        evidence_artifacts: Vec<RedactedEvidenceRef>,
+    ) -> Result<Option<TurnTelemetry>, TelemetryError> {
         if !self.config.enabled {
             return Ok(None);
         }
@@ -500,6 +541,7 @@ impl TelemetryRecorder {
         };
         let observed_failures = std::mem::take(&mut active.record.summary.tool_failures);
         active.record.outcome = outcome;
+        active.record.terminal_state = terminal_state;
         active.record.summary = summary;
         merge_tool_failures(&mut active.record.summary.tool_failures, observed_failures);
         active.record.replay_fixture_candidate = replay_fixture_candidate;
@@ -753,6 +795,10 @@ mod tests {
                     quality_score: Some(100),
                     latency_ms: 12,
                     approval_count: 1,
+                    retry_count: 1,
+                    repair_count: 1,
+                    recovery_count: 1,
+                    validation_count: 1,
                     tool_calls: 1,
                     model_calls: 1,
                     estimated_cost_microusd: 4,

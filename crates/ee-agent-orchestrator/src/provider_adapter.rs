@@ -27,6 +27,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use ee_acp_agent_server::{
     AgentProvider, ClientBridge, LoadSessionContext, NewSessionContext, PromptContext,
@@ -44,16 +45,27 @@ use tokio::sync::watch;
 
 use crate::checkpoint_store::CheckpointStore;
 use crate::config::OrchestratorConfig;
+use crate::final_response::FinalResponse;
 use crate::mcp::{
     McpBackedTool, McpDiscoveryDiagnostic, McpServerDescriptor, McpSessionManager, McpToolPolicy,
 };
+#[cfg(test)]
 use crate::memory::MemoryStore;
 use crate::model::ModelAdapter;
+use crate::observability::{
+    TelemetryAttribution, TelemetryConfig, TelemetryRecorder, TelemetrySummary, TelemetryTransport,
+    TelemetryTurnOutcome, TelemetryVersionLabels, ToolFailureReason, WaterfallFinish,
+    WaterfallOutcome, WaterfallStage,
+};
 use crate::policy::{PolicyEngine, ToolPolicy};
-use crate::recovery::TurnOutcome;
-use crate::runtime::OrchestratorRuntime;
+use crate::runtime::{
+    OrchestratorRuntime, StrategicRecoveryContext, StrategicRecoveryTurn, StrategicTurnOutcome,
+};
 use crate::session_store::SessionStateStore;
+use crate::strategy::StrategicInput;
+#[cfg(test)]
 use crate::tasks::TaskGraph;
+use crate::validation::WorkspaceValidationConfig;
 
 /// Default implementation name advertised in `initialize` responses.
 pub const DEFAULT_IMPLEMENTATION_NAME: &str = "ee-agent-orchestrator";
@@ -79,6 +91,14 @@ pub struct OrchestratorProviderConfig {
     pub session_state_dir: Option<std::path::PathBuf>,
     /// Maximum serialized bytes retained for one normal-session snapshot.
     pub max_session_state_bytes: usize,
+    /// Trusted validation declarations supplied by server configuration. Repository
+    /// instructions and ACP prompts cannot introduce executable commands here.
+    pub validation_workspace: WorkspaceValidationConfig,
+    /// Privacy-safe local telemetry retention. Disabled by default; this never
+    /// enables network delivery or automatic persistence.
+    pub telemetry: TelemetryConfig,
+    /// Opaque version labels attached to locally retained telemetry records.
+    pub telemetry_attribution: TelemetryAttribution,
 }
 
 impl Default for OrchestratorProviderConfig {
@@ -93,6 +113,9 @@ impl Default for OrchestratorProviderConfig {
             mcp: McpToolPolicy::default(),
             session_state_dir: None,
             max_session_state_bytes: crate::config::DEFAULT_MAX_CHECKPOINT_BYTES,
+            validation_workspace: WorkspaceValidationConfig::default(),
+            telemetry: TelemetryConfig::default(),
+            telemetry_attribution: default_telemetry_attribution(),
         }
     }
 }
@@ -127,6 +150,9 @@ struct ConversationMessage {
 enum ConversationRole {
     User,
     Agent,
+    /// Host-derived terminal completion report. Kept distinct from streamed
+    /// model text so replay cannot turn it into unsupported model prose.
+    FinalResponse,
 }
 
 /// Upper bound of recorded conversation messages; the oldest messages are
@@ -138,8 +164,220 @@ const WRITE_MODE_ID: &str = "write";
 const PLAN_MODE_ID: &str = "plan";
 const PLAN_PAYLOAD_MARKER: &str = "<!-- ee-plan";
 
+fn default_telemetry_attribution() -> TelemetryAttribution {
+    TelemetryAttribution::new(
+        TelemetryVersionLabels {
+            provider_version: "ee-acp".into(),
+            model_version: "default".into(),
+            prompt_version: "acp-v1".into(),
+            manifest_version: "mcp-v1".into(),
+            schema_version: "telemetry-v1".into(),
+            policy_version: "policy-v1".into(),
+            routing_version: "orchestrator-v1".into(),
+        },
+        TelemetryTransport::Acp,
+    )
+    .expect("built-in telemetry attribution is valid")
+}
+
 fn default_session_mode() -> SessionModeId {
     SessionModeId::new(ASK_MODE_ID)
+}
+
+/// Emits typed, evidence-derived completion on the existing ACP text-update
+/// surface. No ACP request or response schema changes; a unique message id
+/// lets the host pane retain this terminal state separately from model prose.
+fn emit_final_response(
+    sink: &UpdateSink,
+    final_response: &FinalResponse,
+    next_final_response: &AtomicU64,
+) -> Result<(), ProviderError> {
+    let id = next_final_response.fetch_add(1, Ordering::Relaxed);
+    sink.agent_message_chunk(format!("ee-final-response-{id}"), final_response.to_string()).map_err(
+        |error| ProviderError::BackendFailure(format!("failed to emit final response: {error}")),
+    )
+}
+
+fn finish_provider_telemetry(
+    recorder: &Arc<Mutex<TelemetryRecorder>>,
+    turn_id: &str,
+    started_at: Instant,
+    events: &[crate::events::OrchestratorEvent],
+    outcome: TelemetryTurnOutcome,
+    terminal_state: Option<crate::completion::CompletionState>,
+    evidence_ids: Vec<String>,
+) {
+    let mut recorder = recorder.lock().expect("telemetry recorder poisoned");
+    let elapsed_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    let mut operation_id = 1_u64;
+    let mut model_calls = 0_u64;
+    let mut tool_calls = 0_u64;
+    let mut approval_count = 0_u64;
+    let mut retry_count = 0_u64;
+    let mut repair_count = 0_u64;
+    let mut recovery_count = 0_u64;
+    let mut validation_count = 0_u64;
+    for event in events {
+        match event {
+            crate::events::OrchestratorEvent::ModelRequested { .. } => model_calls += 1,
+            crate::events::OrchestratorEvent::ToolFinished { tool_name, success, .. } => {
+                tool_calls += 1;
+                let stage = if crate::strategy::is_validation_tool_name(tool_name) {
+                    validation_count += 1;
+                    WaterfallStage::Validation
+                } else {
+                    WaterfallStage::ToolExecution
+                };
+                let _ = recorder.record_started(
+                    turn_id,
+                    elapsed_ms,
+                    stage,
+                    operation_id,
+                    Some(tool_name),
+                );
+                let _ = recorder.record_finished(
+                    turn_id,
+                    WaterfallFinish {
+                        elapsed_ms,
+                        stage,
+                        operation_id,
+                        outcome: if *success {
+                            WaterfallOutcome::Succeeded
+                        } else {
+                            WaterfallOutcome::Failed
+                        },
+                        tool_failure: (!success).then_some(ToolFailureReason::InternalError),
+                        tool_name: Some(tool_name.clone()),
+                    },
+                );
+                operation_id += 1;
+            }
+            crate::events::OrchestratorEvent::ApprovalRequested { tool_name, .. } => {
+                approval_count += 1;
+                let _ = recorder.record_started(
+                    turn_id,
+                    elapsed_ms,
+                    WaterfallStage::Approval,
+                    operation_id,
+                    Some(tool_name),
+                );
+                let _ = recorder.record_finished(
+                    turn_id,
+                    WaterfallFinish {
+                        elapsed_ms,
+                        stage: WaterfallStage::Approval,
+                        operation_id,
+                        outcome: WaterfallOutcome::Succeeded,
+                        tool_failure: None,
+                        tool_name: Some(tool_name.clone()),
+                    },
+                );
+                operation_id += 1;
+            }
+            crate::events::OrchestratorEvent::RetryScheduled { tool_name, .. } => {
+                retry_count += 1;
+                let _ = recorder.record_started(
+                    turn_id,
+                    elapsed_ms,
+                    WaterfallStage::Retry,
+                    operation_id,
+                    Some(tool_name),
+                );
+                let _ = recorder.record_finished(
+                    turn_id,
+                    WaterfallFinish {
+                        elapsed_ms,
+                        stage: WaterfallStage::Retry,
+                        operation_id,
+                        outcome: WaterfallOutcome::Succeeded,
+                        tool_failure: None,
+                        tool_name: Some(tool_name.clone()),
+                    },
+                );
+                operation_id += 1;
+            }
+            crate::events::OrchestratorEvent::CheckpointSaved { .. }
+            | crate::events::OrchestratorEvent::TurnInterrupted { .. }
+            | crate::events::OrchestratorEvent::TurnResumed { .. }
+            | crate::events::OrchestratorEvent::RepairStarted { .. }
+            | crate::events::OrchestratorEvent::RepairStopped { .. } => {
+                match event {
+                    crate::events::OrchestratorEvent::RepairStarted { .. }
+                    | crate::events::OrchestratorEvent::RepairStopped { .. } => repair_count += 1,
+                    _ => recovery_count += 1,
+                }
+                let _ = recorder.record_started(
+                    turn_id,
+                    elapsed_ms,
+                    WaterfallStage::Recovery,
+                    operation_id,
+                    None,
+                );
+                let _ = recorder.record_finished(
+                    turn_id,
+                    WaterfallFinish {
+                        elapsed_ms,
+                        stage: WaterfallStage::Recovery,
+                        operation_id,
+                        outcome: WaterfallOutcome::Succeeded,
+                        tool_failure: None,
+                        tool_name: None,
+                    },
+                );
+                operation_id += 1;
+            }
+            _ => {}
+        }
+    }
+    for _ in 0..model_calls {
+        let _ = recorder.record_started(
+            turn_id,
+            elapsed_ms,
+            WaterfallStage::ModelCall,
+            operation_id,
+            None,
+        );
+        let _ = recorder.record_finished(
+            turn_id,
+            WaterfallFinish {
+                elapsed_ms,
+                stage: WaterfallStage::ModelCall,
+                operation_id,
+                outcome: WaterfallOutcome::Succeeded,
+                tool_failure: None,
+                tool_name: None,
+            },
+        );
+        operation_id += 1;
+    }
+    // Exact host approval outcomes remain host-owned and are never inferred.
+    let evidence_artifacts = if outcome == TelemetryTurnOutcome::Failed {
+        evidence_ids
+            .into_iter()
+            .filter_map(|id| crate::observability::RedactedEvidenceRef::new(id).ok())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let _ = recorder.finish_turn_with_terminal_state(
+        turn_id,
+        outcome,
+        terminal_state,
+        TelemetrySummary {
+            latency_ms: elapsed_ms,
+            approval_count,
+            retry_count,
+            repair_count,
+            recovery_count,
+            validation_count,
+            tool_calls,
+            model_calls,
+            estimated_cost_microusd: 0,
+            ..TelemetrySummary::default()
+        },
+        None,
+        evidence_artifacts,
+    );
 }
 
 fn session_modes(current_mode: SessionModeId) -> SessionModeState {
@@ -247,18 +485,12 @@ fn parse_plan_items(response: &str) -> Result<Vec<crate::plan_compiler::PlanInpu
     Ok(items)
 }
 
-/// Serialized orchestrator state kept when a session closes so a later
-/// `session/load` can restore it.
+/// Durable normal-session recovery metadata. Transcript, task text, memory,
+/// tool arguments, and tool summaries stay process-local and are never stored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedSession {
-    tasks: TaskGraph,
-    memory: MemoryStore,
     #[serde(default = "default_session_mode")]
     mode: SessionModeId,
-    /// Conversation log captured during the session (memory-bounded);
-    /// replayed as `user_message_chunk` / `agent_message_chunk` updates by
-    /// `session/load`.
-    conversation: Vec<ConversationMessage>,
 }
 
 /// ACP provider adapter around [`OrchestratorRuntime`].
@@ -274,6 +506,12 @@ pub struct OrchestratorProvider<M> {
     persisted: Arc<Mutex<HashMap<String, PersistedSession>>>,
     session_store: Arc<SessionStateStore>,
     next_session: Arc<AtomicU64>,
+    /// Unique final-response message ids across sessions and turns.
+    next_final_response: Arc<AtomicU64>,
+    /// User-controlled, local-only per-turn telemetry. Never session-persisted.
+    telemetry: Arc<Mutex<TelemetryRecorder>>,
+    /// Opaque telemetry IDs independent of ACP session/task identifiers.
+    next_telemetry_turn: Arc<AtomicU64>,
 }
 
 impl<M> Clone for OrchestratorProvider<M> {
@@ -286,6 +524,9 @@ impl<M> Clone for OrchestratorProvider<M> {
             persisted: self.persisted.clone(),
             session_store: self.session_store.clone(),
             next_session: self.next_session.clone(),
+            next_final_response: self.next_final_response.clone(),
+            telemetry: self.telemetry.clone(),
+            next_telemetry_turn: self.next_telemetry_turn.clone(),
         }
     }
 }
@@ -308,6 +549,9 @@ impl<M: ModelAdapter> OrchestratorProvider<M> {
             config.session_state_dir.clone(),
             config.max_session_state_bytes,
         ));
+        // Invalid user telemetry caps fail closed by disabling telemetry rather
+        // than preventing the ACP provider from starting.
+        let telemetry = TelemetryRecorder::new(config.telemetry.clone()).unwrap_or_default();
         Self {
             config,
             model,
@@ -316,7 +560,16 @@ impl<M: ModelAdapter> OrchestratorProvider<M> {
             persisted: Arc::new(Mutex::new(HashMap::new())),
             session_store,
             next_session: Arc::new(AtomicU64::new(1)),
+            next_final_response: Arc::new(AtomicU64::new(1)),
+            telemetry: Arc::new(Mutex::new(telemetry)),
+            next_telemetry_turn: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    /// Exports retained privacy-safe telemetry as local JSONL. This never
+    /// writes files or sends data over the network; caller owns destination.
+    pub fn export_telemetry_jsonl(&self) -> Result<String, crate::observability::TelemetryError> {
+        self.telemetry.lock().expect("telemetry recorder poisoned").export_jsonl()
     }
 
     /// Snapshot of the live task/memory state for one session, when the
@@ -357,6 +610,22 @@ impl<M: ModelAdapter> OrchestratorProvider<M> {
     #[cfg(test)]
     pub(crate) fn has_persisted_state(&self, session_id: &str) -> bool {
         self.persisted.lock().expect("adapter persisted poisoned").contains_key(session_id)
+    }
+
+    /// Registers a deterministic server tool in an existing session for
+    /// hermetic ACP replay fixtures. Production providers register tools only
+    /// through built-ins and per-prompt MCP discovery.
+    #[cfg(feature = "test-utils")]
+    pub fn register_test_tool_for_session(
+        &self,
+        session_id: &str,
+        tool: Arc<dyn crate::tools::ServerTool>,
+    ) -> Result<(), ProviderError> {
+        let sessions = self.sessions.lock().expect("adapter sessions poisoned");
+        let session = sessions.get(session_id).ok_or_else(|| {
+            ProviderError::InvalidRequest(format!("unknown orchestrator session: {session_id}"))
+        })?;
+        session.runtime.register_tool(tool).map_err(ProviderError::from)
     }
 }
 
@@ -485,6 +754,21 @@ fn record_agent_message(
     }
 }
 
+/// Records the host-derived final response as its own replay item. It must
+/// never merge into preceding model text, because that would obscure which
+/// claims were evidence-gated.
+fn record_final_response(
+    conversation: &Arc<Mutex<Vec<ConversationMessage>>>,
+    text: impl Into<String>,
+) {
+    let mut log = conversation.lock().expect("conversation poisoned");
+    log.push(ConversationMessage { role: ConversationRole::FinalResponse, text: text.into() });
+    if log.len() > CONVERSATION_MAX_MESSAGES {
+        let overflow = log.len() - CONVERSATION_MAX_MESSAGES;
+        log.drain(..overflow);
+    }
+}
+
 /// Streams a recorded conversation to the client as `user_message_chunk` /
 /// `agent_message_chunk` updates, in order, with deterministic replay ids
 /// (ACP v1 `session/load` conversation replay).  With no sink (or nothing
@@ -504,9 +788,13 @@ fn replay_conversation(
                     ProviderError::BackendFailure(format!("failed to replay user message: {error}"))
                 })?;
             }
-            ConversationRole::Agent => {
-                sink.agent_message_chunk(format!("replay-a-{}", index + 1), message.text.clone())
-                    .map_err(|error| {
+            ConversationRole::Agent | ConversationRole::FinalResponse => {
+                let message_id = if message.role == ConversationRole::FinalResponse {
+                    format!("ee-final-response-replay-{}", index + 1)
+                } else {
+                    format!("replay-a-{}", index + 1)
+                };
+                sink.agent_message_chunk(message_id, message.text.clone()).map_err(|error| {
                     ProviderError::BackendFailure(format!(
                         "failed to replay agent message: {error}"
                     ))
@@ -535,44 +823,6 @@ fn restore_runtime_from_checkpoint<M: ModelAdapter>(
     OrchestratorRuntime::from_checkpoint(checkpoint, model, policy)
         .map(Arc::new)
         .map_err(ProviderError::from)
-}
-
-/// Replays the pending turn's checkpoint transcript tail as conversation
-/// chunks (crash-restore fallback): user and assistant text messages only.
-fn replay_checkpoint_transcript(
-    sink: Option<&UpdateSink>,
-    checkpoint: &crate::checkpoint::OrchestratorCheckpoint,
-) -> Result<(), ProviderError> {
-    let Some(sink) = sink else { return Ok(()) };
-    let Some(resume) = checkpoint.resume.as_ref() else { return Ok(()) };
-    for (index, message) in resume.transcript.iter().enumerate() {
-        let text = message.text_content();
-        if text.is_empty() {
-            continue;
-        }
-        match message.role {
-            crate::model::ModelRole::User => {
-                let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
-                    .message_id(MessageId::new(format!("replay-u-{}", index + 1)));
-                sink.raw_update(SessionUpdate::UserMessageChunk(chunk)).map_err(|error| {
-                    ProviderError::BackendFailure(format!(
-                        "failed to replay checkpoint user message: {error}"
-                    ))
-                })?;
-            }
-            crate::model::ModelRole::Assistant => {
-                sink.agent_message_chunk(format!("replay-a-{}", index + 1), text).map_err(
-                    |error| {
-                        ProviderError::BackendFailure(format!(
-                            "failed to replay checkpoint agent message: {error}"
-                        ))
-                    },
-                )?;
-            }
-            _ => {}
-        }
-    }
-    Ok(())
 }
 
 /// The initial slash commands advertised for a session: `/compact` always;
@@ -613,32 +863,7 @@ fn next_session_number(
 }
 
 fn session_snapshot(session: &SessionRuntime) -> PersistedSession {
-    PersistedSession {
-        tasks: session.runtime.tasks(),
-        memory: session.runtime.memory(),
-        mode: session.mode.clone(),
-        conversation: normalize_conversation(
-            session.conversation.lock().expect("conversation poisoned").clone(),
-        ),
-    }
-}
-
-/// Merges legacy per-delta records while preserving user/agent turn order.
-/// Snapshots written before adjacent agent chunks were coalesced are repaired
-/// on their next load and subsequent save.
-fn normalize_conversation(conversation: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
-    let mut normalized: Vec<ConversationMessage> = Vec::with_capacity(conversation.len());
-    for message in conversation {
-        if message.role == ConversationRole::Agent
-            && let Some(last) = normalized.last_mut()
-            && last.role == ConversationRole::Agent
-        {
-            last.text.push_str(&message.text);
-        } else {
-            normalized.push(message);
-        }
-    }
-    normalized
+    PersistedSession { mode: session.mode.clone() }
 }
 
 fn persist_session_snapshot(
@@ -699,7 +924,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
         let mut session_capabilities = SessionCapabilities::new()
             .list(SessionListCapabilities::new())
             .close(SessionCloseCapabilities::new());
-        if self.config.orchestrator.recovery.enabled {
+        if self.config.orchestrator.recovery.is_durable() {
             session_capabilities = session_capabilities.resume(SessionResumeCapabilities::new());
         }
         AgentCapabilities::default()
@@ -809,14 +1034,12 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                 Some(state) => {
                     let mode = state.mode;
                     (
-                        Arc::new(OrchestratorRuntime::with_state(
+                        Arc::new(OrchestratorRuntime::with_policy(
                             config,
                             model.clone(),
                             mode_policy(&policy, &mode)?,
-                            state.tasks,
-                            state.memory,
                         )),
-                        normalize_conversation(state.conversation),
+                        Vec::new(),
                         mode,
                     )
                 }
@@ -832,8 +1055,13 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                             ))
                         })?
                     else {
+                        let detail = if config.recovery.enabled && !config.recovery.is_durable() {
+                            "recovery is memory-only; provider restart cannot be resumed without EE_CHECKPOINT_DIR"
+                        } else {
+                            "no persisted orchestrator state for this session"
+                        };
                         return Err(ProviderError::BackendFailure(format!(
-                            "no persisted orchestrator state for session {session_id}"
+                            "{detail}: {session_id}"
                         )));
                     };
                     // The pending checkpoint stays until the resumed turn
@@ -845,9 +1073,8 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                         model.clone(),
                         mode_policy(&policy, &mode)?,
                     )?;
-                    // Crash fallback replay: the checkpoint's transcript
-                    // tail is the only conversation that survived.
-                    replay_checkpoint_transcript(ctx.replay_sink.as_ref(), &checkpoint)?;
+                    // Durable checkpoints contain no transcript content, so
+                    // crash restore never replays user or model text.
                     (runtime, Vec::new(), mode)
                 }
             };
@@ -883,7 +1110,14 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
         let sessions = self.sessions.clone();
         let session_id = ctx.session_id.clone();
         let recovery_enabled = config.recovery.enabled;
+        let recovery_durable = config.recovery.is_durable();
         Box::pin(async move {
+            if !recovery_durable {
+                return Err(ProviderError::BackendFailure(
+                    "recovery is memory-only; provider restart cannot be resumed without EE_CHECKPOINT_DIR"
+                        .to_string(),
+                ));
+            }
             // `session/resume` restores context with NO replay (ACP v1): the
             // interrupted turn is continued by the next `session/prompt` via
             // the pending-checkpoint detection.  A live session (same
@@ -959,6 +1193,11 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
         let session_store = self.session_store.clone();
         let mcp_policy = self.config.mcp.clone();
         let implementation_name = self.config.implementation.name.clone();
+        let next_final_response = self.next_final_response.clone();
+        let validation_workspace = self.config.validation_workspace.clone();
+        let telemetry = self.telemetry.clone();
+        let telemetry_attribution = self.config.telemetry_attribution.clone();
+        let next_telemetry_turn = self.next_telemetry_turn.clone();
         Box::pin(async move {
             let session = {
                 let sessions = sessions.lock().expect("adapter sessions poisoned");
@@ -977,6 +1216,14 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                     "no orchestrator state for session {session_id}"
                 )));
             };
+            let telemetry_turn =
+                format!("turn-{}", next_telemetry_turn.fetch_add(1, Ordering::Relaxed));
+            let telemetry_started_at = Instant::now();
+            let telemetry_event_start = runtime.event_snapshot().len();
+            let _ = telemetry
+                .lock()
+                .expect("telemetry recorder poisoned")
+                .start_turn(&telemetry_turn, telemetry_attribution);
             let system_context = mode_system_context(system_context, &mode);
             // `/compact` is detected here, before any MCP bridging or tool
             // registration, so compaction turns never connect servers or
@@ -997,7 +1244,22 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                 let result = runtime
                     .run_turn_with_system_context(ctx, sink, client, cancel, system_context)
                     .await
-                    .map_err(ProviderError::from)?;
+                    .map_err(ProviderError::from);
+                let events = runtime.event_snapshot();
+                finish_provider_telemetry(
+                    &telemetry,
+                    &telemetry_turn,
+                    telemetry_started_at,
+                    &events[telemetry_event_start..],
+                    if result.is_ok() {
+                        TelemetryTurnOutcome::Succeeded
+                    } else {
+                        TelemetryTurnOutcome::Failed
+                    },
+                    None,
+                    Vec::new(),
+                );
+                let result = result?;
                 persist_session_snapshot(
                     &session_store,
                     &implementation_name,
@@ -1018,6 +1280,15 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                 store.delete_session(&session_id.to_string());
                 let _ = sink
                     .agent_message_chunk("discard", "paused turn discarded; checkpoint cleared");
+                finish_provider_telemetry(
+                    &telemetry,
+                    &telemetry_turn,
+                    telemetry_started_at,
+                    &runtime.event_snapshot()[telemetry_event_start..],
+                    TelemetryTurnOutcome::Succeeded,
+                    None,
+                    Vec::new(),
+                );
                 return Ok(PromptResult::new(StopReason::EndTurn));
             }
             let has_pending = store.has_pending(&session_id.to_string());
@@ -1049,12 +1320,24 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                         _ => String::new(),
                     };
                     if !text.is_empty() {
-                        record_agent_message(&recording_conversation, &text);
-                        recorded_plan_output.lock().expect("plan output poisoned").push_str(&text);
+                        let is_final_response =
+                            chunk.message_id.as_ref().is_some_and(|message_id| {
+                                message_id.0.starts_with("ee-final-response-")
+                            });
+                        if is_final_response {
+                            record_final_response(&recording_conversation, text);
+                        } else {
+                            record_agent_message(&recording_conversation, &text);
+                            recorded_plan_output
+                                .lock()
+                                .expect("plan output poisoned")
+                                .push_str(&text);
+                        }
                     }
                 }
             }));
             let plan_sink = sink.clone();
+            let final_sink = sink.clone();
             // Phase 12: bridge the session's MCP servers into the tool
             // registry for this prompt.  The manager is per prompt (the
             // `ClientBridge` is per prompt), while the validated descriptors
@@ -1093,32 +1376,39 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
             let resume_client = client.clone();
             let resume_cancel = cancel.clone();
             let resume_system = system_context.clone();
-            let result = if !recovery.enabled {
-                runtime
-                    .run_turn_with_system_context(ctx, sink, client, cancel, system_context)
-                    .await
-                    .map(TurnOutcome::Completed)
-            } else if has_pending {
+            // Host evidence is unavailable on current `PromptContext` / `ClientBridge`.
+            // Required host seam: bounded, redacted completion evidence IDs plus
+            // revisions supplied with this prompt and mapped into `StrategicInput`.
+            // Until that existing-provider input is added, responses stay unverified.
+            let strategic_input =
+                StrategicInput { validation_workspace, ..StrategicInput::default() };
+            let recovery_context = StrategicRecoveryContext::new(
+                strategic_input.clone(),
+                system_context,
+                provider_name.clone(),
+            );
+            let resume_recovery_context =
+                StrategicRecoveryContext::new(strategic_input, resume_system, provider_name);
+            let result = if has_pending {
                 // A paused turn awaits: the same prompt resumes it from its
-                // checkpoint (manual resume), continuing completed work.
-                // `/resume` resumes without appending the command text as a
-                // user message.
+                // checkpoint (manual resume). `/resume` carries no new prompt
+                // text, so the checkpoint transcript remains authoritative.
                 let resume_ctx = if resume_command {
                     PromptContext::new(ctx.session_id.clone(), Vec::new())
                 } else {
                     ctx
                 };
                 runtime
-                    .resume_turn(resume_ctx, sink, client, cancel, system_context, &provider_name)
+                    .resume_turn_strategic(resume_ctx, sink, client, cancel, recovery_context)
                     .await
             } else {
                 runtime
-                    .run_turn_recoverable(ctx, sink, client, cancel, system_context, &provider_name)
+                    .run_turn_strategic_recoverable(ctx, sink, client, cancel, recovery_context)
                     .await
             };
-            let result = match result {
-                Ok(TurnOutcome::Completed(result)) => Ok(result),
-                Ok(TurnOutcome::Interrupted(interruption)) => {
+            let result: Result<Box<StrategicRecoveryTurn>, ProviderError> = match result {
+                Ok(StrategicTurnOutcome::Completed(turn)) => Ok(turn),
+                Ok(StrategicTurnOutcome::Interrupted(interruption)) => {
                     // Safe single auto-resume: transient/deadline faults with
                     // a durable checkpoint and no ambiguous in-flight tool
                     // resume once automatically, capped by the config.
@@ -1127,18 +1417,17 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                         && interruption.resumed_count < recovery.auto_resume_max;
                     if auto_resume {
                         match runtime
-                            .resume_turn(
+                            .resume_turn_strategic(
                                 resume_ctx,
                                 resume_sink,
                                 resume_client,
                                 resume_cancel,
-                                resume_system,
-                                &provider_name,
+                                resume_recovery_context,
                             )
                             .await
                         {
-                            Ok(TurnOutcome::Completed(result)) => Ok(result),
-                            Ok(TurnOutcome::Interrupted(again)) => {
+                            Ok(StrategicTurnOutcome::Completed(turn)) => Ok(turn),
+                            Ok(StrategicTurnOutcome::Interrupted(again)) => {
                                 Err(ProviderError::Recoverable(again.into_wire()))
                             }
                             Err(error) => Err(ProviderError::from(error)),
@@ -1149,9 +1438,15 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                 }
                 Err(error) => Err(ProviderError::from(error)),
             };
+            let telemetry_completion = result.as_ref().ok().map(|turn| {
+                (
+                    turn.final_response.completion.state,
+                    turn.final_response.completion.evidence_ids.clone(),
+                )
+            });
             let result = if mode.to_string() == PLAN_MODE_ID {
                 match result {
-                    Ok(prompt_result) => {
+                    Ok(turn) => {
                         let plan_output = plan_output.lock().expect("plan output poisoned").clone();
                         let plan_result = parse_plan_items(&plan_output).and_then(|items| {
                             let entries = runtime
@@ -1168,14 +1463,47 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                                 ))
                             })
                         });
-                        plan_result.map(|()| prompt_result)
+                        plan_result.and_then(|()| {
+                            emit_final_response(
+                                &final_sink,
+                                &turn.final_response,
+                                &next_final_response,
+                            )?;
+                            Ok(turn.prompt_result)
+                        })
                     }
                     Err(error) => Err(error),
                 }
             } else {
-                result
+                result.and_then(|turn| {
+                    emit_final_response(&final_sink, &turn.final_response, &next_final_response)?;
+                    Ok(turn.prompt_result)
+                })
             };
             cleanup.finish().await;
+            let events = runtime.event_snapshot();
+            let telemetry_outcome = if result.is_ok() {
+                TelemetryTurnOutcome::Succeeded
+            } else if result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.to_string().to_ascii_lowercase().contains("cancel"))
+            {
+                TelemetryTurnOutcome::Cancelled
+            } else {
+                TelemetryTurnOutcome::Failed
+            };
+            let (terminal_state, evidence_ids) =
+                telemetry_completion.map_or((None, Vec::new()), |(state, ids)| (Some(state), ids));
+            finish_provider_telemetry(
+                &telemetry,
+                &telemetry_turn,
+                telemetry_started_at,
+                &events[telemetry_event_start..],
+                telemetry_outcome,
+                terminal_state,
+                evidence_ids,
+            );
             match result {
                 Ok(prompt_result) => {
                     persist_session_snapshot(
@@ -1372,7 +1700,7 @@ mod tests {
         model: Arc<DelayedModel>,
         auto_resume_max: u32,
     ) -> OrchestratorProvider<DelayedModel> {
-        let mut recovery = RecoveryConfig::durable(None);
+        let mut recovery = RecoveryConfig::memory_only();
         recovery.auto_resume_max = auto_resume_max;
         OrchestratorProvider::with_policy(
             OrchestratorProviderConfig {
@@ -1440,8 +1768,23 @@ mod tests {
         // Prompt 2 with the same prompt resumes from the checkpoint and
         // completes; the pending checkpoint is cleared.
         handle.send(request(3, "session/prompt", prompt_params(&session_id, "hello")));
-        let result = request_result(next_response_frame(&handle).await);
+        let (frame, updates) = next_response_with_updates(&handle).await;
+        let result = request_result(frame);
         assert_eq!(result["stopReason"], "end_turn", "resumed turn completes: {result}");
+        let final_reports = updates
+            .iter()
+            .filter(|update| {
+                update["update"]["messageId"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("ee-final-response-"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(final_reports.len(), 1, "completed resume emits one final report");
+        assert!(
+            final_reports[0]["update"]["content"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("completion: unverified"))
+        );
 
         handle.shutdown(task).await;
     }
@@ -1460,8 +1803,19 @@ mod tests {
         // One prompt: the first slice times out, the safe single auto-resume
         // continues from the checkpoint and completes.
         handle.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
-        let result = request_result(next_response_frame(&handle).await);
+        let (frame, updates) = next_response_with_updates(&handle).await;
+        let result = request_result(frame);
         assert_eq!(result["stopReason"], "end_turn", "auto-resume completes: {result}");
+        assert_eq!(
+            updates
+                .iter()
+                .filter(|update| update["update"]["messageId"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("ee-final-response-")))
+                .count(),
+            1,
+            "auto-resume emits one final report only after terminal completion"
+        );
 
         handle.shutdown(task).await;
     }
@@ -1497,7 +1851,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_adapter_resume_command_continues_paused_turn_without_prompt_text() {
+    async fn provider_adapter_resume_command_requires_fresh_prompt_after_durable_redaction() {
         let model = Arc::new(DelayedModel::new(
             std::time::Duration::from_millis(5_000),
             std::time::Duration::from_millis(1),
@@ -1514,25 +1868,13 @@ mod tests {
             panic!("expected a recoverable error");
         };
 
-        // `/resume` continues the paused turn without appending the command
-        // text to the model transcript.
+        // `/resume` carries no user content. Durable checkpoints omit the
+        // original transcript, so recovery fails closed until caller supplies
+        // a fresh prompt or explicitly abandons with `/discard`.
         handle.send(request(3, "session/prompt", prompt_params(&session_id, "/resume")));
-        let result = request_result(next_response_frame(&handle).await);
-        assert_eq!(result["stopReason"], "end_turn", "resumed turn completes: {result}");
-        for request in model.inner.requests() {
-            for message in &request.transcript {
-                assert!(
-                    !message.text_content().contains("/resume"),
-                    "no model message may carry the /resume command text"
-                );
-            }
-        }
-        assert!(
-            model.inner.requests().iter().any(|request| {
-                request.transcript.iter().any(|message| message.text_content().contains("hello"))
-            }),
-            "the original prompt is present in the resumed transcript"
-        );
+        let error = request_error(next_response_frame(&handle).await);
+        assert!(error.message.contains("omits transcript content"), "{error:?}");
+        assert!(model.inner.requests().is_empty(), "resume must not call model blindly");
 
         handle.shutdown(task).await;
     }
@@ -1570,7 +1912,7 @@ mod tests {
         model: Arc<DelayedModel>,
         dir: &std::path::Path,
     ) -> OrchestratorProvider<DelayedModel> {
-        let mut recovery = RecoveryConfig::durable(Some(dir.to_path_buf()));
+        let mut recovery = RecoveryConfig::durable(dir.to_path_buf());
         recovery.auto_resume_max = 0;
         OrchestratorProvider::with_policy(
             OrchestratorProviderConfig {
@@ -1732,8 +2074,8 @@ mod tests {
             }
         }
         assert!(
-            replayed_user_texts.iter().any(|text| text == "hello"),
-            "crash replay carries the pending user message: {replayed_user_texts:?}"
+            replayed_user_texts.is_empty(),
+            "crash restore must not replay durable transcript text: {replayed_user_texts:?}"
         );
         assert!(commands_seen, "loaded providers re-advertise their commands");
         let result = request_result(response.expect("load response arrives after replay"));
@@ -1748,7 +2090,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_adapter_initialize_advertises_resume_capability_only_with_recovery() {
+    async fn provider_adapter_initialize_advertises_resume_capability_only_with_durable_recovery() {
         let plain = Arc::new(FakeModel::new(Vec::new()));
         let provider =
             OrchestratorProvider::new(OrchestratorProviderConfig::default(), plain.clone());
@@ -1776,8 +2118,27 @@ mod tests {
         let result = request_result(handle.next_frame().await);
         assert_eq!(
             result["agentCapabilities"]["sessionCapabilities"]["resume"],
+            Value::Null,
+            "memory-only recovery never implies crash-resumable ACP state"
+        );
+        handle.shutdown(task).await;
+
+        let dir = tempfile::TempDir::new().expect("checkpoint dir");
+        let provider = durable_recovery_provider(
+            Arc::new(DelayedModel::new(
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+                FakeModel::new(Vec::new()),
+            )),
+            dir.path(),
+        );
+        let (handle, task) = spawn_server(provider);
+        handle.send(request(1, "initialize", json!({ "protocolVersion": 1 })));
+        let result = request_result(handle.next_frame().await);
+        assert_eq!(
+            result["agentCapabilities"]["sessionCapabilities"]["resume"],
             json!({}),
-            "recovery advertises session/resume"
+            "durable recovery advertises session/resume"
         );
         handle.shutdown(task).await;
     }
@@ -1890,8 +2251,10 @@ mod tests {
         }
         let result = request_result(response.expect("load response"));
         assert_eq!(result["modes"]["currentModeId"], ASK_MODE_ID);
-        assert!(replayed.contains(&json!("hello")), "replayed: {replayed:?}");
-        assert!(replayed.contains(&json!("done")), "replayed: {replayed:?}");
+        assert!(
+            replayed.is_empty(),
+            "durable session load must not replay transcript: {replayed:?}"
+        );
         handle_b.shutdown(task_b).await;
     }
 
@@ -1903,6 +2266,23 @@ mod tests {
             let frame = handle.next_frame_real().await;
             if let RawJsonRpcMessage::Response(_) = &frame {
                 return frame;
+            }
+        }
+    }
+
+    /// Collects prompt updates through its response. Recovery tests use this
+    /// to prove an interruption emits no terminal report while a completed
+    /// resume emits exactly one report on the existing ACP update surface.
+    async fn next_response_with_updates(handle: &Harness) -> (RawJsonRpcMessage, Vec<Value>) {
+        let mut updates = Vec::new();
+        loop {
+            let frame = handle.next_frame_real().await;
+            match &frame {
+                RawJsonRpcMessage::Notification(update) => {
+                    updates.push(raw_params_to_value(update.params.clone()));
+                }
+                RawJsonRpcMessage::Response(_) => return (frame, updates),
+                _ => {}
             }
         }
     }
@@ -2240,10 +2620,10 @@ mod tests {
         assert_eq!(session_id, "session-1");
 
         handle.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
-        // MCP diagnostics (no servers configured), then plan replace, then
-        // the assistant message chunk, then the response.
+        // MCP diagnostics, plan replacement, model text, host-derived final
+        // evidence report, then the unchanged ACP response.
         drain_mcp_diagnostics(&handle).await;
-        let frames = handle.next_frames(3).await;
+        let frames = handle.next_frames(4).await;
         let RawJsonRpcMessage::Notification(plan) = &frames[0] else {
             panic!("first frame is the plan update, got {:?}", frames[0]);
         };
@@ -2263,8 +2643,55 @@ mod tests {
             "message chunk carries the assistant text: {message_params}"
         );
 
-        let result = request_result(frames[2].clone());
+        let final_params = raw_params_to_value(match &frames[2] {
+            RawJsonRpcMessage::Notification(update) => update.params.clone(),
+            other => panic!("third frame is the final response, got {other:?}"),
+        });
+        assert_eq!(final_params["update"]["messageId"], "ee-final-response-1");
+        assert!(
+            final_params["update"]["content"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("completion: unverified")),
+            "typed final completion report: {final_params}"
+        );
+        let result = request_result(frames[3].clone());
         assert_eq!(result["stopReason"], "end_turn");
+
+        handle.shutdown(task).await;
+    }
+
+    #[tokio::test]
+    async fn provider_telemetry_is_opt_in_local_and_records_terminal_state() {
+        let model = Arc::new(FakeModel::new(vec![ModelResponse::new().text("done").completed()]));
+        let provider = OrchestratorProvider::new(
+            OrchestratorProviderConfig {
+                telemetry: TelemetryConfig {
+                    enabled: true,
+                    max_turns: 2,
+                    max_events_per_turn: 16,
+                    max_bytes_per_turn: 4_096,
+                },
+                ..OrchestratorProviderConfig::default()
+            },
+            model,
+        );
+        let probe = provider.clone();
+        let (handle, task) = spawn_server(provider);
+        let session_id = new_session(&handle, 1).await;
+        handle.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
+        let result = request_result(next_response_frame(&handle).await);
+        assert_eq!(result["stopReason"], "end_turn");
+
+        let records = probe.export_telemetry_jsonl().expect("exports telemetry");
+        assert_eq!(records.lines().count(), 1);
+        let record: Value =
+            serde_json::from_str(records.lines().next().expect("record")).expect("json");
+        assert_eq!(record["turnId"], "turn-1");
+        assert_eq!(record["outcome"], "succeeded");
+        assert_eq!(record["terminalState"], "unverified");
+        assert_eq!(record["summary"]["modelCalls"], 1);
+        assert!(!records.contains(&session_id), "telemetry IDs must not contain ACP sessions");
+        assert_eq!(record["attribution"]["transport"], "acp");
 
         handle.shutdown(task).await;
     }
@@ -2306,8 +2733,8 @@ mod tests {
         assert_eq!(request_result(handle.next_frame().await), json!({}));
         handle.send(request(3, "session/prompt", prompt_params(&session_id, "read .ee.toml")));
         drain_mcp_diagnostics(&handle).await;
-        let frames = handle.next_frames(4).await;
-        assert_eq!(request_result(frames[3].clone())["stopReason"], "end_turn");
+        let frames = handle.next_frames(5).await;
+        assert_eq!(request_result(frames[4].clone())["stopReason"], "end_turn");
 
         let requests = model.requests();
         let context = requests[0].transcript[0].text_content();
@@ -2367,12 +2794,13 @@ mod tests {
 
         // Answer the bridge call; the loop appends the observation and asks
         // the model again, streaming the completed tool-call update, then the
-        // assistant update, concrete plan replacement, then the response.
+        // assistant update, concrete plan replacement, host final response,
+        // then the unchanged ACP response.
         handle.send(RawJsonRpcMessage::response(
             fs_request.id.clone(),
             Ok(json!({ "content": "file contents" })),
         ));
-        let frames = handle.next_frames(4).await;
+        let frames = handle.next_frames(5).await;
         assert_eq!(
             raw_params_to_value(match &frames[0] {
                 RawJsonRpcMessage::Notification(update) => update.params.clone(),
@@ -2396,7 +2824,12 @@ mod tests {
         });
         assert_eq!(plan["update"]["sessionUpdate"], "plan");
         assert_eq!(plan["update"]["entries"][1]["content"], "Inspect implementation");
-        let result = request_result(frames[3].clone());
+        let final_params = raw_params_to_value(match &frames[3] {
+            RawJsonRpcMessage::Notification(update) => update.params.clone(),
+            other => panic!("expected final completion update, got {other:?}"),
+        });
+        assert_eq!(final_params["update"]["messageId"], "ee-final-response-1");
+        let result = request_result(frames[4].clone());
         assert_eq!(result["stopReason"], "end_turn");
 
         handle.shutdown(task).await;
@@ -2461,13 +2894,13 @@ mod tests {
         // One turn creates a root task; closing persists the task graph.
         handle.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
         drain_mcp_diagnostics(&handle).await;
-        handle.next_frames(3).await; // plan, message, response
+        handle.next_frames(4).await; // plan, model message, final response, response
         assert_eq!(probe.session_state(&session_id).expect("state").0.len(), 1);
         handle.send(request(3, "session/close", json!({ "sessionId": session_id })));
         let _ = request_result(handle.next_frame().await);
 
-        // Loading restores the persisted graph and replays the recorded
-        // conversation (user prompt + agent text) before the response.
+        // Durable load restores only mode metadata. Transcript, task text,
+        // memory, and tool data are not persisted or replayed.
         handle.send(request(
             4,
             "session/load",
@@ -2478,46 +2911,26 @@ mod tests {
                 "mcpServers": [],
             }),
         ));
-        // Replay order: user message, agent message, then the re-advertised
-        // initial commands, then the response (all updates precede it).
-        let frames = handle.next_frames(4).await;
-        let RawJsonRpcMessage::Notification(user) = &frames[0] else {
-            panic!("expected the replayed user message, got {:?}", frames[0]);
-        };
-        let user_params = raw_params_to_value(user.params.clone());
-        assert_eq!(user_params["update"]["sessionUpdate"], "user_message_chunk");
-        assert_eq!(user_params["update"]["messageId"], "replay-u-1");
-        assert_eq!(user_params["update"]["content"]["text"], "hello");
-        let RawJsonRpcMessage::Notification(agent) = &frames[1] else {
-            panic!("expected the replayed agent message, got {:?}", frames[1]);
-        };
-        let agent_params = raw_params_to_value(agent.params.clone());
-        assert_eq!(agent_params["update"]["sessionUpdate"], "agent_message_chunk");
-        assert_eq!(agent_params["update"]["messageId"], "replay-a-2");
-        assert_eq!(agent_params["update"]["content"]["text"], "first turn");
-        let RawJsonRpcMessage::Notification(commands) = &frames[2] else {
-            panic!("expected the available_commands_update, got {:?}", frames[2]);
+        let frames = handle.next_frames(2).await;
+        let RawJsonRpcMessage::Notification(commands) = &frames[0] else {
+            panic!("expected available commands update, got {:?}", frames[0]);
         };
         assert_eq!(
             raw_params_to_value(commands.params.clone())["update"]["sessionUpdate"],
             "available_commands_update"
         );
-        let result = request_result(frames[3].clone());
-        assert_eq!(
-            result["modes"]["currentModeId"], ASK_MODE_ID,
-            "load restores mode advertisement alongside persisted state"
-        );
-        let (tasks, _memory) = probe.session_state(&session_id).expect("restored state");
-        assert_eq!(tasks.len(), 1, "persisted root task restored");
+        let result = request_result(frames[1].clone());
+        assert_eq!(result["modes"]["currentModeId"], ASK_MODE_ID);
+        assert_eq!(probe.session_state(&session_id).expect("restored state").0.len(), 0);
 
         handle.send(request(5, "session/prompt", prompt_params(&session_id, "again")));
         drain_mcp_diagnostics(&handle).await;
-        let frames = handle.next_frames(3).await;
-        assert_eq!(request_result(frames[2].clone())["stopReason"], "end_turn");
+        let frames = handle.next_frames(4).await;
+        assert_eq!(request_result(frames[3].clone())["stopReason"], "end_turn");
         assert_eq!(
             probe.session_state(&session_id).expect("state").0.len(),
-            2,
-            "restored graph carries into the new turn"
+            1,
+            "new turn starts with a fresh durable-session runtime"
         );
 
         handle.shutdown(task).await;

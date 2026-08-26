@@ -544,8 +544,12 @@ pub enum ContextInvalidation {
     BufferRevision { session_id: String },
     /// Diagnostics snapshot changed.
     DiagnosticsRevision { session_id: String },
+    /// Selected validation produced a new result.
+    ValidationResult { session_id: String },
     /// Graph/index revision changed.
     GraphRevision { session_id: String },
+    /// Git worktree changed without a tracked editor write (for example an external VCS operation).
+    WorktreeRevision { session_id: String },
     /// Git checkout changed.
     CheckoutRevision { session_id: String },
     /// Policy/instruction revision changed.
@@ -560,7 +564,9 @@ impl ContextInvalidation {
             Self::Write { session_id }
             | Self::BufferRevision { session_id }
             | Self::DiagnosticsRevision { session_id }
+            | Self::ValidationResult { session_id }
             | Self::GraphRevision { session_id }
+            | Self::WorktreeRevision { session_id }
             | Self::CheckoutRevision { session_id }
             | Self::PolicyChanged { session_id }
             | Self::SessionEnded { session_id } => session_id,
@@ -861,6 +867,28 @@ mod tests {
         let mut cache = ContextPlanCache::new();
         cache.insert("task-1", &planning_input, &config, plan);
         cache.invalidate(ContextInvalidation::BufferRevision {
+            session_id: "session-1".to_string(),
+        });
+        assert!(cache.is_empty());
+
+        cache.insert(
+            "task-1",
+            &planning_input,
+            &config,
+            ContextPlanner.plan(&planning_input, &config),
+        );
+        cache.invalidate(ContextInvalidation::ValidationResult {
+            session_id: "session-1".to_string(),
+        });
+        assert!(cache.is_empty());
+
+        cache.insert(
+            "task-1",
+            &planning_input,
+            &config,
+            ContextPlanner.plan(&planning_input, &config),
+        );
+        cache.invalidate(ContextInvalidation::WorktreeRevision {
             session_id: "session-1".to_string(),
         });
         assert!(cache.is_empty());

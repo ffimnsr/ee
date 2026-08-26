@@ -14,7 +14,7 @@ use ee_agent_host::{
     AgentConnection, AgentConnectionOptions, AgentError, AgentEvent, AgentManager,
     AgentManagerConfig, AgentProcessConfig, ClientRequest, ClientRequestHandler,
     ClientRequestResponse, ClientRequestResult, DenyAllHandler, HandlerCapabilities,
-    RecordingHandler, ThreadCloseReason,
+    RecordingHandler, SafeFollowUp, ThreadCloseReason, TurnBlocker,
 };
 use ee_agent_protocol::{
     AudioContent, ContentBlock, CreateElicitationResponse, CreateTerminalResponse,
@@ -585,9 +585,15 @@ async fn recoverable_error_surfaces_as_paused_event_with_structured_info() {
     assert!(matches!(error, AgentError::Rpc(_)), "wire error stays an Rpc error: {error:?}");
     assert!(!thread.is_turn_running(), "the thread stays alive after a pause");
 
+    let mut saw_paused_evidence = false;
     let paused = loop {
         match next_event(&mut host.events).await {
             AgentEvent::TurnPausedRecoverable { recoverable, .. } => break *recoverable,
+            AgentEvent::TurnEvidenceUpdated { summary, .. } => {
+                assert_eq!(summary.blocker, Some(TurnBlocker::PromptPausedRecoverable));
+                assert_eq!(summary.safe_follow_up, SafeFollowUp::ResumeOrDiscard);
+                saw_paused_evidence = true;
+            }
             AgentEvent::TurnStarted { .. }
             | AgentEvent::SessionUpdate { .. }
             | AgentEvent::ConnectionStateChanged { .. }
@@ -595,6 +601,7 @@ async fn recoverable_error_surfaces_as_paused_event_with_structured_info() {
             other => panic!("unexpected event: {other:?}"),
         }
     };
+    assert!(saw_paused_evidence);
     assert_eq!(paused.fault, "deadline");
     assert_eq!(paused.detail, "paused after 300s");
     assert!(paused.safe_resume);
@@ -686,6 +693,49 @@ async fn cancel_sends_session_cancel_and_resolves_prompt() {
         }
     }
     assert!(matches!(terminal_events[0], AgentEvent::TurnCancelled { .. }));
+    host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
+async fn cancellation_keeps_turn_reservation_until_old_prompt_future_resolves() {
+    let script = base_script()
+        .wait_for("session/prompt")
+        .delay(100)
+        .respond(json!({ "stopReason": "end_turn" }))
+        .wait_for("session/prompt")
+        .respond(json!({ "stopReason": "end_turn" }));
+    let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
+
+    let old_thread = thread.clone();
+    let old_prompt = tokio::spawn(async move {
+        old_thread.send_prompt(vec![ContentBlock::Text(TextContent::new("old"))]).await
+    });
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while !fake.log_contains("\"method\":\"session/prompt\"") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("old prompt request observed");
+
+    thread.cancel().await.expect("cancel succeeds");
+    assert!(thread.is_turn_running(), "cancelling turn retains reservation");
+    assert!(matches!(
+        thread.send_prompt(vec![ContentBlock::Text(TextContent::new("replacement"))]).await,
+        Err(AgentError::TurnAlreadyRunning)
+    ));
+
+    assert!(matches!(old_prompt.await.expect("old prompt task joins"), Err(AgentError::Cancelled)));
+    assert!(!thread.is_turn_running(), "old completion releases only its reservation");
+    thread
+        .send_prompt(vec![ContentBlock::Text(TextContent::new("replacement"))])
+        .await
+        .expect("replacement prompt starts after old future resolves");
+
     host.close().await;
     fake.join(TEST_TIMEOUT).await;
 }

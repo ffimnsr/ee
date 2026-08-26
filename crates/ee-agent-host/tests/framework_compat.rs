@@ -262,6 +262,13 @@ async fn host_drives_framework_initialize_session_prompt_and_close() {
         next_event(&mut host.events).await,
         AgentEvent::TurnCompleted { stop_reason: StopReason::EndTurn, .. }
     ));
+    match next_event(&mut host.events).await {
+        AgentEvent::TurnEvidenceUpdated { summary, .. } => {
+            assert_eq!(summary.status, ee_agent_host::TurnTerminalStatus::Unverified);
+            assert_eq!(summary.blocker, Some(ee_agent_host::TurnBlocker::MissingRevision));
+        }
+        other => panic!("expected host turn evidence event, got {other:?}"),
+    }
 
     // Session close.
     host.connection

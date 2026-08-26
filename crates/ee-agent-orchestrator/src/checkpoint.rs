@@ -1,10 +1,10 @@
 //! Orchestrator checkpoints: serializable snapshots and validated restore.
 //!
 //! An [`OrchestratorCheckpoint`] captures the bounded, secret-conscious state
-//! of one session — config, task graph, memory store, transcript summary,
-//! budget snapshot, finished subagent outcomes, the deterministic id
-//! generator counter, and (for recovery checkpoints) an exact resumable
-//! [`ResumeState`] — so turns are inspectable and resumable.  Restore is
+//! of one session — config, task graph, redacted memory, opaque transcript
+//! accounting, budget snapshot, finished subagent outcomes, deterministic id
+//! generator counter, and (for recovery checkpoints) a bounded [`ResumeState`]
+//! without transcript/tool payloads — so turns can resume safely. Restore is
 //! fail-closed: [`OrchestratorCheckpoint::validate`] rejects unsupported
 //! schema versions, dangling task references, over-limit or sensitive memory,
 //! budget snapshots that do not match the checkpoint config, and resume state
@@ -14,26 +14,36 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::budget::BudgetSnapshot;
 use crate::config::OrchestratorConfig;
 use crate::error::OrchestratorError;
 use crate::memory::MemoryStore;
 use crate::model::{ModelAdapter, ModelMessage};
+use crate::observability::RedactedEvidenceRef;
 use crate::policy::PolicyEngine;
 use crate::runtime::OrchestratorRuntime;
+use crate::sensitive_data::is_secret_like;
 use crate::subagents::{SubagentId, SubagentResult};
 use crate::tasks::{TaskGraph, TaskId, TaskStatus};
 use crate::tools::SideEffectClass;
 
 /// Current checkpoint schema version; restore rejects everything else.
 ///
-/// v2 adds recovery state: [`ResumeState`], creation timestamp, and provider
-/// identity.  v1 checkpoints fail closed (never migrated silently).
-pub const CHECKPOINT_SCHEMA_VERSION: u32 = 2;
-/// Cap on transcript tail messages kept in a [`TranscriptSummary`]; older
-/// messages are dropped, so snapshots stay bounded.
-pub const MAX_TRANSCRIPT_TAIL_MESSAGES: usize = 8;
+/// v4 excludes transcripts, tool arguments, and tool summaries from durable
+/// payloads. Earlier checkpoint schemas fail closed and are never migrated
+/// silently.
+pub const CHECKPOINT_SCHEMA_VERSION: u32 = 4;
+/// Maximum opaque context-source labels retained with one checkpoint.
+pub const MAX_CHECKPOINT_CONTEXT_SOURCES: usize = 16;
+/// Maximum opaque host evidence references retained with one checkpoint.
+pub const MAX_CHECKPOINT_EVIDENCE_REFS: usize = 32;
+/// Maximum length of opaque checkpoint provenance labels.
+pub const MAX_CHECKPOINT_PROVENANCE_LABEL_CHARS: usize = 128;
+/// Legacy compatibility cap. Durable summaries retain zero transcript
+/// messages regardless of this value.
+pub const MAX_TRANSCRIPT_TAIL_MESSAGES: usize = 0;
 /// Default provenance label for checkpoints built without an explicit one.
 pub const DEFAULT_CHECKPOINT_PROVENANCE: &str = "checkpoint";
 
@@ -82,8 +92,8 @@ impl Default for IdGeneratorState {
     }
 }
 
-/// Bounded summary of a turn's transcript, kept instead of the full transcript
-/// so checkpoints stay small and secret-conscious.
+/// Opaque accounting for a turn's transcript. Durable checkpoints deliberately
+/// retain no user or model message content.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct TranscriptSummary {
@@ -91,9 +101,10 @@ pub struct TranscriptSummary {
     pub message_count: usize,
     /// Total serialized bytes of the source transcript.
     pub total_bytes: usize,
-    /// Whether older messages were dropped from `tail`.
+    /// Whether the source transcript contained content omitted from durable state.
     pub truncated: bool,
-    /// Newest messages (at most [`MAX_TRANSCRIPT_TAIL_MESSAGES`]).
+    /// Compatibility field. Durable checkpoints always persist this as empty.
+    #[serde(default)]
     pub tail: Vec<ModelMessage>,
 }
 
@@ -105,12 +116,11 @@ impl TranscriptSummary {
             .iter()
             .map(|message| serde_json::to_string(message).map_or(0, |json| json.len()))
             .sum();
-        let start = transcript.len().saturating_sub(MAX_TRANSCRIPT_TAIL_MESSAGES);
         Self {
             message_count: transcript.len(),
             total_bytes,
-            truncated: start > 0,
-            tail: transcript[start..].to_vec(),
+            truncated: !transcript.is_empty(),
+            tail: Vec::new(),
         }
     }
 
@@ -132,7 +142,7 @@ impl TranscriptSummary {
         self.truncated
     }
 
-    /// The retained newest messages.
+    /// Compatibility accessor. Durable checkpoints never retain transcript messages.
     #[must_use]
     pub fn tail(&self) -> &[ModelMessage] {
         &self.tail
@@ -223,11 +233,16 @@ pub struct CompletedToolCall {
     pub tool_call_id: String,
     /// Tool name.
     pub tool_name: String,
-    /// Exact arguments the model supplied.
+    /// Exact arguments retained only in volatile state. Durable persistence
+    /// replaces this with `null`.
     pub arguments: serde_json::Value,
+    /// Opaque SHA-256 fingerprint of tool name and arguments. This survives
+    /// persistence to block duplicate side effects without retaining arguments.
+    #[serde(default)]
+    pub arguments_fingerprint: String,
     /// Whether the call succeeded.
     pub success: bool,
-    /// Bounded result summary (never raw tool output).
+    /// Volatile result summary. Durable persistence clears this field.
     pub summary: String,
     /// Side-effect class, so replays of write/execute calls are blocked.
     pub side_effect_class: SideEffectClass,
@@ -242,16 +257,66 @@ pub struct InFlightOperation {
     pub tool_call_id: String,
     /// Tool name.
     pub tool_name: String,
+    /// Opaque SHA-256 fingerprint of tool name and arguments. It identifies an
+    /// ambiguous side effect without retaining its arguments.
+    #[serde(default)]
+    pub arguments_fingerprint: String,
     /// Wall-clock millis when execution started.
     pub started_at_millis: u64,
+}
+
+/// Why a recovery checkpoint was persisted. This is lifecycle provenance,
+/// not a completion or validation claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointCaptureOrigin {
+    /// Debounced state snapshot after a turn milestone.
+    Milestone,
+    /// Unconditional snapshot while a turn was interrupted.
+    Interruption,
+}
+
+/// Bounded, opaque context revisions and source classes associated with one
+/// recovery capture. No prompts, excerpts, paths, terminal output, or repo
+/// instructions may enter this type.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct CheckpointContextProvenance {
+    pub workspace_revision: Option<String>,
+    pub buffer_revision: Option<String>,
+    pub diagnostics_revision: Option<String>,
+    pub checkout_revision: Option<String>,
+    pub source_labels: Vec<String>,
+}
+
+/// Immutable metadata captured with a recovery checkpoint. Evidence references
+/// are opaque host-redacted IDs only; they never turn a restored turn into a
+/// verified completion state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct CheckpointCaptureMetadata {
+    pub origin: CheckpointCaptureOrigin,
+    pub context: CheckpointContextProvenance,
+    pub evidence_refs: Vec<RedactedEvidenceRef>,
+}
+
+impl Default for CheckpointCaptureMetadata {
+    fn default() -> Self {
+        Self {
+            origin: CheckpointCaptureOrigin::Milestone,
+            context: CheckpointContextProvenance::default(),
+            evidence_refs: Vec::new(),
+        }
+    }
 }
 
 /// Exact resumable turn state carried by recovery checkpoints.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ResumeState {
-    /// Exact transcript tail (already bounded by the memory limit).  A
-    /// resumed turn continues from here instead of rebuilding the prompt.
+    /// Volatile transcript retained only while the process is alive. Durable
+    /// persistence always clears it; a crash resume requires a fresh prompt.
+    #[serde(default)]
     pub transcript: Vec<ModelMessage>,
     /// Id of the active root task the resumed turn continues.
     pub active_task_id: String,
@@ -298,6 +363,8 @@ pub struct OrchestratorCheckpoint {
     /// Exact resumable turn state; `None` for plain snapshots without
     /// pending work.
     pub resume: Option<ResumeState>,
+    /// Bounded lifecycle, context, and evidence provenance for this capture.
+    pub capture: CheckpointCaptureMetadata,
 }
 
 impl OrchestratorCheckpoint {
@@ -351,6 +418,43 @@ impl OrchestratorCheckpoint {
         created_at_millis: u64,
         resume: Option<ResumeState>,
     ) -> Result<Self, OrchestratorError> {
+        Self::with_recovery_metadata(
+            provenance,
+            config,
+            session_id,
+            tasks,
+            memory,
+            transcript_summary,
+            budget,
+            subagents,
+            id_generator,
+            provider,
+            created_at_millis,
+            resume,
+            CheckpointCaptureMetadata::default(),
+        )
+    }
+
+    /// Builds a recovery checkpoint with bounded host-derived provenance.
+    /// Callers must provide only opaque revision labels and redacted evidence
+    /// IDs; raw prompts, paths, outputs, and repository instructions are not
+    /// accepted by this metadata surface.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_recovery_metadata(
+        provenance: impl Into<String>,
+        config: OrchestratorConfig,
+        session_id: impl Into<String>,
+        tasks: TaskGraph,
+        memory: MemoryStore,
+        transcript_summary: TranscriptSummary,
+        budget: BudgetSnapshot,
+        subagents: SubagentTreeState,
+        id_generator: IdGeneratorState,
+        provider: impl Into<String>,
+        created_at_millis: u64,
+        resume: Option<ResumeState>,
+        capture: CheckpointCaptureMetadata,
+    ) -> Result<Self, OrchestratorError> {
         let checkpoint = Self {
             schema_version: CHECKPOINT_SCHEMA_VERSION,
             provenance: provenance.into(),
@@ -365,6 +469,7 @@ impl OrchestratorCheckpoint {
             subagents,
             id_generator,
             resume,
+            capture,
         };
         checkpoint.validate()?;
         Ok(checkpoint)
@@ -437,6 +542,7 @@ impl OrchestratorCheckpoint {
             ));
         }
         self.subagents.validate(&self.tasks)?;
+        validate_capture_metadata(&self.capture)?;
         if let Some(resume) = &self.resume {
             if self.tasks.get(&TaskId::new(resume.active_task_id.clone())).is_none() {
                 return Err(OrchestratorError::InvalidState(format!(
@@ -462,6 +568,34 @@ impl OrchestratorCheckpoint {
         Ok(())
     }
 
+    /// Produces the bounded redacted form accepted by durable stores. Volatile
+    /// transcript/tool data is removed; side-effect fingerprints remain.
+    pub(crate) fn persistence_safe_copy(&self) -> Result<Self, OrchestratorError> {
+        self.validate()?;
+        let mut checkpoint = self.clone();
+        checkpoint.transcript_summary.tail.clear();
+        if let Some(resume) = &mut checkpoint.resume {
+            resume.transcript.clear();
+            for completed in &mut resume.completed_tools {
+                completed.arguments_fingerprint =
+                    tool_call_fingerprint(&completed.tool_name, &completed.arguments)?;
+                completed.arguments = serde_json::Value::Null;
+                completed.summary.clear();
+            }
+            if let Some(in_flight) = &resume.in_flight
+                && in_flight.arguments_fingerprint.is_empty()
+            {
+                return Err(OrchestratorError::InvalidState(
+                    "in-flight operation has no side-effect fingerprint; refusing durable persistence"
+                        .into(),
+                ));
+            }
+        }
+        redact_persisted_strings(&mut checkpoint)?;
+        checkpoint.validate()?;
+        Ok(checkpoint)
+    }
+
     /// Restores the runtime and reports every restored item with its
     /// provenance.  The runtime rebuilds its stores from this checkpoint;
     /// `model` and `policy` come from the caller (never persisted).
@@ -474,11 +608,121 @@ impl OrchestratorCheckpoint {
         let runtime = OrchestratorRuntime::from_validated_checkpoint(self, model, policy)?;
         let report = RestoreReport {
             provenance: self.provenance.clone(),
+            capture: self.capture.clone(),
             restored_tasks: self.tasks.list().into_iter().map(|task| task.id).collect(),
             restored_memory_items: self.memory.items().to_vec(),
         };
         Ok((runtime, report))
     }
+}
+
+/// Opaque stable identity for a side-effect request. The hash covers both
+/// tool name and canonical JSON arguments and never exposes their contents.
+pub(crate) fn tool_call_fingerprint(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+) -> Result<String, OrchestratorError> {
+    let arguments = serde_json::to_vec(arguments).map_err(|error| {
+        OrchestratorError::Serialization(format!("tool arguments cannot be fingerprinted: {error}"))
+    })?;
+    let mut hasher = Sha256::new();
+    hasher.update(tool_name.as_bytes());
+    hasher.update([0]);
+    hasher.update(arguments);
+    Ok(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn redact_persisted_strings(
+    checkpoint: &mut OrchestratorCheckpoint,
+) -> Result<(), OrchestratorError> {
+    let mut value = serde_json::to_value(&*checkpoint).map_err(|error| {
+        OrchestratorError::Serialization(format!(
+            "checkpoint persistence redaction failed: {error}"
+        ))
+    })?;
+    redact_value_strings(&mut value, None);
+    *checkpoint = serde_json::from_value(value).map_err(|error| {
+        OrchestratorError::Serialization(format!(
+            "checkpoint persistence redaction failed: {error}"
+        ))
+    })?;
+    Ok(())
+}
+
+fn redact_value_strings(value: &mut serde_json::Value, field: Option<&str>) {
+    const IDENTITY_FIELDS: &[&str] = &[
+        "active_task_id",
+        "arguments_fingerprint",
+        "dependencies",
+        "id",
+        "parent",
+        "provider",
+        "session_id",
+        "tool_call_id",
+        "tool_name",
+    ];
+    match value {
+        serde_json::Value::String(text)
+            if !field.is_some_and(|name| IDENTITY_FIELDS.contains(&name)) =>
+        {
+            *text = crate::sensitive_data::redact(text);
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_value_strings(item, field);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for (name, item) in fields {
+                redact_value_strings(item, Some(name));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn validate_capture_metadata(
+    metadata: &CheckpointCaptureMetadata,
+) -> Result<(), OrchestratorError> {
+    if metadata.context.source_labels.len() > MAX_CHECKPOINT_CONTEXT_SOURCES {
+        return Err(OrchestratorError::Serialization(format!(
+            "checkpoint has more than {MAX_CHECKPOINT_CONTEXT_SOURCES} context source labels"
+        )));
+    }
+    if metadata.evidence_refs.len() > MAX_CHECKPOINT_EVIDENCE_REFS {
+        return Err(OrchestratorError::Serialization(format!(
+            "checkpoint has more than {MAX_CHECKPOINT_EVIDENCE_REFS} evidence references"
+        )));
+    }
+    let revisions = [
+        metadata.context.workspace_revision.as_deref(),
+        metadata.context.buffer_revision.as_deref(),
+        metadata.context.diagnostics_revision.as_deref(),
+        metadata.context.checkout_revision.as_deref(),
+    ];
+    for label in
+        revisions.into_iter().flatten().chain(
+            metadata.context.source_labels.iter().map(String::as_str).chain(
+                metadata.evidence_refs.iter().map(|reference| reference.artifact_id.as_str()),
+            ),
+        )
+    {
+        if !is_opaque_checkpoint_label(label) {
+            return Err(OrchestratorError::PolicyDenied(
+                "checkpoint capture metadata contains a non-opaque or secret-like label".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_opaque_checkpoint_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_CHECKPOINT_PROVENANCE_LABEL_CHARS
+        && !is_secret_like(value)
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
 }
 
 /// Current wall-clock time in Unix milliseconds (checkpoint timestamps).
@@ -495,6 +739,9 @@ pub fn current_unix_millis() -> u64 {
 pub struct RestoreReport {
     /// Where the restored items came from.
     pub provenance: String,
+    /// Bounded capture lifecycle/context/evidence provenance. This remains
+    /// insufficient to claim verified completion after restore.
+    pub capture: CheckpointCaptureMetadata,
     /// Task ids restored from the checkpoint, in stable order.
     pub restored_tasks: Vec<TaskId>,
     /// Memory items restored from the checkpoint (all non-sensitive).
@@ -592,7 +839,7 @@ mod tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(CHECKPOINT_SCHEMA_VERSION, 2);
+        assert_eq!(CHECKPOINT_SCHEMA_VERSION, 4);
         assert_eq!(sample_checkpoint().schema_version(), CHECKPOINT_SCHEMA_VERSION);
     }
 
@@ -627,6 +874,11 @@ mod tests {
                     tool_call_id: "tc-1".into(),
                     tool_name: "read_file".into(),
                     arguments: serde_json::json!({ "path": "/work/a.txt" }),
+                    arguments_fingerprint: tool_call_fingerprint(
+                        "read_file",
+                        &serde_json::json!({ "path": "/work/a.txt" }),
+                    )
+                    .expect("fingerprint"),
                     success: true,
                     summary: "a.txt: hello".into(),
                     side_effect_class: crate::tools::SideEffectClass::Read,
@@ -645,6 +897,46 @@ mod tests {
         let resume = restored.resume.expect("resume state survives");
         assert_eq!(resume.completed_tools[0].tool_name, "read_file");
         assert_eq!(resume.resumed_count, 1);
+    }
+
+    #[test]
+    fn recovery_capture_preserves_only_bounded_opaque_provenance() {
+        let base = sample_checkpoint();
+        let metadata = CheckpointCaptureMetadata {
+            origin: CheckpointCaptureOrigin::Interruption,
+            context: CheckpointContextProvenance {
+                workspace_revision: Some("workspace-7".into()),
+                buffer_revision: Some("buffer-2".into()),
+                diagnostics_revision: Some("diagnostics-4".into()),
+                checkout_revision: Some("checkout-1".into()),
+                source_labels: vec!["diagnostics".into(), "git_diff".into()],
+            },
+            evidence_refs: vec![RedactedEvidenceRef::new("evidence-9").expect("opaque ref")],
+        };
+        let checkpoint = OrchestratorCheckpoint::with_recovery_metadata(
+            "recovery",
+            base.config.clone(),
+            "s-1",
+            base.tasks.clone(),
+            base.memory.clone(),
+            base.transcript_summary.clone(),
+            base.budget,
+            base.subagents.clone(),
+            base.id_generator,
+            "provider",
+            1,
+            None,
+            metadata.clone(),
+        )
+        .expect("metadata checkpoint is valid");
+        let (_, report) = checkpoint.restore_runtime(model(), policy()).expect("restores");
+        assert_eq!(report.capture, metadata);
+        assert_eq!(report.capture.origin, CheckpointCaptureOrigin::Interruption);
+        assert_eq!(report.capture.evidence_refs[0].artifact_id, "evidence-9");
+
+        let mut invalid = checkpoint.clone();
+        invalid.capture.context.workspace_revision = Some("/workspace/path".into());
+        assert!(matches!(invalid.validate(), Err(OrchestratorError::PolicyDenied(_))));
     }
 
     #[test]
@@ -700,6 +992,11 @@ mod tests {
                     tool_call_id: String::new(),
                     tool_name: "read_file".into(),
                     arguments: serde_json::json!({}),
+                    arguments_fingerprint: tool_call_fingerprint(
+                        "read_file",
+                        &serde_json::json!({}),
+                    )
+                    .expect("fingerprint"),
                     success: true,
                     summary: "x".into(),
                     side_effect_class: crate::tools::SideEffectClass::Read,
@@ -732,22 +1029,16 @@ mod tests {
 
     #[test]
     fn transcript_summary_is_bounded_and_tracks_truncation() {
-        use crate::model::ModelContent;
         let messages: Vec<ModelMessage> =
             (0..20).map(|index| ModelMessage::text(ModelRole::User, format!("m{index}"))).collect();
         let summary = TranscriptSummary::from_transcript(&messages);
         assert_eq!(summary.message_count(), 20);
         assert!(summary.truncated());
-        assert_eq!(summary.tail().len(), MAX_TRANSCRIPT_TAIL_MESSAGES);
-        // The newest message survives truncation.
-        assert_eq!(
-            summary.tail()[summary.tail().len() - 1].content,
-            vec![ModelContent::Text("m19".into())]
-        );
+        assert!(summary.tail().is_empty(), "durable summaries retain no transcript content");
 
         let small = TranscriptSummary::from_transcript(&messages[..3]);
-        assert!(!small.truncated());
-        assert_eq!(small.tail().len(), 3);
+        assert!(small.truncated());
+        assert!(small.tail().is_empty());
         assert!(small.total_bytes() > 0);
     }
 

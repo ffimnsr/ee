@@ -23,8 +23,9 @@ use tokio::sync::watch;
 
 use crate::budget::BudgetTracker;
 use crate::checkpoint::{
-    CompletedToolCall, IdGeneratorState, InFlightOperation, OrchestratorCheckpoint, ResumeState,
-    SubagentTreeState, TranscriptSummary, current_unix_millis,
+    CheckpointCaptureOrigin, CompletedToolCall, IdGeneratorState, InFlightOperation,
+    OrchestratorCheckpoint, ResumeState, SubagentTreeState, TranscriptSummary, current_unix_millis,
+    tool_call_fingerprint,
 };
 use crate::checkpoint_store::CheckpointHandle;
 use crate::config::OrchestratorConfig;
@@ -88,6 +89,9 @@ pub(crate) struct TurnSystemContext {
     pub memory: Option<String>,
     /// Immutable session facts such as cwd and path rules.
     pub session: Option<String>,
+    /// Fresh task context. Repository and tool content retain their untrusted
+    /// transcript role; this must never be flattened into system context.
+    pub task_context: Option<crate::context_planner::ContextPlan>,
 }
 
 impl Default for LoopOptions {
@@ -183,7 +187,7 @@ impl LoopEngine {
             client,
             cancel,
             task,
-            TurnSystemContext { memory, session: None },
+            TurnSystemContext { memory, session: None, task_context: None },
         )
         .await
     }
@@ -206,6 +210,9 @@ impl LoopEngine {
         }
         if let Some(session) = context.session.as_deref().filter(|text| !text.is_empty()) {
             transcript.prepend_system(session);
+        }
+        if let Some(task_context) = context.task_context {
+            task_context.apply_to_transcript(&mut transcript);
         }
         self.run_transcript(&mut transcript, ctx.session_id.to_string(), sink, client, cancel, task)
             .await
@@ -521,6 +528,10 @@ impl LoopEngine {
                             tool_call_id: intent.tool_call_id.clone(),
                             tool_name: intent.name.clone(),
                             arguments: intent.arguments.clone(),
+                            arguments_fingerprint: tool_call_fingerprint(
+                                &intent.name,
+                                &intent.arguments,
+                            )?,
                             success: result.success,
                             summary: result.summary_text(),
                             side_effect_class: SideEffectClass::Read,
@@ -556,6 +567,10 @@ impl LoopEngine {
                                 Some(InFlightOperation {
                                     tool_call_id: intent.tool_call_id.clone(),
                                     tool_name: intent.name.clone(),
+                                    arguments_fingerprint: tool_call_fingerprint(
+                                        &intent.name,
+                                        &intent.arguments,
+                                    )?,
                                     started_at_millis: current_unix_millis(),
                                 });
                             let executed = self
@@ -601,6 +616,10 @@ impl LoopEngine {
                                 tool_call_id: intent.tool_call_id.clone(),
                                 tool_name: intent.name.clone(),
                                 arguments: intent.arguments.clone(),
+                                arguments_fingerprint: tool_call_fingerprint(
+                                    &intent.name,
+                                    &intent.arguments,
+                                )?,
                                 success: result.success,
                                 summary: result.summary_text(),
                                 side_effect_class: class.unwrap_or(SideEffectClass::Read),
@@ -645,13 +664,14 @@ impl LoopEngine {
         ) {
             return None;
         }
+        let fingerprint = tool_call_fingerprint(&intent.name, &intent.arguments).ok()?;
         let completed = track
             .lock()
             .expect("recovery track poisoned")
             .completed_tools
             .iter()
             .find(|completed| {
-                completed.tool_name == intent.name && completed.arguments == intent.arguments
+                completed.tool_name == intent.name && completed.arguments_fingerprint == fingerprint
             })
             .cloned()?;
         self.events.record(OrchestratorEvent::ToolResultReused {
@@ -660,7 +680,7 @@ impl LoopEngine {
         });
         let result = ToolResult {
             success: completed.success,
-            text_output: completed.summary.clone(),
+            text_output: "previous side-effect result withheld from durable recovery state".into(),
             structured_output: None,
             error_kind: None,
         };
@@ -689,7 +709,7 @@ impl LoopEngine {
             let memory = memory.lock().expect("memory store poisoned").clone();
             let budget = self.budget.lock().expect("budget tracker poisoned").snapshot();
             let summary = TranscriptSummary::from_transcript(transcript.messages());
-            OrchestratorCheckpoint::with_recovery(
+            OrchestratorCheckpoint::with_recovery_metadata(
                 "checkpoint",
                 self.config.clone(),
                 handle.session_id(),
@@ -702,6 +722,11 @@ impl LoopEngine {
                 handle.provider(),
                 current_unix_millis(),
                 Some(resume),
+                handle.capture_metadata(if force {
+                    CheckpointCaptureOrigin::Interruption
+                } else {
+                    CheckpointCaptureOrigin::Milestone
+                }),
             )
         };
         let checkpoint = match checkpoint {

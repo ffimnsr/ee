@@ -72,6 +72,8 @@ use crate::inbound::{
     ClientRequest, ClientRequestHandler, ClientRequestResponse, HandlerCapabilities, ProxyTextEdit,
 };
 use crate::process::AgentProcess;
+use crate::session::ThreadShared;
+use crate::turn_evidence::TurnKey;
 
 /// The outbound message type the rmcp serve loop hands to the transport
 /// (server→client traffic; for the ee proxy always a response to an inner
@@ -173,6 +175,8 @@ async fn proxy_executor(
 struct HostProxyBackend {
     jobs: mpsc::UnboundedSender<ProxyJob>,
     process: Arc<Mutex<Option<AgentProcess>>>,
+    threads: Arc<Mutex<HashMap<SessionId, Arc<ThreadShared>>>>,
+    agent_id: String,
     scope: String,
     supported_tools: Option<Vec<String>>,
 }
@@ -212,11 +216,98 @@ impl HostProxyBackend {
             }
         })
     }
+
+    fn evidence_unavailable(message: &'static str) -> ProxyToolError {
+        ProxyToolError {
+            message: format!("evidence_unavailable: {message}"),
+            is_permission_denied: false,
+        }
+    }
+
+    fn resolve_evidence_thread(
+        &self,
+        session_id: Option<String>,
+        turn_id: Option<u64>,
+    ) -> Result<(Arc<ThreadShared>, u64), ProxyToolError> {
+        if turn_id.is_some() && session_id.is_none() {
+            return Err(Self::evidence_unavailable(
+                "a specified turn requires a connection-owned session",
+            ));
+        }
+
+        let (thread, turn_id) = match session_id {
+            Some(session_id) => {
+                let session = SessionId::new(session_id);
+                let thread = self
+                    .threads
+                    .lock()
+                    .expect("threads poisoned")
+                    .get(&session)
+                    .cloned()
+                    .ok_or_else(|| {
+                        Self::evidence_unavailable("session is not owned by this connection")
+                    })?;
+                if thread.agent_id != self.agent_id || thread.session_id != session {
+                    return Err(Self::evidence_unavailable("session ownership validation failed"));
+                }
+                let turn_id = match turn_id {
+                    Some(turn_id) => turn_id,
+                    None => thread
+                        .active_turn
+                        .lock()
+                        .expect("active turn poisoned")
+                        .as_ref()
+                        .map(|turn| turn.turn_id())
+                        .ok_or_else(|| {
+                            Self::evidence_unavailable("session has no current evidence turn")
+                        })?,
+                };
+                (thread, turn_id)
+            }
+            None => {
+                let candidates = self
+                    .threads
+                    .lock()
+                    .expect("threads poisoned")
+                    .values()
+                    .filter_map(|thread| {
+                        if thread.agent_id != self.agent_id {
+                            return None;
+                        }
+                        thread
+                            .active_turn
+                            .lock()
+                            .expect("active turn poisoned")
+                            .as_ref()
+                            .map(|turn| (thread.clone(), turn.turn_id()))
+                    })
+                    .collect::<Vec<_>>();
+                match candidates.as_slice() {
+                    [(thread, turn_id)] => (thread.clone(), *turn_id),
+                    [] => return Err(Self::evidence_unavailable("no current evidence turn")),
+                    _ => {
+                        return Err(Self::evidence_unavailable(
+                            "current evidence turn is ambiguous; specify session_id",
+                        ));
+                    }
+                }
+            }
+        };
+        Ok((thread, turn_id))
+    }
 }
 
 impl EeProxyBackend for HostProxyBackend {
     fn supported_tools(&self) -> Option<Vec<String>> {
         self.supported_tools.clone()
+    }
+
+    fn exposes_turn_evidence_summary(&self) -> bool {
+        self.threads
+            .lock()
+            .expect("threads poisoned")
+            .values()
+            .any(|thread| thread.agent_id == self.agent_id && thread.has_turn_evidence())
     }
 
     fn web_search(&self, request: WebSearchRequest) -> Result<WebSearchResult, ProxyToolError> {
@@ -699,6 +790,26 @@ impl EeProxyBackend for HostProxyBackend {
         proxy_value(self.call(ClientRequest::ProxyReviewContext)?, "review_context")
     }
 
+    fn turn_evidence_summary(
+        &self,
+        session_id: Option<String>,
+        turn_id: Option<u64>,
+    ) -> Result<serde_json::Value, ProxyToolError> {
+        let (thread, turn_id) = self.resolve_evidence_thread(session_id, turn_id)?;
+        let summary = thread
+            .evidence_summary(turn_id)
+            .ok_or_else(|| Self::evidence_unavailable("turn evidence is missing or stale"))?;
+        let expected_key =
+            TurnKey::new(self.agent_id.clone(), thread.session_id.0.to_string(), turn_id);
+        if summary.key != expected_key {
+            return Err(Self::evidence_unavailable("turn ownership validation failed"));
+        }
+        serde_json::to_value(summary).map_err(|_| ProxyToolError {
+            message: String::from("evidence_unavailable: turn summary serialization failed"),
+            is_permission_denied: false,
+        })
+    }
+
     fn project_instructions(&self) -> Result<ProjectInstructionsResult, ProxyToolError> {
         proxy_value(self.call(ClientRequest::ProxyProjectInstructions)?, "project_instructions")
     }
@@ -1022,6 +1133,11 @@ pub(crate) struct McpOverAcpRegistry {
     jobs: mpsc::UnboundedSender<ProxyJob>,
     /// Agent stderr capture for the `ee_diagnostics` tool.
     process: Arc<Mutex<Option<AgentProcess>>>,
+    /// Active host session threads for this agent connection. MCP wire calls
+    /// contain no session id, so evidence retrieval must resolve only through
+    /// this connection-owned map.
+    threads: Arc<Mutex<HashMap<SessionId, Arc<ThreadShared>>>>,
+    agent_id: String,
     proxy_discovery: bool,
 }
 
@@ -1035,6 +1151,7 @@ impl McpOverAcpRegistry {
         handler: Arc<dyn ClientRequestHandler>,
         handler_capabilities: HandlerCapabilities,
         process: Arc<Mutex<Option<AgentProcess>>>,
+        threads: Arc<Mutex<HashMap<SessionId, Arc<ThreadShared>>>>,
     ) -> Self {
         let (jobs_tx, jobs_rx) = mpsc::unbounded_channel();
         if enabled {
@@ -1049,6 +1166,8 @@ impl McpOverAcpRegistry {
             next_connection_id: AtomicU64::new(0),
             jobs: jobs_tx,
             process,
+            threads,
+            agent_id: agent_id.to_owned(),
             proxy_discovery: handler_capabilities.proxy_discovery,
         }
     }
@@ -1113,6 +1232,8 @@ impl McpOverAcpRegistry {
         let backend = HostProxyBackend {
             jobs: self.jobs.clone(),
             process: self.process.clone(),
+            threads: self.threads.clone(),
+            agent_id: self.agent_id.clone(),
             scope: connection_id.to_string(),
             supported_tools: (!self.proxy_discovery).then(Vec::new),
         };
@@ -1367,6 +1488,8 @@ impl McpOverAcpRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reducer::SessionState;
+    use crate::turn_evidence::{EvidenceRevision, TurnEvidenceStore, TurnObservation};
     use rmcp::model::JsonRpcMessage as ModelJsonRpcMessage;
     use serde_json::json;
 
@@ -1410,6 +1533,8 @@ mod tests {
         let backend = HostProxyBackend {
             jobs,
             process: Arc::new(Mutex::new(None)),
+            threads: Arc::new(Mutex::new(HashMap::new())),
+            agent_id: String::from("test-agent"),
             scope: String::from("test"),
             supported_tools: None,
         };
@@ -1456,6 +1581,8 @@ mod tests {
         let backend = HostProxyBackend {
             jobs,
             process: Arc::new(Mutex::new(None)),
+            threads: Arc::new(Mutex::new(HashMap::new())),
+            agent_id: String::from("test-agent"),
             scope: String::from("test"),
             supported_tools: None,
         };
@@ -1490,5 +1617,71 @@ mod tests {
             vec![2, 3]
         );
         worker.join().expect("proxy terminal output worker");
+    }
+
+    #[test]
+    fn turn_evidence_summary_returns_only_owned_redacted_host_summary() {
+        let session = SessionId::new("session-1");
+        let (events, _) = mpsc::unbounded_channel();
+        let mut evidence = TurnEvidenceStore::default();
+        let turn = evidence.start_turn(String::from("agent-1"), session.0.to_string());
+        evidence
+            .observe(
+                turn.turn_id(),
+                TurnObservation::ChangedFiles {
+                    revision: EvidenceRevision::new("revision-1"),
+                    files: vec![String::from("/private/workspace/secret.rs")],
+                    truncated: false,
+                },
+            )
+            .expect("host observation records");
+        let shared = Arc::new(ThreadShared {
+            agent_id: String::from("agent-1"),
+            session_id: session.clone(),
+            state: Mutex::new(SessionState::default()),
+            order: Mutex::new(ee_agent_protocol::SessionUpdateOrder::new()),
+            turn: Mutex::new(None),
+            active_turn: Mutex::new(Some(turn.clone())),
+            paused_turn: Mutex::new(None),
+            turn_started: Mutex::new(None),
+            evidence: Mutex::new(evidence),
+            evidence_available: std::sync::atomic::AtomicBool::new(true),
+            modes: Mutex::new(None),
+            events,
+        });
+        let threads = Arc::new(Mutex::new(HashMap::from([(session.clone(), shared)])));
+        let (jobs, _) = mpsc::unbounded_channel();
+        let backend = HostProxyBackend {
+            jobs,
+            process: Arc::new(Mutex::new(None)),
+            threads,
+            agent_id: String::from("agent-1"),
+            scope: String::from("test"),
+            supported_tools: None,
+        };
+
+        assert!(backend.exposes_turn_evidence_summary());
+        let current = backend.turn_evidence_summary(None, None).expect("current summary");
+        assert!(
+            current["key"]["agent_id"].as_str().is_some_and(|value| value.starts_with("sha256:"))
+        );
+        assert!(
+            current["key"]["session_id"].as_str().is_some_and(|value| value.starts_with("sha256:"))
+        );
+        assert_eq!(current["key"]["turn_id"], 1);
+        let serialized = current.to_string();
+        assert!(!serialized.contains("agent-1"));
+        assert!(!serialized.contains("session-1"));
+        assert!(!serialized.contains("/private/workspace/secret.rs"));
+        assert!(!serialized.contains("terminal output"));
+        assert!(!serialized.contains("prompt"));
+
+        assert!(backend.turn_evidence_summary(Some(String::from("session-1")), Some(1)).is_ok());
+        for (session_id, turn_id) in [("foreign", 1), ("session-1", 2)] {
+            let error = backend
+                .turn_evidence_summary(Some(String::from(session_id)), Some(turn_id))
+                .expect_err("foreign or stale evidence must fail closed");
+            assert!(error.message.starts_with("evidence_unavailable:"));
+        }
     }
 }

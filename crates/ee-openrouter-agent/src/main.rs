@@ -1,18 +1,14 @@
 //! Thin stdio entry point: parse arguments, load `.env`, build the provider
 //! (simple or orchestrated), and let the framework own the ACP protocol loop.
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
 use clap::Parser;
 use ee_acp_agent_server::{AcpAgentServer, AcpAgentServerConfig};
-use ee_agent_orchestrator::{OrchestratorConfig, OrchestratorProvider, OrchestratorProviderConfig};
-use ee_agent_protocol::Implementation;
 use ee_openrouter_agent::config::{Args, Config, setup_manifest};
 use ee_openrouter_agent::dotenv::load_dotenv;
-use ee_openrouter_agent::orchestrated::{OpenRouterModelAdapter, openrouter_orchestrated_policy};
+use ee_openrouter_agent::orchestrated::{OpenRouterModelAdapter, openrouter_orchestrated_provider};
 use ee_openrouter_agent::provider::OpenRouterProvider;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -74,19 +70,7 @@ async fn run_orchestrated(
     server_config: AcpAgentServerConfig,
 ) -> Result<(), String> {
     let adapter = OpenRouterModelAdapter::new(config.clone())?;
-    // Keep the agent identity the same in both modes.
-    let provider_config = OrchestratorProviderConfig {
-        implementation: Implementation::new("ee-openrouter-agent", env!("CARGO_PKG_VERSION"))
-            .title("OpenRouter"),
-        orchestrator: orchestrator_config(&config),
-        session_state_dir: Some(default_session_state_dir()?),
-        ..OrchestratorProviderConfig::default()
-    };
-    let provider = OrchestratorProvider::with_policy(
-        provider_config,
-        Arc::new(adapter),
-        openrouter_orchestrated_policy(),
-    );
+    let provider = openrouter_orchestrated_provider(&config, default_session_state_dir()?, adapter);
     AcpAgentServer::new(provider, server_config)
         .run_stdio()
         .await
@@ -101,18 +85,6 @@ fn default_session_state_dir() -> Result<PathBuf, String> {
     )
 }
 
-fn orchestrator_config(config: &Config) -> OrchestratorConfig {
-    OrchestratorConfig {
-        context_window_tokens: config.context_window,
-        max_loop_iterations: config.max_iterations,
-        max_model_calls: config.max_iterations,
-        // Resumable turns: durable checkpoints in the configured directory (or
-        // memory-only when unset), with one safe automatic resume.
-        recovery: ee_agent_orchestrator::RecoveryConfig::durable(config.checkpoint_dir.clone()),
-        ..OrchestratorConfig::default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -120,6 +92,7 @@ mod tests {
     use super::*;
     use ee_openrouter_agent::config::DEFAULT_API_URL;
     use ee_openrouter_agent::config::DEFAULT_CONTEXT_WINDOW_TOKENS;
+    use ee_openrouter_agent::orchestrated::openrouter_orchestrator_config;
 
     fn config(orchestrated: bool) -> Config {
         Config {
@@ -157,7 +130,9 @@ mod tests {
         let mut config = config(true);
         config.max_iterations = 64;
 
-        let orchestrator = orchestrator_config(&config);
+        let orchestrator =
+            openrouter_orchestrator_config(&config, PathBuf::from("/tmp/ee-agent-sessions"))
+                .orchestrator;
 
         assert_eq!(orchestrator.max_loop_iterations, 64);
         assert_eq!(orchestrator.max_model_calls, 64);

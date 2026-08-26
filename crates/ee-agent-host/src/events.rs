@@ -15,6 +15,7 @@ use ee_agent_protocol::{
 use serde::Deserialize;
 
 use crate::error::AgentError;
+use crate::turn_evidence::{TurnEvidenceSummary, TurnKey};
 
 /// A unique id for one pending permission request on a connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -124,14 +125,24 @@ pub enum AgentEvent {
     /// A session thread was closed (host shutdown or connection loss).
     ThreadClosed { agent_id: String, session_id: SessionId, reason: ThreadCloseReason },
     /// A prompt turn started (optimistic user message already reduced).
-    TurnStarted { session_id: SessionId },
+    TurnStarted { session_id: SessionId, turn: TurnKey },
     /// One `session/update` notification was reduced into session state.
     ///
     /// The UI re-reads the thread snapshot; the raw update is included for
     /// diagnostics and Phase 3 regression tests.
     SessionUpdate { session_id: SessionId, update: Box<SessionUpdate> },
-    /// The running turn completed with a stop reason.
+    /// The running ACP transport turn completed with a stop reason.
+    ///
+    /// This is protocol lifecycle only. It does not establish that editor
+    /// changes were reviewed, validated, or verified; see
+    /// [`AgentEvent::TurnEvidenceUpdated`].
     TurnCompleted { session_id: SessionId, stop_reason: StopReason, metrics: TurnMetrics },
+    /// Host-derived evidence state changed for one turn.
+    ///
+    /// Payload is bounded and ACP-wire-independent, safe for UI and future
+    /// MCP retrieval surfaces. It never includes prompt text, raw tool output,
+    /// terminal output, or model-declared completion claims.
+    TurnEvidenceUpdated { session_id: SessionId, summary: Box<TurnEvidenceSummary> },
     /// The running turn was cancelled locally or by the agent.
     TurnCancelled { session_id: SessionId, metrics: TurnMetrics },
     /// The running turn failed.

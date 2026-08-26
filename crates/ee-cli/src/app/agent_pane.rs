@@ -26,7 +26,7 @@ use ee_agent_host::events::{
 };
 use ee_agent_host::{
     AgentError, AgentEvent, AgentManager, AgentManagerConfig, AgentThread, ClientRequestResponse,
-    ClientRequestResult, PermissionRequestId, ToolCallState,
+    ClientRequestResult, EvidenceRevision, PermissionRequestId, ToolCallState, TurnEvidenceSummary,
 };
 use ee_agent_protocol::{
     AvailableCommand, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
@@ -254,6 +254,12 @@ pub(crate) struct AgentThreadUi {
     pub(crate) turn_metrics: BTreeMap<ResponseGroupId, TurnMetrics>,
     /// Metrics of the most recent completed turn (footer rendering).
     pub(crate) last_turn_metrics: Option<TurnMetrics>,
+    /// Host-derived completion state; distinct from ACP `stopReason`.
+    pub(crate) terminal_evidence: Option<TurnEvidenceSummary>,
+    /// Current turn's agent-written paths and aggregate evidence revision.
+    /// Remains pane-local; host evidence stores only redacted opaque ids.
+    pub(crate) verification_paths: Vec<PathBuf>,
+    pub(crate) verification_revision: Option<EvidenceRevision>,
     /// Active local group for the currently streaming agent turn.
     pub(crate) active_response_group: Option<ResponseGroupId>,
     /// Next response-group identifier for this thread.
@@ -1082,6 +1088,10 @@ enum HostCommand {
         thread: AgentThread,
         blocks: Vec<ContentBlock>,
     },
+    ResumePrompt {
+        thread: AgentThread,
+        blocks: Vec<ContentBlock>,
+    },
     SetMode {
         thread: AgentThread,
         mode_id: SessionModeId,
@@ -1179,6 +1189,9 @@ fn host_worker(
                     // stream; the host's `send_prompt` owns them.
                     std::mem::drop(tokio::spawn(async move { thread.send_prompt(blocks).await }));
                 }
+                HostCommand::ResumePrompt { thread, blocks } => {
+                    std::mem::drop(tokio::spawn(async move { thread.resume_prompt(blocks).await }));
+                }
                 HostCommand::SetMode { thread, mode_id, reply } => {
                     let message = format!("mode set: {}", mode_id.0);
                     let result = thread.set_mode(mode_id).await.map(|()| message);
@@ -1263,6 +1276,11 @@ impl AgentHostBridge {
     /// Enqueues a prompt turn (fire-and-forget; events carry the outcome).
     fn send_prompt(&self, thread: AgentThread, blocks: Vec<ContentBlock>) {
         let _ = self.commands.send(HostCommand::SendPrompt { thread, blocks });
+    }
+
+    /// Enqueues a recoverable-turn resume without allocating a new host evidence turn.
+    fn resume_prompt(&self, thread: AgentThread, blocks: Vec<ContentBlock>) {
+        let _ = self.commands.send(HostCommand::ResumePrompt { thread, blocks });
     }
 
     /// Enqueues a mode change.
@@ -1622,7 +1640,12 @@ impl App {
                             }
                         }
                         AgentConnectionState::Ready { agent_info, .. } => {
-                            thread.state = ThreadUiState::Ready;
+                            if matches!(
+                                thread.state,
+                                ThreadUiState::Starting | ThreadUiState::Failed
+                            ) {
+                                thread.state = ThreadUiState::Ready;
+                            }
                             if let Some(info) = agent_info.as_ref() {
                                 let label = info.title.as_deref().unwrap_or(&info.name);
                                 if !label.is_empty() {
@@ -1679,12 +1702,28 @@ impl App {
                     self.notify_unread(index);
                 }
             }
-            AgentEvent::TurnStarted { session_id } => {
+            AgentEvent::TurnStarted { session_id, .. } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.agents.threads[index].state = ThreadUiState::Running;
+                    self.agents.threads[index].verification_paths.clear();
+                    self.agents.threads[index].verification_revision = None;
                     self.agents.threads[index].active_response_group = None;
                     self.agents.threads[index].turn_started_at = Some(Instant::now());
                     self.agents.threads[index].push_system(String::from("turn started"));
+                    self.notify_unread(index);
+                }
+            }
+            AgentEvent::TurnEvidenceUpdated { session_id, summary } => {
+                if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
+                    let thread = &mut self.agents.threads[index];
+                    let evidence_ids = summary.evidence_ids.join(", ");
+                    thread.terminal_evidence = Some(*summary);
+                    let status =
+                        thread.terminal_evidence.as_ref().expect("evidence summary just stored");
+                    thread.push_system(format!(
+                        "verification: {:?}; blocker: {:?}; evidence: {evidence_ids}",
+                        status.status, status.blocker
+                    ));
                     self.notify_unread(index);
                 }
             }
@@ -2182,6 +2221,9 @@ impl App {
             turn_started_at: None,
             turn_metrics: BTreeMap::new(),
             last_turn_metrics: None,
+            terminal_evidence: None,
+            verification_paths: Vec::new(),
+            verification_revision: None,
             active_response_group: None,
             next_response_group: 1,
             selected_response_group: None,
@@ -4252,7 +4294,9 @@ impl App {
                 },
             );
         }
-        config.ee_proxy_enabled = self.config.mcp.proxy.enabled;
+        // Always host policy-governed editor MCP for ACP-native agents. Explicit
+        // proxy configuration remains required only for stdio fallback.
+        config.ee_proxy_enabled = true;
         #[cfg(test)]
         for (id, factory) in &self.agents.test_fake_transports {
             config.fake_transports.insert(id.clone(), factory.clone());
@@ -5980,7 +6024,7 @@ impl App {
         thread.turn_started_at = Some(Instant::now());
         thread.push_system(String::from("resuming paused turn"));
         let host = self.agents.host.as_ref().expect("host present");
-        host.send_prompt(thread.host.clone(), blocks);
+        host.resume_prompt(thread.host.clone(), blocks);
     }
 
     /// Discards the paused turn: tells the agent to drop its checkpoint and

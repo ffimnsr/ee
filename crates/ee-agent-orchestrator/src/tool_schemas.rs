@@ -216,6 +216,24 @@ mod tests {
     ]
   },
   {
+    "name": "cargo_check",
+    "description": "Runs focused cargo check through editor terminal",
+    "inputSchema": {
+      "properties": {
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "sideEffect": "execute",
+    "sideEffectSubclass": null,
+    "requiredCapabilities": [],
+    "requires": [],
+    "produces": []
+  },
+  {
     "name": "create_terminal",
     "description": "Creates a terminal running a command",
     "inputSchema": {

@@ -785,6 +785,10 @@ impl ValidationRunner {
                 return Ok(RetriedValidationToolResult { result, attempts, retry_reasons });
             }
             retry_reasons.push(kind.as_str().to_string());
+            self.events.record(OrchestratorEvent::RetryScheduled {
+                tool_name: intent.name.clone(),
+                reason: kind.as_str().to_string(),
+            });
             self.retry_policy.backoff.sleep_for((attempts - 1) as usize).await;
         }
     }
@@ -914,6 +918,8 @@ fn record_validation_evidence(
         skip_reason: (result.status == ValidationOutcome::Skipped)
             .then(|| result.output_summary.clone()),
         revision: None,
+        // Only the editor host can bind a result to its current revision and
+        // select it for completion. Server execution alone stays insufficient.
         selected: false,
         denied: result.failure == Some(ValidationCommandFailure::PolicyDenied),
         detail: Some(result.output_summary.clone()),

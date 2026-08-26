@@ -45,6 +45,22 @@ pub enum OrchestratorEvent {
         /// Whether it succeeded.
         success: bool,
     },
+    /// A host-owned approval was requested before a trusted editor mutation
+    /// or terminal operation. This records no arguments or approval decision.
+    ApprovalRequested {
+        /// Model-supplied tool-call id.
+        tool_call_id: String,
+        /// Tool name.
+        tool_name: String,
+    },
+    /// A classified transient retry was scheduled. Policy denial, invalid
+    /// input, stale state, and approval denial never emit this event.
+    RetryScheduled {
+        /// Tool name.
+        tool_name: String,
+        /// Safe typed failure class, never raw error text.
+        reason: String,
+    },
     /// A subagent started (subagent phase).
     SubagentStarted {
         /// Subagent id.
@@ -136,6 +152,18 @@ pub enum OrchestratorEvent {
         checkpoint_id: String,
         /// Resume count after this resume.
         resumed_count: u32,
+    },
+    /// A bounded automatic repair attempt began after fresh host context was collected.
+    RepairStarted {
+        /// One-based repair attempt number.
+        attempt_number: usize,
+        /// Typed repair-failure source.
+        reason: String,
+    },
+    /// Automatic repair reached a typed terminal stop. This is not ACP prompt completion.
+    RepairStopped {
+        /// Stable stop classification.
+        reason: String,
     },
     /// A completed write/execute/delegate call was reused instead of replayed
     /// (idempotency guard on resumed turns).
@@ -234,6 +262,14 @@ mod tests {
                 tool_name: "read_file".into(),
                 success: false,
             },
+            OrchestratorEvent::ApprovalRequested {
+                tool_call_id: "tc-2".into(),
+                tool_name: "ee_write_text_file".into(),
+            },
+            OrchestratorEvent::RetryScheduled {
+                tool_name: "cargo_check".into(),
+                reason: "timeout".into(),
+            },
             OrchestratorEvent::SubagentStarted {
                 subagent_id: "sub-1".into(),
                 model_id: Some("default".into()),
@@ -272,6 +308,11 @@ mod tests {
                 checkpoint_id: "s-1-0000000002".into(),
                 resumed_count: 2,
             },
+            OrchestratorEvent::RepairStarted {
+                attempt_number: 1,
+                reason: "selected_validation_failure".into(),
+            },
+            OrchestratorEvent::RepairStopped { reason: "attempts_exhausted".into() },
             OrchestratorEvent::ToolResultReused {
                 tool_call_id: "tc-2".into(),
                 tool_name: "write_file".into(),

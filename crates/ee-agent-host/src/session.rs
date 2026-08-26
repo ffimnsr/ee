@@ -6,6 +6,7 @@
 //! [`SessionState`] snapshots.  All wire traffic happens on the owning
 //! [`AgentConnection`] driver; threads never touch JSON-RPC directly.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,10 @@ use crate::events::{
 };
 use crate::mcp_over_acp::EeProxyMode;
 use crate::reducer::{MessageKind, ReducedMessage, SessionState, apply_update};
+use crate::turn_evidence::{
+    PromptTerminalOutcome, TurnEvidence, TurnEvidenceError, TurnEvidenceStore, TurnEvidenceSummary,
+    TurnKey, TurnObservation,
+};
 
 /// Shared per-session state; the connection routes `session/update`
 /// notifications here and the thread exposes snapshots to the UI.
@@ -33,9 +38,25 @@ pub(crate) struct ThreadShared {
     pub session_id: SessionId,
     pub state: Mutex<SessionState>,
     pub order: Mutex<ee_agent_protocol::SessionUpdateOrder>,
-    pub turn: Mutex<Option<watch::Sender<bool>>>,
+    /// Explicit reservation for the one in-flight ACP prompt. Cancellation
+    /// changes its state but keeps this reservation until that exact
+    /// `send_prompt` future resolves, so a replacement prompt cannot race it.
+    pub turn: Mutex<Option<RunningTurn>>,
+    /// Current host turn key while an ACP prompt is active. Editor-owned
+    /// observations may attach only to this key; stale or proxy-only calls
+    /// cannot fabricate completion evidence.
+    pub active_turn: Mutex<Option<TurnKey>>,
+    /// Host-owned evidence turn retained only after an agent-reported
+    /// recoverable interruption, for an explicit resume request.
+    pub paused_turn: Mutex<Option<TurnKey>>,
     /// When the running turn started; cleared when the turn finishes.
     pub turn_started: Mutex<Option<Instant>>,
+    /// Append-only, host-owned evidence keyed by monotonic ACP turn id.
+    pub evidence: Mutex<TurnEvidenceStore>,
+    /// Set after the first host turn starts. Used only to gate discovery of
+    /// the read-only evidence tool; summary retrieval still validates each
+    /// requested session and turn.
+    pub(crate) evidence_available: AtomicBool,
     pub modes: Mutex<Option<SessionModeState>>,
     pub events: mpsc::UnboundedSender<AgentEvent>,
 }
@@ -65,6 +86,73 @@ impl ThreadShared {
         let _ = self.events.send(event);
     }
 
+    /// Reserves this thread for a prompt and reduces its optimistic user
+    /// message only after the reservation succeeds. This keeps rejected
+    /// concurrent prompts out of the transcript.
+    fn start_turn(
+        &self,
+        prompt: Vec<ContentBlock>,
+        resume: bool,
+    ) -> Result<StartedTurn, AgentError> {
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let turn = {
+            let mut active = self.turn.lock().expect("turn state poisoned");
+            if active.is_some() {
+                return Err(AgentError::TurnAlreadyRunning);
+            }
+            let turn =
+                if resume {
+                    self.paused_turn.lock().expect("paused turn poisoned").take().ok_or_else(
+                        || AgentError::invalid_params("no recoverable turn to resume"),
+                    )?
+                } else {
+                    self.paused_turn.lock().expect("paused turn poisoned").take();
+                    self.evidence
+                        .lock()
+                        .expect("turn evidence poisoned")
+                        .start_turn(self.agent_id.clone(), self.session_id.0.to_string())
+                };
+            *active = Some(RunningTurn::new(turn.clone(), cancel_tx));
+            turn
+        };
+        if !resume {
+            self.state.lock().expect("session state poisoned").messages.push(ReducedMessage {
+                kind: MessageKind::User,
+                message_id: None,
+                blocks: prompt,
+            });
+        }
+        *self.active_turn.lock().expect("active turn poisoned") = Some(turn.clone());
+        self.evidence_available.store(true, Ordering::Release);
+        Ok(StartedTurn { cancel_rx, turn })
+    }
+
+    fn observe_evidence(
+        &self,
+        turn_id: u64,
+        observation: TurnObservation,
+    ) -> Result<TurnEvidenceSummary, TurnEvidenceError> {
+        let summary =
+            self.evidence.lock().expect("turn evidence poisoned").observe(turn_id, observation)?;
+        let _ = self.events.send(AgentEvent::TurnEvidenceUpdated {
+            session_id: self.session_id.clone(),
+            summary: Box::new(summary.clone()),
+        });
+        Ok(summary)
+    }
+
+    fn evidence_snapshot(&self, turn_id: u64) -> Option<TurnEvidence> {
+        self.evidence.lock().expect("turn evidence poisoned").snapshot(turn_id)
+    }
+
+    pub(crate) fn evidence_summary(&self, turn_id: u64) -> Option<TurnEvidenceSummary> {
+        self.evidence.lock().expect("turn evidence poisoned").summary(turn_id)
+    }
+
+    pub(crate) fn has_turn_evidence(&self) -> bool {
+        self.evidence_available.load(Ordering::Acquire)
+    }
+
     /// Called by the connection when it goes away: clears the running turn
     /// (the driver resolves the prompt with a connection-closed error) and
     /// reports the thread as closed.
@@ -73,6 +161,8 @@ impl ThreadShared {
         // `ConnectionClosed` (terminate arm); `send_prompt` owns the
         // TurnFailed/TurnCancelled event, so only clear the local marker.
         *self.turn.lock().expect("turn state poisoned") = None;
+        *self.active_turn.lock().expect("active turn poisoned") = None;
+        *self.paused_turn.lock().expect("paused turn poisoned") = None;
         let _ = self.events.send(AgentEvent::ThreadClosed {
             agent_id: self.agent_id.clone(),
             session_id: self.session_id.clone(),
@@ -82,6 +172,34 @@ impl ThreadShared {
                 ThreadCloseReason::ConnectionLost
             },
         });
+    }
+}
+
+struct StartedTurn {
+    cancel_rx: watch::Receiver<bool>,
+    turn: TurnKey,
+}
+
+/// Reservation state for one exact host turn.
+pub(crate) struct RunningTurn {
+    key: TurnKey,
+    cancel: watch::Sender<bool>,
+    cancelling: bool,
+}
+
+impl RunningTurn {
+    fn new(key: TurnKey, cancel: watch::Sender<bool>) -> Self {
+        Self { key, cancel, cancelling: false }
+    }
+}
+
+impl RunningTurn {
+    fn key(&self) -> &TurnKey {
+        &self.key
+    }
+
+    pub(crate) fn cancel(self) -> watch::Sender<bool> {
+        self.cancel
     }
 }
 
@@ -131,7 +249,11 @@ impl AgentThread {
             state: Mutex::new(state),
             order: Mutex::new(ee_agent_protocol::SessionUpdateOrder::new()),
             turn: Mutex::new(None),
+            active_turn: Mutex::new(None),
+            paused_turn: Mutex::new(None),
             turn_started: Mutex::new(None),
+            evidence: Mutex::new(TurnEvidenceStore::default()),
+            evidence_available: AtomicBool::new(false),
             modes: Mutex::new(modes),
             events: connection.inner.events.clone(),
         });
@@ -154,6 +276,44 @@ impl AgentThread {
     #[must_use]
     pub fn is_turn_running(&self) -> bool {
         self.shared.turn.lock().expect("turn state poisoned").is_some()
+    }
+
+    /// Current active host turn key, if the ACP prompt has not reached a
+    /// terminal lifecycle state. Editor integrations must use this instead of
+    /// guessing a turn number from transcript order.
+    #[must_use]
+    pub fn active_turn_key(&self) -> Option<TurnKey> {
+        self.shared.active_turn.lock().expect("active turn poisoned").clone()
+    }
+
+    /// Immutable snapshot of evidence for one monotonic host turn.
+    #[must_use]
+    pub fn turn_evidence(&self, turn_id: u64) -> Option<TurnEvidence> {
+        self.shared.evidence_snapshot(turn_id)
+    }
+
+    /// Current transport-safe terminal evidence summary for one host turn.
+    #[must_use]
+    pub fn turn_evidence_summary(&self, turn_id: u64) -> Option<TurnEvidenceSummary> {
+        self.shared.evidence_summary(turn_id)
+    }
+
+    /// Appends one bounded editor observation to a turn's evidence ledger.
+    ///
+    /// Callers provide only structured revision/check data. The host sanitizes
+    /// identifiers, generates evidence ids, and emits `TurnEvidenceUpdated`.
+    /// This does not alter ACP transport lifecycle state.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `turn_id` is not known for this thread or its bounded
+    /// observation limit is exhausted.
+    pub fn observe_turn_evidence(
+        &self,
+        turn_id: u64,
+        observation: TurnObservation,
+    ) -> Result<TurnEvidenceSummary, TurnEvidenceError> {
+        self.shared.observe_evidence(turn_id, observation)
     }
 
     /// Whether this session's agent advertises additional-directory support.
@@ -215,31 +375,36 @@ impl AgentThread {
         &self,
         prompt: Vec<ContentBlock>,
     ) -> Result<PromptResponse, AgentError> {
-        validate_prompt_blocks(&self.connection, &prompt)?;
-        {
-            let mut state = self.shared.state.lock().expect("session state poisoned");
-            state.messages.push(ReducedMessage {
-                kind: MessageKind::User,
-                message_id: None,
-                blocks: prompt.clone(),
-            });
-        }
-        let (cancel_tx, cancel_rx) = watch::channel(false);
-        {
-            let mut turn = self.shared.turn.lock().expect("turn state poisoned");
-            if turn.is_some() {
-                return Err(AgentError::TurnAlreadyRunning);
-            }
-            *turn = Some(cancel_tx);
-        }
-        *self.shared.turn_started.lock().expect("turn state poisoned") = Some(Instant::now());
-        let _ = self
-            .shared
-            .events
-            .send(AgentEvent::TurnStarted { session_id: self.session_id.clone() });
+        self.send_prompt_inner(prompt, false).await
+    }
 
-        let result = self.connection.send_prompt(self.session_id.clone(), prompt, cancel_rx).await;
-        self.finish_turn();
+    /// Re-sends the original prompt for an agent-reported recoverable pause.
+    /// The host reuses the paused turn's evidence ledger rather than creating
+    /// editor facts in the caller or a new evidence turn.
+    pub async fn resume_prompt(
+        &self,
+        prompt: Vec<ContentBlock>,
+    ) -> Result<PromptResponse, AgentError> {
+        self.send_prompt_inner(prompt, true).await
+    }
+
+    async fn send_prompt_inner(
+        &self,
+        prompt: Vec<ContentBlock>,
+        resume: bool,
+    ) -> Result<PromptResponse, AgentError> {
+        validate_prompt_blocks(&self.connection, &prompt)?;
+        let started_turn = self.shared.start_turn(prompt.clone(), resume)?;
+        *self.shared.turn_started.lock().expect("turn state poisoned") = Some(Instant::now());
+        let _ = self.shared.events.send(AgentEvent::TurnStarted {
+            session_id: self.session_id.clone(),
+            turn: started_turn.turn.clone(),
+        });
+
+        let result = self
+            .connection
+            .send_prompt(self.session_id.clone(), prompt, started_turn.cancel_rx)
+            .await;
 
         match &result {
             Ok(response) => {
@@ -249,6 +414,7 @@ impl AgentThread {
                     stop_reason: response.stop_reason,
                     metrics,
                 });
+                self.record_turn_terminal(&started_turn.turn, PromptTerminalOutcome::Completed);
             }
             Err(AgentError::Cancelled) => {
                 let metrics = self.take_turn_metrics(None);
@@ -256,6 +422,7 @@ impl AgentThread {
                     session_id: self.session_id.clone(),
                     metrics,
                 });
+                self.record_turn_terminal(&started_turn.turn, PromptTerminalOutcome::Cancelled);
             }
             Err(error) => {
                 let metrics = self.take_turn_metrics(None);
@@ -267,27 +434,40 @@ impl AgentThread {
                     && let Some(recoverable) = data.get("recoverable")
                     && let Ok(info) = serde_json::from_value::<RecoverableInfo>(recoverable.clone())
                 {
+                    *self.shared.paused_turn.lock().expect("paused turn poisoned") =
+                        Some(started_turn.turn.clone());
+                    self.record_turn_terminal(
+                        &started_turn.turn,
+                        PromptTerminalOutcome::PausedRecoverable,
+                    );
+                    // The pane may resume as soon as it receives this event.
+                    // Release this attempt's reservation first so resume can
+                    // reattach the same host-owned evidence turn.
+                    self.finish_turn(&started_turn.turn);
                     let _ = self.shared.events.send(AgentEvent::TurnPausedRecoverable {
                         session_id: self.session_id.clone(),
                         metrics,
                         recoverable: Box::new(info),
                     });
+                    return result;
                 } else {
                     let _ = self.shared.events.send(AgentEvent::TurnFailed {
                         session_id: self.session_id.clone(),
                         error: error.clone(),
                         metrics,
                     });
+                    self.record_turn_terminal(&started_turn.turn, PromptTerminalOutcome::Failed);
                 }
             }
         }
+        self.finish_turn(&started_turn.turn);
         result
     }
 
     /// Cancels the running turn: sends `session/cancel`, cancels the
     /// in-flight prompt request, and resolves pending permissions as
-    /// cancelled.  The running `send_prompt` future resolves with
-    /// [`AgentError::Cancelled`] and emits the terminal turn event.
+    /// cancelled. The reservation remains occupied until the running
+    /// `send_prompt` future resolves, preventing a replacement prompt race.
     ///
     /// # Errors
     ///
@@ -295,12 +475,20 @@ impl AgentThread {
     pub async fn cancel(&self) -> Result<(), AgentError> {
         let cancel = {
             let mut turn = self.shared.turn.lock().expect("turn state poisoned");
-            turn.take().ok_or(AgentError::NoRunningTurn)?
+            let turn = turn.as_mut().ok_or(AgentError::NoRunningTurn)?;
+            if turn.cancelling {
+                None
+            } else {
+                turn.cancelling = true;
+                Some(turn.cancel.clone())
+            }
         };
-        let _ = cancel.send(true);
-        self.connection.send_session_cancel(self.session_id.clone());
-        let resolved = self.connection.cancel_session_permissions(&self.session_id);
-        tracing::debug!(session_id = %self.session_id.0, resolved, "cancelled pending permissions");
+        if let Some(cancel) = cancel {
+            let _ = cancel.send(true);
+            self.connection.send_session_cancel(self.session_id.clone());
+            let resolved = self.connection.cancel_session_permissions(&self.session_id);
+            tracing::debug!(session_id = %self.session_id.0, resolved, "cancelled pending permissions");
+        }
         Ok(())
     }
 
@@ -388,10 +576,43 @@ impl AgentThread {
         });
     }
 
-    /// Clears the running turn state if this thread still has one.
-    fn finish_turn(&self) {
-        let mut turn = self.shared.turn.lock().expect("turn state poisoned");
-        *turn = None;
+    /// Records host-observed prompt completion separately from ACP lifecycle.
+    fn record_turn_terminal(&self, turn: &TurnKey, outcome: PromptTerminalOutcome) {
+        if !matches!(outcome, PromptTerminalOutcome::Completed)
+            && let Some(evidence) = self.shared.evidence_snapshot(turn.turn_id())
+            && evidence.records().iter().any(|record| {
+                matches!(
+                    record.observation(),
+                    TurnObservation::Write { .. } | TurnObservation::WriteTransaction { .. }
+                )
+            })
+            && let Some(revision) = evidence.current_revision().cloned()
+        {
+            let _ = self.shared.observe_evidence(
+                turn.turn_id(),
+                TurnObservation::WriteTransaction {
+                    revision,
+                    stage: crate::turn_evidence::WriteTransactionStage::Interrupted,
+                    outcome: crate::turn_evidence::EvidenceCheck::Failed,
+                },
+            );
+        }
+        let _ = self
+            .shared
+            .observe_evidence(turn.turn_id(), TurnObservation::PromptTerminal { outcome });
+    }
+
+    /// Clears state only when `turn` still owns this reservation. A late
+    /// completion from an older prompt must never clear a newer turn.
+    fn finish_turn(&self, turn: &TurnKey) {
+        let mut active = self.shared.turn.lock().expect("turn state poisoned");
+        if active.as_ref().is_some_and(|running| running.key() == turn) {
+            *active = None;
+            let mut active_turn = self.shared.active_turn.lock().expect("active turn poisoned");
+            if active_turn.as_ref().is_some_and(|current| current == turn) {
+                *active_turn = None;
+            }
+        }
     }
 
     /// Builds the metrics for the just-finished turn and clears the start
@@ -517,5 +738,78 @@ mod tests {
         });
         assert_eq!(state.messages.len(), 1);
         assert_eq!(state.messages[0].blocks.len(), 1);
+    }
+
+    #[test]
+    fn concurrent_prompt_reservation_does_not_duplicate_optimistic_message() {
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let shared = ThreadShared {
+            agent_id: String::from("agent"),
+            session_id: SessionId::new("session"),
+            state: Mutex::new(SessionState::default()),
+            order: Mutex::new(ee_agent_protocol::SessionUpdateOrder::new()),
+            turn: Mutex::new(None),
+            active_turn: Mutex::new(None),
+            paused_turn: Mutex::new(None),
+            turn_started: Mutex::new(None),
+            evidence: Mutex::new(TurnEvidenceStore::default()),
+            evidence_available: AtomicBool::new(false),
+            modes: Mutex::new(None),
+            events,
+        };
+        let prompt = vec![ContentBlock::Text(TextContent::new("fix it"))];
+
+        shared.start_turn(prompt.clone(), false).expect("first prompt reserves turn");
+        assert!(shared.has_turn_evidence());
+        assert!(matches!(shared.start_turn(prompt, false), Err(AgentError::TurnAlreadyRunning)));
+
+        let state = shared.state.lock().expect("session state poisoned");
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.messages[0].blocks.len(), 1);
+    }
+
+    #[test]
+    fn resume_reuses_paused_host_evidence_turn() {
+        let (events, _events_rx) = mpsc::unbounded_channel();
+        let shared = ThreadShared {
+            agent_id: String::from("agent"),
+            session_id: SessionId::new("session"),
+            state: Mutex::new(SessionState::default()),
+            order: Mutex::new(ee_agent_protocol::SessionUpdateOrder::new()),
+            turn: Mutex::new(None),
+            active_turn: Mutex::new(None),
+            paused_turn: Mutex::new(None),
+            turn_started: Mutex::new(None),
+            evidence: Mutex::new(TurnEvidenceStore::default()),
+            evidence_available: AtomicBool::new(false),
+            modes: Mutex::new(None),
+            events,
+        };
+        let prompt = vec![ContentBlock::Text(TextContent::new("fix it"))];
+        let initial = shared.start_turn(prompt.clone(), false).expect("initial turn starts");
+        let initial_key = initial.turn.clone();
+        let before = shared
+            .observe_evidence(
+                initial_key.turn_id(),
+                TurnObservation::PromptTerminal {
+                    outcome: PromptTerminalOutcome::PausedRecoverable,
+                },
+            )
+            .expect("paused prompt evidence")
+            .evidence_ids;
+        *shared.paused_turn.lock().expect("paused turn poisoned") = Some(initial_key.clone());
+        *shared.turn.lock().expect("turn state poisoned") = None;
+        *shared.active_turn.lock().expect("active turn poisoned") = None;
+
+        let resumed = shared.start_turn(prompt, true).expect("paused turn resumes");
+        assert_eq!(resumed.turn, initial_key);
+        let after = shared
+            .observe_evidence(
+                resumed.turn.turn_id(),
+                TurnObservation::PromptTerminal { outcome: PromptTerminalOutcome::Completed },
+            )
+            .expect("completed prompt evidence");
+        assert!(before.iter().all(|id| after.evidence_ids.contains(id)));
+        assert_eq!(shared.state.lock().expect("session state poisoned").messages.len(), 1);
     }
 }

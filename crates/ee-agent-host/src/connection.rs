@@ -144,7 +144,7 @@ pub(crate) struct AgentConnectionInner {
     pub handler: Arc<dyn ClientRequestHandler>,
     pub handler_capabilities: HandlerCapabilities,
     pub process: Arc<Mutex<Option<AgentProcess>>>,
-    pub threads: Mutex<HashMap<SessionId, Arc<ThreadShared>>>,
+    pub threads: Arc<Mutex<HashMap<SessionId, Arc<ThreadShared>>>>,
     /// ACP-native MCP-over-ACP hosting for the ee proxy (Phase 6b).
     pub mcp: McpOverAcpRegistry,
     active_url_elicitations: Mutex<HashSet<String>>,
@@ -333,12 +333,14 @@ impl AgentConnection {
         let handler_capabilities = handler.capabilities();
         let broker = PermissionBroker::new();
         let process = Arc::new(Mutex::new(process));
+        let threads = Arc::new(Mutex::new(HashMap::new()));
         let mcp = McpOverAcpRegistry::new(
             options.ee_proxy_enabled,
             &agent_id,
             handler.clone(),
             handler_capabilities,
             process.clone(),
+            threads.clone(),
         );
 
         let inner = Arc::new(AgentConnectionInner {
@@ -350,7 +352,7 @@ impl AgentConnection {
             handler: handler.clone(),
             handler_capabilities,
             process,
-            threads: Mutex::new(HashMap::new()),
+            threads,
             mcp,
             active_url_elicitations: Mutex::new(HashSet::new()),
             completed_url_elicitations: Mutex::new(HashSet::new()),
@@ -676,20 +678,17 @@ impl AgentConnection {
         mcp_servers: &mut Vec<McpServer>,
         ee_proxy_stdio_fallback: Option<McpServerStdio>,
     ) -> EeProxyMode {
-        let Some(fallback) = ee_proxy_stdio_fallback else {
-            return EeProxyMode::Disabled;
-        };
-        match self.inner.mcp.server_id() {
-            Some(server_id)
-                if self.agent_capabilities().is_some_and(|caps| caps.mcp_capabilities.acp) =>
-            {
-                mcp_servers.push(ee_agent_protocol::ee_proxy_acp_entry(server_id.clone()));
-                EeProxyMode::AcpNative
-            }
-            _ => {
-                mcp_servers.push(McpServer::Stdio(fallback));
-                EeProxyMode::StdioFallback
-            }
+        if let Some(server_id) = self.inner.mcp.server_id()
+            && self.agent_capabilities().is_some_and(|caps| caps.mcp_capabilities.acp)
+        {
+            mcp_servers.push(ee_agent_protocol::ee_proxy_acp_entry(server_id.clone()));
+            return EeProxyMode::AcpNative;
+        }
+        if let Some(fallback) = ee_proxy_stdio_fallback {
+            mcp_servers.push(McpServer::Stdio(fallback));
+            EeProxyMode::StdioFallback
+        } else {
+            EeProxyMode::Disabled
         }
     }
 
@@ -1029,7 +1028,12 @@ impl AgentConnection {
     fn prepare_local_thread_for_close(&self, session_id: &SessionId) {
         let thread = self.inner.threads.lock().expect("threads poisoned").get(session_id).cloned();
         if let Some(thread) = thread
-            && let Some(cancel) = thread.turn.lock().expect("turn state poisoned").take()
+            && let Some(cancel) = thread
+                .turn
+                .lock()
+                .expect("turn state poisoned")
+                .take()
+                .map(crate::session::RunningTurn::cancel)
         {
             let _ = cancel.send(true);
         }

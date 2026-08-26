@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::compaction::CompactionConfig;
 use crate::reflection::ReflectionConfig;
+use crate::repair::RepairConfig;
 use crate::stuck::StuckConfig;
 
 /// Default maximum loop iterations per turn.
@@ -85,12 +86,23 @@ impl Default for RecoveryConfig {
 }
 
 impl RecoveryConfig {
-    /// Enables recovery, persisting checkpoints in `dir` when provided
-    /// (memory-only otherwise).  The type is `#[non_exhaustive]`, so external
-    /// crates construct it through builders like this one.
+    /// Enables same-process recovery only. Checkpoints are never written to
+    /// disk, so a provider restart cannot resume this state.
     #[must_use]
-    pub fn durable(checkpoint_dir: Option<std::path::PathBuf>) -> Self {
-        Self { enabled: true, checkpoint_dir, ..Self::default() }
+    pub fn memory_only() -> Self {
+        Self { enabled: true, checkpoint_dir: None, ..Self::default() }
+    }
+
+    /// Enables crash-recoverable checkpoints under the explicit local directory.
+    #[must_use]
+    pub fn durable(checkpoint_dir: std::path::PathBuf) -> Self {
+        Self { enabled: true, checkpoint_dir: Some(checkpoint_dir), ..Self::default() }
+    }
+
+    /// Whether checkpoints survive provider process restart.
+    #[must_use]
+    pub fn is_durable(&self) -> bool {
+        self.enabled && self.checkpoint_dir.is_some()
     }
 }
 /// Default checkpoints retained per session before the oldest is pruned.
@@ -147,6 +159,8 @@ pub struct OrchestratorConfig {
     pub stuck: StuckConfig,
     /// Bounded self-review behavior after tool/edit loops.
     pub reflection: ReflectionConfig,
+    /// Deterministic bound for automatic repairs after current validation fails.
+    pub repair: RepairConfig,
     /// LLM compaction knobs (Phase 12): deterministic memory compaction
     /// settings plus the compaction-context input bound.
     pub compaction: CompactionConfig,
@@ -174,6 +188,7 @@ impl Default for OrchestratorConfig {
             context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
             stuck: StuckConfig::default(),
             reflection: ReflectionConfig::default(),
+            repair: RepairConfig::default(),
             compaction: CompactionConfig::default(),
             recovery: RecoveryConfig::default(),
         }
@@ -215,6 +230,7 @@ mod tests {
             config.reflection,
             ReflectionConfig { enabled: false, max_review_iterations: 1, max_fix_iterations: 1 }
         );
+        assert_eq!(config.repair, RepairConfig::default());
         assert_eq!(config.compaction, CompactionConfig::default());
         assert_eq!(config.recovery, RecoveryConfig::default());
         assert!(!config.recovery.enabled);
@@ -249,6 +265,7 @@ mod tests {
                 max_review_iterations: 2,
                 max_fix_iterations: 1,
             },
+            repair: RepairConfig { max_attempts: 2 },
             compaction: CompactionConfig { max_input_bytes: 2048, ..CompactionConfig::default() },
             recovery: RecoveryConfig { enabled: true, ..RecoveryConfig::default() },
         };
@@ -274,6 +291,7 @@ mod tests {
         assert!(restored.reflection.enabled);
         assert_eq!(restored.reflection.max_review_iterations, 2);
         assert_eq!(restored.reflection.max_fix_iterations, 1);
+        assert_eq!(restored.repair, RepairConfig { max_attempts: 2 });
         assert_eq!(restored.compaction.max_input_bytes, 2048);
         assert!(restored.recovery.enabled);
     }

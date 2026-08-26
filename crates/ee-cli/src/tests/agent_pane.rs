@@ -6,17 +6,36 @@
 //! exercised exactly as in the TUI loop.  No external binaries are spawned.
 
 use std::fs;
-use std::sync::{Arc, Mutex};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use ee_agent_host::FakeTransportFactory;
+use ee_acp_agent_server::{
+    AcpAgentServer, AcpAgentServerConfig, AcpServerError, MemoryTransport, MemoryTransportHandle,
+};
 use ee_agent_host::fake::{FakeAgent, FakeAgentScript, FakeAgentTransport, wire};
-use ee_agent_protocol::ContentBlock;
+use ee_agent_host::{
+    EvidenceCheck, EvidenceRevision, FakeTransportFactory, SafeFollowUp, TurnBlocker,
+    TurnObservation, TurnTerminalStatus,
+};
+use ee_agent_protocol::{ContentBlock, RawJsonRpcMessage};
+use ee_openrouter_agent::config::Config as OpenRouterConfig;
+use ee_openrouter_agent::orchestrated::{
+    openrouter_orchestrated_policy, openrouter_orchestrated_provider,
+    openrouter_orchestrated_provider_with_turn_timeout, openrouter_orchestrator_config,
+    test_support::ScriptedOpenRouterCompletion,
+};
+use futures::channel::mpsc as futures_mpsc;
+use futures::{StreamExt, sink, stream};
+use git2::{IndexAddOption, Repository, Signature};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use serde_json::{Value, json};
+use tokio::sync::watch;
+use xi_core_lib::plugin_rpc::{Diagnostic, DiagnosticSeverity, Range};
 
 use crate::app::{
     AgentPaneLayout, App, MessageRenderKind, Mode, ThreadUiState, TranscriptItem, wrap_text,
@@ -25,7 +44,14 @@ use crate::registers::RegisterName;
 use crate::tests::helpers::*;
 use crate::ui::ui;
 
-const WAIT: Duration = Duration::from_secs(5);
+const WAIT: Duration = Duration::from_secs(20);
+
+/// Test-only write-verification hooks are process-global; live fixtures must not overlap.
+static PHASE_SIX_LIVE_LOCK: Mutex<()> = Mutex::new(());
+
+fn phase_six_live_lock() -> MutexGuard<'static, ()> {
+    PHASE_SIX_LIVE_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+}
 
 // ── Fake transport factory ───────────────────────────────────────────────────
 
@@ -59,6 +85,137 @@ impl FakeTransportFactory for ScriptedFake {
     }
 }
 
+/// Test-only adapter from the host's line transport to a real in-process ACP
+/// server. It retains scripted OpenRouter model traffic while exercising both
+/// production provider construction and `AgentManager` transport insertion.
+struct LiveAcpServer {
+    stop: watch::Sender<bool>,
+    pump: tokio::task::JoinHandle<()>,
+    server: tokio::task::JoinHandle<Result<(), AcpServerError>>,
+}
+
+#[derive(Clone)]
+struct LiveOpenRouterTransport {
+    config: OpenRouterConfig,
+    session_state_dir: PathBuf,
+    scripted: ScriptedOpenRouterCompletion,
+    turn_timeout: Option<Duration>,
+    auto_resume_max: Option<u32>,
+    servers: Arc<Mutex<Vec<LiveAcpServer>>>,
+}
+
+impl LiveOpenRouterTransport {
+    fn new(
+        config: OpenRouterConfig,
+        session_state_dir: PathBuf,
+        scripted: ScriptedOpenRouterCompletion,
+    ) -> Self {
+        Self {
+            config,
+            session_state_dir,
+            scripted,
+            turn_timeout: None,
+            auto_resume_max: None,
+            servers: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn with_turn_timeout(mut self, turn_timeout: Duration) -> Self {
+        self.turn_timeout = Some(turn_timeout);
+        self
+    }
+
+    /// Disables automatic recovery only where a fixture must exercise pane `/resume`.
+    fn with_auto_resume_max(mut self, auto_resume_max: u32) -> Self {
+        self.auto_resume_max = Some(auto_resume_max);
+        self
+    }
+
+    fn shutdown(&self) {
+        for server in self.servers.lock().expect("live ACP servers poisoned").drain(..) {
+            let _ = server.stop.send(true);
+            server.pump.abort();
+            server.server.abort();
+        }
+    }
+}
+
+impl FakeTransportFactory for LiveOpenRouterTransport {
+    fn build(&self) -> FakeAgentTransport {
+        let adapter = self.scripted.adapter(self.config.clone());
+        let provider = match (self.turn_timeout, self.auto_resume_max) {
+            (None, None) => openrouter_orchestrated_provider(
+                &self.config,
+                self.session_state_dir.clone(),
+                adapter,
+            ),
+            (Some(turn_timeout), None) => openrouter_orchestrated_provider_with_turn_timeout(
+                &self.config,
+                self.session_state_dir.clone(),
+                adapter,
+                turn_timeout,
+            ),
+            (turn_timeout, auto_resume_max) => {
+                let mut config =
+                    openrouter_orchestrator_config(&self.config, self.session_state_dir.clone());
+                if let Some(turn_timeout) = turn_timeout {
+                    config.orchestrator.turn_timeout = turn_timeout;
+                }
+                if let Some(auto_resume_max) = auto_resume_max {
+                    config.orchestrator.recovery.auto_resume_max = auto_resume_max;
+                }
+                ee_agent_orchestrator::OrchestratorProvider::with_policy(
+                    config,
+                    Arc::new(adapter),
+                    openrouter_orchestrated_policy(),
+                )
+            }
+        };
+        let server = AcpAgentServer::new(provider, AcpAgentServerConfig::default());
+        let (transport, handle) = MemoryTransport::new();
+        let server = tokio::spawn(async move { server.run_with_transport(transport).await });
+        let (bridge, transport) = memory_transport_bridge(handle);
+        self.servers.lock().expect("live ACP servers poisoned").push(LiveAcpServer {
+            stop: bridge.0,
+            pump: bridge.1,
+            server,
+        });
+        transport
+    }
+}
+
+fn memory_transport_bridge(
+    handle: MemoryTransportHandle,
+) -> ((watch::Sender<bool>, tokio::task::JoinHandle<()>), FakeAgentTransport) {
+    let (to_host_tx, to_host_rx) = futures_mpsc::unbounded::<io::Result<String>>();
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let outgoing_sink = sink::unfold(handle.clone(), |handle, line: String| async move {
+        let frame = serde_json::from_str::<RawJsonRpcMessage>(&line)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if !handle.send(frame) {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "ACP server closed"));
+        }
+        Ok::<_, io::Error>(handle)
+    });
+    let pump = tokio::spawn(async move {
+        loop {
+            if *stop_rx.borrow() {
+                break;
+            }
+            for frame in handle.take_outbound() {
+                if let Ok(line) = serde_json::to_string(&frame) {
+                    let _ = to_host_tx.unbounded_send(Ok(line));
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+    });
+    let incoming_stream =
+        stream::unfold(to_host_rx, |mut rx| async move { rx.next().await.map(|item| (item, rx)) });
+    let transport = FakeAgentTransport::new(Box::pin(outgoing_sink), Box::pin(incoming_stream));
+    ((stop_tx, pump), transport)
+}
+
 // ── Test helpers ─────────────────────────────────────────────────────────────
 
 /// Standard initialize + session/new happy path.
@@ -77,6 +234,55 @@ enabled = true
 [agents.servers.fake]
 command = "unused"
 "#;
+
+fn openrouter_fixture_config() -> OpenRouterConfig {
+    OpenRouterConfig {
+        model: String::from("test/model"),
+        api_url: String::from("https://openrouter.invalid/api/v1"),
+        api_key: Some(String::from("sk-hermetic-test-key")),
+        site_url: None,
+        app_title: String::from("ee-cli-live-phase-six-test"),
+        timeout: Duration::from_secs(1),
+        system_prompt: String::from("system"),
+        reasoning_effort: None,
+        orchestrated: true,
+        compact_min_messages: 4,
+        compact_retained_tail: 2,
+        compact_max_input_bytes: 65_536,
+        context_window: 128_000,
+        auto_compact_threshold_percent: 80,
+        max_iterations: 16,
+        retry_max_attempts: 0,
+        retry_base_delay: Duration::from_millis(1),
+        retry_max_delay: Duration::from_millis(10),
+        checkpoint_dir: None,
+    }
+}
+
+fn commit_git_baseline(workspace: &std::path::Path) {
+    let repository = Repository::init(workspace).expect("initialize fixture repository");
+    let mut index = repository.index().expect("fixture index");
+    index.add_all(["*"].iter(), IndexAddOption::DEFAULT, None).expect("stage fixture baseline");
+    index.write().expect("write fixture index");
+    let tree_id = index.write_tree().expect("write fixture tree");
+    let tree = repository.find_tree(tree_id).expect("find fixture tree");
+    let signature =
+        Signature::now("EE Fixture", "fixture@example.invalid").expect("fixture signature");
+    repository
+        .commit(Some("HEAD"), &signature, &signature, "fixture baseline", &tree, &[])
+        .expect("commit fixture baseline");
+}
+
+fn live_openrouter_app_in(workspace: &std::path::Path, factory: LiveOpenRouterTransport) -> App {
+    let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let _cwd_restore = CurrentDirGuard::capture();
+    std::env::set_current_dir(workspace).unwrap();
+    let mut app = App::from_path(None).unwrap();
+    drop(_cwd_restore);
+    drop(_cwd_lock);
+    app.agents.test_fake_transports.insert(String::from("fake"), Arc::new(factory));
+    app
+}
 
 /// Builds an `App` in an existing workspace and installs the fake agent for
 /// the `fake` server id. Reusing the directory simulates a full TUI restart.
@@ -119,6 +325,27 @@ fn press(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     app.handle_event(Event::Key(KeyEvent::new(code, modifiers)));
 }
 
+fn approve_until_turn_ready(app: &mut App, label: &str, max_approvals: usize) -> usize {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut approvals = 0;
+    while Instant::now() < deadline {
+        app.pump_agents();
+        let _ = app.backend.drain_events();
+        if !app.agents.approvals.is_empty() {
+            assert!(approvals < max_approvals, "{label} exceeded {max_approvals} approvals");
+            press(app, KeyCode::Enter, KeyModifiers::NONE);
+            approvals += 1;
+        } else if app.agents.threads[0].state == ThreadUiState::Ready {
+            return approvals;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!(
+        "timed out waiting for {label}; approvals={approvals}; status={:?}",
+        app.backend.status_message.as_deref()
+    );
+}
+
 fn type_text(app: &mut App, text: &str) {
     for ch in text.chars() {
         press(app, KeyCode::Char(ch), KeyModifiers::NONE);
@@ -130,6 +357,180 @@ fn open_pane_and_wait_ready(app: &mut App) {
     wait_until(app, "first agent thread ready", |app| {
         app.agents.threads.len() == 1 && app.agents.threads[0].state == ThreadUiState::Ready
     });
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PhaseSixFixtureMetrics {
+    prompt_requests: usize,
+    evidence_ids: usize,
+    approvals: usize,
+}
+
+fn live_write_script(
+    target: &Path,
+    call_id: &str,
+    content: &str,
+    completion: &str,
+) -> ScriptedOpenRouterCompletion {
+    live_write_script_with_calls(target, &[(call_id, content)], completion)
+}
+
+fn live_tool_response(call_id: &str, name: &str, arguments: Value) -> Value {
+    json!({
+        "choices": [{
+            "message": {
+                "content": null,
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": { "name": name, "arguments": arguments.to_string() },
+                }],
+            },
+            "finish_reason": "tool_calls",
+        }],
+    })
+}
+
+fn live_completion_response(content: &str) -> Value {
+    json!({
+        "choices": [{
+            "message": { "content": content },
+            "finish_reason": "stop",
+        }],
+    })
+}
+
+fn live_write_script_with_calls(
+    target: &Path,
+    calls: &[(&str, &str)],
+    completion: &str,
+) -> ScriptedOpenRouterCompletion {
+    let requests =
+        calls.iter().map(|(call_id, content)| (*call_id, target, *content)).collect::<Vec<_>>();
+    live_write_script_with_requests(&requests, completion)
+}
+
+fn live_write_script_with_requests(
+    requests: &[(&str, &Path, &str)],
+    completion: &str,
+) -> ScriptedOpenRouterCompletion {
+    let tool_calls = requests
+        .iter()
+        .map(|(call_id, target, content)| {
+            json!({
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "arguments": json!({
+                        "path": target.display().to_string(),
+                        "content": content,
+                    })
+                    .to_string(),
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    ScriptedOpenRouterCompletion::new(vec![
+        json!({
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "tool_calls": tool_calls,
+                },
+                "finish_reason": "tool_calls",
+            }],
+        }),
+        json!({
+            "choices": [{
+                "message": { "content": completion },
+                "finish_reason": "stop",
+            }],
+        }),
+    ])
+}
+
+fn live_write_script_in_rounds(
+    requests: &[(&str, &Path, &str)],
+    completion: &str,
+) -> ScriptedOpenRouterCompletion {
+    let mut responses = requests
+        .iter()
+        .map(|(call_id, target, content)| {
+            json!({
+                "choices": [{
+                    "message": {
+                        "content": null,
+                        "tool_calls": [{
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": "write_file",
+                                "arguments": json!({
+                                    "path": target.display().to_string(),
+                                    "content": content,
+                                })
+                                .to_string(),
+                            },
+                        }],
+                    },
+                    "finish_reason": "tool_calls",
+                }],
+            })
+        })
+        .collect::<Vec<_>>();
+    responses.push(json!({
+        "choices": [{
+            "message": { "content": completion },
+            "finish_reason": "stop",
+        }],
+    }));
+    ScriptedOpenRouterCompletion::new(responses)
+}
+
+fn select_live_write_mode(app: &mut App) {
+    type_text(app, "/mode");
+    press(app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(app, "provider write mode advertised", |app| {
+        app.agents
+            .mode_selection
+            .as_ref()
+            .is_some_and(|picker| picker.options.iter().any(|mode| mode == "write"))
+    });
+    while app
+        .agents
+        .mode_selection
+        .as_ref()
+        .is_some_and(|picker| picker.options[picker.selected] != "write")
+    {
+        press(app, KeyCode::Down, KeyModifiers::NONE);
+    }
+    press(app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(app, "provider write mode selected", |app| {
+        app.agents.threads[0]
+            .host
+            .snapshot()
+            .current_mode
+            .as_ref()
+            .is_some_and(|mode| mode.0.as_ref() == "write")
+    });
+}
+
+fn begin_fixture_turn(app: &mut App, fake: &ScriptedFake) -> u64 {
+    type_text(app, "phase six fixture");
+    press(app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(app, "fixture turn starts", |app| {
+        app.agents.threads[0].state == ThreadUiState::Running
+            && app.agents.threads[0].host.active_turn_key().is_some()
+    });
+    wait_until(app, "fixture prompt reaches fake agent", |_| {
+        fake.agent().requests_by_method("session/prompt").len() == 1
+    });
+    app.agents.threads[0]
+        .host
+        .active_turn_key()
+        .expect("fixture evidence must be recorded while turn remains active")
+        .turn_id()
 }
 
 // ── Disabled path ────────────────────────────────────────────────────────────
@@ -1034,7 +1435,870 @@ fn context_slash_command_uses_unsaved_open_buffer_snapshot() {
 }
 
 #[test]
-fn recoverable_pause_offers_resume_and_resume_resends_prompt() {
+fn phase_six_live_openrouter_pane_write_collects_post_write_evidence() {
+    let _live_lock = phase_six_live_lock();
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Metrics {
+        model_requests: usize,
+        approvals: usize,
+        evidence_ids: usize,
+        write_actions: usize,
+    }
+
+    let workspace = tempfile::tempdir().expect("fixture workspace");
+    let target = workspace.path().join("live.txt");
+    fs::write(workspace.path().join(".ee.toml"), AGENTS_TOML).expect("write agents config");
+    fs::write(&target, "before\n").expect("write baseline file");
+    commit_git_baseline(workspace.path());
+
+    let scripted = live_write_script(&target, "write-live-file", "after\n", "write complete");
+    let state = tempfile::tempdir().expect("fixture session state");
+    let factory = LiveOpenRouterTransport::new(
+        openrouter_fixture_config(),
+        state.path().join("agent-sessions"),
+        scripted.clone(),
+    );
+    let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open target buffer");
+    app.backend.switch_to_id(buffer_id).expect("focus target buffer");
+    open_pane_and_wait_ready(&mut app);
+
+    // Select production provider's write mode through the real pane picker;
+    // no host evidence is injected by this fixture.
+    select_live_write_mode(&mut app);
+
+    type_text(&mut app, "make live editor write");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "real write approval", |app| app.agents.approvals.len() == 1);
+    let approval_count = app.agents.approvals.len();
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "pane terminal write evidence", |app| {
+        app.agents.threads[0].terminal_evidence.as_ref().is_some_and(|summary| {
+            summary.status == TurnTerminalStatus::PartiallyVerified
+                && summary.blocker == Some(TurnBlocker::MissingSelectedValidation)
+                && summary.safe_follow_up == SafeFollowUp::RunSelectedValidation
+        })
+    });
+
+    wait_until(&mut app, "real provider turn completion", |app| {
+        app.agents.threads[0].state == ThreadUiState::Ready
+    });
+
+    let thread = &app.agents.threads[0];
+    let summary = thread.terminal_evidence.as_ref().expect("post-write pane evidence");
+    assert_eq!(fs::read_to_string(&target).expect("read agent write"), "after\n");
+    assert_eq!(thread.state, ThreadUiState::Ready);
+    assert_eq!(app.backend.active().whole_text().as_deref(), Some("after\n"));
+    assert!(thread.verification_paths.iter().any(|path| path == &target));
+    let write_actions = app
+        .agents
+        .action_log
+        .iter()
+        .filter(|action| format!("{action:?}").starts_with("Write {"))
+        .count();
+    assert_eq!(write_actions, 1, "one approved write is recorded: {:?}", app.agents.action_log);
+    let metrics = Metrics {
+        model_requests: scripted.request_bodies().len(),
+        approvals: approval_count,
+        evidence_ids: summary.evidence_ids.len(),
+        write_actions,
+    };
+    assert_eq!(metrics.model_requests, 2);
+    assert_eq!(metrics.approvals, 1);
+    assert_eq!(metrics.write_actions, 1);
+    assert!(
+        metrics.evidence_ids >= 15,
+        "one real approved write must retain changed-files, diagnostics, diff, and missing-validation evidence: {metrics:?}"
+    );
+    let bodies = scripted.request_bodies();
+    assert!(
+        bodies[1]["messages"].as_array().expect("second model request messages").iter().any(
+            |message| message["role"] == "tool" && message["tool_call_id"] == "write-live-file"
+        ),
+        "approved bridge write result must reach concrete OpenRouter adapter"
+    );
+
+    app.shutdown_agents();
+    factory.shutdown();
+}
+
+#[test]
+fn phase_six_live_openrouter_pane_denied_write_reports_blocked_evidence() {
+    let _live_lock = phase_six_live_lock();
+    let workspace = tempfile::tempdir().expect("fixture workspace");
+    let target = workspace.path().join("denied.txt");
+    fs::write(workspace.path().join(".ee.toml"), AGENTS_TOML).expect("write agents config");
+    fs::write(&target, "before\n").expect("write baseline file");
+    commit_git_baseline(workspace.path());
+
+    let scripted = live_write_script_with_calls(
+        &target,
+        &[("write-live-warmup", "before\n"), ("write-live-denied", "after\n")],
+        "write denied",
+    );
+    let state = tempfile::tempdir().expect("fixture session state");
+    let factory = LiveOpenRouterTransport::new(
+        openrouter_fixture_config(),
+        state.path().join("agent-sessions"),
+        scripted.clone(),
+    );
+    let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open target buffer");
+    app.backend.switch_to_id(buffer_id).expect("focus target buffer");
+    open_pane_and_wait_ready(&mut app);
+    select_live_write_mode(&mut app);
+
+    type_text(&mut app, "reject live editor write");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "warmup write approval", |app| !app.agents.approvals.is_empty());
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "denied write approval", |app| !app.agents.approvals.is_empty());
+    assert_eq!(app.agents.approvals.front().expect("write approval").selected, 0);
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(app.agents.approvals.front().expect("write approval").selected, 2);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "write denial resolved", |app| app.agents.approvals.is_empty());
+    wait_until(&mut app, "pane denied-write evidence", |app| {
+        app.agents.threads[0].system_notices().iter().any(|notice| {
+            notice.contains("verification: Blocked") && notice.contains("WriteDenied")
+        })
+    });
+    wait_until(&mut app, "denied provider turn completion", |app| {
+        app.agents.threads[0].state == ThreadUiState::Ready
+    });
+
+    let thread = &app.agents.threads[0];
+    assert_eq!(fs::read_to_string(&target).expect("read denied write"), "before\n");
+    assert_eq!(app.backend.active().whole_text().as_deref(), Some("before\n"));
+    assert_eq!(
+        app.agents
+            .action_log
+            .iter()
+            .filter(|action| format!("{action:?}").starts_with("Write {"))
+            .count(),
+        1,
+        "only no-op warmup reaches the write bridge"
+    );
+    assert_eq!(scripted.request_bodies().len(), 2, "denial must reach provider tool result");
+    assert!(
+        scripted.request_bodies()[1]["messages"]
+            .as_array()
+            .expect("second model request messages")
+            .iter()
+            .any(|message| message["role"] == "tool"
+                && message["tool_call_id"] == "write-live-denied"),
+        "denied pane write result must reach concrete OpenRouter adapter"
+    );
+    assert!(
+        thread.system_notices().iter().any(|notice| {
+            notice.contains("verification: Blocked") && notice.contains("WriteDenied")
+        }),
+        "pane must render denied-write blocker: {:?}",
+        thread.system_notices()
+    );
+
+    app.shutdown_agents();
+    factory.shutdown();
+}
+
+#[test]
+fn phase_six_live_openrouter_pane_dirty_buffer_reports_blocked_evidence() {
+    let _live_lock = phase_six_live_lock();
+    let workspace = tempfile::tempdir().expect("fixture workspace");
+    let target = workspace.path().join("dirty.txt");
+    fs::write(workspace.path().join(".ee.toml"), AGENTS_TOML).expect("write agents config");
+    fs::write(&target, "before\n").expect("write baseline file");
+    commit_git_baseline(workspace.path());
+
+    let scripted = live_write_script(&target, "write-live-dirty", "after\n", "write conflicted");
+    let state = tempfile::tempdir().expect("fixture session state");
+    let factory = LiveOpenRouterTransport::new(
+        openrouter_fixture_config(),
+        state.path().join("agent-sessions"),
+        scripted.clone(),
+    );
+    let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open target buffer");
+    app.backend.switch_to_id(buffer_id).expect("focus target buffer");
+    wait_until(&mut app, "target buffer loaded", |app| {
+        app.backend.active().whole_text().as_deref() == Some("before\n")
+    });
+    app.backend
+        .replace_line_range(0, 0, &[String::from("unsaved user edit")])
+        .expect("make target buffer dirty");
+    app.backend.flush_all_pending_edits().expect("flush user edit");
+    wait_until(&mut app, "target buffer dirty", |app| {
+        app.backend.active().whole_text().as_deref() == Some("unsaved user edit\n")
+    });
+
+    open_pane_and_wait_ready(&mut app);
+    select_live_write_mode(&mut app);
+    type_text(&mut app, "conflict with dirty editor write");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "real dirty write approval", |app| app.agents.approvals.len() == 1);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "pane conflicted-write evidence", |app| {
+        app.agents.threads[0].system_notices().iter().any(|notice| {
+            notice.contains("verification: Blocked") && notice.contains("WriteConflicted")
+        })
+    });
+    wait_until(&mut app, "dirty provider turn completion", |app| {
+        app.agents.threads[0].state == ThreadUiState::Ready
+    });
+
+    let thread = &app.agents.threads[0];
+    assert_eq!(fs::read_to_string(&target).expect("read conflicted write"), "before\n");
+    assert_eq!(app.backend.active().whole_text().as_deref(), Some("unsaved user edit\n"));
+    assert!(
+        app.agents.action_log.iter().all(|action| !format!("{action:?}").starts_with("Write {"))
+    );
+    assert_eq!(scripted.request_bodies().len(), 2, "conflict must reach provider tool result");
+    assert!(
+        scripted.request_bodies()[1]["messages"]
+            .as_array()
+            .expect("second model request messages")
+            .iter()
+            .any(|message| message["role"] == "tool"
+                && message["tool_call_id"] == "write-live-dirty"),
+        "conflicted pane write result must reach concrete OpenRouter adapter"
+    );
+    assert!(
+        thread.system_notices().iter().any(|notice| {
+            notice.contains("verification: Blocked") && notice.contains("WriteConflicted")
+        }),
+        "pane must render dirty-buffer blocker: {:?}",
+        thread.system_notices()
+    );
+
+    app.shutdown_agents();
+    factory.shutdown();
+}
+
+#[test]
+fn phase_six_live_openrouter_pane_partial_multi_file_apply_reports_blocked_evidence() {
+    let _live_lock = phase_six_live_lock();
+    let workspace = tempfile::tempdir().expect("fixture workspace");
+    let first = workspace.path().join("first.txt");
+    let second_directory = workspace.path().join("second-directory");
+    fs::write(workspace.path().join(".ee.toml"), AGENTS_TOML).expect("write agents config");
+    fs::write(&first, "before\n").expect("write first baseline");
+    fs::create_dir(&second_directory).expect("create failing write target");
+    commit_git_baseline(workspace.path());
+
+    let scripted = live_write_script_in_rounds(
+        &[
+            ("write-first", first.as_path(), "after first\n"),
+            ("write-second", second_directory.as_path(), "after second\n"),
+        ],
+        "partial apply reported",
+    );
+    let state = tempfile::tempdir().expect("fixture session state");
+    let factory = LiveOpenRouterTransport::new(
+        openrouter_fixture_config(),
+        state.path().join("agent-sessions"),
+        scripted.clone(),
+    );
+    let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let buffer_id = app.backend.open_buffer(Some(first.clone())).expect("open first buffer");
+    app.backend.switch_to_id(buffer_id).expect("focus first buffer");
+    open_pane_and_wait_ready(&mut app);
+    select_live_write_mode(&mut app);
+
+    type_text(&mut app, "partially apply real multi-file write");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "first write approval", |app| !app.agents.approvals.is_empty());
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "second write approval", |app| !app.agents.approvals.is_empty());
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "pane partial-apply evidence", |app| {
+        app.agents.threads[0].system_notices().iter().any(|notice| {
+            notice.contains("verification: Blocked") && notice.contains("WriteFailed")
+        })
+    });
+    wait_until(&mut app, "partial provider turn completion", |app| {
+        app.agents.threads[0].state == ThreadUiState::Ready
+    });
+
+    let thread = &app.agents.threads[0];
+    let summary = thread.terminal_evidence.as_ref().expect("partial-apply pane evidence");
+    assert_eq!(summary.status, TurnTerminalStatus::Blocked);
+    assert_eq!(summary.blocker, Some(TurnBlocker::WriteFailed));
+    assert_eq!(summary.safe_follow_up, SafeFollowUp::RefreshEvidence);
+    assert_eq!(fs::read_to_string(&first).expect("read first write"), "after first\n");
+    assert!(second_directory.is_dir(), "failed second write must preserve directory target");
+    assert!(
+        thread.system_notices().iter().any(|notice| {
+            notice.contains("verification: Blocked") && notice.contains("WriteFailed")
+        }),
+        "pane must render partial-apply blocker and follow-up: {:?}",
+        thread.system_notices()
+    );
+    assert_eq!(scripted.request_bodies().len(), 3);
+
+    app.shutdown_agents();
+    factory.shutdown();
+}
+
+#[test]
+fn phase_six_live_openrouter_pane_diagnostics_regression_reports_blocked_evidence() {
+    let _live_lock = phase_six_live_lock();
+    let workspace = tempfile::tempdir().expect("fixture workspace");
+    let target = workspace.path().join("diagnostics.txt");
+    fs::write(workspace.path().join(".ee.toml"), AGENTS_TOML).expect("write agents config");
+    fs::write(&target, "before\n").expect("write baseline file");
+    commit_git_baseline(workspace.path());
+
+    let scripted =
+        live_write_script(&target, "write-live-diagnostics", "after\n", "diagnostics regressed");
+    let state = tempfile::tempdir().expect("fixture session state");
+    let factory = LiveOpenRouterTransport::new(
+        openrouter_fixture_config(),
+        state.path().join("agent-sessions"),
+        scripted.clone(),
+    );
+    let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open target buffer");
+    app.backend.switch_to_id(buffer_id).expect("focus target buffer");
+    wait_until(&mut app, "target buffer loaded", |app| {
+        app.backend.active().whole_text().as_deref() == Some("before\n")
+    });
+    App::set_pre_write_verification_test_hook(|app| {
+        app.backend.diagnostics = vec![Diagnostic {
+            range: Range { start: 0, end: 5 },
+            severity: DiagnosticSeverity::Error,
+            message: String::from("fresh post-write diagnostic"),
+            source: Some(String::from("test-lsp")),
+            code: Some(String::from("E-POST-WRITE")),
+        }];
+    });
+    open_pane_and_wait_ready(&mut app);
+    select_live_write_mode(&mut app);
+
+    type_text(&mut app, "trigger real diagnostic regression");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "diagnostic write approval", |app| app.agents.approvals.len() == 1);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "diagnostic provider turn completion", |app| {
+        app.agents.threads[0].state == ThreadUiState::Ready
+    });
+
+    let thread = &app.agents.threads[0];
+    let summary = thread.terminal_evidence.as_ref().expect("diagnostics pane evidence");
+    assert_eq!(summary.status, TurnTerminalStatus::Blocked);
+    assert_eq!(summary.blocker, Some(TurnBlocker::DiagnosticsFailed));
+    assert_eq!(summary.safe_follow_up, SafeFollowUp::RefreshEvidence);
+    assert_eq!(fs::read_to_string(&target).expect("read diagnostics write"), "after\n");
+    assert_eq!(app.backend.diagnostics.len(), 1, "post-write diagnostic reaches editor state");
+    let bodies = scripted.request_bodies();
+    assert_eq!(bodies.len(), 3, "diagnostic failure triggers one bounded repair model round");
+    assert!(bodies.iter().any(|body| {
+        body["messages"].as_array().is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message["content"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("Repair controller request."))
+            })
+        })
+    }));
+
+    app.shutdown_agents();
+    factory.shutdown();
+}
+
+#[test]
+fn phase_six_live_openrouter_pane_stale_revision_after_evidence_is_blocked() {
+    let _live_lock = phase_six_live_lock();
+    let workspace = tempfile::tempdir().expect("fixture workspace");
+    let target = workspace.path().join("stale.txt");
+    fs::write(workspace.path().join(".ee.toml"), AGENTS_TOML).expect("write agents config");
+    fs::write(&target, "before\n").expect("write baseline file");
+    commit_git_baseline(workspace.path());
+
+    let scripted = live_write_script(&target, "write-stale", "after\n", "write complete");
+    let state = tempfile::tempdir().expect("fixture session state");
+    let factory = LiveOpenRouterTransport::new(
+        openrouter_fixture_config(),
+        state.path().join("agent-sessions"),
+        scripted.clone(),
+    );
+    let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open target buffer");
+    app.backend.switch_to_id(buffer_id).expect("focus target buffer");
+    wait_until(&mut app, "target buffer loaded", |app| {
+        app.backend.active().whole_text().as_deref() == Some("before\n")
+    });
+    App::set_post_write_test_hook(|app| {
+        app.backend
+            .replace_line_range(0, 0, &[String::from("intervening editor mutation")])
+            .expect("mutate buffer after evidence capture");
+        app.backend.flush_all_pending_edits().expect("flush intervening editor mutation");
+    });
+    open_pane_and_wait_ready(&mut app);
+    select_live_write_mode(&mut app);
+
+    type_text(&mut app, "write then mutate editor after verification capture");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "stale write approval", |app| app.agents.approvals.len() == 1);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "stale revision evidence", |app| {
+        app.agents.threads[0].terminal_evidence.as_ref().is_some_and(|summary| {
+            summary.status == TurnTerminalStatus::Blocked
+                && summary.blocker == Some(TurnBlocker::StaleRevision)
+                && summary.safe_follow_up == SafeFollowUp::RefreshEvidence
+        })
+    });
+    wait_until(&mut app, "stale provider turn completion", |app| {
+        app.agents.threads[0].state == ThreadUiState::Ready
+    });
+
+    let thread = &app.agents.threads[0];
+    assert_eq!(fs::read_to_string(&target).expect("read saved agent write"), "after\n");
+    assert_eq!(app.backend.active().whole_text().as_deref(), Some("intervening editor mutation\n"));
+    assert_eq!(
+        thread.terminal_evidence.as_ref().expect("stale evidence").blocker,
+        Some(TurnBlocker::StaleRevision)
+    );
+    assert_eq!(scripted.request_bodies().len(), 2);
+
+    app.shutdown_agents();
+    factory.shutdown();
+}
+
+#[test]
+fn phase_six_live_openrouter_pane_unavailable_terminal_validation_is_blocked() {
+    let _live_lock = phase_six_live_lock();
+    let workspace = tempfile::tempdir().expect("fixture workspace");
+    let target = workspace.path().join("unavailable.txt");
+    let missing_cwd = workspace.path().join("missing-terminal-cwd");
+    fs::write(workspace.path().join(".ee.toml"), AGENTS_TOML).expect("write agents config");
+    fs::write(&target, "before\n").expect("write baseline file");
+    commit_git_baseline(workspace.path());
+
+    let scripted = ScriptedOpenRouterCompletion::new(vec![
+        live_tool_response(
+            "write-unavailable",
+            "write_file",
+            json!({ "path": target.display().to_string(), "content": "after\n" }),
+        ),
+        live_tool_response(
+            "terminal-unavailable",
+            "create_terminal",
+            json!({ "command": "echo unavailable", "cwd": missing_cwd.display().to_string() }),
+        ),
+        live_completion_response("terminal unavailable reported"),
+    ]);
+    let state = tempfile::tempdir().expect("fixture session state");
+    let factory = LiveOpenRouterTransport::new(
+        openrouter_fixture_config(),
+        state.path().join("agent-sessions"),
+        scripted.clone(),
+    );
+    let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open target buffer");
+    app.backend.switch_to_id(buffer_id).expect("focus target buffer");
+    open_pane_and_wait_ready(&mut app);
+    select_live_write_mode(&mut app);
+
+    type_text(&mut app, "write then run unavailable selected validation");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "write approval", |app| app.agents.approvals.len() == 1);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "terminal approval", |app| app.agents.approvals.len() == 1);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "unavailable terminal evidence", |app| {
+        app.agents.threads[0].terminal_evidence.as_ref().is_some_and(|summary| {
+            summary.status == TurnTerminalStatus::Blocked
+                && summary.blocker == Some(TurnBlocker::ValidationUnavailable)
+                && summary.safe_follow_up == SafeFollowUp::RunSelectedValidation
+        })
+    });
+    wait_until(&mut app, "unavailable terminal provider completion", |app| {
+        app.agents.threads[0].state == ThreadUiState::Ready
+    });
+
+    let summary = app.agents.threads[0].terminal_evidence.as_ref().expect("unavailable evidence");
+    assert_eq!(summary.blocker, Some(TurnBlocker::ValidationUnavailable));
+    assert_eq!(fs::read_to_string(&target).expect("read agent write"), "after\n");
+    assert!(!missing_cwd.exists());
+    assert_eq!(scripted.request_bodies().len(), 3);
+
+    app.shutdown_agents();
+    factory.shutdown();
+}
+
+#[test]
+fn phase_six_live_openrouter_pane_repeated_selected_validation_stops_repair() {
+    let _live_lock = phase_six_live_lock();
+    let workspace = tempfile::tempdir().expect("fixture workspace");
+    let target = workspace.path().join("lib.rs");
+    fs::write(workspace.path().join(".ee.toml"), AGENTS_TOML).expect("write agents config");
+    fs::write(
+        workspace.path().join("Cargo.toml"),
+        "[package]\nname = \"phase-six-validation\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n",
+    )
+    .expect("write cargo manifest");
+    fs::write(&target, "pub fn phase_six() {}\n").expect("write baseline Rust file");
+    commit_git_baseline(workspace.path());
+
+    let scripted = ScriptedOpenRouterCompletion::new(vec![
+        live_tool_response(
+            "write-invalid-initial",
+            "write_file",
+            json!({ "path": target.display().to_string(), "content": "pub fn phase_six() {\n" }),
+        ),
+        live_completion_response("initial implementation complete"),
+        live_tool_response(
+            "write-invalid-repair",
+            "write_file",
+            json!({ "path": target.display().to_string(), "content": "pub fn phase_six_repaired() {\n" }),
+        ),
+        live_completion_response("repair attempted"),
+    ]);
+    let state = tempfile::tempdir().expect("fixture session state");
+    let factory = LiveOpenRouterTransport::new(
+        openrouter_fixture_config(),
+        state.path().join("agent-sessions"),
+        scripted.clone(),
+    );
+    let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open target buffer");
+    app.backend.switch_to_id(buffer_id).expect("focus target buffer");
+    open_pane_and_wait_ready(&mut app);
+    select_live_write_mode(&mut app);
+
+    type_text(&mut app, "write invalid Rust and exercise bounded repair");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    let approval_count =
+        approve_until_turn_ready(&mut app, "repeated validation provider completion", 8);
+    assert!(approval_count >= 4, "write, validation, repair, and revalidation need approval");
+    wait_until(&mut app, "repeated validation pane evidence", |app| {
+        app.agents.threads[0].terminal_evidence.as_ref().is_some_and(|summary| {
+            summary.status == TurnTerminalStatus::Blocked
+                && summary.blocker == Some(TurnBlocker::ValidationFailed)
+        })
+    });
+
+    let thread = &app.agents.threads[0];
+    assert_eq!(
+        app.agents
+            .action_log
+            .iter()
+            .filter(|action| format!("{action:?}").starts_with("Write {"))
+            .count(),
+        2,
+        "initial write plus one repair write must execute"
+    );
+    assert_eq!(
+        scripted.request_bodies().len(),
+        4,
+        "repair controller must stop before another model loop"
+    );
+    assert!(
+        scripted.request_bodies().iter().any(|body| {
+            body["messages"].as_array().is_some_and(|messages| {
+                messages.iter().any(|message| {
+                    message["content"]
+                        .as_str()
+                        .is_some_and(|text| text.contains("Repair controller request."))
+                })
+            })
+        }),
+        "repair request must use fresh production repair context"
+    );
+    assert_eq!(
+        thread.terminal_evidence.as_ref().expect("failed validation evidence").blocker,
+        Some(TurnBlocker::ValidationFailed)
+    );
+
+    app.shutdown_agents();
+    factory.shutdown();
+}
+
+#[test]
+fn phase_six_live_openrouter_pane_resume_reuses_completed_write() {
+    let _live_lock = phase_six_live_lock();
+    let workspace = tempfile::tempdir().expect("fixture workspace");
+    let target = workspace.path().join("resume.txt");
+    fs::write(workspace.path().join(".ee.toml"), AGENTS_TOML).expect("write agents config");
+    fs::write(&target, "before\n").expect("write baseline file");
+    commit_git_baseline(workspace.path());
+
+    let write_arguments = json!({ "path": target.display().to_string(), "content": "after\n" });
+    let scripted = ScriptedOpenRouterCompletion::pause_then(
+        vec![live_tool_response("write-before-pause", "write_file", write_arguments.clone())],
+        vec![
+            live_tool_response("write-before-pause", "write_file", write_arguments),
+            live_completion_response("resumed without repeating write"),
+        ],
+    );
+    let state = tempfile::tempdir().expect("fixture session state");
+    let factory = LiveOpenRouterTransport::new(
+        openrouter_fixture_config(),
+        state.path().join("agent-sessions"),
+        scripted.clone(),
+    )
+    .with_turn_timeout(Duration::from_secs(1))
+    .with_auto_resume_max(0);
+    let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
+    let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open target buffer");
+    app.backend.switch_to_id(buffer_id).expect("focus target buffer");
+    open_pane_and_wait_ready(&mut app);
+    select_live_write_mode(&mut app);
+
+    type_text(&mut app, "write then interrupt and resume");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "write approval before pause", |app| app.agents.approvals.len() == 1);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "provider checkpointed pause", |app| {
+        app.agents.threads[0].state == ThreadUiState::PausedRecoverable
+    });
+    let evidence_before_resume = app.agents.threads[0]
+        .terminal_evidence
+        .as_ref()
+        .expect("post-write evidence retained before resume")
+        .evidence_ids
+        .clone();
+    assert_eq!(fs::read_to_string(&target).expect("read paused write"), "after\n");
+    assert_eq!(
+        scripted.request_bodies().len(),
+        2,
+        "timeout interrupts after checkpointed write and before manual resume"
+    );
+
+    type_text(&mut app, "/resume");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "resumed provider completion", |app| {
+        app.agents.threads[0].state == ThreadUiState::Ready && scripted.request_bodies().len() == 4
+    });
+
+    let thread = &app.agents.threads[0];
+    assert!(thread.pending_recovery.is_none());
+    assert_eq!(fs::read_to_string(&target).expect("read resumed write"), "after\n");
+    assert_eq!(
+        app.agents
+            .action_log
+            .iter()
+            .filter(|action| format!("{action:?}").starts_with("Write {"))
+            .count(),
+        1,
+        "resumed duplicate write must reuse completed side effect"
+    );
+    assert!(
+        evidence_before_resume.iter().all(|id| thread
+            .terminal_evidence
+            .as_ref()
+            .is_some_and(|summary| summary.evidence_ids.contains(id))),
+        "resume must preserve pre-interruption host evidence"
+    );
+    let bodies = scripted.request_bodies();
+    assert_eq!(bodies.len(), 4, "resume performs only two bounded model rounds");
+    assert!(
+        bodies[3]["messages"]
+            .as_array()
+            .expect("final resumed request messages")
+            .iter()
+            .any(|message| message["role"] == "tool"
+                && message["tool_call_id"] == "write-before-pause"),
+        "resumed model receives reused completed tool result instead of a duplicate bridge write"
+    );
+
+    app.shutdown_agents();
+    factory.shutdown();
+}
+
+#[test]
+fn phase_six_fixture_matrix_reduces_live_host_evidence_before_completion() {
+    struct Fixture {
+        name: &'static str,
+        observations: Vec<TurnObservation>,
+        status: TurnTerminalStatus,
+        blocker: TurnBlocker,
+        follow_up: SafeFollowUp,
+        evidence_ids: usize,
+    }
+
+    let revision = |value| EvidenceRevision::new(value);
+    let current = revision("phase-six-current");
+    let fixtures = vec![
+        Fixture {
+            name: "stale_context",
+            observations: vec![
+                TurnObservation::Revision { revision: revision("phase-six-captured") },
+                TurnObservation::ChangedFiles {
+                    revision: revision("phase-six-captured"),
+                    files: vec![String::from("src/lib.rs")],
+                    truncated: false,
+                },
+                TurnObservation::Diagnostics {
+                    revision: revision("phase-six-captured"),
+                    outcome: EvidenceCheck::Passed,
+                },
+                TurnObservation::DiffReview {
+                    revision: revision("phase-six-captured"),
+                    outcome: EvidenceCheck::Passed,
+                },
+                TurnObservation::Validation {
+                    revision: revision("phase-six-captured"),
+                    selected: true,
+                    outcome: EvidenceCheck::Passed,
+                },
+                TurnObservation::Revision { revision: current.clone() },
+            ],
+            status: TurnTerminalStatus::Blocked,
+            blocker: TurnBlocker::StaleRevision,
+            follow_up: SafeFollowUp::RefreshEvidence,
+            evidence_ids: 6,
+        },
+        Fixture {
+            name: "repeated_validation_failure",
+            observations: vec![
+                TurnObservation::Revision { revision: current.clone() },
+                TurnObservation::ChangedFiles {
+                    revision: current.clone(),
+                    files: vec![String::from("src/lib.rs")],
+                    truncated: false,
+                },
+                TurnObservation::Diagnostics {
+                    revision: current.clone(),
+                    outcome: EvidenceCheck::Passed,
+                },
+                TurnObservation::DiffReview {
+                    revision: current.clone(),
+                    outcome: EvidenceCheck::Passed,
+                },
+                TurnObservation::Validation {
+                    revision: current.clone(),
+                    selected: true,
+                    outcome: EvidenceCheck::Failed,
+                },
+                TurnObservation::Validation {
+                    revision: current.clone(),
+                    selected: true,
+                    outcome: EvidenceCheck::Failed,
+                },
+            ],
+            status: TurnTerminalStatus::Blocked,
+            blocker: TurnBlocker::ValidationFailed,
+            follow_up: SafeFollowUp::RefreshEvidence,
+            evidence_ids: 6,
+        },
+        Fixture {
+            name: "validation_skipped",
+            observations: vec![
+                TurnObservation::Revision { revision: current.clone() },
+                TurnObservation::ChangedFiles {
+                    revision: current.clone(),
+                    files: vec![String::from("src/lib.rs")],
+                    truncated: false,
+                },
+                TurnObservation::Diagnostics {
+                    revision: current.clone(),
+                    outcome: EvidenceCheck::Passed,
+                },
+                TurnObservation::DiffReview {
+                    revision: current.clone(),
+                    outcome: EvidenceCheck::Passed,
+                },
+                TurnObservation::Validation {
+                    revision: current.clone(),
+                    selected: true,
+                    outcome: EvidenceCheck::Skipped,
+                },
+            ],
+            status: TurnTerminalStatus::Blocked,
+            blocker: TurnBlocker::ValidationSkipped,
+            follow_up: SafeFollowUp::RunSelectedValidation,
+            evidence_ids: 5,
+        },
+        Fixture {
+            name: "validation_unavailable",
+            observations: vec![
+                TurnObservation::Revision { revision: current.clone() },
+                TurnObservation::ChangedFiles {
+                    revision: current.clone(),
+                    files: vec![String::from("src/lib.rs")],
+                    truncated: false,
+                },
+                TurnObservation::Diagnostics {
+                    revision: current.clone(),
+                    outcome: EvidenceCheck::Passed,
+                },
+                TurnObservation::DiffReview {
+                    revision: current.clone(),
+                    outcome: EvidenceCheck::Passed,
+                },
+                TurnObservation::Validation {
+                    revision: current.clone(),
+                    selected: true,
+                    outcome: EvidenceCheck::Unavailable,
+                },
+            ],
+            status: TurnTerminalStatus::Blocked,
+            blocker: TurnBlocker::ValidationUnavailable,
+            follow_up: SafeFollowUp::RunSelectedValidation,
+            evidence_ids: 5,
+        },
+    ];
+
+    for fixture in fixtures {
+        let script = base_script().wait_for("session/prompt");
+        let (mut app, _temp, fake) = fake_agents_app(script);
+        open_pane_and_wait_ready(&mut app);
+        let turn_id = begin_fixture_turn(&mut app, &fake);
+
+        // Fixture facts must reach the live host while the ACP request remains
+        // active. Never manufacture evidence after transport completion.
+        for observation in fixture.observations {
+            app.agents.threads[0]
+                .host
+                .observe_turn_evidence(turn_id, observation)
+                .expect("live fixture turn accepts host evidence");
+        }
+        wait_until(&mut app, fixture.name, |app| {
+            app.agents.threads[0].terminal_evidence.as_ref().is_some_and(|summary| {
+                summary.status == fixture.status && summary.blocker == Some(fixture.blocker)
+            })
+        });
+
+        let summary = app.agents.threads[0].terminal_evidence.as_ref().expect("pane evidence");
+        let metrics = PhaseSixFixtureMetrics {
+            prompt_requests: fake.agent().requests_by_method("session/prompt").len(),
+            evidence_ids: summary.evidence_ids.len(),
+            approvals: app.agents.approvals.len(),
+        };
+        assert_eq!(summary.safe_follow_up, fixture.follow_up, "fixture={}", fixture.name);
+        assert_eq!(
+            metrics,
+            PhaseSixFixtureMetrics {
+                prompt_requests: 1,
+                evidence_ids: fixture.evidence_ids,
+                approvals: 0,
+            },
+            "fixture={} metrics",
+            fixture.name
+        );
+        assert_eq!(app.agents.threads[0].state, ThreadUiState::Running, "fixture={}", fixture.name);
+        assert!(
+            app.agents.threads[0].host.active_turn_key().is_some(),
+            "fixture={} evidence must precede completion",
+            fixture.name
+        );
+        assert!(
+            app.agents.threads[0]
+                .system_notices()
+                .iter()
+                .any(|notice| notice.contains("verification: Blocked")
+                    && notice.contains(&format!("{:?}", fixture.blocker))),
+            "fixture={} pane must reduce host blocker",
+            fixture.name
+        );
+        app.shutdown_agents();
+    }
+}
+
+#[test]
+fn phase_six_resume_interruption_preserves_prompt_without_duplicate_acp_request() {
     // The agent answers the first prompt with a recoverable interruption
     // (deadline, durable checkpoint), then completes the resumed prompt.
     let script = base_script()
@@ -1108,6 +2372,18 @@ fn recoverable_pause_offers_resume_and_resume_resends_prompt() {
             && app.agents.threads[0].system_notices().iter().any(|n| n.contains("turn completed"))
     });
     assert!(app.agents.threads[0].pending_recovery.is_none(), "resume clears the pause");
+    assert_eq!(
+        PhaseSixFixtureMetrics {
+            prompt_requests: fake.agent().requests_by_method("session/prompt").len(),
+            evidence_ids: app.agents.threads[0]
+                .terminal_evidence
+                .as_ref()
+                .map_or(0, |summary| summary.evidence_ids.len()),
+            approvals: app.agents.approvals.len(),
+        },
+        PhaseSixFixtureMetrics { prompt_requests: 2, evidence_ids: 1, approvals: 0 },
+        "resume sends only original and resumed ACP prompt; completed tool replay stays provider-owned"
+    );
 }
 
 #[test]

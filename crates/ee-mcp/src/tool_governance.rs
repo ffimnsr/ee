@@ -104,6 +104,16 @@ const TERMINAL_ERRORS: &[&str] = &[
 const DEFAULT_REDACTION: &[&str] = &["secret_like_values", "sensitive_diagnostics"];
 const TERMINAL_REDACTION: &[&str] =
     &["secret_like_environment_values", "secret_like_environment_keys", "sensitive_diagnostics"];
+const TURN_EVIDENCE_REDACTION: &[&str] = &[
+    "host_owned_evidence_summary_only",
+    "no_transcript",
+    "no_raw_paths",
+    "no_prompts",
+    "no_terminal_output",
+    "secret_like_values",
+];
+const TURN_EVIDENCE_ERRORS: &[&str] =
+    &["invalid_arguments", "unsupported_tool", "evidence_unavailable", "backend_failure"];
 /// Remote responses are data, never instructions. The session-local cache retains
 /// normalized public fields only and expires entries after 60 seconds.
 const WEB_CONTEXT_REDACTION: &[&str] = &[
@@ -145,6 +155,21 @@ const fn web_context_read(cap_kind: &'static str, cap: u64) -> ToolGovernance {
         output_cap: cap,
         redaction_rules: WEB_CONTEXT_REDACTION,
         error_classes: WEB_CONTEXT_ERROR_CLASSES,
+        deprecated: false,
+        replacement: None,
+    }
+}
+
+const fn turn_evidence_read() -> ToolGovernance {
+    ToolGovernance {
+        side_effect: SideEffectClass::Read,
+        approval: "none",
+        transports: ACP_ONLY,
+        required_capabilities: NO_CAPABILITIES,
+        output_cap_kind: "evidence_ids",
+        output_cap: 128,
+        redaction_rules: TURN_EVIDENCE_REDACTION,
+        error_classes: TURN_EVIDENCE_ERRORS,
         deprecated: false,
         replacement: None,
     }
@@ -238,6 +263,7 @@ pub fn governance(tool: &str) -> Option<ToolGovernance> {
         }
         "ee_file_dependency_map" => read(DEPENDENCY_INDEX_CAPABILITY, "result_items", 500),
         "ee_symbol_dependency_map" => dependency_index_read(),
+        "ee_turn_evidence_summary" => turn_evidence_read(),
         "ee_terminal_output"
         | "ee_terminal_output_since"
         | "ee_terminal_wait"
@@ -324,6 +350,7 @@ pub const STABLE_TOOL_NAMES: &[&str] = &[
     "ee_git_diff_file",
     "ee_changed_files",
     "ee_review_context",
+    "ee_turn_evidence_summary",
     "ee_project_instructions",
     "ee_save_note",
     "ee_read_notes",
@@ -348,11 +375,24 @@ mod tests {
     }
 
     #[test]
-    fn stdio_does_not_advertise_acp_only_terminal_lifecycle_tools() {
+    fn stdio_does_not_advertise_acp_only_tools() {
         let stdio = tool_names_for_transport(ToolTransport::Stdio);
         assert!(stdio.contains(&"ee_terminal_create"));
         assert!(!stdio.contains(&"ee_terminal_output"));
         assert!(!stdio.contains(&"ee_terminal_kill"));
+        assert!(!stdio.contains(&"ee_turn_evidence_summary"));
+    }
+
+    #[test]
+    fn turn_evidence_summary_is_acp_only_and_redacted() {
+        let entry = governance("ee_turn_evidence_summary").expect("evidence governance");
+        assert_eq!(entry.side_effect, SideEffectClass::Read);
+        assert_eq!(entry.approval, "none");
+        assert_eq!(entry.transports, ACP_ONLY);
+        assert_eq!(entry.output_cap_kind, "evidence_ids");
+        assert_eq!(entry.output_cap, 128);
+        assert_eq!(entry.redaction_rules, TURN_EVIDENCE_REDACTION);
+        assert_eq!(entry.error_classes, TURN_EVIDENCE_ERRORS);
     }
 
     #[test]

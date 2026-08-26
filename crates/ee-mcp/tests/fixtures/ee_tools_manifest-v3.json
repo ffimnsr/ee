@@ -2321,6 +2321,53 @@
       "errorClasses": [
         "invalid_arguments",
         "unsupported_tool",
+        "evidence_unavailable",
+        "backend_failure"
+      ],
+      "example": {},
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "turn_id": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "ee_turn_evidence_summary",
+      "outputCaps": [
+        {
+          "kind": "evidence_ids",
+          "max": 128
+        }
+      ],
+      "redactionRules": [
+        "host_owned_evidence_summary_only",
+        "no_transcript",
+        "no_raw_paths",
+        "no_prompts",
+        "no_terminal_output",
+        "secret_like_values"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 3,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
         "permission_denied",
         "backend_failure",
         "output_truncated"

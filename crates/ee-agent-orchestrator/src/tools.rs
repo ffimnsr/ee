@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -31,7 +31,7 @@ use crate::budget::BudgetTracker;
 use crate::config::OrchestratorConfig;
 use crate::destructive_policy::SideEffectSubclass;
 use crate::error::OrchestratorError;
-use crate::events::EventRecorder;
+use crate::events::{EventRecorder, OrchestratorEvent};
 use crate::model::ModelMessage;
 use crate::policy::{PolicyContext, PolicyEngine};
 use crate::tasks::TaskNode;
@@ -660,6 +660,118 @@ impl ServerTool for ClientBridgeTool {
     }
 }
 
+/// Fixed validation command routed through the existing approved terminal
+/// lifecycle. The command is code-owned; callers cannot replace its argv.
+#[derive(Clone)]
+struct CargoCheckTool {
+    session_id: SessionId,
+}
+
+impl ServerTool for CargoCheckTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new("cargo_check", "Runs focused cargo check through editor terminal")
+            .side_effect_class(SideEffectClass::Execute)
+            .input_schema(serde_json::json!({
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": [],
+            }))
+    }
+
+    fn execute(
+        &self,
+        arguments: serde_json::Value,
+        client: ClientBridge,
+        cancel: watch::Receiver<bool>,
+        _context: ToolCallContext,
+    ) -> ToolFuture<ToolResult> {
+        let session_id = self.session_id.clone();
+        Box::pin(async move {
+            if *cancel.borrow() {
+                return ToolResult::failure(ToolErrorKind::Cancelled, "validation cancelled");
+            }
+            let mut request = CreateTerminalRequest::new(session_id.clone(), "cargo check --quiet");
+            if let Some(path) = optional_string_arg(&arguments, "path")
+                && let Some(parent) =
+                    Path::new(&path).parent().filter(|parent| parent.is_absolute())
+            {
+                request = request.cwd(parent.to_path_buf());
+            }
+            let terminal = match client.create_terminal(request).await {
+                Ok(response) => response.terminal_id,
+                Err(error) => return bridge_error(error),
+            };
+            let wait = client.wait_for_terminal_exit(WaitForTerminalExitRequest::new(
+                session_id.clone(),
+                terminal.clone(),
+            ));
+            let mut cancel_wait = cancel.clone();
+            let waited = tokio::select! {
+                result = tokio::time::timeout(DEFAULT_TERMINAL_WAIT_TIMEOUT, wait) => result,
+                changed = cancel_wait.changed() => {
+                    let _ = changed;
+                    let _ = client.kill_terminal(KillTerminalRequest::new(session_id.clone(), terminal.clone())).await;
+                    let _ = client.release_terminal(ReleaseTerminalRequest::new(session_id, terminal)).await;
+                    return ToolResult::failure(ToolErrorKind::Cancelled, "validation cancelled");
+                }
+            };
+            let wait = match waited {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => return bridge_error(error),
+                Err(_) => {
+                    let _ = client
+                        .kill_terminal(KillTerminalRequest::new(
+                            session_id.clone(),
+                            terminal.clone(),
+                        ))
+                        .await;
+                    let _ = client
+                        .release_terminal(ReleaseTerminalRequest::new(session_id, terminal))
+                        .await;
+                    return ToolResult::failure(ToolErrorKind::Timeout, "cargo check timed out");
+                }
+            };
+            let output = client
+                .terminal_output(TerminalOutputRequest::new(session_id.clone(), terminal.clone()))
+                .await;
+            let _ =
+                client.release_terminal(ReleaseTerminalRequest::new(session_id, terminal)).await;
+            let output = match output {
+                Ok(output) => output,
+                Err(error) => return bridge_error(error),
+            };
+            let exit_code = serde_json::to_value(wait.exit_status)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("exitCode")
+                        .or_else(|| value.get("exit_code"))
+                        .and_then(serde_json::Value::as_u64)
+                })
+                .and_then(|code| i32::try_from(code).ok());
+            if exit_code == Some(0) {
+                ToolResult::success_structured(
+                    "cargo check passed",
+                    serde_json::json!({
+                        "exit_status": exit_code,
+                        "output": output.output,
+                        "truncated": output.truncated,
+                    }),
+                )
+            } else {
+                ToolResult::failure(
+                    ToolErrorKind::Backend,
+                    format!(
+                        "cargo check failed (exit: {}): {}",
+                        exit_code.map_or_else(|| "unknown".into(), |code| code.to_string()),
+                        output.output
+                    ),
+                )
+            }
+        })
+    }
+}
+
 /// All built-in tools, bound to the given session.
 fn builtin_tools(session_id: &SessionId) -> Vec<Arc<dyn ServerTool>> {
     let schema = |properties: &[(&str, &str)], required: &[&str]| {
@@ -693,6 +805,7 @@ fn builtin_tools(session_id: &SessionId) -> Vec<Arc<dyn ServerTool>> {
     };
     let none = ToolDependency::new();
     vec![
+        Arc::new(CargoCheckTool { session_id: session_id.clone() }) as Arc<dyn ServerTool>,
         make(
             BridgeCall::ReadTextFile,
             "read_file",
@@ -909,6 +1022,12 @@ impl ToolExecutor {
             let result = ToolResult::failure(ToolErrorKind::PermissionDenied, reason);
             emit_failed_tool(sink, intent, &result)?;
             return Ok(result);
+        }
+        if definition.host_approval {
+            self.events.record(OrchestratorEvent::ApprovalRequested {
+                tool_call_id: intent.tool_call_id.clone(),
+                tool_name: definition.name.clone(),
+            });
         }
         {
             let mut budget = self.budget.lock().expect("budget tracker poisoned");
@@ -1227,6 +1346,7 @@ mod tests {
             names,
             vec![
                 "ask_user",
+                "cargo_check",
                 "create_terminal",
                 "kill_terminal",
                 "read_file",
@@ -1236,7 +1356,7 @@ mod tests {
                 "write_file"
             ]
         );
-        assert_eq!(registry.len(), 8);
+        assert_eq!(registry.len(), 9);
     }
 
     #[test]

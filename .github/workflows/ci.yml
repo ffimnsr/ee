@@ -147,3 +147,11 @@ jobs:
 
       - name: Run deterministic LLM harness baseline gate (phase 8)
         run: cargo test --quiet -p ee-agent-orchestrator --features test-utils evaluation
+
+      - name: Run Phase 6 pane fixture matrix gate
+        run: |
+          cargo test --quiet -p ee-cli --features agents --locked phase_six_fixture_matrix
+          cargo test --quiet -p ee-cli --features agents --locked phase_six_live_openrouter_pane_write_collects_post_write_evidence
+
+      - name: Run OpenRouter ACP host-transport integration gate
+        run: cargo test --quiet -p ee-agent-host --test orchestrated_replay --locked

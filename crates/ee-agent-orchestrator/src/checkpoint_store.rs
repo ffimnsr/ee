@@ -1,13 +1,15 @@
-//! Durable, atomic, bounded checkpoint store.
+//! Durable, bounded checkpoint store.
 //!
-//! Checkpoints are written as JSON files (temp file + atomic rename), each
-//! carrying a SHA-256 checksum over the payload so corruption is detected
-//! before restore.  Per-session retention and a global TTL keep the store
+//! Checkpoints are written as JSON files (synced temp file + rename + parent
+//! directory sync where supported), each carrying a SHA-256 checksum over the
+//! payload so corruption is detected before restore. This is best-effort
+//! crash consistency, not a filesystem-independent power-loss guarantee.  Per-session retention and a global TTL keep the store
 //! bounded; expired or over-cap entries are pruned on access.  With
 //! `checkpoint_dir: None` the store degrades to an in-memory map so
-//! same-process resume still works, but crash restore is not available.
+//! same-process recovery metadata still works, but crash restore is not available.
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -15,7 +17,10 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::checkpoint::{OrchestratorCheckpoint, current_unix_millis};
+use crate::checkpoint::{
+    CheckpointCaptureMetadata, CheckpointContextProvenance, OrchestratorCheckpoint,
+    current_unix_millis,
+};
 use crate::config::RecoveryConfig;
 use crate::error::OrchestratorError;
 
@@ -70,7 +75,9 @@ impl CheckpointStore {
             next_seq: Mutex::new(HashMap::new()),
         };
         if let Some(dir) = &store.dir {
-            let _ = std::fs::create_dir_all(dir);
+            // Construction cannot report I/O failure; `save` repeats this and
+            // fails closed if restrictive durable storage cannot be prepared.
+            let _ = create_private_dir(dir);
         }
         store
     }
@@ -93,8 +100,8 @@ impl CheckpointStore {
         session_id: &str,
         checkpoint: &OrchestratorCheckpoint,
     ) -> Result<String, OrchestratorError> {
-        checkpoint.validate()?;
-        let payload = serde_json::to_vec(checkpoint).map_err(|error| {
+        let checkpoint = checkpoint.persistence_safe_copy()?;
+        let payload = serde_json::to_vec(&checkpoint).map_err(|error| {
             OrchestratorError::Serialization(format!("checkpoint serialization failed: {error}"))
         })?;
         if payload.len() > self.max_bytes {
@@ -336,13 +343,9 @@ impl CheckpointStore {
         session_id: &str,
         stored: &StoredCheckpoint,
     ) -> Result<(), OrchestratorError> {
+        create_private_dir(dir)?;
         let session = session_dir(dir, session_id);
-        std::fs::create_dir_all(&session).map_err(|error| {
-            OrchestratorError::Serialization(format!(
-                "failed to create checkpoint directory {}: {error}",
-                session.display()
-            ))
-        })?;
+        create_private_dir(&session)?;
         let envelope = serde_json::to_vec(&stored).map_err(|error| {
             OrchestratorError::Serialization(format!(
                 "checkpoint envelope serialization failed: {error}"
@@ -350,18 +353,14 @@ impl CheckpointStore {
         })?;
         let final_path = seq_path(dir, session_id, stored.seq);
         let tmp_path = session.join(format!("tmp-{}-{}.json", std::process::id(), stored.seq));
-        std::fs::write(&tmp_path, &envelope).map_err(|error| {
-            OrchestratorError::Serialization(format!(
-                "failed to write checkpoint {}: {error}",
-                tmp_path.display()
-            ))
-        })?;
+        write_private_file(&tmp_path, &envelope)?;
         std::fs::rename(&tmp_path, &final_path).map_err(|error| {
             OrchestratorError::Serialization(format!(
                 "failed to finalize checkpoint {}: {error}",
                 final_path.display()
             ))
         })?;
+        sync_directory(&session)?;
         Ok(())
     }
 
@@ -398,6 +397,86 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Creates a durable-store directory with owner-only permissions where the
+/// platform exposes POSIX modes. Existing directories are tightened too.
+fn create_private_dir(path: &Path) -> Result<(), OrchestratorError> {
+    std::fs::create_dir_all(path).map_err(|error| {
+        OrchestratorError::Serialization(format!(
+            "failed to create checkpoint directory {}: {error}",
+            path.display()
+        ))
+    })?;
+    set_private_directory_permissions(path)
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), OrchestratorError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|error| {
+        OrchestratorError::Serialization(format!(
+            "failed to create checkpoint {}: {error}",
+            path.display()
+        ))
+    })?;
+    file.write_all(bytes).and_then(|()| file.sync_all()).map_err(|error| {
+        OrchestratorError::Serialization(format!(
+            "failed to durably write checkpoint {}: {error}",
+            path.display()
+        ))
+    })?;
+    set_private_file_permissions(path)
+}
+
+fn sync_directory(path: &Path) -> Result<(), OrchestratorError> {
+    #[cfg(unix)]
+    {
+        std::fs::File::open(path).and_then(|directory| directory.sync_all()).map_err(|error| {
+            OrchestratorError::Serialization(format!(
+                "failed to sync checkpoint directory {}: {error}",
+                path.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_directory_permissions(path: &Path) -> Result<(), OrchestratorError> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(|error| {
+        OrchestratorError::Serialization(format!(
+            "failed to restrict checkpoint directory {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+#[cfg(not(unix))]
+fn set_private_directory_permissions(_path: &Path) -> Result<(), OrchestratorError> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_file_permissions(path: &Path) -> Result<(), OrchestratorError> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|error| {
+        OrchestratorError::Serialization(format!(
+            "failed to restrict checkpoint {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+#[cfg(not(unix))]
+fn set_private_file_permissions(_path: &Path) -> Result<(), OrchestratorError> {
+    Ok(())
+}
+
 /// Per-turn checkpoint writer wired into the loop engine by the runtime.
 ///
 /// Milestone captures are debounced (at most one per [`CHECKPOINT_MILESTONE_DEBOUNCE`])
@@ -408,6 +487,8 @@ pub struct CheckpointHandle {
     store: Arc<CheckpointStore>,
     session_id: String,
     provider: String,
+    capture_context: CheckpointContextProvenance,
+    evidence_refs: Vec<crate::observability::RedactedEvidenceRef>,
     last_milestone: Arc<Mutex<Option<Instant>>>,
 }
 
@@ -423,7 +504,36 @@ impl CheckpointHandle {
             store,
             session_id: session_id.into(),
             provider: provider.into(),
+            capture_context: CheckpointContextProvenance::default(),
+            evidence_refs: Vec::new(),
             last_milestone: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Attaches bounded host-derived context revisions and redacted evidence
+    /// references to every capture for this turn. The loop only receives these
+    /// opaque metadata values; it cannot invent editor observations.
+    #[must_use]
+    pub fn with_capture_metadata(
+        mut self,
+        capture_context: CheckpointContextProvenance,
+        evidence_refs: Vec<crate::observability::RedactedEvidenceRef>,
+    ) -> Self {
+        self.capture_context = capture_context;
+        self.evidence_refs = evidence_refs;
+        self
+    }
+
+    /// Produces metadata for one capture origin.
+    #[must_use]
+    pub fn capture_metadata(
+        &self,
+        origin: crate::checkpoint::CheckpointCaptureOrigin,
+    ) -> CheckpointCaptureMetadata {
+        CheckpointCaptureMetadata {
+            origin,
+            context: self.capture_context.clone(),
+            evidence_refs: self.evidence_refs.clone(),
         }
     }
 
@@ -497,9 +607,13 @@ fn seq_from_name(name: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::checkpoint::{IdGeneratorState, SubagentTreeState, TranscriptSummary};
+    use crate::checkpoint::{
+        CompletedToolCall, IdGeneratorState, ResumeState, SubagentTreeState, TranscriptSummary,
+        tool_call_fingerprint,
+    };
     use crate::config::OrchestratorConfig;
     use crate::memory::MemoryStore;
+    use crate::model::{ModelMessage, ModelRole};
     use crate::tasks::TaskGraph;
 
     fn config() -> OrchestratorConfig {
@@ -604,6 +718,87 @@ mod tests {
             .map(|entry| entry.expect("entry").file_name().to_string_lossy().to_string())
             .collect();
         assert_eq!(names, vec!["0000000001.json"], "only the finalized file remains");
+    }
+
+    #[test]
+    fn durable_checkpoint_omits_transcript_tool_data_and_secrets() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = RecoveryConfig {
+            enabled: true,
+            checkpoint_dir: Some(dir.path().to_path_buf()),
+            ..RecoveryConfig::default()
+        };
+        let store = CheckpointStore::new(&config);
+        let mut checkpoint = sample("s-1", "one");
+        let arguments = serde_json::json!({
+            "path": "tool-argument-do-not-persist",
+            "api_key": "sk-live-1234567890",
+        });
+        checkpoint.resume = Some(ResumeState {
+            transcript: vec![
+                ModelMessage::text(ModelRole::User, "PROMPT_DO_NOT_PERSIST"),
+                ModelMessage::text(ModelRole::Assistant, "MODEL_DO_NOT_PERSIST"),
+            ],
+            active_task_id: checkpoint.tasks.list()[0].id.as_str().to_string(),
+            completed_tools: vec![CompletedToolCall {
+                tool_call_id: "call-1".into(),
+                tool_name: "write_file".into(),
+                arguments: arguments.clone(),
+                arguments_fingerprint: tool_call_fingerprint("write_file", &arguments)
+                    .expect("fingerprint"),
+                success: true,
+                summary: "TOOL_SUMMARY_DO_NOT_PERSIST".into(),
+                side_effect_class: crate::tools::SideEffectClass::Write,
+            }],
+            in_flight: None,
+            resumed_count: 0,
+            first_started_at_millis: current_unix_millis(),
+        });
+        store.save("s-1", &checkpoint).expect("saves");
+
+        let bytes = std::fs::read(session_dir(dir.path(), "s-1").join("0000000001.json"))
+            .expect("reads checkpoint");
+        let persisted = String::from_utf8(bytes).expect("checkpoint is JSON");
+        for forbidden in [
+            "PROMPT_DO_NOT_PERSIST",
+            "MODEL_DO_NOT_PERSIST",
+            "tool-argument-do-not-persist",
+            "TOOL_SUMMARY_DO_NOT_PERSIST",
+            "sk-live-1234567890",
+        ] {
+            assert!(!persisted.contains(forbidden), "persisted checkpoint leaked {forbidden}");
+        }
+        let (_, restored) = store.load_latest("s-1").expect("loads").expect("exists");
+        let resume = restored.resume.expect("resume state");
+        assert!(resume.transcript.is_empty());
+        assert_eq!(resume.completed_tools[0].arguments, serde_json::Value::Null);
+        assert!(resume.completed_tools[0].summary.is_empty());
+        assert!(!resume.completed_tools[0].arguments_fingerprint.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_checkpoint_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = RecoveryConfig {
+            enabled: true,
+            checkpoint_dir: Some(dir.path().to_path_buf()),
+            ..RecoveryConfig::default()
+        };
+        let store = CheckpointStore::new(&config);
+        store.save("s-1", &sample("s-1", "one")).expect("saves");
+        let session = session_dir(dir.path(), "s-1");
+        let file = session.join("0000000001.json");
+        assert_eq!(
+            std::fs::metadata(session).expect("session metadata").permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(file).expect("file metadata").permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]

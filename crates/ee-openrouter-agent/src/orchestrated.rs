@@ -17,14 +17,17 @@
 //! network-free with scripted responses.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use ee_acp_agent_server::ProviderError;
 use ee_agent_orchestrator::{
     ModelAdapter, ModelContent, ModelError, ModelFuture, ModelMessage, ModelRequest, ModelResponse,
-    ModelRole, ModelUsage, PolicyEngine, StreamSink, ToolDefinition, ToolIntent, ToolPolicy,
+    ModelRole, ModelUsage, OrchestratorConfig, OrchestratorProvider, OrchestratorProviderConfig,
+    PolicyEngine, StreamSink, ToolDefinition, ToolIntent, ToolPolicy,
 };
+use ee_agent_protocol::Implementation;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
@@ -39,17 +42,85 @@ use crate::openrouter::{
 /// Builds the default policy for orchestrated OpenRouter sessions.
 ///
 /// Read, execute, and delegate tools are available because orchestrated mode is
-/// the production OpenRouter path. Write tools and destructive subclasses stay
-/// denied until separately allowed by a narrower policy.
+/// the production OpenRouter path. Writes are admitted only so the ACP client
+/// bridge can present its existing host approval and workspace-containment
+/// checks; this policy never performs a write itself. Destructive overwrites
+/// remain bounded to the editor bridge and require a host decision.
 #[must_use]
 pub fn openrouter_orchestrated_policy() -> PolicyEngine {
-    PolicyEngine::new(ToolPolicy {
-        allow_read: true,
-        allow_write: false,
-        allow_execute: true,
-        allow_delegate: true,
-        ..ToolPolicy::default()
-    })
+    PolicyEngine::new(
+        ToolPolicy {
+            allow_read: true,
+            allow_write: true,
+            allow_execute: true,
+            allow_delegate: true,
+            ..ToolPolicy::default()
+        }
+        .allow_side_effect_subclass(ee_agent_orchestrator::SideEffectSubclass::Overwrite),
+    )
+}
+
+/// Builds the production configuration for an orchestrated OpenRouter ACP provider.
+#[must_use]
+pub fn openrouter_orchestrator_config(
+    config: &Config,
+    session_state_dir: PathBuf,
+) -> OrchestratorProviderConfig {
+    OrchestratorProviderConfig {
+        implementation: Implementation::new("ee-openrouter-agent", env!("CARGO_PKG_VERSION"))
+            .title("OpenRouter"),
+        orchestrator: OrchestratorConfig {
+            context_window_tokens: config.context_window,
+            max_loop_iterations: config.max_iterations,
+            max_model_calls: config.max_iterations,
+            // Recovery remains same-process only until EE_CHECKPOINT_DIR supplies
+            // explicit durable storage; never imply crash recovery without it.
+            recovery: match config.checkpoint_dir.clone() {
+                Some(directory) => ee_agent_orchestrator::RecoveryConfig::durable(directory),
+                None => ee_agent_orchestrator::RecoveryConfig::memory_only(),
+            },
+            ..OrchestratorConfig::default()
+        },
+        session_state_dir: Some(session_state_dir),
+        ..OrchestratorProviderConfig::default()
+    }
+}
+
+/// Builds the production OpenRouter adapter and orchestrator policy combination.
+///
+/// The concrete [`OpenRouterModelAdapter`] parameter prevents generic test models
+/// from being mistaken for the production OpenRouter configuration.
+#[must_use]
+pub fn openrouter_orchestrated_provider(
+    config: &Config,
+    session_state_dir: PathBuf,
+    adapter: OpenRouterModelAdapter,
+) -> OrchestratorProvider<OpenRouterModelAdapter> {
+    OrchestratorProvider::with_policy(
+        openrouter_orchestrator_config(config, session_state_dir),
+        Arc::new(adapter),
+        openrouter_orchestrated_policy(),
+    )
+}
+
+/// Builds the production provider with a bounded test-only turn deadline.
+///
+/// Production construction always uses [`openrouter_orchestrated_provider`].
+#[cfg(any(test, feature = "test-utils"))]
+#[must_use]
+pub fn openrouter_orchestrated_provider_with_turn_timeout(
+    config: &Config,
+    session_state_dir: PathBuf,
+    adapter: OpenRouterModelAdapter,
+    turn_timeout: std::time::Duration,
+) -> OrchestratorProvider<OpenRouterModelAdapter> {
+    let mut provider_config = openrouter_orchestrator_config(config, session_state_dir);
+    provider_config.orchestrator.turn_timeout = turn_timeout;
+    OrchestratorProvider::with_policy(
+        provider_config,
+        Arc::new(adapter),
+        openrouter_orchestrated_policy(),
+    )
 }
 
 /// Boxed future returned by a completion client.
@@ -90,7 +161,7 @@ impl OpenRouterModelAdapter {
     }
 
     /// Builds an adapter with an injected completion client (tests).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     #[must_use]
     pub(crate) fn with_completion(
         config: Config,
@@ -355,10 +426,129 @@ pub(crate) fn openrouter_body_for_request(
     )
 }
 
+/// Hermetic OpenRouter completion fixture for cross-crate integration tests.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_support {
+    use std::collections::VecDeque;
+    use std::future;
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::{Value, json};
+
+    use super::{Config, OpenRouterCompletionClient, OpenRouterModelAdapter};
+
+    #[derive(Clone)]
+    enum Script {
+        Steps(VecDeque<ScriptStep>),
+        Never,
+    }
+
+    #[derive(Clone)]
+    enum ScriptStep {
+        Response(Value),
+        Pending,
+    }
+
+    /// Replays canned OpenRouter response envelopes and records normalized requests.
+    #[derive(Clone)]
+    pub struct ScriptedOpenRouterCompletion {
+        script: Arc<Mutex<Script>>,
+        bodies: Arc<Mutex<Vec<Value>>>,
+    }
+
+    impl ScriptedOpenRouterCompletion {
+        /// Creates a finite response script. Each item is an OpenRouter response envelope.
+        #[must_use]
+        pub fn new(responses: Vec<Value>) -> Self {
+            Self {
+                script: Arc::new(Mutex::new(Script::Steps(
+                    responses.into_iter().map(ScriptStep::Response).collect(),
+                ))),
+                bodies: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        /// Creates a completion script that remains pending until cancellation.
+        #[must_use]
+        pub fn never() -> Self {
+            Self {
+                script: Arc::new(Mutex::new(Script::Never)),
+                bodies: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        /// Creates a script that pauses one model call, then serves resume responses.
+        ///
+        /// The pending call advances the script before it awaits forever, so a
+        /// resumed turn deterministically consumes `resume_responses`.
+        #[must_use]
+        pub fn pause_then(responses: Vec<Value>, resume_responses: Vec<Value>) -> Self {
+            let mut steps =
+                responses.into_iter().map(ScriptStep::Response).collect::<VecDeque<_>>();
+            steps.push_back(ScriptStep::Pending);
+            steps.extend(resume_responses.into_iter().map(ScriptStep::Response));
+            Self {
+                script: Arc::new(Mutex::new(Script::Steps(steps))),
+                bodies: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        /// Builds a concrete OpenRouter adapter backed by this scripted client.
+        #[must_use]
+        pub fn adapter(&self, config: Config) -> OpenRouterModelAdapter {
+            OpenRouterModelAdapter::with_completion(config, self.client())
+        }
+
+        /// Returns normalized OpenRouter request bodies observed by this fixture.
+        #[must_use]
+        pub fn request_bodies(&self) -> Vec<Value> {
+            self.bodies.lock().expect("bodies poisoned").clone()
+        }
+
+        #[cfg(test)]
+        pub(crate) fn bodies(&self) -> Vec<Value> {
+            self.request_bodies()
+        }
+
+        pub(crate) fn client(&self) -> Arc<OpenRouterCompletionClient> {
+            let scripted = self.clone();
+            Arc::new(move |_config, _api_key, messages, tools| {
+                let scripted = scripted.clone();
+                let messages = messages.to_vec();
+                let tools = tools.to_vec();
+                Box::pin(async move {
+                    scripted
+                        .bodies
+                        .lock()
+                        .expect("bodies poisoned")
+                        .push(json!({ "messages": messages, "tools": tools }));
+                    let response = match &mut *scripted.script.lock().expect("script poisoned") {
+                        Script::Steps(steps) => match steps.pop_front() {
+                            Some(ScriptStep::Response(response)) => Some(response),
+                            Some(ScriptStep::Pending) => None,
+                            None => Some(json!({
+                                "choices": [{ "message": { "content": "" }, "finish_reason": "stop" }]
+                            })),
+                        },
+                        Script::Never => None,
+                    };
+                    let Some(response) = response else {
+                        return future::pending().await;
+                    };
+                    crate::openrouter::extract_openrouter_message(&response).ok_or_else(|| {
+                        ee_acp_agent_server::ProviderError::BackendFailure(
+                            "scripted OpenRouter response has no assistant message".into(),
+                        )
+                    })
+                })
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
-    use std::future;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -576,69 +766,14 @@ mod tests {
 
     // ── Orchestrated mode over the framework server ──────────────────────
 
-    /// Scripted completion client: replays canned responses and records every
-    /// request body; network-free by construction.
-    #[derive(Clone)]
-    struct ScriptedCompletion {
-        script: Arc<Mutex<VecDeque<Value>>>,
-        bodies: Arc<Mutex<Vec<Value>>>,
-    }
-
-    impl ScriptedCompletion {
-        fn new(responses: Vec<Value>) -> Self {
-            Self {
-                script: Arc::new(Mutex::new(responses.into())),
-                bodies: Arc::new(Mutex::new(Vec::new())),
-            }
-        }
-
-        fn bodies(&self) -> Vec<Value> {
-            self.bodies.lock().expect("bodies poisoned").clone()
-        }
-
-        fn never() -> Self {
-            Self::new(Vec::new())
-        }
-    }
+    type ScriptedCompletion = test_support::ScriptedOpenRouterCompletion;
 
     fn scripted_client(script: ScriptedCompletion) -> Arc<OpenRouterCompletionClient> {
-        Arc::new(move |_config, _api_key, messages, tools| {
-            let script = script.clone();
-            let messages = messages.to_vec();
-            let tools = tools.to_vec();
-            Box::pin(async move {
-                script
-                    .bodies
-                    .lock()
-                    .expect("bodies poisoned")
-                    .push(json!({ "messages": messages, "tools": tools }));
-                let response = script
-                    .script
-                    .lock()
-                    .expect("script poisoned")
-                    .pop_front()
-                    .unwrap_or_else(|| {
-                        json!({ "choices": [{ "message": { "content": "" }, "finish_reason": "stop" }] })
-                    });
-                Ok(extract_openrouter_message_for_test(&response))
-            })
-        })
+        script.client()
     }
 
     fn never_client(script: ScriptedCompletion) -> Arc<OpenRouterCompletionClient> {
-        Arc::new(move |_config, _api_key, messages, tools| {
-            let script = script.clone();
-            let messages = messages.to_vec();
-            let tools = tools.to_vec();
-            Box::pin(async move {
-                script
-                    .bodies
-                    .lock()
-                    .expect("bodies poisoned")
-                    .push(json!({ "messages": messages, "tools": tools }));
-                future::pending::<Result<OpenRouterMessage, ProviderError>>().await
-            })
-        })
+        script.client()
     }
 
     fn response_with_tool_args(id: &str, name: &str, arguments: Value) -> Value {
@@ -897,7 +1032,7 @@ mod tests {
         handle.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
 
         drain_mcp_diagnostics(&handle).await;
-        let frames = handle.next_frames(4).await;
+        let frames = handle.next_frames(5).await;
         let thought_params = raw_params_to_value(match &frames[1] {
             RawJsonRpcMessage::Notification(update) => update.params.clone(),
             other => panic!("expected thought update, got {other:?}"),
@@ -910,7 +1045,17 @@ mod tests {
         });
         assert_eq!(answer_params["update"]["sessionUpdate"], "agent_message_chunk");
         assert_eq!(answer_params["update"]["content"]["text"], "final");
-        let result = request_result(frames[3].clone());
+        let final_params = raw_params_to_value(match &frames[3] {
+            RawJsonRpcMessage::Notification(update) => update.params.clone(),
+            other => panic!("expected host final response update, got {other:?}"),
+        });
+        assert_eq!(final_params["update"]["messageId"], "ee-final-response-1");
+        assert!(
+            final_params["update"]["content"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("completion: unverified"))
+        );
+        let result = request_result(frames[4].clone());
         assert_eq!(result["stopReason"], "end_turn");
 
         handle.shutdown(task).await;
@@ -952,8 +1097,8 @@ mod tests {
         handle.send(request(2, "session/prompt", prompt_params(&session_id, "hello")));
 
         drain_mcp_diagnostics(&handle).await;
-        let frames = handle.next_frames(4).await;
-        let result = request_result(frames[3].clone());
+        let frames = handle.next_frames(5).await;
+        let result = request_result(frames[4].clone());
         assert_eq!(result["stopReason"], "end_turn");
         let bodies = serde_json::to_string(&script.bodies()).expect("bodies serialize");
         let events = frames.iter().map(|frame| format!("{frame:?}")).collect::<String>();
@@ -965,14 +1110,16 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_orchestrated_policy_allows_execute_and_delegate_not_write() {
+    fn openrouter_orchestrated_policy_admits_editor_writes_without_bypassing_host_gate() {
+        use ee_agent_orchestrator::{SideEffectClass, SideEffectSubclass};
+
         let policy = openrouter_orchestrated_policy();
         let context = ee_agent_orchestrator::PolicyContext::default();
         assert!(
             policy
                 .check(
                     &ToolDefinition::new("create_terminal", "runs")
-                        .side_effect_class(ee_agent_orchestrator::SideEffectClass::Execute),
+                        .side_effect_class(SideEffectClass::Execute),
                     context,
                 )
                 .allow
@@ -981,19 +1128,32 @@ mod tests {
             policy
                 .check(
                     &ToolDefinition::new("delegate_task", "delegates")
-                        .side_effect_class(ee_agent_orchestrator::SideEffectClass::Delegate),
+                        .side_effect_class(SideEffectClass::Delegate),
                     context,
                 )
                 .allow
         );
         assert!(
-            !policy
+            policy
                 .check(
                     &ToolDefinition::new("write_file", "writes")
-                        .side_effect_class(ee_agent_orchestrator::SideEffectClass::Write),
+                        .side_effect_class(SideEffectClass::Write)
+                        .side_effect_subclass(SideEffectSubclass::Overwrite),
                     context,
                 )
-                .allow
+                .allow,
+            "admission only reaches ACP fs/writeTextFile; BridgeUiHandler still requires approval"
+        );
+        assert!(
+            !policy
+                .check(
+                    &ToolDefinition::new("delete_file", "deletes")
+                        .side_effect_class(SideEffectClass::Write)
+                        .side_effect_subclass(SideEffectSubclass::Delete),
+                    context,
+                )
+                .allow,
+            "unrelated destructive writes remain denied before any host request"
         );
     }
 
@@ -1022,12 +1182,13 @@ mod tests {
         assert_eq!(fs_params["path"], "/tmp/notes.txt");
 
         // Answer the bridge call; the tool observation lands in the next
-        // model request, then the answer streams and the turn ends.
+        // model request, then the answer and evidence-gated final report
+        // stream before the unchanged ACP response.
         handle.send(RawJsonRpcMessage::response(
             fs_request.id.clone(),
             Ok(json!({ "content": "file contents" })),
         ));
-        let frames = handle.next_frames(3).await;
+        let frames = handle.next_frames(4).await;
         let completed_update = raw_params_to_value(match &frames[0] {
             RawJsonRpcMessage::Notification(update) => update.params.clone(),
             other => panic!("expected completed tool-call update, got {other:?}"),
@@ -1041,8 +1202,13 @@ mod tests {
         });
         assert_eq!(message_params["update"]["sessionUpdate"], "agent_message_chunk");
         assert!(message_params.to_string().contains("done"));
+        let final_params = raw_params_to_value(match &frames[2] {
+            RawJsonRpcMessage::Notification(update) => update.params.clone(),
+            other => panic!("expected host final response update, got {other:?}"),
+        });
+        assert_eq!(final_params["update"]["messageId"], "ee-final-response-1");
 
-        let result = request_result(frames[2].clone());
+        let result = request_result(frames[3].clone());
         assert_eq!(result["stopReason"], "end_turn");
 
         // The second model round carried the tool observation.
@@ -1088,13 +1254,13 @@ mod tests {
             terminal_request.id.clone(),
             Ok(json!({ "terminalId": "term-1" })),
         ));
-        let frames = handle.next_frames(3).await;
+        let frames = handle.next_frames(4).await;
         let completed_update = raw_params_to_value(match &frames[0] {
             RawJsonRpcMessage::Notification(update) => update.params.clone(),
             other => panic!("expected completed tool-call update, got {other:?}"),
         });
         assert_eq!(completed_update["update"]["status"], "completed");
-        assert_eq!(request_result(frames[2].clone())["stopReason"], "end_turn");
+        assert_eq!(request_result(frames[3].clone())["stopReason"], "end_turn");
 
         handle.shutdown(task).await;
     }
@@ -1114,14 +1280,14 @@ mod tests {
 
         handle.send(request(3, "session/prompt", prompt_params(&session_id, "delegate")));
         drain_mcp_diagnostics(&handle).await;
-        let frames = handle.next_frames(6).await;
+        let frames = handle.next_frames(7).await;
         let completed_update = raw_params_to_value(match &frames[3] {
             RawJsonRpcMessage::Notification(update) => update.params.clone(),
             other => panic!("expected completed delegate update, got {other:?}"),
         });
         assert_eq!(completed_update["update"]["sessionUpdate"], "tool_call_update");
         assert_eq!(completed_update["update"]["status"], "completed");
-        assert_eq!(request_result(frames[5].clone())["stopReason"], "end_turn");
+        assert_eq!(request_result(frames[6].clone())["stopReason"], "end_turn");
         assert_eq!(script.bodies().len(), 3, "parent, child, parent model rounds");
 
         handle.shutdown(task).await;

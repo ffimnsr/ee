@@ -4353,3 +4353,145 @@ Goal: lock provider contracts, privacy boundaries, compatibility, and user confi
 - [x] All Exa, Tavily, and Brave LLM Context integration tests run against deterministic local fakes; no test requires a vendor account, credential, or outbound request.
 - [x] Tests prove credential isolation, fixed-origin enforcement, no cross-provider fallback, user-global-only authority, bounded output, and existing SSRF/approval/cancellation guarantees.
 - [x] Documentation gives secure copyable setup for each provider and clearly separates search discovery from source fetch.
+
+## ACP Agentic Loop Production Integration
+
+Audit date: 2026-08-26.
+
+`ee-agent-orchestrator` contains bounded loops, completion evidence, validation, write transactions, context planning, recovery, retries, strategies, and telemetry primitives. Default OpenRouter ACP prompts route through `OrchestratorProvider::prompt` → `OrchestratorRuntime::run_turn_strategic_recoverable` → `LoopEngine`. Host evidence remains authoritative; never claim a turn is verified merely because the model returned ACP `stopReason: end_turn`.
+
+### Phase 0: Concurrent prompt transcript correctness
+
+- [x] Reserve an ACP turn before reducing its optimistic user message in `crates/ee-agent-host/src/session.rs`.
+- [x] Reject a concurrent prompt without mutating reduced transcript state.
+- [x] Add regression coverage: `concurrent_prompt_reservation_does_not_duplicate_optimistic_message`.
+
+### Phase 1: Host-owned turn evidence and terminal-state reducer
+
+Add immutable editor-observed evidence at the ACP host boundary. Keep `ee-agent-orchestrator` server-side and `ee-agent-host`/`ee-cli` editor-side; exchange only bounded structured evidence through existing MCP/ACP-safe surfaces.
+
+#### Work items
+
+- [x] Add immutable `TurnEvidence` in `ee-agent-host`, keyed by agent id, ACP session id, and monotonic turn id.
+  - [x] Record base/current workspace or buffer revision, changed-file inventory, write approvals/applies, post-write diagnostics, final diff review, selected validation records, and evidence ids.
+  - [x] Store only redacted bounded summaries; never persist prompt text, raw terminal output, secrets, or untrusted repository instructions as evidence.
+  - [x] Make observations append-only. A workspace/buffer revision change invalidates prior revision-bound evidence instead of mutating it into success.
+- [x] Add deterministic terminal-state reducer producing `verified`, `partially_verified`, `blocked`, or `unverified` from evidence only.
+  - [x] `verified` requires matching-revision changed-file inventory, diagnostics, diff review, and selected passing validation.
+  - [x] Denied, failed, stale, conflicting, or missing evidence cannot be overridden by model prose, ACP plan status, or `stopReason`.
+  - [x] Emit a bounded host event/UI state containing terminal status, blocker, safe follow-up, and evidence ids.
+- [x] Preserve `AgentEvent::TurnCompleted` as transport lifecycle only; do not overload it as validation success.
+- [x] Add explicit transport-safe completion payload or MCP retrieval path so the orchestrator and pane can consume host-derived status without ee-owned ACP wire structs.
+  - ACP-only `ee_turn_evidence_summary` returns bounded, redacted, connection-owned `TurnEvidenceSummary` through existing MCP discovery. Pane consumes same host event; provider can retrieve current or explicit owned evidence on a subsequent discovered-tool turn.
+
+#### Exit criteria
+
+- [x] Every ACP turn has a host terminal state distinct from ACP prompt completion.
+- [x] UI and final responses cite evidence ids for any build, test, formatting, diagnostics, or verification claim.
+- [x] A model cannot report verified completion without current matching host evidence.
+
+### Phase 2: Production strategic/recoverable turn integration
+
+Unify strategic final-response assembly with production recovery. Current `run_turn_strategic` owns completion-state assembly but default ACP prompts use `run_turn_recoverable`.
+
+#### Work items
+
+- [x] Add `OrchestratorRuntime::run_turn_strategic_recoverable` or equivalent single production path.
+  - [x] Preserve existing timeout, cancellation, checkpoint, idempotent completed-tool reuse, manual resume, and bounded auto-resume semantics.
+  - [x] Return ACP `PromptResult` plus typed `FinalResponse`/`CompletionReport`; map interruption separately from terminal completion.
+- [x] Route `OrchestratorProvider::prompt` through this path for normal OpenRouter orchestrated sessions.
+- [x] Keep `/compact`, `/resume`, and `/discard` semantics explicit; they must not accidentally claim verified work.
+- [x] Wire completion output into host pane state without changing ACP-defined request/response schemas.
+- [x] Add end-to-end tests proving default `OPENROUTER_ORCHESTRATED=true` reaches strategic completion instead of only unit-testing the strategic API.
+
+#### Exit criteria
+
+- [x] Default ACP prompt path exposes evidence-derived terminal state.
+- [x] Recovery resumes prior work without replaying completed write/execute operations or losing evidence provenance.
+- [x] Existing simple-provider fallback remains explicit opt-out only.
+
+### Phase 3: Post-write verification and validation execution
+
+Use existing editor/MCP tools and approval paths. Do not spawn ungoverned shell commands or add overloaded protocol methods.
+
+#### Work items
+
+- [x] Add post-write verification runner using existing buffer-aware edit outcomes, `ee_get_diagnostics`, `ee_changed_files`, `ee_git_diff`/`ee_review_context`, and approved terminal lifecycle tools.
+  - [x] Collect changed-file inventory, post-write diagnostics, final diff review, and current revision after every successful write sequence.
+  - [x] Assign stable evidence ids and attach results to current `TurnEvidence` only when revision still matches.
+  - [x] Record no-op writes distinctly; never fabricate a changed-file inventory.
+- [x] Wire `ValidationPlanner` and `ValidationRunner` into default production turns.
+  - [x] Select focused validation from changed files, resolved symbols, declared workspace tasks, and registered tools before broader escalation.
+  - [x] Route all command execution through existing command policy, approval, cancellation, timeout, output cap, redaction, and terminal ownership checks.
+  - [x] Record `ValidationRecord` fields: command id, command/tool, outcome, exit status, elapsed time, affected tests, diagnostics delta, truncation, skip/denial reason, revision, and evidence id.
+- [x] Wire `WriteTransaction` lifecycle from host-observed read, preview, approval, apply, diagnostics, final diff, validation, interruption, and safe rollback facts.
+  - [x] Block on stale revisions, dirty user buffers, partial applies, diagnostic regression, mismatched diff paths, denied validation, or validation failure.
+  - [x] Never let the server synthesize host ownership, revision, approval, or diagnostics observations.
+
+#### Exit criteria
+
+- [x] A successful write cannot finish `verified` before current diagnostics, diff review, and selected validation evidence pass.
+- [x] Failed, skipped, denied, stale, or unavailable validation produces typed `blocked`, `partially_verified`, or `unverified` outcome with safe follow-up.
+- [x] No post-write verification bypasses existing approval or workspace-containment policy.
+
+### Phase 4: Fresh context and bounded repair controller
+
+Refresh editor facts after mutation or failure. Permit deterministic, bounded repair; never create hidden unlimited self-prompt loops.
+
+#### Work items
+
+- [x] Invalidate context plan/cache after write, buffer revision, diagnostic update, git/worktree change, checkout change, or validation result.
+- [x] Build fresh bounded repair context from current project instructions, dirty buffers, diagnostics, changed files/diff, relevant symbols/tests, prior evidence ids, and typed failure summaries.
+- [x] Route failed diagnostics, diff review, or selected validation into a repair request with fresh context.
+- [x] Cap repair attempts (default two) per turn; record attempt number, reason, prior evidence ids, and progress signal.
+- [x] Stop early on repeated identical tool calls, unchanged diff, repeated validation failure, no-progress iterations, policy denial, stale state, cancellation, or budget exhaustion.
+- [x] Use `ToolRetrier` only for explicitly transient classified tool failures; never retry policy denial, invalid input, stale revision, approval denial, or destructive work automatically.
+- [x] End exhausted repair as `blocked`, preserving evidence and exact safe user follow-up.
+
+#### Exit criteria
+
+- [x] Repair attempts always see post-write/current-revision context, never stale pre-write context.
+- [x] Repeated failure cannot consume unbounded model calls, tools, approvals, or time.
+- [x] User can distinguish failed repair, blocked policy, stale-state conflict, timeout, cancellation, and unavailable environment.
+
+### Phase 5: Recovery, adaptive guidance, and observability wiring
+
+Finish live integrations for components currently implemented as primitives or strategic-only paths.
+
+#### Work items
+
+- [x] Ensure interrupted ACP turns checkpoint task/milestone, completed-tool, context provenance, and evidence references needed for safe resume.
+- [x] Choose and document durable checkpoint behavior when `EE_CHECKPOINT_DIR` is absent: secure local default or explicit memory-only recovery status. Do not imply crash recovery when state is memory-only.
+- [x] Wire context/strategy selection and capability-aware next-tool guidance into default ACP turns; guidance must be bounded, based on advertised tools/capabilities, and never override policy.
+- [x] Wire privacy-safe telemetry recorder into OpenRouter provider lifecycle: turn start/stop, model/tool counts, approvals, retries, repairs, recovery, validation, terminal state, latency, and estimated cost.
+- [x] Keep telemetry disabled by default or user-controlled; enforce retention, redaction, and local export rules before persistence.
+
+#### Exit criteria
+
+- [x] Resume restores safe work state and clearly labels any unavailable durable state.
+- [x] Default ACP turns receive fresh capability-aware guidance without broad repository dumps.
+- [x] Maintainers can inspect redacted loop-quality regressions by provider, prompt, policy, and manifest version.
+
+### Phase 6: Replay and production integration fixtures
+
+Add deterministic fixtures around actual default ACP prompt wiring, not isolated utility modules only.
+
+#### Work items
+
+- [x] Add false-success fixture: model returns completion text without required post-write evidence; expected terminal state `unverified`.
+- [x] Add stale-context fixture: write changes revision after diagnostics/context capture; expected evidence invalidation and blocked refresh path.
+- [x] Add repeated-failure fixture: same validation fails across repair attempts; expected bounded retries then `blocked`.
+- [x] Add resume-after-interruption fixture: checkpointed turn resumes with completed write/execute idempotency guard and preserved evidence references.
+- [x] Add approval-denied, dirty-user-buffer, partial-multi-file-apply, diagnostics-regression, skipped-validation, and unavailable-capability fixtures.
+- [x] Run every fixture through default OpenRouter orchestrated ACP provider path plus host/pane evidence reduction.
+  - Concrete OpenRouter production fixtures exercise approved/denied/conflicted/partial writes, diagnostics regression, stale revision, unavailable validation, repeated selected-validation repair, and interrupted completed-write resume through host/pane reduction.
+- [x] Record fixture metrics: terminal state, evidence ids, model/tool/repair count, approvals, latency, recovery behavior, and policy violations.
+- [x] Add CI threshold preventing regressions in verification correctness, repair boundedness, recovery safety, and false-success rejection.
+- [x] Add hermetic production-config OpenRouter ACP host-transport false-success coverage. It verifies model completion without host evidence stays `unverified`; it deliberately does not claim editor post-write or pane rendering coverage.
+
+#### Exit criteria
+
+- [x] Production ACP integration tests prove framework primitives are actually wired into live editor/pane turns.
+- [x] False success, stale evidence, repeated repair failure, and unsafe resume cannot silently pass through the full production ACP path.
+  - Native host editor MCP is advertised to ACP-capable agents without requiring stdio fallback configuration, so repair context uses current editor facts; ambiguous in-flight side effects remain blocked while completed tool-call ids are reused on pane `/resume`.
+- [x] Current OpenRouter ACP host-transport replay stays hermetic, redacted, and deterministic.

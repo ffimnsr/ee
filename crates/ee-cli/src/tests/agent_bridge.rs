@@ -462,7 +462,7 @@ fn write_in_non_active_workspace_root_fails_before_approval() {
 }
 
 #[test]
-fn concurrent_user_edit_merges_into_agent_write() {
+fn dirty_user_edit_blocks_blind_agent_write() {
     let temp = tempfile::tempdir().unwrap();
     let file = temp.path().join("merge.txt");
     fs::write(&file, "one\ntwo\nthree\n").unwrap();
@@ -476,11 +476,9 @@ fn concurrent_user_edit_merges_into_agent_write() {
             == vec![String::from("one"), String::from("two"), String::from("three"), String::new()]
     });
 
-    // The user edits line 3 while the agent write is queued.
     app.backend.replace_line_range(2, 2, &[String::from("threeX")]).unwrap();
     app.backend.flush_all_pending_edits().unwrap();
     wait_until(&mut app, "user edit lands", |app| {
-        // Newline-terminated files keep a trailing empty line in the model.
         app.backend.lines
             == vec![String::from("one"), String::from("two"), String::from("threeX"), String::new()]
     });
@@ -489,13 +487,14 @@ fn concurrent_user_edit_merges_into_agent_write() {
     wait_until(&mut app, "write approval appears", |app| app.agents.approvals.front().is_some());
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE); // Allow once
 
-    wait_until(&mut app, "merged write lands", |_| {
-        fake.agent().response_with_id(103).is_some_and(|response| response.get("result").is_some())
-    });
+    wait_until(&mut app, "dirty write rejected", |_| fake.agent().response_with_id(103).is_some());
+    let response = fake.agent().response_with_id(103).expect("write response");
+    assert!(response.get("error").is_some(), "dirty write must fail: {response}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "one\ntwo\nthree\n");
     assert_eq!(
-        fs::read_to_string(&file).unwrap(),
-        "one\nTWO\nthreeX\n",
-        "user edit survives the agent write"
+        app.backend.lines,
+        vec![String::from("one"), String::from("two"), String::from("threeX"), String::new()],
+        "agent must not overwrite unsaved user edits"
     );
 }
 

@@ -195,6 +195,8 @@ pub mod provider_adapter;
 pub mod rate_limit;
 pub mod recovery;
 pub mod reflection;
+pub mod repair;
+pub mod repair_context;
 #[cfg(feature = "test-utils")]
 pub mod replay;
 pub mod retries;
@@ -226,9 +228,11 @@ pub mod write_transaction;
 
 pub use budget::{BudgetConfig, BudgetSnapshot, BudgetTracker};
 pub use checkpoint::{
-    CHECKPOINT_SCHEMA_VERSION, CompletedToolCall, DEFAULT_CHECKPOINT_PROVENANCE, IdGeneratorState,
-    InFlightOperation, OrchestratorCheckpoint, RestoreReport, ResumeState, SubagentTreeState,
-    TranscriptSummary, current_unix_millis,
+    CHECKPOINT_SCHEMA_VERSION, CheckpointCaptureMetadata, CheckpointCaptureOrigin,
+    CheckpointContextProvenance, CompletedToolCall, DEFAULT_CHECKPOINT_PROVENANCE,
+    IdGeneratorState, InFlightOperation, MAX_CHECKPOINT_CONTEXT_SOURCES,
+    MAX_CHECKPOINT_EVIDENCE_REFS, MAX_CHECKPOINT_PROVENANCE_LABEL_CHARS, OrchestratorCheckpoint,
+    RestoreReport, ResumeState, SubagentTreeState, TranscriptSummary, current_unix_millis,
 };
 pub use checkpoint_store::{CheckpointMeta, CheckpointStore};
 pub use command_intelligence::{
@@ -340,19 +344,29 @@ pub use reflection::{
     ReflectionConfig, ReflectionOutcome, ReviewContext, ReviewFinding, build_review_context,
     build_review_request, create_finding_tasks, findings_from_response, mark_finding_tasks,
 };
+pub use repair::{
+    DEFAULT_MAX_REPAIR_ATTEMPTS, MAX_REPAIR_ATTEMPTS, RepairAttempt, RepairConfig,
+    RepairController, RepairDecision, RepairFailureSummary, RepairProgress, RepairReason,
+    RepairStopReason,
+};
+pub use repair_context::{
+    REPAIR_CONTEXT_TOOLS, RepairContextObservation, RepairContextSnapshot, build_repair_context,
+};
 pub use retries::{
     BackoffStrategy, RetryErrorClass, RetryPolicy, ToolRetrier, classify_tool_error,
 };
-pub use runtime::OrchestratorRuntime;
+pub use runtime::{
+    OrchestratorRuntime, StrategicRecoveryContext, StrategicRecoveryTurn, StrategicTurnOutcome,
+};
 pub use semantic_memory::{
     DEFAULT_MAX_SEMANTIC_HITS, DEFAULT_SEMANTIC_LIMIT, SEMANTIC_VALUE_MAX_CHARS, SemanticMemory,
     SemanticMemoryAdapter, SemanticMemoryConfig, SemanticMemoryHit,
 };
 pub use sensitive_data::{SensitiveDataGuard, is_secret_like, redact_values};
 pub use strategy::{
-    StrategicInput, StrategyContext, StrategyDecision, StrategyReason, StrategySelector,
-    TurnResult, TurnStrategy, has_independent_children, is_validation_tool_name,
-    required_capabilities_for,
+    CapabilityAwareGuidance, StrategicInput, StrategyContext, StrategyDecision, StrategyReason,
+    StrategySelector, TurnResult, TurnStrategy, capability_aware_guidance,
+    has_independent_children, is_validation_tool_name, required_capabilities_for,
 };
 pub use streaming::{
     StreamConsumer, StreamEvent, StreamReceiver, StreamSink, StreamedTurn, StreamingModelAdapter,

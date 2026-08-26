@@ -17,16 +17,22 @@ use ee_agent_protocol::{
 use tokio::sync::watch;
 
 use crate::budget::BudgetTracker;
-use crate::checkpoint::{OrchestratorCheckpoint, current_unix_millis};
+use crate::checkpoint::{CheckpointContextProvenance, OrchestratorCheckpoint, current_unix_millis};
 use crate::checkpoint_store::{CheckpointHandle, CheckpointStore};
+use crate::command_intelligence::ValidationCommandFailure;
 use crate::compaction::{
     CompactTurnReport, SESSION_SUMMARY_KEY, build_compaction_context, build_compaction_prompt,
 };
 use crate::config::OrchestratorConfig;
-use crate::context_planner::{ContextPlan, ContextPlanner, ContextPlannerConfig};
+use crate::context_planner::{
+    ContextInvalidation, ContextPlan, ContextPlanCache, ContextPlanner, ContextPlannerConfig,
+};
 use crate::error::OrchestratorError;
 use crate::events::{EventRecorder, OrchestratorEvent};
-use crate::final_response::{FinalResponseBuilder, ValidationRecorder, changed_files_from_log};
+use crate::final_response::{
+    FinalResponse, FinalResponseBuilder, ValidationOutcome, ValidationRecorder,
+    changed_files_from_log,
+};
 use crate::loop_engine::{LoopEngine, LoopOptions, TurnSystemContext};
 use crate::memory::{MemoryItem, MemoryStore};
 use crate::memory_compaction::compact_memory;
@@ -38,13 +44,25 @@ use crate::plan_compiler::{PlanCompiler, PlanInput};
 use crate::policy::PolicyEngine;
 use crate::progress::ProgressTracker;
 use crate::recovery::{RecoverableInterruption, TurnOutcome, session_timeout_expired};
+use crate::repair::{
+    RepairController, RepairDecision, RepairFailureSummary, RepairProgress, RepairReason,
+    RepairStopReason,
+};
+use crate::repair_context::{
+    REPAIR_CONTEXT_TOOLS, RepairContextObservation, RepairContextSnapshot, build_repair_context,
+};
 use crate::sensitive_data::SensitiveDataGuard;
 use crate::strategy::{
     StrategicInput, StrategyContext, StrategyExecutor, StrategyRun, StrategySelector, TurnResult,
+    capability_aware_guidance,
 };
 use crate::subagents::{DelegateTool, SubagentManager};
 use crate::tasks::{TaskGraph, TaskId, TaskNode, truncate};
-use crate::tools::{ServerTool, ToolExecutionLogEntry, ToolRegistry};
+use crate::tools::{ServerTool, ToolExecutionLogEntry, ToolExecutor, ToolRegistry};
+use crate::validation::{
+    ValidationPlanner, ValidationPlanningContext, ValidationResult, ValidationRunner,
+    WorkspaceValidationConfig, finalize_validation_tasks,
+};
 
 /// Cap on the root task title derived from the prompt.
 const MAX_TASK_TITLE_CHARS: usize = 120;
@@ -52,6 +70,65 @@ const MAX_TASK_TITLE_CHARS: usize = 120;
 const MAX_TASK_DESCRIPTION_CHARS: usize = 4_000;
 /// Title used when the prompt has no text blocks.
 const UNTITLED_TASK: &str = "untitled task";
+const REPAIR_CONTEXT_TOOL_CALL_PREFIX: &str = "repair-context";
+
+/// Server-observed validation results available to the repair controller.
+/// They are not host-selected completion evidence.
+#[derive(Debug, Clone, Default)]
+struct PostWriteValidation {
+    results: Vec<ValidationResult>,
+}
+
+/// Host-derived metadata retained only as bounded checkpoint provenance.
+/// It never includes raw context excerpts, prompt text, tool output, or paths.
+#[derive(Debug, Clone, Default)]
+struct RecoveryTurnMetadata {
+    context_plan: Option<ContextPlan>,
+    checkpoint_context: CheckpointContextProvenance,
+    evidence_refs: Vec<crate::observability::RedactedEvidenceRef>,
+}
+
+/// Server-side orchestrator runtime.
+/// Completed recovery turn plus its evidence-gated final response.
+///
+/// ACP still receives the contained [`PromptResult`]. The typed final response
+/// travels through host-safe text/update surfaces instead of new ACP fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StrategicRecoveryTurn {
+    pub prompt_result: PromptResult,
+    pub final_response: FinalResponse,
+}
+
+/// Inputs shared by a fresh strategic recovery turn and a resumed one.
+/// Grouping this metadata keeps the production API narrow while retaining the
+/// exact provider identity and system context used by checkpoint recovery.
+#[derive(Debug, Clone)]
+pub struct StrategicRecoveryContext {
+    pub input: StrategicInput,
+    pub system_context: String,
+    pub provider: String,
+}
+
+impl StrategicRecoveryContext {
+    #[must_use]
+    pub fn new(
+        input: StrategicInput,
+        system_context: impl Into<String>,
+        provider: impl Into<String>,
+    ) -> Self {
+        Self { input, system_context: system_context.into(), provider: provider.into() }
+    }
+}
+
+/// Recovery-aware strategic completion outcome.
+///
+/// Interruption remains distinct from terminal completion so callers never
+/// emit a final completion report for a checkpointed, resumable turn.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StrategicTurnOutcome {
+    Completed(Box<StrategicRecoveryTurn>),
+    Interrupted(RecoverableInterruption),
+}
 
 /// Server-side orchestrator runtime.
 pub struct OrchestratorRuntime {
@@ -64,6 +141,20 @@ pub struct OrchestratorRuntime {
     policy: Arc<RwLock<PolicyEngine>>,
     checkpoints: Arc<CheckpointStore>,
     events: EventRecorder,
+    /// Final response facts from latest terminal recovery turn. These facts
+    /// are server-observed tool records only; host evidence remains separate.
+    last_turn_changed_files: Mutex<Vec<crate::final_response::ChangedFile>>,
+    last_turn_validation: Mutex<ValidationRecorder>,
+    /// Trusted planning inputs set by strategic recovery before its loop starts.
+    /// They select registered validation tools only; never completion evidence.
+    validation_workspace: Mutex<WorkspaceValidationConfig>,
+    validation_changed_symbols: Mutex<Vec<String>>,
+    /// Revision-keyed fresh-context cache. It is invalidated conservatively on every
+    /// host-observed mutation, diagnostics, VCS, and validation transition.
+    context_cache: Mutex<ContextPlanCache>,
+    /// Typed terminal repair stop from latest production turn. This never upgrades
+    /// host completion evidence; it only blocks unsupported completion claims.
+    last_repair_stop: Mutex<Option<RepairStopReason>>,
 }
 
 impl OrchestratorRuntime {
@@ -208,6 +299,12 @@ impl OrchestratorRuntime {
             policy: Arc::new(RwLock::new(policy)),
             checkpoints,
             events,
+            last_turn_changed_files: Mutex::new(Vec::new()),
+            last_turn_validation: Mutex::new(ValidationRecorder::new()),
+            validation_workspace: Mutex::new(WorkspaceValidationConfig::default()),
+            validation_changed_symbols: Mutex::new(Vec::new()),
+            context_cache: Mutex::new(ContextPlanCache::new()),
+            last_repair_stop: Mutex::new(None),
         }
     }
 
@@ -368,15 +465,43 @@ impl OrchestratorRuntime {
         system_context: String,
         provider: &str,
     ) -> Result<TurnOutcome, OrchestratorError> {
+        self.run_turn_recoverable_with_metadata(
+            ctx,
+            sink,
+            client,
+            cancel,
+            system_context,
+            provider,
+            RecoveryTurnMetadata::default(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_turn_recoverable_with_metadata(
+        &self,
+        ctx: PromptContext,
+        sink: UpdateSink,
+        client: ClientBridge,
+        cancel: watch::Receiver<bool>,
+        system_context: String,
+        provider: &str,
+        metadata: RecoveryTurnMetadata,
+    ) -> Result<TurnOutcome, OrchestratorError> {
+        *self.last_turn_changed_files.lock().expect("last turn changed files poisoned") =
+            Vec::new();
+        *self.last_turn_validation.lock().expect("last turn validation poisoned") =
+            ValidationRecorder::new();
+        *self.last_repair_stop.lock().expect("last repair stop poisoned") = None;
         if !self.config.recovery.enabled {
             let result = self
-                .run_turn_recording_with_system_context(
+                .run_turn_guided_without_recovery(
                     ctx,
                     sink,
                     client,
                     cancel,
-                    EventRecorder::new(),
-                    Some(system_context),
+                    system_context,
+                    metadata,
                 )
                 .await?;
             return Ok(TurnOutcome::Completed(result));
@@ -403,7 +528,37 @@ impl OrchestratorRuntime {
             OrchestratorError::InvalidState(format!("plan emission failed: {error}"))
         })?;
         let session_id = ctx.session_id.to_string();
-        let handle = CheckpointHandle::new(self.checkpoints.clone(), &session_id, provider);
+        let definitions = self.tools.lock().expect("tool registry poisoned").definitions();
+        let strategy_context = StrategyContext {
+            prompt_text: prompt_text.clone(),
+            has_code_changes: false,
+            validation_tools_available: definitions
+                .iter()
+                .any(|definition| crate::strategy::is_validation_tool_name(&definition.name)),
+            delegation_allowed: self.policy().policy().allow_delegate,
+            task_graph: self.tasks.lock().expect("task graph poisoned").clone(),
+            tool_definitions: definitions,
+        };
+        let guidance = capability_aware_guidance(&strategy_context, &self.policy());
+        self.events.record(OrchestratorEvent::StrategySelected {
+            strategy: guidance.decision.strategy,
+            reason: guidance.decision.reason,
+        });
+        let mut system_context = system_context;
+        if !system_context.is_empty() {
+            system_context.push_str("\n\n");
+        }
+        system_context.push_str(&guidance.text);
+        let handle = CheckpointHandle::new(self.checkpoints.clone(), &session_id, provider)
+            .with_capture_metadata(
+                metadata.checkpoint_context.clone(),
+                metadata.evidence_refs.clone(),
+            );
+        let execution_log = Arc::new(Mutex::new(Vec::new()));
+        let validation_sink = sink.clone();
+        let validation_client = client.clone();
+        let validation_cancel = cancel.clone();
+        let validation_task = task.clone();
         let outcome = self
             .run_loop_with_options(
                 ctx.clone(),
@@ -411,20 +566,48 @@ impl OrchestratorRuntime {
                 client,
                 cancel,
                 task,
-                Some(system_context),
+                Some(system_context.clone()),
+                metadata.context_plan.clone(),
                 self.events.clone(),
                 LoopOptions {
+                    read_first: guidance.decision.strategy
+                        == crate::strategy::TurnStrategy::ResearchThenEdit,
                     graph: Some(self.tasks.clone()),
                     available_models: self.models.advertised(),
                     model_id: Some(DEFAULT_MODEL_ID.to_string()),
                     memory: Some(self.memory.clone()),
                     checkpoint: Some(handle),
+                    execution_log: Some(execution_log.clone()),
                     ..LoopOptions::default()
                 },
             )
             .await;
         match outcome {
             Ok(result) => {
+                let post_validation_log =
+                    execution_log.lock().expect("execution log poisoned").clone();
+                let validation = self
+                    .run_post_write_validation(
+                        post_validation_log,
+                        &validation_task,
+                        validation_sink.clone(),
+                        validation_client.clone(),
+                        validation_cancel.clone(),
+                    )
+                    .await?;
+                self.run_bounded_repair(
+                    &ctx,
+                    &validation_task,
+                    execution_log,
+                    validation,
+                    validation_sink,
+                    validation_client,
+                    validation_cancel,
+                    Some(system_context),
+                    &session_id,
+                    provider,
+                )
+                .await?;
                 self.checkpoints.delete_session(&session_id);
                 Ok(TurnOutcome::Completed(result))
             }
@@ -442,6 +625,572 @@ impl OrchestratorRuntime {
         }
     }
 
+    /// Runs the default production loop when recovery is disabled while still
+    /// applying bounded capability-aware strategy guidance and host-provided
+    /// untrusted task context. It deliberately reuses `LoopEngine`; guidance
+    /// never bypasses tool policy, approval, or budget gates.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_turn_guided_without_recovery(
+        &self,
+        ctx: PromptContext,
+        sink: UpdateSink,
+        client: ClientBridge,
+        cancel: watch::Receiver<bool>,
+        system_context: String,
+        metadata: RecoveryTurnMetadata,
+    ) -> Result<PromptResult, OrchestratorError> {
+        let prompt_text = prompt_text(&ctx);
+        if let Some(command) = parse_slash_command(&prompt_text)
+            && command.name == COMPACT_COMMAND_NAME
+        {
+            return self
+                .run_compact_turn(ctx, sink, cancel, command.instructions, Some(system_context))
+                .await;
+        }
+        let (title, description) = task_summary(&ctx);
+        let (task, entries) = {
+            let mut tasks = self.tasks.lock().expect("task graph poisoned");
+            let task = tasks.create_root(&title, &description);
+            let entries = tasks.plan_entries();
+            (task, entries)
+        };
+        sink.plan_replace(entries).map_err(|error| {
+            OrchestratorError::InvalidState(format!("plan emission failed: {error}"))
+        })?;
+        let definitions = self.tools.lock().expect("tool registry poisoned").definitions();
+        let strategy_context = StrategyContext {
+            prompt_text,
+            has_code_changes: false,
+            validation_tools_available: definitions
+                .iter()
+                .any(|definition| crate::strategy::is_validation_tool_name(&definition.name)),
+            delegation_allowed: self.policy().policy().allow_delegate,
+            task_graph: self.tasks.lock().expect("task graph poisoned").clone(),
+            tool_definitions: definitions,
+        };
+        let guidance = capability_aware_guidance(&strategy_context, &self.policy());
+        self.events.record(OrchestratorEvent::StrategySelected {
+            strategy: guidance.decision.strategy,
+            reason: guidance.decision.reason,
+        });
+        let mut system_context = system_context;
+        if !system_context.is_empty() {
+            system_context.push_str("\n\n");
+        }
+        system_context.push_str(&guidance.text);
+        self.run_loop_with_options(
+            ctx,
+            sink,
+            client,
+            cancel,
+            task,
+            Some(system_context),
+            metadata.context_plan,
+            self.events.clone(),
+            LoopOptions {
+                read_first: guidance.decision.strategy
+                    == crate::strategy::TurnStrategy::ResearchThenEdit,
+                graph: Some(self.tasks.clone()),
+                available_models: self.models.advertised(),
+                model_id: Some(DEFAULT_MODEL_ID.to_string()),
+                ..LoopOptions::default()
+            },
+        )
+        .await
+    }
+
+    /// Runs the production recovery path and builds an evidence-gated final
+    /// response only after the recovery engine reaches terminal completion.
+    ///
+    /// This deliberately delegates all loop/checkpoint work to
+    /// [`OrchestratorRuntime::run_turn_recoverable`]. The strategic wrapper
+    /// therefore preserves timeout, cancellation, durable checkpoint,
+    /// completed-tool reuse, and interruption semantics without creating a
+    /// second root task or replaying side effects.
+    pub async fn run_turn_strategic_recoverable(
+        &self,
+        ctx: PromptContext,
+        sink: UpdateSink,
+        client: ClientBridge,
+        cancel: watch::Receiver<bool>,
+        recovery: StrategicRecoveryContext,
+    ) -> Result<StrategicTurnOutcome, OrchestratorError> {
+        self.set_validation_planning_input(&recovery.input);
+        let metadata = recovery_turn_metadata(&recovery.input);
+        match self
+            .run_turn_recoverable_with_metadata(
+                ctx,
+                sink,
+                client,
+                cancel,
+                recovery.system_context,
+                &recovery.provider,
+                metadata,
+            )
+            .await?
+        {
+            TurnOutcome::Completed(prompt_result) => {
+                Ok(StrategicTurnOutcome::Completed(Box::new(StrategicRecoveryTurn {
+                    prompt_result,
+                    final_response: self.build_recovery_final_response(&recovery.input),
+                })))
+            }
+            TurnOutcome::Interrupted(interruption) => {
+                Ok(StrategicTurnOutcome::Interrupted(interruption))
+            }
+        }
+    }
+
+    /// Resumes an interrupted production turn and assembles final evidence only
+    /// once the restored recovery path has actually completed.
+    ///
+    /// Completed tool calls continue to be reused by [`OrchestratorRuntime::resume_turn`].
+    pub async fn resume_turn_strategic(
+        &self,
+        ctx: PromptContext,
+        sink: UpdateSink,
+        client: ClientBridge,
+        cancel: watch::Receiver<bool>,
+        recovery: StrategicRecoveryContext,
+    ) -> Result<StrategicTurnOutcome, OrchestratorError> {
+        self.set_validation_planning_input(&recovery.input);
+        let metadata = recovery_turn_metadata(&recovery.input);
+        match self
+            .resume_turn_with_metadata(
+                ctx,
+                sink,
+                client,
+                cancel,
+                recovery.system_context,
+                &recovery.provider,
+                metadata,
+            )
+            .await?
+        {
+            TurnOutcome::Completed(prompt_result) => {
+                Ok(StrategicTurnOutcome::Completed(Box::new(StrategicRecoveryTurn {
+                    prompt_result,
+                    final_response: self.build_recovery_final_response(&recovery.input),
+                })))
+            }
+            TurnOutcome::Interrupted(interruption) => {
+                Ok(StrategicTurnOutcome::Interrupted(interruption))
+            }
+        }
+    }
+
+    /// Builds completion from host-provided evidence only. The recovery loop
+    /// does not fabricate editor facts or copy model prose into evidence, so
+    /// missing host evidence remains explicitly unverified.
+    fn build_recovery_final_response(&self, input: &StrategicInput) -> FinalResponse {
+        let validation =
+            self.last_turn_validation.lock().expect("last turn validation poisoned").clone();
+        let changed_files =
+            self.last_turn_changed_files.lock().expect("last turn changed files poisoned").clone();
+        let tasks = self.tasks.lock().expect("task graph poisoned").clone();
+        let memory = self.memory.lock().expect("memory store poisoned").clone();
+        let mut final_response = FinalResponseBuilder {
+            changed_files,
+            validation: &validation,
+            completion_evidence: input.completion_evidence.as_ref(),
+            unresolved_risks: Vec::new(),
+            follow_up_suggestions: Vec::new(),
+            task_graph: &tasks,
+            memory: &memory,
+            progress: None,
+        }
+        .build();
+        if let Some(transaction) = &input.write_transaction {
+            transaction.constrain_completion(&mut final_response.completion);
+            final_response.can_finish = final_response.completion.is_verified();
+        }
+        if let Some(reason) = *self.last_repair_stop.lock().expect("last repair stop poisoned") {
+            final_response.completion.state = crate::completion::CompletionState::Blocked;
+            final_response.completion.blocker =
+                Some(format!("automatic repair stopped: {}", repair_stop_label(reason)));
+            final_response.completion.safe_follow_up =
+                Some(repair_safe_follow_up(reason).to_string());
+            final_response
+                .unresolved_risks
+                .push(format!("automatic repair stopped: {}", repair_stop_label(reason)));
+            final_response.follow_up_suggestions.push(repair_safe_follow_up(reason).to_string());
+            final_response.can_finish = false;
+        }
+        final_response
+    }
+
+    /// Sets trusted, bounded inputs used only to select registered validation tools.
+    fn set_validation_planning_input(&self, input: &StrategicInput) {
+        *self.validation_workspace.lock().expect("validation workspace poisoned") =
+            input.validation_workspace.clone();
+        *self.validation_changed_symbols.lock().expect("validation symbols poisoned") =
+            input.changed_symbols.iter().take(64).cloned().collect();
+    }
+
+    /// Plans and executes focused validation after a completed write sequence.
+    /// Every command still goes through the shared executor, so policy,
+    /// approval, cancellation, timeout, output cap, and terminal ownership
+    /// stay enforced by their existing implementations.
+    async fn run_post_write_validation(
+        &self,
+        execution_log: Vec<ToolExecutionLogEntry>,
+        task: &TaskNode,
+        sink: UpdateSink,
+        client: ClientBridge,
+        cancel: watch::Receiver<bool>,
+    ) -> Result<PostWriteValidation, OrchestratorError> {
+        let changed_files = changed_files_from_log(&execution_log, &task.id);
+        let definitions = self.tools.lock().expect("tool registry poisoned").definitions();
+        let workspace =
+            self.validation_workspace.lock().expect("validation workspace poisoned").clone();
+        let changed_symbols =
+            self.validation_changed_symbols.lock().expect("validation symbols poisoned").clone();
+        let planner = ValidationPlanner::new();
+        let plan = planner.plan_with_context(
+            ValidationPlanningContext {
+                changed_files: &changed_files,
+                changed_symbols: &changed_symbols,
+                workspace: &workspace,
+            },
+            &definitions,
+        );
+        let mut validation = ValidationRecorder::new();
+        let mut results = Vec::new();
+        if !plan.is_empty() {
+            let task_ids = {
+                let mut graph = self.tasks.lock().expect("task graph poisoned");
+                planner.create_tasks(&mut graph, &plan, &task.id)?
+            };
+            let executor = ToolExecutor::new(
+                self.config.clone(),
+                self.tools.clone(),
+                self.budget.clone(),
+                self.policy(),
+                0,
+                self.events.clone(),
+            )
+            .with_model_id(Some(DEFAULT_MODEL_ID.to_string()));
+            let mut runner = ValidationRunner::new(executor, self.events.clone());
+            results = runner
+                .run_plan(&plan, &task_ids, &sink, &client, cancel, task, &[], &mut validation)
+                .await?;
+            let mut graph = self.tasks.lock().expect("task graph poisoned");
+            finalize_validation_tasks(&mut graph, &task_ids, &results)?;
+        }
+        *self.last_turn_changed_files.lock().expect("last turn changed files poisoned") =
+            changed_files;
+        *self.last_turn_validation.lock().expect("last turn validation poisoned") = validation;
+        Ok(PostWriteValidation { results })
+    }
+
+    /// Runs at most the configured number of repair loops after a current
+    /// validation, diagnostic, or conflict-diff failure. Each attempt refreshes
+    /// read-only host facts first, reuses this turn's root task and budgets, and
+    /// never converts server observations into host completion evidence.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_bounded_repair(
+        &self,
+        ctx: &PromptContext,
+        task: &TaskNode,
+        execution_log: Arc<Mutex<Vec<ToolExecutionLogEntry>>>,
+        mut validation: PostWriteValidation,
+        sink: UpdateSink,
+        client: ClientBridge,
+        cancel: watch::Receiver<bool>,
+        system_context: Option<String>,
+        session_id: &str,
+        provider: &str,
+    ) -> Result<(), OrchestratorError> {
+        let mut controller = RepairController::new(self.config.repair);
+        let mut previous_write_count =
+            successful_write_count(&execution_log.lock().expect("execution log poisoned"));
+        if previous_write_count == 0 {
+            return Ok(());
+        }
+
+        loop {
+            self.invalidate_repair_context(session_id, true);
+            let snapshot = match self
+                .collect_repair_context(task, &sink, &client, cancel.clone(), session_id)
+                .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(reason) => {
+                    self.finish_repair(reason);
+                    return Ok(());
+                }
+            };
+            let recorded_validation =
+                self.last_turn_validation.lock().expect("last turn validation poisoned").clone();
+            let Some((reason, failure, evidence_ids)) =
+                repair_request(&snapshot, &validation, &recorded_validation)
+            else {
+                return Ok(());
+            };
+            let write_count =
+                successful_write_count(&execution_log.lock().expect("execution log poisoned"));
+            let progress = RepairProgress {
+                context_revision: snapshot.revision.clone(),
+                diff_fingerprint: snapshot.diff_fingerprint.clone(),
+                validation_fingerprint: repair_validation_fingerprint(&validation),
+                made_progress: controller.attempts().is_empty()
+                    || write_count > previous_write_count,
+                ..RepairProgress::default()
+            };
+            let attempt = match controller.starts(reason, failure, evidence_ids, progress) {
+                RepairDecision::Attempt(attempt) => attempt,
+                RepairDecision::Stop(reason) => {
+                    self.finish_repair(reason);
+                    return Ok(());
+                }
+            };
+            self.events.record(OrchestratorEvent::RepairStarted {
+                attempt_number: attempt.attempt_number,
+                reason: repair_reason_label(attempt.reason).to_string(),
+            });
+            let plan = self.plan_repair_context(&task.id, &snapshot.input);
+            let repair_context = repair_system_context(&snapshot, &attempt);
+            let repair_log_start = execution_log.lock().expect("execution log poisoned").len();
+            let outcome = self
+                .run_repair_loop(
+                    ctx.clone(),
+                    task.clone(),
+                    sink.clone(),
+                    client.clone(),
+                    cancel.clone(),
+                    system_context.clone(),
+                    repair_context,
+                    plan,
+                    execution_log.clone(),
+                    session_id,
+                    provider,
+                )
+                .await;
+            match outcome {
+                Ok(()) => {}
+                Err(OrchestratorError::Cancellation) => {
+                    return Err(OrchestratorError::Cancellation);
+                }
+                Err(OrchestratorError::DeadlineExceeded(_))
+                | Err(OrchestratorError::Timeout(_)) => {
+                    self.finish_repair(RepairStopReason::Timeout);
+                    return Ok(());
+                }
+                Err(OrchestratorError::BudgetExceeded(_)) => {
+                    self.finish_repair(RepairStopReason::BudgetExhaustion);
+                    return Ok(());
+                }
+                Err(OrchestratorError::PolicyDenied(_)) => {
+                    self.finish_repair(RepairStopReason::PolicyDenial);
+                    return Ok(());
+                }
+                Err(_) => {
+                    self.finish_repair(RepairStopReason::UnavailableEnvironment);
+                    return Ok(());
+                }
+            }
+            let repair_log = execution_log.lock().expect("execution log poisoned").clone();
+            let repaired_write_count = successful_write_count(&repair_log);
+            let observed_progress = RepairProgress {
+                context_revision: snapshot.revision,
+                diff_fingerprint: snapshot.diff_fingerprint,
+                validation_fingerprint: repair_validation_fingerprint(&validation),
+                tool_call_fingerprints: repair_log[repair_log_start..]
+                    .iter()
+                    .map(|entry| format!("tool:{}", entry.tool_name))
+                    .collect(),
+                made_progress: repaired_write_count > write_count,
+                ..RepairProgress::default()
+            };
+            if let Some(reason) = controller.record_progress(observed_progress) {
+                self.finish_repair(reason);
+                return Ok(());
+            }
+
+            self.invalidate_repair_context(session_id, false);
+            previous_write_count = write_count;
+            let post_repair_log = execution_log.lock().expect("execution log poisoned").clone();
+            validation = self
+                .run_post_write_validation(
+                    post_repair_log,
+                    task,
+                    sink.clone(),
+                    client.clone(),
+                    cancel.clone(),
+                )
+                .await?;
+        }
+    }
+
+    /// Collects a new snapshot using only existing registered read-only editor
+    /// MCP tools. No command, approval, or write tool is invoked here.
+    async fn collect_repair_context(
+        &self,
+        task: &TaskNode,
+        sink: &UpdateSink,
+        client: &ClientBridge,
+        cancel: watch::Receiver<bool>,
+        session_id: &str,
+    ) -> Result<RepairContextSnapshot, RepairStopReason> {
+        let executor = ToolExecutor::new(
+            self.config.clone(),
+            self.tools.clone(),
+            self.budget.clone(),
+            self.policy(),
+            0,
+            self.events.clone(),
+        )
+        .with_model_id(Some(DEFAULT_MODEL_ID.to_string()));
+        let mut observations = Vec::new();
+        for (index, tool_name) in REPAIR_CONTEXT_TOOLS.iter().enumerate() {
+            let intent = crate::tools::ToolIntent::new(
+                format!("{REPAIR_CONTEXT_TOOL_CALL_PREFIX}-{index}"),
+                *tool_name,
+                serde_json::json!({}),
+            );
+            let result = match executor
+                .execute(&intent, sink, client, cancel.clone(), task, &[])
+                .await
+            {
+                Ok(result) => result,
+                Err(OrchestratorError::Cancellation) => return Err(RepairStopReason::Cancellation),
+                Err(OrchestratorError::BudgetExceeded(_)) => {
+                    return Err(RepairStopReason::BudgetExhaustion);
+                }
+                Err(OrchestratorError::DeadlineExceeded(_))
+                | Err(OrchestratorError::Timeout(_)) => {
+                    return Err(RepairStopReason::Timeout);
+                }
+                Err(OrchestratorError::PolicyDenied(_)) => {
+                    return Err(RepairStopReason::PolicyDenial);
+                }
+                Err(_) => return Err(RepairStopReason::UnavailableEnvironment),
+            };
+            observations
+                .push(RepairContextObservation { tool_name: (*tool_name).to_string(), result });
+        }
+        build_repair_context(session_id, &observations)
+    }
+
+    fn plan_repair_context(
+        &self,
+        task_id: &TaskId,
+        input: &crate::context_planner::ContextPlanningInput,
+    ) -> ContextPlan {
+        let config = ContextPlannerConfig::default();
+        let mut cache = self.context_cache.lock().expect("context plan cache poisoned");
+        if let Some(plan) = cache.get(task_id.as_str(), input, &config) {
+            return plan;
+        }
+        let plan = ContextPlanner.plan(input, &config);
+        cache.insert(task_id.as_str(), input, &config, plan.clone());
+        plan
+    }
+
+    /// Conservatively invalidate every stale source class before a fresh host
+    /// snapshot. Cache invalidation is cheap and stronger than selectively
+    /// trusting state that may have changed outside this process.
+    fn invalidate_repair_context(&self, session_id: &str, after_write: bool) {
+        let mut cache = self.context_cache.lock().expect("context plan cache poisoned");
+        if after_write {
+            cache.invalidate(ContextInvalidation::Write { session_id: session_id.to_string() });
+        }
+        cache
+            .invalidate(ContextInvalidation::BufferRevision { session_id: session_id.to_string() });
+        cache.invalidate(ContextInvalidation::DiagnosticsRevision {
+            session_id: session_id.to_string(),
+        });
+        cache.invalidate(ContextInvalidation::WorktreeRevision {
+            session_id: session_id.to_string(),
+        });
+        cache.invalidate(ContextInvalidation::CheckoutRevision {
+            session_id: session_id.to_string(),
+        });
+        cache.invalidate(ContextInvalidation::ValidationResult {
+            session_id: session_id.to_string(),
+        });
+    }
+
+    /// Runs a repair loop against the existing root task and shared counters.
+    /// The primary turn deadline remains in force; only the remaining duration
+    /// is given to this loop's outer timeout.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_repair_loop(
+        &self,
+        ctx: PromptContext,
+        task: TaskNode,
+        sink: UpdateSink,
+        client: ClientBridge,
+        cancel: watch::Receiver<bool>,
+        system_context: Option<String>,
+        repair_context: String,
+        context_plan: ContextPlan,
+        execution_log: Arc<Mutex<Vec<ToolExecutionLogEntry>>>,
+        session_id: &str,
+        provider: &str,
+    ) -> Result<(), OrchestratorError> {
+        let remaining = self
+            .budget
+            .lock()
+            .expect("budget tracker poisoned")
+            .deadline_remaining()
+            .unwrap_or(self.config.turn_timeout);
+        if remaining.is_zero() {
+            return Err(OrchestratorError::DeadlineExceeded(
+                "repair budget deadline elapsed".into(),
+            ));
+        }
+        let mut config = self.config.clone();
+        config.turn_timeout = remaining;
+        let handle = CheckpointHandle::new(self.checkpoints.clone(), session_id, provider);
+        let model = self.models.default_adapter()?;
+        let engine = LoopEngine::new(
+            config,
+            model,
+            self.tools.clone(),
+            self.budget.clone(),
+            self.policy(),
+            self.events.clone(),
+            LoopOptions {
+                graph: Some(self.tasks.clone()),
+                available_models: self.models.advertised(),
+                model_id: Some(DEFAULT_MODEL_ID.to_string()),
+                memory: Some(self.memory.clone()),
+                checkpoint: Some(handle),
+                execution_log: Some(execution_log),
+                ..LoopOptions::default()
+            },
+        );
+        let memory = self.memory.lock().expect("memory store poisoned").compact_context();
+        let mut session = system_context.unwrap_or_default();
+        if !session.is_empty() {
+            session.push_str("\n\n");
+        }
+        session.push_str(&repair_context);
+        engine
+            .run_with_system_context(
+                ctx,
+                sink,
+                client,
+                cancel,
+                task,
+                TurnSystemContext {
+                    memory,
+                    session: Some(session),
+                    task_context: Some(context_plan),
+                },
+            )
+            .await
+            .map(|_| ())
+    }
+
+    fn finish_repair(&self, reason: RepairStopReason) {
+        *self.last_repair_stop.lock().expect("last repair stop poisoned") = Some(reason);
+        self.events.record(OrchestratorEvent::RepairStopped {
+            reason: repair_stop_label(reason).to_string(),
+        });
+    }
+
     /// Resumes an interrupted turn from its latest checkpoint: restores the
     /// stores (fresh deadline slice, cumulative counters retained), appends
     /// the new prompt to the checkpoint transcript tail, and runs the loop
@@ -455,6 +1204,29 @@ impl OrchestratorRuntime {
         cancel: watch::Receiver<bool>,
         system_context: String,
         provider: &str,
+    ) -> Result<TurnOutcome, OrchestratorError> {
+        self.resume_turn_with_metadata(
+            ctx,
+            sink,
+            client,
+            cancel,
+            system_context,
+            provider,
+            RecoveryTurnMetadata::default(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resume_turn_with_metadata(
+        &self,
+        ctx: PromptContext,
+        sink: UpdateSink,
+        client: ClientBridge,
+        cancel: watch::Receiver<bool>,
+        system_context: String,
+        provider: &str,
+        metadata: RecoveryTurnMetadata,
     ) -> Result<TurnOutcome, OrchestratorError> {
         let session_id = ctx.session_id.to_string();
         let Some((checkpoint_id, checkpoint)) =
@@ -477,6 +1249,18 @@ impl OrchestratorRuntime {
         let resume = checkpoint.resume.clone().ok_or_else(|| {
             OrchestratorError::InvalidState("checkpoint has no resumable turn state".into())
         })?;
+        if let Some(in_flight) = &resume.in_flight {
+            return Err(OrchestratorError::PolicyDenied(format!(
+                "pending {} operation {} ({}) has ambiguous completion; explicitly abandon with /discard before another turn",
+                in_flight.tool_name, in_flight.tool_call_id, in_flight.arguments_fingerprint
+            )));
+        }
+        if resume.transcript.is_empty() && ctx.prompt.is_empty() {
+            return Err(OrchestratorError::InvalidState(
+                "durable recovery omits transcript content; send a fresh prompt or explicitly abandon with /discard"
+                    .into(),
+            ));
+        }
         if session_timeout_expired(
             &self.config,
             resume.first_started_at_millis,
@@ -490,7 +1274,6 @@ impl OrchestratorRuntime {
         self.restore_from_checkpoint(&checkpoint)?;
         let mut resumed = resume.clone();
         resumed.resumed_count += 1;
-        resumed.in_flight = None;
         self.events.record(OrchestratorEvent::TurnResumed {
             session_id: session_id.clone(),
             checkpoint_id: checkpoint_id.clone(),
@@ -498,8 +1281,8 @@ impl OrchestratorRuntime {
         });
         let mut transcript = Transcript::new();
         transcript.messages = resume.transcript;
-        // `/resume` continuation carries no prompt text: the original prompt
-        // already lives in the checkpoint transcript, so nothing is appended.
+        // Durable checkpoints omit transcript content. A non-empty prompt is
+        // therefore required after crash recovery; `/resume` alone fails above.
         if !ctx.prompt.is_empty() {
             transcript.messages.extend(Transcript::from_prompt(&ctx).messages);
         }
@@ -510,7 +1293,8 @@ impl OrchestratorRuntime {
         if !system_context.is_empty() {
             transcript.prepend_system(&system_context);
         }
-        let handle = CheckpointHandle::new(self.checkpoints.clone(), &session_id, provider);
+        let handle = CheckpointHandle::new(self.checkpoints.clone(), &session_id, provider)
+            .with_capture_metadata(metadata.checkpoint_context, metadata.evidence_refs);
         let model = self.models.default_adapter()?;
         let policy = self.policy();
         let engine = LoopEngine::new(
@@ -653,6 +1437,7 @@ impl OrchestratorRuntime {
             cancel,
             task,
             system_context,
+            None,
             events,
             LoopOptions {
                 graph: Some(self.tasks.clone()),
@@ -677,6 +1462,7 @@ impl OrchestratorRuntime {
         cancel: watch::Receiver<bool>,
         task: TaskNode,
         system_context: Option<String>,
+        task_context: Option<ContextPlan>,
         events: EventRecorder,
         options: LoopOptions,
     ) -> Result<PromptResult, OrchestratorError> {
@@ -703,7 +1489,7 @@ impl OrchestratorRuntime {
                 client,
                 cancel,
                 task,
-                TurnSystemContext { memory, session: system_context },
+                TurnSystemContext { memory, session: system_context, task_context },
             )
             .await
     }
@@ -978,7 +1764,195 @@ impl OrchestratorRuntime {
     }
 }
 
-/// Concatenates the text content blocks of a prompt.
+/// Builds checkpoint-safe metadata from host-provided strategic input. Context
+/// excerpts and paths are deliberately excluded; only revision labels, source
+/// classes, and host-redacted evidence identifiers may cross this boundary.
+fn recovery_turn_metadata(input: &StrategicInput) -> RecoveryTurnMetadata {
+    let checkpoint_context =
+        input.context.as_ref().map_or_else(CheckpointContextProvenance::default, |context| {
+            let mut source_labels = context
+                .candidates
+                .iter()
+                .map(|candidate| candidate.source.label().to_string())
+                .collect::<Vec<_>>();
+            source_labels.sort();
+            source_labels.dedup();
+            source_labels.truncate(crate::checkpoint::MAX_CHECKPOINT_CONTEXT_SOURCES);
+            CheckpointContextProvenance {
+                workspace_revision: nonempty_label(&context.identity.workspace_revision),
+                buffer_revision: nonempty_label(&context.identity.buffer_revision),
+                diagnostics_revision: nonempty_label(&context.identity.diagnostics_revision),
+                checkout_revision: nonempty_label(&context.identity.checkout_revision),
+                source_labels,
+            }
+        });
+    let mut evidence_ids = input
+        .completion_evidence
+        .as_ref()
+        .into_iter()
+        .flat_map(|evidence| {
+            [
+                evidence.changed_file_inventory.as_ref(),
+                evidence.post_write_diagnostics.as_ref(),
+                evidence.final_diff_review.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .map(|item| item.id.clone())
+        })
+        .collect::<Vec<_>>();
+    evidence_ids.sort();
+    evidence_ids.dedup();
+    let evidence_refs = evidence_ids
+        .into_iter()
+        .take(crate::checkpoint::MAX_CHECKPOINT_EVIDENCE_REFS)
+        .filter_map(|id| crate::observability::RedactedEvidenceRef::new(id).ok())
+        .collect();
+    RecoveryTurnMetadata {
+        context_plan: input
+            .context
+            .as_ref()
+            .map(|context| ContextPlanner.plan(context, &ContextPlannerConfig::default())),
+        checkpoint_context,
+        evidence_refs,
+    }
+}
+
+fn nonempty_label(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// Counts successful writes in a turn execution log.
+fn successful_write_count(log: &[ToolExecutionLogEntry]) -> usize {
+    log.iter()
+        .filter(|entry| {
+            entry.success && entry.side_effect_class == Some(crate::tools::SideEffectClass::Write)
+        })
+        .count()
+}
+
+fn repair_request(
+    snapshot: &RepairContextSnapshot,
+    validation: &PostWriteValidation,
+    records: &ValidationRecorder,
+) -> Option<(RepairReason, RepairFailureSummary, Vec<String>)> {
+    if snapshot.error_diagnostic_count > 0 {
+        return Some((
+            RepairReason::Diagnostics,
+            RepairFailureSummary::Diagnostics {
+                diagnostic_count: snapshot.error_diagnostic_count,
+                fingerprint: format!(
+                    "diagnostics:{}:{}",
+                    snapshot.revision, snapshot.error_diagnostic_count
+                ),
+            },
+            Vec::new(),
+        ));
+    }
+    if snapshot.has_conflicts {
+        return Some((
+            RepairReason::Diff,
+            RepairFailureSummary::Diff {
+                changed_file_count: snapshot.changed_file_count,
+                fingerprint: format!(
+                    "conflicted-diff:{}:{}",
+                    snapshot.revision, snapshot.changed_file_count
+                ),
+            },
+            Vec::new(),
+        ));
+    }
+    let result =
+        validation.results.iter().find(|result| result.status == ValidationOutcome::Failed)?;
+    let evidence_ids = records
+        .records()
+        .iter()
+        .filter(|record| record.command == result.command)
+        .map(|record| record.evidence_id.clone())
+        .take(1)
+        .collect::<Vec<_>>();
+    Some((
+        RepairReason::SelectedValidationFailure,
+        RepairFailureSummary::SelectedValidationFailure {
+            evidence_id: evidence_ids.first().cloned().unwrap_or_default(),
+            fingerprint: validation_result_fingerprint(result),
+        },
+        evidence_ids,
+    ))
+}
+
+fn repair_validation_fingerprint(validation: &PostWriteValidation) -> String {
+    validation
+        .results
+        .iter()
+        .find(|result| result.status == ValidationOutcome::Failed)
+        .map(validation_result_fingerprint)
+        .unwrap_or_default()
+}
+
+fn validation_result_fingerprint(result: &ValidationResult) -> String {
+    let failure = result.failure.map_or("unknown", ValidationCommandFailure::as_str);
+    format!("validation:{}:{failure}", result.command_id)
+}
+
+fn repair_system_context(
+    snapshot: &RepairContextSnapshot,
+    attempt: &crate::repair::RepairAttempt,
+) -> String {
+    format!(
+        "Repair controller request. Attempt {} of bounded automatic repair. Failure source: {}. Current host revision: {}. Use current untrusted context below; inspect before mutating. Do not claim verified completion.\n",
+        attempt.attempt_number,
+        repair_reason_label(attempt.reason),
+        snapshot.revision,
+    )
+}
+
+fn repair_reason_label(reason: RepairReason) -> &'static str {
+    match reason {
+        RepairReason::Diagnostics => "diagnostics",
+        RepairReason::Diff => "diff",
+        RepairReason::SelectedValidationFailure => "selected_validation_failure",
+    }
+}
+
+fn repair_stop_label(reason: RepairStopReason) -> &'static str {
+    match reason {
+        RepairStopReason::RepeatedIdenticalToolCalls => "repeated_identical_tool_calls",
+        RepairStopReason::UnchangedDiff => "unchanged_diff",
+        RepairStopReason::RepeatedValidationFailure => "repeated_validation_failure",
+        RepairStopReason::NoProgress => "no_progress",
+        RepairStopReason::PolicyDenial => "policy_denial",
+        RepairStopReason::StaleState => "stale_state",
+        RepairStopReason::Cancellation => "cancellation",
+        RepairStopReason::BudgetExhaustion => "budget_exhaustion",
+        RepairStopReason::Timeout => "timeout",
+        RepairStopReason::UnavailableEnvironment => "unavailable_environment",
+        RepairStopReason::AttemptsExhausted => "attempts_exhausted",
+    }
+}
+
+fn repair_safe_follow_up(reason: RepairStopReason) -> &'static str {
+    match reason {
+        RepairStopReason::PolicyDenial => "grant required approval or policy, then retry repair",
+        RepairStopReason::StaleState => {
+            "refresh editor buffers and workspace state, then retry repair"
+        }
+        RepairStopReason::Cancellation => "resume or start a new turn when ready",
+        RepairStopReason::BudgetExhaustion => "start a new turn with a smaller repair scope",
+        RepairStopReason::Timeout => "check environment responsiveness, then retry repair",
+        RepairStopReason::UnavailableEnvironment => {
+            "restore required editor or MCP context tools, then retry repair"
+        }
+        RepairStopReason::RepeatedIdenticalToolCalls
+        | RepairStopReason::UnchangedDiff
+        | RepairStopReason::RepeatedValidationFailure
+        | RepairStopReason::NoProgress
+        | RepairStopReason::AttemptsExhausted => {
+            "review current failure evidence and provide a focused next repair instruction"
+        }
+    }
+}
+
 fn prompt_text(ctx: &PromptContext) -> String {
     ctx.prompt
         .iter()
@@ -1067,6 +2041,133 @@ mod tests {
                 .side_effect_class(SideEffectClass::Read),
             ToolResult::success("echoed"),
         ))
+    }
+
+    fn repair_context_tool(name: &str, value: serde_json::Value) -> Arc<FakeTool> {
+        Arc::new(FakeTool::new(
+            ToolDefinition::new(name, "repair host context")
+                .side_effect_class(SideEffectClass::Read),
+            ToolResult::success_structured(value.to_string(), value),
+        ))
+    }
+
+    #[tokio::test]
+    async fn repair_uses_fresh_host_context_and_stops_before_second_model_call_on_stale_revision() {
+        let model =
+            Arc::new(FakeModel::new(vec![ModelResponse::new().text("repair done").completed()]));
+        let policy = PolicyEngine::new(ToolPolicy { allow_execute: true, ..ToolPolicy::default() });
+        let runtime =
+            OrchestratorRuntime::with_policy(OrchestratorConfig::default(), model.clone(), policy);
+        for tool in [
+            repair_context_tool("ee_project_instructions", json!({"sources": []})),
+            repair_context_tool("ee_open_buffers", json!({"buffers": [{"revisionId": "rev-1"}]})),
+            repair_context_tool(
+                "ee_get_diagnostics",
+                json!({"diagnostics": [], "truncated": false}),
+            ),
+            repair_context_tool(
+                "ee_changed_files",
+                json!({"files": [{"path": "/work/src/lib.rs", "conflicted": false}], "truncated": false}),
+            ),
+            repair_context_tool(
+                "ee_git_diff",
+                json!({"diff": "diff", "bytesReturned": 4, "truncated": false}),
+            ),
+            repair_context_tool(
+                "ee_review_context",
+                json!({"diagnostics": {"truncated": false}, "changedFiles": {"truncated": false}}),
+            ),
+        ] {
+            runtime.register_tool(tool).expect("register repair host tool");
+        }
+        runtime
+            .register_tool(Arc::new(FakeTool::new(
+                ToolDefinition::new("cargo_check", "fails validation")
+                    .side_effect_class(SideEffectClass::Execute),
+                ToolResult::failure(crate::tools::ToolErrorKind::Backend, "compile failed"),
+            )))
+            .expect("register validation tool");
+        let task = {
+            let mut graph = runtime.tasks.lock().expect("task graph poisoned");
+            graph.create_root("repair", "repair")
+        };
+        let mut records = ValidationRecorder::new();
+        records.record_evidence(crate::final_response::ValidationRecord::evidence(
+            "validation-cargo_check-task-1",
+            "cargo check",
+            ValidationOutcome::Failed,
+            Some("cargo_check".into()),
+            Some(1),
+            Some(1),
+            Vec::new(),
+            0,
+            false,
+            None,
+            None,
+            false,
+            false,
+            Some("failed".into()),
+        ));
+        *runtime.last_turn_validation.lock().expect("validation poisoned") = records;
+        let validation = PostWriteValidation {
+            results: vec![ValidationResult {
+                command_id: "cargo_check".into(),
+                command: "cargo check".into(),
+                status: ValidationOutcome::Failed,
+                failure: Some(ValidationCommandFailure::CommandFailed),
+                exit_status: Some(1),
+                elapsed_ms: 1,
+                test_ids: Vec::new(),
+                diagnostics_delta: 0,
+                output_redacted: false,
+                output_truncated: false,
+                attempts: 1,
+                retry_reasons: Vec::new(),
+                escalation: crate::command_intelligence::ValidationEscalation::Direct,
+                output_summary: "failed".into(),
+                recorded_at: std::time::SystemTime::now(),
+                task_id: Some(task.id.clone()),
+            }],
+        };
+        let log = Arc::new(Mutex::new(vec![ToolExecutionLogEntry {
+            tool_call_id: "write-1".into(),
+            tool_name: "write_file".into(),
+            side_effect_class: Some(SideEffectClass::Write),
+            arguments: json!({"path": "/work/src/lib.rs"}),
+            success: true,
+            summary: "written".into(),
+        }]));
+        let (sink, client, _rx) = plumbing();
+        let (_cancel_tx, cancel) = watch::channel(false);
+        runtime
+            .run_bounded_repair(
+                &prompt("repair"),
+                &task,
+                log,
+                validation,
+                sink,
+                client,
+                cancel,
+                None,
+                "s-1",
+                "test",
+            )
+            .await
+            .expect("repair controller returns terminal state");
+
+        assert_eq!(model.call_count(), 1, "stale second snapshot must stop before a model call");
+        assert_eq!(
+            *runtime.last_repair_stop.lock().expect("repair stop poisoned"),
+            Some(RepairStopReason::StaleState)
+        );
+        assert!(runtime.event_snapshot().iter().any(|event| matches!(
+            event,
+            OrchestratorEvent::RepairStarted { attempt_number: 1, .. }
+        )));
+        assert!(runtime.event_snapshot().iter().any(|event| matches!(
+            event,
+            OrchestratorEvent::RepairStopped { reason } if reason == "stale_state"
+        )));
     }
 
     #[tokio::test]
@@ -1507,6 +2608,58 @@ mod tests {
     }
 
     // ── Strategic turn path ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn default_strategic_recovery_path_injects_bounded_capability_guidance_and_context() {
+        let model = Arc::new(FakeModel::new(vec![ModelResponse::new().text("done").completed()]));
+        let runtime = OrchestratorRuntime::new(OrchestratorConfig::default(), model.clone());
+        let (sink, client, _rx) = plumbing();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let fresh = crate::context_planner::ContextFreshness::fresh("rev-1");
+        let input = StrategicInput {
+            context: Some(crate::context_planner::ContextPlanningInput {
+                identity: crate::context_planner::ContextPlanIdentity {
+                    session_id: "s-1".into(),
+                    policy_revision: "policy-1".into(),
+                    workspace_revision: "workspace-1".into(),
+                    buffer_revision: "buffer-1".into(),
+                    diagnostics_revision: "diagnostics-1".into(),
+                    graph_revision: "graph-1".into(),
+                    checkout_revision: "checkout-1".into(),
+                },
+                candidates: vec![crate::context_planner::ContextCandidate::new(
+                    "diagnostic-1",
+                    crate::context_planner::ContextSource::Diagnostics,
+                    crate::context_planner::ContextTrustClass::RepositoryContent,
+                    fresh,
+                    "type mismatch",
+                )],
+            }),
+            ..StrategicInput::default()
+        };
+        let outcome = runtime
+            .run_turn_strategic_recoverable(
+                prompt("inspect the active file"),
+                sink,
+                client,
+                cancel_rx,
+                StrategicRecoveryContext::new(input, "session facts", "provider"),
+            )
+            .await
+            .expect("turn succeeds");
+        assert!(matches!(outcome, StrategicTurnOutcome::Completed(_)));
+        let request = &model.requests()[0];
+        assert!(request.transcript[0].text_content().contains("Turn guidance:"));
+        assert!(request.transcript.iter().any(|message| {
+            message.metadata.get("context_source").map(String::as_str) == Some("diagnostics")
+        }));
+        assert!(
+            runtime
+                .event_snapshot()
+                .iter()
+                .any(|event| matches!(event, OrchestratorEvent::StrategySelected { .. }))
+        );
+    }
 
     #[tokio::test]
     async fn strategic_turn_selects_strategy_and_emits_decision_event() {
@@ -2015,10 +3168,7 @@ mod tests {
         assert_eq!(id, interruption.checkpoint_id.unwrap());
         assert_eq!(checkpoint.provider, "test-provider");
         let resume = checkpoint.resume.expect("resume state captured");
-        assert!(
-            resume.transcript.iter().any(|message| message.role == ModelRole::User),
-            "transcript tail carries the user turn"
-        );
+        assert!(resume.transcript.is_empty(), "durable checkpoint omits transcript content");
         assert!(runtime.event_snapshot().iter().any(|event| {
             matches!(
                 event,
@@ -2107,7 +3257,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn resumed_turn_never_replays_identical_write_calls() {
+    async fn manual_resume_preserves_ambiguous_write_and_never_replays_it() {
         let write = || ToolIntent::new("tc-1", "write_file", json!({ "path": "/tmp/x" }));
         let tool = Arc::new(FakeTool::new(
             ToolDefinition::new("write_file", "writes a file")
@@ -2156,38 +3306,36 @@ mod tests {
         );
         assert_eq!(tool.call_count(), 1, "the first slice executed the write once");
 
+        // Simulate a process stop after an approved write began but before
+        // completion reached the checkpoint. The marker must survive resume.
+        let store = runtime.checkpoint_store();
+        let (_, mut checkpoint) = store.load_latest("s-1").expect("loads").expect("pending");
+        let resume = checkpoint.resume.as_mut().expect("resume state");
+        resume.in_flight = Some(crate::checkpoint::InFlightOperation {
+            tool_call_id: "tc-ambiguous".into(),
+            tool_name: "write_file".into(),
+            arguments_fingerprint: crate::checkpoint::tool_call_fingerprint(
+                "write_file",
+                &json!({ "path": "/tmp/x" }),
+            )
+            .expect("fingerprint"),
+            started_at_millis: current_unix_millis(),
+        });
+        store.save("s-1", &checkpoint).expect("persists ambiguous marker");
+
         let (sink, client, _rx) = plumbing();
         let (_cancel_tx, cancel_rx) = watch::channel(false);
-        let outcome = tokio::join!(
-            runtime.resume_turn(
-                prompt("hello"),
-                sink,
-                client,
-                cancel_rx,
-                String::new(),
-                "test-provider",
-            ),
-            async {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-                tokio::time::advance(Duration::from_millis(50)).await;
-            },
-        )
-        .0;
+        let error = runtime
+            .resume_turn(prompt("hello"), sink, client, cancel_rx, String::new(), "test-provider")
+            .await
+            .expect_err("ambiguous write blocks manual resume");
         assert!(
-            matches!(outcome, Ok(TurnOutcome::Completed(_))),
-            "resumed turn completes, got {outcome:?}"
+            matches!(error, OrchestratorError::PolicyDenied(ref reason) if reason.contains("explicitly abandon")),
+            "{error}"
         );
-        assert_eq!(
-            tool.call_count(),
-            1,
-            "identical write call reused from the checkpoint, never replayed"
-        );
-        assert!(runtime.event_snapshot().iter().any(|event| {
-            matches!(
-                event,
-                OrchestratorEvent::ToolResultReused { tool_name, .. } if tool_name == "write_file"
-            )
-        }));
+        assert_eq!(tool.call_count(), 1, "resume must not replay ambiguous write");
+        let (_, retained) = store.load_latest("s-1").expect("loads").expect("still pending");
+        assert!(retained.resume.expect("resume state").in_flight.is_some());
     }
 
     #[tokio::test(start_paused = true)]

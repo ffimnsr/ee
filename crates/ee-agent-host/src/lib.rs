@@ -25,6 +25,7 @@ pub mod process;
 pub mod redact;
 pub mod reducer;
 pub mod session;
+pub mod turn_evidence;
 pub mod web_context;
 
 #[cfg(feature = "test-utils")]
@@ -52,6 +53,12 @@ pub use reducer::{
     MessageKind, ReducedMessage, SessionState, ToolCallState, UsageInfo, apply_update,
 };
 pub use session::AgentThread;
+pub use turn_evidence::{
+    EvidenceCheck, EvidenceRecord, EvidenceRevision, HostValidationRecord, MAX_EVIDENCE_FILES,
+    MAX_TURN_OBSERVATIONS, PromptTerminalOutcome, SafeFollowUp, TurnBlocker, TurnEvidence,
+    TurnEvidenceError, TurnEvidenceSummary, TurnKey, TurnObservation, TurnTerminalStatus,
+    WriteEvidenceOutcome, WriteTransactionStage,
+};
 pub use web_context::{
     AgentWebContextConfig, BrowserRunRetryPolicy, ReqwestWebTransport, WebContextConfigError,
     WebContextError, WebContextErrorCode, WebContextLimits, WebContextService, WebFetchRequest,

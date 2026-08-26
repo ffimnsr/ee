@@ -64,9 +64,9 @@ impl RecoverableInterruption {
     ) -> Self {
         let (completed_tool_calls, resumed_count, safe_resume) = match checkpoint {
             Some((_id, checkpoint)) => checkpoint.resume.as_ref().map_or((0, 0, false), |resume| {
-                let safe = fault.is_safe_to_resume()
-                    && resume.in_flight.is_none()
-                    && !resume.transcript.is_empty();
+                // Durable checkpoints deliberately omit transcript content.
+                // A fresh prompt can still continue a non-ambiguous turn.
+                let safe = fault.is_safe_to_resume() && resume.in_flight.is_none();
                 (resume.completed_tools.len() as u64, resume.resumed_count, safe)
             }),
             None => (0, 0, false),
@@ -210,6 +210,11 @@ mod tests {
                 tool_call_id: format!("tc-{index}"),
                 tool_name: "read_file".into(),
                 arguments: serde_json::json!({ "path": "/work/a.txt" }),
+                arguments_fingerprint: crate::checkpoint::tool_call_fingerprint(
+                    "read_file",
+                    &serde_json::json!({ "path": "/work/a.txt" }),
+                )
+                .expect("fingerprint"),
                 success: true,
                 summary: "a.txt: content".into(),
                 side_effect_class: crate::tools::SideEffectClass::Read,
@@ -222,6 +227,7 @@ mod tests {
             in_flight: in_flight.then(|| InFlightOperation {
                 tool_call_id: "tc-99".into(),
                 tool_name: "write_file".into(),
+                arguments_fingerprint: "f".repeat(64),
                 started_at_millis: 1,
             }),
             resumed_count: 1,

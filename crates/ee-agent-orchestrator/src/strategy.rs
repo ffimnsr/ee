@@ -26,13 +26,16 @@ use crate::final_response::{
 };
 use crate::loop_engine::{LoopEngine, LoopMode, LoopOptions};
 use crate::model::{ModelAdapter, ModelRequest, Transcript};
-use crate::policy::PolicyEngine;
+use crate::policy::{PolicyContext, PolicyEngine};
 use crate::reflection::{
     ReflectionOutcome, ReviewFinding, build_review_context, build_review_request,
     create_finding_tasks, findings_from_response, mark_finding_tasks,
 };
 use crate::tasks::{TaskGraph, TaskId, TaskNode, TaskStatus};
-use crate::tools::{ToolDefinition, ToolExecutionLogEntry, ToolExecutor, ToolIntent, ToolRegistry};
+use crate::tools::{
+    SideEffectClass, ToolDefinition, ToolExecutionLogEntry, ToolExecutor, ToolIntent, ToolRegistry,
+};
+use crate::validation::WorkspaceValidationConfig;
 
 /// Which deterministic turn strategy to run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -141,6 +144,17 @@ pub struct StrategyContext {
     pub tool_definitions: Vec<ToolDefinition>,
 }
 
+/// Bounded policy-aware guidance for the next production loop. This is advisory
+/// only: tool execution still passes the normal policy and host-approval gates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CapabilityAwareGuidance {
+    pub decision: StrategyDecision,
+    pub available_capabilities: Vec<String>,
+    pub tool_names: Vec<String>,
+    pub text: String,
+}
+
 /// Inputs a strategic turn needs beyond the ACP prompt itself.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -163,6 +177,14 @@ pub struct StrategicInput {
     /// fresh and complete.
     #[serde(default)]
     pub write_transaction: Option<crate::write_transaction::WriteTransaction>,
+    /// Trusted provider configuration for declared workspace validation tasks.
+    /// Repository instructions cannot populate this field.
+    #[serde(default)]
+    pub validation_workspace: WorkspaceValidationConfig,
+    /// Bounded changed-symbol identifiers supplied by a trusted host or code graph.
+    /// Empty means no such host fact was available for this turn.
+    #[serde(default)]
+    pub changed_symbols: Vec<String>,
 }
 
 /// Pure, deterministic strategy selector.
@@ -254,6 +276,64 @@ impl StrategySelector {
         (contains_any(&text, &INSPECTION_SIGNALS) || mentions_tool).then(|| {
             StrategyDecision::new(TurnStrategy::ToolLoop, StrategyReason::FileInspectionRequested)
         })
+    }
+}
+
+/// Chooses an executable conservative strategy and emits bounded next-tool
+/// guidance from currently registered, policy-allowed capabilities. Guidance
+/// never grants a capability and names at most 16 advertised tools.
+#[must_use]
+pub fn capability_aware_guidance(
+    context: &StrategyContext,
+    policy: &PolicyEngine,
+) -> CapabilityAwareGuidance {
+    let definitions = context.tool_definitions.as_slice();
+    let allowed = definitions
+        .iter()
+        .filter(|definition| policy.check(definition, PolicyContext::default()).allow)
+        .collect::<Vec<_>>();
+    let mut available_capabilities = Vec::new();
+    for (capability, class) in [
+        ("fs:read", SideEffectClass::Read),
+        ("fs:write", SideEffectClass::Write),
+        ("terminal:run", SideEffectClass::Execute),
+        ("subagent:spawn", SideEffectClass::Delegate),
+    ] {
+        if allowed.iter().any(|definition| definition.side_effect_class == class) {
+            available_capabilities.push(capability.to_string());
+        }
+    }
+    let tool_names =
+        allowed.iter().map(|definition| definition.name.clone()).take(16).collect::<Vec<_>>();
+    let requested = StrategySelector.select(context);
+    let decision = downgrade_unavailable_strategy(requested, &available_capabilities);
+    let tools = if tool_names.is_empty() { "none".to_string() } else { tool_names.join(", ") };
+    let capabilities = if available_capabilities.is_empty() {
+        "none".to_string()
+    } else {
+        available_capabilities.join(", ")
+    };
+    let text = format!(
+        "Turn guidance: strategy={:?}; reason={}; policy-allowed capabilities=[{capabilities}]; advertised tools=[{tools}]. Use only advertised tools when needed. Policy and host approval remain mandatory; do not claim verification without host evidence.",
+        decision.strategy,
+        decision.reason.code(),
+    );
+    CapabilityAwareGuidance { decision, available_capabilities, tool_names, text }
+}
+
+fn downgrade_unavailable_strategy(
+    requested: StrategyDecision,
+    available_capabilities: &[String],
+) -> StrategyDecision {
+    let has = |capability: &str| available_capabilities.iter().any(|item| item == capability);
+    let supported = requested.required_capabilities.iter().all(|capability| has(capability));
+    if supported {
+        return requested;
+    }
+    if has("fs:read") {
+        StrategyDecision::new(TurnStrategy::ToolLoop, StrategyReason::FileInspectionRequested)
+    } else {
+        StrategyDecision::new(TurnStrategy::SimpleAnswer, StrategyReason::NoToolsRequested)
     }
 }
 
@@ -905,6 +985,29 @@ mod tests {
         ctx.tool_definitions = vec![ToolDefinition::new("read_file", "reads a file")];
         let decision = StrategySelector.select(&ctx);
         assert_eq!(decision.strategy, TurnStrategy::ToolLoop);
+    }
+
+    #[test]
+    fn capability_guidance_downgrades_unavailable_strategies_without_granting_policy() {
+        let mut context = selector_context("implement login across multiple files");
+        let guidance = capability_aware_guidance(&context, &PolicyEngine::default());
+        assert_eq!(guidance.decision.strategy, TurnStrategy::SimpleAnswer);
+        assert!(guidance.tool_names.is_empty());
+        assert!(guidance.text.contains("advertised tools=[none]"));
+
+        context.tool_definitions = vec![
+            ToolDefinition::new("read_file", "reads").side_effect_class(SideEffectClass::Read),
+            ToolDefinition::new("write_file", "writes").side_effect_class(SideEffectClass::Write),
+        ];
+        let guidance = capability_aware_guidance(&context, &PolicyEngine::default());
+        assert_eq!(guidance.decision.strategy, TurnStrategy::ToolLoop);
+        assert_eq!(guidance.available_capabilities, vec!["fs:read"]);
+        assert_eq!(guidance.tool_names, vec!["read_file"]);
+
+        let policy = PolicyEngine::new(ToolPolicy { allow_write: true, ..ToolPolicy::default() });
+        let guidance = capability_aware_guidance(&context, &policy);
+        assert_eq!(guidance.decision.strategy, TurnStrategy::PlanThenExecute);
+        assert_eq!(guidance.available_capabilities, vec!["fs:read", "fs:write"]);
     }
 
     #[test]

@@ -7,6 +7,10 @@ license = "Apache-2.0"
 authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
 description = "OpenRouter ACP agent provider built on the ee-acp-agent-server framework."
 
+[features]
+# Exposes hermetic scripted completions for cross-crate integration tests.
+test-utils = []
+
 [dependencies]
 clap.workspace = true
 dirs.workspace = true

@@ -24,6 +24,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, Stdio};
+#[cfg(test)]
+use std::sync::LazyLock;
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -31,7 +33,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use ee_agent_host::{
     AgentError, ClientRequest, ClientRequestHandler, ClientRequestResponse, ClientRequestResult,
-    HandlerCapabilities,
+    EvidenceCheck, EvidenceRevision, HandlerCapabilities, HostValidationRecord, TurnObservation,
+    WriteEvidenceOutcome, WriteTransactionStage,
 };
 use ee_agent_protocol::{
     CreateElicitationRequest, CreateTerminalRequest, CreateTerminalResponse, ElicitationScope,
@@ -51,6 +54,17 @@ use tokio_util::sync::CancellationToken;
 use super::*;
 
 use super::agents_mcp::ProxyRoute;
+
+#[cfg(test)]
+type WriteVerificationTestHook = Box<dyn FnOnce(&mut App) + Send>;
+
+#[cfg(test)]
+static PRE_WRITE_VERIFICATION_TEST_HOOK: LazyLock<Mutex<Option<WriteVerificationTestHook>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+#[cfg(test)]
+static POST_WRITE_TEST_HOOK: LazyLock<Mutex<Option<WriteVerificationTestHook>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 use crate::policy::{
     CommandInvocation, CommandRule, DecisionReason, MAX_WRITE_FILE_BYTES, MAX_WRITE_FILES,
@@ -195,6 +209,15 @@ fn terminal_child_env(request: &CreateTerminalRequest) -> Vec<(String, String)> 
 fn terminal_command_line(request: &CreateTerminalRequest) -> String {
     let mut command = request.command.clone();
     for arg in &request.args {
+        command.push(' ');
+        command.push_str(&crate::terminal::shell_quote(arg));
+    }
+    command
+}
+
+fn terminal_command_line_for_track(track: &AgentTerminalTrack) -> String {
+    let mut command = track.command.clone();
+    for arg in &track.args {
         command.push(' ');
         command.push_str(&crate::terminal::shell_quote(arg));
     }
@@ -384,6 +407,28 @@ pub(crate) enum OwnedTerminalStop {
     AlreadyExited,
 }
 
+/// Bounded terminal completion sent from worker bridge back to pane. Never
+/// contains command output; evidence records retain only structured outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalCompletion {
+    pub(crate) session_id: String,
+    pub(crate) terminal_id: String,
+    pub(crate) command: String,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) elapsed_ms: u64,
+    pub(crate) output_truncated: bool,
+    validation: Option<TerminalValidationRun>,
+}
+
+/// Host-owned association between an approved terminal and one current
+/// verification revision. It never contains terminal output or model claims.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TerminalValidationRun {
+    revision: EvidenceRevision,
+    selector: String,
+    diagnostics_before: Option<u32>,
+}
+
 /// One tracked agent terminal: child process, bounded output, exit status.
 #[derive(Debug)]
 pub(crate) struct AgentTerminalTrack {
@@ -403,6 +448,7 @@ pub(crate) struct AgentTerminalTrack {
     pub(crate) exit_status: Option<TerminalExitStatus>,
     started_at: Instant,
     pub(crate) released: bool,
+    validation: Option<TerminalValidationRun>,
 }
 
 #[derive(Debug, Default)]
@@ -487,6 +533,7 @@ impl AgentTerminals {
             exit_status: None,
             started_at: Instant::now(),
             released: false,
+            validation: None,
         };
         let mut registry = self.inner.lock().expect("terminals poisoned");
         if registry.active.contains_key(&terminal_id)
@@ -556,6 +603,56 @@ impl AgentTerminals {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    /// Returns bounded post-exit metadata for pane-owned evidence collection.
+    fn completion(
+        &self,
+        request: &WaitForTerminalExitRequest,
+    ) -> Result<TerminalCompletion, AgentError> {
+        let mut registry = self.inner.lock().expect("terminals poisoned");
+        let Some(track) = registry.active.get_mut(request.terminal_id.0.as_ref()) else {
+            return Err(AgentError::invalid_params("unknown terminal"));
+        };
+        self.validate_owner(track, &request.session_id)?;
+        self.refresh_exit(track);
+        let snapshot = Self::output_snapshot_for_track(track);
+        let exit_code = snapshot.exit_status.and_then(|status| {
+            serde_json::to_value(status)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("exitCode")
+                        .or_else(|| value.get("exit_code"))
+                        .and_then(serde_json::Value::as_u64)
+                })
+                .and_then(|code| i32::try_from(code).ok())
+        });
+        Ok(TerminalCompletion {
+            session_id: track.owner.session_id.clone(),
+            terminal_id: track.terminal_id.clone(),
+            command: terminal_command_line_for_track(track),
+            exit_code,
+            elapsed_ms: snapshot.elapsed_ms,
+            output_truncated: snapshot.truncated,
+            validation: track.validation.clone(),
+        })
+    }
+
+    /// Associates an approved terminal with current write verification.
+    fn register_validation_run(
+        &self,
+        terminal_id: &TerminalId,
+        session_id: &SessionId,
+        validation: TerminalValidationRun,
+    ) -> Result<(), AgentError> {
+        let mut registry = self.inner.lock().expect("terminals poisoned");
+        let Some(track) = registry.active.get_mut(terminal_id.0.as_ref()) else {
+            return Err(AgentError::invalid_params("unknown terminal"));
+        };
+        self.validate_owner(track, session_id)?;
+        track.validation = Some(validation);
+        Ok(())
     }
 
     /// Kills the terminal process and reaps it.
@@ -841,6 +938,10 @@ pub(crate) enum BridgeUiMessage {
     /// connection-scoped and must not survive a socket lifetime.
     ProxyConnectionClosed {
         scope: String,
+    },
+    /// Terminal lifecycle completion. Internal pane signal, not ACP or MCP.
+    TerminalCompleted {
+        completion: TerminalCompletion,
     },
 }
 
@@ -1323,11 +1424,13 @@ impl ClientRequestHandler for BridgeUiHandler {
                         ))
                     })
                 }
-                ClientRequest::WaitForTerminalExit(request) => self
-                    .terminals
-                    .wait_for_exit(&request)
-                    .await
-                    .map(ClientRequestResponse::WaitForTerminalExit),
+                ClientRequest::WaitForTerminalExit(request) => {
+                    let response = self.terminals.wait_for_exit(&request).await?;
+                    if let Ok(completion) = self.terminals.completion(&request) {
+                        let _ = self.tx.send(BridgeUiMessage::TerminalCompleted { completion });
+                    }
+                    Ok(ClientRequestResponse::WaitForTerminalExit(response))
+                }
                 ClientRequest::KillTerminal(request) => {
                     self.terminals.kill(&request).map(ClientRequestResponse::KillTerminal)
                 }
@@ -2105,6 +2208,9 @@ impl App {
                 }
                 BridgeUiMessage::ProxyConnectionClosed { scope } => {
                     self.clear_proxy_network_scope(&scope);
+                }
+                BridgeUiMessage::TerminalCompleted { completion } => {
+                    self.record_terminal_validation(completion);
                 }
             }
         }
@@ -3204,6 +3310,7 @@ impl App {
                         match self.persist_write_rule(&prompt) {
                             Ok(rule_id) => self.dispatch_write_prompt(prompt, Some(rule_id)),
                             Err(error) => {
+                                self.record_denied_write(&prompt.session_id, &prompt.kind);
                                 let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
                                     reason: format!(
                                         "persistent write approval unavailable: {error}"
@@ -3223,6 +3330,7 @@ impl App {
                         Err(error) => {
                             // Persistence failure: current permission error,
                             // nothing is dispatched, budget unchanged.
+                            self.record_denied_write(&prompt.session_id, &prompt.kind);
                             let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
                                 reason: format!("persistent MCP approval unavailable: {error}"),
                             }));
@@ -3239,6 +3347,8 @@ impl App {
         }
         let allow = choice.allows();
         if !allow {
+            self.record_denied_write(&prompt.session_id, &prompt.kind);
+            self.record_denied_validation(&prompt.session_id, &prompt.kind);
             if let ApprovalKind::Network { current_host, call, .. } = &prompt.kind {
                 let action = match call {
                     WebApprovalCall::Search { .. } => "search",
@@ -3670,7 +3780,27 @@ impl App {
         rule_id: Option<String>,
         reply: oneshot::Sender<ClientRequestResult>,
     ) {
+        let validation = self.validation_run_for_terminal(session_id, request);
         let result = self.agents.terminals.spawn(request, agent_id);
+        match (&result, validation) {
+            (Ok(response), Some(validation)) => {
+                if let Err(error) = self.agents.terminals.register_validation_run(
+                    &response.terminal_id,
+                    &request.session_id,
+                    validation,
+                ) {
+                    tracing::warn!(
+                        session_id,
+                        ?error,
+                        "cannot record terminal validation lifecycle"
+                    );
+                }
+            }
+            (Err(_), Some(validation)) => {
+                self.record_unavailable_validation(session_id, request, validation);
+            }
+            _ => {}
+        }
         if result.is_ok()
             && let Some(rule_id) = rule_id
         {
@@ -3689,6 +3819,51 @@ impl App {
             return;
         };
         self.resolve_approval(prompt, choice);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_pre_write_verification_test_hook(
+        hook: impl FnOnce(&mut App) + Send + 'static,
+    ) {
+        *PRE_WRITE_VERIFICATION_TEST_HOOK
+            .lock()
+            .expect("pre-write verification test hook poisoned") = Some(Box::new(hook));
+    }
+
+    #[cfg(test)]
+    fn run_pre_write_verification_test_hook(&mut self) {
+        if let Some(hook) = PRE_WRITE_VERIFICATION_TEST_HOOK
+            .lock()
+            .expect("pre-write verification test hook poisoned")
+            .take()
+        {
+            hook(self);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_post_write_test_hook(hook: impl FnOnce(&mut App) + Send + 'static) {
+        *POST_WRITE_TEST_HOOK.lock().expect("post-write test hook poisoned") = Some(Box::new(hook));
+    }
+
+    #[cfg(test)]
+    fn run_post_write_test_hook(&mut self) {
+        if let Some(hook) =
+            POST_WRITE_TEST_HOOK.lock().expect("post-write test hook poisoned").take()
+        {
+            hook(self);
+        }
+    }
+
+    /// Records the current revision after a test-controlled editor mutation.
+    ///
+    /// This captures the real buffer state at the same reduction boundary as a
+    /// user edit; tests never construct `TurnObservation` values themselves.
+    #[cfg(test)]
+    fn observe_post_write_test_revision(&self, session_id: &str, paths: &[PathBuf]) {
+        if let Ok(revision) = self.evidence_revision_for_paths(paths) {
+            self.observe_active_turn(session_id, TurnObservation::Revision { revision });
+        }
     }
 
     /// Performs an approved buffer write: open/reuse buffer, diff, edit,
@@ -3711,6 +3886,59 @@ impl App {
             let _ = reply.send(Err(error));
             return;
         }
+
+        let paths = vec![path.to_path_buf()];
+        let pre_write_revision = self
+            .evidence_revision_for_paths(&paths)
+            .unwrap_or_else(|_| EvidenceRevision::new("unavailable"));
+        self.observe_active_turn(
+            session_id,
+            TurnObservation::Revision { revision: pre_write_revision.clone() },
+        );
+        let blocks_dirty_buffer = self.has_dirty_buffer(&paths)
+            && matches!(
+                prepared.expectation,
+                WriteExpectation::Blind | WriteExpectation::MustNotExist
+            );
+        self.observe_transaction_stage(
+            session_id,
+            pre_write_revision.clone(),
+            WriteTransactionStage::Read,
+            if blocks_dirty_buffer { EvidenceCheck::Failed } else { EvidenceCheck::Passed },
+        );
+        if blocks_dirty_buffer {
+            self.observe_active_turn(
+                session_id,
+                TurnObservation::Write {
+                    revision: pre_write_revision,
+                    outcome: WriteEvidenceOutcome::Conflicted,
+                },
+            );
+            let _ = reply.send(Err(AgentError::invalid_params(
+                "dirty editor buffer requires explicit user handoff before blind agent write",
+            )));
+            return;
+        }
+        self.observe_transaction_stage(
+            session_id,
+            pre_write_revision.clone(),
+            WriteTransactionStage::Preview,
+            EvidenceCheck::Passed,
+        );
+        self.observe_active_turn(
+            session_id,
+            TurnObservation::Write {
+                revision: pre_write_revision.clone(),
+                outcome: WriteEvidenceOutcome::Approved,
+            },
+        );
+        self.observe_transaction_stage(
+            session_id,
+            pre_write_revision,
+            WriteTransactionStage::Approval,
+            EvidenceCheck::Passed,
+        );
+        let diagnostics_before = self.refresh_diagnostic_error_count(&paths).ok();
         match self.write_through_buffer(path, content) {
             Ok(outcome) => {
                 if let Some(rule_id) = rule_id {
@@ -3720,6 +3948,7 @@ impl App {
                         rule_id,
                     );
                 }
+                let changed = outcome.old_content != content;
                 self.agents.action_log.push(ActionLogEntry::Write {
                     path: path.to_path_buf(),
                     old_fingerprint: fingerprint(&outcome.old_content),
@@ -3727,10 +3956,6 @@ impl App {
                     tool_call_id: prepared.tool_call_id,
                     session_id: session_id.to_string(),
                 });
-                if let Some(thread) = self.session_thread_by_id(session_id) {
-                    self.agents.threads[thread]
-                        .push_system(format!("agent wrote: {}", path.display()));
-                }
                 let response = match prepared.reply_kind {
                     WriteReplyKind::FsWrite => {
                         ClientRequestResponse::WriteTextFile(WriteTextFileResponse::new())
@@ -3740,15 +3965,83 @@ impl App {
                             changed_file: path.display().to_string(),
                             byte_count: outcome.byte_count,
                             edit_count: prepared.proxy_edit_count,
-                            new_revision: outcome.new_revision,
+                            new_revision: outcome.new_revision.clone(),
                             saved: outcome.saved,
                             dirty: outcome.dirty,
                         }))
                     }
                 };
+                // A successful response confirms only this completed write.
+                // Host-owned diagnostics and validation evidence continue below.
                 let _ = reply.send(Ok(response));
+                let post_write_revision = self
+                    .evidence_revision_for_paths(&paths)
+                    .unwrap_or_else(|_| EvidenceRevision::new(&outcome.new_revision));
+                self.observe_active_turn(
+                    session_id,
+                    TurnObservation::Revision { revision: post_write_revision.clone() },
+                );
+                self.observe_active_turn(
+                    session_id,
+                    TurnObservation::Write {
+                        revision: post_write_revision.clone(),
+                        outcome: if changed {
+                            WriteEvidenceOutcome::Applied
+                        } else {
+                            WriteEvidenceOutcome::NoOp
+                        },
+                    },
+                );
+                self.observe_transaction_stage(
+                    session_id,
+                    post_write_revision,
+                    WriteTransactionStage::Apply,
+                    EvidenceCheck::Passed,
+                );
+                if changed {
+                    #[cfg(test)]
+                    self.run_pre_write_verification_test_hook();
+                    self.collect_post_write_verification(session_id, &paths, diagnostics_before);
+                    #[cfg(test)]
+                    {
+                        self.run_post_write_test_hook();
+                        self.observe_post_write_test_revision(session_id, &paths);
+                    }
+                }
+                if let Some(thread) = self.session_thread_by_id(session_id) {
+                    self.agents.threads[thread]
+                        .push_system(format!("agent wrote: {}", path.display()));
+                }
             }
             Err(error) => {
+                let revision = self
+                    .evidence_revision_for_paths(&paths)
+                    .unwrap_or_else(|_| EvidenceRevision::new("unavailable"));
+                let outcome = if error.to_string().contains("conflict") {
+                    WriteEvidenceOutcome::Conflicted
+                } else {
+                    WriteEvidenceOutcome::Failed
+                };
+                self.observe_active_turn(
+                    session_id,
+                    TurnObservation::Revision { revision: revision.clone() },
+                );
+                self.observe_active_turn(
+                    session_id,
+                    TurnObservation::Write { revision: revision.clone(), outcome },
+                );
+                self.observe_transaction_stage(
+                    session_id,
+                    revision.clone(),
+                    WriteTransactionStage::Apply,
+                    EvidenceCheck::Failed,
+                );
+                self.observe_transaction_stage(
+                    session_id,
+                    revision,
+                    WriteTransactionStage::RollbackSafety,
+                    EvidenceCheck::Unavailable,
+                );
                 let _ = reply.send(Err(error));
             }
         }
@@ -3774,11 +4067,67 @@ impl App {
                 return;
             }
         }
+        let paths = writes.iter().map(|prepared| prepared.path.clone()).collect::<Vec<_>>();
+        let blocks_dirty_buffer = self.has_dirty_buffer(&paths)
+            && writes.iter().any(|prepared| {
+                matches!(
+                    prepared.expectation,
+                    WriteExpectation::Blind | WriteExpectation::MustNotExist
+                )
+            });
+        let pre_write_revision = self
+            .evidence_revision_for_paths(&paths)
+            .unwrap_or_else(|_| EvidenceRevision::new("unavailable"));
+        self.observe_active_turn(
+            session_id,
+            TurnObservation::Revision { revision: pre_write_revision.clone() },
+        );
+        self.observe_transaction_stage(
+            session_id,
+            pre_write_revision.clone(),
+            WriteTransactionStage::Read,
+            if blocks_dirty_buffer { EvidenceCheck::Failed } else { EvidenceCheck::Passed },
+        );
+        if blocks_dirty_buffer {
+            self.observe_active_turn(
+                session_id,
+                TurnObservation::Write {
+                    revision: pre_write_revision,
+                    outcome: WriteEvidenceOutcome::Conflicted,
+                },
+            );
+            let _ = reply.send(Err(AgentError::invalid_params(
+                "dirty editor buffer requires explicit user handoff before agent write",
+            )));
+            return;
+        }
+        self.observe_transaction_stage(
+            session_id,
+            pre_write_revision.clone(),
+            WriteTransactionStage::Preview,
+            EvidenceCheck::Passed,
+        );
+        self.observe_active_turn(
+            session_id,
+            TurnObservation::Write {
+                revision: pre_write_revision.clone(),
+                outcome: WriteEvidenceOutcome::Approved,
+            },
+        );
+        self.observe_transaction_stage(
+            session_id,
+            pre_write_revision,
+            WriteTransactionStage::Approval,
+            EvidenceCheck::Passed,
+        );
+        let diagnostics_before = self.refresh_diagnostic_error_count(&paths).ok();
+        let mut changed = false;
         let mut files = Vec::new();
         for prepared in writes {
             let path = prepared.path.clone();
             match self.write_through_buffer(path.as_path(), prepared.content.as_str()) {
                 Ok(outcome) => {
+                    changed |= outcome.old_content != prepared.content;
                     self.agents.action_log.push(ActionLogEntry::Write {
                         path: path.clone(),
                         old_fingerprint: fingerprint(&outcome.old_content),
@@ -3796,9 +4145,73 @@ impl App {
                     });
                 }
                 Err(error) => {
+                    let revision = self
+                        .evidence_revision_for_paths(&paths)
+                        .unwrap_or_else(|_| EvidenceRevision::new("unavailable"));
+                    let outcome = if error.to_string().contains("conflict") {
+                        WriteEvidenceOutcome::Conflicted
+                    } else {
+                        WriteEvidenceOutcome::Failed
+                    };
+                    self.observe_active_turn(
+                        session_id,
+                        TurnObservation::Revision { revision: revision.clone() },
+                    );
+                    self.observe_active_turn(
+                        session_id,
+                        TurnObservation::Write { revision: revision.clone(), outcome },
+                    );
+                    self.observe_transaction_stage(
+                        session_id,
+                        revision.clone(),
+                        WriteTransactionStage::Apply,
+                        EvidenceCheck::Failed,
+                    );
+                    if !files.is_empty() {
+                        self.observe_transaction_stage(
+                            session_id,
+                            revision,
+                            WriteTransactionStage::RollbackSafety,
+                            EvidenceCheck::Unavailable,
+                        );
+                    }
                     let _ = reply.send(Err(error));
                     return;
                 }
+            }
+        }
+        let post_write_revision = self
+            .evidence_revision_for_paths(&paths)
+            .unwrap_or_else(|_| EvidenceRevision::new("unavailable"));
+        self.observe_active_turn(
+            session_id,
+            TurnObservation::Revision { revision: post_write_revision.clone() },
+        );
+        self.observe_active_turn(
+            session_id,
+            TurnObservation::Write {
+                revision: post_write_revision.clone(),
+                outcome: if changed {
+                    WriteEvidenceOutcome::Applied
+                } else {
+                    WriteEvidenceOutcome::NoOp
+                },
+            },
+        );
+        self.observe_transaction_stage(
+            session_id,
+            post_write_revision,
+            WriteTransactionStage::Apply,
+            EvidenceCheck::Passed,
+        );
+        if changed {
+            #[cfg(test)]
+            self.run_pre_write_verification_test_hook();
+            self.collect_post_write_verification(session_id, &paths, diagnostics_before);
+            #[cfg(test)]
+            {
+                self.run_post_write_test_hook();
+                self.observe_post_write_test_revision(session_id, &paths);
             }
         }
         if let Some(rule_id) = rule_id {
@@ -4027,6 +4440,400 @@ impl App {
 
     fn session_thread_by_id(&self, session_id: &str) -> Option<usize> {
         self.agents.thread_index(session_id)
+    }
+
+    /// Appends one host-owned observation only while this exact ACP session
+    /// owns an active turn. Generic stdio MCP proxy calls use the synthetic
+    /// `proxy` session and deliberately cannot borrow a pane turn's evidence.
+    fn observe_active_turn(&self, session_id: &str, observation: TurnObservation) {
+        let Some(index) = self.session_thread_by_id(session_id) else {
+            return;
+        };
+        let thread = &self.agents.threads[index].host;
+        let Some(turn) = thread.active_turn_key() else {
+            return;
+        };
+        if let Err(error) = thread.observe_turn_evidence(turn.turn_id(), observation) {
+            tracing::warn!(
+                session_id,
+                turn_id = turn.turn_id(),
+                ?error,
+                "bridge evidence was not recorded"
+            );
+        }
+    }
+
+    fn validation_run_for_terminal(
+        &mut self,
+        session_id: &str,
+        request: &CreateTerminalRequest,
+    ) -> Option<TerminalValidationRun> {
+        let index = self.session_thread_by_id(session_id)?;
+        let (revision, scope) = {
+            let thread = &self.agents.threads[index];
+            (thread.verification_revision.clone()?, thread.verification_paths.clone())
+        };
+        Some(TerminalValidationRun {
+            revision,
+            selector: terminal_command_line(request),
+            diagnostics_before: self.refresh_diagnostic_error_count(&scope).ok(),
+        })
+    }
+
+    fn observe_transaction_stage(
+        &self,
+        session_id: &str,
+        revision: EvidenceRevision,
+        stage: WriteTransactionStage,
+        outcome: EvidenceCheck,
+    ) {
+        self.observe_active_turn(
+            session_id,
+            TurnObservation::WriteTransaction { revision, stage, outcome },
+        );
+    }
+
+    fn record_unavailable_validation(
+        &self,
+        session_id: &str,
+        request: &CreateTerminalRequest,
+        validation: TerminalValidationRun,
+    ) {
+        self.observe_active_turn(
+            session_id,
+            TurnObservation::ValidationRecord {
+                revision: validation.revision.clone(),
+                selected: true,
+                record: HostValidationRecord {
+                    run_id: format!("unavailable:{}", terminal_command_line(request)),
+                    command_id: terminal_command_line(request),
+                    command: terminal_command_line(request),
+                    tool: Some(String::from("terminal")),
+                    selector: Some(validation.selector),
+                    outcome: EvidenceCheck::Unavailable,
+                    exit_status: None,
+                    elapsed_ms: None,
+                    affected_tests: Vec::new(),
+                    diagnostics_delta: 0,
+                    output_truncated: false,
+                    skip_or_denial: Some(String::from("terminal_unavailable")),
+                },
+            },
+        );
+        self.observe_transaction_stage(
+            session_id,
+            validation.revision,
+            WriteTransactionStage::Validation,
+            EvidenceCheck::Unavailable,
+        );
+    }
+
+    fn record_denied_validation(&self, session_id: &str, kind: &ApprovalKind) {
+        let ApprovalKind::TerminalCreate { request } = kind else {
+            return;
+        };
+        let Some(index) = self.session_thread_by_id(session_id) else {
+            return;
+        };
+        let Some(revision) = self.agents.threads[index].verification_revision.clone() else {
+            return;
+        };
+        self.observe_active_turn(
+            session_id,
+            TurnObservation::ValidationRecord {
+                revision: revision.clone(),
+                selected: true,
+                record: HostValidationRecord {
+                    run_id: format!("denied:{}", terminal_command_line(request)),
+                    command_id: terminal_command_line(request),
+                    command: terminal_command_line(request),
+                    tool: Some(String::from("terminal")),
+                    selector: Some(String::from("approved_terminal")),
+                    outcome: EvidenceCheck::Denied,
+                    exit_status: None,
+                    elapsed_ms: None,
+                    affected_tests: Vec::new(),
+                    diagnostics_delta: 0,
+                    output_truncated: false,
+                    skip_or_denial: Some(String::from("approval_denied")),
+                },
+            },
+        );
+        self.observe_transaction_stage(
+            session_id,
+            revision,
+            WriteTransactionStage::Validation,
+            EvidenceCheck::Denied,
+        );
+    }
+
+    fn record_denied_write(&self, session_id: &str, kind: &ApprovalKind) {
+        let paths = match kind {
+            ApprovalKind::Write { path, .. } => vec![path.clone()],
+            ApprovalKind::WriteBatch { writes, .. } => {
+                writes.iter().map(|write| write.path.clone()).collect()
+            }
+            ApprovalKind::TerminalCreate { .. } | ApprovalKind::Network { .. } => return,
+        };
+        let revision = self
+            .evidence_revision_for_paths(&paths)
+            .unwrap_or_else(|_| EvidenceRevision::new("unavailable"));
+        self.observe_active_turn(
+            session_id,
+            TurnObservation::Write {
+                revision: revision.clone(),
+                outcome: WriteEvidenceOutcome::Denied,
+            },
+        );
+        self.observe_transaction_stage(
+            session_id,
+            revision,
+            WriteTransactionStage::Approval,
+            EvidenceCheck::Denied,
+        );
+    }
+
+    /// Hashes current buffer/disk revisions for exactly the write sequence.
+    /// Raw paths and buffer contents never enter the evidence store.
+    fn evidence_revision_for_paths(
+        &self,
+        paths: &[PathBuf],
+    ) -> Result<EvidenceRevision, AgentError> {
+        let mut members = Vec::with_capacity(paths.len());
+        for path in paths {
+            let revision =
+                self.current_text_revision(path)?.unwrap_or_else(|| String::from("missing"));
+            let dirty = self
+                .backend
+                .all_bufs()
+                .iter()
+                .find(|buffer| {
+                    buffer
+                        .path
+                        .as_deref()
+                        .is_some_and(|candidate| paths_equivalent(candidate, path))
+                })
+                .is_some_and(|buffer| !buffer.pristine);
+            members.push(format!("{}:{revision}:{dirty}", path.display()));
+        }
+        members.sort();
+        Ok(EvidenceRevision::new(format!("sha256:{}", sha256_hex(members.join("\n").as_bytes()))))
+    }
+
+    fn has_dirty_buffer(&self, paths: &[PathBuf]) -> bool {
+        self.backend.all_bufs().iter().any(|buffer| {
+            !buffer.pristine
+                && buffer.path.as_deref().is_some_and(|candidate| {
+                    paths.iter().any(|path| paths_equivalent(candidate, path))
+                })
+        })
+    }
+
+    fn refresh_diagnostic_error_count(&mut self, paths: &[PathBuf]) -> Result<u32, AgentError> {
+        // Drain pending editor/LSP events before reading diagnostics. If the
+        // host cannot produce a complete current snapshot, callers record an
+        // unavailable fact rather than treating cached diagnostics as passing.
+        let _ = self.backend.drain_events();
+        let value = self.proxy_get_diagnostics(None)?;
+        let diagnostics = serde_json::from_value::<ee_mcp::DiagnosticsResult>(value)
+            .map_err(|error| AgentError::HandlerError(error.to_string()))?;
+        if diagnostics.truncated {
+            return Err(AgentError::HandlerError(String::from(
+                "current diagnostics snapshot is truncated",
+            )));
+        }
+        let mut path_set = paths.to_vec();
+        path_set.sort();
+        path_set.dedup();
+        Ok(u32::try_from(
+            diagnostics
+                .diagnostics
+                .into_iter()
+                .filter(|entry| {
+                    entry.severity == "error"
+                        && path_set
+                            .iter()
+                            .any(|path| paths_equivalent(path, Path::new(&entry.path)))
+                })
+                .count(),
+        )
+        .unwrap_or(u32::MAX))
+    }
+
+    /// Collects current editor/Git facts after a successful buffer write. A
+    /// missing tool, dirty user buffer, conflict, truncated response, or
+    /// unavailable Git diff leaves the turn blocked/unverified instead of
+    /// treating model prose or ACP completion as verification.
+    fn collect_post_write_verification(
+        &mut self,
+        session_id: &str,
+        paths: &[PathBuf],
+        diagnostics_before: Option<u32>,
+    ) {
+        let Some(index) = self.session_thread_by_id(session_id) else {
+            return;
+        };
+        let scope = {
+            let thread = &mut self.agents.threads[index];
+            for path in paths {
+                if !thread.verification_paths.iter().any(|known| paths_equivalent(known, path)) {
+                    thread.verification_paths.push(path.clone());
+                }
+            }
+            thread.verification_paths.clone()
+        };
+        // Apply pending editor updates before snapshotting one revision for every
+        // verification fact collected below. Otherwise later host observations can
+        // correctly invalidate evidence that was already stale at collection time.
+        let _ = self.backend.drain_events();
+        let Ok(revision) = self.evidence_revision_for_paths(&scope) else {
+            return;
+        };
+        self.agents.threads[index].verification_revision = Some(revision.clone());
+        self.observe_active_turn(
+            session_id,
+            TurnObservation::Revision { revision: revision.clone() },
+        );
+
+        let changed_files = match self.proxy_changed_files_result() {
+            Ok(result) => result,
+            Err(_) => return,
+        };
+        let expected_present = scope.iter().all(|expected| {
+            changed_files
+                .files
+                .iter()
+                .any(|entry| paths_equivalent(expected, Path::new(&entry.path)))
+        });
+        let has_unsafe_buffer = changed_files.files.iter().any(|entry| {
+            scope.iter().any(|expected| paths_equivalent(expected, Path::new(&entry.path)))
+                && (entry.conflicted || entry.dirty || !entry.saved)
+        });
+        self.observe_active_turn(
+            session_id,
+            TurnObservation::ChangedFiles {
+                revision: revision.clone(),
+                files: changed_files.files.iter().map(|entry| entry.path.clone()).collect(),
+                truncated: changed_files.truncated || !expected_present || has_unsafe_buffer,
+            },
+        );
+
+        let diagnostics_outcome =
+            match (diagnostics_before, self.refresh_diagnostic_error_count(&scope)) {
+                (Some(before), Ok(after)) if after <= before => EvidenceCheck::Passed,
+                (Some(_), Ok(_)) => EvidenceCheck::Failed,
+                _ => EvidenceCheck::Unavailable,
+            };
+        self.observe_active_turn(
+            session_id,
+            TurnObservation::Diagnostics {
+                revision: revision.clone(),
+                outcome: diagnostics_outcome,
+            },
+        );
+        self.observe_transaction_stage(
+            session_id,
+            revision.clone(),
+            WriteTransactionStage::Diagnostics,
+            diagnostics_outcome,
+        );
+
+        let diff_outcome = self.proxy_git_diff().and_then(|value| {
+            serde_json::from_value::<ee_mcp::GitDiffResult>(value)
+                .map_err(|error| AgentError::HandlerError(error.to_string()))
+        });
+        let review_passed = diff_outcome.is_ok_and(|diff| {
+            !diff.truncated
+                && !diff.diff.is_empty()
+                && !has_unsafe_buffer
+                && changed_files.files.iter().all(|entry| !entry.conflicted)
+        });
+        let diff_outcome =
+            if review_passed { EvidenceCheck::Passed } else { EvidenceCheck::Unavailable };
+        self.observe_active_turn(
+            session_id,
+            TurnObservation::DiffReview { revision: revision.clone(), outcome: diff_outcome },
+        );
+        self.observe_transaction_stage(
+            session_id,
+            revision.clone(),
+            WriteTransactionStage::FinalDiff,
+            diff_outcome,
+        );
+
+        // Do not synthesize a pending validation command. A selected terminal
+        // is registered only after its approved spawn and contributes evidence
+        // only after its observed lifecycle completes.
+    }
+
+    fn record_terminal_validation(&mut self, completion: TerminalCompletion) {
+        let Some(validation) = completion.validation else {
+            return;
+        };
+        let Some(index) = self.session_thread_by_id(&completion.session_id) else {
+            return;
+        };
+        let scope = self.agents.threads[index].verification_paths.clone();
+        let diagnostics_after = self.refresh_diagnostic_error_count(&scope);
+        let (diagnostics_outcome, diagnostics_delta) =
+            match (validation.diagnostics_before, diagnostics_after) {
+                (Some(before), Ok(after)) if after <= before => {
+                    (EvidenceCheck::Passed, i64::from(after) - i64::from(before))
+                }
+                (Some(before), Ok(after)) => {
+                    (EvidenceCheck::Failed, i64::from(after) - i64::from(before))
+                }
+                _ => (EvidenceCheck::Unavailable, 0),
+            };
+        self.observe_active_turn(
+            &completion.session_id,
+            TurnObservation::Diagnostics {
+                revision: validation.revision.clone(),
+                outcome: diagnostics_outcome,
+            },
+        );
+        let outcome = if matches!(diagnostics_outcome, EvidenceCheck::Passed) {
+            match completion.exit_code {
+                Some(0) => EvidenceCheck::Passed,
+                Some(_) => EvidenceCheck::Failed,
+                None => EvidenceCheck::Unavailable,
+            }
+        } else {
+            EvidenceCheck::Unavailable
+        };
+        self.observe_active_turn(
+            &completion.session_id,
+            TurnObservation::ValidationRecord {
+                revision: validation.revision.clone(),
+                selected: true,
+                record: HostValidationRecord {
+                    run_id: completion.terminal_id.clone(),
+                    command_id: completion.terminal_id,
+                    command: completion.command.clone(),
+                    tool: Some(String::from("terminal")),
+                    selector: Some(validation.selector),
+                    outcome,
+                    exit_status: completion.exit_code,
+                    elapsed_ms: Some(completion.elapsed_ms),
+                    affected_tests: Vec::new(),
+                    diagnostics_delta,
+                    output_truncated: completion.output_truncated,
+                    skip_or_denial: None,
+                },
+            },
+        );
+        self.observe_transaction_stage(
+            &completion.session_id,
+            validation.revision,
+            WriteTransactionStage::Validation,
+            outcome,
+        );
+        self.agents.threads[index].push_system(format!(
+            "validation terminal completed (exit: {}; {}ms; output truncated: {})",
+            completion.exit_code.map_or_else(|| String::from("unknown"), |code| code.to_string()),
+            completion.elapsed_ms,
+            completion.output_truncated,
+        ));
     }
 
     fn path_in_workspace(&self, path: &Path) -> bool {

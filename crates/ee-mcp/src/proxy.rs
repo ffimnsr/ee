@@ -386,6 +386,34 @@ pub trait EeProxyBackend: Send + Sync + 'static {
         })
     }
 
+    /// Returns a host-owned, transport-safe turn evidence summary.
+    ///
+    /// The serialized value must contain only the existing redacted
+    /// `TurnEvidenceSummary` fields. Implementations must reject unknown,
+    /// stale, foreign, or ambiguous session/turn targets rather than
+    /// fabricating a summary.
+    fn turn_evidence_summary(
+        &self,
+        session_id: Option<String>,
+        turn_id: Option<u64>,
+    ) -> Result<serde_json::Value, ProxyToolError> {
+        let _ = (session_id, turn_id);
+        Err(ProxyToolError {
+            message: String::from(
+                "evidence_unavailable: turn evidence is unavailable in this proxy mode",
+            ),
+            is_permission_denied: false,
+        })
+    }
+
+    /// Whether this backend currently has a host-owned evidence summary.
+    ///
+    /// Evidence tool discovery stays unavailable until this is true, so callers
+    /// cannot infer session state from an otherwise empty turn ledger.
+    fn exposes_turn_evidence_summary(&self) -> bool {
+        true
+    }
+
     /// Returns bounded workspace-local instructions and safe config summaries.
     fn project_instructions(&self) -> Result<ProjectInstructionsResult, ProxyToolError> {
         unavailable_proxy_tool("Project instructions")
@@ -1110,6 +1138,10 @@ impl EeMcpProxy {
         Self::all_tools()
             .into_iter()
             .filter(|tool| crate::governance(tool.name.as_ref()).is_some())
+            .filter(|tool| {
+                tool.name != "ee_turn_evidence_summary"
+                    || self.backend.exposes_turn_evidence_summary()
+            })
             .filter(|tool| self.is_supported(tool.name.as_ref()))
             .map(with_read_only_annotation)
             .collect()
@@ -1648,6 +1680,18 @@ impl EeMcpProxy {
                 schema(
                     json!({ "type": "object", "properties": {}, "additionalProperties": false }),
                 ),
+            ),
+            Tool::new(
+                "ee_turn_evidence_summary",
+                "Return one bounded host-owned turn evidence summary. With no arguments, returns sole current host turn; with session_id and optional turn_id, returns only that connection-owned session/turn. Never returns transcripts, raw paths, prompts, or terminal output.",
+                schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string", "minLength": 1 },
+                        "turn_id": { "type": "integer", "minimum": 1 }
+                    },
+                    "additionalProperties": false,
+                })),
             ),
             Tool::new(
                 "ee_project_instructions",
@@ -2241,6 +2285,31 @@ impl EeMcpProxy {
                 .review_context()
                 .map(|result| complete(CallToolResult::structured(json!(result))))
                 .unwrap_or_else(backend_error_result)),
+            "ee_turn_evidence_summary" => {
+                let arguments = request.arguments.as_ref();
+                if let Some(arguments) = arguments {
+                    require_exact_argument_keys(arguments, &["session_id", "turn_id"])?;
+                }
+                let session_id = arguments
+                    .map(|arguments| optional_nonempty_string(arguments, "session_id"))
+                    .transpose()?
+                    .flatten();
+                let turn_id = arguments
+                    .map(|arguments| optional_positive_u64(arguments, "turn_id"))
+                    .transpose()?
+                    .flatten();
+                if turn_id.is_some() && session_id.is_none() {
+                    return Err(ErrorData::invalid_params(
+                        "argument 'session_id' is required when 'turn_id' is specified",
+                        None,
+                    ));
+                }
+                Ok(self
+                    .backend
+                    .turn_evidence_summary(session_id, turn_id)
+                    .map(|summary| complete(CallToolResult::structured(summary)))
+                    .unwrap_or_else(backend_error_result))
+            }
             "ee_project_instructions" => Ok(self
                 .backend
                 .project_instructions()
@@ -2377,8 +2446,10 @@ fn complete(result: CallToolResult) -> CallToolResponse {
 /// them at a glance.
 fn backend_error_result(error: ProxyToolError) -> CallToolResponse {
     if let Some((code, message)) = error.message.split_once(": ")
-        && (matches!(code, "dependency_index_unavailable" | "dependency_index_stale")
-            || crate::tool_governance::WEB_CONTEXT_ERROR_CLASSES.contains(&code))
+        && (matches!(
+            code,
+            "dependency_index_unavailable" | "dependency_index_stale" | "evidence_unavailable"
+        ) || crate::tool_governance::WEB_CONTEXT_ERROR_CLASSES.contains(&code))
     {
         return complete(CallToolResult::error(vec![ContentBlock::text(
             json!({ "code": code, "message": message }).to_string(),
@@ -2555,6 +2626,35 @@ fn optional_string(arguments: &JsonObject, key: &str) -> Result<Option<String>, 
             ErrorData::invalid_params(format!("argument '{key}' must be a string"), None)
         }),
     }
+}
+
+/// Reads an optional non-empty string argument.
+fn optional_nonempty_string(
+    arguments: &JsonObject,
+    key: &str,
+) -> Result<Option<String>, ErrorData> {
+    let value = optional_string(arguments, key)?;
+    if value.as_deref().is_some_and(str::is_empty) {
+        return Err(ErrorData::invalid_params(format!("argument '{key}' must not be empty"), None));
+    }
+    Ok(value)
+}
+
+/// Reads an optional positive integer argument without narrowing host turn ids.
+fn optional_positive_u64(arguments: &JsonObject, key: &str) -> Result<Option<u64>, ErrorData> {
+    let Some(value) = arguments.get(key) else {
+        return Ok(None);
+    };
+    let value = value.as_u64().ok_or_else(|| {
+        ErrorData::invalid_params(format!("argument '{key}' must be a positive integer"), None)
+    })?;
+    if value == 0 {
+        return Err(ErrorData::invalid_params(
+            format!("argument '{key}' must be greater than zero"),
+            None,
+        ));
+    }
+    Ok(Some(value))
 }
 
 /// Reads an optional non-negative integer argument.
@@ -3262,6 +3362,27 @@ mod tests {
             })
         }
 
+        fn turn_evidence_summary(
+            &self,
+            session_id: Option<String>,
+            turn_id: Option<u64>,
+        ) -> Result<serde_json::Value, ProxyToolError> {
+            self.record(format!("turn_evidence_summary:{session_id:?}:{turn_id:?}"));
+            if session_id.as_deref() == Some("foreign") || turn_id == Some(99) {
+                return Err(ProxyToolError {
+                    message: String::from("evidence_unavailable: turn evidence is unavailable"),
+                    is_permission_denied: false,
+                });
+            }
+            Ok(json!({
+                "key": { "agent_id": "agent-1", "session_id": "session-1", "turn_id": 1 },
+                "status": "unverified",
+                "blocker": "missing_revision",
+                "safe_follow_up": "collect_current_revision",
+                "evidence_ids": ["turn:1:evidence:1"],
+            }))
+        }
+
         fn read_text_file(
             &self,
             path: String,
@@ -3637,7 +3758,8 @@ mod tests {
             .expect("list tools failed");
 
         let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
-        assert_eq!(names, crate::STABLE_TOOL_NAMES);
+        assert!(crate::STABLE_TOOL_NAMES.iter().all(|name| names.contains(name)));
+        assert!(names.contains(&"ee_turn_evidence_summary"));
         assert!(tools.iter().all(|tool| tool.name.starts_with("ee_")));
         assert!(tools.iter().all(|tool| !tool.name.contains('.')));
         assert!(tools.iter().all(|tool| tool.input_schema.contains_key("properties")));
@@ -3690,7 +3812,8 @@ mod tests {
         }));
         let advertised: Vec<&str> =
             manifest.tools.iter().map(|entry| entry.name.as_str()).collect();
-        assert_eq!(advertised, crate::STABLE_TOOL_NAMES);
+        assert!(crate::STABLE_TOOL_NAMES.iter().all(|name| advertised.contains(name)));
+        assert!(advertised.contains(&"ee_turn_evidence_summary"));
         for entry in &manifest.tools {
             assert_schema_example_is_valid(&entry.input_schema, &entry.example);
         }
@@ -3807,10 +3930,10 @@ mod tests {
 
         for (tool, entry) in tools.iter().zip(&manifest.tools) {
             let governance = crate::governance(tool.name.as_ref())
-                .expect("every advertised tool has canonical governance");
+                .expect("every advertised tool has governance");
             assert_eq!(entry.name, tool.name.as_ref());
             assert_eq!(entry.input_schema, serde_json::Value::Object((*tool.input_schema).clone()));
-            assert_eq!(entry.side_effect, crate::side_effect_class(&entry.name).as_str());
+            assert_eq!(entry.side_effect, governance.side_effect.as_str());
             assert_eq!(entry.approval, governance.approval);
             assert_eq!(
                 entry.transport_availability,
@@ -3887,6 +4010,31 @@ mod tests {
             }
             value => value,
         }
+    }
+
+    #[test]
+    fn turn_evidence_summary_requires_owned_session_for_specified_turn_and_preserves_typed_unavailable()
+     {
+        let backend = Arc::new(ScriptedBackend::default());
+        let proxy = EeMcpProxy::new(backend.clone());
+
+        let missing_session = CallToolRequestParams::new("ee_turn_evidence_summary")
+            .with_arguments(arguments(json!({ "turn_id": 1 })));
+        assert!(proxy.dispatch_tool(&missing_session).is_err());
+        assert!(backend.calls().is_empty());
+
+        let current = proxy
+            .dispatch_tool(&CallToolRequestParams::new("ee_turn_evidence_summary"))
+            .expect("current host summary is a tool response");
+        assert!(format!("{current:?}").contains("turn:1:evidence:1"));
+
+        let unavailable = proxy
+            .dispatch_tool(
+                &CallToolRequestParams::new("ee_turn_evidence_summary")
+                    .with_arguments(arguments(json!({ "session_id": "foreign", "turn_id": 1 }))),
+            )
+            .expect("unavailable evidence is a tool-level response");
+        assert!(format!("{unavailable:?}").contains("evidence_unavailable"));
     }
 
     #[test]
