@@ -405,33 +405,39 @@ pub fn reduce_terminal_state(evidence: &TurnEvidence) -> TurnEvidenceSummary {
         );
     }
 
-    for record in &evidence.records {
-        match record.observation {
-            TurnObservation::PromptTerminal { outcome: PromptTerminalOutcome::Cancelled } => {
-                return summary(
-                    TurnTerminalStatus::Blocked,
-                    Some(TurnBlocker::PromptCancelled),
-                    SafeFollowUp::StartNewTurn,
-                );
-            }
-            TurnObservation::PromptTerminal { outcome: PromptTerminalOutcome::Failed } => {
-                return summary(
-                    TurnTerminalStatus::Blocked,
-                    Some(TurnBlocker::PromptFailed),
-                    SafeFollowUp::StartNewTurn,
-                );
-            }
-            TurnObservation::PromptTerminal {
-                outcome: PromptTerminalOutcome::PausedRecoverable,
-            } => {
-                return summary(
-                    TurnTerminalStatus::Blocked,
-                    Some(TurnBlocker::PromptPausedRecoverable),
-                    SafeFollowUp::ResumeOrDiscard,
-                );
-            }
-            _ => {}
+    // Resume keeps one append-only evidence ledger. Earlier pause/failure facts
+    // remain auditable, but only newest prompt lifecycle fact describes current
+    // transport state.
+    let latest_prompt_terminal = evidence.records.iter().rev().find_map(|record| {
+        if let TurnObservation::PromptTerminal { outcome } = record.observation {
+            Some(outcome)
+        } else {
+            None
         }
+    });
+    match latest_prompt_terminal {
+        Some(PromptTerminalOutcome::Cancelled) => {
+            return summary(
+                TurnTerminalStatus::Blocked,
+                Some(TurnBlocker::PromptCancelled),
+                SafeFollowUp::StartNewTurn,
+            );
+        }
+        Some(PromptTerminalOutcome::Failed) => {
+            return summary(
+                TurnTerminalStatus::Blocked,
+                Some(TurnBlocker::PromptFailed),
+                SafeFollowUp::StartNewTurn,
+            );
+        }
+        Some(PromptTerminalOutcome::PausedRecoverable) => {
+            return summary(
+                TurnTerminalStatus::Blocked,
+                Some(TurnBlocker::PromptPausedRecoverable),
+                SafeFollowUp::ResumeOrDiscard,
+            );
+        }
+        Some(PromptTerminalOutcome::Completed) | None => {}
     }
 
     let Some(current_revision) = current_revision else {
@@ -805,6 +811,21 @@ mod tests {
         assert_eq!(summary.status, TurnTerminalStatus::Verified);
         assert_eq!(summary.blocker, None);
         assert_eq!(summary.evidence_ids.len(), 6);
+    }
+
+    #[test]
+    fn completed_resume_supersedes_historical_recoverable_pause() {
+        let mut store = verified_store();
+        for outcome in [PromptTerminalOutcome::PausedRecoverable, PromptTerminalOutcome::Completed]
+        {
+            store.observe(1, TurnObservation::PromptTerminal { outcome }).expect("known turn");
+        }
+
+        let summary = store.summary(1).expect("summary");
+        assert_eq!(summary.status, TurnTerminalStatus::Verified);
+        assert_eq!(summary.blocker, None);
+        assert_eq!(summary.safe_follow_up, SafeFollowUp::ReportEvidence);
+        assert_eq!(summary.evidence_ids.len(), 8, "both lifecycle facts remain auditable");
     }
 
     #[test]

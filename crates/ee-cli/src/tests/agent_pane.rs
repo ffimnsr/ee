@@ -2074,6 +2074,10 @@ fn phase_six_live_openrouter_pane_resume_reuses_completed_write() {
 
     let thread = &app.agents.threads[0];
     assert!(thread.pending_recovery.is_none());
+    let resumed_summary = thread.terminal_evidence.as_ref().expect("resumed terminal evidence");
+    assert_eq!(resumed_summary.status, TurnTerminalStatus::PartiallyVerified);
+    assert_eq!(resumed_summary.blocker, Some(TurnBlocker::MissingSelectedValidation));
+    assert_eq!(resumed_summary.safe_follow_up, SafeFollowUp::RunSelectedValidation);
     assert_eq!(fs::read_to_string(&target).expect("read resumed write"), "after\n");
     assert_eq!(
         app.agents
@@ -2372,17 +2376,18 @@ fn phase_six_resume_interruption_preserves_prompt_without_duplicate_acp_request(
             && app.agents.threads[0].system_notices().iter().any(|n| n.contains("turn completed"))
     });
     assert!(app.agents.threads[0].pending_recovery.is_none(), "resume clears the pause");
+    let summary = app.agents.threads[0].terminal_evidence.as_ref().expect("resumed evidence");
+    assert_eq!(summary.status, TurnTerminalStatus::Unverified);
+    assert_eq!(summary.blocker, Some(TurnBlocker::MissingRevision));
+    assert_eq!(summary.safe_follow_up, SafeFollowUp::CollectCurrentRevision);
     assert_eq!(
         PhaseSixFixtureMetrics {
             prompt_requests: fake.agent().requests_by_method("session/prompt").len(),
-            evidence_ids: app.agents.threads[0]
-                .terminal_evidence
-                .as_ref()
-                .map_or(0, |summary| summary.evidence_ids.len()),
+            evidence_ids: summary.evidence_ids.len(),
             approvals: app.agents.approvals.len(),
         },
-        PhaseSixFixtureMetrics { prompt_requests: 2, evidence_ids: 1, approvals: 0 },
-        "resume sends only original and resumed ACP prompt; completed tool replay stays provider-owned"
+        PhaseSixFixtureMetrics { prompt_requests: 2, evidence_ids: 2, approvals: 0 },
+        "resume retains pause and completion evidence while sending only original and resumed ACP prompts"
     );
 }
 
