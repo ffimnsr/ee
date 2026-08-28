@@ -1,6 +1,6 @@
 [package]
 name = "ee-acp-agent-server"
-version = "0.11.2"
+version = "0.11.3"
 license = "Apache-2.0"
 authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
 description = "Reusable ACP v1 agent-side server framework: stdio/memory transports, framing, IDs, config, and errors for provider binaries."

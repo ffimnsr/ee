@@ -1,6 +1,6 @@
 [package]
 name = "ee-agent-protocol"
-version = "0.11.2"
+version = "0.11.3"
 license = "Apache-2.0"
 authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
 description = "ACP v1 wire protocol facade for ee agents mode, built on the official agent-client-protocol SDK."

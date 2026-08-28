@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.11.3 - 2026-08-28
+
+### Features
+
+- update criterion to 0.8.2 and some deps to vendored ssl (`58d107be`)
+- add browser run and more option for search internet context (`fb0ee3b0`)
+- add fixes to gap on acp agentic loop (`ae5416ee`)
+
+
+### Fixes
+
+- lint problem on the web browser agent (`e232ae5a`)
+- resume turn terminal bug (`48c06cd5`)
+
+
+### Maintenance
+
+- update toml from 0.8 to 1.1.4 (`6cb61603`)
+
+
 ## 0.11.2 - 2026-08-24
 
 ### Fixes
