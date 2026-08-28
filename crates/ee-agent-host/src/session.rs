@@ -527,6 +527,28 @@ impl AgentThread {
         Ok(())
     }
 
+    /// Ensures a session has a concrete mode.
+    ///
+    /// When the agent omitted both legacy modes and a mode configuration
+    /// option, this sends `session/set_mode` explicitly instead of inventing
+    /// local state. Callers can therefore require a safe startup mode and fail
+    /// closed when the agent rejects mode negotiation.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the requested mode is unavailable or the agent rejects it.
+    pub async fn ensure_mode(&self, mode_id: SessionModeId) -> Result<(), AgentError> {
+        if self.snapshot().current_mode.is_some() {
+            return Ok(());
+        }
+        if self.mode_config_option().is_some() || self.advertised_modes().is_some() {
+            return self.set_mode(mode_id).await;
+        }
+        self.connection.set_mode(self.session_id.clone(), mode_id.clone()).await?;
+        self.shared.state.lock().expect("session state poisoned").current_mode = Some(mode_id);
+        Ok(())
+    }
+
     /// Sets one session config option through `session/set_config_option`.
     pub async fn set_config_option(
         &self,

@@ -72,6 +72,8 @@ const AGENT_ADDITIONAL_ROOT_MAX: usize = 8;
 const AGENT_TERMINAL_OUTPUT_TAIL_BYTES: usize = 4 * 1024;
 /// Maximum agent-owned terminals targeted by one `/stop all` request.
 const AGENT_TERMINAL_STOP_ALL_MAX: usize = 16;
+/// Safe mode explicitly negotiated when an agent omits session mode state.
+const DEFAULT_AGENT_MODE_ID: &str = "ask";
 
 // ── Pane layout ──────────────────────────────────────────────────────────────
 
@@ -100,7 +102,7 @@ impl AgentPaneLayout {
 // ── Transcript model ─────────────────────────────────────────────────────────
 
 /// How a chat message line is attributed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum MessageRenderKind {
     User,
     Assistant,
@@ -133,7 +135,7 @@ pub(crate) struct ExternalEditorRequest {
 }
 
 /// One line in the IRC-style scrollback.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum TranscriptItem {
     /// A chat message with a nick column.
     Message {
@@ -586,6 +588,20 @@ impl AgentThreadUi {
         while self.transcript.len() > AGENTS_TRANSCRIPT_MAX {
             self.transcript.remove(0);
         }
+    }
+
+    fn clear_transcript_state(&mut self) {
+        self.transcript.clear();
+        self.optimistic_message = None;
+        self.scroll = 0;
+        self.stick_to_bottom = true;
+        self.active_response_group = None;
+        self.next_response_group = 1;
+        self.selected_response_group = None;
+        self.collapsed_response_groups.clear();
+        self.expanded_tool_details.clear();
+        self.turn_metrics.clear();
+        self.last_turn_metrics = None;
     }
 
     fn record_prompt_history(&mut self, prompt: &str) {
@@ -1110,6 +1126,14 @@ enum HostCommand {
     Shutdown,
 }
 
+async fn ensure_default_agent_mode(
+    result: Result<AgentThread, AgentError>,
+) -> Result<AgentThread, AgentError> {
+    let thread = result?;
+    thread.ensure_mode(SessionModeId::new(DEFAULT_AGENT_MODE_ID)).await?;
+    Ok(thread)
+}
+
 /// Runs async host operations on a dedicated worker thread.
 ///
 /// The whole loop runs inside `block_on` and awaits commands over a tokio
@@ -1137,6 +1161,7 @@ fn host_worker(
                     let result = manager
                         .new_session(&agent_id, roots, mcp_servers, ee_proxy_stdio_fallback)
                         .await;
+                    let result = ensure_default_agent_mode(result).await;
                     let _ = reply.send(result.map_err(|error| error.to_string()));
                 }
                 HostCommand::ReconnectSession {
@@ -1177,6 +1202,7 @@ fn host_worker(
                         }
                         Err(error) => Err(error),
                     };
+                    let result = ensure_default_agent_mode(result).await;
                     let _ = reply.send(result.map_err(|error| error.to_string()));
                 }
                 HostCommand::SendPrompt { thread, blocks } => {
@@ -1367,6 +1393,10 @@ struct PersistedAgentSession {
     /// User-selected local session name. Absent in records written before Phase 1.
     #[serde(default)]
     session_name: Option<String>,
+    /// Bounded local transcript fallback. `session/load` replay replaces it when
+    /// the agent supplies conversation updates; otherwise reconnect keeps it.
+    #[serde(default)]
+    transcript: Vec<TranscriptItem>,
 }
 
 /// Ordered client-side session registry for one canonical workspace.
@@ -1385,7 +1415,7 @@ struct PersistedAgentWorkspace {
 }
 
 const fn persisted_agent_workspace_version() -> u32 {
-    1
+    2
 }
 
 /// Transitional read format for the former one-session-per-workspace record.
@@ -1575,6 +1605,15 @@ impl std::fmt::Debug for AgentPaneState {
 
 // ── App integration ──────────────────────────────────────────────────────────
 
+fn session_update_replays_transcript(update: &SessionUpdate) -> bool {
+    matches!(
+        update,
+        SessionUpdate::UserMessageChunk(_)
+            | SessionUpdate::AgentMessageChunk(_)
+            | SessionUpdate::AgentThoughtChunk(_)
+    )
+}
+
 impl App {
     /// Whether the agents pane owns keyboard focus.
     pub(crate) fn agents_focused(&self) -> bool {
@@ -1756,6 +1795,7 @@ impl App {
                 // The turn is no longer resumable; drop the persisted prompt before
                 // optionally recording the newly dispatched queued follow-up.
                 self.update_persisted_last_prompt(session_id.0.as_ref(), None);
+                self.persist_agent_workspace();
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.dispatch_next_queued_prompt(index);
                 }
@@ -1772,6 +1812,7 @@ impl App {
                     self.notify_unread(index);
                 }
                 self.update_persisted_last_prompt(session_id.0.as_ref(), None);
+                self.persist_agent_workspace();
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.dispatch_next_queued_prompt(index);
                 }
@@ -1788,6 +1829,7 @@ impl App {
                     self.notify_unread(index);
                 }
                 self.update_persisted_last_prompt(session_id.0.as_ref(), None);
+                self.persist_agent_workspace();
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.dispatch_next_queued_prompt(index);
                 }
@@ -1810,6 +1852,7 @@ impl App {
                     thread.pending_recovery =
                         thread.last_prompt.take().map(|prompt| PendingRecovery { info, prompt });
                     self.notify_unread(index);
+                    self.persist_agent_workspace();
                 }
             }
             AgentEvent::PermissionRequested { session_id, request } => {
@@ -1982,14 +2025,8 @@ impl App {
                 self.agents.threads[thread_index]
                     .push_system(format!("mode: {}", mode.current_mode_id.0));
             }
-            SessionUpdate::AvailableCommandsUpdate(commands) => {
+            SessionUpdate::AvailableCommandsUpdate(_) => {
                 self.sync_thread_snapshot_fields(thread_index);
-                let listed = available_commands_summary(&commands.available_commands);
-                self.agents.threads[thread_index].push_system(if listed.is_empty() {
-                    String::from("commands: none")
-                } else {
-                    format!("commands: {listed}")
-                });
             }
             SessionUpdate::ConfigOptionUpdate(_) => {
                 self.sync_thread_snapshot_fields(thread_index);
@@ -2188,6 +2225,33 @@ impl App {
             workspace.sessions.into_iter().find(|record| record.session_id == session_id)
         });
         let session_name = persisted.as_ref().and_then(|record| record.session_name.clone());
+        let transcript =
+            persisted.as_ref().map(|record| record.transcript.clone()).unwrap_or_default();
+        let prompt_history = transcript
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Message { text, kind: MessageRenderKind::User, .. } => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .rev()
+            .take(AGENT_PROMPT_HISTORY_MAX)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let next_response_group = transcript
+            .iter()
+            .filter_map(|item| match item {
+                TranscriptItem::Message { response_group, .. } => *response_group,
+                TranscriptItem::ToolCall { response_group, .. } => Some(*response_group),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let restored = persisted.is_some();
         self.agents.threads.push(AgentThreadUi {
             index,
             agent_id: agent_id.to_string(),
@@ -2204,10 +2268,10 @@ impl App {
             unread: 0,
             activity: false,
             host: thread,
-            transcript: Vec::new(),
+            transcript,
             optimistic_message: None,
             draft: std::mem::take(&mut self.agents.pending_draft),
-            prompt_history: Vec::new(),
+            prompt_history,
             prompt_history_cursor: None,
             prompt_history_restore_draft: None,
             queued_prompts: VecDeque::new(),
@@ -2225,7 +2289,7 @@ impl App {
             verification_paths: Vec::new(),
             verification_revision: None,
             active_response_group: None,
-            next_response_group: 1,
+            next_response_group,
             selected_response_group: None,
             collapsed_response_groups: BTreeSet::new(),
             expanded_tool_details: BTreeSet::new(),
@@ -2251,11 +2315,10 @@ impl App {
             self.agents.active_thread = Some(self.agents.threads.len() - 1);
         }
         self.agents.error = None;
-        self.agents
-            .threads
-            .last_mut()
-            .expect("thread pushed")
-            .push_system(format!("session started ({session_id})"));
+        self.agents.threads.last_mut().expect("thread pushed").push_system(format!(
+            "session {} ({session_id})",
+            if restored { "restored" } else { "started" }
+        ));
         self.persist_agent_workspace();
     }
 
@@ -2362,6 +2425,9 @@ impl App {
                         .thread_index(&session_id)
                         .zip(self.agents.pending_replay.remove(&session_id))
                     {
+                        if index.1.iter().any(session_update_replays_transcript) {
+                            self.agents.threads[index.0].clear_transcript_state();
+                        }
                         for update in index.1 {
                             self.apply_session_update(index.0, &update);
                         }
@@ -3013,22 +3079,6 @@ pub(crate) fn agent_slash_command_names(commands: &[AvailableCommand]) -> Vec<&s
         }
     }
     names
-}
-
-/// Renders the advertised command list for the transcript notice:
-/// `/name — description` when a description is advertised, `/name` otherwise.
-fn available_commands_summary(commands: &[AvailableCommand]) -> String {
-    commands
-        .iter()
-        .map(|command| {
-            if command.description.is_empty() {
-                format!("/{}", command.name)
-            } else {
-                format!("/{} — {}", command.name, command.description)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 /// Draft text for a cycled command, preserving any trailing user text.
@@ -3813,10 +3863,8 @@ impl App {
                 Some(String::from("cannot clear scrollback while a turn is running"));
             return;
         }
-        thread.transcript.clear();
-        thread.optimistic_message = None;
-        thread.scroll = 0;
-        thread.stick_to_bottom = true;
+        thread.clear_transcript_state();
+        self.persist_agent_workspace();
         self.backend.status_message =
             Some(String::from("visible scrollback cleared; provider conversation remains intact"));
     }
@@ -4059,6 +4107,8 @@ impl App {
     /// agent subprocesses.  Every step is internally bounded (host request
     /// timeouts), so a hung agent or MCP server cannot delay exit.
     pub(crate) fn shutdown_agents(&mut self) {
+        // Persist local transcript before host teardown clears in-memory threads.
+        self.persist_agent_workspace();
         // 1. Cancel running turns (also resolves their pending permissions).
         if let Some(host) = &self.agents.host {
             for thread in &self.agents.threads {
@@ -4460,6 +4510,7 @@ impl App {
                     .find(|record| record.session_id == thread.session_id)
                     .and_then(|record| record.last_prompt.clone()),
                 session_name: thread.session_name.clone(),
+                transcript: thread.transcript.clone(),
             })
             .collect();
         let active_session_id = self
@@ -5940,6 +5991,7 @@ impl App {
             thread.last_prompt = Some(blocks.clone());
             thread.host.clone()
         };
+        self.persist_agent_workspace();
         let host = self.agents.host.as_ref().expect("host present");
         host.send_prompt(thread_handle, blocks);
     }
@@ -6851,16 +6903,6 @@ mod tests {
             split_slash_command("/compactness"),
             (Some(String::from("compactness")), String::new())
         );
-    }
-
-    #[test]
-    fn available_commands_summary_includes_descriptions() {
-        let commands = vec![compact_command(), AvailableCommand::new("plan", "Create a plan")];
-        let summary = available_commands_summary(&commands);
-        assert!(summary.contains("/compact — Summarize the session history"), "{summary}");
-        assert!(summary.contains("/plan — Create a plan"), "{summary}");
-        assert_eq!(available_commands_summary(&[]), "");
-        assert_eq!(available_commands_summary(&[AvailableCommand::new("bare", "")]), "/bare");
     }
 
     #[test]

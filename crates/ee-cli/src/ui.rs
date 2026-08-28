@@ -652,7 +652,7 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             .host
             .snapshot()
             .current_mode
-            .map_or_else(|| String::from("ask"), |mode| mode.0.to_string());
+            .map_or_else(|| String::from("unset"), |mode| mode.0.to_string());
         let footer_text = format!(
             "{} [{}] | mode:{} | session:{} / {} | thoughts:{} | unread:{} | last:{}",
             thread.nick,
@@ -729,7 +729,7 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         let footer_style = Style::default().fg(theme::FG_AGENT_STATUS).bg(theme::BG_AGENT_STATUS);
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "agents [no session] | mode:ask",
+                "agents [no session] | mode:unset",
                 footer_style,
             )))
             .style(footer_style),

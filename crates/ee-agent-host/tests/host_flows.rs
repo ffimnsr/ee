@@ -1940,6 +1940,25 @@ async fn set_mode_updates_shared_mode_state() {
 }
 
 #[tokio::test]
+async fn ensure_mode_negotiates_explicit_default_when_agent_omits_mode_state() {
+    let script = base_script().wait_for("session/set_mode").respond(json!({}));
+    let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
+
+    thread.ensure_mode(SessionModeId::new("ask")).await.expect("default mode negotiated");
+
+    let requests = fake.requests_by_method("session/set_mode");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["params"]["sessionId"], "s1");
+    assert_eq!(requests[0]["params"]["modeId"], "ask");
+    assert_eq!(thread.snapshot().current_mode, Some(SessionModeId::new("ask")));
+    host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
 async fn set_mode_without_advertised_modes_fails_closed() {
     let script = base_script();
     let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;

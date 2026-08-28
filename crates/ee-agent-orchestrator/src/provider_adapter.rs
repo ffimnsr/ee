@@ -51,7 +51,7 @@ use crate::mcp::{
 };
 #[cfg(test)]
 use crate::memory::MemoryStore;
-use crate::model::ModelAdapter;
+use crate::model::{ModelAdapter, ModelMessage, ModelRole};
 use crate::observability::{
     TelemetryAttribution, TelemetryConfig, TelemetryRecorder, TelemetrySummary, TelemetryTransport,
     TelemetryTurnOutcome, TelemetryVersionLabels, ToolFailureReason, WaterfallFinish,
@@ -754,6 +754,25 @@ fn record_agent_message(
     }
 }
 
+/// Converts client-visible live-session messages into normalized model history.
+/// Host-derived final reports stay excluded because they are not model output.
+fn model_history(conversation: &Arc<Mutex<Vec<ConversationMessage>>>) -> Vec<ModelMessage> {
+    conversation
+        .lock()
+        .expect("conversation poisoned")
+        .iter()
+        .filter_map(|message| match message.role {
+            ConversationRole::User => {
+                Some(ModelMessage::text(ModelRole::User, message.text.clone()))
+            }
+            ConversationRole::Agent => {
+                Some(ModelMessage::text(ModelRole::Assistant, message.text.clone()))
+            }
+            ConversationRole::FinalResponse => None,
+        })
+        .collect()
+}
+
 /// Records the host-derived final response as its own replay item. It must
 /// never merge into preceding model text, because that would obscure which
 /// claims were evidence-gated.
@@ -1296,6 +1315,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
             // (client-crash continuation).  Without a pending checkpoint it
             // is an ordinary prompt whose text reaches the model.
             let resume_command = recovery.enabled && is_resume_command(&prompt_text);
+            let history = if has_pending { Vec::new() } else { model_history(&conversation) };
             if !has_pending {
                 record_user_message(&conversation, prompt_text);
                 // Persist prompt receipt before model work so an abrupt host
@@ -1403,7 +1423,14 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                     .await
             } else {
                 runtime
-                    .run_turn_strategic_recoverable(ctx, sink, client, cancel, recovery_context)
+                    .run_turn_strategic_recoverable_with_history(
+                        ctx,
+                        sink,
+                        client,
+                        cancel,
+                        recovery_context,
+                        history,
+                    )
                     .await
             };
             let result: Result<Box<StrategicRecoveryTurn>, ProviderError> = match result {
@@ -1612,7 +1639,9 @@ mod tests {
 
     use super::*;
     use crate::config::RecoveryConfig;
-    use crate::model::{ModelAdapter, ModelError, ModelFuture, ModelRequest, ModelResponse};
+    use crate::model::{
+        ModelAdapter, ModelError, ModelFuture, ModelRequest, ModelResponse, ModelRole,
+    };
     use crate::test_support::FakeModel;
 
     const PLAN_PAYLOAD: &str = r#"<!-- ee-plan
@@ -2608,6 +2637,62 @@ mod tests {
             policy.check(&tool(SideEffectClass::Write).host_approval(), Default::default()).allow,
             "write preserves host approval routing"
         );
+    }
+
+    #[tokio::test]
+    async fn provider_adapter_mode_switch_preserves_model_conversation() {
+        let model = Arc::new(FakeModel::new(vec![
+            ModelResponse::new()
+                .text("I can create that file after write mode is enabled")
+                .completed(),
+            ModelResponse::new().text("implemented").completed(),
+        ]));
+        let provider =
+            OrchestratorProvider::new(OrchestratorProviderConfig::default(), model.clone());
+        let (handle, task) = spawn_server(provider);
+        let session_id = new_session(&handle, 1).await;
+
+        handle.send(request(
+            2,
+            "session/prompt",
+            prompt_params(&session_id, "create a long HTML file in test_assets"),
+        ));
+        let (frame, _) = next_response_with_updates(&handle).await;
+        assert_eq!(request_result(frame)["stopReason"], "end_turn");
+
+        handle.send(request(
+            3,
+            "session/set_mode",
+            json!({ "sessionId": session_id, "modeId": WRITE_MODE_ID }),
+        ));
+        assert_eq!(request_result(handle.next_frame().await), json!({}));
+
+        handle.send(request(4, "session/prompt", prompt_params(&session_id, "implement it")));
+        let (frame, _) = next_response_with_updates(&handle).await;
+        assert_eq!(request_result(frame)["stopReason"], "end_turn");
+
+        let requests = model.requests();
+        assert_eq!(requests.len(), 2, "one model call per completed prompt");
+        let conversation = requests[1]
+            .transcript
+            .iter()
+            .filter(|message| matches!(message.role, ModelRole::User | ModelRole::Assistant))
+            .map(|message| (message.role, message.text_content()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            conversation,
+            vec![
+                (ModelRole::User, "create a long HTML file in test_assets".to_string()),
+                (
+                    ModelRole::Assistant,
+                    "I can create that file after write mode is enabled".to_string(),
+                ),
+                (ModelRole::User, "implement it".to_string()),
+            ],
+            "mode switch must keep prior user and assistant turns in model context"
+        );
+
+        handle.shutdown(task).await;
     }
 
     #[tokio::test]

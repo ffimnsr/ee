@@ -32,7 +32,9 @@ use crate::config::OrchestratorConfig;
 use crate::error::OrchestratorError;
 use crate::events::{EventRecorder, OrchestratorEvent};
 use crate::memory::MemoryStore;
-use crate::model::{ModelAdapter, ModelRequest, ModelUsage, Transcript, prompt_result_with_usage};
+use crate::model::{
+    ModelAdapter, ModelMessage, ModelRequest, ModelUsage, Transcript, prompt_result_with_usage,
+};
 use crate::model_registry::ModelInfo;
 use crate::parallel_tools::ParallelToolRunner;
 use crate::streaming::run_streaming_response;
@@ -85,6 +87,8 @@ pub(crate) struct LoopOptions {
 /// System messages prepended before one model/tool loop.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TurnSystemContext {
+    /// Prior normalized user and assistant messages from this live session.
+    pub history: Vec<ModelMessage>,
     /// Compact memory facts from the runtime store.
     pub memory: Option<String>,
     /// Immutable session facts such as cwd and path rules.
@@ -187,7 +191,7 @@ impl LoopEngine {
             client,
             cancel,
             task,
-            TurnSystemContext { memory, session: None, task_context: None },
+            TurnSystemContext { history: Vec::new(), memory, session: None, task_context: None },
         )
         .await
     }
@@ -204,7 +208,9 @@ impl LoopEngine {
         task: TaskNode,
         context: TurnSystemContext,
     ) -> Result<PromptResult, OrchestratorError> {
-        let mut transcript = Transcript::from_prompt(&ctx);
+        let mut transcript = Transcript::new();
+        transcript.messages = context.history;
+        transcript.messages.extend(Transcript::from_prompt(&ctx).messages);
         if let Some(facts) = &context.memory {
             transcript.prepend_system(format!("Memory facts:\n{facts}"));
         }

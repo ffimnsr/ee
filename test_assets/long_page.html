@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Long HTML Test Page</title>
+    <style>
+        body {
+            font-family: Georgia, "Times New Roman", serif;
+            line-height: 1.6;
+            margin: 0;
+            background-color: #faf8f0;
+            color: #222;
+        }
+        header, footer {
+            background-color: #2c3e50;
+            color: #ecf0f1;
+            text-align: center;
+            padding: 2rem 1rem;
+        }
+        main {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        h1, h2, h3 {
+            color: #2c3e50;
+        }
+        h2 {
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 0.3rem;
+            margin-top: 2.5rem;
+        }
+        pre {
+            background-color: #2d2d2d;
+            color: #f8f8f2;
+            padding: 1rem;
+            overflow-x: auto;
+            border-radius: 4px;
+        }
+        code {
+            background-color: #eee;
+            padding: 0.15rem 0.4rem;
+            border-radius: 3px;
+            font-family: "Consolas", "Courier New", monospace;
+        }
+        pre code {
+            background-color: transparent;
+            padding: 0;
+        }
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 1rem 0;
+        }
+        th, td {
+            border: 1px solid #aaa;
+            padding: 0.5rem;
+            text-align: left;
+        }
+        th {
+            background-color: #3498db;
+            color: white;
+        }
+        tr:nth-child(even) {
+            background-color: #eef4fa;
+        }
+        blockquote {
+            border-left: 4px solid #3498db;
+            margin: 1.5rem 0;
+            padding: 0.5rem 1rem;
+            background-color: #eef4fa;
+        }
+        .note {
+            background-color: #fdf6d8;
+            border: 1px solid #e0c56b;
+            border-radius: 4px;
+            padding: 0.75rem 1rem;
+            margin: 1rem 0;
+        }
+        .anchor:target {
+            background-color: #ffff99;
+        }
+        ul.toc {
+            list-style: none;
+            padding-left: 0;
+        }
+        ul.toc li {
+            margin: 0.25rem 0;
+        }
+        ul.toc a {
+            text-decoration: none;
+            color: #2980b9;
+        }
+        ul.toc a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>Long HTML Test Page</h1>
+    <p>A generated page designed to be long enough for testing scrolling, anchors, tables, code blocks, and paragraph-heavy parsing.</p>
+    <p>Source: <code>test_assets/long_page.html</code></p>
+    <p><em>Last updated: 2025-08-28</em></p>
+</header>
+
+<main>
+    <nav>
+        <h2>Table of Contents</h2>
+        <ul class="toc">
+            <li><a href="#section-1">1. Overview</a></li>
+            <li><a href="#section-2">2. The Story So Far</a></li>
+            <li><a href="#section-3">3. Markdown-styled Content</a></li>
+            <li><a href="#section-4">4. Tables</a></li>
+            <li><a href="#section-5">5. Lists &amp; Snippets</a></li>
+            <li><a href="#section-6">6. Quotations</a></li>
+            <li><a href="#section-7">7. Deep Dive into Syntax</a></li>
+            <li><a href="#section-8">8. More Prose</a></li>
+            <li><a href="#section-9">9. Navigation Practice</a></li>
+            <li><a href="#section-10">10. Conclusion</a></li>
+        </ul>
+    </nav>
+
+    <section id="section-1" class="anchor">
+        <h2>1. Overview</h2>
+        <p>
+            This page was generated to provide a substantial amount of HTML content for testing purposes.
+            It includes many paragraphs, headings, a table of contents with anchor links, a data table,
+            blockquotes, code samples, and various text elements that exercise typical HTML parser features.
+        </p>
+        <p>
+            The page is intentionally verbose. Each section below contains multiple paragraphs of placeholder
+            text so the document reaches a length that is convenient for scroll-position tests, fragment
+            navigation tests, and chunked preview rendering. Feel free to jump between the sections by using
+            the table of contents above.
+        </p>
+        <p>
+            Number of characters in this file is on the order of twenty thousand, which is large enough to be
+            considered a "long" document while still being small enough for a single HTTP response or file read.
+        </p>
+    </section>
+
+    <section id="section-2" class="anchor">
+        <h2>2. The Story So Far</h2>
+        <p>
+            Once upon a time, a software engineer needed a long HTML file. They reached for their keyboard,
+            opened the editor, and began typing. The file grew paragraph by paragraph, section by section,
+            until it was long enough to satisfy the requirements of the test.
+        </p>
+        <p>
+            Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore
+            et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut
+            aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse
+            cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in
+            culpa qui officia deserunt mollit anim id est laborum.
+        </p>
+        <p>
+            The engineer remembered that tests often need realistic content, not just the letter "a" repeated
+            ten thousand times. Realistic content has headings, links, emphasis, code, tables, lists, and the
+            occasional aside. So the engineer wrote exactly those things.
+        </p>
+    </section>
+
+    <section id="section-3" class="anchor">
+        <h2>3. Markdown-styled Content</h2>
+        <p>
+            Although this is pure HTML, the text below mimics markdown conventions so that any tooling that
+            extract textual content will see familiar patterns. For example, we can talk about <code>inline code</code>,
+            <strong>strong text</strong>, and <em>emphasized text</em>.
+        </p>
+        <p>
+            We can also include links like <a href="https://example.com/">example.com</a> inside the flowing prose.
+            Links in the middle of sentences are common in real documents, so test suites should expect to handle them.
+        </p>
+        <p>
+            Sometimes a document contains a URL directly, like https://example.com/long/path/to/resource and expects
+            naive linkification to not break surrounding words. This sentence tests exactly that kind of edge case.
+        </p>
+        <p>
+            Finally, this document contains a deliberate mix of short sentences. And long ones. And some that are
+            neither, such as this one, which is merely of average length but written to fill out a paragraph.
+        </p>
+    </section>
+
+    <section id="section-4" class="anchor">
+        <h2>4. Tables</h2>
+        <p>This section contains a table with a header row, several body rows, and alternating row colors.</p>
+        <table>
+            <thead>
+                <tr>
+                    <th>Language</th>
+                    <th>Paradigm</th>
+                    <th>First Appeared</th>
+                    <th>Typing</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Rust</td>
+                    <td>Multi-paradigm</td>
+                    <td>2010</td>
+                    <td>Static, strong</td>
+                </tr>
+                <tr>
+                    <td>Python</td>
+                    <td>Multi-paradigm</td>
+                    <td>1991</td>
+                    <td>Dynamic, duck</td>
+                </tr>
+                <tr>
+                    <td>Go</td>
+                    <td>Procedural / concurrent</td>
+                    <td>2009</td>
+                    <td>Static, strong</td>
+                </tr>
+                <tr>
+                    <td>TypeScript</td>
+                    <td>Object-oriented</td>
+                    <td>2012</td>
+                    <td>Static with inference</td>
+                </tr>
+                <tr>
+                    <td>C</td>
+                    <td>Procedural</td>
+                    <td>1972</td>
+                    <td>Static, weak</td>
+                </tr>
+                <tr>
+                    <td>Haskell</td>
+                    <td>Functional</td>
+                    <td>1990</td>
+                    <td>Static, strong</td>
+                </tr>
+                <tr>
+                    <td>Elixir</td>
+                    <td>Functional / concurrent</td>
+                    <td>2011</td>
+                    <td>Dynamic</td>
+                </tr>
+                <tr>
+                    <td>JavaScript</td>
+                    <td>Event-driven / prototype</td>
+                    <td>1995</td>
+                    <td>Dynamic, weak</td>
+                </tr>
+            </tbody>
+        </table>
+        <p>
+            The table above has eight rows covering a variety of programming languages. It is important for a
+            table parser to represent each cell correctly, including cells with multiple words separated by spaces.
+        </p>
+    </section>
+
+    <section id="section-5" class="anchor">
+        <h2>5. Lists &amp; Snippets</h2>
+        <p>An unordered list of reasons why long files are useful:</p>
+        <ul>
+            <li>They exercise pagination and lazy rendering.</li>
+            <li>They stress-test anchor and jump-to-fragment behavior.</li>
+            <li>They make scrollbars appear, which is a prerequisite for many UI tests.</li>
+            <li>They allow search / highlight code to be validated across large DOMs.</li>
+        </ul>
+        <p>An ordered list describing the steps to generate such a file:</p>
+        <ol>
+            <li>Choose a folder named <code>test_assets</code>.</li>
+            <li>Create a file with a clear name, such as <code>long_page.html</code>.</li>
+            <li>Write many sections of prose.</li>
+            <li>Add structure: tables, lists, code, and quotations.</li>
+            <li>Review the result in a browser.</li>
+        </ol>
+        <p>A nested list for good measure:</p>
+        <ul>
+            <li>Fruits
+                <ul>
+                    <li>Apple</li>
+                    <li>Banana</li>
+                    <li>Orange</li>
+                </ul>
+            </li>
+            <li>Vegetables
+                <ul>
+                    <li>Carrot</li>
+                    <li>Broccoli</li>
+                    <li>The mysterious "Beet"</li>
+                </ul>
+            </li>
+        </ul>
+        <p>Now a code block, which should be preserved with its indentation and newlines:</p>
+        <pre><code>fn main() {
+    let message = "hello, long html";
+    for word in message.split_whitespace() {
+        println!("&lt;{}&gt;", word);
+    }
+    // Note: &amp; and &lt; should be unescaped by a proper parser.
+}</code></pre>
+        <p>And a short inline snippet: <code>const LIMIT: usize = 100_000;</code> followed by some trailing prose.</p>
+    </section>
+
+    <section id="section-6" class="anchor">
+        <h2>6. Quotations</h2>
+        <blockquote>
+            "The best way to predict the future is to invent it."
+            <footer>— Alan Kay</footer>
+        </blockquote>
+        <blockquote>
+            "Any sufficiently advanced technology is indistinguishable from magic."
+            <footer>— Arthur C. Clarke</footer>
+        </blockquote>
+        <p>
+            Blockquotes are useful for testing how a document model preserves citation structure. The two quote
+            blocks above are self-contained; a parser should keep their inner text together and not merge them
+            with the surrounding paragraphs.
+        </p>
+    </section>
+
+    <section id="section-7" class="anchor">
+        <h2>7. Deep Dive into Syntax</h2>
+        <p>
+            Let's talk about special characters. HTML entities include <code>&amp;amp;</code> for ampersand,
+            <code>&amp;lt;</code> for less-than, <code>&amp;gt;</code> for greater-than, and <code>&amp;quot;</code>
+            for double quotes. A well-behaved parser will convert these into their literal equivalents when
+            extracting text.
+        </p>
+        <p>
+            Suppose a paragraph has a mix like <code>a &lt; b &amp;&amp; c &gt; d</code>. After unescaping, that
+            string should read <code>a &lt; b &amp;&amp; c &gt; d</code> in the raw text sense. And when the text
+            is re-serialized, the entities must be re-escaped to remain valid HTML.
+        </p>
+        <p>
+            This section also describes a few edge cases that frequently appear in generated documents: em dashes —
+            which some authors write as three hyphens --- others write as a single character &mdash; and numbers like
+            1,000,000.50 or 42 %. Fragment identifiers may contain hyphens, underscores, and periods, as all the
+            <code>id</code> attributes on this page demonstrate.
+        </p>
+        <p>
+            It is also common for real content to contain mathematical comparisons, dates such as 2025-08-28, times
+            like 09:30:00 UTC, and file paths such as <code>/home/pastel/Projects/ee/test_assets/long_page.html</code>.
+        </p>
+    </section>
+
+    <section id="section-8" class="anchor">
+        <h2>8. More Prose</h2>
+        <p>
+            This section exists purely to add length. Every paragraph here is another paragraph a test can count,
+            scroll past, or use to verify that the document keeps its order. Order matters: section 8 must come after
+            section 7 and before section 9.
+        </p>
+        <p>
+            Paragraph order is the backbone of most text-extraction tests. A naive implementation that stores sections
+            in a hash map might scramble them; a correct implementation preserves insertion order. This paragraph is,
+            quite proudly, the second paragraph of section eight.
+        </p>
+        <p>
+            Over the years, many test documents have been written in this spirit. There is nothing special here: just
+            enough words to make the editor scroll. The pleasant green hills of prose roll on, paragraph after
+            paragraph, until the end of the file.
+        </p>
+        <p>
+            Consider the humble sentence starter. "Moreover," "Additionally," "However," and "Consequently" all appear
+            in real writing with surprising frequency. Including them here helps entropy-based tests that compare
+            token distributions between the expected and actual extracted text.
+        </p>
+        <p>
+            One must also consider the ellipsis... which sometimes has spaces before it ... and sometimes not. Punctuation
+            handling is subtle but important for exact-match diffing. Commas, semicolons, colons, and periods all
+            participated in making this paragraph feel real.
+        </p>
+        <p>
+            And finally, a paragraph that is exactly long enough to push the section boundary, ensuring that whitespace
+            between sections is consistent and that upstream tooling does not accidentally trim meaningful blank lines.
+            There should be a blank line before the next heading, just like in this file.
+        </p>
+    </section>
+
+    <section id="section-9" class="anchor">
+        <h2>9. Navigation Practice</h2>
+        <p>
+            The anchors on this page make it a great candidate for fragment navigation tests. Each section beginss
+            with an <code>id</code> attribute, so URLs like
+            <code>https://example.test/test_assets/long_page.html#section-9</code> should land the user right here.
+        </p>
+        <p>
+            Navigation tests may also want to verify that the total number of section headings is ten, matching the
+            table of contents. Other checks could count the number of <code>&lt;p&gt;</code> elements, the number of
+            <code>&lt;li&gt;</code> items, or the number of <code>&lt;pre&gt;</code> blocks presented earlier.
+        </p>
+        <p>
+            For completeness, a short SVG-like inline note: the document should not render it, but a parser might
+            still encounter it if the body ever gained rich media. As it stands, the page contains plain text, tables,
+            and code only.
+        </p>
+    </section>
+
+    <section id="section-10" class="anchor">
+        <h2>10. Conclusion</h2>
+        <p>
+            In conclusion, this long HTML file serves as the requested artifact in the <code>test_assets</code>
+            folder. It is long, structured, readable, and can be used across many kinds of tool tests: text extraction,
+            DOM traversal, anchor navigation, caching, scrolling, syntax highlighting, and diffing.
+        </p>
+        <p>
+            A recap of section contents:
+        </p>
+        <table>
+            <thead>
+                <tr>
+                    <th>Section</th>
+                    <th>Content</th>
+                    <th>Length (approx.)</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr><td>1</td><td>Overview</td><td>3 paragraphs</td></tr>
+                <tr><td>2</td><td>The Story So Far</td><td>3 paragraphs</td></tr>
+                <tr><td>3</td><td>Markdown-styled Content</td><td>4 paragraphs</td></tr>
+                <tr><td>4</td><td>Tables</td><td>1 table + prose</td></tr>
+                <tr><td>5</td><td>Lists &amp; Snippets</td><td>lists + code</td></tr>
+                <tr><td>6</td><td>Quotations</td><td>2 blockquotes</td></tr>
+                <tr><td>7</td><td>Deep Dive into Syntax</td><td>4 paragraphs</td></tr>
+                <tr><td>8</td><td>More Prose</td><td>6 paragraphs</td></tr>
+                <tr><td>9</td><td>Navigation Practice</td><td>3 paragraphs</td></tr>
+                <tr><td>10</td><td>Conclusion</td><td>summary + table</td></tr>
+            </tbody>
+        </table>
+        <p>
+            The file ends here. If you are reading this far, you have reached the actual physical end of the document,
+            which is what a scroll-to-bottom test would check. Thanks for reading, and happy testing!
+        </p>
+    </section>
+</main>
+
+<footer>
+    <p>Long HTML Test Page &mdash; generated for testing purposes.</p>
+    <p>File: <code>test_assets/long_page.html</code></p>
+    <p><a href="#top" style="color:#ecf0f1;">Back to top</a></p>
+</footer>
+
+</body>
+</html>

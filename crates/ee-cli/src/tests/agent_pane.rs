@@ -218,13 +218,16 @@ fn memory_transport_bridge(
 
 // ── Test helpers ─────────────────────────────────────────────────────────────
 
-/// Standard initialize + session/new happy path.
+/// Standard initialize + session/new happy path. Mode-less agents must accept
+/// the TUI's explicit safe default before the session becomes ready.
 fn base_script() -> FakeAgentScript {
     FakeAgentScript::new()
         .wait_for("initialize")
         .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
         .wait_for("session/new")
         .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
 }
 
 const AGENTS_TOML: &str = r#"
@@ -733,7 +736,11 @@ fn exit_slash_commands_work_without_a_configured_agent() {
 
 #[test]
 fn local_slash_commands_control_agent_tui_without_forwarding_prompts() {
-    let script = base_script().wait_for("session/new").respond(json!({ "sessionId": "s2" }));
+    let script = base_script()
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s2" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}));
     let (mut app, _temp, fake) = fake_agents_app(script);
     open_pane_and_wait_ready(&mut app);
 
@@ -841,7 +848,11 @@ fn phase_one_slash_commands_are_local_and_safe() {
 
 #[test]
 fn phase_two_session_lifecycle_commands_keep_local_and_provider_state_distinct() {
-    let script = base_script().wait_for("session/new").respond(json!({ "sessionId": "s2" }));
+    let script = base_script()
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s2" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}));
     let (mut app, _temp, fake) = fake_agents_app(script);
     open_pane_and_wait_ready(&mut app);
 
@@ -913,10 +924,14 @@ fn fork_and_branch_create_redacted_seeded_sessions_without_mutating_parent() {
     let script = base_script()
         .wait_for("session/new")
         .respond(json!({ "sessionId": "s2" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
         .wait_for("session/prompt")
         .respond(json!({ "stopReason": "end_turn" }))
         .wait_for("session/new")
         .respond(json!({ "sessionId": "s3" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
         .wait_for("session/prompt")
         .respond(json!({ "stopReason": "end_turn" }));
     let (mut app, _temp, fake) = fake_agents_app(script);
@@ -1156,7 +1171,9 @@ fn add_dir_requires_advertised_capability_and_explicit_confirmation() {
             "agentCapabilities": { "sessionCapabilities": { "additionalDirectories": {} } }
         }))
         .wait_for("session/new")
-        .respond(json!({ "sessionId": "s1" }));
+        .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}));
     let (mut app, temp, _fake) = fake_agents_app(script);
     open_pane_and_wait_ready(&mut app);
     let extra = temp.path().join("extra-root");
@@ -2449,6 +2466,8 @@ fn agents_reconnect_loads_persisted_session_and_replays_conversation() {
         }))
         .wait_for("session/new")
         .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
         .wait_for("session/prompt")
         .respond_error_with_data(
             -32603,
@@ -2471,6 +2490,8 @@ fn agents_reconnect_loads_persisted_session_and_replays_conversation() {
         .wait_for("session/load")
         .emit(wire::session_update("s1", wire::user_message_chunk("hello agent")))
         .emit(wire::session_update("s1", wire::agent_message_chunk("m1", "first answer")))
+        .respond(json!({}))
+        .wait_for("session/set_mode")
         .respond(json!({}));
     let (mut app, _temp, fake) = fake_agents_app(script);
     app.agents.test_session_state_base = Some(state_dir.path().to_path_buf());
@@ -2556,8 +2577,12 @@ fn workspace_restart_restores_all_agent_threads_on_pane_open() {
         .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
         .wait_for("session/new")
         .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
         .wait_for("session/new")
-        .respond(json!({ "sessionId": "s2" }));
+        .respond(json!({ "sessionId": "s2" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}));
     let (mut first_app, _first_fake) = fake_agents_app_in(workspace.path(), first_script);
     first_app.agents.test_session_state_base = Some(state_dir.path().to_path_buf());
     open_pane_and_wait_ready(&mut first_app);
@@ -2579,8 +2604,12 @@ fn workspace_restart_restores_all_agent_threads_on_pane_open() {
         .wait_for("session/load")
         .emit(wire::session_update("s1", wire::agent_message_chunk("s1-message", "first replay")))
         .respond(json!({}))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
         .wait_for("session/load")
         .emit(wire::session_update("s2", wire::agent_message_chunk("s2-message", "second replay")))
+        .respond(json!({}))
+        .wait_for("session/set_mode")
         .respond(json!({}));
     let (mut restarted_app, restarted_fake) =
         fake_agents_app_in(workspace.path(), restarted_script);
@@ -2619,6 +2648,84 @@ fn workspace_restart_restores_all_agent_threads_on_pane_open() {
 }
 
 #[test]
+fn workspace_restart_restores_local_transcript_when_agent_load_has_no_replay() {
+    let workspace = tempfile::tempdir().unwrap();
+    let state_dir = tempfile::tempdir().unwrap();
+    let first_script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}));
+    let (mut first_app, _first_fake) = fake_agents_app_in(workspace.path(), first_script);
+    first_app.agents.test_session_state_base = Some(state_dir.path().to_path_buf());
+    open_pane_and_wait_ready(&mut first_app);
+    first_app.agents.threads[0].transcript.push(TranscriptItem::Message {
+        nick: String::from("you"),
+        text: String::from("persisted question"),
+        kind: MessageRenderKind::User,
+        message_id: Some(String::from("user-1")),
+        response_group: None,
+        at: SystemTime::now(),
+    });
+    first_app.agents.threads[0].transcript.push(TranscriptItem::Message {
+        nick: String::from("assistant"),
+        text: String::from("persisted answer"),
+        kind: MessageRenderKind::Assistant,
+        message_id: Some(String::from("assistant-1")),
+        response_group: Some(1),
+        at: SystemTime::now(),
+    });
+    first_app.shutdown_agents();
+    drop(first_app);
+
+    let restarted_script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({
+            "protocolVersion": 1,
+            "agentCapabilities": { "loadSession": true }
+        }))
+        .wait_for("session/load")
+        .respond(json!({}))
+        .wait_for("session/set_mode")
+        .respond(json!({}));
+    let (mut restarted_app, restarted_fake) =
+        fake_agents_app_in(workspace.path(), restarted_script);
+    restarted_app.agents.test_session_state_base = Some(state_dir.path().to_path_buf());
+
+    run_ex(&mut restarted_app, "agents");
+    wait_until(&mut restarted_app, "local transcript restored", |app| {
+        app.agents.threads.first().is_some_and(|thread| {
+            thread.state == ThreadUiState::Ready
+                && thread.transcript.iter().any(|item| {
+                    matches!(
+                        item,
+                        TranscriptItem::Message {
+                            kind: MessageRenderKind::User,
+                            text,
+                            ..
+                        } if text == "persisted question"
+                    )
+                })
+                && thread.transcript.iter().any(|item| {
+                    matches!(
+                        item,
+                        TranscriptItem::Message {
+                            kind: MessageRenderKind::Assistant,
+                            text,
+                            ..
+                        } if text == "persisted answer"
+                    )
+                })
+        })
+    });
+
+    assert_eq!(restarted_fake.agent().requests_by_method("session/load").len(), 1);
+    assert!(restarted_fake.agent().requests_by_method("session/new").is_empty());
+}
+
+#[test]
 fn agents_reconnect_without_persisted_session_reports_error() {
     // A fresh state directory and no session ever created: there is no
     // persisted record to reconnect.
@@ -2636,7 +2743,7 @@ fn agents_reconnect_without_persisted_session_reports_error() {
 }
 
 #[test]
-fn no_session_footer_uses_agent_status_background_and_ask_mode() {
+fn no_session_footer_uses_agent_status_background_without_mode_fallback() {
     let temp = tempfile::tempdir().unwrap();
     fs::write(temp.path().join(".ee.toml"), "[agents]\nenabled = true\n").unwrap();
     let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
@@ -2656,7 +2763,7 @@ fn no_session_footer_uses_agent_status_background_and_ask_mode() {
         .collect();
     let footer_y = rendered
         .iter()
-        .position(|row| row.contains("agents [no session] | mode:ask"))
+        .position(|row| row.contains("agents [no session] | mode:unset"))
         .expect("no-session footer row");
 
     let footer = &rendered[footer_y];
@@ -2677,8 +2784,8 @@ fn no_session_footer_uses_agent_status_background_and_ask_mode() {
 }
 
 #[test]
-fn footer_defaults_unadvertised_agent_mode_to_ask() {
-    let (mut app, _temp, _fake) = fake_agents_app(base_script());
+fn cold_launch_negotiates_ask_for_agent_without_mode_state() {
+    let (mut app, _temp, fake) = fake_agents_app(base_script());
     open_pane_and_wait_ready(&mut app);
 
     let backend = TestBackend::new(120, 24);
@@ -2693,8 +2800,11 @@ fn footer_defaults_unadvertised_agent_mode_to_ask() {
 
     assert!(
         rendered[composer_row - 1].contains("mode:ask"),
-        "footer must default to ask mode: {rendered:#?}"
+        "footer must show negotiated ask mode: {rendered:#?}"
     );
+    let requests = fake.agent().requests_by_method("session/set_mode");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["params"]["modeId"], "ask");
 }
 
 #[test]
@@ -3212,7 +3322,8 @@ fn slash_commands_are_discoverable_and_tab_inserts_prompt_text() {
         app.agents.threads[0]
             .system_notices()
             .iter()
-            .any(|notice| notice.contains("commands: /plan — Create plan, /edit — Edit code"))
+            .all(|notice| !notice.starts_with("commands:")),
+        "advertised commands must not add chat-area hints"
     );
 
     // Slash-prefixed drafts autocomplete by prefix; once completed, Tab and
@@ -3497,6 +3608,8 @@ fn provider_features_require_live_advertisement_or_advertised_config() {
                 }
             ]
         }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
         .wait_for("session/set_config_option")
         .respond(json!({}))
         .wait_for("session/set_config_option")
@@ -4530,8 +4643,12 @@ fn new_thread_slash_command_starts_and_focuses_thread_locally() {
         .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
         .wait_for("session/new")
         .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
         .wait_for("session/new")
-        .respond(json!({ "sessionId": "s2" }));
+        .respond(json!({ "sessionId": "s2" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}));
     let (mut app, _temp, fake) = fake_agents_app(script);
     open_pane_and_wait_ready(&mut app);
 
@@ -4622,8 +4739,12 @@ fn agents_threads_opens_picker_and_focuses_selected_session() {
         .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
         .wait_for("session/new")
         .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
         .wait_for("session/new")
-        .respond(json!({ "sessionId": "s2" }));
+        .respond(json!({ "sessionId": "s2" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}));
     let (mut app, _temp, _fake) = fake_agents_app(script);
     open_pane_and_wait_ready(&mut app);
     run_ex(&mut app, "agents_new");
@@ -4653,8 +4774,12 @@ fn sessions_slash_command_opens_agent_thread_picker_locally() {
         .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
         .wait_for("session/new")
         .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
         .wait_for("session/new")
-        .respond(json!({ "sessionId": "s2" }));
+        .respond(json!({ "sessionId": "s2" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}));
     let (mut app, _temp, fake) = fake_agents_app(script);
     open_pane_and_wait_ready(&mut app);
     run_ex(&mut app, "agents_new");
@@ -4679,8 +4804,12 @@ fn ctrl_t_opens_agent_thread_picker() {
         .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
         .wait_for("session/new")
         .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
         .wait_for("session/new")
-        .respond(json!({ "sessionId": "s2" }));
+        .respond(json!({ "sessionId": "s2" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}));
     let (mut app, _temp, _fake) = fake_agents_app(script);
     open_pane_and_wait_ready(&mut app);
     run_ex(&mut app, "agents_new");
@@ -4702,8 +4831,12 @@ fn thread_switching_preserves_drafts_scroll_unread_and_activity() {
         .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
         .wait_for("session/new")
         .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
         .wait_for("session/new")
         .respond(json!({ "sessionId": "s2" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
         // After s2 is fully registered, a prompt on s2 lets the fake emit
         // content for s1 while s2 is the focused thread (deterministic
         // unread bump).

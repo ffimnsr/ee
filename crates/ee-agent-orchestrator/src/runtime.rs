@@ -79,10 +79,11 @@ struct PostWriteValidation {
     results: Vec<ValidationResult>,
 }
 
-/// Host-derived metadata retained only as bounded checkpoint provenance.
-/// It never includes raw context excerpts, prompt text, tool output, or paths.
+/// Host-derived metadata used while preparing one turn. Only redacted provenance
+/// fields are retained in checkpoints; normalized live-session history is transient.
 #[derive(Debug, Clone, Default)]
 struct RecoveryTurnMetadata {
+    history: Vec<ModelMessage>,
     context_plan: Option<ContextPlan>,
     checkpoint_context: CheckpointContextProvenance,
     evidence_refs: Vec<crate::observability::RedactedEvidenceRef>,
@@ -567,6 +568,7 @@ impl OrchestratorRuntime {
                 cancel,
                 task,
                 Some(system_context.clone()),
+                metadata.history.clone(),
                 metadata.context_plan.clone(),
                 self.events.clone(),
                 LoopOptions {
@@ -685,6 +687,7 @@ impl OrchestratorRuntime {
             cancel,
             task,
             Some(system_context),
+            metadata.history,
             metadata.context_plan,
             self.events.clone(),
             LoopOptions {
@@ -715,8 +718,29 @@ impl OrchestratorRuntime {
         cancel: watch::Receiver<bool>,
         recovery: StrategicRecoveryContext,
     ) -> Result<StrategicTurnOutcome, OrchestratorError> {
+        self.run_turn_strategic_recoverable_with_history(
+            ctx,
+            sink,
+            client,
+            cancel,
+            recovery,
+            Vec::new(),
+        )
+        .await
+    }
+
+    pub(crate) async fn run_turn_strategic_recoverable_with_history(
+        &self,
+        ctx: PromptContext,
+        sink: UpdateSink,
+        client: ClientBridge,
+        cancel: watch::Receiver<bool>,
+        recovery: StrategicRecoveryContext,
+        history: Vec<ModelMessage>,
+    ) -> Result<StrategicTurnOutcome, OrchestratorError> {
         self.set_validation_planning_input(&recovery.input);
-        let metadata = recovery_turn_metadata(&recovery.input);
+        let mut metadata = recovery_turn_metadata(&recovery.input);
+        metadata.history = history;
         match self
             .run_turn_recoverable_with_metadata(
                 ctx,
@@ -1175,6 +1199,7 @@ impl OrchestratorRuntime {
                 cancel,
                 task,
                 TurnSystemContext {
+                    history: Vec::new(),
                     memory,
                     session: Some(session),
                     task_context: Some(context_plan),
@@ -1437,6 +1462,7 @@ impl OrchestratorRuntime {
             cancel,
             task,
             system_context,
+            Vec::new(),
             None,
             events,
             LoopOptions {
@@ -1462,6 +1488,7 @@ impl OrchestratorRuntime {
         cancel: watch::Receiver<bool>,
         task: TaskNode,
         system_context: Option<String>,
+        history: Vec<ModelMessage>,
         task_context: Option<ContextPlan>,
         events: EventRecorder,
         options: LoopOptions,
@@ -1489,7 +1516,7 @@ impl OrchestratorRuntime {
                 client,
                 cancel,
                 task,
-                TurnSystemContext { memory, session: system_context, task_context },
+                TurnSystemContext { history, memory, session: system_context, task_context },
             )
             .await
     }
@@ -1809,6 +1836,7 @@ fn recovery_turn_metadata(input: &StrategicInput) -> RecoveryTurnMetadata {
         .filter_map(|id| crate::observability::RedactedEvidenceRef::new(id).ok())
         .collect();
     RecoveryTurnMetadata {
+        history: Vec::new(),
         context_plan: input
             .context
             .as_ref()
