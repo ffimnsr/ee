@@ -23,6 +23,27 @@ Examples:
 EOF
 }
 
+install_file_atomically() {
+  local source_path="$1"
+  local destination_path="$2"
+  local mode="$3"
+  local staged_path
+
+  staged_path="$(mktemp "${destination_path}.tmp.XXXXXX")"
+  if ! cp -- "$source_path" "$staged_path"; then
+    rm -f -- "$staged_path"
+    return 1
+  fi
+  if ! chmod "$mode" "$staged_path"; then
+    rm -f -- "$staged_path"
+    return 1
+  fi
+  if ! mv -f -- "$staged_path" "$destination_path"; then
+    rm -f -- "$staged_path"
+    return 1
+  fi
+}
+
 main() {
   local repo_root
   repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -85,9 +106,11 @@ main() {
 
   local install_dir="$plugin_dir/xi-lsp-plugin"
   mkdir -p "$install_dir/bin"
-  cp "$manifest_path" "$install_dir/manifest.toml"
-  cp "$binary_path" "$install_dir/bin/xi-lsp-plugin${EXE_SUFFIX:-}"
-  chmod +x "$install_dir/bin/xi-lsp-plugin${EXE_SUFFIX:-}"
+  install_file_atomically "$manifest_path" "$install_dir/manifest.toml" 0644
+  install_file_atomically \
+    "$binary_path" \
+    "$install_dir/bin/xi-lsp-plugin${EXE_SUFFIX:-}" \
+    0755
 
   printf 'bundled plugins installed at %s\n' "$plugin_dir"
   printf 'installed plugin: xi-lsp-plugin\n'
