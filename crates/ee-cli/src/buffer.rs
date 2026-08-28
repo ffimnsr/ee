@@ -2180,6 +2180,10 @@ impl BufferManager {
         let rpc_id = self.next_rpc_id;
         self.next_rpc_id += 1;
 
+        if let Err(error) = crate::config::configure_runtime_loader_for_file(path.as_deref(), true)
+        {
+            eprintln!("ee: warning: failed to configure runtime languages: {error}");
+        }
         send_lsp_config_notification(&self.tx, path.as_deref())?;
 
         // Register a one-shot channel so the reader thread can hand us the

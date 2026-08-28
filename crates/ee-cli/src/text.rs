@@ -1,4 +1,66 @@
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+/// Deterministic display-width wrapping for terminal UI text.
+///
+/// Breaks at whitespace when possible and hard-breaks overlong words; output
+/// never exceeds `width` display columns.
+pub(crate) fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(4);
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let paragraph = paragraph.strip_suffix('\r').unwrap_or(paragraph);
+        let mut wrapped = wrap_text_paragraph(paragraph, width);
+        if wrapped.is_empty() {
+            lines.push(String::new());
+        } else {
+            lines.append(&mut wrapped);
+        }
+    }
+    lines
+}
+
+fn wrap_text_paragraph(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    for word in text.split_whitespace() {
+        let word_width = UnicodeWidthStr::width(word);
+        if current_width + 1 + word_width > width && !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        if word_width > width {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                current_width = 0;
+            }
+            let mut rest = word;
+            while UnicodeWidthStr::width(rest) > width {
+                let mut cut = width;
+                while !rest.is_char_boundary(cut) {
+                    cut -= 1;
+                }
+                lines.push(rest[..cut].to_string());
+                rest = &rest[cut..];
+            }
+            if !rest.is_empty() {
+                current = rest.to_string();
+                current_width = UnicodeWidthStr::width(rest);
+            }
+            continue;
+        }
+        if !current.is_empty() {
+            current.push(' ');
+            current_width += 1;
+        }
+        current.push_str(word);
+        current_width += word_width;
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
 
 #[cfg(test)]
 fn is_word_char(ch: char) -> bool {
@@ -174,4 +236,32 @@ pub(crate) fn next_word_end(line: &str, byte: usize, long_word: bool) -> Option<
     }
 
     found.then_some(end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_text_breaks_at_whitespace_and_hard_breaks_long_words() {
+        let lines = wrap_text("alpha beta gamma delta", 10);
+        assert_eq!(lines, vec!["alpha beta", "gamma", "delta"]);
+
+        let long = wrap_text("supercalifragilistic", 8);
+        assert!(long.iter().all(|line| UnicodeWidthStr::width(line.as_str()) <= 8));
+        assert_eq!(long.join(""), "supercalifragilistic");
+    }
+
+    #[test]
+    fn wrap_text_handles_narrow_widths() {
+        let lines = wrap_text("ab cd", 4);
+        assert_eq!(lines, vec!["ab", "cd"]);
+        assert!(!wrap_text("x", 4).is_empty());
+    }
+
+    #[test]
+    fn wrap_text_preserves_explicit_newlines() {
+        let lines = wrap_text("alpha beta\ngamma\n\ndelta", 20);
+        assert_eq!(lines, vec!["alpha beta", "gamma", "", "delta"]);
+    }
 }

@@ -20,18 +20,19 @@ use crate::theme::ui as theme;
 use crate::ui::ui;
 
 #[test]
-fn ui_render_shows_scrolled_gutter_after_many_enters() {
+fn ui_render_shows_scrolled_gutter_for_long_buffer() {
     let mut app = App::from_path(None).unwrap();
-
-    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
-    for _ in 0..50 {
-        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        app.backend.pump().unwrap();
-    }
-    // Bounded wait: xi-core applies edits asynchronously; under parallel test
-    // load the fixed pump budget can lapse, so wait until the buffer actually
-    // holds all 51 lines (2s deadline, then the assertions below report state).
-    app.backend.pump_until(|state| state.get_line(50).is_some()).expect("buffer reaches 51 lines");
+    app.backend.lines = vec![String::new(); 51];
+    app.backend.line_cache = vec![
+        LineSlot::Known(CachedLine {
+            text: String::new(),
+            cursors: Vec::new(),
+            syntax_spans: Vec::new(),
+        });
+        51
+    ];
+    app.backend.cursor_line = 50;
+    app.backend.cursor_col = 0;
 
     let width = 80;
     let height = 49;

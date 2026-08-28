@@ -452,6 +452,30 @@ fn open_file_bootstraps_visible_lines_lazily() {
 }
 
 #[test]
+fn opening_yaml_after_scratch_buffer_emits_syntax_spans() {
+    let _tree_sitter_guard = tree_sitter_test_lock().lock().unwrap_or_else(|err| err.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("workflow.yml");
+    fs::write(&path, "name: CI\non:\n  push:\n").unwrap();
+    let mut app = App::from_path(None).unwrap();
+
+    let buf_id = app.backend.open_buffer(Some(path)).unwrap();
+    app.backend.switch_to_id(buf_id).unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "YAML syntax spans",
+        Duration::from_secs(5),
+        |backend| {
+            backend
+                .active()
+                .line_cache
+                .iter()
+                .any(|slot| matches!(slot, LineSlot::Known(line) if !line.syntax_spans.is_empty()))
+        },
+    );
+}
+
+#[test]
 fn startup_render_ready_after_first_visible_line() {
     assert!(!startup_render_ready(&[]));
     assert!(!startup_render_ready(&[LineSlot::Invalid]));

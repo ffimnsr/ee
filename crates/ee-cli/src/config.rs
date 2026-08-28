@@ -1462,10 +1462,14 @@ impl ConfigEnvironment {
     }
 
     fn anchor_dir(&self, file_path: Option<&Path>) -> PathBuf {
-        match file_path {
-            Some(path) if path.is_dir() => path.to_path_buf(),
-            Some(path) => path.parent().map(Path::to_path_buf).unwrap_or_else(|| self.cwd.clone()),
-            None => self.cwd.clone(),
+        let Some(path) = file_path else {
+            return self.cwd.clone();
+        };
+        let path = if path.is_absolute() { path.to_path_buf() } else { self.cwd.join(path) };
+        if path.is_dir() {
+            path
+        } else {
+            path.parent().map(Path::to_path_buf).unwrap_or_else(|| self.cwd.clone())
         }
     }
 
@@ -1478,10 +1482,14 @@ impl ConfigEnvironment {
     }
 
     fn workspace_candidate_paths(&self, file_path: Option<&Path>) -> Vec<PathBuf> {
+        let legacy_user_path = self.legacy_user_config_path();
         let mut candidates = Vec::new();
         let mut dir = self.anchor_dir(file_path);
         loop {
-            candidates.push(dir.join(".ee.toml"));
+            let candidate = dir.join(".ee.toml");
+            if legacy_user_path.as_ref() != Some(&candidate) {
+                candidates.push(candidate);
+            }
             if !dir.pop() {
                 break;
             }
@@ -3840,6 +3848,52 @@ tab_width = 4
         let settings = load_config_with_env(None, &env);
         assert!(settings.wrap_lines);
         assert!(!settings.cursor_line);
+    }
+
+    #[test]
+    fn legacy_user_config_is_not_misclassified_as_workspace_config() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let mut env = test_config_environment(temp.path());
+        env.home_dir = Some(home.clone());
+        env.cwd = home.join("project");
+        std::fs::create_dir_all(&env.cwd).unwrap();
+        std::fs::create_dir_all(env.config_dir.as_ref().unwrap().join("ee")).unwrap();
+        std::fs::write(
+            home.join(".ee.toml"),
+            "[languages.yaml]\nfile_types = [\"yaml\", \"yml\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            env.config_dir.as_ref().unwrap().join("ee").join("config.toml"),
+            "wrap_lines = true\n",
+        )
+        .unwrap();
+
+        let runtime = runtime_languages_with_env(None, &env);
+        let layers = discover_config_layers_with_env(&env, None).layers;
+
+        assert!(!runtime.workspace_overrides.contains_key("yaml"));
+        assert_eq!(
+            layer_paths(&layers),
+            vec![env.config_dir.as_ref().unwrap().join("ee").join("config.toml")]
+        );
+    }
+
+    #[test]
+    fn relative_file_path_discovers_workspace_config_from_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let env = test_config_environment(temp.path());
+        let file = env.cwd.join("src").join("main.rs");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        std::fs::write(env.cwd.join(".ee.toml"), "cursor_line = true\n").unwrap();
+
+        let layers = discover_config_layers_with_env(&env, Some(Path::new("src/main.rs"))).layers;
+
+        assert!(layers.iter().any(|layer| {
+            layer.kind == ConfigLayerKind::Ancestor && layer.path == env.cwd.join(".ee.toml")
+        }));
     }
 
     #[test]

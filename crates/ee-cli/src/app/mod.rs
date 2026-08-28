@@ -65,10 +65,12 @@ pub(crate) use agent_bridge::{
 };
 
 #[cfg(feature = "agents")]
+pub(crate) use crate::text::wrap_text;
+#[cfg(feature = "agents")]
 pub(crate) use agent_pane::{
     AGENTS_NICK_COL_WIDTH, AGENTS_PANE_BOTTOM_HEIGHT, AGENTS_PANE_RIGHT_WIDTH, AgentPaneLayout,
     AgentThreadUi, MessageRenderKind, ThreadUiState, TranscriptItem, format_duration,
-    turn_metrics_label, wrap_text,
+    turn_metrics_label,
 };
 
 const SWIFT_MOTION_LABELS: &[u8] = b"abcdefghijklmnopqrstuvwxyz";

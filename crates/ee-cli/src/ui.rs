@@ -1,7 +1,9 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap,
+};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use xi_core_lib::plugin_rpc::DiagnosticSeverity;
 
@@ -11,7 +13,7 @@ use crate::buffer::BufState;
 use crate::config::{NumberStyle, StatuslineFormat};
 use crate::picker::PickerKind;
 use crate::quickfix::QfList;
-use crate::text::{byte_col_to_display_col, display_col_to_byte};
+use crate::text::{byte_col_to_display_col, display_col_to_byte, wrap_text};
 use crate::theme::ui as theme;
 
 #[derive(Clone, Copy)]
@@ -2887,32 +2889,42 @@ fn render_picker(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     );
 }
 
+const TOAST_MAX_WIDTH: u16 = 72;
+const TOAST_MIN_WIDTH: u16 = 24;
+const TOAST_MAX_CONTENT_HEIGHT: u16 = 6;
+const TOAST_MARGIN: u16 = 1;
+const TOAST_FRAME_WIDTH: u16 = 4;
+const TOAST_FRAME_HEIGHT: u16 = 2;
+
+fn toast_content_lines(message: &str, width: u16, max_height: u16) -> Vec<String> {
+    let content_width = usize::from(width.saturating_sub(TOAST_FRAME_WIDTH)).max(4);
+    let mut lines = wrap_text(message, content_width);
+    lines.truncate(usize::from(max_height));
+    lines
+}
+
 fn toast_rect(area: Rect, message: &str) -> Option<Rect> {
-    const MAX_WIDTH: u16 = 52;
-    const MAX_CONTENT_HEIGHT: u16 = 3;
-    const MARGIN: u16 = 1;
-
-    let width = area.width.saturating_sub(MARGIN * 2).min(MAX_WIDTH);
-    if width < 12 || area.height < 4 {
+    let available_width = area.width.saturating_sub(TOAST_MARGIN * 2);
+    let available_height = area.height.saturating_sub(TOAST_MARGIN * 2);
+    if available_width < TOAST_MIN_WIDTH || available_height <= TOAST_FRAME_HEIGHT {
         return None;
     }
 
-    let content_width = usize::from(width.saturating_sub(2)).max(1);
-    let content_lines = message
-        .lines()
-        .map(|line| UnicodeWidthStr::width(line).max(1).div_ceil(content_width))
-        .sum::<usize>()
-        .max(1)
-        .min(usize::from(MAX_CONTENT_HEIGHT));
-    let height =
-        (content_lines as u16).saturating_add(2).min(area.height.saturating_sub(MARGIN * 2));
-    if height < 3 {
-        return None;
-    }
+    let natural_content_width = message.lines().map(UnicodeWidthStr::width).max().unwrap_or(1);
+    let desired_width = u16::try_from(natural_content_width)
+        .unwrap_or(u16::MAX)
+        .saturating_add(TOAST_FRAME_WIDTH)
+        .max(TOAST_MIN_WIDTH);
+    let width = desired_width.min(TOAST_MAX_WIDTH).min(available_width);
+    let max_content_height =
+        TOAST_MAX_CONTENT_HEIGHT.min(available_height.saturating_sub(TOAST_FRAME_HEIGHT));
+    let content_height =
+        toast_content_lines(message, width, max_content_height).len().max(1) as u16;
+    let height = content_height.saturating_add(TOAST_FRAME_HEIGHT);
 
     Some(Rect {
-        x: area.right().saturating_sub(width + MARGIN),
-        y: area.y.saturating_add(MARGIN),
+        x: area.right().saturating_sub(width + TOAST_MARGIN),
+        y: area.y.saturating_add(TOAST_MARGIN),
         width,
         height,
     })
@@ -2922,13 +2934,17 @@ fn render_toast(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let Some(message) = app.toast_message() else { return };
     let Some(rect) = toast_rect(area, message) else { return };
 
+    let content_height = rect.height.saturating_sub(TOAST_FRAME_HEIGHT);
+    let content = toast_content_lines(message, rect.width, content_height).join("\n");
+
     frame.render_widget(Clear, rect);
     frame.render_widget(
-        Paragraph::new(message)
+        Paragraph::new(content)
             .block(
                 Block::default()
                     .title(" notification ")
                     .borders(Borders::ALL)
+                    .padding(Padding::new(1, 1, 0, 0))
                     .border_style(Style::default().fg(theme::BORDER_MUTED))
                     .style(Style::default().bg(theme::BG_CHROME)),
             )
@@ -3151,14 +3167,21 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| ui(frame, &app)).unwrap();
         let buffer = terminal.backend().buffer();
-        let toast_row =
-            (0..width).map(|x| buffer.cell((x, 2)).unwrap().symbol()).collect::<String>();
+        let rect = toast_rect(Rect::new(0, 0, width, height), "saved /tmp/example.rs").unwrap();
+        let row_text = |y| {
+            (rect.x + 1..rect.right() - 1)
+                .map(|x| buffer.cell((x, y)).unwrap().symbol())
+                .collect::<String>()
+        };
+        let content_row = row_text(rect.y + 1);
         let prompt_row =
             (0..width).map(|x| buffer.cell((x, height - 1)).unwrap().symbol()).collect::<String>();
 
-        assert!(toast_row.contains("saved /tmp/example.rs"), "toast row: {toast_row:?}");
+        assert!(content_row.contains("saved /tmp/example.rs"), "toast row: {content_row:?}");
+        assert_eq!(buffer.cell((rect.x + 1, rect.y + 1)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((rect.right() - 2, rect.y + 1)).unwrap().symbol(), " ");
         assert!(prompt_row.trim().is_empty(), "prompt row: {prompt_row:?}");
-        assert_eq!(buffer.cell((28, 2)).unwrap().bg, theme::BG_CHROME);
+        assert_eq!(buffer.cell((rect.x + 1, rect.y + 1)).unwrap().bg, theme::BG_CHROME);
     }
 
     #[test]
@@ -3190,14 +3213,34 @@ mod tests {
     }
 
     #[test]
-    fn toast_rect_is_top_right_and_bounded() {
+    fn toast_rect_is_top_right_and_content_sized() {
         let area = Rect { x: 10, y: 4, width: 120, height: 40 };
         let rect = toast_rect(area, "saved /tmp/example.rs").expect("space for toast");
 
-        assert_eq!(rect.x, 77);
+        assert_eq!(rect.x, 104);
         assert_eq!(rect.y, 5);
-        assert_eq!(rect.width, 52);
+        assert_eq!(rect.width, 25);
         assert_eq!(rect.height, 3);
+    }
+
+    #[test]
+    fn toast_hard_wraps_long_paths_and_accounts_for_horizontal_padding() {
+        let area = Rect { x: 0, y: 0, width: 58, height: 20 };
+        let message =
+            "saved\n/home/pastel/Projects/ee/test_assets/sample-program/sample-program.rs";
+        let rect = toast_rect(area, message).expect("space for toast");
+        let lines = toast_content_lines(
+            message,
+            rect.width,
+            rect.height.saturating_sub(TOAST_FRAME_HEIGHT),
+        );
+
+        assert_eq!(rect.x, 1);
+        assert_eq!(rect.y, 1);
+        assert_eq!(rect.width, 56);
+        assert_eq!(rect.height, lines.len() as u16 + TOAST_FRAME_HEIGHT);
+        assert_eq!(lines[0], "saved");
+        assert_eq!(lines[1..].concat(), message.lines().nth(1).unwrap());
     }
 
     #[test]
