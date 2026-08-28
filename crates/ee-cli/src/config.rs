@@ -36,8 +36,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use xi_core_lib::config::Table as XiConfigTable;
 use xi_core_lib::runtime_loader::{
-    RuntimeLanguageConfig, RuntimeLanguageOverrides, configure_default_runtime_loader_overrides,
-    validate_runtime_language_overrides,
+    RuntimeLanguageConfig, RuntimeLanguageOverrides,
+    configure_default_runtime_loader_overrides_if_changed, validate_runtime_language_overrides,
 };
 use xi_lsp_lib::{
     Config as PluginLspConfig, DisabledLanguageConfig as PluginDisabledLanguageConfig,
@@ -3211,7 +3211,7 @@ pub(crate) fn configure_runtime_loader_for_file(
 ) -> Result<(), String> {
     let runtime_languages =
         runtime_languages_with_env(file_path, &ConfigEnvironment::from_process());
-    configure_default_runtime_loader_overrides(
+    configure_default_runtime_loader_overrides_if_changed(
         runtime_languages.user_overrides,
         runtime_languages.workspace_overrides,
         workspace_trusted,

@@ -1062,6 +1062,49 @@ fn test_grammar_bootstrap_populates_default_loader_only_in_tests() {
 }
 
 #[test]
+fn identical_default_loader_overrides_preserve_runtime_caches() {
+    let _guard = runtime_loader_test_guard();
+    let mut changed_overrides = RuntimeLanguageOverrides::new();
+    changed_overrides.insert(
+        String::from("rust"),
+        RuntimeLanguageConfig { enabled: Some(true), ..RuntimeLanguageConfig::default() },
+    );
+    configure_default_runtime_loader_overrides(
+        changed_overrides,
+        RuntimeLanguageOverrides::new(),
+        false,
+    )
+    .unwrap();
+    configure_default_runtime_loader_overrides(
+        RuntimeLanguageOverrides::new(),
+        RuntimeLanguageOverrides::new(),
+        false,
+    )
+    .unwrap();
+
+    let cache_path = PathBuf::from("__test__/repeated-config-cache");
+    with_default_runtime_loader_mut(|loader| {
+        loader.record_grammar_handle(GrammarHandle::from_loaded(
+            test_grammars::rust(),
+            &cache_path,
+            "tree_sitter_rust",
+        ));
+    });
+
+    configure_default_runtime_loader_overrides_if_changed(
+        RuntimeLanguageOverrides::new(),
+        RuntimeLanguageOverrides::new(),
+        false,
+    )
+    .unwrap();
+
+    with_default_runtime_loader(|loader| {
+        assert!(loader.grammar_cache.contains_key(&cache_path));
+    });
+    ensure_default_runtime_loader_has_test_grammars();
+}
+
+#[test]
 fn query_inheritance_merges_parent_before_child() {
     let temp_dir = TempDir::new().unwrap();
     let bundled_root = temp_dir.path().join("bundle");

@@ -607,7 +607,7 @@ pub(crate) struct FileTypeOwner {
     pub priority: i32,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct DefaultRuntimeLoaderOverrides {
     pub user_overrides: RuntimeLanguageOverrides,
     pub workspace_overrides: RuntimeLanguageOverrides,

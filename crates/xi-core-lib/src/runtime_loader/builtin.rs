@@ -481,14 +481,34 @@ pub fn configure_default_runtime_loader_overrides(
     workspace_overrides: RuntimeLanguageOverrides,
     workspace_trusted: bool,
 ) -> Result<(), RuntimeLoaderError> {
+    configure_default_runtime_loader_overrides_inner(
+        DefaultRuntimeLoaderOverrides { user_overrides, workspace_overrides, workspace_trusted },
+        false,
+    )
+}
+
+pub fn configure_default_runtime_loader_overrides_if_changed(
+    user_overrides: RuntimeLanguageOverrides,
+    workspace_overrides: RuntimeLanguageOverrides,
+    workspace_trusted: bool,
+) -> Result<(), RuntimeLoaderError> {
+    configure_default_runtime_loader_overrides_inner(
+        DefaultRuntimeLoaderOverrides { user_overrides, workspace_overrides, workspace_trusted },
+        true,
+    )
+}
+
+fn configure_default_runtime_loader_overrides_inner(
+    requested: DefaultRuntimeLoaderOverrides,
+    skip_unchanged: bool,
+) -> Result<(), RuntimeLoaderError> {
     {
         let mut guard =
             DEFAULT_RUNTIME_LOADER_OVERRIDES.write().expect("runtime loader overrides poisoned");
-        *guard = DefaultRuntimeLoaderOverrides {
-            user_overrides,
-            workspace_overrides,
-            workspace_trusted,
-        };
+        if skip_unchanged && *guard == requested {
+            return Ok(());
+        }
+        *guard = requested;
     }
     reload_default_runtime_loader_languages(&builtin_runtime_languages())
 }
