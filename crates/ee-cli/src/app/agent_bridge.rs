@@ -26,6 +26,8 @@ use std::pin::Pin;
 use std::process::{Child, Stdio};
 #[cfg(test)]
 use std::sync::LazyLock;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -66,29 +68,30 @@ static PRE_WRITE_VERIFICATION_TEST_HOOK: LazyLock<Mutex<Option<WriteVerification
 static POST_WRITE_TEST_HOOK: LazyLock<Mutex<Option<WriteVerificationTestHook>>> =
     LazyLock::new(|| Mutex::new(None));
 
+#[cfg(test)]
+static WEB_DISPATCH_TEST_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 use crate::policy::{
-    CommandInvocation, CommandRule, DecisionReason, MAX_WRITE_FILE_BYTES, MAX_WRITE_FILES,
-    MAX_WRITE_TOTAL_BYTES, MatchMode, McpInvocation, McpRule, OperationIdentity, PathPrefix,
-    PolicyInput, TERMINAL_READONLY_PROFILE, TransportKind, TrustCategory, TrustDecision,
+    BoundedRuleCandidate, BoundedRulePreview, BrowserActionClass, CATASTROPHIC_DELETE_RULE_ID,
+    CommandInvocation, CommandRule, DecisionReason, FilesystemOperationKind, FilesystemRule,
+    HostMatchMode, MAX_WRITE_FILE_BYTES, MAX_WRITE_FILES, MAX_WRITE_TOTAL_BYTES, MatchMode,
+    McpDenyRule, McpInvocation, NetworkMethodClass, NetworkRule, NetworkScheme, OperationIdentity,
+    PathPrefix, PolicyInput, SafeguardCategory, SafeguardMatch, TERMINAL_READONLY_PROFILE,
+    ToolRule, ToolRuleIdentity, TransportKind, TrustCategory, TrustDecision, TrustEffect,
     TrustOperation, TrustOutcome, TrustRule, TrustRuleScope, TrustStore, TrustStoreDocument,
     TrustStoreError, WorkspaceIdentity, WriteOperationKind, WriteRule, evaluate,
-    generate_command_rule_id, generate_mcp_rule_id, generate_write_rule_id,
-    is_protected_relative_path, match_profile_entry, resolve_command_cwd, validate_command_tokens,
+    generate_command_rule_id, generate_filesystem_rule_id, generate_mcp_rule_id,
+    generate_network_rule_id, generate_tool_rule_id, generate_write_rule_id, inspect_path_escape,
+    inspect_protected_state_path, inspect_special_file, inspect_terminal_command,
+    is_protected_relative_path, match_profile_entry, resolve_command_cwd, validate_argv_tokens,
+    validate_command_tokens,
 };
 
 // ── Policy constants ─────────────────────────────────────────────────────────
 
-/// Persistent terminal grant window (`Allow for 1 hour / 20 uses`).
-pub(crate) const PERSISTENT_TERMINAL_DURATION: Duration = Duration::from_secs(60 * 60);
-/// Maximum successful uses of one persistent terminal grant.
-pub(crate) const PERSISTENT_TERMINAL_MAX_USES: u64 = 20;
 /// The persistent terminal approval option label.
 pub(crate) const PERSISTENT_TERMINAL_OPTION_LABEL: &str = "Allow for 1 hour / 20 uses";
 
-/// Persistent write grant window (`Allow for 1 hour / 5 uses`, Phase 5).
-pub(crate) const PERSISTENT_WRITE_DURATION: Duration = Duration::from_secs(60 * 60);
-/// Maximum successful uses of one persistent write grant.
-pub(crate) const PERSISTENT_WRITE_MAX_USES: u64 = 5;
 /// The persistent write approval option label.
 pub(crate) const PERSISTENT_WRITE_OPTION_LABEL: &str = "Allow for 1 hour / 5 uses";
 
@@ -1612,9 +1615,16 @@ pub(crate) enum ApprovalChoice {
     DenyOnce,
     /// Deny this and every identical operation for the rest of the session.
     DenySession,
-    /// Allow this exact command for 1 hour / 20 uses via a host-local
-    /// persistent rule (eligible terminal requests only).
+    /// Preview and persist the exact bounded candidate using default limits.
     AllowPersistent,
+    /// Preview and persist the exact bounded candidate using shorter fixed limits.
+    AllowPersistentShort,
+    /// Preview and persist a command argv prefix ending at selected token boundary.
+    AllowPersistentPrefix(usize),
+    /// Preview and persist a command argv prefix using shorter fixed limits.
+    AllowPersistentPrefixShort(usize),
+    /// Preview and persist a narrow host-local deny rule before denying.
+    DenyPersistent,
 }
 
 impl ApprovalChoice {
@@ -1625,6 +1635,12 @@ impl ApprovalChoice {
             ApprovalChoice::DenyOnce => "Deny",
             ApprovalChoice::DenySession => "Deny session",
             ApprovalChoice::AllowPersistent => PERSISTENT_TERMINAL_OPTION_LABEL,
+            ApprovalChoice::AllowPersistentShort => "Allow for 10 minutes / 5 uses",
+            ApprovalChoice::AllowPersistentPrefix(_) => "Allow structured command prefix",
+            ApprovalChoice::AllowPersistentPrefixShort(_) => {
+                "Allow structured command prefix for 10 minutes"
+            }
+            ApprovalChoice::DenyPersistent => "Deny for this workspace",
         }
     }
 
@@ -1634,6 +1650,9 @@ impl ApprovalChoice {
             ApprovalChoice::AllowOnce
                 | ApprovalChoice::AllowSession
                 | ApprovalChoice::AllowPersistent
+                | ApprovalChoice::AllowPersistentShort
+                | ApprovalChoice::AllowPersistentPrefix(_)
+                | ApprovalChoice::AllowPersistentPrefixShort(_)
         )
     }
 }
@@ -1687,12 +1706,36 @@ fn approval_fingerprint(kind: &ApprovalKind) -> String {
 /// persistent grants are host-local rules, not session decisions.
 fn session_decision(choice: ApprovalChoice) -> Option<SessionChoice> {
     match choice {
-        ApprovalChoice::AllowOnce | ApprovalChoice::DenyOnce | ApprovalChoice::AllowPersistent => {
-            None
-        }
+        ApprovalChoice::AllowOnce
+        | ApprovalChoice::DenyOnce
+        | ApprovalChoice::AllowPersistent
+        | ApprovalChoice::AllowPersistentShort
+        | ApprovalChoice::AllowPersistentPrefix(_)
+        | ApprovalChoice::AllowPersistentPrefixShort(_)
+        | ApprovalChoice::DenyPersistent => None,
         ApprovalChoice::AllowSession => Some(SessionChoice::Allow),
         ApprovalChoice::DenySession => Some(SessionChoice::Deny),
     }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DenyScopePreview {
+    pub(crate) workspace: String,
+    pub(crate) agent: String,
+    pub(crate) matcher_fields: Vec<(String, String)>,
+    pub(crate) expires: String,
+}
+
+#[derive(Debug)]
+struct PersistentDenyCandidate {
+    rule: TrustRule,
+    preview: DenyScopePreview,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MandatoryConfirmation {
+    pub(crate) rule_id: String,
+    pub(crate) template_id: Option<String>,
 }
 
 /// A pending file-write or terminal-create approval.
@@ -1713,6 +1756,11 @@ pub(crate) struct ApprovalPrompt {
     /// the request is an eligible proxy tool call.  Presence gates the
     /// persistent `Allow for 1 hour / 20 uses` option.
     mcp: Option<McpInvocation>,
+    allow_candidates: Vec<(ApprovalChoice, BoundedRuleCandidate)>,
+    confirming_allow: Option<ApprovalChoice>,
+    deny_candidate: Option<PersistentDenyCandidate>,
+    confirming_deny: bool,
+    mandatory_confirmation: Option<MandatoryConfirmation>,
     pub(crate) reply: oneshot::Sender<ClientRequestResult>,
 }
 
@@ -1757,6 +1805,11 @@ impl ApprovalPrompt {
             selected: 0,
             kind: ApprovalKind::Filesystem { operation },
             mcp: None,
+            allow_candidates: Vec::new(),
+            confirming_allow: None,
+            deny_candidate: None,
+            confirming_deny: false,
+            mandatory_confirmation: None,
             reply,
         }
     }
@@ -1809,6 +1862,11 @@ impl ApprovalPrompt {
                 proxy_edit_count: prepared.proxy_edit_count,
             },
             mcp,
+            allow_candidates: Vec::new(),
+            confirming_allow: None,
+            deny_candidate: None,
+            confirming_deny: false,
+            mandatory_confirmation: None,
             reply,
         }
     }
@@ -1832,6 +1890,11 @@ impl ApprovalPrompt {
             selected: 0,
             kind: ApprovalKind::WriteBatch { writes, total_edit_count },
             mcp,
+            allow_candidates: Vec::new(),
+            confirming_allow: None,
+            deny_candidate: None,
+            confirming_deny: false,
+            mandatory_confirmation: None,
             reply,
         }
     }
@@ -1882,6 +1945,11 @@ impl ApprovalPrompt {
                 cancellation,
             },
             mcp: None,
+            allow_candidates: Vec::new(),
+            confirming_allow: None,
+            deny_candidate: None,
+            confirming_deny: false,
+            mandatory_confirmation: None,
             reply,
         }
     }
@@ -1922,8 +1990,38 @@ impl ApprovalPrompt {
             selected: 0,
             kind: ApprovalKind::TerminalCreate { request: request.clone() },
             mcp: None,
+            allow_candidates: Vec::new(),
+            confirming_allow: None,
+            deny_candidate: None,
+            confirming_deny: false,
+            mandatory_confirmation: None,
             reply,
         }
+    }
+
+    pub(crate) fn allow_confirmation_preview(&self) -> Option<&BoundedRulePreview> {
+        let choice = self.confirming_allow?;
+        self.allow_candidates.iter().find_map(|(candidate_choice, candidate)| {
+            (*candidate_choice == choice).then_some(&candidate.preview)
+        })
+    }
+
+    pub(crate) fn deny_confirmation_preview(&self) -> Option<&DenyScopePreview> {
+        self.confirming_deny
+            .then(|| self.deny_candidate.as_ref().map(|candidate| &candidate.preview))
+            .flatten()
+    }
+
+    pub(crate) fn is_confirming_rule(&self) -> bool {
+        self.confirming_deny || self.confirming_allow.is_some()
+    }
+
+    pub(crate) fn confirming_allow_choice(&self) -> Option<ApprovalChoice> {
+        self.confirming_allow
+    }
+
+    pub(crate) fn mandatory_confirmation(&self) -> Option<&MandatoryConfirmation> {
+        self.mandatory_confirmation.as_ref()
     }
 }
 
@@ -2009,6 +2107,12 @@ pub(crate) enum ActionLogEntry {
         reason: DecisionReason,
         remaining_uses: Option<u64>,
         session_id: String,
+    },
+    /// Redacted durable trust-rule lifecycle event, separate from decisions.
+    TrustRuleMutation {
+        rule_id: Option<String>,
+        action: String,
+        source: String,
     },
     /// External provenance only. Retains final canonical source URL, never a
     /// separate request body, response text, headers, credentials, or search query.
@@ -2796,28 +2900,462 @@ impl App {
         }
     }
 
-    /// Network approvals intentionally bypass generic MCP trust, persistent
-    /// rules, and autopilot. Only route + canonical host participate.
-    fn request_web_approval(&mut self, prompt: ApprovalPrompt) {
-        let fingerprint = approval_fingerprint(&prompt.kind);
-        match self.agents.approval_policy.lookup(&prompt.session_id, &fingerprint) {
-            Some(SessionChoice::Allow) => {
-                self.resolve_approval(prompt, ApprovalChoice::AllowSession)
-            }
-            Some(SessionChoice::Deny) => self.resolve_approval(prompt, ApprovalChoice::DenySession),
-            None => {
-                if let ApprovalKind::Network { current_host, call, .. } = &prompt.kind {
-                    let action = match call {
-                        WebApprovalCall::Search { .. } => "search",
-                        WebApprovalCall::Fetch { .. } => "fetch",
-                        WebApprovalCall::BrowserRun { request } => request.action.as_str(),
-                    };
-                    self.record_web_failure(action, current_host, "approval required");
+    fn attach_bounded_allows(&self, prompt: &mut ApprovalPrompt, operation: &TrustOperation) {
+        prompt.options.retain(|(_, choice)| {
+            !matches!(
+                choice,
+                ApprovalChoice::AllowPersistent
+                    | ApprovalChoice::AllowPersistentShort
+                    | ApprovalChoice::AllowPersistentPrefix(_)
+                    | ApprovalChoice::AllowPersistentPrefixShort(_)
+            )
+        });
+        prompt.allow_candidates.clear();
+        let now = self.trust_clock.now();
+        let agent = prompt.agent_id.as_deref();
+        let mut candidates = Vec::new();
+        match &prompt.kind {
+            ApprovalKind::TerminalCreate { request } => {
+                let Ok(invocation) = self.command_invocation_for_request(request) else {
+                    return;
+                };
+                if let Ok(candidate) = BoundedRuleCandidate::command_exact(&invocation, agent, now)
+                {
+                    candidates.push((
+                        ApprovalChoice::AllowPersistent,
+                        PERSISTENT_TERMINAL_OPTION_LABEL.to_string(),
+                        candidate,
+                    ));
                 }
-                self.agents.approvals.push_back(prompt);
-                self.backend.status_message = Some(String::from("network approval required"));
+                if let Ok(candidate) =
+                    BoundedRuleCandidate::command_exact_short(&invocation, agent, now)
+                {
+                    candidates.push((
+                        ApprovalChoice::AllowPersistentShort,
+                        "Allow for 10 minutes / 5 uses".to_string(),
+                        candidate,
+                    ));
+                }
+                // Offer two deliberate token boundaries at most: first argument
+                // and full argv. This keeps scope selection explicit without
+                // allowing long requests to hide approval controls.
+                if !invocation.argv.is_empty() {
+                    for argument_count in [1, invocation.argv.len()] {
+                        if argument_count == invocation.argv.len()
+                            && argument_count == 1
+                            && candidates.iter().any(|(choice, _, _)| {
+                                *choice == ApprovalChoice::AllowPersistentPrefix(1)
+                            })
+                        {
+                            continue;
+                        }
+                        if let Ok(candidate) = BoundedRuleCandidate::command_prefix(
+                            &invocation,
+                            agent,
+                            argument_count,
+                            now,
+                        ) {
+                            candidates.push((
+                                ApprovalChoice::AllowPersistentPrefix(argument_count),
+                                format!(
+                                    "Allow prefix through argument {argument_count} for 1 hour / 20 uses"
+                                ),
+                                candidate,
+                            ));
+                        }
+                        if let Ok(candidate) = BoundedRuleCandidate::command_prefix_short(
+                            &invocation,
+                            agent,
+                            argument_count,
+                            now,
+                        ) {
+                            candidates.push((
+                                ApprovalChoice::AllowPersistentPrefixShort(argument_count),
+                                format!(
+                                    "Allow prefix through argument {argument_count} for 10 minutes / 5 uses"
+                                ),
+                                candidate,
+                            ));
+                        }
+                    }
+                }
             }
+            ApprovalKind::Write { .. } | ApprovalKind::WriteBatch { .. }
+                if prompt.mcp.is_some() =>
+            {
+                if let Some(invocation) = prompt.mcp.as_ref()
+                    && let Ok(candidate) = BoundedRuleCandidate::mcp_exact(invocation, agent, now)
+                {
+                    candidates.push((
+                        ApprovalChoice::AllowPersistent,
+                        PERSISTENT_TERMINAL_OPTION_LABEL.to_string(),
+                        candidate,
+                    ));
+                }
+                if let Some(invocation) = prompt.mcp.as_ref()
+                    && let Ok(candidate) =
+                        BoundedRuleCandidate::mcp_exact_short(invocation, agent, now)
+                {
+                    candidates.push((
+                        ApprovalChoice::AllowPersistentShort,
+                        "Allow for 10 minutes / 5 uses".to_string(),
+                        candidate,
+                    ));
+                }
+            }
+            ApprovalKind::Write { path, content, expectation, .. } => {
+                if let Some((write_operation, prefix, files, total, file)) =
+                    self.native_single_write_rule_shape(path, content, expectation)
+                    && let Ok(candidate) = BoundedRuleCandidate::write_prefix(
+                        operation.workspace,
+                        agent,
+                        write_operation,
+                        prefix,
+                        files,
+                        total,
+                        file,
+                        now,
+                    )
+                {
+                    candidates.push((
+                        ApprovalChoice::AllowPersistent,
+                        PERSISTENT_WRITE_OPTION_LABEL.to_string(),
+                        candidate,
+                    ));
+                }
+                if let Some((write_operation, prefix, files, total, file)) =
+                    self.native_single_write_rule_shape(path, content, expectation)
+                    && let Ok(candidate) = BoundedRuleCandidate::write_prefix_short(
+                        operation.workspace,
+                        agent,
+                        write_operation,
+                        prefix,
+                        files,
+                        total,
+                        file,
+                        now,
+                    )
+                {
+                    candidates.push((
+                        ApprovalChoice::AllowPersistentShort,
+                        "Allow for 10 minutes / 1 use".to_string(),
+                        candidate,
+                    ));
+                }
+            }
+            ApprovalKind::WriteBatch { writes, .. } => {
+                if let Some((write_operation, prefix, files, total, file)) =
+                    self.native_batch_write_rule_shape(writes)
+                    && let Ok(candidate) = BoundedRuleCandidate::write_prefix(
+                        operation.workspace,
+                        agent,
+                        write_operation,
+                        prefix,
+                        files,
+                        total,
+                        file,
+                        now,
+                    )
+                {
+                    candidates.push((
+                        ApprovalChoice::AllowPersistent,
+                        PERSISTENT_WRITE_OPTION_LABEL.to_string(),
+                        candidate,
+                    ));
+                }
+                if let Some((write_operation, prefix, files, total, file)) =
+                    self.native_batch_write_rule_shape(writes)
+                    && let Ok(candidate) = BoundedRuleCandidate::write_prefix_short(
+                        operation.workspace,
+                        agent,
+                        write_operation,
+                        prefix,
+                        files,
+                        total,
+                        file,
+                        now,
+                    )
+                {
+                    candidates.push((
+                        ApprovalChoice::AllowPersistentShort,
+                        "Allow for 10 minutes / 1 use".to_string(),
+                        candidate,
+                    ));
+                }
+            }
+            ApprovalKind::Network { .. } => {
+                if let OperationIdentity::Network { scheme, host, port, method, browser_action } =
+                    &operation.identity
+                    && let Ok(candidate) = BoundedRuleCandidate::network_exact_read(
+                        operation.workspace,
+                        agent,
+                        *scheme,
+                        host.clone(),
+                        *port,
+                        *method,
+                        *browser_action,
+                        now,
+                    )
+                {
+                    candidates.push((
+                        ApprovalChoice::AllowPersistent,
+                        "Allow exact host for 1 hour / 20 uses".to_string(),
+                        candidate,
+                    ));
+                }
+                if let OperationIdentity::Network { scheme, host, port, method, browser_action } =
+                    &operation.identity
+                    && let Ok(candidate) = BoundedRuleCandidate::network_exact_read_short(
+                        operation.workspace,
+                        agent,
+                        *scheme,
+                        host.clone(),
+                        *port,
+                        *method,
+                        *browser_action,
+                        now,
+                    )
+                {
+                    candidates.push((
+                        ApprovalChoice::AllowPersistentShort,
+                        "Allow exact host for 10 minutes / 5 uses".to_string(),
+                        candidate,
+                    ));
+                }
+            }
+            ApprovalKind::Filesystem { .. } => {}
         }
+        for (choice, label, candidate) in candidates {
+            prompt.options.push((label, choice));
+            prompt.allow_candidates.push((choice, candidate));
+        }
+    }
+
+    fn attach_persistent_deny(&self, prompt: &mut ApprovalPrompt, operation: &TrustOperation) {
+        let Some(candidate) = self.persistent_deny_candidate(prompt, operation) else {
+            return;
+        };
+        prompt.options.push((
+            ApprovalChoice::DenyPersistent.label().to_string(),
+            ApprovalChoice::DenyPersistent,
+        ));
+        prompt.deny_candidate = Some(candidate);
+    }
+
+    fn persistent_deny_candidate(
+        &self,
+        prompt: &ApprovalPrompt,
+        operation: &TrustOperation,
+    ) -> Option<PersistentDenyCandidate> {
+        let scope = TrustRuleScope {
+            workspace: operation.workspace,
+            agent: prompt.agent_id.clone(),
+            expires_at: None,
+            max_uses: None,
+        };
+        let (rule, matcher_fields) = match &operation.identity {
+            OperationIdentity::Command { executable, argv } => {
+                let rule = TrustRule::Command(CommandRule {
+                    id: generate_command_rule_id(),
+                    effect: TrustEffect::Deny,
+                    scope,
+                    executable: executable.clone(),
+                    match_mode: MatchMode::ArgvExact,
+                    argv: argv.clone(),
+                });
+                (
+                    rule,
+                    vec![
+                        ("kind".into(), "command".into()),
+                        ("executable".into(), executable.clone()),
+                        ("arguments".into(), format!("exact · {} tokens", argv.len())),
+                    ],
+                )
+            }
+            OperationIdentity::Mcp {
+                server,
+                transport_identity,
+                tool,
+                tool_schema_version,
+                ..
+            }
+            | OperationIdentity::McpRead {
+                server,
+                transport_identity,
+                tool,
+                tool_schema_version,
+                ..
+            } => {
+                let rule = TrustRule::mcp_deny(McpDenyRule {
+                    id: generate_mcp_rule_id(),
+                    effect: TrustEffect::Deny,
+                    scope,
+                    server: server.clone(),
+                    transport_identity: transport_identity.clone(),
+                    tool: tool.clone(),
+                    tool_schema_version: *tool_schema_version,
+                    category: Some(operation.category),
+                });
+                (
+                    rule,
+                    vec![
+                        ("kind".into(), "mcp".into()),
+                        ("server".into(), server.clone()),
+                        ("transport".into(), transport_identity.clone()),
+                        ("tool".into(), tool.clone()),
+                        ("schema".into(), tool_schema_version.to_string()),
+                        ("category".into(), operation.category.as_str().into()),
+                    ],
+                )
+            }
+            OperationIdentity::Write { relative_path, .. } => {
+                let operation_kind = match operation.category {
+                    TrustCategory::WriteCreate => WriteOperationKind::Create,
+                    TrustCategory::WriteModify => WriteOperationKind::Modify,
+                    _ => return None,
+                };
+                let rule = TrustRule::Write(WriteRule {
+                    id: generate_write_rule_id(),
+                    effect: TrustEffect::Deny,
+                    scope,
+                    operation: operation_kind,
+                    path_prefix: PathPrefix::parse(relative_path).ok()?,
+                    max_files: 0,
+                    max_total_bytes: 0,
+                    max_file_bytes: 0,
+                });
+                (
+                    rule,
+                    vec![
+                        ("kind".into(), "filesystem write".into()),
+                        ("operation".into(), format!("{operation_kind:?}").to_ascii_lowercase()),
+                        ("path prefix".into(), relative_path.clone()),
+                    ],
+                )
+            }
+            OperationIdentity::Filesystem {
+                operation: filesystem_operation,
+                source_path,
+                destination_path,
+            } => {
+                let path = source_path.as_ref().or(destination_path.as_ref())?;
+                let rule = TrustRule::filesystem(FilesystemRule {
+                    id: generate_filesystem_rule_id(),
+                    effect: TrustEffect::Deny,
+                    scope,
+                    operations: vec![*filesystem_operation],
+                    path_prefix: PathPrefix::parse(path).ok()?,
+                });
+                (
+                    rule,
+                    vec![
+                        ("kind".into(), "filesystem".into()),
+                        (
+                            "operation".into(),
+                            format!("{filesystem_operation:?}").to_ascii_lowercase(),
+                        ),
+                        ("path prefix".into(), path.clone()),
+                    ],
+                )
+            }
+            OperationIdentity::Network { scheme, host, port, method, browser_action } => {
+                let rule = TrustRule::Network(
+                    NetworkRule::deny(
+                        generate_network_rule_id(),
+                        scope,
+                        *scheme,
+                        host.clone(),
+                        HostMatchMode::Exact,
+                        *port,
+                        *method,
+                        *browser_action,
+                    )
+                    .ok()?,
+                );
+                (
+                    rule,
+                    vec![
+                        ("kind".into(), "network".into()),
+                        ("scheme".into(), format!("{scheme:?}").to_ascii_lowercase()),
+                        ("host".into(), host.clone()),
+                        ("port".into(), port.to_string()),
+                        ("method class".into(), format!("{method:?}").to_ascii_lowercase()),
+                        (
+                            "browser action".into(),
+                            format!("{browser_action:?}").to_ascii_lowercase(),
+                        ),
+                    ],
+                )
+            }
+            OperationIdentity::NativeTool { tool } => {
+                let rule = TrustRule::tool(ToolRule {
+                    id: generate_tool_rule_id(),
+                    effect: TrustEffect::Deny,
+                    scope,
+                    identity: ToolRuleIdentity::Native { tool: tool.clone() },
+                    category: Some(operation.category),
+                });
+                (
+                    rule,
+                    vec![
+                        ("kind".into(), "native tool/category".into()),
+                        ("tool".into(), tool.clone()),
+                        ("category".into(), operation.category.as_str().into()),
+                    ],
+                )
+            }
+            _ => return None,
+        };
+        Some(PersistentDenyCandidate {
+            rule,
+            preview: DenyScopePreview {
+                workspace: operation.workspace.as_string(),
+                agent: prompt.agent_id.clone().unwrap_or_else(|| "all agents".into()),
+                matcher_fields,
+                expires: "never".into(),
+            },
+        })
+    }
+
+    /// Network approvals use typed persistent deny and session policy, but
+    /// never persistent allow or approval-mode bypass.
+    fn request_web_approval(&mut self, mut prompt: ApprovalPrompt) {
+        let fingerprint = approval_fingerprint(&prompt.kind);
+        let operation = self.trust_operation_for_prompt(&prompt);
+        self.attach_bounded_allows(&mut prompt, &operation);
+        self.attach_persistent_deny(&mut prompt, &operation);
+        let decision = self.evaluate_operation(&operation, &prompt.session_id, &fingerprint);
+        self.mark_mandatory_confirmation(&mut prompt, &operation, &decision);
+        self.push_trust_audit(&operation, &decision, &prompt.session_id);
+        match &decision {
+            TrustDecision {
+                outcome: TrustOutcome::Allow,
+                reason: DecisionReason::PersistentAllow,
+                rule_id: Some(rule_id),
+            } => {
+                self.resolve_persistent_allow(prompt, rule_id.clone());
+                return;
+            }
+            TrustDecision { outcome: TrustOutcome::Allow, .. } => {
+                self.resolve_approval(prompt, ApprovalChoice::AllowSession);
+                return;
+            }
+            TrustDecision { outcome: TrustOutcome::Deny, .. } => {
+                self.resolve_policy_deny(prompt, &decision);
+                return;
+            }
+            TrustDecision { outcome: TrustOutcome::Confirm, .. } => {}
+        }
+        if let ApprovalKind::Network { current_host, call, .. } = &prompt.kind {
+            let action = match call {
+                WebApprovalCall::Search { .. } => "search",
+                WebApprovalCall::Fetch { .. } => "fetch",
+                WebApprovalCall::BrowserRun { request } => request.action.as_str(),
+            };
+            self.record_web_failure(action, current_host, "approval required");
+        }
+        self.agents.approvals.push_back(prompt);
+        self.backend.status_message = Some(String::from("network approval required"));
     }
 
     fn clear_proxy_network_scope(&mut self, scope: &str) {
@@ -2843,21 +3381,33 @@ impl App {
     /// Queues an approval prompt (front of the queue wins) and notifies,
     /// unless the shared policy (session state first, then persistent
     /// rules) already resolves it without UI.
-    fn request_bridge_approval(&mut self, prompt: ApprovalPrompt) {
+    fn request_bridge_approval(&mut self, mut prompt: ApprovalPrompt) {
         let thread_index = prompt.thread_index;
         let session_id = prompt.session_id.clone();
         let fingerprint = approval_fingerprint(&prompt.kind);
         let operation = self.trust_operation_for_prompt(&prompt);
-        let mut decision = self.evaluate_operation(&operation, &session_id, &fingerprint);
+        let safeguard = self.built_in_safeguard_for_prompt(&prompt);
+        self.attach_bounded_allows(&mut prompt, &operation);
+        self.attach_persistent_deny(&mut prompt, &operation);
+        let mut decision = self.evaluate_operation_with_safeguard(
+            &operation,
+            &session_id,
+            &fingerprint,
+            safeguard,
+        );
         // Phase 4 curated-profile fallback: a terminal request that matches
         // a fixed registry entry is evaluated as its profile when the exact
         // command grant did not cover it.  The narrower exact grant always
         // wins; the profile grant fills the gap.
         let mut audited_operation = operation.clone();
-        if matches!(decision.outcome, TrustOutcome::Prompt)
+        if matches!(decision.outcome, TrustOutcome::Confirm)
             && matches!(
                 decision.reason,
-                DecisionReason::NoMatchingRule | DecisionReason::WorkspaceDisabled
+                DecisionReason::NoMatchingRule
+                    | DecisionReason::WorkspaceDisabled
+                    | DecisionReason::ToolDefaultConfirm
+                    | DecisionReason::CategoryDefaultConfirm
+                    | DecisionReason::GlobalDefaultConfirm
             )
             && let ApprovalKind::TerminalCreate { request } = &prompt.kind
             && let Some(profile) = self.profile_id_for_request(request)
@@ -2872,6 +3422,7 @@ impl App {
             decision = self.evaluate_operation(&profile_operation, &session_id, &fingerprint);
             audited_operation = profile_operation;
         }
+        self.mark_mandatory_confirmation(&mut prompt, &audited_operation, &decision);
         // Phase 6 audit: every automatic decision (allow or prompt fallback)
         // records redacted rule/category/reason/remaining-use metadata.
         self.push_trust_audit(&audited_operation, &decision, &session_id);
@@ -2917,19 +3468,17 @@ impl App {
                 self.resolve_approval(prompt, ApprovalChoice::AllowSession);
                 return;
             }
-            TrustDecision {
-                outcome: TrustOutcome::Prompt,
-                reason: DecisionReason::SessionDeny,
-                ..
-            } => {
-                self.resolve_approval(prompt, ApprovalChoice::DenySession);
+            TrustDecision { outcome: TrustOutcome::Deny, .. } => {
+                self.resolve_policy_deny(prompt, &decision);
                 return;
             }
             _ => {}
         }
         let approval_mode =
             self.agents.approval_modes.get(&session_id).copied().unwrap_or_default();
-        if self.tool_approval_mode_allows(approval_mode, &prompt, &operation) {
+        if decision.reason != DecisionReason::MandatoryConfirm
+            && self.tool_approval_mode_allows(approval_mode, &prompt, &operation)
+        {
             let summary = format!("tool auto-approved ({})", approval_mode.label());
             if let Some(thread_index) = thread_index
                 && let Some(thread) = self.agents.threads.get_mut(thread_index)
@@ -2948,6 +3497,43 @@ impl App {
         });
     }
 
+    fn mark_mandatory_confirmation(
+        &self,
+        prompt: &mut ApprovalPrompt,
+        operation: &TrustOperation,
+        decision: &TrustDecision,
+    ) {
+        let TrustDecision {
+            outcome: TrustOutcome::Confirm,
+            reason: DecisionReason::MandatoryConfirm,
+            rule_id: Some(rule_id),
+        } = decision
+        else {
+            return;
+        };
+        let template_id = self
+            .effective_trust_document(operation.workspace)
+            .rules
+            .iter()
+            .find(|rule| rule.id() == rule_id)
+            .and_then(TrustRule::template_id)
+            .map(str::to_string);
+        prompt.mandatory_confirmation =
+            Some(MandatoryConfirmation { rule_id: rule_id.clone(), template_id });
+        prompt.options.retain(|(_, choice)| {
+            !matches!(
+                choice,
+                ApprovalChoice::AllowSession
+                    | ApprovalChoice::AllowPersistent
+                    | ApprovalChoice::AllowPersistentShort
+                    | ApprovalChoice::AllowPersistentPrefix(_)
+                    | ApprovalChoice::AllowPersistentPrefixShort(_)
+            )
+        });
+        prompt.allow_candidates.clear();
+        prompt.selected = prompt.selected.min(prompt.options.len().saturating_sub(1));
+    }
+
     /// Whether a pending bridge operation is eligible for the active local
     /// approval mode. Invalid or unnormalizable operations always stay on the
     /// explicit approval path.
@@ -2961,6 +3547,11 @@ impl App {
             return false;
         }
         if matches!(prompt.kind, ApprovalKind::Network { .. }) {
+            return false;
+        }
+        if let ApprovalKind::TerminalCreate { request } = &prompt.kind
+            && self.command_invocation_for_request(request).is_err()
+        {
             return false;
         }
         match mode {
@@ -3000,27 +3591,95 @@ impl App {
                     match &prompt.kind {
                         ApprovalKind::Write { path, content, expectation, .. } => self
                             .native_write_operation(path, content, expectation)
-                            .unwrap_or((TrustCategory::Unknown, OperationIdentity::Unknown)),
-                        ApprovalKind::WriteBatch { writes, .. } => self
-                            .native_write_batch_operation(writes)
-                            .unwrap_or((TrustCategory::Unknown, OperationIdentity::Unknown)),
+                            .unwrap_or_else(|| {
+                                let category = match expectation {
+                                    WriteExpectation::MustNotExist => TrustCategory::WriteCreate,
+                                    WriteExpectation::ExpectRevision(_) => {
+                                        TrustCategory::WriteModify
+                                    }
+                                    WriteExpectation::Blind if !path.exists() => {
+                                        TrustCategory::WriteCreate
+                                    }
+                                    WriteExpectation::Blind => TrustCategory::WriteModify,
+                                };
+                                (
+                                    category,
+                                    OperationIdentity::native_tool("fs/write_text_file")
+                                        .unwrap_or(OperationIdentity::Unknown),
+                                )
+                            }),
+                        ApprovalKind::WriteBatch { writes, .. } => {
+                            self.native_write_batch_operation(writes).unwrap_or_else(|| {
+                                let category = if writes.iter().all(|write| {
+                                    matches!(write.expectation, WriteExpectation::MustNotExist)
+                                        || (matches!(write.expectation, WriteExpectation::Blind)
+                                            && !write.path.exists())
+                                }) {
+                                    TrustCategory::WriteCreate
+                                } else {
+                                    TrustCategory::WriteModify
+                                };
+                                (
+                                    category,
+                                    OperationIdentity::native_tool("fs/write_text_file_batch")
+                                        .unwrap_or(OperationIdentity::Unknown),
+                                )
+                            })
+                        }
                         _ => unreachable!(),
                     }
                 }
             }
             ApprovalKind::TerminalCreate { request } => {
                 let identity = self
-                    .command_invocation_for_request(request)
-                    .map(|invocation| OperationIdentity::Command {
-                        executable: invocation.executable,
-                        argv: invocation.argv,
-                    })
+                    .command_identity_for_policy_request(request)
                     .unwrap_or(OperationIdentity::Unknown);
                 (TrustCategory::Execute, identity)
             }
-            // Filesystem and web approvals are never eligible for generic trust matching.
-            ApprovalKind::Filesystem { .. } | ApprovalKind::Network { .. } => {
-                (TrustCategory::Unknown, OperationIdentity::Unknown)
+            ApprovalKind::Filesystem { operation } => (
+                match operation {
+                    super::agent_filesystem::FilesystemOperation::CreateDirectory { .. }
+                    | super::agent_filesystem::FilesystemOperation::CopyPath { .. } => {
+                        TrustCategory::WriteCreate
+                    }
+                    super::agent_filesystem::FilesystemOperation::DeletePath { .. } => {
+                        TrustCategory::Delete
+                    }
+                    super::agent_filesystem::FilesystemOperation::MovePath { .. } => {
+                        TrustCategory::WriteModify
+                    }
+                },
+                self.filesystem_policy_identity(operation).unwrap_or_else(|| {
+                    OperationIdentity::native_tool(operation.tool_name())
+                        .unwrap_or(OperationIdentity::Unknown)
+                }),
+            ),
+            ApprovalKind::Network { route, current_host, call, .. } => {
+                let browser_action = match call {
+                    WebApprovalCall::Search { .. } | WebApprovalCall::Fetch { .. } => {
+                        BrowserActionClass::Fetch
+                    }
+                    WebApprovalCall::BrowserRun { .. } => BrowserActionClass::Navigate,
+                };
+                let identity = OperationIdentity::network(
+                    NetworkScheme::Https,
+                    current_host,
+                    443,
+                    NetworkMethodClass::Read,
+                    browser_action,
+                )
+                .unwrap_or(OperationIdentity::Unknown);
+                let mut operation = TrustOperation {
+                    workspace,
+                    agent: prompt.agent_id.clone(),
+                    transport: route.transport_kind(),
+                    category: TrustCategory::Network,
+                    identity,
+                };
+                if operation.is_unknown() {
+                    operation.category = TrustCategory::Unknown;
+                }
+                return operation;
             }
         };
         TrustOperation {
@@ -3029,6 +3688,132 @@ impl App {
             transport: TransportKind::Acp,
             category,
             identity,
+        }
+    }
+
+    /// Runs application-owned safeguards against raw typed request fields before
+    /// configurable policy. Returned metadata is redacted and versioned.
+    fn built_in_safeguard_for_prompt(&self, prompt: &ApprovalPrompt) -> Option<SafeguardMatch> {
+        match &prompt.kind {
+            ApprovalKind::TerminalCreate { request } => {
+                let cwd = request.cwd.as_deref().unwrap_or(&self.working_dir);
+                inspect_terminal_command(
+                    &request.command,
+                    &request.args,
+                    cwd,
+                    &self.canonical_workspace_roots(),
+                    dirs::home_dir().as_deref(),
+                    &self.protected_state_paths(),
+                )
+            }
+            ApprovalKind::Write { path, .. } => self.inspect_mutation_path(path),
+            ApprovalKind::WriteBatch { writes, .. } => {
+                writes.iter().find_map(|write| self.inspect_mutation_path(&write.path))
+            }
+            ApprovalKind::Filesystem { operation } => {
+                use super::agent_filesystem::FilesystemOperation;
+                let roots = self.canonical_workspace_roots();
+                let paths: Vec<&Path> = match operation {
+                    FilesystemOperation::CreateDirectory { path }
+                    | FilesystemOperation::DeletePath { path } => vec![path],
+                    FilesystemOperation::CopyPath { source, destination }
+                    | FilesystemOperation::MovePath { source, destination } => {
+                        vec![source, destination]
+                    }
+                };
+                if matches!(operation, FilesystemOperation::DeletePath { .. })
+                    && paths.iter().any(|path| {
+                        std::fs::canonicalize(path)
+                            .ok()
+                            .is_some_and(|candidate| roots.contains(&candidate))
+                    })
+                {
+                    return Some(SafeguardMatch::new(
+                        CATASTROPHIC_DELETE_RULE_ID,
+                        SafeguardCategory::CatastrophicDeletion,
+                    ));
+                }
+                paths.into_iter().find_map(|path| self.inspect_mutation_path(path))
+            }
+            ApprovalKind::Network { .. } => None,
+        }
+    }
+
+    fn protected_state_paths(&self) -> Vec<PathBuf> {
+        let mut protected = Vec::new();
+        if let Some(store) = self.workspace_trust_store() {
+            protected.push(store.path().to_path_buf());
+        }
+        if let Ok(vault) = crate::secrets::default_vault_path() {
+            protected.push(vault);
+        }
+        protected
+    }
+
+    fn inspect_mutation_path(&self, path: &Path) -> Option<SafeguardMatch> {
+        inspect_protected_state_path(path, &self.protected_state_paths())
+            .or_else(|| inspect_special_file(path))
+            .or_else(|| inspect_path_escape(path, &self.canonical_workspace_roots()))
+    }
+
+    fn command_identity_for_policy_request(
+        &self,
+        request: &CreateTerminalRequest,
+    ) -> Result<OperationIdentity, String> {
+        if request.command.is_empty()
+            || request.command.chars().any(|character| character.is_control())
+        {
+            return Err("invalid executable token".into());
+        }
+        validate_argv_tokens(&request.args)?;
+        let primary =
+            std::fs::canonicalize(&self.working_dir).unwrap_or_else(|_| self.working_dir.clone());
+        let raw_cwd = request.cwd.as_deref().unwrap_or(&primary);
+        resolve_command_cwd(raw_cwd, &self.canonical_workspace_roots())?;
+        Ok(OperationIdentity::Command {
+            executable: request.command.clone(),
+            argv: request.args.clone(),
+        })
+    }
+
+    fn filesystem_policy_identity(
+        &self,
+        operation: &super::agent_filesystem::FilesystemOperation,
+    ) -> Option<OperationIdentity> {
+        let relative = |path: &Path| {
+            let canonical = self.canonical_native_write_target(path)?;
+            self.workspace_relative_segments(&canonical)
+        };
+        match operation {
+            super::agent_filesystem::FilesystemOperation::CreateDirectory { path } => {
+                let path = relative(path)?;
+                OperationIdentity::filesystem(FilesystemOperationKind::Create, Some(&path), None)
+                    .ok()
+            }
+            super::agent_filesystem::FilesystemOperation::DeletePath { path } => {
+                let path = relative(path)?;
+                OperationIdentity::filesystem(FilesystemOperationKind::Delete, Some(&path), None)
+                    .ok()
+            }
+            super::agent_filesystem::FilesystemOperation::CopyPath { destination, .. } => {
+                let destination = relative(destination)?;
+                OperationIdentity::filesystem(
+                    FilesystemOperationKind::Create,
+                    None,
+                    Some(&destination),
+                )
+                .ok()
+            }
+            super::agent_filesystem::FilesystemOperation::MovePath { source, destination } => {
+                let source = relative(source)?;
+                let destination = relative(destination)?;
+                OperationIdentity::filesystem(
+                    FilesystemOperationKind::Rename,
+                    Some(&source),
+                    Some(&destination),
+                )
+                .ok()
+            }
         }
     }
 
@@ -3044,6 +3829,13 @@ impl App {
     ) -> Result<CommandInvocation, String> {
         let primary =
             std::fs::canonicalize(&self.working_dir).unwrap_or_else(|_| self.working_dir.clone());
+        if request
+            .command
+            .chars()
+            .any(|character| character.is_whitespace() || ";&|()<>$`'\"\\".contains(character))
+        {
+            return Err("shell command text is ineligible for persistent allow".into());
+        }
         validate_command_tokens(&request.command, &request.args)?;
         let raw_cwd = request.cwd.as_deref().unwrap_or(&primary);
         let canonical_cwd = resolve_command_cwd(raw_cwd, &self.canonical_workspace_roots())?;
@@ -3059,12 +3851,45 @@ impl App {
 
     /// The host-local trust store for the primary workspace, or `None` when
     /// no state directory is available (fail closed: empty effective rules).
-    fn workspace_trust_store(&self) -> Option<TrustStore> {
+    pub(super) fn workspace_trust_store(&self) -> Option<TrustStore> {
         #[cfg(test)]
         if let Some(base) = self.agents.test_trust_store_base.as_deref() {
             return TrustStore::at(base, &self.working_dir).ok();
         }
         TrustStore::default_for(&self.working_dir).ok()
+    }
+
+    fn empty_trust_document(&self, workspace: WorkspaceIdentity) -> TrustStoreDocument {
+        TrustStoreDocument {
+            workspace,
+            workspace_enabled: false,
+            rules: Vec::new(),
+            tool_defaults: Vec::new(),
+            category_defaults: Vec::new(),
+            global_default: crate::policy::FallbackEffect::Confirm,
+        }
+    }
+
+    fn effective_trust_document(&self, workspace: WorkspaceIdentity) -> TrustStoreDocument {
+        if self.agents.trust_policy.borrow().is_none() {
+            let document = self
+                .workspace_trust_store()
+                .map(|store| store.effective_at(self.trust_clock.now()))
+                .unwrap_or_else(|| self.empty_trust_document(workspace));
+            self.agents.trust_policy.replace(Some(document));
+        }
+        self.agents
+            .trust_policy
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| self.empty_trust_document(workspace))
+    }
+
+    pub(crate) fn reload_workspace_trust_store(&self) -> Result<(), TrustStoreError> {
+        let store = self.workspace_trust_store().ok_or(TrustStoreError::StateDirUnavailable)?;
+        let document = store.load_at(self.trust_clock.now())?;
+        self.agents.trust_policy.replace(Some(document));
+        Ok(())
     }
 
     /// Canonical workspace identity for the primary (working-directory)
@@ -3103,16 +3928,30 @@ impl App {
         session_id: &str,
         fingerprint: &str,
     ) -> TrustDecision {
+        self.evaluate_operation_with_safeguard(operation, session_id, fingerprint, None)
+    }
+
+    fn evaluate_operation_with_safeguard(
+        &self,
+        operation: &TrustOperation,
+        session_id: &str,
+        fingerprint: &str,
+        built_in_deny: Option<SafeguardMatch>,
+    ) -> TrustDecision {
         let now = self.trust_clock.now();
-        let effective = self
-            .workspace_trust_store()
-            .map(|store| store.effective_at(now))
-            .unwrap_or_else(|| TrustStoreDocument {
-                workspace: operation.workspace,
-                workspace_enabled: false,
-                rules: Vec::new(),
-            });
+        let effective = self.effective_trust_document(operation.workspace);
         let usage = self.agents.usage_ledger.snapshot(operation.workspace, session_id);
+        let tool_key = operation.tool_key();
+        let tool_default = effective
+            .tool_defaults
+            .iter()
+            .find(|rule| rule.tool == tool_key)
+            .map(|rule| rule.effect);
+        let category_default = effective
+            .category_defaults
+            .iter()
+            .find(|rule| rule.category == operation.category)
+            .map(|rule| rule.effect);
         evaluate(&PolicyInput {
             session_id,
             fingerprint,
@@ -3122,6 +3961,10 @@ impl App {
             now,
             usage: &usage,
             workspace_enabled: effective.workspace_enabled,
+            built_in_deny,
+            tool_default,
+            category_default,
+            global_default: Some(effective.global_default),
         })
     }
 
@@ -3163,11 +4006,9 @@ impl App {
         else {
             return None;
         };
-        let now = self.trust_clock.now();
         let usage = self.agents.usage_ledger.snapshot(operation.workspace, session_id);
         let scope = self
-            .workspace_trust_store()?
-            .effective_at(now)
+            .effective_trust_document(operation.workspace)
             .rules
             .into_iter()
             .find(|rule| rule.id() == rule_id)?
@@ -3344,6 +4185,148 @@ impl App {
         paths_equivalent(&canonical, &canonical_vault)
     }
 
+    fn resolve_policy_deny(&mut self, prompt: ApprovalPrompt, decision: &TrustDecision) {
+        let summary = if decision.reason == DecisionReason::BuiltInDeny {
+            let rule_id = decision.rule_id.as_deref().unwrap_or("builtin.unknown");
+            format!("blocked by non-overridable safeguard {rule_id}")
+        } else {
+            decision
+                .rule_id
+                .as_deref()
+                .map(|rule_id| format!("blocked by workspace deny rule {rule_id}"))
+                .unwrap_or_else(|| format!("operation denied ({})", decision.reason.as_str()))
+        };
+        self.record_denied_write(&prompt.session_id, &prompt.kind);
+        self.record_denied_validation(&prompt.session_id, &prompt.kind);
+        if let ApprovalKind::Network { current_host, call, .. } = &prompt.kind {
+            let action = match call {
+                WebApprovalCall::Search { .. } => "search",
+                WebApprovalCall::Fetch { .. } => "fetch",
+                WebApprovalCall::BrowserRun { request } => request.action.as_str(),
+            };
+            self.record_web_failure(action, current_host, "denied");
+        }
+        let error = if decision.reason == DecisionReason::BuiltInDeny {
+            AgentError::NonOverridableDenied {
+                rule_id: decision.rule_id.clone().unwrap_or_else(|| "builtin.unknown".into()),
+                category: self
+                    .built_in_safeguard_for_prompt(&prompt)
+                    .map(|matched| matched.category.as_str().to_string())
+                    .unwrap_or_else(|| "unknown".into()),
+            }
+        } else {
+            AgentError::PermissionDenied { reason: summary.clone() }
+        };
+        let _ = prompt.reply.send(Err(error));
+        if let Some(thread_index) = prompt.thread_index
+            && let Some(thread) = self.agents.threads.get_mut(thread_index)
+        {
+            thread.push_system(summary.clone());
+        }
+        self.backend.status_message = Some(summary);
+    }
+
+    fn persist_deny_rule(&mut self, prompt: &ApprovalPrompt) -> Result<String, TrustStoreError> {
+        let candidate = prompt.deny_candidate.as_ref().ok_or_else(|| {
+            TrustStoreError::ValidationFailure(
+                "approval has no narrow persistent deny scope".into(),
+            )
+        })?;
+        let rule_id = candidate.rule.id().to_string();
+        let store = self.workspace_trust_store().ok_or(TrustStoreError::StateDirUnavailable)?;
+        store.add_rule(candidate.rule.clone())?;
+        self.reload_workspace_trust_store()?;
+        self.agents.action_log.push(ActionLogEntry::TrustRuleMutation {
+            rule_id: Some(rule_id.clone()),
+            action: "create".into(),
+            source: "approval-deny".into(),
+        });
+        Ok(rule_id)
+    }
+
+    fn resolve_persistent_deny_choice(&mut self, prompt: ApprovalPrompt) {
+        self.record_denied_write(&prompt.session_id, &prompt.kind);
+        self.record_denied_validation(&prompt.session_id, &prompt.kind);
+        if let ApprovalKind::Network { current_host, call, .. } = &prompt.kind {
+            let action = match call {
+                WebApprovalCall::Search { .. } => "search",
+                WebApprovalCall::Fetch { .. } => "fetch",
+                WebApprovalCall::BrowserRun { request } => request.action.as_str(),
+            };
+            self.record_web_failure(action, current_host, "denied");
+        }
+        let (reason, summary) = match self.persist_deny_rule(&prompt) {
+            Ok(rule_id) => (
+                format!("denied and saved workspace rule {rule_id}"),
+                format!("workspace deny rule saved: {rule_id}"),
+            ),
+            Err(_) => (
+                "user denied the operation; workspace deny rule was not saved".to_string(),
+                "operation denied; workspace deny rule was not saved".to_string(),
+            ),
+        };
+        let _ = prompt.reply.send(Err(AgentError::PermissionDenied { reason }));
+        if let Some(thread_index) = prompt.thread_index
+            && let Some(thread) = self.agents.threads.get_mut(thread_index)
+        {
+            thread.push_system(summary.clone());
+        }
+        self.backend.status_message = Some(summary);
+    }
+
+    fn persist_allow_candidate(
+        &mut self,
+        candidate: &BoundedRuleCandidate,
+    ) -> Result<String, TrustStoreError> {
+        if candidate.rule.effect() != TrustEffect::Allow
+            || candidate.rule.scope().expires_at.is_none()
+            || candidate.rule.scope().max_uses.is_none()
+        {
+            return Err(TrustStoreError::ValidationFailure(
+                "bounded allow candidate lacks mandatory limits".into(),
+            ));
+        }
+        let rule_id = candidate.rule.id().to_string();
+        let store = self.workspace_trust_store().ok_or(TrustStoreError::StateDirUnavailable)?;
+        store.add_rule(candidate.rule.clone())?;
+        self.reload_workspace_trust_store()?;
+        self.agents.action_log.push(ActionLogEntry::TrustRuleMutation {
+            rule_id: Some(rule_id.clone()),
+            action: "create".into(),
+            source: "approval-bounded-allow".into(),
+        });
+        Ok(rule_id)
+    }
+
+    fn resolve_persistent_allow_choice(&mut self, prompt: ApprovalPrompt, choice: ApprovalChoice) {
+        let Some(candidate) =
+            prompt.allow_candidates.iter().find_map(|(candidate_choice, candidate)| {
+                (*candidate_choice == choice).then_some(candidate.clone())
+            })
+        else {
+            let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
+                reason: "persistent approval has no previewed bounded candidate".into(),
+            }));
+            return;
+        };
+        let rule_id = match self.persist_allow_candidate(&candidate) {
+            Ok(rule_id) => rule_id,
+            Err(error) => {
+                self.record_denied_write(&prompt.session_id, &prompt.kind);
+                let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
+                    reason: format!("persistent approval unavailable: {error}"),
+                }));
+                if let Some(thread) = prompt.thread_index
+                    && let Some(thread) = self.agents.threads.get_mut(thread)
+                {
+                    thread.push_system("approval denied");
+                }
+                return;
+            }
+        };
+        self.resolve_persistent_allow(prompt, rule_id);
+    }
+
     /// Resolves one approval with the chosen policy decision.
     fn resolve_approval(&mut self, prompt: ApprovalPrompt, choice: ApprovalChoice) {
         // A disconnected proxy client has dropped its receiver. Do not record
@@ -3352,95 +4335,23 @@ impl App {
             return;
         }
 
+        if choice == ApprovalChoice::DenyPersistent {
+            self.resolve_persistent_deny_choice(prompt);
+            return;
+        }
+
         let fingerprint = approval_fingerprint(&prompt.kind);
         if let Some(decision) = session_decision(choice) {
             self.agents.approval_policy.record(&prompt.session_id, &fingerprint, decision);
         }
-        if choice == ApprovalChoice::AllowPersistent {
-            // Persistent grants exist only for eligible terminal requests
-            // (phase 2), eligible generic MCP invocations (phase 3), and
-            // eligible bounded native writes (phase 5); everything else
-            // fails closed.
-            match &prompt.kind {
-                ApprovalKind::TerminalCreate { .. } => match prompt.kind {
-                    ApprovalKind::TerminalCreate { request } => {
-                        let session_id = prompt.session_id.clone();
-                        match self.persist_terminal_rule(&request, prompt.agent_id.as_deref()) {
-                            Ok(rule_id) => self.spawn_trusted_terminal(
-                                &request,
-                                &session_id,
-                                prompt.agent_id.as_deref(),
-                                Some(rule_id),
-                                prompt.reply,
-                            ),
-                            Err(error) => {
-                                // Persistence failure: current permission
-                                // error, terminal stays unspawned, budget
-                                // unchanged.
-                                let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
-                                    reason: format!(
-                                        "persistent terminal approval unavailable: {error}"
-                                    ),
-                                }));
-                                if let Some(thread) = prompt.thread_index
-                                    && let Some(thread) = self.agents.threads.get_mut(thread)
-                                {
-                                    thread.push_system("approval denied");
-                                }
-                            }
-                        }
-                    }
-                    _ => unreachable!(),
-                },
-                ApprovalKind::Filesystem { .. } | ApprovalKind::Network { .. } => {
-                    let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
-                        reason: String::from(
-                            "persistent filesystem or network approval is not supported",
-                        ),
-                    }));
-                }
-                ApprovalKind::Write { .. } | ApprovalKind::WriteBatch { .. } => {
-                    if prompt.mcp.is_none() {
-                        // Phase 5: bounded native create/modify writes derive
-                        // a host-local rule narrower than the application
-                        // safety maxima; persistence failure denies the write
-                        // and nothing is dispatched.
-                        match self.persist_write_rule(&prompt) {
-                            Ok(rule_id) => self.dispatch_write_prompt(prompt, Some(rule_id)),
-                            Err(error) => {
-                                self.record_denied_write(&prompt.session_id, &prompt.kind);
-                                let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
-                                    reason: format!(
-                                        "persistent write approval unavailable: {error}"
-                                    ),
-                                }));
-                                if let Some(thread) = prompt.thread_index
-                                    && let Some(thread) = self.agents.threads.get_mut(thread)
-                                {
-                                    thread.push_system("approval denied");
-                                }
-                            }
-                        }
-                        return;
-                    }
-                    match self.persist_mcp_rule(&prompt) {
-                        Ok(rule_id) => self.dispatch_write_prompt(prompt, Some(rule_id)),
-                        Err(error) => {
-                            // Persistence failure: current permission error,
-                            // nothing is dispatched, budget unchanged.
-                            self.record_denied_write(&prompt.session_id, &prompt.kind);
-                            let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
-                                reason: format!("persistent MCP approval unavailable: {error}"),
-                            }));
-                            if let Some(thread) = prompt.thread_index
-                                && let Some(thread) = self.agents.threads.get_mut(thread)
-                            {
-                                thread.push_system("approval denied");
-                            }
-                        }
-                    }
-                }
-            }
+        if matches!(
+            choice,
+            ApprovalChoice::AllowPersistent
+                | ApprovalChoice::AllowPersistentShort
+                | ApprovalChoice::AllowPersistentPrefix(_)
+                | ApprovalChoice::AllowPersistentPrefixShort(_)
+        ) {
+            self.resolve_persistent_allow_choice(prompt, choice);
             return;
         }
         let allow = choice.allows();
@@ -3550,11 +4461,38 @@ impl App {
             ApprovalKind::Write { .. } | ApprovalKind::WriteBatch { .. } => {
                 self.dispatch_write_prompt(prompt, Some(rule_id));
             }
-            ApprovalKind::Filesystem { .. } | ApprovalKind::Network { .. } => {
+            ApprovalKind::Network { .. } => match prompt.kind {
+                ApprovalKind::Network {
+                    route,
+                    requested_host,
+                    current_host,
+                    call,
+                    mut approved_hosts,
+                    cancellation,
+                } => {
+                    // Network dispatch completion is asynchronous. Consume before
+                    // dispatch so failed/cancelled attempts cannot expand authority.
+                    self.agents.usage_ledger.record_use(
+                        self.primary_workspace_identity(),
+                        &session_id,
+                        &rule_id,
+                    );
+                    approved_hosts.insert(current_host);
+                    self.dispatch_web_call(
+                        route,
+                        session_id,
+                        requested_host,
+                        call,
+                        approved_hosts,
+                        cancellation,
+                        prompt.reply,
+                    );
+                }
+                _ => unreachable!(),
+            },
+            ApprovalKind::Filesystem { .. } => {
                 let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
-                    reason: String::from(
-                        "persistent filesystem or network approval is not supported",
-                    ),
+                    reason: String::from("persistent filesystem approval is not supported"),
                 }));
             }
         }
@@ -3600,33 +4538,6 @@ impl App {
                 }));
             }
         }
-    }
-
-    /// Derives an exact MCP invocation rule from the validated invocation
-    /// behind the prompt (`Allow for 1 hour / 20 uses`), persists it
-    /// host-locally, and returns the stable rule id.
-    fn persist_mcp_rule(&self, prompt: &ApprovalPrompt) -> Result<String, TrustStoreError> {
-        let invocation = prompt.mcp.as_ref().ok_or_else(|| {
-            TrustStoreError::ValidationFailure("prompt carries no validated MCP invocation".into())
-        })?;
-        let store = self.workspace_trust_store().ok_or(TrustStoreError::StateDirUnavailable)?;
-        let rule_id = generate_mcp_rule_id();
-        let rule = TrustRule::Mcp(McpRule {
-            id: rule_id.clone(),
-            scope: TrustRuleScope {
-                workspace: invocation.workspace,
-                agent: prompt.agent_id.clone(),
-                expires_at: Some(self.trust_clock.now() + PERSISTENT_TERMINAL_DURATION),
-                max_uses: Some(PERSISTENT_TERMINAL_MAX_USES),
-            },
-            server: invocation.server.clone(),
-            transport_identity: invocation.transport_identity.clone(),
-            tool: invocation.tool.clone(),
-            tool_schema_version: invocation.tool_schema_version,
-            arguments_json: invocation.arguments_json.clone(),
-        });
-        store.add_rule(rule)?;
-        Ok(rule_id)
     }
 
     // ── Phase 5: native write normalization and bounded write grants ─────
@@ -3802,77 +4713,6 @@ impl App {
             .map(|_| PERSISTENT_WRITE_OPTION_LABEL)
     }
 
-    /// Persists a bounded write rule derived from an approved native write
-    /// request (`Allow for 1 hour / 5 uses`): the canonical directory
-    /// prefix and the exact file/byte bounds of the approved request,
-    /// narrowed to the application safety maxima.  The rule activates
-    /// immediately; later approvals reload the store before evaluation.
-    fn persist_write_rule(&self, prompt: &ApprovalPrompt) -> Result<String, TrustStoreError> {
-        let store = self.workspace_trust_store().ok_or(TrustStoreError::StateDirUnavailable)?;
-        let shape = match &prompt.kind {
-            ApprovalKind::Write { path, content, expectation, .. } => {
-                self.native_single_write_rule_shape(path, content, expectation)
-            }
-            ApprovalKind::WriteBatch { writes, .. } => self.native_batch_write_rule_shape(writes),
-            _ => None,
-        }
-        .ok_or_else(|| {
-            TrustStoreError::ValidationFailure(
-                "write request is not eligible for persistent trust".to_string(),
-            )
-        })?;
-        let (operation, path_prefix, max_files, max_total_bytes, max_file_bytes) = shape;
-        let rule_id = generate_write_rule_id();
-        let rule = TrustRule::Write(WriteRule {
-            id: rule_id.clone(),
-            scope: TrustRuleScope {
-                workspace: self.primary_workspace_identity(),
-                agent: prompt.agent_id.clone(),
-                expires_at: Some(self.trust_clock.now() + PERSISTENT_WRITE_DURATION),
-                max_uses: Some(PERSISTENT_WRITE_MAX_USES),
-            },
-            operation,
-            path_prefix,
-            max_files,
-            max_total_bytes,
-            max_file_bytes,
-        });
-        store.add_rule(rule)?;
-        Ok(rule_id)
-    }
-
-    /// Derives a narrow exact command rule from the full current argv
-    /// (`Allow for 1 hour / 20 uses`), persists it host-locally, and returns
-    /// the stable rule id.  The rule activates immediately: later approvals
-    /// reload the store before evaluation.
-    fn persist_terminal_rule(
-        &self,
-        request: &CreateTerminalRequest,
-        agent_id: Option<&str>,
-    ) -> Result<String, TrustStoreError> {
-        let store = self.workspace_trust_store().ok_or(TrustStoreError::StateDirUnavailable)?;
-        let invocation = self.command_invocation_for_request(request).map_err(|error| {
-            TrustStoreError::ValidationFailure(format!(
-                "terminal request is not eligible for persistent trust: {error}"
-            ))
-        })?;
-        let rule_id = generate_command_rule_id();
-        let rule = TrustRule::Command(CommandRule {
-            id: rule_id.clone(),
-            scope: TrustRuleScope {
-                workspace: invocation.workspace,
-                agent: agent_id.map(String::from),
-                expires_at: Some(self.trust_clock.now() + PERSISTENT_TERMINAL_DURATION),
-                max_uses: Some(PERSISTENT_TERMINAL_MAX_USES),
-            },
-            executable: invocation.executable,
-            match_mode: MatchMode::ArgvExact,
-            argv: invocation.argv,
-        });
-        store.add_rule(rule)?;
-        Ok(rule_id)
-    }
-
     /// Spawns an approved terminal through the existing pipeline and records
     /// the matched persistent rule use only after a successful spawn.
     fn spawn_trusted_terminal(
@@ -3916,12 +4756,189 @@ impl App {
         let _ = reply.send(result.map(ClientRequestResponse::CreateTerminal));
     }
 
+    #[cfg(test)]
+    pub(crate) fn queue_terminal_approval_for_test(
+        &mut self,
+        session_id: &str,
+        agent_id: Option<&str>,
+        command: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        cwd: Option<PathBuf>,
+    ) -> oneshot::Receiver<ClientRequestResult> {
+        let request = CreateTerminalRequest::new(SessionId::new(session_id), command)
+            .args(args.iter().map(|value| (*value).to_string()).collect())
+            .env(env.iter().map(|(name, value)| EnvVariable::new(*name, *value)).collect())
+            .cwd(cwd);
+        let persistent_allowed = self.command_invocation_for_request(&request).is_ok();
+        let (reply, receiver) = oneshot::channel();
+        self.request_bridge_approval(ApprovalPrompt::terminal(
+            None,
+            agent_id.map(str::to_string),
+            &SessionId::new(session_id),
+            &request,
+            reply,
+            persistent_allowed,
+        ));
+        receiver
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queue_write_approval_for_test(
+        &mut self,
+        path: PathBuf,
+        content: &str,
+    ) -> oneshot::Receiver<ClientRequestResult> {
+        let request =
+            WriteTextFileRequest::new(SessionId::new("persistent-deny-write"), path, content);
+        let (reply, receiver) = oneshot::channel();
+        self.request_bridge_approval(ApprovalPrompt::write(
+            None,
+            &request.session_id,
+            &request,
+            None,
+            reply,
+        ));
+        receiver
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queue_filesystem_create_approval_for_test(
+        &mut self,
+        path: PathBuf,
+    ) -> oneshot::Receiver<ClientRequestResult> {
+        let (reply, receiver) = oneshot::channel();
+        self.queue_proxy_filesystem(
+            super::agent_filesystem::FilesystemOperation::CreateDirectory { path },
+            reply,
+        );
+        receiver
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queue_filesystem_delete_approval_for_test(
+        &mut self,
+        path: PathBuf,
+    ) -> oneshot::Receiver<ClientRequestResult> {
+        let (reply, receiver) = oneshot::channel();
+        self.queue_proxy_filesystem(
+            super::agent_filesystem::FilesystemOperation::DeletePath { path },
+            reply,
+        );
+        receiver
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queue_network_fetch_approval_for_test(
+        &mut self,
+        host: &str,
+    ) -> oneshot::Receiver<ClientRequestResult> {
+        let (reply, receiver) = oneshot::channel();
+        self.request_web_approval(ApprovalPrompt::web(
+            ProxyRoute::Stdio,
+            String::from("proxy-network:stdio:ee --mcp-proxy:persistent-deny-test"),
+            host.to_string(),
+            host.to_string(),
+            None,
+            WebApprovalCall::Fetch { url: format!("https://{host}/blocked") },
+            BTreeSet::new(),
+            CancellationToken::new(),
+            reply,
+        ));
+        receiver
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queue_generic_mcp_write_approval_for_test(
+        &mut self,
+        path: PathBuf,
+        content: &str,
+    ) -> oneshot::Receiver<ClientRequestResult> {
+        let invocation = self
+            .mcp_invocation_for_tool(
+                "ee_format_file",
+                serde_json::json!({ "path": path }),
+                ProxyRoute::Stdio,
+            )
+            .expect("format tool must have exact MCP identity");
+        let spec = ProxyWriteSpec {
+            title: String::from("ee_format_file"),
+            detail: path.display().to_string(),
+            prepared: PreparedWrite {
+                path,
+                content: content.to_string(),
+                tool_call_id: None,
+                expectation: WriteExpectation::Blind,
+                reply_kind: WriteReplyKind::ProxyStructured,
+                proxy_edit_count: 1,
+            },
+        };
+        let (reply, receiver) = oneshot::channel();
+        self.request_bridge_approval(ApprovalPrompt::proxy_write(
+            spec,
+            Some(invocation),
+            None,
+            reply,
+        ));
+        receiver
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_web_dispatch_count_for_test() {
+        WEB_DISPATCH_TEST_COUNT.store(0, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn web_dispatch_count_for_test() -> usize {
+        WEB_DISPATCH_TEST_COUNT.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn confirm_bridge_approval_for_test(&mut self, choice: ApprovalChoice) {
+        self.confirm_bridge_approval(choice);
+    }
+
     /// Confirms the front approval with the selected option.
     pub(super) fn confirm_bridge_approval(&mut self, choice: ApprovalChoice) {
+        if matches!(
+            choice,
+            ApprovalChoice::AllowPersistent
+                | ApprovalChoice::AllowPersistentShort
+                | ApprovalChoice::AllowPersistentPrefix(_)
+                | ApprovalChoice::AllowPersistentPrefixShort(_)
+        ) && let Some(prompt) = self.agents.approvals.front_mut()
+            && prompt.confirming_allow != Some(choice)
+        {
+            prompt.confirming_allow = Some(choice);
+            self.backend.status_message =
+                Some(String::from("confirm bounded workspace allow rule"));
+            return;
+        }
+        if choice == ApprovalChoice::DenyPersistent
+            && let Some(prompt) = self.agents.approvals.front_mut()
+            && !prompt.confirming_deny
+        {
+            prompt.confirming_deny = true;
+            self.backend.status_message = Some(String::from("confirm workspace deny rule"));
+            return;
+        }
         let Some(prompt) = self.agents.approvals.pop_front() else {
             return;
         };
         self.resolve_approval(prompt, choice);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cancel_rule_confirmation_for_test(&mut self) {
+        self.cancel_rule_confirmation();
+    }
+
+    pub(super) fn cancel_rule_confirmation(&mut self) {
+        if let Some(prompt) = self.agents.approvals.front_mut() {
+            prompt.confirming_deny = false;
+            prompt.confirming_allow = None;
+            self.backend.status_message = Some(String::from("trust rule confirmation cancelled"));
+        }
     }
 
     #[cfg(test)]
@@ -5290,11 +6307,8 @@ impl App {
         operation: super::agent_filesystem::FilesystemOperation,
         reply: oneshot::Sender<ClientRequestResult>,
     ) {
-        if let Err(error) = super::agent_filesystem::validate(&operation, &self.allowed_fs_roots())
-        {
-            let _ = reply.send(Err(AgentError::invalid_params(error.to_string())));
-            return;
-        }
+        // Application safeguards inspect typed paths before ordinary validation;
+        // executor validates again immediately before mutation.
         if let Some(path) = self
             .backend
             .all_bufs()
@@ -5828,6 +6842,9 @@ impl App {
         cancellation: CancellationToken,
         reply: oneshot::Sender<ClientRequestResult>,
     ) {
+        #[cfg(test)]
+        WEB_DISPATCH_TEST_COUNT.fetch_add(1, Ordering::SeqCst);
+
         match call {
             WebApprovalCall::Search { query } => {
                 let service = match self.web_context_service() {

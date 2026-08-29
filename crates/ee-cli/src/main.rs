@@ -613,6 +613,7 @@ fn grant_agent_trust_profiles_at(
                 document.rules.push(policy::TrustRule::McpReadProfile(
                     policy::McpReadProfileRule {
                         id: id.to_string(),
+                        effect: policy::TrustEffect::Allow,
                         scope: scope.clone(),
                         server: "ee".to_string(),
                         transport_identity: transport_identity.to_string(),
@@ -639,6 +640,7 @@ fn grant_agent_trust_profiles_at(
         {
             document.rules.push(policy::TrustRule::Profile(policy::ProfileRule {
                 id: id.to_string(),
+                effect: policy::TrustEffect::Allow,
                 scope: scope.clone(),
                 profile: profile.to_string(),
             }));

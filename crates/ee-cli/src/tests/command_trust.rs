@@ -16,7 +16,7 @@ use tempfile::TempDir;
 
 use crate::policy::rules::{MatchMode, TrustRule};
 use crate::policy::session::SessionPolicy;
-use crate::policy::store::TrustStore;
+use crate::policy::store::{TrustStore, TrustStoreError};
 use crate::policy::{
     DecisionReason, OperationIdentity, SHELL_WRAPPERS, TrustCategory, TrustOperation, TrustOutcome,
     TrustRuleScope, UsageLedger, UsageSnapshot, WorkspaceIdentity, is_shell_wrapper,
@@ -54,6 +54,7 @@ fn command_rule(
 ) -> TrustRule {
     TrustRule::Command(crate::policy::CommandRule {
         id: id.to_string(),
+        effect: crate::policy::TrustEffect::Allow,
         scope: scope(workspace),
         executable: executable.to_string(),
         match_mode,
@@ -88,6 +89,10 @@ fn decide(
         now: at("2026-08-07T12:00:00Z"),
         usage,
         workspace_enabled: true,
+        built_in_deny: None,
+        tool_default: None,
+        category_default: None,
+        global_default: None,
     })
 }
 
@@ -208,7 +213,7 @@ fn git_status_rules_match_only_intended_structured_argv() {
     let short = command_op(ws, "git", &["status", "--short"]);
     assert_eq!(
         decide(&short, std::slice::from_ref(&exact), &UsageSnapshot::default()).outcome,
-        TrustOutcome::Prompt,
+        TrustOutcome::Confirm,
         "exact rule rejects extra flags"
     );
     for argv in [
@@ -220,13 +225,13 @@ fn git_status_rules_match_only_intended_structured_argv() {
     ] {
         let op = command_op(ws, "git", argv);
         let decision = decide(&op, std::slice::from_ref(&exact), &UsageSnapshot::default());
-        assert_eq!(decision.outcome, TrustOutcome::Prompt, "{argv:?} must not match exact");
+        assert_eq!(decision.outcome, TrustOutcome::Confirm, "{argv:?} must not match exact");
         let decision = decide(&op, std::slice::from_ref(&prefix), &UsageSnapshot::default());
-        assert_eq!(decision.outcome, TrustOutcome::Prompt, "{argv:?} must not match prefix");
+        assert_eq!(decision.outcome, TrustOutcome::Confirm, "{argv:?} must not match prefix");
     }
     // The executable token is part of the identity.
     let other = command_op(ws, "hub", &["status"]);
-    assert_eq!(decide(&other, &[exact], &UsageSnapshot::default()).outcome, TrustOutcome::Prompt);
+    assert_eq!(decide(&other, &[exact], &UsageSnapshot::default()).outcome, TrustOutcome::Confirm);
 }
 
 #[test]
@@ -241,7 +246,7 @@ fn argv_exact_empty_rule_matches_only_a_no_argument_request() {
     let with_args = command_op(ws, "true", &["--flag"]);
     assert_eq!(
         decide(&with_args, &[rule], &UsageSnapshot::default()).outcome,
-        TrustOutcome::Prompt
+        TrustOutcome::Confirm
     );
 }
 
@@ -277,9 +282,8 @@ max_uses = 20
         identity = store.workspace().as_string()
     );
     write_store_text(store.path(), &text);
-    let document = store.load().expect("load");
-    let ids: Vec<&str> = document.rules.iter().map(TrustRule::id).collect();
-    assert_eq!(ids, vec!["cmd_ok"], "command-only git rule rejected, bounded rule loads");
+    assert!(matches!(store.load(), Err(TrustStoreError::ValidationFailure(_))));
+    assert_eq!(fs::read_to_string(store.path()).unwrap(), text);
 }
 
 #[test]
@@ -322,9 +326,8 @@ max_uses = 20
         identity = store.workspace().as_string()
     );
     write_store_text(store.path(), &text);
-    let document = store.load().expect("load");
-    let ids: Vec<&str> = document.rules.iter().map(TrustRule::id).collect();
-    assert_eq!(ids, vec!["cmd_git"], "shell wrapper rules rejected at load");
+    assert!(matches!(store.load(), Err(TrustStoreError::ValidationFailure(_))));
+    assert_eq!(fs::read_to_string(store.path()).unwrap(), text);
 }
 
 // ── Usage ledger ─────────────────────────────────────────────────────────────
@@ -374,7 +377,7 @@ fn exhausted_persistent_grant_prompts_without_mutating_usage() {
     let exhausted =
         UsageSnapshot::new(std::collections::BTreeMap::from([("cmd_1".to_string(), 2)]));
     let decision = decide(&op, &[rule], &exhausted);
-    assert_eq!(decision.outcome, TrustOutcome::Prompt);
+    assert_eq!(decision.outcome, TrustOutcome::Confirm);
     assert_eq!(decision.reason, DecisionReason::NoMatchingRule);
     assert_eq!(exhausted.used("cmd_1"), 2, "usage snapshot unchanged");
 }
@@ -441,6 +444,7 @@ mod e2e {
         let id = format!("cmd_seed_{executable}_{}", argv.join("_"));
         let rule = TrustRule::Command(crate::policy::CommandRule {
             id: id.clone(),
+            effect: crate::policy::TrustEffect::Allow,
             scope: TrustRuleScope {
                 workspace: ws,
                 agent: None,
@@ -469,6 +473,14 @@ mod e2e {
             press(app, KeyCode::Right, KeyModifiers::NONE);
         }
         press(app, KeyCode::Enter, KeyModifiers::NONE);
+        if app
+            .agents
+            .approvals
+            .front()
+            .is_some_and(|prompt| prompt.allow_confirmation_preview().is_some())
+        {
+            press(app, KeyCode::Enter, KeyModifiers::NONE);
+        }
     }
 
     #[test]
@@ -514,9 +526,14 @@ mod e2e {
         wait_until(&mut app, "approval queued", |app| !app.agents.approvals.is_empty());
         {
             let prompt = app.agents.approvals.front().unwrap();
-            assert_eq!(prompt.options.len(), 5, "persistent option offered");
+            assert_eq!(
+                prompt.options.len(),
+                9,
+                "default/short exact, prefix, and deny persistence offered"
+            );
             assert_eq!(prompt.options[4].0, "Allow for 1 hour / 20 uses");
             assert_eq!(prompt.options[4].1, ApprovalChoice::AllowPersistent);
+            assert_eq!(prompt.options[6].1, ApprovalChoice::AllowPersistentPrefix(1));
         }
         open_pane_and_select(&mut app, 4); // Allow for 1 hour / 20 uses
 
@@ -580,8 +597,11 @@ mod e2e {
         wait_until(&mut app, "shell approval queued", |app| !app.agents.approvals.is_empty());
         {
             let prompt = app.agents.approvals.front().unwrap();
-            assert_eq!(prompt.options.len(), 4, "shell wrapper never offers persistent");
+            assert_eq!(prompt.options.len(), 5, "shell wrapper offers deny only");
             assert!(prompt.options.iter().all(|(label, _)| !label.contains("1 hour")));
+            assert!(prompt.options.iter().any(|(label, choice)| {
+                label == "Deny for this workspace" && *choice == ApprovalChoice::DenyPersistent
+            }));
         }
         run_ex(&mut app, "agents");
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE); // Deny

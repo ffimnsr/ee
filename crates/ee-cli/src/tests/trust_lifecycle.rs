@@ -33,6 +33,7 @@ fn command_rule(
 ) -> TrustRule {
     TrustRule::Command(CommandRule {
         id: id.to_string(),
+        effect: crate::policy::TrustEffect::Allow,
         scope: TrustRuleScope { workspace, agent: None, expires_at, max_uses },
         executable: "git".to_string(),
         match_mode: MatchMode::ArgvExact,
@@ -83,6 +84,10 @@ fn decide(
         now,
         usage,
         workspace_enabled: true,
+        built_in_deny: None,
+        tool_default: None,
+        category_default: None,
+        global_default: None,
     })
 }
 
@@ -109,7 +114,7 @@ fn virtual_clock_permits_before_expiry_and_prompts_after() {
         before + Duration::from_secs(7200),
         &UsageSnapshot::default(),
     );
-    assert_eq!(late.outcome, TrustOutcome::Prompt, "expired rule prompts");
+    assert_eq!(late.outcome, TrustOutcome::Confirm, "expired rule prompts");
     assert_eq!(late.reason, DecisionReason::NoMatchingRule);
 
     // At exactly the expiry instant the rule is expired (expires_at is
@@ -120,7 +125,7 @@ fn virtual_clock_permits_before_expiry_and_prompts_after() {
         before + Duration::from_secs(3600),
         &UsageSnapshot::default(),
     );
-    assert_eq!(exact.outcome, TrustOutcome::Prompt, "expiry instant is expired");
+    assert_eq!(exact.outcome, TrustOutcome::Confirm, "expiry instant is expired");
 }
 
 #[test]
@@ -131,6 +136,7 @@ fn execute_and_write_grants_allow_exactly_configured_uses_then_prompt() {
         command_rule("lifecycle_rule", ws, Some(now + Duration::from_secs(3600)), Some(3));
     let write = TrustRule::Write(crate::policy::WriteRule {
         id: "lifecycle_rule".to_string(),
+        effect: crate::policy::TrustEffect::Allow,
         scope: TrustRuleScope {
             workspace: ws,
             agent: None,
@@ -153,12 +159,12 @@ fn execute_and_write_grants_allow_exactly_configured_uses_then_prompt() {
         );
         assert_eq!(
             decide(&op, std::slice::from_ref(&rule), now, &used(3)).outcome,
-            TrustOutcome::Prompt,
+            TrustOutcome::Confirm,
             "budget exhausted allows exactly max_uses"
         );
         assert_eq!(
             decide(&op, std::slice::from_ref(&rule), now, &used(99)).outcome,
-            TrustOutcome::Prompt
+            TrustOutcome::Confirm
         );
     }
 }
@@ -275,6 +281,9 @@ fn reload_preserves_valid_expiry_metadata() {
         .write(&crate::policy::TrustStoreDocument {
             workspace: ws,
             workspace_enabled: false,
+            tool_defaults: Vec::new(),
+            category_defaults: Vec::new(),
+            global_default: crate::policy::FallbackEffect::Confirm,
             rules: vec![rule],
         })
         .expect("write");
@@ -327,13 +336,6 @@ argv = ["status"]
 expires_at = "{within}"
 max_uses = 50000
 
-[[mcp_allow]]
-id = "unlimited_mcp"
-server = "ee"
-transport_identity = "stdio:test"
-tool = "ee_apply_code_action"
-tool_schema_version = 1
-arguments_json = "{{\"path\":\"src/main.rs\"}}"
 
 [[command_allow]]
 id = "valid"
@@ -347,16 +349,11 @@ max_uses = 20
     write_store_text(store.path(), &document_with(&store, &entries));
     let document = store.load_at(now).expect("load at injected time");
     let ids: Vec<&str> = document.rules.iter().map(TrustRule::id).collect();
-    assert_eq!(
-        ids,
-        vec!["valid"],
-        "past expiry, overlong window, oversized budget, and unlimited MCP never load"
-    );
+    assert_eq!(ids, vec!["valid"], "past expiry, overlong window, and oversized budget never load");
     // The invalid entries remain stored on disk; they just never become
     // effective authority.
     let text = fs::read_to_string(store.path()).unwrap();
     assert!(text.contains("past_expiry"), "expired rule stays stored");
-    assert!(text.contains("unlimited_mcp"), "unlimited mcp stays stored");
 }
 
 #[test]
@@ -369,6 +366,9 @@ fn load_at_uses_injected_time_deterministically() {
         .write(&crate::policy::TrustStoreDocument {
             workspace: ws,
             workspace_enabled: false,
+            tool_defaults: Vec::new(),
+            category_defaults: Vec::new(),
+            global_default: crate::policy::FallbackEffect::Confirm,
             rules: vec![rule],
         })
         .expect("write");
@@ -421,6 +421,7 @@ mod e2e {
         let store = TrustStore::at(state_dir, workspace).unwrap();
         let rule = TrustRule::Command(CommandRule {
             id: id.to_string(),
+            effect: crate::policy::TrustEffect::Allow,
             scope: TrustRuleScope {
                 workspace: *store.workspace(),
                 agent: None,
@@ -435,6 +436,9 @@ mod e2e {
             .write(&TrustStoreDocument {
                 workspace: *store.workspace(),
                 workspace_enabled: true,
+                tool_defaults: Vec::new(),
+                category_defaults: Vec::new(),
+                global_default: crate::policy::FallbackEffect::Confirm,
                 rules: vec![rule],
             })
             .expect("seed store");
@@ -502,6 +506,7 @@ mod e2e {
         let store = TrustStore::at(&state_dir, temp.path()).unwrap();
         let rule = TrustRule::Write(crate::policy::WriteRule {
             id: "write_audit".to_string(),
+            effect: crate::policy::TrustEffect::Allow,
             scope: TrustRuleScope {
                 workspace: *store.workspace(),
                 agent: None,
@@ -518,6 +523,9 @@ mod e2e {
             .write(&TrustStoreDocument {
                 workspace: *store.workspace(),
                 workspace_enabled: true,
+                tool_defaults: Vec::new(),
+                category_defaults: Vec::new(),
+                global_default: crate::policy::FallbackEffect::Confirm,
                 rules: vec![rule],
             })
             .expect("seed store");
@@ -625,7 +633,7 @@ mod e2e {
             .expect("prompt fallback audit recorded");
         assert_eq!(entry.0, &None, "no rule matched");
         assert_eq!(*entry.1, TrustCategory::Execute);
-        assert_eq!(*entry.2, DecisionReason::NoMatchingRule);
+        assert_eq!(*entry.2, DecisionReason::GlobalDefaultConfirm);
         assert_eq!(entry.3, &None, "no remaining use without a matched rule");
         assert_eq!(entry.4, "proxy");
         let rendered = format!("{log:?}");

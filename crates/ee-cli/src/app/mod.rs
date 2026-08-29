@@ -39,6 +39,8 @@ pub(crate) mod agents_mcp;
 mod commands;
 mod parsing;
 mod state;
+#[cfg(feature = "agents")]
+mod trust_manager;
 
 const VLF_SOURCE_CONTROL_DISABLED_REASON: &str = "requires whole-buffer diff/blame scans";
 
@@ -60,10 +62,16 @@ pub(crate) use state::{
 // module tree without those modules, so the lint fires there.
 #[cfg(all(feature = "agents", test))]
 #[allow(unused_imports)]
+pub(crate) use crate::policy::{
+    EXECUTE_GRANT_MAX_USES as PERSISTENT_TERMINAL_MAX_USES,
+    WRITE_GRANT_MAX_USES as PERSISTENT_WRITE_MAX_USES,
+};
+#[cfg(all(feature = "agents", test))]
+#[allow(unused_imports)]
 pub(crate) use agent_bridge::{
     ActionLogEntry, AgentTerminals, ApprovalChoice, OwnedTerminalStop,
-    PERSISTENT_TERMINAL_MAX_USES, PERSISTENT_TERMINAL_OPTION_LABEL, PERSISTENT_WRITE_MAX_USES,
-    PreparedWrite, TerminalOwner, ToolApprovalMode, WriteExpectation, WriteReplyKind,
+    PERSISTENT_TERMINAL_OPTION_LABEL, PreparedWrite, TerminalOwner, ToolApprovalMode,
+    WriteExpectation, WriteReplyKind,
 };
 
 #[cfg(feature = "agents")]

@@ -64,6 +64,7 @@ fn command_rule(
 ) -> TrustRule {
     TrustRule::Command(crate::policy::CommandRule {
         id: spec.id.to_string(),
+        effect: crate::policy::TrustEffect::Allow,
         scope: scope_for(&spec, workspace),
         executable: executable.to_string(),
         match_mode,
@@ -74,6 +75,7 @@ fn command_rule(
 fn mcp_rule(spec: RuleSpec<'_>, workspace: WorkspaceIdentity, arguments_json: &str) -> TrustRule {
     TrustRule::Mcp(crate::policy::McpRule {
         id: spec.id.to_string(),
+        effect: crate::policy::TrustEffect::Allow,
         scope: scope_for(&spec, workspace),
         server: "ee".to_string(),
         transport_identity: "stdio:test".to_string(),
@@ -91,6 +93,7 @@ fn read_path_rule(
 ) -> TrustRule {
     TrustRule::ReadPath(crate::policy::ReadPathRule {
         id: spec.id.to_string(),
+        effect: crate::policy::TrustEffect::Allow,
         scope: scope_for(&spec, workspace),
         path_prefix: PathPrefix::parse(path_prefix).expect("valid prefix"),
         max_bytes,
@@ -100,6 +103,7 @@ fn read_path_rule(
 fn profile_rule(spec: RuleSpec<'_>, workspace: WorkspaceIdentity, profile: &str) -> TrustRule {
     TrustRule::Profile(crate::policy::ProfileRule {
         id: spec.id.to_string(),
+        effect: crate::policy::TrustEffect::Allow,
         scope: scope_for(&spec, workspace),
         profile: profile.to_string(),
     })
@@ -116,6 +120,7 @@ fn write_rule(
 ) -> TrustRule {
     TrustRule::Write(crate::policy::WriteRule {
         id: spec.id.to_string(),
+        effect: crate::policy::TrustEffect::Allow,
         scope: scope_for(&spec, workspace),
         operation,
         path_prefix: PathPrefix::parse(path_prefix).expect("valid prefix"),
@@ -192,6 +197,10 @@ fn decide(
         now: at(now),
         usage,
         workspace_enabled,
+        built_in_deny: None,
+        tool_default: None,
+        category_default: None,
+        global_default: None,
     })
 }
 
@@ -296,7 +305,7 @@ fn every_unknown_operation_prompts() {
     ] {
         let op = operation(ws, None, category, identity);
         let decision = decide_default(&op, &[]);
-        assert_eq!(decision.outcome, TrustOutcome::Prompt, "unknown op must prompt");
+        assert_eq!(decision.outcome, TrustOutcome::Confirm, "unknown op must prompt");
         assert_eq!(decision.reason, DecisionReason::UnknownOperation);
         assert_eq!(decision.reason.as_str(), "unknown_operation");
     }
@@ -313,7 +322,7 @@ fn unknown_operations_never_match_a_persistent_rule() {
         OperationIdentity::Command { executable: "git".into(), argv: vec!["status".into()] },
     );
     let decision = decide_default(&op, &[rule]);
-    assert_eq!(decision.outcome, TrustOutcome::Prompt);
+    assert_eq!(decision.outcome, TrustOutcome::Confirm);
     assert_eq!(decision.reason, DecisionReason::UnknownOperation);
 }
 
@@ -334,7 +343,7 @@ fn session_deny_overrides_matching_persistent_allow() {
         &UsageSnapshot::default(),
         true,
     );
-    assert_eq!(denied.outcome, TrustOutcome::Prompt);
+    assert_eq!(denied.outcome, TrustOutcome::Deny);
     assert_eq!(denied.reason, DecisionReason::SessionDeny);
 
     // Without the session deny the same persistent rule allows.
@@ -354,7 +363,7 @@ fn session_deny_precedes_session_allow_and_is_scoped() {
     // Deny recorded after allow still wins.
     let decision =
         decide(&op, &[], &session, "s1", "2026-08-07T12:00:00Z", &UsageSnapshot::default(), true);
-    assert_eq!(decision.outcome, TrustOutcome::Prompt);
+    assert_eq!(decision.outcome, TrustOutcome::Deny);
     assert_eq!(decision.reason, DecisionReason::SessionDeny);
     // The deny is per-session.
     let other =
@@ -388,15 +397,15 @@ fn command_exact_rule_matches_only_exact_argv() {
     assert_eq!(
         decide_default(&command_op(ws, "git", &["status", "--short"]), std::slice::from_ref(&rule))
             .outcome,
-        TrustOutcome::Prompt
+        TrustOutcome::Confirm
     );
     assert_eq!(
         decide_default(&command_op(ws, "git", &["stash"]), std::slice::from_ref(&rule)).outcome,
-        TrustOutcome::Prompt
+        TrustOutcome::Confirm
     );
     assert_eq!(
         decide_default(&command_op(ws, "hub", &["status"]), &[rule]).outcome,
-        TrustOutcome::Prompt
+        TrustOutcome::Confirm
     );
 }
 
@@ -415,7 +424,7 @@ fn command_prefix_rule_matches_only_matching_prefix() {
     );
     assert_eq!(
         decide_default(&command_op(ws, "git", &["stash"]), &[rule]).outcome,
-        TrustOutcome::Prompt
+        TrustOutcome::Confirm
     );
 }
 
@@ -425,7 +434,7 @@ fn cross_workspace_rule_never_matches() {
     let other = identity(b"/work/other");
     let rule = command_rule(spec("cmd_1"), ws, "git", MatchMode::ArgvExact, &["status"]);
     let decision = decide_default(&command_op(other, "git", &["status"]), &[rule]);
-    assert_eq!(decision.outcome, TrustOutcome::Prompt);
+    assert_eq!(decision.outcome, TrustOutcome::Confirm);
     assert_eq!(decision.reason, DecisionReason::NoMatchingRule);
 }
 
@@ -453,9 +462,9 @@ fn agent_scoping_matches_only_the_configured_agent() {
     );
     assert_eq!(
         decide_default(&op(None), std::slice::from_ref(&rule)).outcome,
-        TrustOutcome::Prompt
+        TrustOutcome::Confirm
     );
-    assert_eq!(decide_default(&op(Some("other")), &[rule]).outcome, TrustOutcome::Prompt);
+    assert_eq!(decide_default(&op(Some("other")), &[rule]).outcome, TrustOutcome::Confirm);
 
     // A rule without an agent scopes to any agent.
     let any_agent = command_rule(spec("cmd_2"), ws, "git", MatchMode::ArgvExact, &["status"]);
@@ -502,7 +511,7 @@ fn expired_rule_prompts_and_only_injected_time_decides() {
         &UsageSnapshot::default(),
         true,
     );
-    assert_eq!(at_expiry.outcome, TrustOutcome::Prompt, "expiry boundary is exclusive");
+    assert_eq!(at_expiry.outcome, TrustOutcome::Confirm, "expiry boundary is exclusive");
     let after = decide(
         &op,
         &[rule],
@@ -512,7 +521,7 @@ fn expired_rule_prompts_and_only_injected_time_decides() {
         &UsageSnapshot::default(),
         true,
     );
-    assert_eq!(after.outcome, TrustOutcome::Prompt);
+    assert_eq!(after.outcome, TrustOutcome::Confirm);
     assert_eq!(after.reason, DecisionReason::NoMatchingRule);
 }
 
@@ -543,7 +552,7 @@ fn exhausted_rule_prompts_without_mutating_usage() {
         &exhausted,
         true,
     );
-    assert_eq!(decision.outcome, TrustOutcome::Prompt);
+    assert_eq!(decision.outcome, TrustOutcome::Confirm);
     assert_eq!(decision.reason, DecisionReason::NoMatchingRule);
     assert_eq!(exhausted.used("cmd_1"), 2, "usage snapshot must be unchanged");
 }
@@ -562,7 +571,7 @@ fn read_rules_require_the_workspace_gate() {
         &UsageSnapshot::default(),
         false,
     );
-    assert_eq!(gated.outcome, TrustOutcome::Prompt);
+    assert_eq!(gated.outcome, TrustOutcome::Confirm);
     assert_eq!(gated.reason, DecisionReason::WorkspaceDisabled);
     let open = decide(
         &op,
@@ -585,7 +594,7 @@ fn read_rules_require_the_workspace_gate() {
         &UsageSnapshot::default(),
         true,
     );
-    assert_eq!(no_rule.outcome, TrustOutcome::Prompt);
+    assert_eq!(no_rule.outcome, TrustOutcome::Confirm);
 }
 
 #[test]
@@ -637,12 +646,12 @@ fn read_path_rule_enforces_prefix_and_byte_cap() {
     assert_eq!(
         decide_default(&read_path_op(ws, "src/main.rs", Some(2048)), std::slice::from_ref(&rule))
             .outcome,
-        TrustOutcome::Prompt,
+        TrustOutcome::Confirm,
         "over byte cap"
     );
     assert_eq!(
         decide_default(&read_path_op(ws, "lib/main.rs", Some(100)), &[rule]).outcome,
-        TrustOutcome::Prompt,
+        TrustOutcome::Confirm,
         "outside prefix"
     );
 }
@@ -671,13 +680,13 @@ fn mcp_rule_matches_exact_invocation_only() {
     );
     assert_eq!(
         decide_default(&op(r#"{"path":"src/other.rs"}"#), std::slice::from_ref(&rule)).outcome,
-        TrustOutcome::Prompt,
+        TrustOutcome::Confirm,
         "changed argument"
     );
     assert_eq!(
         decide_default(&op(r#"{"path":"src/main.rs","line":1}"#), std::slice::from_ref(&rule))
             .outcome,
-        TrustOutcome::Prompt,
+        TrustOutcome::Confirm,
         "extra argument"
     );
     let other_tool = operation(
@@ -692,7 +701,7 @@ fn mcp_rule_matches_exact_invocation_only() {
             arguments_json: r#"{"path":"src/main.rs"}"#.into(),
         },
     );
-    assert_eq!(decide_default(&other_tool, &[rule]).outcome, TrustOutcome::Prompt, "changed tool");
+    assert_eq!(decide_default(&other_tool, &[rule]).outcome, TrustOutcome::Confirm, "changed tool");
 }
 
 #[test]
@@ -726,7 +735,7 @@ fn write_rule_authorizes_only_its_operation_kind() {
     );
     assert_eq!(
         decide_default(&op(TrustCategory::WriteModify), &[create]).outcome,
-        TrustOutcome::Prompt,
+        TrustOutcome::Confirm,
         "create never authorizes modify"
     );
 
@@ -784,7 +793,7 @@ fn write_rule_enforces_path_and_budget_bounds() {
             std::slice::from_ref(&rule)
         )
         .outcome,
-        TrustOutcome::Prompt,
+        TrustOutcome::Confirm,
         "outside prefix"
     );
     assert_eq!(
@@ -793,7 +802,7 @@ fn write_rule_enforces_path_and_budget_bounds() {
             std::slice::from_ref(&rule)
         )
         .outcome,
-        TrustOutcome::Prompt,
+        TrustOutcome::Confirm,
         "over file count"
     );
     assert_eq!(
@@ -802,12 +811,12 @@ fn write_rule_enforces_path_and_budget_bounds() {
             std::slice::from_ref(&rule)
         )
         .outcome,
-        TrustOutcome::Prompt,
+        TrustOutcome::Confirm,
         "over total bytes"
     );
     assert_eq!(
         decide_default(&op("src/generated/a.rs", 1, Some(1024), Some(20_000)), &[rule]).outcome,
-        TrustOutcome::Prompt,
+        TrustOutcome::Confirm,
         "over per-file bytes"
     );
 }
@@ -850,7 +859,7 @@ fn evaluator_performs_no_filesystem_clock_or_counter_mutation() {
         &usage,
         true,
     );
-    assert_eq!(late.outcome, TrustOutcome::Prompt);
+    assert_eq!(late.outcome, TrustOutcome::Confirm);
 }
 
 // ── Store: schema compatibility ──────────────────────────────────────────────
@@ -860,6 +869,9 @@ fn sample_document(store: &TrustStore) -> TrustStoreDocument {
     TrustStoreDocument {
         workspace: ws,
         workspace_enabled: false,
+        tool_defaults: Vec::new(),
+        category_defaults: Vec::new(),
+        global_default: crate::policy::FallbackEffect::Confirm,
         rules: vec![
             command_rule(
                 spec("cmd_1").agent(Some("openrouter")),
@@ -872,6 +884,7 @@ fn sample_document(store: &TrustStore) -> TrustStoreDocument {
             read_path_rule(spec("read_1").agent(Some("openrouter")), ws, "src", 262_144),
             TrustRule::McpRead(crate::policy::McpReadRule {
                 id: "mcp_read_1".to_string(),
+                effect: crate::policy::TrustEffect::Allow,
                 scope: scope_for(&spec("mcp_read_1").agent(Some("openrouter")), ws),
                 server: "ee".to_string(),
                 transport_identity: "stdio:test".to_string(),
@@ -917,30 +930,36 @@ fn serialized_document_uses_canonical_schema_shape() {
     store.write(&sample_document(&store)).expect("write");
     let text = fs::read_to_string(store.path()).unwrap();
 
-    assert!(text.contains("schema_version = 1"), "schema version first");
+    assert!(text.contains("schema_version = 2"), "schema version first");
     assert!(text.contains(&format!("identity = \"{}\"", store.workspace().as_string())));
     assert!(text.contains("workspace_enabled = false"));
     for array in [
-        "[[command_allow]]",
-        "[[mcp_allow]]",
-        "[[read_path_allow]]",
-        "[[mcp_read_allow]]",
-        "[[profile_allow]]",
-        "[[write_allow]]",
+        "[[command_rules]]",
+        "[[mcp_rules]]",
+        "[[read_path_rules]]",
+        "[[mcp_read_rules]]",
+        "[[profile_rules]]",
+        "[[write_rules]]",
     ] {
         assert!(text.contains(array), "missing {array}");
     }
-    // Canonical field order inside the command table (id, agent,
+    // Canonical field order inside command table (id, effect, agent,
     // executable, match, argv, expires_at, max_uses).
     let index = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("missing {needle}"));
     let id = index("id = \"cmd_1\"");
+    let effect = index("effect = \"allow\"");
     let agent = index("agent = \"openrouter\"");
     let executable = index("executable = \"git\"");
     let argv = index("argv =");
     let expires = index("expires_at =");
     let uses = index("max_uses =");
     assert!(
-        id < agent && agent < executable && executable < argv && argv < expires && expires < uses
+        id < effect
+            && effect < agent
+            && agent < executable
+            && executable < argv
+            && argv < expires
+            && expires < uses
     );
     // No raw workspace path or identity prefix leaks into the document.
     assert!(!text.contains("sha256:sha256:"));
@@ -952,18 +971,18 @@ fn unsupported_schema_version_loads_no_effective_rules() {
     store.write(&sample_document(&store)).expect("write");
     let text = fs::read_to_string(store.path())
         .unwrap()
-        .replace("schema_version = 1", "schema_version = 2");
+        .replace("schema_version = 2", "schema_version = 99");
     write_store_text(store.path(), &text);
 
     match store.load() {
-        Err(TrustStoreError::UnsupportedSchemaVersion(2)) => {}
-        other => panic!("expected UnsupportedSchemaVersion(2), got {other:?}"),
+        Err(TrustStoreError::UnsupportedSchemaVersion(99)) => {}
+        other => panic!("expected UnsupportedSchemaVersion(99), got {other:?}"),
     }
     let effective = store.effective();
     assert!(effective.rules.is_empty(), "unsupported version yields no effective rules");
     assert!(!effective.workspace_enabled);
     let op = command_op(*store.workspace(), "git", &["status"]);
-    assert_eq!(decide_default(&op, &effective.rules).outcome, TrustOutcome::Prompt);
+    assert_eq!(decide_default(&op, &effective.rules).outcome, TrustOutcome::Confirm);
 }
 
 #[test]
@@ -999,7 +1018,7 @@ fn cross_workspace_document_fails_identity_validation() {
     let effective = store_b.effective();
     assert!(effective.rules.is_empty(), "copied store file grants nothing");
     let op = command_op(*store_b.workspace(), "git", &["status"]);
-    assert_eq!(decide_default(&op, &effective.rules).outcome, TrustOutcome::Prompt);
+    assert_eq!(decide_default(&op, &effective.rules).outcome, TrustOutcome::Confirm);
 }
 
 #[test]
@@ -1068,11 +1087,8 @@ max_uses = 20
         identity = ws.as_string()
     );
     write_store_text(store.path(), &text);
-    let document = store.load().expect("load");
-    assert_eq!(document.rules.len(), 1, "conflicting duplicates dropped, unique entry loads");
-    assert_eq!(document.rules[0].id(), "cmd_2");
-    // Cross-array duplicates are conflicts too.
-    assert_eq!(document.rules[0].id(), "cmd_2");
+    assert!(matches!(store.load(), Err(TrustStoreError::ValidationFailure(_))));
+    assert_eq!(fs::read_to_string(store.path()).unwrap(), text);
 }
 
 #[test]
@@ -1117,9 +1133,8 @@ max_uses = 20
         identity = ws.as_string()
     );
     write_store_text(store.path(), &text);
-    let document = store.load().expect("load");
-    let ids: Vec<&str> = document.rules.iter().map(TrustRule::id).collect();
-    assert_eq!(ids, vec!["cmd_1", "read_1"], "invalid entries dropped, valid entries load");
+    assert!(matches!(store.load(), Err(TrustStoreError::ValidationFailure(_))));
+    assert_eq!(fs::read_to_string(store.path()).unwrap(), text);
 }
 
 #[test]
@@ -1165,9 +1180,8 @@ max_uses = 20
         identity = ws.as_string()
     );
     write_store_text(store.path(), &text);
-    let document = store.load().expect("load");
-    assert_eq!(document.rules.len(), 1);
-    assert_eq!(document.rules[0].id(), "cmd_1");
+    assert!(matches!(store.load(), Err(TrustStoreError::ValidationFailure(_))));
+    assert_eq!(fs::read_to_string(store.path()).unwrap(), text);
 }
 
 #[test]
@@ -1211,19 +1225,8 @@ max_uses = 20
         identity = ws.as_string()
     );
     write_store_text(store.path(), &text);
-    let document = store.load().expect("load");
-    let ids: Vec<&str> = document.rules.iter().map(TrustRule::id).collect();
-    assert_eq!(ids, vec!["cmd_exact", "cmd_ok"], "exact [] accepted, prefix [] rejected");
-    let exact = document.rules.iter().find(|rule| rule.id() == "cmd_exact").unwrap();
-    assert_eq!(
-        decide_default(&command_op(ws, "git", &[]), std::slice::from_ref(exact)).outcome,
-        TrustOutcome::Allow,
-        "no-argument invocation matches argv_exact = []"
-    );
-    assert_eq!(
-        decide_default(&command_op(ws, "git", &["status"]), std::slice::from_ref(exact)).outcome,
-        TrustOutcome::Prompt
-    );
+    assert!(matches!(store.load(), Err(TrustStoreError::ValidationFailure(_))));
+    assert_eq!(fs::read_to_string(store.path()).unwrap(), text);
 }
 
 #[test]
@@ -1265,7 +1268,7 @@ fn malformed_store_toml_yields_empty_effective_rules() {
     assert!(matches!(store.load(), Err(TrustStoreError::ParseFailure(_))));
     assert!(store.effective().rules.is_empty());
     let op = command_op(*store.workspace(), "git", &["status"]);
-    assert_eq!(decide_default(&op, &store.effective().rules).outcome, TrustOutcome::Prompt);
+    assert_eq!(decide_default(&op, &store.effective().rules).outcome, TrustOutcome::Confirm);
 }
 
 #[test]
@@ -1325,9 +1328,8 @@ workspace_enabled = false
         identity = ws.as_string()
     );
     write_store_text(store.path(), &text);
-    let document = store.load().expect("load");
-    let ids: Vec<&str> = document.rules.iter().map(TrustRule::id).collect();
-    assert_eq!(ids, vec!["read_1"], "only the valid prefix loads");
+    assert!(matches!(store.load(), Err(TrustStoreError::ValidationFailure(_))));
+    assert_eq!(fs::read_to_string(store.path()).unwrap(), text);
 }
 
 #[test]
@@ -1389,12 +1391,8 @@ workspace_enabled = false
         identity = ws.as_string()
     );
     write_store_text(store.path(), &text);
-    let document = store.load().expect("load");
-    assert_eq!(document.rules.len(), 1, "only the valid canonical argument object loads");
-    let TrustRule::Mcp(rule) = &document.rules[0] else {
-        panic!("expected mcp rule");
-    };
-    assert_eq!(rule.arguments_json, r#"{"b":{"x":1},"path":"src/main.rs"}"#);
+    assert!(matches!(store.load(), Err(TrustStoreError::ValidationFailure(_))));
+    assert_eq!(fs::read_to_string(store.path()).unwrap(), text);
 }
 
 #[test]
@@ -1442,14 +1440,8 @@ expires_at = "2026-08-08T12:00:00Z"
         identity = ws.as_string()
     );
     write_store_text(store.path(), &text);
-    let document = store.load().expect("load");
-    let ids: Vec<&str> = document.rules.iter().map(TrustRule::id).collect();
-    assert_eq!(ids, vec!["read_unlimited"], "read may omit scope; execute/write cannot");
-    let TrustRule::ReadPath(rule) = &document.rules[0] else {
-        panic!("expected read rule");
-    };
-    assert_eq!(rule.scope.expires_at, None);
-    assert_eq!(rule.scope.max_uses, None);
+    assert!(matches!(store.load(), Err(TrustStoreError::ValidationFailure(_))));
+    assert_eq!(fs::read_to_string(store.path()).unwrap(), text);
 }
 
 // ── Store: file behavior and atomicity ───────────────────────────────────────
@@ -1463,7 +1455,7 @@ fn missing_store_loads_an_empty_document() {
     assert!(document.rules.is_empty());
     assert!(store.effective().rules.is_empty());
     let op = command_op(*store.workspace(), "git", &["status"]);
-    assert_eq!(decide_default(&op, &store.effective().rules).outcome, TrustOutcome::Prompt);
+    assert_eq!(decide_default(&op, &store.effective().rules).outcome, TrustOutcome::Confirm);
 }
 
 #[test]
@@ -1631,6 +1623,6 @@ fn store_rules_feed_the_evaluator_end_to_end() {
         &UsageSnapshot::default(),
         true,
     );
-    assert_eq!(denied.outcome, TrustOutcome::Prompt);
+    assert_eq!(denied.outcome, TrustOutcome::Deny);
     assert_eq!(denied.reason, DecisionReason::SessionDeny);
 }

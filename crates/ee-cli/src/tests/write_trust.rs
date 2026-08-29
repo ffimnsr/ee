@@ -59,6 +59,7 @@ fn write_rule(
 ) -> TrustRule {
     TrustRule::Write(WriteRule {
         id: id.to_string(),
+        effect: crate::policy::TrustEffect::Allow,
         scope: scope(workspace, Some(20)),
         operation,
         path_prefix: PathPrefix::parse(prefix).expect("valid prefix"),
@@ -106,6 +107,10 @@ fn decide(
         now: at("2026-08-07T12:00:00Z"),
         usage,
         workspace_enabled,
+        built_in_deny: None,
+        tool_default: None,
+        category_default: None,
+        global_default: None,
     })
 }
 
@@ -123,6 +128,7 @@ fn raw_write_rule(
 ) -> RawWriteRule {
     RawWriteRule {
         id: id.to_string(),
+        effect: crate::policy::TrustEffect::Allow,
         agent: None,
         operation,
         path_prefix: prefix.to_string(),
@@ -263,7 +269,7 @@ fn exhausted_write_rule_prompts_without_mutating_anything() {
     let exhausted = UsageSnapshot::new([("write_1".to_string(), 20u64)].into_iter().collect());
     let decision =
         decide(&op, std::slice::from_ref(&rule), &SessionPolicy::default(), true, &exhausted);
-    assert_eq!(decision.outcome, TrustOutcome::Prompt, "exhausted budget never allows");
+    assert_eq!(decision.outcome, TrustOutcome::Confirm, "exhausted budget never allows");
     assert_eq!(decision.reason, DecisionReason::NoMatchingRule);
 }
 
@@ -279,7 +285,7 @@ fn session_deny_overrides_matching_write_allow() {
     let decision =
         decide(&op, std::slice::from_ref(&rule), &session, true, &UsageSnapshot::default());
     assert_eq!(decision.reason, DecisionReason::SessionDeny);
-    assert_eq!(decision.outcome, TrustOutcome::Prompt);
+    assert_eq!(decision.outcome, TrustOutcome::Deny);
 }
 
 #[test]
@@ -299,6 +305,9 @@ fn write_allow_round_trips_through_the_store_without_usage_counters() {
     let document = TrustStoreDocument {
         workspace: *store.workspace(),
         workspace_enabled: false,
+        tool_defaults: Vec::new(),
+        category_defaults: Vec::new(),
+        global_default: crate::policy::FallbackEffect::Confirm,
         rules: vec![rule],
     };
     store.write(&document).expect("write seed");
@@ -369,6 +378,9 @@ mod e2e {
         let document = TrustStoreDocument {
             workspace: *store.workspace(),
             workspace_enabled: true,
+            tool_defaults: Vec::new(),
+            category_defaults: Vec::new(),
+            global_default: crate::policy::FallbackEffect::Confirm,
             rules: vec![rule],
         };
         store.write(&document).expect("seed store");
@@ -392,6 +404,14 @@ mod e2e {
             press(app, KeyCode::Right, KeyModifiers::NONE);
         }
         press(app, KeyCode::Enter, KeyModifiers::NONE);
+        if app
+            .agents
+            .approvals
+            .front()
+            .is_some_and(|prompt| prompt.allow_confirmation_preview().is_some())
+        {
+            press(app, KeyCode::Enter, KeyModifiers::NONE);
+        }
     }
 
     #[test]

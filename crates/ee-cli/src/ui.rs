@@ -927,6 +927,58 @@ fn approval_mode_confirmation_composer_lines(app: &App) -> Option<(Vec<Line<'sta
 #[cfg(feature = "agents")]
 fn approval_composer_lines(app: &App, width: usize) -> Option<(Vec<Line<'static>>, usize)> {
     let approval = app.agents.approvals.front()?;
+    if let Some(preview) = approval.allow_confirmation_preview() {
+        let detail_width = width.saturating_sub(2).max(4);
+        let mut lines = vec![Line::from(Span::styled(
+            "confirm bounded workspace allow",
+            Style::default().fg(theme::FG_WARNING).add_modifier(Modifier::BOLD),
+        ))];
+        for (label, value) in preview.authority_fields() {
+            for segment in crate::app::wrap_text(&format!("{label}: {value}"), detail_width) {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(segment, Style::default().fg(theme::FG_TEXT)),
+                ]));
+            }
+        }
+        lines.push(Line::from(Span::styled(
+            "  Enter save and execute · Esc back",
+            theme_style(theme::FG_DIM),
+        )));
+        return Some((lines, 0));
+    }
+    if let Some(preview) = approval.deny_confirmation_preview() {
+        let detail_width = width.saturating_sub(2).max(4);
+        let mut lines = vec![Line::from(Span::styled(
+            "confirm workspace deny",
+            Style::default().fg(theme::FG_WARNING).add_modifier(Modifier::BOLD),
+        ))];
+        for (label, value) in [
+            ("effect".to_string(), "deny".to_string()),
+            ("workspace".to_string(), preview.workspace.clone()),
+            ("agent".to_string(), preview.agent.clone()),
+        ]
+        .into_iter()
+        .chain(preview.matcher_fields.iter().cloned())
+        .chain(std::iter::once(("expires".to_string(), preview.expires.clone())))
+        {
+            for segment in crate::app::wrap_text(&format!("{label}: {value}"), detail_width) {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(segment, Style::default().fg(theme::FG_TEXT)),
+                ]));
+            }
+        }
+        lines.push(Line::from(Span::styled(
+            "  Matching future requests deny without approval UI",
+            Style::default().fg(theme::FG_WARNING),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  Enter save and deny · Esc back",
+            theme_style(theme::FG_DIM),
+        )));
+        return Some((lines, 0));
+    }
     let count = approval.options.len();
     let selected = approval.selected.min(count.saturating_sub(1));
     let detail_width = width.saturating_sub(2).max(4);
@@ -946,6 +998,21 @@ fn approval_composer_lines(app: &App, width: usize) -> Option<(Vec<Line<'static>
             Span::raw("  "),
             Span::styled(segment, Style::default().fg(theme::FG_TEXT)),
         ]));
+    }
+    if let Some(mandatory) = approval.mandatory_confirmation() {
+        let source = mandatory
+            .template_id
+            .as_deref()
+            .map(|template| format!("template {template}"))
+            .unwrap_or_else(|| format!("rule {}", mandatory.rule_id));
+        lines.push(Line::from(Span::styled(
+            format!("  mandatory confirmation: {source}"),
+            Style::default().fg(theme::FG_WARNING),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  prior session, bounded, profile, and approval-mode allows cannot bypass this rule",
+            theme_style(theme::FG_DIM),
+        )));
     }
 
     let first_option_row = lines.len();

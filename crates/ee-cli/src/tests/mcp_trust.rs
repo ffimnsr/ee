@@ -67,6 +67,7 @@ fn mcp_rule(
 ) -> TrustRule {
     TrustRule::Mcp(crate::policy::McpRule {
         id: id.to_string(),
+        effect: crate::policy::TrustEffect::Allow,
         scope: TrustRuleScope {
             workspace,
             agent: None,
@@ -91,6 +92,10 @@ fn decide(op: &TrustOperation, rules: &[TrustRule]) -> crate::policy::TrustDecis
         now: at("2026-08-07T12:00:00Z"),
         usage: &UsageSnapshot::default(),
         workspace_enabled: true,
+        built_in_deny: None,
+        tool_default: None,
+        category_default: None,
+        global_default: None,
     })
 }
 
@@ -115,7 +120,7 @@ fn mcp_rule_matches_every_identity_field_exactly() {
     );
     assert_eq!(
         decide(&changed_value, std::slice::from_ref(&rule)).outcome,
-        TrustOutcome::Prompt,
+        TrustOutcome::Confirm,
         "changed argument value"
     );
 
@@ -129,7 +134,7 @@ fn mcp_rule_matches_every_identity_field_exactly() {
     assert_eq!(decide(&array_a, std::slice::from_ref(&array_rule)).outcome, TrustOutcome::Allow);
     assert_eq!(
         decide(&array_b, std::slice::from_ref(&array_rule)).outcome,
-        TrustOutcome::Prompt,
+        TrustOutcome::Confirm,
         "changed array order"
     );
 
@@ -137,7 +142,7 @@ fn mcp_rule_matches_every_identity_field_exactly() {
     let other_transport = mcp_op(ws, None, "acp:ee", "ee_apply_code_action", args);
     assert_eq!(
         decide(&other_transport, std::slice::from_ref(&rule)).outcome,
-        TrustOutcome::Prompt,
+        TrustOutcome::Confirm,
         "cross-transport"
     );
 
@@ -154,7 +159,7 @@ fn mcp_rule_matches_every_identity_field_exactly() {
     };
     assert_eq!(
         decide(&other_server, std::slice::from_ref(&rule)).outcome,
-        TrustOutcome::Prompt,
+        TrustOutcome::Confirm,
         "changed server"
     );
     let other_tool = mcp_op(
@@ -166,7 +171,7 @@ fn mcp_rule_matches_every_identity_field_exactly() {
     );
     assert_eq!(
         decide(&other_tool, std::slice::from_ref(&rule)).outcome,
-        TrustOutcome::Prompt,
+        TrustOutcome::Confirm,
         "changed tool"
     );
     let other_schema = TrustOperation {
@@ -181,7 +186,7 @@ fn mcp_rule_matches_every_identity_field_exactly() {
     };
     assert_eq!(
         decide(&other_schema, std::slice::from_ref(&rule)).outcome,
-        TrustOutcome::Prompt,
+        TrustOutcome::Confirm,
         "changed schema version"
     );
 
@@ -195,7 +200,7 @@ fn mcp_rule_matches_every_identity_field_exactly() {
     );
     assert_eq!(
         decide(&other_workspace, std::slice::from_ref(&rule)).outcome,
-        TrustOutcome::Prompt,
+        TrustOutcome::Confirm,
         "cross-workspace"
     );
     let scoped = mcp_rule("mcp_3", ws, "stdio:ee --mcp-proxy", "ee_apply_code_action", args);
@@ -208,7 +213,7 @@ fn mcp_rule_matches_every_identity_field_exactly() {
     };
     assert_eq!(
         decide(&base, std::slice::from_ref(&scoped)).outcome,
-        TrustOutcome::Prompt,
+        TrustOutcome::Confirm,
         "agent-scoped rule never matches an unscoped operation"
     );
 }
@@ -275,6 +280,7 @@ mod e2e {
     /// Seeds one exact MCP rule into the host-local store for the app
     /// workspace and returns its stable id.
     fn seed_mcp_rule(
+        app: &App,
         state_dir: &Path,
         workspace: &Path,
         transport_identity: &str,
@@ -284,9 +290,14 @@ mod e2e {
     ) -> String {
         let store = TrustStore::at(state_dir, workspace).unwrap();
         let ws = *store.workspace();
-        let id = format!("mcp_seed_{tool}_{transport_identity}");
+        let transport_id = transport_identity
+            .chars()
+            .map(|character| if character.is_ascii_alphanumeric() { character } else { '_' })
+            .collect::<String>();
+        let id = format!("mcp_seed_{tool}_{transport_id}");
         let rule = TrustRule::Mcp(crate::policy::McpRule {
             id: id.clone(),
+            effect: crate::policy::TrustEffect::Allow,
             scope: TrustRuleScope {
                 workspace: ws,
                 agent: None,
@@ -300,6 +311,7 @@ mod e2e {
             arguments_json: arguments_json.to_string(),
         });
         store.add_rule(rule).expect("seed rule");
+        app.reload_workspace_trust_store().expect("reload seeded MCP rule");
         id
     }
 
@@ -338,6 +350,14 @@ mod e2e {
             press(app, KeyCode::Right, KeyModifiers::NONE);
         }
         press(app, KeyCode::Enter, KeyModifiers::NONE);
+        if app
+            .agents
+            .approvals
+            .front()
+            .is_some_and(|prompt| prompt.allow_confirmation_preview().is_some())
+        {
+            press(app, KeyCode::Enter, KeyModifiers::NONE);
+        }
     }
 
     fn ledger_workspace(state_dir: &Path, workspace: &Path) -> WorkspaceIdentity {
@@ -370,7 +390,7 @@ mod e2e {
             );
             assert!(prompt.detail.contains("class: write"), "detail: {}", prompt.detail);
             assert!(prompt.detail.contains("args:"), "detail: {}", prompt.detail);
-            assert_eq!(prompt.options.len(), 5, "persistent option offered");
+            assert_eq!(prompt.options.len(), 7, "default/short allow and deny offered");
             assert_eq!(prompt.options[4].1, ApprovalChoice::AllowPersistent);
         }
         open_pane_and_select(&mut app, 4); // Allow for 1 hour / 20 uses
@@ -456,6 +476,7 @@ mod e2e {
         seed_code_action(&mut app, "act_1", &target_text, "alpha-edited", 1);
         // Grant through the ACP-native route only.
         seed_mcp_rule(
+            &app,
             &state_dir,
             temp.path(),
             "acp:ee",
@@ -493,6 +514,7 @@ mod e2e {
         // The grant was created through the stdio route: it must never
         // authorize the ACP-native route.
         seed_mcp_rule(
+            &app,
             &state_dir,
             temp.path(),
             "stdio:ee --mcp-proxy",
@@ -536,7 +558,7 @@ mod e2e {
         wait_until(&mut app, "write approval queued", |app| !app.agents.approvals.is_empty());
         {
             let prompt = app.agents.approvals.front().unwrap();
-            assert_eq!(prompt.options.len(), 4, "content-bearing write never offers persistent");
+            assert_eq!(prompt.options.len(), 5, "content-bearing write offers deny only");
             assert!(prompt.options.iter().all(|(label, _)| !label.contains("1 hour")));
         }
         press(&mut app, KeyCode::Esc, KeyModifiers::NONE); // Deny
@@ -553,7 +575,11 @@ mod e2e {
         wait_until(&mut app, "terminal approval queued", |app| !app.agents.approvals.is_empty());
         {
             let prompt = app.agents.approvals.front().unwrap();
-            assert_eq!(prompt.options.len(), 5, "command trust offers its persistent option");
+            assert_eq!(
+                prompt.options.len(),
+                9,
+                "command trust offers default/short exact, prefix, and deny persistence"
+            );
         }
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
@@ -587,6 +613,7 @@ mod e2e {
         seed_code_action(&mut app, "act_1", &target_text, "alpha-edited", 1);
         // Create the store (and its 0700 trust directory) first.
         seed_mcp_rule(
+            &app,
             &state_dir,
             temp.path(),
             "stdio:ee --mcp-proxy",
@@ -639,6 +666,7 @@ mod e2e {
         app.agents.test_trust_store_base = Some(state_dir.clone());
         seed_code_action(&mut app, "act_1", &target_text, "alpha-edited", 1);
         let rule_id = seed_mcp_rule(
+            &app,
             &state_dir,
             temp.path(),
             "stdio:ee --mcp-proxy",
@@ -683,6 +711,7 @@ mod e2e {
         app.agents.test_trust_store_base = Some(state_dir.clone());
         seed_code_action(&mut app, "act_1", &target_text, "alpha-edited", 1);
         seed_mcp_rule(
+            &app,
             &state_dir,
             temp.path(),
             "stdio:ee --mcp-proxy",

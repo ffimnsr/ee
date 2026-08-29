@@ -3288,8 +3288,8 @@ Rules:
 - Project configuration has no trust or capability-request fields in version one; host-local trust store alone controls authority.
 - Every operation begins with validated normalized identity. Missing identity, unknown category, malformed config, invalid path, expired rule, exhausted rule, or tool metadata mismatch returns prompt.
 - Session deny takes precedence over every persistent or session allow.
-- Persistent grants are allow-only. Persistent deny is out of scope; deny once/session remains current in-memory behavior.
-- Delete, rename, chmod, symlink creation, binary writes, secret access, VCS mutation, package install/script execution, publish, non-GET network access, and unknown tools remain prompt-only.
+- Phases 1-7 establish allow-only persistent grants. Phases 8-14 extend the same host-local engine with typed persistent deny, mandatory-confirm rules, non-overridable safeguards, and confirm/deny defaults; no phase adds unlimited persistent allow.
+- Delete, rename, chmod, symlink creation, binary writes, secret access, VCS mutation, package install/script execution, publish, non-GET network access, and unknown tools are never auto-allowed; they resolve to mandatory confirm or deny.
 - Rule evaluator is pure. It does not write files, dispatch tools, consume budgets, mutate UI, or access system clock.
 
 ### Phase 1: Establish shared policy contracts and host-local trust store
@@ -3697,6 +3697,284 @@ Rules:
 - `cargo test --quiet -p ee-agent-host` passes.
 - `cargo test --quiet -p ee-mcp` passes.
 - Automated matrix tests prove no repository-controlled configuration, unclassified tool, destructive operation, external path, sensitive value, expired rule, exhausted rule, or scope mismatch bypasses approval.
+
+### Phase 8: Add policy effects, deterministic precedence, and schema version 2
+
+Goal: extend unified trust engine from allow/prompt decisions to explicit deny, mandatory-confirm, bounded-allow, and fallback decisions without introducing unlimited persistent authority.
+
+Overview: add rule effect and fallback policy as shared domain concepts before adding new user-facing controls. Replace allow-named version 1 arrays with version 2 typed rule arrays carrying explicit effect, migrate valid existing grants atomically, and keep evaluator pure.
+
+Rules:
+
+- Supported persistent effects are `allow`, `deny`, and `confirm`; `allow` remains bounded exactly as phases 1-7 require.
+- Tool and global fallback values are `confirm` or `deny` only. Persistent or default unrestricted `allow` is invalid.
+- Effective precedence is built-in deny, persistent deny, session deny, mandatory confirm, session allow, bounded persistent allow, tool default, then global default.
+- Deny never dispatches or opens approval UI. Confirm always opens approval UI and cannot be bypassed by session allow, bounded allow, profile, or approval preset.
+- Version 2 remains host-local and workspace-bound. Repository, project, agent, MCP-server, and tool output cannot define or modify policy.
+
+#### Work items
+
+- [x] Extend shared policy domain types.
+  - [x] Add `TrustEffect::{Allow, Deny, Confirm}` and verdicts that distinguish automatic deny from approval-required prompt.
+  - [x] Add redacted decision reasons for built-in deny, persistent deny, mandatory confirm, tool-default deny, tool-default confirm, and global-default confirm.
+  - [x] Keep evaluator inputs immutable and inject effective defaults with session state, time, usage, and normalized operation.
+- [x] Implement exact precedence in one evaluator path.
+  - [x] Evaluate non-overridable safeguards before persisted or session policy.
+  - [x] Evaluate every deny before confirm and every confirm before allow.
+  - [x] Apply session allow only when no safeguard, deny, or mandatory-confirm rule matches.
+  - [x] Apply tool/global fallback only when no rule or session decision resolves operation.
+- [x] Introduce trust-store schema version `2`.
+  - [x] Replace effect-specific allow array names with typed command, MCP, path, profile, write, network, and tool-default rule arrays carrying explicit `effect`.
+  - [x] Preserve workspace identity, agent scope, canonical matching fields, expiry, use budget, stable rule id, restrictive permissions, and atomic write rules.
+  - [x] Reject unknown effect, `default = "allow"`, unlimited execute/write allow, effect-incompatible fields, duplicate ids, and mixed version fields.
+  - [x] Add one atomic version 1 to version 2 migration that maps every valid old allow entry to `effect = "allow"` without broadening scope; corruption or unsafe permissions fail closed without rewriting source bytes.
+  - [x] Remove version 1 runtime evaluation after successful migration; do not maintain parallel evaluators.
+- [x] Add deterministic schema and precedence tests.
+  - [x] Cover every pairwise conflict among built-in deny, persistent deny, session deny, confirm, session allow, bounded allow, and defaults.
+  - [x] Prove migration preserves exact operation identity, workspace/agent scope, expiry, use budget, and stable rule ids.
+  - [x] Prove failed migration leaves original store unchanged and yields confirm fallback.
+
+#### Actionable criteria
+
+- [x] `cargo test --quiet -p ee-cli trust_policy_effects` passes.
+- [x] Automated precedence tests prove no allow source overrides a matching deny or mandatory-confirm rule.
+- [x] Trust-store tests prove schema migration never broadens or invents authority.
+
+### Phase 9: Add typed persistent deny rules
+
+Goal: let user permanently block known-dangerous operations for one host-local workspace without relying on repeated denial prompts.
+
+Overview: reuse existing structured command, MCP, path, profile, write, and operation identities. Deny rules match typed fields, not display text or raw regex, and may be indefinite because they remove authority rather than grant it.
+
+Rules:
+
+- Persistent deny may omit expiration and use budget; it never creates execution authority.
+- Deny matching uses exact tokens, canonical path-segment prefixes, exact MCP identity, fixed tool metadata, and explicit operation kinds only.
+- Root-wide deny is allowed only through explicit tool/category default or built-in safeguard, not ambiguous empty path or command patterns.
+- Protected paths and secret classes may be denied by application-owned classifier without serializing sensitive path values.
+- User denial choice must preview generated scope before persistence; no agent-proposed rule is written without direct user action.
+
+#### Work items
+
+- [x] Add deny support to every eligible typed matcher.
+  - [x] Add command deny with exact executable plus `argv_exact` or non-empty `argv_prefix`.
+  - [x] Add MCP deny with exact server, transport identity, tool, schema version, and optional validated side-effect category scope.
+  - [x] Add filesystem deny with canonical path prefix and explicit operation set covering read, create, modify, delete, rename, chmod, and symlink.
+  - [x] Add network deny with normalized scheme, exact host or validated host suffix, port, method class, and browser action class.
+  - [x] Add tool/category deny for an exact native or MCP tool identity when operation-specific fields are unavailable.
+- [x] Integrate persistent deny into approval UI.
+  - [x] Add `Deny for this workspace` only when safe narrow scope can be derived.
+  - [x] Show effect, workspace, agent scope, matcher fields, and whether rule expires before confirmation.
+  - [x] Persist rule atomically before returning denied result; persistence failure still denies current request but reports rule was not saved.
+- [x] Add deny lifecycle and revocation behavior.
+  - [x] Reload valid host-local deny changes only through explicit trust-store reload path.
+  - [x] Ensure session close does not remove persistent deny.
+  - [x] Allow user to revoke deny through trust-rule manager added in phase 13.
+- [x] Add deny regression tests.
+  - [x] Cover exact/prefix command boundaries, path segment boundaries, host suffix boundaries, MCP schema changes, agent scope, workspace scope, and transport identity.
+  - [x] Prove deny dispatches no process, write, network call, MCP call, or approval prompt.
+  - [x] Prove copied, repository-controlled, malformed, and insecure-permission deny files cannot affect policy.
+
+#### Actionable criteria
+
+- [x] `cargo test --quiet -p ee-cli persistent_deny` passes.
+- [x] Automated tests prove persistent deny wins over session allow, bounded allow, profiles, and approval presets.
+- [x] Audit output identifies matched deny rule without exposing command environment, sensitive paths, headers, or MCP arguments.
+
+### Phase 10: Add typed mandatory-confirm rules and safe defaults
+
+Goal: guarantee sensitive operations always require live user confirmation and let users choose conservative fallback behavior per tool or category.
+
+Overview: add persistent `confirm` rules plus host-local confirm/deny defaults. These controls reduce accidental auto-resolution while preserving once/session and bounded allow for operations not covered by stronger policy.
+
+Rules:
+
+- Mandatory confirm never grants operation and may be indefinite.
+- Confirm overrides session allow, bounded persistent allow, curated profiles, and `/approval` presets; deny still overrides confirm.
+- Tool-specific and category defaults support only `confirm` or `deny`.
+- Global default remains `confirm` unless user explicitly chooses global `deny`; global `allow` does not exist.
+- Unknown, malformed, or unclassified operations resolve to confirm or deny according to stricter applicable policy, never allow.
+
+#### Work items
+
+- [x] Add mandatory-confirm typed rules.
+  - [x] Reuse command, MCP, path, network, filesystem-operation, and tool/category matchers from phase 9.
+  - [x] Add common high-risk templates for VCS push/mutation, package publish/install scripts, privilege escalation, workflow/config writes, new network hosts, and destructive filesystem operations.
+  - [x] Keep templates application-owned and versioned; store selected template id plus explicit resolved matcher fields.
+- [x] Add host-local fallback settings.
+  - [x] Add exact native tool and `mcp:<server>:<tool>` defaults with `confirm` or `deny`.
+  - [x] Add side-effect category defaults for read, write-create, write-modify, delete, execute, and network.
+  - [x] Resolve exact tool default before category default, then global default.
+  - [x] Reject unknown tools/categories and every attempted `allow` default during parse, mutation, and serialization.
+- [x] Integrate confirmation behavior.
+  - [x] Mark approval prompt with matched confirm rule/template and explain why prior allow did not auto-resolve.
+  - [x] Keep `Allow once` available when underlying operation is otherwise eligible.
+  - [x] Hide `Allow session` and bounded persistent allow when mandatory-confirm rule requires confirmation on every use.
+- [x] Add confirm/default tests.
+  - [x] Prove mandatory confirm prompts on every identical request in one session.
+  - [x] Prove tool deny beats category confirm, tool confirm beats category fallback, and global fallback handles unmatched operations.
+  - [x] Prove `/approval autopilot|bypass` cannot bypass mandatory confirm or deny.
+
+#### Actionable criteria
+
+- [x] `cargo test --quiet -p ee-cli mandatory_confirm` passes.
+- [x] Automated tests prove no stored or session allow suppresses mandatory confirmation.
+- [x] Config/schema tests prove unrestricted default allow is impossible.
+
+### Phase 11: Add non-overridable destructive-operation safeguards
+
+Goal: block catastrophic operations before configurable policy while preserving clear diagnostics and testable cross-platform behavior.
+
+Overview: add small application-owned safeguard registry evaluated against normalized operations. Terminal safeguards inspect structured executable/argv and safely parsed shell subcommands where shell execution is unavoidable; path safeguards use canonical identities.
+
+Rules:
+
+- Built-in safeguards cannot be disabled, overridden, downgraded to confirm, or shadowed by host-local policy.
+- Safeguards stay narrow and catastrophic-risk focused; ordinary risky work belongs in configurable deny/confirm rules.
+- Shell parsing must be syntax-aware for supported shells. Parse failure denies only when request enters guarded shell path; raw substring matching cannot decide authority.
+- Every chained command component is evaluated independently; one denied component denies whole request.
+- Safeguard diagnostics disclose rule id and safe category only, not secret-bearing raw command or environment.
+
+#### Work items
+
+- [x] Define versioned built-in safeguard registry.
+  - [x] Deny recursive deletion of filesystem root, home, workspace root, current directory, parent directory, and wildcard forms after canonical resolution.
+  - [x] Deny writes/deletes against ee secret vault and application trust-store files through agent tools.
+  - [x] Deny device/special-file writes and canonical path escapes.
+  - [x] Keep existing protected-path and unknown-operation fail-closed checks as independent prerequisites.
+- [x] Add command decomposition.
+  - [x] Continue using structured `command` plus `args` for direct processes.
+  - [x] Parse supported shell wrappers into bounded subcommands only when wrapper execution path exists; reject unsupported syntax, expansion-dependent authority, and parse ambiguity.
+  - [x] Evaluate `&&`, `||`, `;`, pipelines, command groups, and nested supported invocations component-by-component.
+  - [x] Preserve current rejection of shell wrappers for persistent allow creation.
+- [x] Add safeguard diagnostics and tests.
+  - [x] Return typed non-overridable-deny error distinct from user or persistent denial.
+  - [x] Test flag permutations, quoting, whitespace, case behavior where applicable, chained commands, aliases not controlled by ee, and platform path forms.
+  - [x] Prove harmless similarly named paths and commands do not trigger safeguards.
+
+#### Actionable criteria
+
+- [x] `cargo test --quiet -p ee-cli builtin_tool_safeguards` passes.
+- [x] Automated tests prove catastrophic deletion and protected-state mutation cannot reach approval or dispatch.
+- [x] Parser fixtures prove chained-command evaluation has no substring-only security decisions.
+
+### Phase 12: Add bounded structured pattern approvals and rule previews
+
+Goal: reduce repeated prompts for safe operation families without adopting raw regex or unlimited persistent allow.
+
+Overview: expose existing exact/prefix matcher capabilities through deliberate approval choices. Derive candidate matcher from normalized operation, show exact scope and limits, then persist only after second explicit confirmation.
+
+Rules:
+
+- Raw regex, glob, unparsed shell text, empty command prefix, root-wide path allow, arbitrary MCP partial JSON, and unrestricted host wildcard are invalid.
+- Every persistent allow requires explicit expiration and use budget when operation can write, execute, delete, or access network.
+- Candidate extraction defaults to exact identity; broader prefix option appears only when validator can prove bounded structured scope.
+- Agent cannot select pattern breadth, duration, budget, or effect.
+- Approval preview must show all authority-relevant fields before persistence.
+
+#### Work items
+
+- [x] Add candidate rule extractor.
+  - [x] Generate exact command candidate from executable and full argv.
+  - [x] Generate command-prefix candidate only after user selects token boundary and resulting prefix contains at least one argument.
+  - [x] Generate path-prefix candidate only from user-selected canonical workspace directory, excluding root and protected segments.
+  - [x] Keep generic MCP allow exact; use application-owned MCP read profiles for broader read-only families.
+  - [x] Generate network candidate only for normalized exact host and read-only method/action classes approved by network policy.
+- [x] Add two-step approval UX.
+  - [x] First choice selects allow once, allow session, exact bounded grant, or eligible structured-prefix bounded grant.
+  - [x] Second view shows effect, matcher, workspace, agent, expiration, maximum uses, size/result caps, transport identity, and exclusions.
+  - [x] Require explicit confirm/cancel; cancellation executes nothing and writes no rule.
+  - [x] Keep current `1 hour / 20 uses` execute and `1 hour / 5 uses` write defaults while allowing only application-approved shorter alternatives.
+- [x] Add extraction safety tests.
+  - [x] Cover token/path/host boundaries, shell wrappers, empty prefixes, root paths, protected paths, MCP argument changes, and schema-version changes.
+  - [x] Snapshot approval preview text and prove displayed scope equals serialized rule fields.
+  - [x] Prove no UI path creates `expires_at = None` or `max_uses = None` for authority-granting operation.
+
+#### Actionable criteria
+
+- [x] `cargo test --quiet -p ee-cli bounded_rule_extraction` passes.
+- [x] Automated tests prove every UI-created allow is bounded, typed, previewed, and no broader than displayed.
+- [x] No regex engine or unrestricted always-allow option exists in policy or UI.
+
+### Phase 13: Add trust-rule manager, tester, and explainability UI
+
+Goal: let users inspect, test, disable, revoke, and understand host-local policy without manually editing application state.
+
+Overview: add EE-owned trust management surface backed by typed store APIs. Manager never edits repository configuration and never displays secret-bearing matcher material.
+
+Rules:
+
+- Rule mutations require explicit user action and atomic host-local store write.
+- Manager displays redacted matcher summary, effect, workspace, agent, source/template, created time, expiration, remaining session uses, enabled state, and last safe usage metadata.
+- Tester evaluates synthetic normalized input without dispatching tools, consuming usage, changing session state, or writing audit-as-execution records.
+- Disable/revoke takes effect immediately after successful durable write; write failure preserves prior effective policy.
+- Import/export of authority-bearing trust rules is out of scope.
+
+#### Work items
+
+- [x] Add trust management commands and UI.
+  - [x] Add `/permissions` summary and `/permissions list` grouped by built-in safeguard, deny, confirm, bounded allow, and defaults.
+  - [x] Add inspect, disable, enable, revoke, and reload actions using stable rule id.
+  - [x] Require confirmation before bulk revoke/reset and clearly distinguish workspace/session scope.
+  - [x] Show trust-store path only as application state location; never offer project-file save.
+- [x] Add rule tester.
+  - [x] Accept tool-specific structured fields through UI forms, not one raw regex field.
+  - [x] Show normalized identity, final verdict, matched rule/default, complete precedence trace, and validation failures.
+  - [x] Add candidate preview mode for command, path, MCP, write, and network operations.
+- [x] Add audit visibility.
+  - [x] Record redacted rule create/update/disable/revoke/reload events separately from operation decision events.
+  - [x] Show why automatic deny, mandatory confirm, session decision, bounded allow, or fallback won.
+  - [x] Preserve current no-secret, bounded-output, and host-local retention guarantees.
+- [x] Add manager/tester tests.
+  - [x] Cover atomic mutation failure, stale rule id, concurrent reload, expired/exhausted display, and immediate revocation.
+  - [x] Prove tester causes no dispatch, use consumption, session mutation, or authority creation.
+  - [x] Snapshot precedence explanations for representative conflicts.
+
+#### Actionable criteria
+
+- [x] `cargo test --quiet -p ee-cli trust_rule_manager` passes.
+- [x] User can identify and revoke every effective non-built-in rule without opening trust TOML.
+- [x] Rule tester result matches real evaluator verdict for same normalized operation without side effects.
+
+### Phase 14: Run extended permission-policy security and compatibility matrix
+
+Goal: prove deny, confirm, bounded patterns, defaults, safeguards, management, and migration behave identically across transports and lifecycle boundaries.
+
+Overview: extend phase 7 matrix with every new effect and precedence edge. Use deterministic fake clocks, temporary owner-only stores, fake agents/servers, injected dispatch recorders, and no network dependency.
+
+Rules:
+
+- Matrix covers ACP, stdio MCP proxy, ACP-native MCP-over-ACP, native editor tools, terminal, filesystem, and network routes where implemented.
+- Every test asserts decision, approval visibility, dispatch count, usage count, durable store bytes, audit reason, and redaction.
+- No fixed sleeps, user-home dependency, live shell mutation, live network, or repository-controlled authority.
+
+#### Work items
+
+- [x] Add effect/category/transport matrix.
+  - [x] Cover built-in deny, persistent deny, session deny, mandatory confirm, session allow, exact bounded allow, prefix bounded allow, tool default, category default, and global fallback.
+  - [x] Cover command, MCP, read, create, modify, delete, rename, chmod, symlink, network, unknown tool, and malformed identity.
+  - [x] Cover workspace/agent/transport/schema mismatch, expiry, exhaustion, disabled rule, revoked rule, and store corruption.
+- [x] Add lifecycle and migration matrix.
+  - [x] Cover startup migration, reload, session close, connection loss, cancellation before decision, cancellation after approval, and restart.
+  - [x] Prove persistent deny/confirm survive session restart while session choices and usage counters follow existing lifecycle contract.
+  - [x] Prove failed schema migration, failed mutation, and insecure permissions yield no broadened authority.
+- [x] Add UI and audit matrix.
+  - [x] Cover approval options hidden by mandatory confirm, bounded rule preview, persistent deny creation, rule revocation, tester output, and reset confirmation.
+  - [x] Assert secret fixtures never appear in UI, transcript, status, audit, errors, store, stdout, or stderr.
+- [x] Run focused and broad validation.
+  - [x] Run `cargo fmt --check`.
+  - [x] Run `cargo clippy -p ee-cli --features agents --all-targets -- -D warnings`.
+  - [x] Run `cargo test --quiet -p ee-cli --features agents`.
+  - [x] Run `cargo test --quiet -p ee-agent-host`.
+  - [x] Run `cargo test --quiet -p ee-mcp`.
+  - [x] Run `git --no-pager diff --check`.
+
+#### Actionable criteria
+
+- [x] Automated matrix proves no allow source overrides built-in deny, persistent deny, session deny, or mandatory confirm.
+- [x] Automated matrix proves every UI-created authority grant remains finite, typed, workspace-bound, and revocable.
+- [x] Automated matrix proves policy verdict and redacted explanation stay equivalent across supported transports.
+- [x] Full focused validation passes without weakening existing approval, ownership, path, redaction, timeout, cancellation, or output-cap behavior.
 
 ## Agents TUI Harness Parity Plan
 

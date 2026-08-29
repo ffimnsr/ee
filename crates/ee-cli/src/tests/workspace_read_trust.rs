@@ -56,6 +56,7 @@ fn read_path_rule(
 ) -> TrustRule {
     TrustRule::ReadPath(crate::policy::ReadPathRule {
         id: id.to_string(),
+        effect: crate::policy::TrustEffect::Allow,
         scope: scope(workspace),
         path_prefix: PathPrefix::parse(prefix).expect("valid prefix"),
         max_bytes,
@@ -84,6 +85,7 @@ fn mcp_read_rule(
 ) -> TrustRule {
     TrustRule::McpRead(crate::policy::McpReadRule {
         id: id.to_string(),
+        effect: crate::policy::TrustEffect::Allow,
         scope: scope(workspace),
         server: "ee".to_string(),
         transport_identity: "stdio:ee --mcp-proxy".to_string(),
@@ -101,6 +103,7 @@ fn mcp_read_profile_rule(
 ) -> TrustRule {
     TrustRule::McpReadProfile(crate::policy::McpReadProfileRule {
         id: id.to_string(),
+        effect: crate::policy::TrustEffect::Allow,
         scope: scope(workspace),
         server: "ee".to_string(),
         transport_identity: transport_identity.to_string(),
@@ -142,6 +145,10 @@ fn decide(op: &TrustOperation, rules: &[TrustRule], workspace_enabled: bool) -> 
         now: at("2026-08-07T12:00:00Z"),
         usage: &UsageSnapshot::default(),
         workspace_enabled,
+        built_in_deny: None,
+        tool_default: None,
+        category_default: None,
+        global_default: None,
     })
 }
 
@@ -152,10 +159,10 @@ fn gate_alone_never_permits_a_read() {
     let ws = identity(b"/work/root");
     let op = read_op(ws, "src/main.rs", Some(1024));
     let decision = decide(&op, &[], false);
-    assert_eq!(decision.outcome, TrustOutcome::Prompt);
+    assert_eq!(decision.outcome, TrustOutcome::Confirm);
     assert_eq!(decision.reason, DecisionReason::WorkspaceDisabled);
     let open = decide(&op, &[], true);
-    assert_eq!(open.outcome, TrustOutcome::Prompt);
+    assert_eq!(open.outcome, TrustOutcome::Confirm);
     assert_eq!(open.reason, DecisionReason::NoMatchingRule, "gate alone grants nothing");
 }
 
@@ -166,7 +173,7 @@ fn matching_read_rule_requires_gate_and_rule() {
     let op = read_op(ws, "src/main.rs", Some(1024));
 
     let gated = decide(&op, std::slice::from_ref(&rule), false);
-    assert_eq!(gated.outcome, TrustOutcome::Prompt);
+    assert_eq!(gated.outcome, TrustOutcome::Confirm);
     assert_eq!(gated.reason, DecisionReason::WorkspaceDisabled);
 
     let allowed = decide(&op, std::slice::from_ref(&rule), true);
@@ -184,9 +191,9 @@ fn read_rules_enforce_prefix_and_bounded_bytes() {
     assert_eq!(in_prefix.outcome, TrustOutcome::Allow);
     let over_bytes =
         decide(&read_op(ws, "src/main.rs", Some(2048)), std::slice::from_ref(&rule), true);
-    assert_eq!(over_bytes.outcome, TrustOutcome::Prompt, "over bounded byte limit");
+    assert_eq!(over_bytes.outcome, TrustOutcome::Confirm, "over bounded byte limit");
     let outside = decide(&read_op(ws, "lib/main.rs", Some(100)), std::slice::from_ref(&rule), true);
-    assert_eq!(outside.outcome, TrustOutcome::Prompt, "outside prefix");
+    assert_eq!(outside.outcome, TrustOutcome::Confirm, "outside prefix");
 }
 
 #[test]
@@ -256,7 +263,7 @@ fn mcp_read_rule_requires_gate_and_exact_tool_identity() {
         ),
     ] {
         let decision = decide(&candidate, std::slice::from_ref(&rule), true);
-        assert_eq!(decision.outcome, TrustOutcome::Prompt, "{label} must not match");
+        assert_eq!(decision.outcome, TrustOutcome::Confirm, "{label} must not match");
     }
 }
 
@@ -311,7 +318,7 @@ fn mcp_safe_read_profile_is_exactly_scoped_and_never_matches_write_or_unknown_to
     ] {
         assert_eq!(
             decide(&candidate, std::slice::from_ref(&rule), true).outcome,
-            TrustOutcome::Prompt,
+            TrustOutcome::Confirm,
             "{label} must fail closed"
         );
     }
@@ -378,7 +385,7 @@ fn mcp_safe_read_profile_covers_every_pinned_manifest_read_tool() {
         let operation = mcp_read_op(ws, "stdio:ee --mcp-proxy", tool, "src/main.rs", Some(42));
         assert_eq!(
             decide(&operation, std::slice::from_ref(&rule), true).outcome,
-            TrustOutcome::Prompt,
+            TrustOutcome::Confirm,
             "{tool} must not match safe-read profile"
         );
     }
@@ -469,9 +476,8 @@ max_uses = 20
         identity = store.workspace().as_string()
     );
     write_store_text(store.path(), &text);
-    let document = store.load().expect("load");
-    let ids: Vec<&str> = document.rules.iter().map(TrustRule::id).collect();
-    assert_eq!(ids, vec!["mcp_profile_ok", "profile_ok"], "unknown profile ids rejected at load");
+    assert!(matches!(store.load(), Err(crate::policy::TrustStoreError::ValidationFailure(_))));
+    assert_eq!(fs::read_to_string(store.path()).unwrap(), text);
 }
 
 fn store_setup() -> (TempDir, TempDir, TrustStore) {
@@ -516,8 +522,14 @@ mod e2e {
     /// Seeds a store document with the given rules and workspace gate.
     fn seed_store(state_dir: &Path, workspace: &Path, enabled: bool, rules: Vec<TrustRule>) {
         let store = TrustStore::at(state_dir, workspace).unwrap();
-        let document =
-            TrustStoreDocument { workspace: *store.workspace(), workspace_enabled: enabled, rules };
+        let document = TrustStoreDocument {
+            workspace: *store.workspace(),
+            workspace_enabled: enabled,
+            rules,
+            tool_defaults: Vec::new(),
+            category_defaults: Vec::new(),
+            global_default: crate::policy::FallbackEffect::Confirm,
+        };
         store.write(&document).expect("seed store");
     }
 
@@ -544,6 +556,7 @@ mod e2e {
         app.agents.test_trust_store_base = Some(state_dir.clone());
         let ws = *TrustStore::at(&state_dir, workspace).unwrap().workspace();
         seed_store(&state_dir, workspace, true, vec![read_rule_with(ws, "src", 262_144)]);
+        app.reload_workspace_trust_store().expect("reload read rule");
 
         let allowed = app.native_read_decision(&source, Some(100));
         assert_eq!(allowed.outcome, TrustOutcome::Allow, "{allowed:?}");
@@ -551,14 +564,16 @@ mod e2e {
 
         // Gate disabled: the same read prompts (no persistent authority).
         seed_store(&state_dir, workspace, false, vec![read_rule_with(ws, "src", 262_144)]);
+        app.reload_workspace_trust_store().expect("reload disabled gate");
         let gated = app.native_read_decision(&source, Some(100));
-        assert_eq!(gated.outcome, TrustOutcome::Prompt);
+        assert_eq!(gated.outcome, TrustOutcome::Confirm);
         assert_eq!(gated.reason, DecisionReason::WorkspaceDisabled);
 
         // No rule at all: prompt even with the gate open.
         seed_store(&state_dir, workspace, true, Vec::new());
+        app.reload_workspace_trust_store().expect("reload empty rule set");
         let uncovered = app.native_read_decision(&source, Some(100));
-        assert_eq!(uncovered.reason, DecisionReason::NoMatchingRule);
+        assert_eq!(uncovered.reason, DecisionReason::GlobalDefaultConfirm);
     }
 
     #[test]
@@ -633,7 +648,7 @@ mod e2e {
             &request(&source, Some(100)),
             crate::app::agents_mcp::ProxyRoute::AcpNative,
         );
-        assert_eq!(cross_transport.outcome, TrustOutcome::Prompt, "{cross_transport:?}");
+        assert_eq!(cross_transport.outcome, TrustOutcome::Confirm, "{cross_transport:?}");
 
         // Protected paths and over-limit reads never match.
         let hidden = app.mcp_read_decision(
@@ -645,6 +660,6 @@ mod e2e {
             &request(&source, Some(524_288)),
             crate::app::agents_mcp::ProxyRoute::Stdio,
         );
-        assert_eq!(oversized.outcome, TrustOutcome::Prompt, "over bounded byte limit");
+        assert_eq!(oversized.outcome, TrustOutcome::Confirm, "over bounded byte limit");
     }
 }

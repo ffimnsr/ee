@@ -40,6 +40,7 @@ fn at(text: &str) -> SystemTime {
 fn profile_rule(workspace: WorkspaceIdentity, profile: &str) -> TrustRule {
     TrustRule::Profile(crate::policy::ProfileRule {
         id: format!("profile_{profile}"),
+        effect: crate::policy::TrustEffect::Allow,
         scope: TrustRuleScope {
             workspace,
             agent: None,
@@ -74,6 +75,10 @@ fn decide(
         now: at("2026-08-07T12:00:00Z"),
         usage: &UsageSnapshot::default(),
         workspace_enabled,
+        built_in_deny: None,
+        tool_default: None,
+        category_default: None,
+        global_default: None,
     })
 }
 
@@ -189,7 +194,7 @@ fn profile_rules_require_gate_and_exact_profile_id() {
     let op = profile_op(ws, "git_readonly");
 
     let gated = decide(&op, std::slice::from_ref(&rule), false);
-    assert_eq!(gated.outcome, TrustOutcome::Prompt);
+    assert_eq!(gated.outcome, TrustOutcome::Confirm);
     assert_eq!(gated.reason, DecisionReason::WorkspaceDisabled, "gate required");
 
     let allowed = decide(&op, std::slice::from_ref(&rule), true);
@@ -198,7 +203,7 @@ fn profile_rules_require_gate_and_exact_profile_id() {
 
     // Another profile id never matches this rule.
     let other = decide(&profile_op(ws, "rust_validate"), std::slice::from_ref(&rule), true);
-    assert_eq!(other.outcome, TrustOutcome::Prompt);
+    assert_eq!(other.outcome, TrustOutcome::Confirm);
 
     // The gate alone never authorizes a profile command.
     let bare = decide(&op, &[], true);
@@ -223,6 +228,7 @@ mod e2e {
         let store = TrustStore::at(state_dir, workspace).unwrap();
         let rule = TrustRule::Profile(crate::policy::ProfileRule {
             id: format!("profile_{profile}"),
+            effect: crate::policy::TrustEffect::Allow,
             scope: TrustRuleScope {
                 workspace: *store.workspace(),
                 agent: None,
@@ -234,6 +240,9 @@ mod e2e {
         let document = TrustStoreDocument {
             workspace: *store.workspace(),
             workspace_enabled: enabled,
+            tool_defaults: Vec::new(),
+            category_defaults: Vec::new(),
+            global_default: crate::policy::FallbackEffect::Confirm,
             rules: vec![rule],
         };
         store.write(&document).expect("seed store");
@@ -251,6 +260,7 @@ mod e2e {
         fs::create_dir_all(&state_dir).unwrap();
         app.agents.test_trust_store_base = Some(state_dir.clone());
         seed_profile_store(&state_dir, temp.path(), true, "git_readonly");
+        app.reload_workspace_trust_store().expect("reload seeded profile rule");
 
         let mut stream = connect_proxy(&app);
         // Every git_readonly entry auto-allows with the gate open.
@@ -288,6 +298,7 @@ mod e2e {
         fs::create_dir_all(&state_dir).unwrap();
         app.agents.test_trust_store_base = Some(state_dir.clone());
         seed_profile_store(&state_dir, temp.path(), true, TERMINAL_READONLY_PROFILE);
+        app.reload_workspace_trust_store().expect("reload seeded profile rule");
 
         let mut stream = connect_proxy(&app);
         for (id, command, args) in [
@@ -357,6 +368,7 @@ mod e2e {
         fs::create_dir_all(&state_dir).unwrap();
         app.agents.test_trust_store_base = Some(state_dir.clone());
         seed_profile_store(&state_dir, temp.path(), false, "git_readonly");
+        app.reload_workspace_trust_store().expect("reload seeded profile rule");
 
         let mut stream = connect_proxy(&app);
         proxy_send(&mut stream, 1, terminal_frame("git", json!(["status"])));
@@ -379,6 +391,7 @@ mod e2e {
         fs::create_dir_all(&state_dir).unwrap();
         app.agents.test_trust_store_base = Some(state_dir.clone());
         seed_profile_store(&state_dir, temp.path(), true, "git_readonly");
+        app.reload_workspace_trust_store().expect("reload seeded profile rule");
 
         let mut stream = connect_proxy(&app);
         proxy_send(
@@ -407,6 +420,7 @@ mod e2e {
         fs::create_dir_all(&state_dir).unwrap();
         app.agents.test_trust_store_base = Some(state_dir.clone());
         seed_profile_store(&state_dir, temp.path(), true, "git_readonly");
+        app.reload_workspace_trust_store().expect("reload seeded profile rule");
 
         let mut stream = connect_proxy(&app);
         proxy_send(&mut stream, 1, terminal_frame("git", json!(["status"])));
@@ -460,6 +474,7 @@ mod e2e {
         // A matching profile grant is seeded afterwards; the recorded
         // session deny still wins over the persistent profile allow.
         seed_profile_store(&state_dir, temp.path(), true, "git_readonly");
+        app.reload_workspace_trust_store().expect("reload seeded profile rule");
         proxy_send(&mut stream, 2, terminal_frame("git", json!(["status"])));
         settle(&mut app);
         let reply = proxy_recv(&mut stream);

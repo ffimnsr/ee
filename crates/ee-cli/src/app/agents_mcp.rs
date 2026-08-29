@@ -774,7 +774,11 @@ impl ProxyReply {
             Err(error) => Self::Err {
                 error: ProxyErrorBody {
                     message: error.to_string(),
-                    denied: matches!(error, AgentError::PermissionDenied { .. }),
+                    denied: matches!(
+                        error,
+                        AgentError::PermissionDenied { .. }
+                            | AgentError::NonOverridableDenied { .. }
+                    ),
                 },
             },
         }

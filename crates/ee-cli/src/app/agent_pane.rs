@@ -1512,6 +1512,9 @@ pub(crate) struct AgentPaneState {
     /// Session-local successful-use counters for persistent rules; rows die
     /// with the session (Phase 2 command trust).
     pub(crate) usage_ledger: crate::policy::UsageLedger,
+    /// Effective host-local policy snapshot. Disk changes activate only through
+    /// initial load or explicit reload/persistence paths.
+    pub(crate) trust_policy: std::cell::RefCell<Option<crate::policy::TrustStoreDocument>>,
     /// Phase 6 MCP state: health registry, browsing, and the proxy listener.
     pub(crate) mcp: super::agents_mcp::McpPaneState,
     /// Secret-like resolved agent env values collected when the host config
@@ -1577,6 +1580,7 @@ impl Default for AgentPaneState {
             web_context_config_fingerprint: None,
             approval_modes: BTreeMap::new(),
             usage_ledger: crate::policy::UsageLedger::default(),
+            trust_policy: std::cell::RefCell::new(None),
             mcp: super::agents_mcp::McpPaneState::default(),
             resolved_secret_values: Vec::new(),
             #[cfg(test)]
@@ -2898,6 +2902,7 @@ const LOCAL_AGENT_SLASH_COMMANDS: &[&str] = &[
     "config",
     "mcp",
     "approval",
+    "permissions",
     "context",
     "mention",
     "add-dir",
@@ -2923,7 +2928,6 @@ const PROVIDER_OWNED_SLASH_COMMANDS: &[&str] = &[
     "background",
     "side",
     "btw",
-    "permissions",
     "skills",
     "plugins",
     "hooks",
@@ -2963,6 +2967,10 @@ const LOCAL_AGENT_SLASH_HELP: &[(&str, &str)] = &[
     ("/config", "show or change advertised options"),
     ("/mcp", "show local MCP state"),
     ("/approval", "default|autopilot|bypass; bypass keeps validation"),
+    (
+        "/permissions",
+        "list|inspect|disable|enable|revoke|reload|reset|test|preview host-local policy",
+    ),
     ("/context", "list|status|add|remove|clear session snapshots"),
     ("/mention <path>", "attach redacted file snapshot to next prompt only"),
     ("/add-dir <path>", "confirm extra root for capable agent sessions"),
@@ -5808,6 +5816,10 @@ impl App {
             command if PROVIDER_OWNED_SLASH_COMMANDS.contains(&command) => {
                 self.agents_require_advertised_provider_command(command)
             }
+            "permissions" => {
+                self.agents_permissions_command(args);
+                true
+            }
             "approval" => {
                 match args {
                     "" => match self.active_tool_approval_mode() {
@@ -6289,6 +6301,27 @@ impl App {
         // Bridge approvals render above permissions in the composer. Up/down selects
         // a visible option row; left/right and tab remain aliases for compatibility.
         if self.agents.approvals.front().is_some() {
+            if self
+                .agents
+                .approvals
+                .front()
+                .is_some_and(super::agent_bridge::ApprovalPrompt::is_confirming_rule)
+            {
+                match key.code {
+                    KeyCode::Enter => {
+                        let choice = self
+                            .agents
+                            .approvals
+                            .front()
+                            .and_then(super::agent_bridge::ApprovalPrompt::confirming_allow_choice)
+                            .unwrap_or(super::agent_bridge::ApprovalChoice::DenyPersistent);
+                        self.confirm_bridge_approval(choice);
+                    }
+                    KeyCode::Esc => self.cancel_rule_confirmation(),
+                    _ => {}
+                }
+                return;
+            }
             match key.code {
                 KeyCode::Up | KeyCode::Left | KeyCode::BackTab => {
                     self.move_approval_selection(-1);
@@ -6950,6 +6983,7 @@ mod tests {
                 "config",
                 "mcp",
                 "approval",
+                "permissions",
                 "context",
                 "mention",
                 "add-dir",

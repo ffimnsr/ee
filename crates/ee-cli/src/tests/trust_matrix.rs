@@ -54,30 +54,14 @@ fn scope(
 /// state).
 fn rule_with_agent(rule: &TrustRule, agent: &str) -> TrustRule {
     let mut rule = rule.clone();
-    match &mut rule {
-        TrustRule::Command(r) => r.scope.agent = Some(agent.into()),
-        TrustRule::Mcp(r) => r.scope.agent = Some(agent.into()),
-        TrustRule::ReadPath(r) => r.scope.agent = Some(agent.into()),
-        TrustRule::McpRead(r) => r.scope.agent = Some(agent.into()),
-        TrustRule::McpReadProfile(r) => r.scope.agent = Some(agent.into()),
-        TrustRule::Profile(r) => r.scope.agent = Some(agent.into()),
-        TrustRule::Write(r) => r.scope.agent = Some(agent.into()),
-    }
+    rule.scope_mut().agent = Some(agent.into());
     rule
 }
 
 /// Clone of `rule` with the expiry overridden (matrix expired-rule state).
 fn rule_with_expiry(rule: &TrustRule, expires: Option<&str>) -> TrustRule {
     let mut rule = rule.clone();
-    match &mut rule {
-        TrustRule::Command(r) => r.scope.expires_at = expires.map(at),
-        TrustRule::Mcp(r) => r.scope.expires_at = expires.map(at),
-        TrustRule::ReadPath(r) => r.scope.expires_at = expires.map(at),
-        TrustRule::McpRead(r) => r.scope.expires_at = expires.map(at),
-        TrustRule::McpReadProfile(r) => r.scope.expires_at = expires.map(at),
-        TrustRule::Profile(r) => r.scope.expires_at = expires.map(at),
-        TrustRule::Write(r) => r.scope.expires_at = expires.map(at),
-    }
+    rule.scope_mut().expires_at = expires.map(at);
     rule
 }
 
@@ -85,15 +69,7 @@ fn rule_with_expiry(rule: &TrustRule, expires: Option<&str>) -> TrustRule {
 /// state).
 fn rule_with_max_uses(rule: &TrustRule, max_uses: Option<u64>) -> TrustRule {
     let mut rule = rule.clone();
-    match &mut rule {
-        TrustRule::Command(r) => r.scope.max_uses = max_uses,
-        TrustRule::Mcp(r) => r.scope.max_uses = max_uses,
-        TrustRule::ReadPath(r) => r.scope.max_uses = max_uses,
-        TrustRule::McpRead(r) => r.scope.max_uses = max_uses,
-        TrustRule::McpReadProfile(r) => r.scope.max_uses = max_uses,
-        TrustRule::Profile(r) => r.scope.max_uses = max_uses,
-        TrustRule::Write(r) => r.scope.max_uses = max_uses,
-    }
+    rule.scope_mut().max_uses = max_uses;
     rule
 }
 
@@ -114,6 +90,10 @@ fn decide(
         now,
         usage,
         workspace_enabled,
+        built_in_deny: None,
+        tool_default: None,
+        category_default: None,
+        global_default: None,
     })
 }
 
@@ -131,6 +111,7 @@ struct CategoryFixture {
 fn categories(ws: WorkspaceIdentity) -> Vec<CategoryFixture> {
     let command_rule = TrustRule::Command(CommandRule {
         id: "cmd_matrix".into(),
+        effect: crate::policy::TrustEffect::Allow,
         scope: scope(ws, None, Some("2026-08-08T12:00:00Z"), Some(20)),
         executable: "git".into(),
         match_mode: MatchMode::ArgvExact,
@@ -138,6 +119,7 @@ fn categories(ws: WorkspaceIdentity) -> Vec<CategoryFixture> {
     });
     let mcp_rule = TrustRule::Mcp(McpRule {
         id: "mcp_matrix".into(),
+        effect: crate::policy::TrustEffect::Allow,
         scope: scope(ws, None, Some("2026-08-08T12:00:00Z"), Some(20)),
         server: "ee".into(),
         transport_identity: "stdio:matrix".into(),
@@ -147,12 +129,14 @@ fn categories(ws: WorkspaceIdentity) -> Vec<CategoryFixture> {
     });
     let read_rule = TrustRule::ReadPath(ReadPathRule {
         id: "read_matrix".into(),
+        effect: crate::policy::TrustEffect::Allow,
         scope: scope(ws, None, None, None),
         path_prefix: PathPrefix::parse("src").expect("prefix"),
         max_bytes: 1024,
     });
     let mcp_read_rule = TrustRule::McpRead(McpReadRule {
         id: "mcp_read_matrix".into(),
+        effect: crate::policy::TrustEffect::Allow,
         scope: scope(ws, None, None, None),
         server: "ee".into(),
         transport_identity: "stdio:matrix".into(),
@@ -163,12 +147,14 @@ fn categories(ws: WorkspaceIdentity) -> Vec<CategoryFixture> {
     });
     let profile_rule = TrustRule::Profile(ProfileRule {
         id: "profile_matrix".into(),
+        effect: crate::policy::TrustEffect::Allow,
         scope: scope(ws, None, Some("2026-08-08T12:00:00Z"), Some(20)),
         profile: "git_readonly".into(),
     });
     let write_rule = |id: &str, operation: WriteOperationKind| {
         TrustRule::Write(WriteRule {
             id: id.into(),
+            effect: crate::policy::TrustEffect::Allow,
             scope: scope(ws, None, Some("2026-08-08T12:00:00Z"), Some(20)),
             operation,
             path_prefix: PathPrefix::parse("src/generated").expect("prefix"),
@@ -309,7 +295,7 @@ fn category_matrix_never_bypasses_approval() {
                 "{}: gate off",
                 fixture.label
             );
-            assert_eq!(gated.outcome, TrustOutcome::Prompt);
+            assert_eq!(gated.outcome, TrustOutcome::Confirm);
         } else {
             assert_eq!(
                 gated.outcome,
@@ -370,7 +356,7 @@ fn category_matrix_never_bypasses_approval() {
         );
         assert_eq!(
             mismatched.outcome,
-            TrustOutcome::Prompt,
+            TrustOutcome::Confirm,
             "{}: agent scope mismatch",
             fixture.label
         );
@@ -385,7 +371,7 @@ fn category_matrix_never_bypasses_approval() {
             now,
             &UsageSnapshot::default(),
         );
-        assert_eq!(expired.outcome, TrustOutcome::Prompt, "{}: expired rule", fixture.label);
+        assert_eq!(expired.outcome, TrustOutcome::Confirm, "{}: expired rule", fixture.label);
 
         // Exhausted rule: prompt without mutating the usage state.  The
         // budget is keyed by this fixture's rule id.
@@ -400,7 +386,7 @@ fn category_matrix_never_bypasses_approval() {
             now,
             &exhausted,
         );
-        assert_eq!(spent.outcome, TrustOutcome::Prompt, "{}: exhausted rule", fixture.label);
+        assert_eq!(spent.outcome, TrustOutcome::Confirm, "{}: exhausted rule", fixture.label);
     }
 }
 
@@ -435,7 +421,7 @@ fn prompt_only_operations_never_authorize() {
         let decision =
             decide(&op, &[], &SessionPolicy::default(), true, now, &UsageSnapshot::default());
         assert_eq!(decision.reason, DecisionReason::UnknownOperation, "{label} must prompt");
-        assert_eq!(decision.outcome, TrustOutcome::Prompt);
+        assert_eq!(decision.outcome, TrustOutcome::Confirm);
     }
 }
 
@@ -474,7 +460,7 @@ fn malformed_and_cross_workspace_stores_yield_no_effective_authority() {
             &UsageSnapshot::default()
         )
         .outcome,
-        TrustOutcome::Prompt
+        TrustOutcome::Confirm
     );
 
     // Identity mismatch: a document claiming another workspace loads nothing.
@@ -497,12 +483,13 @@ fn malformed_and_cross_workspace_stores_yield_no_effective_authority() {
         now,
         &UsageSnapshot::default(),
     );
-    assert_eq!(cross.outcome, TrustOutcome::Prompt, "cross-workspace rule must not match");
+    assert_eq!(cross.outcome, TrustOutcome::Confirm, "cross-workspace rule must not match");
 }
 
 fn command_rule_for(ws: WorkspaceIdentity, id: &str, max_uses: u64) -> TrustRule {
     TrustRule::Command(CommandRule {
         id: id.to_string(),
+        effect: crate::policy::TrustEffect::Allow,
         scope: TrustRuleScope {
             workspace: ws,
             agent: None,
@@ -669,7 +656,7 @@ fn host_local_trust_store_is_not_repository_config() {
     // The checked-in project schema covers every ee.toml field; the store
     // document schema is a separate versioned contract with its own
     // `schema_version`, never part of repository configuration.
-    assert_eq!(crate::policy::store::TRUST_SCHEMA_VERSION, 1);
+    assert_eq!(crate::policy::store::TRUST_SCHEMA_VERSION, 2);
     let text = std::fs::read_to_string(path).unwrap_or_default();
     assert!(text.is_empty() || text.contains("schema_version"), "store is versioned TOML");
 }
@@ -697,6 +684,9 @@ mod e2e {
             .write(&TrustStoreDocument {
                 workspace: *store.workspace(),
                 workspace_enabled: true,
+                tool_defaults: Vec::new(),
+                category_defaults: Vec::new(),
+                global_default: crate::policy::FallbackEffect::Confirm,
                 rules: vec![rule],
             })
             .expect("seed store");
@@ -848,6 +838,7 @@ mod e2e {
         let ws = *store.workspace();
         let rule = TrustRule::Write(WriteRule {
             id: "write_persist".into(),
+            effect: crate::policy::TrustEffect::Allow,
             scope: TrustRuleScope {
                 workspace: ws,
                 agent: None,
@@ -864,6 +855,9 @@ mod e2e {
             .write(&TrustStoreDocument {
                 workspace: ws,
                 workspace_enabled: true,
+                tool_defaults: Vec::new(),
+                category_defaults: Vec::new(),
+                global_default: crate::policy::FallbackEffect::Confirm,
                 rules: vec![rule],
             })
             .expect("seed store");
@@ -941,6 +935,7 @@ mod e2e {
         fs::create_dir_all(&state_dir).unwrap();
         app.agents.test_trust_store_base = Some(state_dir.clone());
         seed_command_rule(&state_dir, temp.path(), "cmd_status");
+        app.reload_workspace_trust_store().expect("reload seeded command rule");
 
         let mut stream = connect_proxy(&app);
         proxy_send(
@@ -953,12 +948,12 @@ mod e2e {
         });
         let _ = proxy_recv(&mut stream);
 
-        // A valid host-local change applied outside the app is picked up on
-        // the next evaluation (explicit reload per operation).
+        // External host-local changes remain inactive until explicit reload.
         let store = TrustStore::at(&state_dir, temp.path()).unwrap();
         let mut document = store.load().unwrap();
         document.rules.push(TrustRule::Command(CommandRule {
             id: "cmd_diff".into(),
+            effect: crate::policy::TrustEffect::Allow,
             scope: TrustRuleScope {
                 workspace: *store.workspace(),
                 agent: None,
@@ -975,33 +970,48 @@ mod e2e {
             2,
             json!({ "method": "terminal_create", "command": "git", "args": ["diff"] }),
         );
+        wait_until(&mut app, "external rule remains inactive", |app| {
+            !app.agents.approvals.is_empty()
+        });
+        assert_eq!(app.agents.terminals.tracked_count(), 1, "no dispatch before reload");
+        press(&mut app, KeyCode::Esc, KeyModifiers::NONE); // Deny
+        let reply = proxy_recv(&mut stream);
+        assert!(reply["result"]["error"].is_object(), "denied: {reply}");
+
+        app.reload_workspace_trust_store().expect("reload valid external change");
+        proxy_send(
+            &mut stream,
+            3,
+            json!({ "method": "terminal_create", "command": "git", "args": ["diff"] }),
+        );
         wait_until(&mut app, "reloaded rule auto-allows", |app| {
             app.agents.terminals.tracked_count() == 2 && app.agents.approvals.is_empty()
         });
         let _ = proxy_recv(&mut stream);
 
-        // Corruption fails closed: every operation prompts again.
+        // Corrupt reload fails closed without replacing known-good policy.
         write_store_text(store.path(), "broken [[[[ not toml");
-        proxy_send(
-            &mut stream,
-            3,
-            json!({ "method": "terminal_create", "command": "git", "args": ["status"] }),
-        );
-        wait_until(&mut app, "corrupt store prompts", |app| !app.agents.approvals.is_empty());
-        assert_eq!(app.agents.terminals.tracked_count(), 2, "no dispatch on corrupt store");
-        press(&mut app, KeyCode::Esc, KeyModifiers::NONE); // Deny
-        let reply = proxy_recv(&mut stream);
-        assert!(reply["result"]["error"].is_object(), "denied: {reply}");
-
-        // Restoring the store restores authority (fail-closed recovers).
-        store.write(&document).expect("restore store");
+        assert!(app.reload_workspace_trust_store().is_err(), "corrupt reload must fail");
         proxy_send(
             &mut stream,
             4,
+            json!({ "method": "terminal_create", "command": "git", "args": ["status"] }),
+        );
+        wait_until(&mut app, "known-good policy survives corrupt reload", |app| {
+            app.agents.terminals.tracked_count() == 3 && app.agents.approvals.is_empty()
+        });
+        let _ = proxy_recv(&mut stream);
+
+        // Restoring and explicitly reloading keeps valid authority active.
+        store.write(&document).expect("restore store");
+        app.reload_workspace_trust_store().expect("reload restored store");
+        proxy_send(
+            &mut stream,
+            5,
             json!({ "method": "terminal_create", "command": "git", "args": ["diff"] }),
         );
         wait_until(&mut app, "restored store auto-allows", |app| {
-            app.agents.terminals.tracked_count() == 3 && app.agents.approvals.is_empty()
+            app.agents.terminals.tracked_count() == 4 && app.agents.approvals.is_empty()
         });
         let _ = proxy_recv(&mut stream);
     }
@@ -1055,6 +1065,7 @@ mod e2e {
         let ws = *store.workspace();
         let rule = TrustRule::Write(WriteRule {
             id: "write_secret".into(),
+            effect: crate::policy::TrustEffect::Allow,
             scope: TrustRuleScope {
                 workspace: ws,
                 agent: None,
@@ -1071,6 +1082,9 @@ mod e2e {
             .write(&TrustStoreDocument {
                 workspace: ws,
                 workspace_enabled: true,
+                tool_defaults: Vec::new(),
+                category_defaults: Vec::new(),
+                global_default: crate::policy::FallbackEffect::Confirm,
                 rules: vec![rule],
             })
             .expect("seed store");

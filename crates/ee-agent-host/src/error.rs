@@ -40,6 +40,9 @@ pub enum AgentError {
     UnknownPermissionRequest { request_id: u64 },
     /// The client declined a file, terminal, or elicitation operation.
     PermissionDenied { reason: String },
+    /// Application-owned safeguard denied an operation before configurable
+    /// policy or approval. Fields are stable, redacted identifiers.
+    NonOverridableDenied { rule_id: String, category: String },
     /// The client does not advertise or implement the requested capability.
     CapabilityUnsupported { method: String },
     /// The agent sent an invalid session/update for the session's ordering.
@@ -70,6 +73,14 @@ impl AgentError {
             Self::PermissionDenied { reason } | Self::InvalidParams(reason) => {
                 RpcError::invalid_params().data(serde_json::json!({ "reason": reason }))
             }
+            Self::NonOverridableDenied { rule_id, category } => RpcError::invalid_params().data(
+                serde_json::json!({
+                    "reason": "non-overridable safeguard denied operation",
+                    "ruleId": rule_id,
+                    "category": category,
+                    "nonOverridable": true,
+                }),
+            ),
             Self::Cancelled => RpcError::request_cancelled(),
             Self::CapabilityUnsupported { method } => RpcError::method_not_found()
                 .data(serde_json::json!({ "method": method, "reason": "client does not implement this capability" })),
@@ -109,6 +120,9 @@ impl fmt::Display for AgentError {
                 write!(f, "unknown or stale permission request {request_id}")
             }
             Self::PermissionDenied { reason } => write!(f, "permission denied: {reason}"),
+            Self::NonOverridableDenied { rule_id, category } => {
+                write!(f, "operation denied by non-overridable safeguard {rule_id} ({category})")
+            }
             Self::CapabilityUnsupported { method } => {
                 write!(f, "client does not implement capability for {method:?}")
             }
@@ -164,6 +178,25 @@ mod tests {
         let converted = AgentError::PermissionDenied { reason: "blocked".into() }.into_rpc();
         assert_eq!(converted.code, ErrorCode::InvalidParams);
         assert_eq!(converted.data, Some(serde_json::json!({ "reason": "blocked" })));
+    }
+
+    #[test]
+    fn into_rpc_preserves_non_overridable_denial_metadata() {
+        let converted = AgentError::NonOverridableDenied {
+            rule_id: "builtin.v1.test".into(),
+            category: "catastrophic_deletion".into(),
+        }
+        .into_rpc();
+        assert_eq!(converted.code, ErrorCode::InvalidParams);
+        assert_eq!(
+            converted.data,
+            Some(serde_json::json!({
+                "reason": "non-overridable safeguard denied operation",
+                "ruleId": "builtin.v1.test",
+                "category": "catastrophic_deletion",
+                "nonOverridable": true,
+            }))
+        );
     }
 
     #[test]
