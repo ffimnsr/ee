@@ -4122,6 +4122,14 @@ Goal: prove route selection, codecs, agent integration, and extracted shared cod
 - [ ] OpenRouter remains behavior-compatible after shared Chat Completions extraction.
 - [ ] No validation requires or performs live OpenCode account, balance, billing, or paid model call.
 
+## Agent Filesystem Tool Parity
+
+- [x] Add approval-gated `ee_create_directory`, `ee_delete_path`, `ee_copy_path`, and `ee_move_path` tools for stdio and ACP transports.
+- [x] Enforce absolute workspace-contained paths, symlink-safe copy behavior, root-delete prevention, collision checks, recursive copy limits, and atomic-only moves.
+- [x] Reject delete/move operations affecting open editor buffers and revalidate immediately before mutation.
+- [x] Classify create/copy as writes and delete/move with destructive policy subclasses; keep all four ineligible for persistent exact trust.
+- [x] Add MCP contract, host routing, bridge executor, manifest, policy, and regression coverage.
+
 ## Agent Internet Context and Remote Documentation Plan
 
 Goal: give agent shell fast, cited access to public search results and remote documentation/source text without turning terminal execution into a network escape hatch.

@@ -86,6 +86,9 @@ pub(crate) fn base_agent_script() -> FakeAgentScript {
         .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
         .wait_for("session/new")
         .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
+        .delay(25)
 }
 
 /// App with agents enabled, optional `[mcp.servers.tools]`, optional proxy.
@@ -109,7 +112,7 @@ pub(crate) fn mcp_app_in(
     // particular, a developer's `agents.servers.fake.env` secret reference
     // must not make these fake-agent tests depend on a platform keychain.
     let mut toml = String::from(
-        "root = true\n\n[agents]\nenabled = true\n\n[agents.servers.fake]\ncommand = \"unused\"\n",
+        "root = true\n\n[agents]\nenabled = true\ndefault_agent = \"fake\"\n\n[agents.servers.fake]\ncommand = \"unused\"\n",
     );
     if mcp_servers {
         toml.push_str(
@@ -1324,6 +1327,9 @@ pub(crate) fn acp_agent_script() -> FakeAgentScript {
             "server_id",
         )
         .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
+        .delay(25)
 }
 
 /// Script tail: `mcp/connect` (200), capture the connection id, run the

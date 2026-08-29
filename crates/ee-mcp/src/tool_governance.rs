@@ -277,6 +277,10 @@ pub fn governance(tool: &str) -> Option<ToolGovernance> {
         | "ee_apply_patch"
         | "ee_create_text_file"
         | "ee_overwrite_text_file"
+        | "ee_create_directory"
+        | "ee_delete_path"
+        | "ee_copy_path"
+        | "ee_move_path"
         | "ee_apply_code_action"
         | "ee_format_file"
         | "ee_rename_symbol"
@@ -323,6 +327,10 @@ pub const STABLE_TOOL_NAMES: &[&str] = &[
     "ee_apply_patch",
     "ee_create_text_file",
     "ee_overwrite_text_file",
+    "ee_create_directory",
+    "ee_delete_path",
+    "ee_copy_path",
+    "ee_move_path",
     "ee_read_buffer",
     "ee_read_buffer_lines",
     "ee_open_buffers",
@@ -371,6 +379,16 @@ mod tests {
             let entry = governance(tool).expect("stable tool has governance");
             assert!(!entry.transports.is_empty(), "{tool}");
             assert!(!entry.error_classes.is_empty(), "{tool}");
+        }
+    }
+
+    #[test]
+    fn filesystem_writes_require_approval_on_stdio_and_acp() {
+        for tool in ["ee_create_directory", "ee_delete_path", "ee_copy_path", "ee_move_path"] {
+            let entry = governance(tool).expect("filesystem tool governance");
+            assert_eq!(entry.side_effect, SideEffectClass::Write, "{tool}");
+            assert_eq!(entry.approval, "required", "{tool}");
+            assert_eq!(entry.transports, ALL_TRANSPORTS, "{tool}");
         }
     }
 

@@ -633,6 +633,20 @@ pub(crate) enum ProxyCall {
         path: String,
         content: String,
     },
+    CreateDirectory {
+        path: String,
+    },
+    DeletePath {
+        path: String,
+    },
+    CopyPath {
+        source_path: String,
+        destination_path: String,
+    },
+    MovePath {
+        source_path: String,
+        destination_path: String,
+    },
     ReadBuffer {
         path: String,
     },
@@ -846,6 +860,20 @@ pub(crate) enum ProxyToolCall {
         path: String,
         content: String,
     },
+    CreateDirectory {
+        path: String,
+    },
+    DeletePath {
+        path: String,
+    },
+    CopyPath {
+        source_path: String,
+        destination_path: String,
+    },
+    MovePath {
+        source_path: String,
+        destination_path: String,
+    },
     ReadBuffer {
         path: String,
     },
@@ -1054,6 +1082,14 @@ fn start_proxy_call_to_bridge(
         ProxyCall::OverwriteTextFile { path, content } => {
             ProxyToolCall::OverwriteTextFile { path, content }
         }
+        ProxyCall::CreateDirectory { path } => ProxyToolCall::CreateDirectory { path },
+        ProxyCall::DeletePath { path } => ProxyToolCall::DeletePath { path },
+        ProxyCall::CopyPath { source_path, destination_path } => {
+            ProxyToolCall::CopyPath { source_path, destination_path }
+        }
+        ProxyCall::MovePath { source_path, destination_path } => {
+            ProxyToolCall::MovePath { source_path, destination_path }
+        }
         ProxyCall::ReadBuffer { path } => ProxyToolCall::ReadBuffer { path },
         ProxyCall::ReadBufferLines { path, line, limit } => {
             ProxyToolCall::ReadBufferLines { path, line, limit }
@@ -1244,6 +1280,23 @@ impl SocketProxyBackend {
             .as_str()
             .map(ToOwned::to_owned)
             .ok_or_else(|| String::from("proxy reply missing string value"))
+    }
+
+    fn filesystem_call(
+        &self,
+        call: ProxyCall,
+        tool: &str,
+    ) -> Result<ee_mcp::FilesystemResult, ee_mcp::ProxyToolError> {
+        serde_json::from_value(
+            self.call_value(call).map_err(|message| ee_mcp::ProxyToolError {
+                message,
+                is_permission_denied: false,
+            })?,
+        )
+        .map_err(|error| ee_mcp::ProxyToolError {
+            message: format!("proxy {tool} reply invalid: {error}"),
+            is_permission_denied: false,
+        })
     }
 }
 
@@ -1464,6 +1517,36 @@ impl ee_mcp::EeProxyBackend for SocketProxyBackend {
             message: format!("proxy overwrite_text_file reply invalid: {error}"),
             is_permission_denied: false,
         })
+    }
+
+    fn create_directory(
+        &self,
+        path: String,
+    ) -> Result<ee_mcp::FilesystemResult, ee_mcp::ProxyToolError> {
+        self.filesystem_call(ProxyCall::CreateDirectory { path }, "create_directory")
+    }
+
+    fn delete_path(
+        &self,
+        path: String,
+    ) -> Result<ee_mcp::FilesystemResult, ee_mcp::ProxyToolError> {
+        self.filesystem_call(ProxyCall::DeletePath { path }, "delete_path")
+    }
+
+    fn copy_path(
+        &self,
+        source_path: String,
+        destination_path: String,
+    ) -> Result<ee_mcp::FilesystemResult, ee_mcp::ProxyToolError> {
+        self.filesystem_call(ProxyCall::CopyPath { source_path, destination_path }, "copy_path")
+    }
+
+    fn move_path(
+        &self,
+        source_path: String,
+        destination_path: String,
+    ) -> Result<ee_mcp::FilesystemResult, ee_mcp::ProxyToolError> {
+        self.filesystem_call(ProxyCall::MovePath { source_path, destination_path }, "move_path")
     }
 
     fn read_buffer(&self, path: String) -> Result<String, ee_mcp::ProxyToolError> {

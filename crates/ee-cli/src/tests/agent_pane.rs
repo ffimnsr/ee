@@ -231,8 +231,11 @@ fn base_script() -> FakeAgentScript {
 }
 
 const AGENTS_TOML: &str = r#"
+root = true
+
 [agents]
 enabled = true
+default_agent = "fake"
 
 [agents.servers.fake]
 command = "unused"

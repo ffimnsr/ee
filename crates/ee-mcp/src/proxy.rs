@@ -207,6 +207,38 @@ pub trait EeProxyBackend: Send + Sync + 'static {
         content: String,
     ) -> Result<EditTextResult, ProxyToolError>;
 
+    /// Creates a directory, including missing parents. Default fails closed.
+    fn create_directory(&self, path: String) -> Result<FilesystemResult, ProxyToolError> {
+        let _ = path;
+        unavailable_proxy_tool("filesystem writes")
+    }
+
+    /// Deletes a file or directory recursively. Default fails closed.
+    fn delete_path(&self, path: String) -> Result<FilesystemResult, ProxyToolError> {
+        let _ = path;
+        unavailable_proxy_tool("filesystem writes")
+    }
+
+    /// Copies a file or directory recursively. Default fails closed.
+    fn copy_path(
+        &self,
+        source_path: String,
+        destination_path: String,
+    ) -> Result<FilesystemResult, ProxyToolError> {
+        let _ = (source_path, destination_path);
+        unavailable_proxy_tool("filesystem writes")
+    }
+
+    /// Moves or renames a file or directory. Default fails closed.
+    fn move_path(
+        &self,
+        source_path: String,
+        destination_path: String,
+    ) -> Result<FilesystemResult, ProxyToolError> {
+        let _ = (source_path, destination_path);
+        unavailable_proxy_tool("filesystem writes")
+    }
+
     /// Reads current buffer content, including unsaved changes when open.
     fn read_buffer(&self, path: String) -> Result<String, ProxyToolError>;
 
@@ -707,6 +739,17 @@ pub struct EditTextResult {
     pub new_revision: String,
     pub saved: bool,
     pub dirty: bool,
+}
+
+/// Structured success result for filesystem mutation tools.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FilesystemResult {
+    /// Created, deleted, copied, or moved source path.
+    pub path: String,
+    /// Copy or move destination; absent for create and delete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_path: Option<String>,
 }
 
 /// One open buffer summary from `ee_open_buffers`.
@@ -1396,6 +1439,52 @@ impl EeMcpProxy {
                 })),
             ),
             Tool::new(
+                "ee_create_directory",
+                "Create a directory and any missing parents. Requires an absolute path and approval before mutation.",
+                schema(json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"],
+                    "additionalProperties": false,
+                })),
+            ),
+            Tool::new(
+                "ee_delete_path",
+                "Delete a file or directory recursively. Requires an absolute path and approval before mutation.",
+                schema(json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"],
+                    "additionalProperties": false,
+                })),
+            ),
+            Tool::new(
+                "ee_copy_path",
+                "Copy a file or directory recursively. Requires absolute source and destination paths and approval before mutation.",
+                schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "source_path": { "type": "string" },
+                        "destination_path": { "type": "string" },
+                    },
+                    "required": ["source_path", "destination_path"],
+                    "additionalProperties": false,
+                })),
+            ),
+            Tool::new(
+                "ee_move_path",
+                "Move or rename a file or directory. Requires absolute source and destination paths and approval before mutation.",
+                schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "source_path": { "type": "string" },
+                        "destination_path": { "type": "string" },
+                    },
+                    "required": ["source_path", "destination_path"],
+                    "additionalProperties": false,
+                })),
+            ),
+            Tool::new(
                 "ee_read_buffer",
                 "Read current editor buffer content, including unsaved changes. Falls back to disk only when no buffer is open and policy allows.",
                 schema(json!({
@@ -2008,6 +2097,36 @@ impl EeMcpProxy {
                 Ok(self
                     .backend
                     .overwrite_text_file(path.to_owned(), content.to_owned())
+                    .map(|result| complete(CallToolResult::structured(json!(result))))
+                    .unwrap_or_else(backend_error_result))
+            }
+            "ee_create_directory" | "ee_delete_path" => {
+                let arguments = require_arguments(request)?;
+                require_exact_argument_keys(arguments, &["path"])?;
+                let path = require_string(arguments, "path")?;
+                require_absolute(path)?;
+                let result = if request.name == "ee_create_directory" {
+                    self.backend.create_directory(path.to_owned())
+                } else {
+                    self.backend.delete_path(path.to_owned())
+                };
+                Ok(result
+                    .map(|result| complete(CallToolResult::structured(json!(result))))
+                    .unwrap_or_else(backend_error_result))
+            }
+            "ee_copy_path" | "ee_move_path" => {
+                let arguments = require_arguments(request)?;
+                require_exact_argument_keys(arguments, &["source_path", "destination_path"])?;
+                let source_path = require_string(arguments, "source_path")?;
+                let destination_path = require_string(arguments, "destination_path")?;
+                require_absolute(source_path)?;
+                require_absolute(destination_path)?;
+                let result = if request.name == "ee_copy_path" {
+                    self.backend.copy_path(source_path.to_owned(), destination_path.to_owned())
+                } else {
+                    self.backend.move_path(source_path.to_owned(), destination_path.to_owned())
+                };
+                Ok(result
                     .map(|result| complete(CallToolResult::structured(json!(result))))
                     .unwrap_or_else(backend_error_result))
             }
@@ -3066,6 +3185,34 @@ mod tests {
             })
         }
 
+        fn create_directory(&self, path: String) -> Result<FilesystemResult, ProxyToolError> {
+            self.record(format!("create_directory:{path}"));
+            Ok(FilesystemResult { path, destination_path: None })
+        }
+
+        fn delete_path(&self, path: String) -> Result<FilesystemResult, ProxyToolError> {
+            self.record(format!("delete_path:{path}"));
+            Ok(FilesystemResult { path, destination_path: None })
+        }
+
+        fn copy_path(
+            &self,
+            source_path: String,
+            destination_path: String,
+        ) -> Result<FilesystemResult, ProxyToolError> {
+            self.record(format!("copy_path:{source_path}:{destination_path}"));
+            Ok(FilesystemResult { path: source_path, destination_path: Some(destination_path) })
+        }
+
+        fn move_path(
+            &self,
+            source_path: String,
+            destination_path: String,
+        ) -> Result<FilesystemResult, ProxyToolError> {
+            self.record(format!("move_path:{source_path}:{destination_path}"));
+            Ok(FilesystemResult { path: source_path, destination_path: Some(destination_path) })
+        }
+
         fn read_buffer(&self, path: String) -> Result<String, ProxyToolError> {
             self.record(format!("read_buffer:{path}"));
             Ok(format!("buffer of {path}"))
@@ -4119,6 +4266,52 @@ mod tests {
             let request = CallToolRequestParams::new(name).with_arguments(arguments(value));
             assert!(EeMcpProxy::new(backend.clone()).dispatch_tool(&request).is_err(), "{name}");
             assert!(backend.calls().is_empty(), "{name} must not reach backend");
+        }
+    }
+
+    #[test]
+    fn filesystem_tools_validate_absolute_paths_and_dispatch_structured_results() {
+        let backend = Arc::new(ScriptedBackend::default());
+        let proxy = EeMcpProxy::new(backend.clone());
+        for (name, args, expected_call) in [
+            (
+                "ee_create_directory",
+                json!({ "path": "/abs/work/new" }),
+                "create_directory:/abs/work/new",
+            ),
+            ("ee_delete_path", json!({ "path": "/abs/work/old" }), "delete_path:/abs/work/old"),
+            (
+                "ee_copy_path",
+                json!({ "source_path": "/abs/work/a", "destination_path": "/abs/work/b" }),
+                "copy_path:/abs/work/a:/abs/work/b",
+            ),
+            (
+                "ee_move_path",
+                json!({ "source_path": "/abs/work/b", "destination_path": "/abs/work/c" }),
+                "move_path:/abs/work/b:/abs/work/c",
+            ),
+        ] {
+            let request = CallToolRequestParams::new(name).with_arguments(arguments(args));
+            proxy.dispatch_tool(&request).expect("filesystem dispatch");
+            assert_eq!(backend.calls().last().map(String::as_str), Some(expected_call));
+        }
+
+        for (name, args) in [
+            ("ee_create_directory", json!({ "path": "relative" })),
+            ("ee_delete_path", json!({ "path": "relative" })),
+            (
+                "ee_copy_path",
+                json!({ "source_path": "/abs/source", "destination_path": "relative" }),
+            ),
+            (
+                "ee_move_path",
+                json!({ "source_path": "relative", "destination_path": "/abs/destination" }),
+            ),
+        ] {
+            let before = backend.calls().len();
+            let request = CallToolRequestParams::new(name).with_arguments(arguments(args));
+            assert!(proxy.dispatch_tool(&request).is_err(), "{name}");
+            assert_eq!(backend.calls().len(), before, "{name} must fail before dispatch");
         }
     }
 

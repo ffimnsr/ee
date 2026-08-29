@@ -1034,6 +1034,196 @@
       ]
     },
     {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "ee_create_directory",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 3,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "ee_delete_path",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 3,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "destination_path": "example",
+        "source_path": "example"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "destination_path": {
+            "type": "string"
+          },
+          "source_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_path",
+          "destination_path"
+        ],
+        "type": "object"
+      },
+      "name": "ee_copy_path",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 3,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "destination_path": "example",
+        "source_path": "example"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "destination_path": {
+            "type": "string"
+          },
+          "source_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_path",
+          "destination_path"
+        ],
+        "type": "object"
+      },
+      "name": "ee_move_path",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 3,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
       "approval": "none",
       "deprecated": false,
       "errorClasses": [

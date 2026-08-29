@@ -80,6 +80,12 @@ impl ClientRequestHandler for ScriptedHandler {
                         "truncated": false,
                     })))
                 }
+                ClientRequest::ProxyMovePath { source_path, destination_path } => {
+                    Ok(ClientRequestResponse::ProxyValue(json!({
+                        "path": source_path,
+                        "destinationPath": destination_path,
+                    })))
+                }
                 ClientRequest::ProxyOpenBuffers => Ok(ClientRequestResponse::ProxyValue(json!({
                     "buffers": [{
                         "path": "/work/src/main.rs",
@@ -394,6 +400,42 @@ async fn mcp_over_acp_workspace_roots_tool_round_trips_through_the_handler() {
 }
 
 #[tokio::test]
+async fn mcp_over_acp_filesystem_write_routes_through_the_handler() {
+    let script = connect_and_init_script()
+        .emit(emit_message(
+            202,
+            "tools/call",
+            Some(json!({
+                "name": "ee_move_path",
+                "arguments": {
+                    "source_path": "/work/old",
+                    "destination_path": "/work/new"
+                }
+            })),
+        ))
+        .wait_for_response(202);
+    let handler = Arc::new(ScriptedHandler::default());
+    let (fake, host) = spawn_host(script, handler.clone()).await;
+    let connection = ready_connection(&fake, &host).await;
+    connection
+        .new_session(vec![PathBuf::from("/work")], Vec::new(), Some(stdio_fallback()))
+        .await
+        .expect("session starts");
+
+    let response = await_response(&fake, 202).await;
+    assert_eq!(response["result"]["structuredContent"]["path"], json!("/work/old"));
+    assert_eq!(response["result"]["structuredContent"]["destinationPath"], json!("/work/new"));
+    assert!(handler.seen().iter().any(|request| matches!(
+        request,
+        ClientRequest::ProxyMovePath { source_path, destination_path }
+            if source_path == "/work/old" && destination_path == "/work/new"
+    )));
+
+    host.connection.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
 async fn mcp_over_acp_open_buffers_tool_round_trips_through_the_handler() {
     let script = connect_and_init_script()
         .emit(emit_message(202, "tools/call", Some(json!({ "name": "ee_open_buffers" }))))
@@ -460,6 +502,10 @@ async fn mcp_over_acp_connect_and_tools_list_round_trip() {
             "ee_apply_patch",
             "ee_create_text_file",
             "ee_overwrite_text_file",
+            "ee_create_directory",
+            "ee_delete_path",
+            "ee_copy_path",
+            "ee_move_path",
             "ee_read_buffer",
             "ee_read_buffer_lines",
             "ee_open_buffers",

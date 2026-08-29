@@ -49,9 +49,8 @@ pub fn side_effect_class(tool: &str) -> SideEffectClass {
 /// - the argument profile carries no file contents (the trust store never
 ///   persists file contents, secret-like values, or binary attachments).
 ///
-/// Content-bearing write tools (`ee_write_text_file`, `ee_create_text_file`,
-/// `ee_overwrite_text_file`, `ee_replace_text`, `ee_apply_patch`) and
-/// unknown tools are therefore never eligible.
+/// Content-bearing writes and destructive filesystem operations are never
+/// eligible. Unknown tools also fail closed.
 #[must_use]
 pub fn exact_trust_eligible(tool: &str) -> bool {
     matches!(tool, "ee_apply_code_action" | "ee_format_file" | "ee_rename_symbol")
@@ -86,6 +85,10 @@ mod tests {
             "ee_apply_patch",
             "ee_create_text_file",
             "ee_overwrite_text_file",
+            "ee_create_directory",
+            "ee_delete_path",
+            "ee_copy_path",
+            "ee_move_path",
             "ee_apply_code_action",
             "ee_format_file",
             "ee_rename_symbol",
@@ -136,6 +139,10 @@ mod tests {
             "ee_overwrite_text_file",
             "ee_replace_text",
             "ee_apply_patch",
+            "ee_create_directory",
+            "ee_delete_path",
+            "ee_copy_path",
+            "ee_move_path",
         ] {
             assert!(!exact_trust_eligible(tool), "{tool} must not be eligible");
         }

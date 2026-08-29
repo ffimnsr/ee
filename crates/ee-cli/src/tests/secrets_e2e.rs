@@ -341,6 +341,8 @@ mod launch {
             .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
             .wait_for("session/new")
             .respond(json!({ "sessionId": "s1" }))
+            .wait_for("session/set_mode")
+            .respond(json!({}))
     }
 
     #[derive(Clone)]

@@ -1142,6 +1142,44 @@ impl ClientRequestHandler for BridgeUiHandler {
                     })
                     .await
                 }
+                ClientRequest::ProxyCreateDirectory { path } => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: super::agents_mcp::ProxyToolCall::CreateDirectory { path },
+                        reply,
+                    })
+                    .await
+                }
+                ClientRequest::ProxyDeletePath { path } => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: super::agents_mcp::ProxyToolCall::DeletePath { path },
+                        reply,
+                    })
+                    .await
+                }
+                ClientRequest::ProxyCopyPath { source_path, destination_path } => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: super::agents_mcp::ProxyToolCall::CopyPath {
+                            source_path,
+                            destination_path,
+                        },
+                        reply,
+                    })
+                    .await
+                }
+                ClientRequest::ProxyMovePath { source_path, destination_path } => {
+                    forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
+                        route: ProxyRoute::AcpNative,
+                        call: super::agents_mcp::ProxyToolCall::MovePath {
+                            source_path,
+                            destination_path,
+                        },
+                        reply,
+                    })
+                    .await
+                }
                 ClientRequest::ProxyReadBuffer { path } => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
                         route: ProxyRoute::AcpNative,
@@ -1520,6 +1558,9 @@ enum ApprovalKind {
         writes: Vec<PreparedWrite>,
         total_edit_count: u32,
     },
+    Filesystem {
+        operation: super::agent_filesystem::FilesystemOperation,
+    },
     TerminalCreate {
         request: CreateTerminalRequest,
     },
@@ -1621,6 +1662,7 @@ fn approval_fingerprint(kind: &ApprovalKind) -> String {
                 .collect::<Vec<_>>()
                 .join("|")
         ),
+        ApprovalKind::Filesystem { operation } => operation.fingerprint(),
         ApprovalKind::TerminalCreate { request } => {
             let command = [request.command.clone()]
                 .into_iter()
@@ -1699,6 +1741,24 @@ impl ApprovalPrompt {
             persistent_label,
             reply,
         )
+    }
+
+    fn filesystem(
+        operation: super::agent_filesystem::FilesystemOperation,
+        reply: oneshot::Sender<ClientRequestResult>,
+    ) -> Self {
+        Self {
+            thread_index: None,
+            session_id: SessionId::new("proxy").0.to_string(),
+            agent_id: None,
+            title: operation.tool_name().to_string(),
+            detail: operation.detail(),
+            options: approval_options(None),
+            selected: 0,
+            kind: ApprovalKind::Filesystem { operation },
+            mcp: None,
+            reply,
+        }
     }
 
     fn proxy_write(
@@ -2312,6 +2372,40 @@ impl App {
             super::agents_mcp::ProxyToolCall::OverwriteTextFile { path, content } => {
                 self.queue_proxy_overwrite_text_file(&path, &content, reply);
             }
+            super::agents_mcp::ProxyToolCall::CreateDirectory { path } => {
+                self.queue_proxy_filesystem(
+                    super::agent_filesystem::FilesystemOperation::CreateDirectory {
+                        path: PathBuf::from(path),
+                    },
+                    reply,
+                );
+            }
+            super::agents_mcp::ProxyToolCall::DeletePath { path } => {
+                self.queue_proxy_filesystem(
+                    super::agent_filesystem::FilesystemOperation::DeletePath {
+                        path: PathBuf::from(path),
+                    },
+                    reply,
+                );
+            }
+            super::agents_mcp::ProxyToolCall::CopyPath { source_path, destination_path } => {
+                self.queue_proxy_filesystem(
+                    super::agent_filesystem::FilesystemOperation::CopyPath {
+                        source: PathBuf::from(source_path),
+                        destination: PathBuf::from(destination_path),
+                    },
+                    reply,
+                );
+            }
+            super::agents_mcp::ProxyToolCall::MovePath { source_path, destination_path } => {
+                self.queue_proxy_filesystem(
+                    super::agent_filesystem::FilesystemOperation::MovePath {
+                        source: PathBuf::from(source_path),
+                        destination: PathBuf::from(destination_path),
+                    },
+                    reply,
+                );
+            }
             super::agents_mcp::ProxyToolCall::ReadBuffer { path } => {
                 let _ = reply.send(
                     self.proxy_read_buffer(Path::new(&path), None, None)
@@ -2882,7 +2976,7 @@ impl App {
                 ApprovalKind::TerminalCreate { request } => {
                     self.profile_id_for_request(request).is_some()
                 }
-                ApprovalKind::Network { .. } => false,
+                ApprovalKind::Filesystem { .. } | ApprovalKind::Network { .. } => false,
             },
             ToolApprovalMode::Bypass => true,
         }
@@ -2924,8 +3018,10 @@ impl App {
                     .unwrap_or(OperationIdentity::Unknown);
                 (TrustCategory::Execute, identity)
             }
-            // Web approvals are never eligible for generic trust matching.
-            ApprovalKind::Network { .. } => (TrustCategory::Unknown, OperationIdentity::Unknown),
+            // Filesystem and web approvals are never eligible for generic trust matching.
+            ApprovalKind::Filesystem { .. } | ApprovalKind::Network { .. } => {
+                (TrustCategory::Unknown, OperationIdentity::Unknown)
+            }
         };
         TrustOperation {
             workspace,
@@ -3296,9 +3392,11 @@ impl App {
                     }
                     _ => unreachable!(),
                 },
-                ApprovalKind::Network { .. } => {
+                ApprovalKind::Filesystem { .. } | ApprovalKind::Network { .. } => {
                     let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
-                        reason: String::from("persistent network approval is not supported"),
+                        reason: String::from(
+                            "persistent filesystem or network approval is not supported",
+                        ),
                     }));
                 }
                 ApprovalKind::Write { .. } | ApprovalKind::WriteBatch { .. } => {
@@ -3408,6 +3506,9 @@ impl App {
                     prompt.reply,
                 );
             }
+            ApprovalKind::Filesystem { operation } => {
+                self.apply_proxy_filesystem(operation, prompt.reply);
+            }
             ApprovalKind::Network {
                 route,
                 requested_host,
@@ -3449,9 +3550,11 @@ impl App {
             ApprovalKind::Write { .. } | ApprovalKind::WriteBatch { .. } => {
                 self.dispatch_write_prompt(prompt, Some(rule_id));
             }
-            ApprovalKind::Network { .. } => {
+            ApprovalKind::Filesystem { .. } | ApprovalKind::Network { .. } => {
                 let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
-                    reason: String::from("persistent network approval is not supported"),
+                    reason: String::from(
+                        "persistent filesystem or network approval is not supported",
+                    ),
                 }));
             }
         }
@@ -4573,7 +4676,9 @@ impl App {
             ApprovalKind::WriteBatch { writes, .. } => {
                 writes.iter().map(|write| write.path.clone()).collect()
             }
-            ApprovalKind::TerminalCreate { .. } | ApprovalKind::Network { .. } => return,
+            ApprovalKind::Filesystem { .. }
+            | ApprovalKind::TerminalCreate { .. }
+            | ApprovalKind::Network { .. } => return,
         };
         let revision = self
             .evidence_revision_for_paths(&paths)
@@ -5176,6 +5281,73 @@ impl App {
             }
             Err(error) => {
                 let _ = reply.send(Err(error));
+            }
+        }
+    }
+
+    fn queue_proxy_filesystem(
+        &mut self,
+        operation: super::agent_filesystem::FilesystemOperation,
+        reply: oneshot::Sender<ClientRequestResult>,
+    ) {
+        if let Err(error) = super::agent_filesystem::validate(&operation, &self.allowed_fs_roots())
+        {
+            let _ = reply.send(Err(AgentError::invalid_params(error.to_string())));
+            return;
+        }
+        if let Some(path) = self
+            .backend
+            .all_bufs()
+            .iter()
+            .filter_map(|buffer| buffer.path.as_deref())
+            .find(|path| operation.affected_open_path(path))
+        {
+            let _ = reply.send(Err(AgentError::invalid_params(format!(
+                "filesystem operation affects open buffer: {}",
+                path.display()
+            ))));
+            return;
+        }
+        self.request_bridge_approval(ApprovalPrompt::filesystem(operation, reply));
+    }
+
+    fn apply_proxy_filesystem(
+        &mut self,
+        operation: super::agent_filesystem::FilesystemOperation,
+        reply: oneshot::Sender<ClientRequestResult>,
+    ) {
+        if reply.is_closed() {
+            return;
+        }
+        if let Some(path) = self
+            .backend
+            .all_bufs()
+            .iter()
+            .filter_map(|buffer| buffer.path.as_deref())
+            .find(|path| operation.affected_open_path(path))
+        {
+            let _ = reply.send(Err(AgentError::invalid_params(format!(
+                "filesystem operation affects open buffer: {}",
+                path.display()
+            ))));
+            return;
+        }
+        match super::agent_filesystem::execute(&operation, &self.allowed_fs_roots()) {
+            Ok(result) => match serde_json::to_value(result) {
+                Ok(value) => {
+                    let _ = reply.send(Ok(ClientRequestResponse::ProxyValue(value)));
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(AgentError::HandlerError(format!(
+                        "filesystem result serialization failed: {error}"
+                    ))));
+                }
+            },
+            Err(error) => {
+                let _ = reply.send(Err(AgentError::Io(format!(
+                    "{} failed: {error}",
+                    operation.tool_name()
+                ))));
             }
         }
     }

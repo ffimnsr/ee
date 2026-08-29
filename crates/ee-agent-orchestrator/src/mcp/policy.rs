@@ -108,8 +108,13 @@ fn ee_proxy_classification(tool_name: &str) -> Option<McpToolClassSpec> {
     }
     let spec = match ee_mcp::side_effect_class(tool_name) {
         EeProxySideEffectClass::Read => READ,
+        EeProxySideEffectClass::Write if tool_name == "ee_delete_path" => WRITE_DELETE,
+        EeProxySideEffectClass::Write if tool_name == "ee_move_path" => WRITE_MOVE,
         EeProxySideEffectClass::Write
-            if matches!(tool_name, "ee_create_text_file" | "ee_save_note") =>
+            if matches!(
+                tool_name,
+                "ee_create_text_file" | "ee_create_directory" | "ee_copy_path" | "ee_save_note"
+            ) =>
         {
             WRITE
         }
@@ -121,6 +126,10 @@ fn ee_proxy_classification(tool_name: &str) -> Option<McpToolClassSpec> {
 }
 
 const WRITE: McpToolClassSpec = McpToolClassSpec { class: SideEffectClass::Write, subclass: None };
+const WRITE_DELETE: McpToolClassSpec =
+    McpToolClassSpec { class: SideEffectClass::Write, subclass: Some(SideEffectSubclass::Delete) };
+const WRITE_MOVE: McpToolClassSpec =
+    McpToolClassSpec { class: SideEffectClass::Write, subclass: Some(SideEffectSubclass::Move) };
 const WRITE_OVERWRITE: McpToolClassSpec = McpToolClassSpec {
     class: SideEffectClass::Write,
     subclass: Some(SideEffectSubclass::Overwrite),
@@ -173,10 +182,24 @@ mod tests {
     }
 
     #[test]
-    fn create_tool_has_no_destructive_subclass() {
-        let spec = classify_tool("ee", "ee_create_text_file", &policy());
-        assert_eq!(spec.class, SideEffectClass::Write);
-        assert_eq!(spec.subclass, None);
+    fn create_and_copy_tools_have_no_destructive_subclass() {
+        for name in ["ee_create_text_file", "ee_create_directory", "ee_copy_path"] {
+            let spec = classify_tool("ee", name, &policy());
+            assert_eq!(spec.class, SideEffectClass::Write, "{name}");
+            assert_eq!(spec.subclass, None, "{name}");
+        }
+    }
+
+    #[test]
+    fn delete_and_move_tools_keep_destructive_subclasses() {
+        assert_eq!(
+            classify_tool("ee", "ee_delete_path", &policy()).subclass,
+            Some(SideEffectSubclass::Delete)
+        );
+        assert_eq!(
+            classify_tool("ee", "ee_move_path", &policy()).subclass,
+            Some(SideEffectSubclass::Move)
+        );
     }
 
     #[test]

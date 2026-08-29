@@ -28,6 +28,8 @@ mod agent_bridge;
 #[cfg(feature = "agents")]
 mod agent_export;
 #[cfg(feature = "agents")]
+mod agent_filesystem;
+#[cfg(feature = "agents")]
 mod agent_knowledge;
 #[cfg(feature = "agents")]
 mod agent_pane;

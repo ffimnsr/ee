@@ -102,6 +102,10 @@ impl HandlerCapabilities {
             | "_ee/apply_patch"
             | "_ee/create_text_file"
             | "_ee/overwrite_text_file"
+            | "_ee/create_directory"
+            | "_ee/delete_path"
+            | "_ee/copy_path"
+            | "_ee/move_path"
             | "_ee/read_buffer"
             | "_ee/read_buffer_lines"
             | "_ee/open_buffers"
@@ -196,6 +200,20 @@ pub enum ClientRequest {
     ProxyOverwriteTextFile {
         path: String,
         content: String,
+    },
+    ProxyCreateDirectory {
+        path: String,
+    },
+    ProxyDeletePath {
+        path: String,
+    },
+    ProxyCopyPath {
+        source_path: String,
+        destination_path: String,
+    },
+    ProxyMovePath {
+        source_path: String,
+        destination_path: String,
     },
     ProxyReadBuffer {
         path: String,
@@ -316,6 +334,10 @@ impl ClientRequest {
             Self::ProxyApplyPatch { .. } => "_ee/apply_patch",
             Self::ProxyCreateTextFile { .. } => "_ee/create_text_file",
             Self::ProxyOverwriteTextFile { .. } => "_ee/overwrite_text_file",
+            Self::ProxyCreateDirectory { .. } => "_ee/create_directory",
+            Self::ProxyDeletePath { .. } => "_ee/delete_path",
+            Self::ProxyCopyPath { .. } => "_ee/copy_path",
+            Self::ProxyMovePath { .. } => "_ee/move_path",
             Self::ProxyReadBuffer { .. } => "_ee/read_buffer",
             Self::ProxyReadBufferLines { .. } => "_ee/read_buffer_lines",
             Self::ProxyOpenBuffers => "_ee/open_buffers",
@@ -373,6 +395,10 @@ impl ClientRequest {
             | Self::ProxyApplyPatch { .. }
             | Self::ProxyCreateTextFile { .. }
             | Self::ProxyOverwriteTextFile { .. }
+            | Self::ProxyCreateDirectory { .. }
+            | Self::ProxyDeletePath { .. }
+            | Self::ProxyCopyPath { .. }
+            | Self::ProxyMovePath { .. }
             | Self::ProxyReadBuffer { .. }
             | Self::ProxyReadBufferLines { .. }
             | Self::ProxyOpenBuffers
@@ -556,6 +582,10 @@ mod tests {
         for method in [
             "fs/read_text_file",
             "fs/write_text_file",
+            "_ee/create_directory",
+            "_ee/delete_path",
+            "_ee/copy_path",
+            "_ee/move_path",
             "terminal/create",
             "terminal/output",
             "terminal/wait_for_exit",
@@ -629,6 +659,19 @@ mod tests {
         let proxy = ClientRequest::ProxySearchFiles { pattern: String::from("src/*.rs") };
         assert_eq!(proxy.method(), "_ee/search_files");
         assert_eq!(proxy.session_id(), None);
+
+        let create_directory =
+            ClientRequest::ProxyCreateDirectory { path: String::from("/tmp/new") };
+        assert_eq!(create_directory.method(), "_ee/create_directory");
+        assert_eq!(create_directory.session_id(), None);
+        assert!(HandlerCapabilities::all().supports_request(&create_directory));
+
+        let move_path = ClientRequest::ProxyMovePath {
+            source_path: String::from("/tmp/old"),
+            destination_path: String::from("/tmp/new"),
+        };
+        assert_eq!(move_path.method(), "_ee/move_path");
+        assert_eq!(move_path.session_id(), None);
 
         let proxy_regex = ClientRequest::ProxySearchTextRegex { pattern: String::from("main") };
         assert_eq!(proxy_regex.method(), "_ee/search_text_regex");

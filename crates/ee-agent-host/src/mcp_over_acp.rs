@@ -54,7 +54,7 @@ use ee_agent_protocol::{
 use ee_mcp::{
     BrowserRunRequest, BrowserRunResult, ChangedFilesResult, CodeActionsResult, DiagnosticsResult,
     DocumentSymbolsResult, EditTextResult, EeMcpProxy, EeProxyBackend, FetchUrlRequest,
-    FetchUrlResult, FileDependencyMapResult, GitDiffResult, GitStatusResult,
+    FetchUrlResult, FileDependencyMapResult, FilesystemResult, GitDiffResult, GitStatusResult,
     ListDirectoryAllResult, ListDirectoryResult, OpenBuffersResult, ProjectInstructionsResult,
     ProxyToolError, ReferencesResult, RenamePreviewResult, ReviewContextResult,
     SearchFilesAllResult, SearchFilesResult, SearchTextResult, SessionNoteResult,
@@ -542,6 +542,36 @@ impl EeProxyBackend for HostProxyBackend {
                 is_permission_denied: false,
             }),
         }
+    }
+
+    fn create_directory(&self, path: String) -> Result<FilesystemResult, ProxyToolError> {
+        proxy_value(self.call(ClientRequest::ProxyCreateDirectory { path })?, "create_directory")
+    }
+
+    fn delete_path(&self, path: String) -> Result<FilesystemResult, ProxyToolError> {
+        proxy_value(self.call(ClientRequest::ProxyDeletePath { path })?, "delete_path")
+    }
+
+    fn copy_path(
+        &self,
+        source_path: String,
+        destination_path: String,
+    ) -> Result<FilesystemResult, ProxyToolError> {
+        proxy_value(
+            self.call(ClientRequest::ProxyCopyPath { source_path, destination_path })?,
+            "copy_path",
+        )
+    }
+
+    fn move_path(
+        &self,
+        source_path: String,
+        destination_path: String,
+    ) -> Result<FilesystemResult, ProxyToolError> {
+        proxy_value(
+            self.call(ClientRequest::ProxyMovePath { source_path, destination_path })?,
+            "move_path",
+        )
     }
 
     fn read_buffer(&self, path: String) -> Result<String, ProxyToolError> {
