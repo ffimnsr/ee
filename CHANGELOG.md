@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.11.5 - 2026-08-29
+
+### Features
+
+- speed up the loading of files (`27c38f83`)
+- update the restore session and fix tests (`08cda124`)
+- add missing gaps on tools (`30495b75`)
+- enhanced the deny/confirm on trust manager (`fd0d32ef`)
+- update the versions and issues.md (`93fea855`)
+
+
+### Tests
+
+- flaky test updates (`b65cb947`)
+
+
+### Maintenance
+
+- install script avoids text file busy (`c7303e6a`)
+- update cargo toml for libgit (`91f3122d`)
+
+
 ## 0.11.4 - 2026-08-29
 
 ### Features
