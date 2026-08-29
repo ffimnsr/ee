@@ -4781,3 +4781,285 @@ Add deterministic fixtures around actual default ACP prompt wiring, not isolated
 - [x] False success, stale evidence, repeated repair failure, and unsafe resume cannot silently pass through the full production ACP path.
   - Native host editor MCP is advertised to ACP-capable agents without requiring stdio fallback configuration, so repair context uses current editor facts; ambiguous in-flight side effects remain blocked while completed tool-call ids are reused on pane `/resume`.
 - [x] Current OpenRouter ACP host-transport replay stays hermetic, redacted, and deterministic.
+
+## Multiple ACP Agents and Rubber Duck Critic Plan
+
+Add Zed-style external-agent selection and a bounded rubber duck critic that can use either a different model inside an ee-owned agent or a separately configured ACP agent. Keep ACP v1 as the external-agent session protocol. Keep agent-native authentication, billing, model configuration, and native tools owned by each external agent. Do not add ee-owned ACP wire methods for cross-agent delegation; coordinate it inside `ee-agent-host` and `ee-agent-orchestrator` using existing session, config-option, MCP, policy, and evidence surfaces.
+
+Current foundation:
+
+- [x] `AgentManagerConfig::agents` supports multiple configured ACP agent ids.
+- [x] `AgentManager` lazily creates one isolated connection per selected agent id and can keep multiple connections live.
+- [x] New, load, resume, delete, close, and list-session operations are scoped to an explicit agent id.
+- [x] Agent pane threads persist their owning agent id and keep terminal, approval, evidence, and recovery state agent-scoped.
+- [x] ACP session config options are stored, rendered, validated, and changed through `session/set_config_option`.
+- [x] `OrchestratorRuntime` and subagents already support a `ModelRegistry` with explicit model ids.
+- [x] Subagent roles, tool-class policy, citation verification, quarantine, bounded budgets, cancellation, and replay metrics already exist.
+- [ ] Expose configured ACP agent selection when creating a thread; current `:agents` and `:agents_new` always resolve `agents.default_agent`.
+- [ ] Let the production orchestrated OpenRouter provider construct sessions from multiple registered model adapters instead of a single adapter.
+- [ ] Add a dedicated rubber duck critic contract, contrasting-model selection, automatic trigger policy, and optional cross-agent broker.
+
+Rules:
+
+- Root agent owns final plan, synthesis, edits, validation selection, and user response.
+- Rubber duck reviews proposed or completed work; it never directly mutates editor state.
+- Internal model critics must use a model from a different declared family than the active root model. Never silently fall back to the same model or family.
+- Internal critics receive read-only tools only. Deny write, execute, delegate, approval-producing, terminal, and mutating code-action classes twice: filtered discovery plus policy enforcement.
+- External ACP critics are not automatically trusted as read-only. Denying ee-forwarded mutation requests does not control agent-native filesystem or terminal tools.
+- Automatic cross-agent critique requires a verifiable read-only agent mode or an OS-enforced read-only workspace/snapshot. Otherwise keep it manual-only and label the limitation.
+- Keep critic input bounded, revision-aware, redacted, and injection-guarded. Never forward raw secrets, environment values, unrestricted terminal output, or hidden reasoning.
+- Reuse existing task graph, context planner, review evidence, subagent verifier, host evidence, completion reducer, and replay harness. Do not build parallel policy, memory, or validation systems.
+- Keep subprocesses lazy. Agent/model pickers must not start every configured agent or call every provider for discovery.
+- Preserve existing approval, workspace containment, canonical path identity, cancellation, timeout, output cap, and telemetry redaction rules.
+
+### Phase 1: External ACP agent selection parity
+
+Expose multiple agents already supported by `ee-agent-host` through thread creation UX. Keep selection frontend-owned because it is local workflow and presentation; pass selected agent id into existing backend host APIs.
+
+#### Work items
+
+- [ ] Extend `:agents_new` with optional agent id.
+  - [ ] Accept `:agents_new <agent_id>` and start a session through existing `AgentManager::new_session(agent_id, ...)`.
+  - [ ] Preserve no-argument behavior when exactly one agent exists or `agents.default_agent` resolves.
+  - [ ] Open an agent picker when multiple agents exist and no unambiguous default is available.
+  - [ ] Reject unknown ids with a bounded message listing configured ids.
+- [ ] Extend local composer `/new` with optional agent id using the same resolver and picker.
+- [ ] Add a new-thread agent picker.
+  - [ ] List configured agent id, configured display label when available, default marker, and local connection state.
+  - [ ] Do not initialize or spawn unselected agents to populate the picker.
+  - [ ] Keep launch command and environment values hidden or redacted.
+- [ ] Show owning agent id in thread picker, thread status, exported transcript metadata, recovery entries, and failure diagnostics.
+- [ ] Keep thread switching independent of agent connection; selecting an existing thread must reconnect only its owning agent when needed.
+- [ ] Add tests with two fake ACP agents proving each selected thread sends `initialize` and `session/new` only to its selected process.
+- [ ] Add tests proving approvals, terminals, evidence, session load/resume, and shutdown remain scoped by agent id plus session id.
+- [ ] Document multiple manual agent entries under `[agents.servers.<id>]` and `agents.default_agent`.
+
+#### Exit criteria
+
+- [ ] User can create and switch between threads owned by different configured ACP agents without editing config between sessions.
+- [ ] Selecting one agent never starts, authenticates, or sends workspace context to another agent.
+- [ ] Existing single-agent `:agents`, `:agents_new`, and `/new` behavior remains unchanged when selection is unambiguous.
+
+### Phase 2: Model identity and production multi-model provider
+
+Make model contrast trustworthy and wire the existing `ModelRegistry` into production sessions. Model identity belongs in `ee-agent-orchestrator`; provider-specific config translation belongs in `ee-openrouter-agent`.
+
+#### Work items
+
+- [ ] Add typed model identity metadata to `ModelRegistry` entries.
+  - [ ] Record stable model id, provider id, declared model family, display name, and bounded capability hints.
+  - [ ] Add a non-secret `ModelFamily` type covering known families plus explicit `other` identity.
+  - [ ] Reject empty ids, duplicate ids, and malformed provider/family metadata.
+  - [ ] Never infer a trustworthy contrast solely from display name or free-form capability text.
+- [ ] Add deterministic contrasting-model selection.
+  - [ ] Exclude the active model id.
+  - [ ] Exclude models from the active model family.
+  - [ ] Require chat completion and required tool capabilities.
+  - [ ] Prefer an explicit `rubber_duck` role route, then strong tier, then stable route/model id order.
+  - [ ] Return typed unavailable reasons for unknown active identity, no alternative, same-family-only alternatives, missing capability, and disabled route.
+  - [ ] Never fall back to the active model or same-family model.
+- [ ] Refactor `OrchestratorProvider` production construction to own a shared `ModelRegistry` rather than one generic model adapter.
+  - [ ] Require a registered `default` adapter before provider startup succeeds.
+  - [ ] Create new and restored session runtimes through `OrchestratorRuntime::with_model_registry` or equivalent.
+  - [ ] Restore checkpoints and normal session state against process-owned adapters; never serialize adapters, credentials, or HTTP clients.
+  - [ ] Keep a one-adapter constructor only as a focused convenience that builds a single-entry registry.
+- [ ] Extend `ee-openrouter-agent` configuration with optional critic model and family metadata.
+  - [ ] Keep `OPENROUTER_MODEL` as root/default model.
+  - [ ] Add explicit rubber duck model configuration without reusing or exposing the API key in model metadata.
+  - [ ] Build separate adapters for root and critic model ids while sharing only safe immutable HTTP/provider configuration.
+  - [ ] Reject same-id or same-family critic configuration with a clear startup diagnostic; continue root-agent operation with critic unavailable.
+- [ ] Optionally advertise user-selectable root models through existing ACP session config options.
+  - [ ] Use a select option categorized as model.
+  - [ ] Apply changes per session through existing `session/set_config_option` support.
+  - [ ] Keep root model switching separate from independent critic selection; changing root model must recompute the next contrasting critic.
+- [ ] Add unit and provider-flow tests for registry construction, family contrast, deterministic selection, session load/resume, and single-model degradation.
+
+#### Exit criteria
+
+- [ ] Production ee-owned agent can run root and critic calls on distinct registered model adapters.
+- [ ] Every critic invocation records active and selected model ids while proving different declared families.
+- [ ] Single-model setups remain usable and report rubber duck unavailable instead of failing ordinary turns.
+
+### Phase 3: Rubber duck role and structured critique contract
+
+Add a dedicated critic role instead of reusing `Reviewer`, which currently permits execute-class diagnostics. Keep reusable evidence assembly shared with reflection, but do not let critic output mutate task or workspace state directly.
+
+#### Work items
+
+- [ ] Add `BuiltinSubagentRole::RubberDuck` in `ee-agent-orchestrator`.
+  - [ ] Allow `SideEffectClass::Read` only.
+  - [ ] Deny `Write`, `Execute`, `Delegate`, terminal lifecycle, mutating code actions, and approval-producing operations.
+  - [ ] Cap iterations, context bytes, output bytes, timeout, and recursion below root defaults.
+  - [ ] Require citations and quarantine failed, cancelled, malformed, or unverified output.
+- [ ] Add typed critique targets: plan, implementation, tests, failure analysis, and explicit user question.
+- [ ] Add versioned `CritiqueReport` and `CritiqueFinding` schemas.
+  - [ ] Classify findings as blocking, non-blocking, or suggestion.
+  - [ ] Require stable key, issue, impact, concrete recommended change, confidence, and cited evidence for each finding.
+  - [ ] Accept an explicit empty finding list as a clean review.
+  - [ ] Bound finding count and every text/evidence field.
+  - [ ] Reject unknown schema versions, duplicate keys, unsupported severities, empty substantive fields, and uncited observed claims.
+- [ ] Reuse `SubagentReportVerifier`, execution evidence, citation sinks, and quarantine where their contracts match.
+- [ ] Extract shared bounded review-context assembly from `reflection.rs` instead of duplicating changed-file, validation, task, diagnostic, and revision collection.
+- [ ] Keep repository and tool content marked untrusted and pass critic requests through existing prompt-injection preparation.
+- [ ] Add parser/verifier tests for valid report, clean report, malformed JSON, oversized output, duplicate findings, absent citations, and injected repository instructions.
+
+#### Exit criteria
+
+- [ ] Rubber duck can only inspect bounded read context and return a verified structured report.
+- [ ] Critic has no code path that applies edits, runs commands, delegates, or requests approval.
+- [ ] Root agent receives findings as evidence, not permission to mutate or proof of completion.
+
+### Phase 4: Internal same-agent contrasting-model critic
+
+Implement preferred rubber duck backend inside `ee-agent-orchestrator`. Use one ACP session and task graph while calling a contrasting registered model through existing adapter, budget, cancellation, and event machinery.
+
+#### Work items
+
+- [ ] Add `RubberDuckRunner` or equivalent orchestrator service.
+  - [ ] Accept target, user goal, active task/plan, active model identity, optional user question, current revision, and bounded observed evidence.
+  - [ ] Select critic through deterministic contrasting-model API before creating a child task.
+  - [ ] Reserve model/subagent budget before dispatch; budget denial must not create task state.
+  - [ ] Inherit root cancellation and use dedicated bounded timeout.
+  - [ ] Filter tool discovery to read-only definitions and apply a second fail-closed read-only policy.
+  - [ ] Verify report before merging any summary into root transcript or memory.
+- [ ] Add typed outcomes: completed, unavailable/skipped, quarantined, cancelled, and failed.
+- [ ] Inject verified report into root transcript as bounded critic evidence.
+  - [ ] Do not expose hidden reasoning or raw critic transport output.
+  - [ ] Let root summarize accepted findings and planned changes to user timeline.
+  - [ ] Keep critic prose incapable of overriding host validation or completion evidence.
+- [ ] Add root finding resolution states: accepted, rejected with cited evidence, and deferred with reason.
+- [ ] Convert accepted blocking/non-blocking findings into task-graph items only through root-owned reconciliation.
+- [ ] Prevent `verified` completion while a current-revision blocking finding remains unresolved.
+- [ ] Cache only by session, target, active/root model ids, revision, plan/task fingerprint, and policy version; invalidate after writes, model switch, diagnostics, validation, graph, or checkout changes.
+- [ ] Add hermetic tests proving contrasting adapter use, read-only policy, cancellation, unavailable critic degradation, report injection, and unresolved-blocking completion behavior.
+
+#### Exit criteria
+
+- [ ] Same ee-owned ACP agent can use one model for root work and another model family for rubber duck critique without switching root session model.
+- [ ] Root remains sole writer and final decision owner.
+- [ ] Critic failure or absence never corrupts session state or silently substitutes same-model reflection.
+
+### Phase 5: Manual command and automatic high-leverage triggers
+
+Expose explicit `/rubber-duck` first, then add deterministic automatic triggers after replay evidence proves value. Keep trigger policy orchestrator-owned; slash-command parsing remains shared ACP provider behavior.
+
+#### Work items
+
+- [ ] Add shared `/rubber-duck [question]` slash command parsing and advertisement.
+  - [ ] Match exact command name; reject prefix collisions such as `/rubber-ducking`.
+  - [ ] Preserve optional instruction text exactly after separator normalization.
+  - [ ] Advertise command only when provider supports rubber duck flow; unavailable configured critic may still return a typed reason.
+- [ ] Route manual command before normal mutable MCP/tool registration, like `/compact` special handling.
+- [ ] Run critic, inject verified report, then let root perform one bounded synthesis response.
+- [ ] Emit concise timeline updates: critic selected, skipped reason, finding counts, and root plan change. Do not dump raw critic report unless user explicitly requests details.
+- [ ] Add deterministic automatic trigger policy with manual-only default until replay gate passes.
+  - [ ] Plan trigger: after `PlanThenExecute` plan/task emission and before first write for multi-file, API, security, persistence, migration, destructive, or high-coupling work.
+  - [ ] Implementation trigger: after writes and focused validation, before final completion synthesis, when changed scope, diagnostics, skipped validation, recovery, or public API impact is non-trivial.
+  - [ ] Failure trigger: after bounded repeated edit/tool/validation/no-progress evidence, before another equivalent repair attempt.
+  - [ ] Test trigger: when changed behavior lacks adjacent selected tests or validation remains partial.
+- [ ] Skip automatic critique for pure questions, summaries, formatting-only work, one-file mechanical edits with focused passing evidence, prior same-target/current-revision critique, cancellation, unavailable contrast, or exhausted budget.
+- [ ] Run at most once per target/revision/trigger key unless root plan or workspace revision materially changes.
+- [ ] Add trigger tests proving pre-write ordering, post-write revision binding, repeated-failure single invocation, trivial-task skip, and no hidden unlimited loops.
+
+#### Exit criteria
+
+- [ ] User can request a second opinion with `/rubber-duck` and optional focused question.
+- [ ] Automatic critique occurs only at deterministic high-leverage boundaries and never after unbounded speculative retries.
+- [ ] Root reports how critique changed or did not change plan without treating critic opinion as validation evidence.
+
+### Phase 6: Optional cross-agent ACP critic broker
+
+Allow a configured ACP agent to critique another agent's work. Keep broker in editor host because only host owns multiple ACP connections. Do not let one external ACP process directly address or control sibling processes.
+
+#### Work items
+
+- [ ] Add host-local critic backend selection: internal model or external agent id.
+- [ ] Add `CriticAgentBroker` in `ee-agent-host` using existing `AgentManager` connections and session APIs.
+  - [ ] Resolve configured critic agent id without changing `agents.default_agent`.
+  - [ ] Reject root agent id when configuration requires independent agent implementation.
+  - [ ] Create an ephemeral critic session with bounded cwd/additional directories and no mutable forwarded tools.
+  - [ ] Send a bounded critique request containing explicit untrusted context delimiters and structured response schema.
+  - [ ] Collect final response, verify report, close ephemeral session, and retain only bounded verified evidence.
+  - [ ] Propagate root cancellation and close orphaned critic session/connection work deterministically.
+- [ ] Forward only read-class ee MCP tools to critic session.
+  - [ ] Omit write, execute, terminal, code-action apply, rename apply, note persistence, and approval-producing tools from discovery.
+  - [ ] Deny any unexpected mutation request at host policy even if critic cached an old manifest.
+- [ ] Add explicit external-agent read-only trust classification.
+  - [ ] Distinguish `host_forwarded_read_only` from `sandbox_enforced_read_only`.
+  - [ ] Never claim arbitrary external agent is fully read-only when its native tools remain outside ee control.
+  - [ ] Require sandbox-enforced read-only workspace/snapshot or agent-advertised verifiable read-only mode before automatic use.
+  - [ ] Keep unsandboxed external critic manual-only with visible warning.
+- [ ] Prevent credential/config sharing between root and critic agents.
+  - [ ] Each process uses only its configured env/auth flow.
+  - [ ] Never copy API keys, login tokens, provider config, or native agent state across processes.
+- [ ] Add two-fake-agent integration tests proving root/critic process separation, context bounds, no mutation forwarding, cancellation, session cleanup, malformed report quarantine, and root synthesis.
+- [ ] Add adversarial test where external critic attempts native/forwarded write; forwarded request must fail and automatic mode must reject non-sandboxed configuration.
+
+#### Exit criteria
+
+- [ ] ee can use same ACP implementation under another configured id/model or a different ACP implementation as manual critic.
+- [ ] Cross-agent sessions, auth, tools, evidence, costs, and failures remain isolated and attributable.
+- [ ] Automatic cross-agent rubber duck never runs without enforceable read-only guarantees.
+
+### Phase 7: Configuration, security, cost, and observability
+
+Add explicit user controls and privacy-safe events. Keep configuration frontend-owned and translate resolved values into backend/orchestrator policy.
+
+#### Work items
+
+- [ ] Add `RubberDuckConfig` with off, manual, and automatic modes plus bounded calls, context bytes, output bytes, and timeout.
+- [ ] Add backend selection configuration for internal model id or external agent id; reject ambiguous simultaneous selections.
+- [ ] Validate model/agent ids during resolved config construction while allowing ordinary agent operation when optional critic is unavailable.
+- [ ] Add typed orchestrator/host events for critic started, completed, skipped, quarantined, cancelled, and finding resolution.
+  - [ ] Record only target, safe reason, model/agent ids, finding counts, latency, token/cost counters, and policy version.
+  - [ ] Never record raw prompts, critique text, workspace content, paths, terminal output, credentials, or hidden reasoning in telemetry.
+- [ ] Surface provider/agent identity, extra model call, latency, and estimated cost before or during manual cross-provider critique.
+- [ ] Attribute internal critics by provider/model/prompt/routing versions and external critics by configured agent id plus advertised implementation metadata.
+- [ ] Keep critique report out of completion evidence. Only root actions plus host-observed diagnostics/diff/validation may change terminal completion state.
+- [ ] Add security tests for prompt injection, path escape, symlink escape, stale revision, cached mutable manifest, secret-like content, oversized context/report, cross-agent approval reuse, and terminal ownership.
+- [ ] Add serialization/roundtrip tests for all new config, events, typed skip reasons, report schema, and resolution states.
+- [ ] Document privacy and billing boundary: external ACP agents own native auth, provider relationship, retention, model choice, and native tool behavior.
+
+#### Exit criteria
+
+- [ ] User controls whether critique runs and which trusted backend it may use.
+- [ ] Critique cost, latency, provider/agent identity, and skip/failure state are visible without leaking workspace data.
+- [ ] Critic output cannot grant trust, approval, completion, or cross-agent policy reuse.
+
+### Phase 8: Replay evaluation, rollout, and documentation
+
+Prove critic quality before automatic enablement. Use existing replay harness and production ACP host/pane fixtures; do not rely on subjective examples.
+
+#### Work items
+
+- [ ] Add versioned replay fixtures for flawed plan, missing authorization, stale revision, unsafe migration, missing regression tests, clean mechanical edit, false-positive critique, unavailable critic, timeout, malformed report, and repository prompt injection.
+- [ ] Add cross-agent fixtures for same implementation/different startup model and different ACP implementations.
+- [ ] Record quality and cost metrics: useful findings, accepted/rejected/deferred findings, duplicate work, false positives, policy violations, model/agent calls, latency, tokens, estimated cost, and final validation score.
+- [ ] Define automatic-mode regression thresholds before changing defaults.
+  - [ ] Require measurable quality improvement on complex fixtures.
+  - [ ] Require no write/execute/delegate critic calls and no approval prompts.
+  - [ ] Require trivial fixtures to skip at high rate.
+  - [ ] Bound latency, token, cost, and duplicate-work regressions.
+  - [ ] Require no false-success or completion-evidence regression.
+- [ ] Start rollout with manual internal-model critique.
+- [ ] Enable automatic internal critique only after replay baseline passes.
+- [ ] Keep external-agent critique manual until sandbox/read-only contract and adversarial fixtures pass.
+- [ ] Document examples for:
+  - [ ] multiple ACP agents with `:agents_new <agent_id>` and picker
+  - [ ] same ACP binary configured twice with different model arguments/env
+  - [ ] one ee-owned OpenRouter agent with root and critic model ids
+  - [ ] different external ACP root and critic agents
+  - [ ] per-session model config through `:agents_config_set`
+  - [ ] `/rubber-duck` manual invocation, automatic trigger behavior, skip reasons, privacy, and cost
+- [ ] Run `cargo fmt --all -- --check`.
+- [ ] Run `cargo clippy --workspace --all-targets --all-features`.
+- [ ] Run targeted quiet tests for `ee-agent-protocol`, `ee-agent-host`, `ee-agent-orchestrator`, `ee-openrouter-agent`, and `ee-cli` agents UI.
+- [ ] Run `./scripts/test-workspace-summary.sh`.
+
+#### Exit criteria
+
+- [ ] Multiple ACP agents are selectable per new thread with lazy isolated processes and agent-scoped sessions.
+- [ ] ee-owned rubber duck uses a verified contrasting model and enforced read-only tools.
+- [ ] Optional external ACP critic is isolated, bounded, attributable, and never misrepresented as fully read-only without sandbox proof.
+- [ ] Root remains sole decision/writer and completion remains derived from current host evidence.
+- [ ] CI replay data demonstrates quality gain without policy, privacy, completion, or boundedness regression.

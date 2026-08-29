@@ -1329,7 +1329,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ee-acp-agent-server"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "ee-acp-agent-server",
  "ee-agent-protocol",
@@ -1342,7 +1342,7 @@ dependencies = [
 
 [[package]]
 name = "ee-agent-host"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "base64 0.22.1",
  "ee-acp-agent-server",
@@ -1367,7 +1367,7 @@ dependencies = [
 
 [[package]]
 name = "ee-agent-orchestrator"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "ee-acp-agent-server",
  "ee-agent-orchestrator",
@@ -1386,7 +1386,7 @@ dependencies = [
 
 [[package]]
 name = "ee-agent-protocol"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "agent-client-protocol",
  "serde",
@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "ee-cli"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "base64 0.22.1",
  "chacha20poly1305",
@@ -1445,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "ee-mcp"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "http",
  "reqwest 0.13.4",
@@ -1461,7 +1461,7 @@ dependencies = [
 
 [[package]]
 name = "ee-openrouter-agent"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "clap",
  "dirs",
@@ -1476,7 +1476,7 @@ dependencies = [
 
 [[package]]
 name = "ee-ts-test-grammars"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "tree-sitter",
  "tree-sitter-bash",
@@ -1502,7 +1502,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-core"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "chrono",
  "dirs",
@@ -1516,7 +1516,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-core-lib"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "bytecount",
  "cc",
@@ -1553,7 +1553,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-lsp-lib"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "chrono",
  "ee-xi-core-lib",
@@ -1573,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-plugin-derive"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1582,7 +1582,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-plugin-lib"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "bytecount",
  "ee-xi-core-lib",
@@ -1601,7 +1601,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-rope"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "bytecount",
  "criterion",
@@ -1617,7 +1617,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-rpc"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "jsonrpc-lite",
  "log",
@@ -1630,7 +1630,7 @@ dependencies = [
 
 [[package]]
 name = "ee-xi-unicode"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "criterion",
 ]
@@ -2075,7 +2075,7 @@ checksum = "0bf7f043f89559805f8c7cacc432749b2fa0d0a0a9ee46ce47164ed5ba7f126c"
 dependencies = [
  "fnv",
  "hashbrown 0.16.1",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "stable_deref_trait",
 ]
 
@@ -2269,9 +2269,9 @@ checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
 name = "hyper"
-version = "1.11.0"
+version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d22053281f852e11534f5198498373cbb59295120a20771d90f7ed1897490a72"
+checksum = "27b501faa50e7a26c3d3560ca625132f4078a17771f4810baf70475ae48cbe43"
 dependencies = [
  "atomic-waker",
  "bytes",
@@ -2504,9 +2504,9 @@ dependencies = [
 
 [[package]]
 name = "indexmap"
-version = "2.14.0"
+version = "2.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
+checksum = "07aa2048142242915a31d35844fb311e0e53fcca590c3a0a40dcf1b841fa09eb"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
@@ -3168,7 +3168,7 @@ checksum = "2e5a6c098c7a3b6547378093f5cc30bc54fd361ce711e05293a5cc589562739b"
 dependencies = [
  "crc32fast",
  "hashbrown 0.17.1",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "memchr",
 ]
 
@@ -3481,7 +3481,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e842efad9119158434d193c6682e2ebee4b44d6ad801d7b349623b3f57cdf55"
 dependencies = [
  "futures",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "nix",
  "tokio",
  "tracing",
@@ -3941,7 +3941,7 @@ dependencies = [
  "chrono",
  "futures",
  "http",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "pastey",
  "pin-project-lite",
  "process-wrap",
@@ -4290,7 +4290,7 @@ version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
 dependencies = [
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "itoa",
  "memchr",
  "serde",
@@ -4350,7 +4350,7 @@ dependencies = [
  "chrono",
  "hex",
  "indexmap 1.9.3",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "jiff",
  "schemars 0.9.0",
  "schemars 1.2.2",
@@ -4821,7 +4821,7 @@ version = "1.1.4+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3aace63f4bbcdfc2c965b059de67119c89c4017a70d633be6c104910f67056f5"
 dependencies = [
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "serde_core",
  "serde_spanned",
  "toml_datetime",
@@ -4845,7 +4845,7 @@ version = "0.25.13+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6975367e4d2ef766d86af01ffad14b622fecc8d4357a998fbc4deb6e9bacaf9b"
 dependencies = [
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "toml_datetime",
  "toml_parser",
  "winnow",
@@ -5541,7 +5541,7 @@ checksum = "71cde4757396defafd25417cfb36aa3161027d06d865b0c24baaae229aac005d"
 dependencies = [
  "bitflags 2.13.1",
  "hashbrown 0.16.1",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "semver",
  "serde",
 ]
@@ -5553,7 +5553,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9a61719f93a87b16d325921e251800c4833f8fab50fa21c7de73aed50086313"
 dependencies = [
  "bitflags 2.13.1",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "semver",
 ]
 
@@ -5619,7 +5619,7 @@ dependencies = [
  "cranelift-entity",
  "gimli",
  "hashbrown 0.16.1",
- "indexmap 2.14.0",
+ "indexmap 2.14.1",
  "log",
  "object",
  "postcard",

@@ -1,6 +1,6 @@
 [package]
 name = "ee-mcp"
-version = "0.11.3"
+version = "0.11.4"
 license = "Apache-2.0"
 authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
 description = "MCP (Model Context Protocol) client integration for ee agents mode."
