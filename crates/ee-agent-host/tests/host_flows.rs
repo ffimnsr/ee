@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ee_agent_host::fake::{FakeAgent, FakeAgentScript, wire};
+use ee_agent_host::fake::{CaptureSource, FakeAgent, FakeAgentScript, wire};
 use ee_agent_host::reducer::MessageKind;
 use ee_agent_host::{
     AgentConnection, AgentConnectionOptions, AgentError, AgentEvent, AgentManager,
@@ -40,11 +40,20 @@ async fn spawn_host(
     script: FakeAgentScript,
     handler: Arc<dyn ee_agent_host::ClientRequestHandler>,
 ) -> (FakeAgent, TestHost) {
+    spawn_host_with_limit(script, handler, ee_agent_host::DEFAULT_MAX_CONCURRENT_PROMPTS).await
+}
+
+async fn spawn_host_with_limit(
+    script: FakeAgentScript,
+    handler: Arc<dyn ee_agent_host::ClientRequestHandler>,
+    max_concurrent_prompts: usize,
+) -> (FakeAgent, TestHost) {
     let (fake, transport) = FakeAgent::spawn(script);
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let options = AgentConnectionOptions {
         handshake_timeout: TEST_TIMEOUT,
         request_timeout: TEST_TIMEOUT,
+        max_concurrent_prompts,
         ..Default::default()
     };
     let connection = AgentConnection::connect_with_transport(
@@ -86,6 +95,16 @@ async fn await_response(fake: &FakeAgent, id: i64) -> Value {
     })
     .await
     .expect("timed out waiting for response")
+}
+
+async fn await_request_count(fake: &FakeAgent, method: &str, count: usize) {
+    tokio::time::timeout(TEST_TIMEOUT, async {
+        while fake.requests_by_method(method).len() < count {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {count} {method} requests"));
 }
 
 #[derive(Debug, Clone)]
@@ -558,6 +577,40 @@ async fn agent_eof_mid_turn_resolves_prompt_with_typed_error() {
 }
 
 #[tokio::test]
+async fn agent_eof_resolves_several_in_flight_prompts_without_hung_waiters() {
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s2" }))
+        .capture(CaptureSource::Request { method: "session/prompt".into() }, "id", "prompt_a")
+        .capture(CaptureSource::Request { method: "session/prompt".into() }, "id", "prompt_b")
+        .close();
+    let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    let a = connection.new_session(vec![PathBuf::from("/a")], Vec::new(), None).await.unwrap();
+    let b = connection.new_session(vec![PathBuf::from("/b")], Vec::new(), None).await.unwrap();
+
+    let prompt_a = tokio::spawn(async move {
+        a.send_prompt(vec![ContentBlock::Text(TextContent::new("A"))]).await
+    });
+    let prompt_b = tokio::spawn(async move {
+        b.send_prompt(vec![ContentBlock::Text(TextContent::new("B"))]).await
+    });
+    for prompt in [prompt_a, prompt_b] {
+        let error = tokio::time::timeout(TEST_TIMEOUT, prompt)
+            .await
+            .expect("prompt waiter resolves after EOF")
+            .expect("prompt task")
+            .unwrap_err();
+        assert!(matches!(error, AgentError::ConnectionClosed { .. } | AgentError::Rpc(_)));
+    }
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
 async fn recoverable_error_surfaces_as_paused_event_with_structured_info() {
     let script = base_script().wait_for("session/prompt").respond_error_with_data(
         -32603,
@@ -634,6 +687,315 @@ async fn plain_errors_still_surface_as_turn_failed() {
     }
     assert!(saw_failed, "plain errors keep the TurnFailed path");
     host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
+async fn lifecycle_requests_on_one_connection_overlap_and_fail_independently() {
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .capture(CaptureSource::Request { method: "session/new".into() }, "id", "new_a_id")
+        .capture(CaptureSource::Request { method: "session/new".into() }, "id", "new_b_id")
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": { "$capture": "new_b_id" },
+            "result": { "sessionId": "s2" }
+        }))
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": { "$capture": "new_a_id" },
+            "error": { "code": -32603, "message": "first create failed" }
+        }));
+    let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+
+    let connection_a = connection.clone();
+    let create_a = tokio::spawn(async move {
+        connection_a.new_session(vec![PathBuf::from("/work/a")], Vec::new(), None).await
+    });
+    await_request_count(&fake, "session/new", 1).await;
+    let connection_b = connection.clone();
+    let create_b = tokio::spawn(async move {
+        connection_b.new_session(vec![PathBuf::from("/work/b")], Vec::new(), None).await
+    });
+
+    let thread_b = tokio::time::timeout(TEST_TIMEOUT, create_b)
+        .await
+        .expect("second create completes")
+        .expect("second create task")
+        .expect("second create succeeds");
+    assert_eq!(thread_b.session_id().0.as_ref(), "s2");
+    let error_a = tokio::time::timeout(TEST_TIMEOUT, create_a)
+        .await
+        .expect("first create resolves")
+        .expect("first create task")
+        .unwrap_err();
+    assert!(matches!(error_a, AgentError::Rpc(_)));
+    assert_eq!(fake.requests_by_method("session/new").len(), 2);
+
+    host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
+async fn prompts_in_two_sessions_on_one_connection_run_concurrently() {
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s2" }))
+        .capture(CaptureSource::Request { method: "session/prompt".into() }, "id", "prompt_a_id")
+        .capture(CaptureSource::Request { method: "session/prompt".into() }, "id", "prompt_b_id")
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": { "$capture": "prompt_b_id" },
+            "result": { "stopReason": "end_turn" }
+        }));
+    let (fake, mut host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    let thread_a =
+        connection.new_session(vec![PathBuf::from("/work/a")], Vec::new(), None).await.unwrap();
+    let thread_b =
+        connection.new_session(vec![PathBuf::from("/work/b")], Vec::new(), None).await.unwrap();
+
+    let prompt_thread_a = thread_a.clone();
+    let mut prompt_a = tokio::spawn(async move {
+        prompt_thread_a.send_prompt(vec![ContentBlock::Text(TextContent::new("A"))]).await
+    });
+    await_request_count(&fake, "session/prompt", 1).await;
+
+    let prompt_thread_b = thread_b.clone();
+    let prompt_b = tokio::spawn(async move {
+        prompt_thread_b.send_prompt(vec![ContentBlock::Text(TextContent::new("B"))]).await
+    });
+    let response_b = tokio::time::timeout(TEST_TIMEOUT, prompt_b)
+        .await
+        .expect("session B completes while session A remains blocked")
+        .expect("session B prompt task")
+        .expect("session B prompt succeeds");
+    assert_eq!(response_b.stop_reason, StopReason::EndTurn);
+    assert!(!prompt_a.is_finished(), "session A must remain pending");
+    assert!(thread_a.is_turn_running());
+    assert!(!thread_b.is_turn_running());
+
+    let prompts = fake.requests_by_method("session/prompt");
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[0]["params"]["sessionId"], "s1");
+    assert_eq!(prompts[1]["params"]["sessionId"], "s2");
+    assert_eq!(prompts[0]["params"]["prompt"][0]["text"], "A");
+    assert_eq!(prompts[1]["params"]["prompt"][0]["text"], "B");
+
+    thread_a.cancel().await.expect("session A cancel succeeds");
+    let error_a = tokio::time::timeout(TEST_TIMEOUT, &mut prompt_a)
+        .await
+        .expect("session A resolves after cancellation")
+        .expect("session A prompt task")
+        .unwrap_err();
+    assert!(matches!(error_a, AgentError::Cancelled));
+    assert!(!thread_a.is_turn_running());
+
+    await_request_count(&fake, "session/cancel", 1).await;
+    let session_cancels = fake.requests_by_method("session/cancel");
+    assert_eq!(session_cancels.len(), 1);
+    assert_eq!(session_cancels[0]["params"]["sessionId"], "s1");
+    let prompt_a_id = prompts[0]["id"].clone();
+    let prompt_b_id = prompts[1]["id"].clone();
+    let request_cancels = fake.requests_by_method("$/cancel_request");
+    assert!(request_cancels.iter().any(|cancel| cancel["params"]["requestId"] == prompt_a_id));
+    assert!(!request_cancels.iter().any(|cancel| cancel["params"]["requestId"] == prompt_b_id));
+
+    let mut completed_b = false;
+    let mut cancelled_a = false;
+    while !(completed_b && cancelled_a) {
+        match next_event(&mut host.events).await {
+            AgentEvent::TurnCompleted { session_id, .. } if session_id.0.as_ref() == "s2" => {
+                completed_b = true;
+            }
+            AgentEvent::TurnCancelled { session_id, .. } if session_id.0.as_ref() == "s1" => {
+                cancelled_a = true;
+            }
+            AgentEvent::TurnCancelled { session_id, .. }
+            | AgentEvent::TurnFailed { session_id, .. }
+                if session_id.0.as_ref() == "s2" =>
+            {
+                panic!("session B received wrong terminal event")
+            }
+            _ => {}
+        }
+    }
+
+    host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
+async fn second_prompt_in_same_session_is_rejected_while_first_is_active() {
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s1" }))
+        .capture(CaptureSource::Request { method: "session/prompt".into() }, "id", "prompt_id");
+    let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
+
+    let first_thread = thread.clone();
+    let first = tokio::spawn(async move {
+        first_thread.send_prompt(vec![ContentBlock::Text(TextContent::new("first"))]).await
+    });
+    await_request_count(&fake, "session/prompt", 1).await;
+
+    let second = thread.send_prompt(vec![ContentBlock::Text(TextContent::new("second"))]).await;
+    assert!(matches!(second, Err(AgentError::TurnAlreadyRunning)));
+    assert_eq!(fake.requests_by_method("session/prompt").len(), 1);
+
+    thread.cancel().await.expect("cancel first prompt");
+    assert!(matches!(first.await.expect("first task"), Err(AgentError::Cancelled)));
+    host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
+async fn prompt_concurrency_limit_queues_cross_session_work_fifo() {
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s2" }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s3" }))
+        .capture(CaptureSource::Request { method: "session/prompt".into() }, "id", "prompt_a")
+        .capture(CaptureSource::Request { method: "session/prompt".into() }, "id", "prompt_b")
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": { "$capture": "prompt_a" },
+            "result": { "stopReason": "end_turn" }
+        }))
+        .capture(CaptureSource::Request { method: "session/prompt".into() }, "id", "prompt_c")
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": { "$capture": "prompt_c" },
+            "result": { "stopReason": "end_turn" }
+        }))
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": { "$capture": "prompt_b" },
+            "result": { "stopReason": "end_turn" }
+        }));
+    let (fake, host) = spawn_host_with_limit(script, Arc::new(DenyAllHandler), 2).await;
+    let connection = ready_connection(&fake, &host).await;
+    let a = connection.new_session(vec![PathBuf::from("/a")], Vec::new(), None).await.unwrap();
+    let b = connection.new_session(vec![PathBuf::from("/b")], Vec::new(), None).await.unwrap();
+    let c = connection.new_session(vec![PathBuf::from("/c")], Vec::new(), None).await.unwrap();
+
+    let prompt_a = tokio::spawn(async move {
+        a.send_prompt(vec![ContentBlock::Text(TextContent::new("work a"))]).await
+    });
+    await_request_count(&fake, "session/prompt", 1).await;
+    let prompt_b = tokio::spawn(async move {
+        b.send_prompt(vec![ContentBlock::Text(TextContent::new("work b"))]).await
+    });
+    await_request_count(&fake, "session/prompt", 2).await;
+    let prompt_c = tokio::spawn(async move {
+        c.send_prompt(vec![ContentBlock::Text(TextContent::new("work c"))]).await
+    });
+
+    for prompt in [prompt_a, prompt_b, prompt_c] {
+        prompt.await.expect("prompt task").expect("prompt succeeds");
+    }
+    let requests = fake.requests_by_method("session/prompt");
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0]["params"]["sessionId"], "s1");
+    assert_eq!(requests[1]["params"]["sessionId"], "s2");
+    assert_eq!(requests[2]["params"]["sessionId"], "s3");
+
+    host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
+async fn connection_commands_remain_responsive_while_prompt_is_pending() {
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({
+            "protocolVersion": 1,
+            "agentCapabilities": { "sessionCapabilities": { "list": {} } }
+        }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s1" }))
+        .capture(CaptureSource::Request { method: "session/prompt".into() }, "id", "prompt_id")
+        .wait_for("session/list")
+        .respond(json!({ "sessions": [] }));
+    let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    let thread =
+        connection.new_session(vec![PathBuf::from("/work")], Vec::new(), None).await.unwrap();
+
+    let prompt_thread = thread.clone();
+    let prompt = tokio::spawn(async move {
+        prompt_thread.send_prompt(vec![ContentBlock::Text(TextContent::new("blocked"))]).await
+    });
+    await_request_count(&fake, "session/prompt", 1).await;
+
+    let sessions = tokio::time::timeout(
+        TEST_TIMEOUT,
+        connection.list_sessions(Some(PathBuf::from("/work")), None),
+    )
+    .await
+    .expect("session/list must not wait behind prompt")
+    .expect("session/list succeeds");
+    assert!(sessions.sessions.is_empty());
+    assert!(!prompt.is_finished());
+
+    thread.cancel().await.expect("cancel pending prompt");
+    assert!(matches!(prompt.await.expect("prompt task"), Err(AgentError::Cancelled)));
+    host.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
+async fn connection_shutdown_resolves_all_in_flight_prompts() {
+    let script = FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s2" }))
+        .capture(CaptureSource::Request { method: "session/prompt".into() }, "id", "prompt_a_id")
+        .capture(CaptureSource::Request { method: "session/prompt".into() }, "id", "prompt_b_id");
+    let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
+    let connection = ready_connection(&fake, &host).await;
+    let thread_a =
+        connection.new_session(vec![PathBuf::from("/work/a")], Vec::new(), None).await.unwrap();
+    let thread_b =
+        connection.new_session(vec![PathBuf::from("/work/b")], Vec::new(), None).await.unwrap();
+
+    let prompt_thread_a = thread_a.clone();
+    let prompt_a = tokio::spawn(async move {
+        prompt_thread_a.send_prompt(vec![ContentBlock::Text(TextContent::new("A"))]).await
+    });
+    await_request_count(&fake, "session/prompt", 1).await;
+    let prompt_thread_b = thread_b.clone();
+    let prompt_b = tokio::spawn(async move {
+        prompt_thread_b.send_prompt(vec![ContentBlock::Text(TextContent::new("B"))]).await
+    });
+    await_request_count(&fake, "session/prompt", 2).await;
+
+    host.close().await;
+    let error_a = prompt_a.await.expect("session A prompt task").unwrap_err();
+    let error_b = prompt_b.await.expect("session B prompt task").unwrap_err();
+    assert!(matches!(error_a, AgentError::ConnectionClosed { .. }));
+    assert!(matches!(error_b, AgentError::ConnectionClosed { .. }));
+    assert!(!thread_a.is_turn_running());
+    assert!(!thread_b.is_turn_running());
     fake.join(TEST_TIMEOUT).await;
 }
 
@@ -1196,7 +1558,9 @@ async fn url_elicitation_completion_is_connection_scoped_and_idempotent() {
     let mut saw_turn_completed = false;
     while !saw_turn_completed {
         match next_event(&mut host.events).await {
-            AgentEvent::ElicitationCompleted { elicitation_id } => {
+            AgentEvent::ElicitationCompleted { agent_id, session_id, elicitation_id } => {
+                assert_eq!(agent_id, "fake");
+                assert_eq!(session_id.as_ref().map(|id| id.0.as_ref()), Some("s1"));
                 completions.push(elicitation_id.0.to_string());
             }
             AgentEvent::TurnCompleted { .. } => {

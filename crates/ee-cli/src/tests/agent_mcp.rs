@@ -154,8 +154,8 @@ pub(crate) fn wait_until(app: &mut App, label: &str, mut condition: impl FnMut(&
         "timed out waiting for {label}; mode={:?} approvals={} permission={} elicitation={} status={:?}",
         app.mode,
         app.agents.approvals.len(),
-        app.agents.permission.is_some(),
-        app.agents.elicitation.is_some(),
+        app.agents.permission().is_some(),
+        app.agents.elicitation().is_some(),
         app.backend.status_message.as_deref()
     );
 }

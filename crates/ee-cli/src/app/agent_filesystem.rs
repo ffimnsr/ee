@@ -60,6 +60,22 @@ impl FilesystemOperation {
             Self::CreateDirectory { .. } | Self::CopyPath { .. } => false,
         }
     }
+
+    /// Canonical paths whose filesystem state this operation mutates.
+    pub(crate) fn canonical_write_scopes(&self, roots: &[PathBuf]) -> io::Result<Vec<PathBuf>> {
+        let roots = roots.iter().map(fs::canonicalize).collect::<io::Result<Vec<_>>>()?;
+        match self {
+            Self::CreateDirectory { path } => Ok(vec![workspace_candidate(path, &roots)?]),
+            Self::DeletePath { path } => Ok(vec![existing_workspace_path(path, &roots)?]),
+            Self::CopyPath { destination, .. } => {
+                Ok(vec![workspace_candidate(destination, &roots)?])
+            }
+            Self::MovePath { source, destination } => Ok(vec![
+                existing_workspace_path(source, &roots)?,
+                workspace_candidate(destination, &roots)?,
+            ]),
+        }
+    }
 }
 
 pub(crate) fn validate(operation: &FilesystemOperation, roots: &[PathBuf]) -> io::Result<()> {

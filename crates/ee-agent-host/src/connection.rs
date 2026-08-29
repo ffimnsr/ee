@@ -8,6 +8,9 @@
 //! - the session command driver (prompt, cancel, set-mode, authenticate,
 //!   session/new, session/load, logout) with per-request timeouts and an
 //!   explicit cancellation path for turns;
+//! - concurrent prompt scheduling across sessions on one connection while
+//!   preserving one active turn per session. Non-prompt commands retain FIFO
+//!   driver ordering and remain responsive while prompt responses are pending;
 //! - inbound dispatch: `session/update` notifications route to session
 //!   threads, `session/request_permission` goes through the permission
 //!   broker, and file/terminal/elicitation requests go to the registered
@@ -17,8 +20,10 @@
 //! request correlation, and response routing; this module only adapts it to
 //! a tokio subprocess and the host lifecycle.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -42,6 +47,7 @@ use ee_agent_protocol::{
     SetSessionModeResponse, TerminalOutputRequest, WaitForTerminalExitRequest,
     WriteTextFileRequest, on_receive_notification, on_receive_request,
 };
+use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
@@ -57,6 +63,8 @@ use crate::session::{AgentThread, ThreadShared};
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Default timeout for non-prompt ACP requests.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default simultaneous prompt limit for sessions sharing one connection.
+pub const DEFAULT_MAX_CONCURRENT_PROMPTS: usize = 4;
 
 /// Connection tuning knobs (tests use tiny timeouts).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +78,9 @@ pub struct AgentConnectionOptions {
     /// hosting for this connection; the agent still has to advertise
     /// `mcp_capabilities.acp` before anything is served).
     pub ee_proxy_enabled: bool,
+    /// Maximum prompt requests sent concurrently on one agent connection.
+    /// Additional cross-session prompts wait FIFO; same-session overlap rejects.
+    pub max_concurrent_prompts: usize,
 }
 
 impl Default for AgentConnectionOptions {
@@ -78,6 +89,7 @@ impl Default for AgentConnectionOptions {
             handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             ee_proxy_enabled: false,
+            max_concurrent_prompts: DEFAULT_MAX_CONCURRENT_PROMPTS,
         }
     }
 }
@@ -147,7 +159,7 @@ pub(crate) struct AgentConnectionInner {
     pub threads: Arc<Mutex<HashMap<SessionId, Arc<ThreadShared>>>>,
     /// ACP-native MCP-over-ACP hosting for the ee proxy (Phase 6b).
     pub mcp: McpOverAcpRegistry,
-    active_url_elicitations: Mutex<HashSet<String>>,
+    active_url_elicitations: Mutex<HashMap<String, Option<SessionId>>>,
     completed_url_elicitations: Mutex<HashSet<String>>,
     pending_client_requests: Mutex<HashMap<String, watch::Sender<bool>>>,
     shutdown: watch::Sender<bool>,
@@ -179,6 +191,7 @@ impl AgentConnectionInner {
             return;
         }
         self.broker.cancel_all();
+        self.cancel_all_client_requests();
         self.mcp.close_all();
         let threads: Vec<Arc<ThreadShared>> =
             self.threads.lock().expect("threads poisoned").values().cloned().collect();
@@ -195,11 +208,11 @@ impl AgentConnectionInner {
             .and_then(|process| process.child().try_wait().ok().flatten())
     }
 
-    fn register_url_elicitation(&self, elicitation_id: &str) {
+    fn register_url_elicitation(&self, elicitation_id: &str, session_id: Option<SessionId>) {
         self.active_url_elicitations
             .lock()
             .expect("active url elicitations poisoned")
-            .insert(elicitation_id.to_string());
+            .insert(elicitation_id.to_string(), session_id);
     }
 
     fn finish_url_elicitation(&self, elicitation_id: &str) {
@@ -213,19 +226,17 @@ impl AgentConnectionInner {
             .insert(elicitation_id.to_string());
     }
 
-    fn complete_url_elicitation(&self, elicitation_id: &str) -> bool {
-        let removed = self
+    fn complete_url_elicitation(&self, elicitation_id: &str) -> Option<Option<SessionId>> {
+        let session_id = self
             .active_url_elicitations
             .lock()
             .expect("active url elicitations poisoned")
-            .remove(elicitation_id);
-        if removed {
-            self.completed_url_elicitations
-                .lock()
-                .expect("completed url elicitations poisoned")
-                .insert(elicitation_id.to_string());
-        }
-        removed
+            .remove(elicitation_id)?;
+        self.completed_url_elicitations
+            .lock()
+            .expect("completed url elicitations poisoned")
+            .insert(elicitation_id.to_string());
+        Some(session_id)
     }
 
     fn register_client_request(&self, request_id: &RequestId) -> watch::Receiver<bool> {
@@ -244,12 +255,21 @@ impl AgentConnectionInner {
             .lock()
             .expect("pending client requests poisoned")
             .remove(&key)
-            .is_some_and(|tx| tx.send(true).is_ok())
+            .is_some_and(|cancel| cancel.send(true).is_ok())
     }
 
     fn finish_client_request(&self, request_id: &RequestId) {
         let key = request_id_key(request_id);
         self.pending_client_requests.lock().expect("pending client requests poisoned").remove(&key);
+    }
+
+    fn cancel_all_client_requests(&self) {
+        let pending = std::mem::take(
+            &mut *self.pending_client_requests.lock().expect("pending client requests poisoned"),
+        );
+        for cancel in pending.into_values() {
+            let _ = cancel.send(true);
+        }
     }
 }
 
@@ -354,7 +374,7 @@ impl AgentConnection {
             process,
             threads,
             mcp,
-            active_url_elicitations: Mutex::new(HashSet::new()),
+            active_url_elicitations: Mutex::new(HashMap::new()),
             completed_url_elicitations: Mutex::new(HashSet::new()),
             pending_client_requests: Mutex::new(HashMap::new()),
             shutdown: shutdown_tx,
@@ -416,6 +436,7 @@ impl AgentConnection {
                 terminate_rx,
                 main_inner.state.subscribe(),
                 options.request_timeout,
+                options.max_concurrent_prompts.max(1),
                 main_inner.clone(),
             ));
 
@@ -1300,31 +1321,105 @@ fn client_capabilities(handler_capabilities: &HandlerCapabilities) -> ClientCapa
     capabilities
 }
 
-/// Executes connection commands against the SDK connection.  Runs until the
-/// connection terminates or every command sender is dropped; pending
-/// requests resolve with typed errors either way.
+type PromptTask = Pin<Box<dyn Future<Output = PromptTaskCompletion> + Send>>;
+type LifecycleTask = Pin<Box<dyn Future<Output = ()> + Send>>;
+
+struct PendingPrompt {
+    request: PromptRequest,
+    cancel: watch::Receiver<bool>,
+    tx: oneshot::Sender<Result<PromptResponse, AgentError>>,
+}
+
+struct PromptTaskCompletion {
+    session_id: SessionId,
+    request_id: RequestId,
+    result: Result<PromptResponse, AgentError>,
+    tx: oneshot::Sender<Result<PromptResponse, AgentError>>,
+}
+
+/// Executes connection commands against the SDK connection.
+///
+/// Prompt requests are tracked separately and polled concurrently, keyed by
+/// session and JSON-RPC request id. Independent create/load/resume requests are
+/// also polled concurrently; SDK request ids preserve response attribution.
+/// Connection-wide and mutating session controls remain FIFO. Shutdown closes
+/// intake, resolves bounded tasks, then rejects queued commands.
 async fn driver_loop(
     connection: ConnectionTo<AgentRole>,
     mut rx: mpsc::UnboundedReceiver<ConnectionCommand>,
     mut terminate: watch::Receiver<bool>,
     state_rx: watch::Receiver<AgentConnectionState>,
     request_timeout: Duration,
+    max_concurrent_prompts: usize,
     inner: Arc<AgentConnectionInner>,
 ) {
     let agent_id = inner.agent_id.clone();
+    let (prompt_shutdown_tx, prompt_shutdown_rx) = watch::channel(false);
+    let (lifecycle_shutdown_tx, lifecycle_shutdown_rx) = watch::channel(false);
+    let mut prompt_tasks = FuturesUnordered::<PromptTask>::new();
+    let mut lifecycle_tasks = FuturesUnordered::<LifecycleTask>::new();
+    let mut active_prompts = HashMap::<SessionId, RequestId>::new();
+    let mut queued_prompts = VecDeque::<PendingPrompt>::new();
+    let mut queued_sessions = HashSet::<SessionId>::new();
     loop {
         tokio::select! {
             _ = terminate.changed() => break,
+            Some(completion) = prompt_tasks.next(), if !prompt_tasks.is_empty() => {
+                finish_prompt_task(completion, &mut active_prompts);
+                dispatch_queued_prompts(
+                    &connection,
+                    &mut prompt_tasks,
+                    &mut active_prompts,
+                    &mut queued_prompts,
+                    &mut queued_sessions,
+                    max_concurrent_prompts,
+                    &prompt_shutdown_rx,
+                    &state_rx,
+                    &agent_id,
+                    &inner,
+                );
+            }
+            Some(()) = lifecycle_tasks.next(), if !lifecycle_tasks.is_empty() => {}
             command = rx.recv() => {
                 let Some(command) = command else { break };
                 match command {
                     ConnectionCommand::NewSession { request, tx } => {
-                        let result = request_with_timeout(&connection, request, request_timeout, "session/new").await;
-                        let _ = tx.send(result);
+                        let connection = connection.clone();
+                        let shutdown = lifecycle_shutdown_rx.clone();
+                        let agent_id = agent_id.clone();
+                        lifecycle_tasks.push(Box::pin(async move {
+                            let result = tokio::select! {
+                                () = wait_for_true(shutdown) => {
+                                    Err(AgentError::ConnectionClosed { agent_id })
+                                }
+                                result = request_with_timeout(
+                                    &connection,
+                                    request,
+                                    request_timeout,
+                                    "session/new",
+                                ) => result,
+                            };
+                            let _ = tx.send(result);
+                        }));
                     }
                     ConnectionCommand::LoadSession { request, tx } => {
-                        let result = request_with_timeout(&connection, request, request_timeout, "session/load").await;
-                        let _ = tx.send(result);
+                        let connection = connection.clone();
+                        let shutdown = lifecycle_shutdown_rx.clone();
+                        let agent_id = agent_id.clone();
+                        lifecycle_tasks.push(Box::pin(async move {
+                            let result = tokio::select! {
+                                () = wait_for_true(shutdown) => {
+                                    Err(AgentError::ConnectionClosed { agent_id })
+                                }
+                                result = request_with_timeout(
+                                    &connection,
+                                    request,
+                                    request_timeout,
+                                    "session/load",
+                                ) => result,
+                            };
+                            let _ = tx.send(result);
+                        }));
                     }
                     ConnectionCommand::ListSessions { request, tx } => {
                         let result = request_with_timeout(&connection, request, request_timeout, "session/list").await;
@@ -1335,8 +1430,23 @@ async fn driver_loop(
                         let _ = tx.send(result);
                     }
                     ConnectionCommand::ResumeSession { request, tx } => {
-                        let result = request_with_timeout(&connection, request, request_timeout, "session/resume").await;
-                        let _ = tx.send(result);
+                        let connection = connection.clone();
+                        let shutdown = lifecycle_shutdown_rx.clone();
+                        let agent_id = agent_id.clone();
+                        lifecycle_tasks.push(Box::pin(async move {
+                            let result = tokio::select! {
+                                () = wait_for_true(shutdown) => {
+                                    Err(AgentError::ConnectionClosed { agent_id })
+                                }
+                                result = request_with_timeout(
+                                    &connection,
+                                    request,
+                                    request_timeout,
+                                    "session/resume",
+                                ) => result,
+                            };
+                            let _ = tx.send(result);
+                        }));
                     }
                     ConnectionCommand::CloseSession { request, tx } => {
                         let result = request_with_timeout(&connection, request, request_timeout, "session/close").await;
@@ -1358,48 +1468,45 @@ async fn driver_loop(
                         let result = request_with_timeout(&connection, request, request_timeout, "logout").await;
                         let _ = tx.send(result);
                     }
-                    ConnectionCommand::Prompt { request, mut cancel, tx } => {
-                        let sent = connection.send_request(request);
-                        let request_id = sent.id().clone();
-                        // A user cancel signals `true`; teardown (sender
-                        // dropped, or a non-true value) leaves the future
-                        // pending so the EOF/terminate arms own the
-                        // connection-closed semantics.
-                        let cancelled = async {
-                            match cancel.changed().await {
-                                Ok(()) if *cancel.borrow() => (),
-                                Ok(()) | Err(_) => std::future::pending().await,
-                            }
-                        };
-                        let result = tokio::select! {
-                            response = sent.block_task() => {
-                                match response {
-                                    Ok(response) => Ok(response),
-                                    // The SDK fails pending requests when the
-                                    // transport closes; map that onto the
-                                    // host's connection-closed error so
-                                    // shutdown resolution is deterministic.
-                                    Err(_error) if matches!(*state_rx.borrow(), AgentConnectionState::Closed(_)) => {
-                                        Err(AgentError::ConnectionClosed { agent_id: agent_id.clone() })
-                                    }
-                                    Err(error) => {
-                                        tracing::warn!(agent_id, ?error, "prompt block_task failed");
-                                        Err(AgentError::Rpc(error))
-                                    }
-                                }
-                            }
-                            _ = cancelled => {
-                                let _ = connection.send_cancel_request(request_id);
-                                Err(AgentError::Cancelled)
-                            }
-                            _ = terminate.changed() => {
-                                let _ = connection.send_cancel_request(request_id);
-                                Err(AgentError::ConnectionClosed { agent_id: agent_id.clone() })
-                            }
-                        };
-                        let _ = tx.send(result);
+                    ConnectionCommand::Prompt { request, cancel, tx } => {
+                        let session_id = request.session_id.clone();
+                        if active_prompts.contains_key(&session_id)
+                            || queued_sessions.contains(&session_id)
+                        {
+                            let _ = tx.send(Err(AgentError::TurnAlreadyRunning));
+                            continue;
+                        }
+                        if active_prompts.len() >= max_concurrent_prompts {
+                            queued_sessions.insert(session_id.clone());
+                            queued_prompts.push_back(PendingPrompt { request, cancel, tx });
+                            let _ = inner.events.send(AgentEvent::TurnQueued {
+                                session_id,
+                                position: queued_prompts.len(),
+                            });
+                            continue;
+                        }
+                        start_prompt_task(
+                            &connection,
+                            &mut prompt_tasks,
+                            &mut active_prompts,
+                            PendingPrompt { request, cancel, tx },
+                            &prompt_shutdown_rx,
+                            &state_rx,
+                            &agent_id,
+                        );
                     }
                     ConnectionCommand::CancelSession { session_id } => {
+                        if let Some(position) = queued_prompts
+                            .iter()
+                            .position(|pending| pending.request.session_id == session_id)
+                        {
+                            if let Some(pending) = queued_prompts.remove(position) {
+                                queued_sessions.remove(&session_id);
+                                let _ = pending.tx.send(Err(AgentError::Cancelled));
+
+                            }
+                            continue;
+                        }
                         let _ = connection.send_notification(CancelNotification::new(session_id));
                         // Turn cancel closes every logical MCP connection on
                         // this connection (Phase 6b lifecycle rule).
@@ -1409,6 +1516,185 @@ async fn driver_loop(
                 }
             }
         }
+    }
+
+    rx.close();
+    let _ = prompt_shutdown_tx.send(true);
+    let _ = lifecycle_shutdown_tx.send(true);
+    while let Some(pending) = queued_prompts.pop_front() {
+        let _ = pending.tx.send(Err(AgentError::ConnectionClosed { agent_id: agent_id.clone() }));
+    }
+    queued_sessions.clear();
+
+    while let Some(completion) = prompt_tasks.next().await {
+        finish_prompt_task(completion, &mut active_prompts);
+    }
+    while lifecycle_tasks.next().await.is_some() {}
+    while let Some(command) = rx.recv().await {
+        reject_command_after_shutdown(command, &agent_id);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_prompt_task(
+    connection: &ConnectionTo<AgentRole>,
+    prompt_tasks: &mut FuturesUnordered<PromptTask>,
+    active_prompts: &mut HashMap<SessionId, RequestId>,
+    pending: PendingPrompt,
+    prompt_shutdown: &watch::Receiver<bool>,
+    state_rx: &watch::Receiver<AgentConnectionState>,
+    agent_id: &str,
+) {
+    let session_id = pending.request.session_id.clone();
+    let sent = connection.send_request(pending.request);
+    let request_id = sent.id().clone();
+    active_prompts.insert(session_id.clone(), request_id.clone());
+    prompt_tasks.push(Box::pin(run_prompt_task(
+        sent,
+        session_id,
+        request_id,
+        pending.cancel,
+        prompt_shutdown.clone(),
+        state_rx.clone(),
+        agent_id.to_string(),
+        connection.clone(),
+        pending.tx,
+    )));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_queued_prompts(
+    connection: &ConnectionTo<AgentRole>,
+    prompt_tasks: &mut FuturesUnordered<PromptTask>,
+    active_prompts: &mut HashMap<SessionId, RequestId>,
+    queued_prompts: &mut VecDeque<PendingPrompt>,
+    queued_sessions: &mut HashSet<SessionId>,
+    max_concurrent_prompts: usize,
+    prompt_shutdown: &watch::Receiver<bool>,
+    state_rx: &watch::Receiver<AgentConnectionState>,
+    agent_id: &str,
+    inner: &AgentConnectionInner,
+) {
+    while active_prompts.len() < max_concurrent_prompts {
+        let Some(pending) = queued_prompts.pop_front() else {
+            break;
+        };
+        queued_sessions.remove(&pending.request.session_id);
+        let _ = inner
+            .events
+            .send(AgentEvent::TurnDispatched { session_id: pending.request.session_id.clone() });
+        start_prompt_task(
+            connection,
+            prompt_tasks,
+            active_prompts,
+            pending,
+            prompt_shutdown,
+            state_rx,
+            agent_id,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_prompt_task(
+    sent: ee_agent_protocol::SentRequest<PromptResponse>,
+    session_id: SessionId,
+    request_id: RequestId,
+    cancel: watch::Receiver<bool>,
+    prompt_shutdown: watch::Receiver<bool>,
+    state_rx: watch::Receiver<AgentConnectionState>,
+    agent_id: String,
+    connection: ConnectionTo<AgentRole>,
+    tx: oneshot::Sender<Result<PromptResponse, AgentError>>,
+) -> PromptTaskCompletion {
+    let cancelled = wait_for_true(cancel);
+    let shutdown = wait_for_true(prompt_shutdown);
+    let result = tokio::select! {
+        biased;
+        () = shutdown => {
+            let _ = connection.send_cancel_request(request_id.clone());
+            Err(AgentError::ConnectionClosed { agent_id: agent_id.clone() })
+        }
+        () = cancelled => {
+            let _ = connection.send_cancel_request(request_id.clone());
+            Err(AgentError::Cancelled)
+        }
+        response = sent.block_task() => {
+            match response {
+                Ok(response) => Ok(response),
+                Err(_error) if matches!(*state_rx.borrow(), AgentConnectionState::Closed(_)) => {
+                    Err(AgentError::ConnectionClosed { agent_id: agent_id.clone() })
+                }
+                Err(error) => {
+                    tracing::warn!(agent_id, ?error, "prompt block_task failed");
+                    Err(AgentError::Rpc(error))
+                }
+            }
+        }
+    };
+    PromptTaskCompletion { session_id, request_id, result, tx }
+}
+
+async fn wait_for_true(mut signal: watch::Receiver<bool>) {
+    if *signal.borrow() {
+        return;
+    }
+    loop {
+        match signal.changed().await {
+            Ok(()) if *signal.borrow() => return,
+            Ok(()) => {}
+            Err(_) => std::future::pending().await,
+        }
+    }
+}
+
+fn finish_prompt_task(
+    completion: PromptTaskCompletion,
+    active_prompts: &mut HashMap<SessionId, RequestId>,
+) {
+    if active_prompts.get(&completion.session_id) == Some(&completion.request_id) {
+        active_prompts.remove(&completion.session_id);
+    }
+    let _ = completion.tx.send(completion.result);
+}
+
+fn reject_command_after_shutdown(command: ConnectionCommand, agent_id: &str) {
+    let error = || AgentError::ConnectionClosed { agent_id: agent_id.to_string() };
+    match command {
+        ConnectionCommand::NewSession { tx, .. } => {
+            let _ = tx.send(Err(error()));
+        }
+        ConnectionCommand::LoadSession { tx, .. } => {
+            let _ = tx.send(Err(error()));
+        }
+        ConnectionCommand::ListSessions { tx, .. } => {
+            let _ = tx.send(Err(error()));
+        }
+        ConnectionCommand::DeleteSession { tx, .. } => {
+            let _ = tx.send(Err(error()));
+        }
+        ConnectionCommand::ResumeSession { tx, .. } => {
+            let _ = tx.send(Err(error()));
+        }
+        ConnectionCommand::CloseSession { tx, .. } => {
+            let _ = tx.send(Err(error()));
+        }
+        ConnectionCommand::SetMode { tx, .. } => {
+            let _ = tx.send(Err(error()));
+        }
+        ConnectionCommand::SetConfigOption { tx, .. } => {
+            let _ = tx.send(Err(error()));
+        }
+        ConnectionCommand::Authenticate { tx, .. } => {
+            let _ = tx.send(Err(error()));
+        }
+        ConnectionCommand::Logout { tx, .. } => {
+            let _ = tx.send(Err(error()));
+        }
+        ConnectionCommand::Prompt { tx, .. } => {
+            let _ = tx.send(Err(error()));
+        }
+        ConnectionCommand::CancelSession { .. } | ConnectionCommand::Close => {}
     }
 }
 
@@ -1444,10 +1730,12 @@ fn handle_elicitation_complete(
     inner: &AgentConnectionInner,
 ) {
     let elicitation_id = notification.elicitation_id.0.to_string();
-    if inner.complete_url_elicitation(&elicitation_id) {
-        let _ = inner
-            .events
-            .send(AgentEvent::ElicitationCompleted { elicitation_id: notification.elicitation_id });
+    if let Some(session_id) = inner.complete_url_elicitation(&elicitation_id) {
+        let _ = inner.events.send(AgentEvent::ElicitationCompleted {
+            agent_id: inner.agent_id.clone(),
+            session_id,
+            elicitation_id: notification.elicitation_id,
+        });
     } else {
         tracing::debug!(
             agent_id = %inner.agent_id,
@@ -1515,7 +1803,7 @@ fn dispatch_client_request(
     if let ClientRequest::CreateElicitation(request) = &request
         && let ee_agent_protocol::ElicitationMode::Url(mode) = &request.mode
     {
-        inner.register_url_elicitation(mode.elicitation_id.0.as_ref());
+        inner.register_url_elicitation(mode.elicitation_id.0.as_ref(), session_id.clone());
     }
     let _ = inner.events.send(AgentEvent::ClientRequestDispatched {
         session_id: session_id.clone(),

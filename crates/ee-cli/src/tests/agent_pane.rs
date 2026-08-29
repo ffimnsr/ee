@@ -16,7 +16,7 @@ use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ee_acp_agent_server::{
     AcpAgentServer, AcpAgentServerConfig, AcpServerError, MemoryTransport, MemoryTransportHandle,
 };
-use ee_agent_host::fake::{FakeAgent, FakeAgentScript, FakeAgentTransport, wire};
+use ee_agent_host::fake::{CaptureSource, FakeAgent, FakeAgentScript, FakeAgentTransport, wire};
 use ee_agent_host::{
     EvidenceCheck, EvidenceRevision, FakeTransportFactory, SafeFollowUp, TurnBlocker,
     TurnObservation, TurnTerminalStatus,
@@ -722,7 +722,7 @@ fn exit_slash_commands_work_without_a_configured_agent() {
     assert_eq!(app.agents.layout, AgentPaneLayout::Closed);
     assert_eq!(app.mode, Mode::Normal);
     assert!(app.agents.pending_draft.is_empty());
-    assert!(app.agents.pending_session.is_none());
+    assert!(app.agents.pending_sessions.is_empty());
     assert!(app.agents.threads.is_empty());
 
     run_ex(&mut app, "agents");
@@ -733,7 +733,7 @@ fn exit_slash_commands_work_without_a_configured_agent() {
     assert_eq!(app.agents.layout, AgentPaneLayout::Full);
     assert_eq!(app.mode, Mode::Agent);
     assert!(app.agents.pending_draft.is_empty());
-    assert!(app.agents.pending_session.is_none());
+    assert!(app.agents.pending_sessions.is_empty());
     assert!(app.agents.threads.is_empty());
 }
 
@@ -1656,8 +1656,6 @@ fn phase_six_live_openrouter_pane_dirty_buffer_reports_blocked_evidence() {
     select_live_write_mode(&mut app);
     type_text(&mut app, "conflict with dirty editor write");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-    wait_until(&mut app, "real dirty write approval", |app| app.agents.approvals.len() == 1);
-    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     wait_until(&mut app, "pane conflicted-write evidence", |app| {
         app.agents.threads[0].system_notices().iter().any(|notice| {
             notice.contains("verification: Blocked") && notice.contains("WriteConflicted")
@@ -1668,6 +1666,7 @@ fn phase_six_live_openrouter_pane_dirty_buffer_reports_blocked_evidence() {
     });
 
     let thread = &app.agents.threads[0];
+    assert!(app.agents.approvals.is_empty(), "dirty scope must fail before approval");
     assert_eq!(fs::read_to_string(&target).expect("read conflicted write"), "before\n");
     assert_eq!(app.backend.active().whole_text().as_deref(), Some("unsaved user edit\n"));
     assert!(
@@ -2544,9 +2543,9 @@ fn agents_reconnect_loads_persisted_session_and_replays_conversation() {
         }
         if Instant::now() > deadline {
             panic!(
-                "reconnect replay never applied; threads={} pending_session={:?} pending_replay={:?} fake_log={:?}",
+                "reconnect replay never applied; threads={} pending_sessions={} pending_replay={:?} fake_log={:?}",
                 app.agents.threads.len(),
-                app.agents.pending_session.is_some(),
+                app.agents.pending_sessions.len(),
                 app.agents.pending_replay.keys().collect::<Vec<_>>(),
                 fake.agent().log(),
             );
@@ -2604,13 +2603,15 @@ fn workspace_restart_restores_all_agent_threads_on_pane_open() {
             "protocolVersion": 1,
             "agentCapabilities": { "loadSession": true }
         }))
-        .wait_for("session/load")
-        .emit(wire::session_update("s1", wire::agent_message_chunk("s1-message", "first replay")))
-        .respond(json!({}))
-        .wait_for("session/set_mode")
-        .respond(json!({}))
-        .wait_for("session/load")
+        // Both loads must arrive before either response. Complete them in
+        // reverse order to verify operation attribution and stable UI ordering.
+        .capture(CaptureSource::Request { method: "session/load".into() }, "id", "load_s1")
+        .capture(CaptureSource::Request { method: "session/load".into() }, "id", "load_s2")
         .emit(wire::session_update("s2", wire::agent_message_chunk("s2-message", "second replay")))
+        .emit(json!({ "jsonrpc": "2.0", "id": { "$capture": "load_s2" }, "result": {} }))
+        .emit(wire::session_update("s1", wire::agent_message_chunk("s1-message", "first replay")))
+        .emit(json!({ "jsonrpc": "2.0", "id": { "$capture": "load_s1" }, "result": {} }))
+        .wait_for("session/set_mode")
         .respond(json!({}))
         .wait_for("session/set_mode")
         .respond(json!({}));
@@ -2644,8 +2645,12 @@ fn workspace_restart_restores_all_agent_threads_on_pane_open() {
     assert_eq!(restarted_app.agents.active_thread, Some(1));
     let loads = restarted_fake.agent().requests_by_method("session/load");
     assert_eq!(loads.len(), 2);
-    assert_eq!(loads[0]["params"]["sessionId"], "s1");
-    assert_eq!(loads[1]["params"]["sessionId"], "s2");
+    let mut loaded_session_ids = loads
+        .iter()
+        .filter_map(|request| request["params"]["sessionId"].as_str())
+        .collect::<Vec<_>>();
+    loaded_session_ids.sort_unstable();
+    assert_eq!(loaded_session_ids, vec!["s1", "s2"]);
     assert!(restarted_fake.agent().requests_by_method("session/new").is_empty());
     assert!(restarted_fake.agent().requests_by_method("session/resume").is_empty());
 }
@@ -3876,6 +3881,99 @@ fn scrollback_pins_to_bottom_until_user_scrolls_up() {
 
 // ── Permission flow ──────────────────────────────────────────────────────────
 
+fn two_session_script() -> FakeAgentScript {
+    FakeAgentScript::new()
+        .wait_for("initialize")
+        .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s1" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
+        .wait_for("session/new")
+        .respond(json!({ "sessionId": "s2" }))
+        .wait_for("session/set_mode")
+        .respond(json!({}))
+}
+
+fn permission_request(id: i64, session_id: &str, tool_call_id: &str, title: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": session_id,
+            "toolCall": { "toolCallId": tool_call_id, "title": title },
+            "options": [
+                { "optionId": "allow_once", "name": "Allow once", "kind": "allow_once" },
+                { "optionId": "deny", "name": "Deny", "kind": "reject_once" }
+            ]
+        }
+    })
+}
+
+fn open_second_thread(app: &mut App) {
+    type_text(app, "/new_thread");
+    press(app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(app, "second session ready", |app| {
+        app.agents.threads.len() == 2 && app.agents.threads[1].state == ThreadUiState::Ready
+    });
+}
+
+#[test]
+fn concurrent_permissions_are_session_scoped_and_fifo() {
+    let script = two_session_script()
+        .wait_for("session/prompt")
+        .emit(permission_request(100, "s1", "call-a1", "A first"))
+        .emit(permission_request(102, "s1", "call-a2", "A second"))
+        .wait_for("session/prompt")
+        .emit(permission_request(101, "s2", "call-b", "B"));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+    open_second_thread(&mut app);
+
+    app.focus_thread(0);
+    type_text(&mut app, "session A");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "two session A permissions", |app| {
+        app.agents.permissions.get("s1").is_some_and(|queue| queue.len() == 2)
+    });
+    assert_eq!(app.agents.threads[0].state, ThreadUiState::AwaitingPermission);
+
+    app.focus_thread(1);
+    assert!(app.agents.permission().is_none(), "session A modal must not leak into B");
+    type_text(&mut app, "session B");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "session B permission", |app| {
+        app.agents.permissions.get("s2").is_some_and(|queue| queue.len() == 1)
+    });
+    assert_eq!(app.agents.threads[0].state, ThreadUiState::AwaitingPermission);
+    assert_eq!(app.agents.threads[1].state, ThreadUiState::AwaitingPermission);
+    assert_eq!(fake.agent().requests_by_method("session/prompt").len(), 2);
+
+    press(&mut app, KeyCode::Right, KeyModifiers::NONE);
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "session B permission response", |_| {
+        fake.agent().response_with_id(101).is_some()
+    });
+
+    app.focus_thread(0);
+    assert_eq!(app.agents.permission().expect("first A permission").tool_title, "A first");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "first session A permission response", |_| {
+        fake.agent().response_with_id(100).is_some()
+    });
+    assert_eq!(app.agents.permission().expect("second A permission").tool_title, "A second");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "second session A permission response", |_| {
+        fake.agent().response_with_id(102).is_some()
+    });
+    assert!(app.agents.permissions.is_empty());
+    assert_eq!(
+        fake.agent().response_with_id(101).expect("session B response")["result"]["outcome"]["optionId"],
+        "deny"
+    );
+}
+
 #[test]
 fn permission_prompt_selection_resolves_host_request() {
     let script = base_script()
@@ -3900,8 +3998,8 @@ fn permission_prompt_selection_resolves_host_request() {
     type_text(&mut app, "run");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
-    wait_until(&mut app, "permission prompt appears", |app| app.agents.permission.is_some());
-    let permission = app.agents.permission.as_ref().expect("permission present");
+    wait_until(&mut app, "permission prompt appears", |app| app.agents.permission().is_some());
+    let permission = app.agents.permission().expect("permission present");
     assert_eq!(permission.options.len(), 2);
     assert_eq!(permission.selected, 0);
     assert_eq!(
@@ -3911,10 +4009,10 @@ fn permission_prompt_selection_resolves_host_request() {
     );
 
     press(&mut app, KeyCode::Right, KeyModifiers::NONE);
-    assert_eq!(app.agents.permission.as_ref().expect("prompt").selected, 1);
+    assert_eq!(app.agents.permission().expect("prompt").selected, 1);
 
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-    assert!(app.agents.permission.is_none(), "prompt clears after confirm");
+    assert!(app.agents.permission().is_none(), "prompt clears after confirm");
 
     wait_until(&mut app, "host answered permission", |_| {
         fake.agent().response_with_id(100).is_some()
@@ -3959,6 +4057,84 @@ fn elicitation_complete(elicitation_id: &str) -> Value {
 }
 
 #[test]
+fn concurrent_elicitations_are_session_scoped_and_keep_identity() {
+    let script = two_session_script()
+        .wait_for("session/prompt")
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": 200,
+            "method": "elicitation/create",
+            "params": {
+                "mode": "form",
+                "sessionId": "s1",
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": { "name": { "type": "string", "title": "Name" } }
+                },
+                "message": "form A"
+            }
+        }))
+        .wait_for("session/prompt")
+        .emit(json!({
+            "jsonrpc": "2.0",
+            "id": 201,
+            "method": "elicitation/create",
+            "params": {
+                "mode": "url",
+                "sessionId": "s2",
+                "elicitationId": "el-b",
+                "url": "https://example.com/authorize",
+                "message": "url B"
+            }
+        }));
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+    open_second_thread(&mut app);
+
+    app.focus_thread(0);
+    type_text(&mut app, "session A");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "session A elicitation", |app| {
+        app.agents.elicitation().is_some_and(|prompt| prompt.message == "form A")
+    });
+    assert_eq!(app.agents.threads[0].state, ThreadUiState::AwaitingElicitation);
+
+    app.focus_thread(1);
+    assert!(app.agents.elicitation().is_none(), "session A modal must not leak into B");
+    type_text(&mut app, "session B");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "session B elicitation", |app| {
+        app.agents.elicitation().is_some_and(|prompt| {
+            prompt.message == "url B" && prompt.completion_id.as_deref() == Some("el-b")
+        })
+    });
+    assert_eq!(app.agents.threads[0].state, ThreadUiState::AwaitingElicitation);
+    assert_eq!(app.agents.threads[1].state, ThreadUiState::AwaitingElicitation);
+    assert_eq!(fake.agent().requests_by_method("session/prompt").len(), 2);
+
+    press(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
+    wait_until(&mut app, "session B elicitation response", |_| {
+        fake.agent().response_with_id(201).is_some()
+    });
+    app.focus_thread(0);
+    assert_eq!(app.agents.elicitation().expect("session A form").message, "form A");
+    press(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    wait_until(&mut app, "session A elicitation response", |_| {
+        fake.agent().response_with_id(200).is_some()
+    });
+
+    assert!(app.agents.elicitations.is_empty());
+    assert_eq!(
+        fake.agent().response_with_id(201).expect("B response")["result"]["action"],
+        "decline"
+    );
+    assert_eq!(
+        fake.agent().response_with_id(200).expect("A response")["result"]["action"],
+        "cancel"
+    );
+}
+
+#[test]
 fn elicitation_widgets_resolve_form_requests() {
     let script = base_script()
         .wait_for("session/prompt")
@@ -3981,8 +4157,8 @@ fn elicitation_widgets_resolve_form_requests() {
     type_text(&mut app, "go");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
-    wait_until(&mut app, "elicitation prompt appears", |app| app.agents.elicitation.is_some());
-    let elicitation = app.agents.elicitation.as_ref().expect("prompt present");
+    wait_until(&mut app, "elicitation prompt appears", |app| app.agents.elicitation().is_some());
+    let elicitation = app.agents.elicitation().expect("prompt present");
     assert_eq!(elicitation.agent_label, "1.fake");
     assert_eq!(elicitation.message, "fill the form");
     assert_eq!(elicitation.fields.len(), 3);
@@ -4006,19 +4182,19 @@ fn elicitation_widgets_resolve_form_requests() {
     // Drive the form: navigate to each field by Tab (fields cycle), fill it,
     // and accept.
     let mut steps = 0;
-    while app.agents.elicitation.as_ref().expect("prompt").selected_field != debug_index {
+    while app.agents.elicitation().expect("prompt").selected_field != debug_index {
         press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         steps += 1;
         assert!(steps < 10, "Tab never reached the boolean field");
     }
     press(&mut app, KeyCode::Right, KeyModifiers::NONE); // toggle debug=true
-    while app.agents.elicitation.as_ref().expect("prompt").selected_field != level_index {
+    while app.agents.elicitation().expect("prompt").selected_field != level_index {
         press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         steps += 1;
         assert!(steps < 10, "Tab never reached the enum field");
     }
     press(&mut app, KeyCode::Right, KeyModifiers::NONE); // low → high
-    while app.agents.elicitation.as_ref().expect("prompt").selected_field != name_index {
+    while app.agents.elicitation().expect("prompt").selected_field != name_index {
         press(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         steps += 1;
         assert!(steps < 10, "Tab never reached the name field");
@@ -4034,7 +4210,7 @@ fn elicitation_widgets_resolve_form_requests() {
     assert_eq!(response["result"]["content"]["name"], "ed");
     assert_eq!(response["result"]["content"]["debug"], true);
     assert_eq!(response["result"]["content"]["level"], "high");
-    assert!(app.agents.elicitation.is_none());
+    assert!(app.agents.elicitation().is_none());
 }
 
 #[test]
@@ -4061,11 +4237,12 @@ fn elicitation_rejects_unsupported_schema_visibly_and_declines() {
     type_text(&mut app, "go");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
-    wait_until(&mut app, "unsupported elicitation appears", |app| app.agents.elicitation.is_some());
+    wait_until(&mut app, "unsupported elicitation appears", |app| {
+        app.agents.elicitation().is_some()
+    });
     let reason = app
         .agents
-        .elicitation
-        .as_ref()
+        .elicitation()
         .and_then(|prompt| prompt.unsupported_reason.clone())
         .expect("unsupported reason must be visible");
     assert!(reason.contains("unsupported"), "reason: {reason}");
@@ -4073,7 +4250,7 @@ fn elicitation_rejects_unsupported_schema_visibly_and_declines() {
     // Enter (accept) fails locally and keeps prompt open until user declines/cancels.
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     wait_until(&mut app, "unsupported elicitation stays local", |app| {
-        app.agents.elicitation.is_some()
+        app.agents.elicitation().is_some()
             && app
                 .backend
                 .status_message
@@ -4088,7 +4265,7 @@ fn elicitation_rejects_unsupported_schema_visibly_and_declines() {
     });
     let response = fake.agent().response_with_id(201).expect("decline response");
     assert_eq!(response["result"]["action"], "decline");
-    assert!(app.agents.elicitation.is_none());
+    assert!(app.agents.elicitation().is_none());
 }
 
 #[test]
@@ -4118,18 +4295,17 @@ fn elicitation_rejects_deep_schema_visibly_and_declines() {
     type_text(&mut app, "go");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
-    wait_until(&mut app, "deep elicitation appears", |app| app.agents.elicitation.is_some());
+    wait_until(&mut app, "deep elicitation appears", |app| app.agents.elicitation().is_some());
     let reason = app
         .agents
-        .elicitation
-        .as_ref()
+        .elicitation()
         .and_then(|prompt| prompt.unsupported_reason.clone())
         .expect("unsupported reason must be visible");
     assert!(reason.contains("schema depth exceeds"), "reason: {reason}");
 
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     wait_until(&mut app, "deep elicitation stays local", |app| {
-        app.agents.elicitation.is_some()
+        app.agents.elicitation().is_some()
             && app
                 .backend
                 .status_message
@@ -4143,7 +4319,7 @@ fn elicitation_rejects_deep_schema_visibly_and_declines() {
         fake.agent().response_with_id(203).is_some()
     });
     assert_eq!(fake.agent().response_with_id(203).expect("response")["result"]["action"], "cancel");
-    assert!(app.agents.elicitation.is_none());
+    assert!(app.agents.elicitation().is_none());
 }
 
 #[test]
@@ -4170,9 +4346,9 @@ fn url_elicitation_shows_full_url_host_and_choice() {
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
     wait_until(&mut app, "url elicitation appears", |app| {
-        app.agents.elicitation.as_ref().is_some_and(|prompt| prompt.url.is_some())
+        app.agents.elicitation().is_some_and(|prompt| prompt.url.is_some())
     });
-    let prompt = app.agents.elicitation.as_ref().expect("prompt");
+    let prompt = app.agents.elicitation().expect("prompt");
     let url = prompt.url.clone().expect("url");
     assert_eq!(prompt.url_host.as_deref(), Some("example.com"));
     assert!(url.contains("https://example.com/authorize"), "full url shown: {url}");
@@ -4192,9 +4368,9 @@ fn url_elicitation_shows_full_url_host_and_choice() {
 
     // Left/Right cycles accept/decline/cancel; Ctrl-D declines without opening.
     press(&mut app, KeyCode::Left, KeyModifiers::NONE);
-    assert_eq!(app.agents.elicitation.as_ref().expect("prompt").selected_choice, 2);
+    assert_eq!(app.agents.elicitation().expect("prompt").selected_choice, 2);
     press(&mut app, KeyCode::Right, KeyModifiers::NONE);
-    assert_eq!(app.agents.elicitation.as_ref().expect("prompt").selected_choice, 0);
+    assert_eq!(app.agents.elicitation().expect("prompt").selected_choice, 0);
     press(&mut app, KeyCode::Char('d'), KeyModifiers::CONTROL);
     wait_until(&mut app, "url elicitation declined", |_| {
         fake.agent().response_with_id(202).is_some()
@@ -4231,7 +4407,7 @@ fn url_elicitation_completion_clears_prompt_and_marks_complete() {
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
     wait_until(&mut app, "url elicitation completion handled", |app| {
-        app.agents.elicitation.is_none() && fake.agent().response_with_id(202).is_some()
+        app.agents.elicitation().is_none() && fake.agent().response_with_id(202).is_some()
     });
     let response = fake.agent().response_with_id(202).expect("completion response");
     assert_eq!(response["result"]["action"], "accept");
@@ -4269,7 +4445,7 @@ fn stale_url_elicitation_completion_is_ignored_without_clearing_prompt() {
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
     wait_until(&mut app, "url elicitation remains open", |app| {
-        app.agents.elicitation.as_ref().is_some_and(|prompt| prompt.url.is_some())
+        app.agents.elicitation().is_some_and(|prompt| prompt.url.is_some())
     });
     std::thread::sleep(Duration::from_millis(100));
     app.pump_agents();
@@ -4307,18 +4483,17 @@ fn secret_like_elicitation_requests_are_blocked_locally() {
     type_text(&mut app, "go");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
-    wait_until(&mut app, "secretive elicitation appears", |app| app.agents.elicitation.is_some());
+    wait_until(&mut app, "secretive elicitation appears", |app| app.agents.elicitation().is_some());
     let reason = app
         .agents
-        .elicitation
-        .as_ref()
+        .elicitation()
         .and_then(|prompt| prompt.unsupported_reason.clone())
         .expect("blocked reason visible");
     assert!(reason.contains("secret-like elicitation requests are blocked"), "reason: {reason}");
 
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     wait_until(&mut app, "blocked elicitation remains local", |app| {
-        app.agents.elicitation.is_some()
+        app.agents.elicitation().is_some()
             && app
                 .backend
                 .status_message
@@ -4359,11 +4534,11 @@ fn elicitation_validation_failure_stays_local_until_user_resolves_it() {
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
     wait_until(&mut app, "required-field elicitation appears", |app| {
-        app.agents.elicitation.is_some()
+        app.agents.elicitation().is_some()
     });
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     wait_until(&mut app, "validation failure stays local", |app| {
-        app.agents.elicitation.is_some()
+        app.agents.elicitation().is_some()
             && app
                 .backend
                 .status_message
@@ -4579,6 +4754,112 @@ fn steer_prioritizes_message_and_queue_runs_follow_up_after_turn_finishes() {
 }
 
 #[test]
+fn queued_session_and_connection_saturation_render_distinctly() {
+    let script = two_session_script().wait_for("session/prompt");
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    app.config.agents.max_concurrent_prompts = 1;
+    open_pane_and_wait_ready(&mut app);
+    open_second_thread(&mut app);
+
+    app.focus_thread(0);
+    type_text(&mut app, "session A");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "session A dispatched", |_| {
+        fake.agent().requests_by_method("session/prompt").len() == 1
+    });
+    app.focus_thread(1);
+    type_text(&mut app, "session B");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "session B queued", |app| {
+        app.agents.threads[1].state == ThreadUiState::Queued
+    });
+
+    let backend = TestBackend::new(120, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let rendered = (0..20)
+        .map(|y| {
+            (0..120)
+                .map(|x| terminal.backend().buffer().cell((x, y)).unwrap().symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        rendered.iter().any(|row| row.contains("[queued]") && row.contains("conn:1/1 +1 queued")),
+        "queued saturation missing: {rendered:#?}"
+    );
+
+    type_text(&mut app, "/stop");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    app.focus_thread(0);
+    type_text(&mut app, "/stop");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "queued and active turns cancel", |app| {
+        app.agents.pending_cancels.is_empty()
+    });
+}
+
+#[test]
+fn concurrent_cancellations_keep_session_scoped_results() {
+    let script = two_session_script().wait_for("session/prompt").wait_for("session/prompt");
+    let (mut app, _temp, fake) = fake_agents_app(script);
+    open_pane_and_wait_ready(&mut app);
+    open_second_thread(&mut app);
+
+    app.focus_thread(0);
+    type_text(&mut app, "session A");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "session A prompt sent", |_| {
+        fake.agent().requests_by_method("session/prompt").len() == 1
+    });
+    app.focus_thread(1);
+    type_text(&mut app, "session B");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "session B prompt sent", |_| {
+        fake.agent().requests_by_method("session/prompt").len() == 2
+    });
+
+    type_text(&mut app, "/stop");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    app.focus_thread(0);
+    type_text(&mut app, "/stop");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(app.agents.pending_cancels.len(), 2, "neither cancellation replaces the other");
+    assert_eq!(app.agents.threads[0].state, ThreadUiState::Cancelling);
+    assert_eq!(app.agents.threads[1].state, ThreadUiState::Cancelling);
+
+    wait_until(&mut app, "both cancellations resolve", |app| app.agents.pending_cancels.is_empty());
+    assert_eq!(
+        fake.agent().requests_by_method("session/cancel").len(),
+        2,
+        "cancel notifications: {:?}",
+        fake.agent().log()
+    );
+    let cancelled_request_ids: std::collections::BTreeSet<String> = fake
+        .agent()
+        .requests_by_method("$/cancel_request")
+        .iter()
+        .filter_map(|request| request["params"]["requestId"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        cancelled_request_ids.len(),
+        2,
+        "each prompt request must be targeted: {:?}",
+        fake.agent().log()
+    );
+    for (index, session_id) in ["s1", "s2"].into_iter().enumerate() {
+        assert_eq!(app.agents.threads[index].session_id, session_id);
+        assert!(
+            app.agents.threads[index]
+                .system_notices()
+                .iter()
+                .any(|notice| notice == "turn cancelled"),
+            "missing cancellation result for {session_id}"
+        );
+    }
+}
+
+#[test]
 fn closing_pane_preserves_thread_state_and_session() {
     let (mut app, _temp, fake) = fake_agents_app(base_script());
     open_pane_and_wait_ready(&mut app);
@@ -4687,8 +4968,8 @@ fn new_slash_command_with_arguments_is_sent_to_agent() {
 }
 
 #[test]
-fn new_thread_slash_command_rejects_second_request_while_session_starts() {
-    let script = base_script().wait_for("session/new");
+fn new_thread_slash_command_allows_parallel_requests_while_session_starts() {
+    let script = base_script().wait_for("session/new").wait_for("session/new");
     let (mut app, _temp, fake) = fake_agents_app(script);
     open_pane_and_wait_ready(&mut app);
 
@@ -4701,8 +4982,11 @@ fn new_thread_slash_command_rejects_second_request_while_session_starts() {
     type_text(&mut app, "/new_thread");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
-    assert_eq!(app.backend.status_message.as_deref(), Some("agent session is already starting"));
-    assert_eq!(fake.agent().requests_by_method("session/new").len(), 2);
+    wait_until(&mut app, "parallel new-thread request pending", |_| {
+        fake.agent().requests_by_method("session/new").len() == 3
+    });
+    assert_eq!(app.backend.status_message.as_deref(), Some("starting new agent session…"));
+    assert_eq!(app.agents.pending_sessions.len(), 2);
 }
 
 #[test]

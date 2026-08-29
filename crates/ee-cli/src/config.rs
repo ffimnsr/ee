@@ -149,6 +149,7 @@ const CONFIG_TEMPLATE: &str = r#"# ee configuration
 # [agents]
 # enabled = false
 # default_agent = "assistant"
+# max_concurrent_prompts = 4 # per configured agent connection; valid 1..32
 #
 # # Web context is disabled by default. Put this only in user-global config;
 # # workspace .ee.toml files may disable or tighten it, never enable/widen it.
@@ -440,18 +441,35 @@ pub(crate) struct LspServerSettings {
 
 /// Default request timeout for Streamable HTTP MCP servers, in milliseconds.
 const DEFAULT_MCP_HTTP_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_AGENT_MAX_CONCURRENT_PROMPTS: usize = 4;
+const MAX_AGENT_MAX_CONCURRENT_PROMPTS: usize = 32;
 
 /// Resolved agents-mode settings.  Agents mode is disabled by default at
 /// runtime; `enabled` only becomes `true` through an explicit config layer.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentsSettings {
     pub enabled: bool,
     pub default_agent: Option<String>,
+    /// Maximum provider prompts in flight on each configured agent connection.
+    pub max_concurrent_prompts: usize,
     pub servers: BTreeMap<String, AgentServerSettings>,
     /// Trusted web retrieval policy. This exists only in agents-enabled builds;
     /// raw config remains parseable in every build so schema validation is stable.
     #[cfg(any(feature = "agents", test))]
     pub web_context: AgentWebContextConfig,
+}
+
+impl Default for AgentsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_agent: None,
+            max_concurrent_prompts: DEFAULT_AGENT_MAX_CONCURRENT_PROMPTS,
+            servers: BTreeMap::new(),
+            #[cfg(any(feature = "agents", test))]
+            web_context: AgentWebContextConfig::default(),
+        }
+    }
 }
 
 /// One agent environment value with its config-layer provenance (phase 5).
@@ -1124,6 +1142,8 @@ pub(crate) struct AgentsToml {
     /// Agent server id used when the user starts a session without choosing
     /// an explicit agent.
     pub default_agent: Option<String>,
+    /// Per-connection prompt concurrency. Valid range: 1 through 32.
+    pub max_concurrent_prompts: Option<usize>,
     #[serde(default)]
     pub servers: BTreeMap<String, AgentServerToml>,
     /// Trusted configuration for optional agent web retrieval. Only user-global
@@ -1773,6 +1793,16 @@ impl EditorSettings {
         }
         if let Some(default_agent) = &patch.default_agent {
             self.agents.default_agent = Some(default_agent.clone());
+        }
+        if let Some(limit) = patch.max_concurrent_prompts {
+            if (1..=MAX_AGENT_MAX_CONCURRENT_PROMPTS).contains(&limit) {
+                self.agents.max_concurrent_prompts = limit;
+            } else {
+                eprintln!(
+                    "ee: warning: agents.max_concurrent_prompts must be between 1 and {MAX_AGENT_MAX_CONCURRENT_PROMPTS}; keeping {}",
+                    self.agents.max_concurrent_prompts
+                );
+            }
         }
         for (id, server) in &patch.servers {
             let existing = self.agents.servers.get(id);
@@ -2776,6 +2806,7 @@ fn agents_settings_to_toml(agents: &AgentsSettings) -> Option<AgentsToml> {
     Some(AgentsToml {
         enabled: Some(agents.enabled),
         default_agent: agents.default_agent.clone(),
+        max_concurrent_prompts: Some(agents.max_concurrent_prompts),
         web_context: {
             #[cfg(any(feature = "agents", test))]
             {
@@ -4887,6 +4918,7 @@ description = "find files"
 
         assert!(!settings.agents.enabled);
         assert!(settings.agents.default_agent.is_none());
+        assert_eq!(settings.agents.max_concurrent_prompts, 4);
         assert!(settings.agents.servers.is_empty());
         assert!(settings.mcp.servers.is_empty());
     }
@@ -4897,6 +4929,7 @@ description = "find files"
 [agents]
 enabled = true
 default_agent = "helper"
+max_concurrent_prompts = 2
 
 [agents.servers.helper]
 command = "ee-helper"
@@ -4915,6 +4948,7 @@ command = "other-agent"
 
         assert!(settings.agents.enabled);
         assert_eq!(settings.agents.default_agent.as_deref(), Some("helper"));
+        assert_eq!(settings.agents.max_concurrent_prompts, 2);
         let helper = settings.agents.servers.get("helper").unwrap();
         assert_eq!(helper.command, "ee-helper");
         assert_eq!(helper.args, vec!["serve"]);
@@ -5672,6 +5706,7 @@ headers = { Authorization = "Bearer token" }
         let agents = defs.get("AgentsToml").unwrap().get("properties").unwrap();
         assert!(agents.get("enabled").is_some());
         assert!(agents.get("default_agent").is_some());
+        assert!(agents.get("max_concurrent_prompts").is_some());
         assert!(agents.get("servers").is_some());
 
         let mcp = defs.get("McpToml").unwrap().get("properties").unwrap();

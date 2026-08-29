@@ -111,8 +111,8 @@ fn wait_until(app: &mut App, label: &str, mut condition: impl FnMut(&App) -> boo
         "timed out waiting for {label}; mode={:?} approvals={} permission={} elicitation={} status={:?} active={:?} lines={:?}",
         app.mode,
         app.agents.approvals.len(),
-        app.agents.permission.is_some(),
-        app.agents.elicitation.is_some(),
+        app.agents.permission().is_some(),
+        app.agents.elicitation().is_some(),
         app.backend.status_message.as_deref(),
         app.backend.active().path,
         app.backend.lines
@@ -490,9 +490,6 @@ fn dirty_user_edit_blocks_blind_agent_write() {
     });
 
     open_pane_and_wait_ready(&mut app);
-    wait_until(&mut app, "write approval appears", |app| app.agents.approvals.front().is_some());
-    press(&mut app, KeyCode::Enter, KeyModifiers::NONE); // Allow once
-
     wait_until(&mut app, "dirty write rejected", |_| fake.agent().response_with_id(103).is_some());
     let response = fake.agent().response_with_id(103).expect("write response");
     assert!(response.get("error").is_some(), "dirty write must fail: {response}");
@@ -502,6 +499,82 @@ fn dirty_user_edit_blocks_blind_agent_write() {
         vec![String::from("one"), String::from("two"), String::from("threeX"), String::new()],
         "agent must not overwrite unsaved user edits"
     );
+    assert!(app.agents.approvals.is_empty(), "dirty conflict must fail before approval");
+}
+
+#[test]
+fn top_level_write_leases_reject_overlap_and_allow_disjoint_sessions() {
+    let temp = tempfile::tempdir().unwrap();
+    let first_path = temp.path().join("first.txt");
+    let second_path = temp.path().join("second.txt");
+    fs::write(&first_path, "one\n").unwrap();
+    fs::write(&second_path, "two\n").unwrap();
+    let (mut app, _fake) = agents_app_in(&temp, base_script());
+
+    let _first =
+        app.queue_session_write_approval_for_test("fake", "s1", first_path.clone(), "agent one\n");
+    assert_eq!(app.agents.approvals.len(), 1);
+    assert_eq!(app.agents.write_leases.len(), 1);
+
+    let mut overlapping =
+        app.queue_session_write_approval_for_test("fake", "s2", first_path, "agent two\n");
+    let error = overlapping
+        .try_recv()
+        .expect("overlap resolves immediately")
+        .expect_err("overlap rejected");
+    assert!(error.to_string().contains("session s1"), "error: {error}");
+    assert_eq!(app.agents.approvals.len(), 1);
+    assert_eq!(app.agents.write_leases.len(), 1);
+
+    let _disjoint =
+        app.queue_session_write_approval_for_test("fake", "s2", second_path, "agent two\n");
+    assert_eq!(app.agents.approvals.len(), 2);
+    assert_eq!(app.agents.write_leases.len(), 2);
+
+    app.confirm_bridge_approval_for_test(crate::app::ApprovalChoice::DenyOnce);
+    assert_eq!(app.agents.write_leases.len(), 1);
+    app.confirm_bridge_approval_for_test(crate::app::ApprovalChoice::DenyOnce);
+    assert_eq!(app.agents.write_leases.len(), 0);
+}
+
+#[test]
+fn cancelled_write_request_releases_only_its_lease() {
+    let temp = tempfile::tempdir().unwrap();
+    let first_path = temp.path().join("cancelled.txt");
+    let second_path = temp.path().join("held.txt");
+    fs::write(&first_path, "one\n").unwrap();
+    fs::write(&second_path, "two\n").unwrap();
+    let (mut app, _fake) = agents_app_in(&temp, base_script());
+
+    let cancelled =
+        app.queue_session_write_approval_for_test("fake", "s1", first_path, "agent one\n");
+    let _held = app.queue_session_write_approval_for_test("fake", "s2", second_path, "agent two\n");
+    assert_eq!(app.agents.write_leases.len(), 2);
+    drop(cancelled);
+
+    app.prune_cancelled_bridge_approvals();
+    assert_eq!(app.agents.approvals.len(), 1);
+    assert_eq!(app.agents.approvals.front().expect("s2 approval").session_id, "s2");
+    assert_eq!(app.agents.write_leases.len(), 1);
+}
+
+#[test]
+fn write_lease_rechecks_revision_at_apply_time() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("stale.txt");
+    fs::write(&path, "before\n").unwrap();
+    let (mut app, _fake) = agents_app_in(&temp, base_script());
+
+    let mut response =
+        app.queue_session_write_approval_for_test("fake", "s1", path.clone(), "agent\n");
+    fs::write(&path, "user\n").unwrap();
+    app.confirm_bridge_approval_for_test(crate::app::ApprovalChoice::AllowOnce);
+
+    let error =
+        response.try_recv().expect("stale write resolves").expect_err("stale revision rejected");
+    assert!(error.to_string().contains("changed after lease acquisition"), "error: {error}");
+    assert_eq!(fs::read_to_string(path).unwrap(), "user\n");
+    assert_eq!(app.agents.write_leases.len(), 0);
 }
 
 // ── terminal bridge ──────────────────────────────────────────────────────────

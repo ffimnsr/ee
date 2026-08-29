@@ -124,8 +124,12 @@ pub enum AgentEvent {
     ThreadCreated { agent_id: String, session_id: SessionId },
     /// A session thread was closed (host shutdown or connection loss).
     ThreadClosed { agent_id: String, session_id: SessionId, reason: ThreadCloseReason },
-    /// A prompt turn started (optimistic user message already reduced).
+    /// A prompt turn started in session state (optimistic user message reduced).
     TurnStarted { session_id: SessionId, turn: TurnKey },
+    /// Prompt waits for one connection concurrency slot. Contains no prompt content.
+    TurnQueued { session_id: SessionId, position: usize },
+    /// Prompt left host queue and was sent to provider.
+    TurnDispatched { session_id: SessionId },
     /// One `session/update` notification was reduced into session state.
     ///
     /// The UI re-reads the thread snapshot; the raw update is included for
@@ -166,8 +170,13 @@ pub enum AgentEvent {
     /// An out-of-band URL elicitation finished.
     ///
     /// The UI may use this to clear pending URL prompts or mark transcript
-    /// state complete. Unknown/stale ids stay diagnostics-only.
-    ElicitationCompleted { elicitation_id: ElicitationId },
+    /// state complete. Connection and session identity prevent an id reused by
+    /// another agent or session from clearing unrelated UI state.
+    ElicitationCompleted {
+        agent_id: String,
+        session_id: Option<SessionId>,
+        elicitation_id: ElicitationId,
+    },
     /// An agent-to-client file/terminal/elicitation request was dispatched
     /// to the registered handler.
     ClientRequestDispatched { session_id: Option<SessionId>, method: String },

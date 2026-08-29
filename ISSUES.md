@@ -5063,3 +5063,183 @@ Prove critic quality before automatic enablement. Use existing replay harness an
 - [ ] Optional external ACP critic is isolated, bounded, attributable, and never misrepresented as fully read-only without sandbox proof.
 - [ ] Root remains sole decision/writer and completion remains derived from current host evidence.
 - [ ] CI replay data demonstrates quality gain without policy, privacy, completion, or boundedness regression.
+
+## Parallel Top-Level Agent Sessions Plan
+
+Enable true concurrent top-level sessions, including multiple sessions sharing one configured agent connection. ACP server concurrency already works across sessions, but the ee host connection driver currently serializes prompt requests. Preserve one active turn per session while allowing independent sessions to progress, request user input, cancel, and shut down without blocking each other.
+
+### Phase 1: Baseline audit and concurrency contract
+
+Document current behavior and define required ordering before changing connection scheduling.
+
+#### Work items
+
+- [x] Confirm different configured agent ids use separate `AgentConnection` instances and can run independently.
+- [x] Confirm ACP server accepts prompts for different sessions concurrently.
+- [x] Confirm same-agent sessions share one `driver_loop` in `ee-agent-host`.
+- [x] Confirm `ConnectionCommand::Prompt` awaits `sent.block_task()` inside `driver_loop`, serializing every later prompt and control command on that connection.
+- [x] Confirm TUI prompt submission uses `tokio::spawn`, but spawned tasks only enqueue commands into the serialized connection driver.
+- [x] Confirm one-active-turn enforcement already exists per session and must remain session-scoped.
+- [x] Confirm existing ACP server and orchestrator parallelism tests do not prove same-agent host or TUI parallelism.
+- [x] Define connection scheduling contract.
+  - [x] Allow prompts for different session ids to execute concurrently.
+  - [x] Reject or serialize a second prompt for the same session id.
+  - [x] Keep lifecycle, configuration, cancellation, and shutdown commands responsive while prompts are active.
+  - [x] Preserve deterministic event attribution and cleanup by connection, session id, and request id.
+
+#### Exit criteria
+
+- [x] Host concurrency behavior is documented independently from ACP server and orchestrator subagent behavior.
+- [x] Ordering guarantees distinguish connection-wide commands from session-scoped commands.
+- [x] Same-session single-turn safety remains intact.
+
+### Phase 2: Concurrent connection prompt driver
+
+Refactor `ee-agent-host` so long-running prompt responses do not block the connection command loop.
+
+#### Work items
+
+- [x] Spawn and track in-flight prompt tasks instead of awaiting each prompt inline in `driver_loop`.
+- [x] Key in-flight prompt state by session id and JSON-RPC request id where available.
+- [x] Route prompt completion, failure, cancellation, and late updates back to the correct `AgentThread`.
+- [x] Keep `session/new`, `session/load`, `session/resume`, `session/close`, mode/config changes, list operations, and cancellation processable while another session prompt is active.
+- [x] Prevent detached-task result loss by joining or explicitly resolving every in-flight prompt task.
+- [x] Define deterministic connection shutdown behavior.
+  - [x] Stop accepting new commands.
+  - [x] Cancel or drain all in-flight prompt tasks according to shutdown reason.
+  - [x] Resolve every waiting caller exactly once.
+  - [x] Release session-local pending permission and client-request state.
+- [x] Preserve late `session/update` handling until each cancelled prompt response arrives.
+- [x] Avoid detaching all connection commands blindly; retain required lifecycle ordering and capability checks.
+
+#### Exit criteria
+
+- [x] Session B can start and finish on one `AgentConnection` while session A remains blocked in a prompt.
+- [x] Connection control commands remain responsive during active prompts.
+- [x] No prompt result, error, update, or waiter is lost during completion, cancellation, disconnect, or shutdown.
+
+### Phase 3: Session-scoped interaction and cancellation state
+
+Replace pane-global single-slot state that can overwrite or block independent sessions.
+
+#### Work items
+
+- [x] Replace `AgentPaneState.permission: Option<PermissionPrompt>` with queued, session-keyed permission state.
+  - [x] Preserve request order within each session.
+  - [x] Allow simultaneous pending permission requests from different sessions without overwrite.
+  - [x] Route approval, denial, and cancellation to exact originating request.
+- [x] Replace `AgentPaneState.elicitation: Option<ElicitationPrompt>` with queued, session-keyed elicitation state.
+  - [x] Preserve form and URL elicitation identity.
+  - [x] Allow simultaneous elicitations from different sessions without overwrite.
+  - [x] Ignore stale completion only for matching connection/session/elicitation identity.
+- [x] Stop global modal presence from blocking prompt submission in unrelated sessions.
+  - [x] Block only originating session when protocol or UI flow requires it.
+  - [x] Keep modal navigation explicit when several sessions await user action.
+- [x] Replace pane-global `pending_cancel: Option<Receiver<_>>` with session-keyed cancellation tracking.
+  - [x] Allow concurrent cancellation requests for different sessions.
+  - [x] Preserve result and error attribution for each cancellation.
+  - [x] Prevent later cancellation from replacing an earlier pending result.
+- [x] Ensure closing one session resolves only its permission, elicitation, and cancellation state.
+
+#### Exit criteria
+
+- [x] Concurrent permissions and elicitations cannot overwrite each other.
+- [x] Modal activity in one session does not prevent independent session submission or cancellation.
+- [x] Two simultaneous cancellations complete with correct session-scoped outcomes.
+
+### Phase 4: Parallel session lifecycle and restoration
+
+Remove pane-global lifecycle serialization where operations are independent while preserving connection and session ordering.
+
+#### Work items
+
+- [x] Replace `pending_session: Option<PendingSession>` with connection/session-keyed lifecycle operation tracking.
+- [x] Allow independent session creation for different agent connections concurrently.
+- [x] Allow same-connection session creation when connection driver ordering permits it safely.
+- [x] Parallelize independent startup restoration instead of restoring every persisted session sequentially.
+- [x] Bound lifecycle concurrency to avoid process, provider, and UI resource spikes.
+- [x] Keep duplicate session id, reconnect, and provisional registration handling deterministic.
+- [x] Isolate failure so one failed create/load/resume does not discard healthy session operations.
+
+#### Exit criteria
+
+- [x] Independent create, load, and resume operations can overlap safely.
+- [x] Startup restoration is bounded and parallel where dependencies allow.
+- [x] Lifecycle failures remain attributable and do not corrupt unrelated sessions.
+
+### Phase 5: Cross-session write coordination
+
+Prevent concurrent top-level sessions from making overlapping unattended writes. Existing `WriteScopeConflictDetector` protects orchestrator subagents only and does not coordinate separate top-level sessions.
+
+#### Work items
+
+- [x] Define host-level write lease ownership by agent connection, session id, task/turn id, and canonical repo path scope.
+- [x] Reuse `atlas_repo::CanonicalRepoPath` or existing canonical path identity APIs for every file/module scope key.
+- [x] Acquire write leases before approval or mutation so conflicting work is visible before either session applies changes.
+- [x] Allow parallel writes only for disjoint scopes.
+- [x] Reject, queue, or require explicit user resolution for overlapping scopes; never silently allow last-writer-wins behavior.
+- [x] Include dirty editor buffers and user edits in conflict checks.
+- [x] Release leases on completion, cancellation, session close, connection failure, and shutdown.
+- [x] Prevent permission approval from one session from authorizing another session's write.
+- [x] Add stale-revision checks at apply time even when lease acquisition succeeded.
+
+#### Exit criteria
+
+- [x] Parallel top-level sessions cannot perform overlapping unattended writes.
+- [x] Disjoint writes remain concurrent.
+- [x] User work, approvals, revisions, and lease ownership stay session-attributable and fail closed.
+
+### Phase 6: Host, TUI, and shutdown regression coverage
+
+Add tests proving concurrency at ee host and UI boundaries rather than inferring it from server behavior.
+
+#### Work items
+
+- [x] Add `ee-agent-host` same-connection cross-session prompt regression test.
+  - [x] Create two sessions on one connection.
+  - [x] Block session A after its prompt request is sent.
+  - [x] Verify session B prompt is sent and completes before session A.
+  - [x] Cancel session A and assert its result and events remain session-scoped.
+- [x] Add host tests for same-session second-prompt rejection or serialization.
+- [x] Add host tests proving lifecycle/config/list commands remain responsive during active prompts.
+- [x] Add host tests for disconnect and shutdown with several in-flight prompts.
+- [x] Add TUI tests for simultaneous permission requests from different sessions.
+- [x] Add TUI tests for simultaneous elicitation requests from different sessions.
+- [x] Add TUI tests for two concurrent cancellations.
+- [x] Add TUI tests proving one session modal does not block unrelated prompt submission.
+- [x] Add lifecycle tests for concurrent create/load/resume and bounded startup restoration.
+- [x] Add write-lease tests for disjoint scopes, overlapping scopes, stale revisions, cancellation, and connection loss.
+- [x] Keep ACP server test `prompts_in_two_sessions_run_concurrently` as server-only coverage; do not treat it as host/TUI proof.
+
+#### Exit criteria
+
+- [x] Tests fail against serialized `driver_loop` behavior and pass only with real same-agent host concurrency.
+- [x] Every concurrent UI request and completion is attributed to correct session.
+- [x] Shutdown tests prove no hung waiter, leaked task, orphaned modal, or retained write lease.
+
+### Phase 7: Status UX, limits, and validation
+
+Expose concurrency state clearly and validate full change set.
+
+#### Work items
+
+- [x] Show per-session running, queued, awaiting permission, awaiting elicitation, cancelling, paused, and failed states.
+- [x] Show connection-level saturation or configured concurrency limit without implying sessions are blocked when they are active.
+- [x] Add configurable bounded same-connection prompt concurrency if provider/process limits require it.
+- [x] Keep default high enough for useful parallel sessions and low enough to prevent unbounded provider calls.
+- [x] Surface per-session provider cost, latency, failure, and cancellation without leaking prompts or workspace content.
+- [x] Document supported matrix.
+  - [x] Different configured agent ids use isolated connections and may run concurrently.
+  - [x] Multiple sessions on one configured agent share one connection but may run prompts concurrently after this plan ships.
+  - [x] One session still permits only one active turn.
+  - [x] Concurrent writes require disjoint host-owned scopes or explicit conflict resolution.
+- [x] Run `cargo fmt --all -- --check`.
+- [x] Run targeted quiet tests for `ee-agent-host` and `ee-cli --features agents`.
+- [x] Run Clippy for touched crates with warnings denied.
+- [x] Run `./scripts/test-workspace-summary.sh` after targeted validation passes.
+
+#### Exit criteria
+
+- [x] Users can distinguish queued work from truly concurrent work in agents pane.
+- [x] Same-agent and cross-agent parallel behavior is documented with limits and write-safety rules.
+- [x] Formatting, targeted tests, Clippy, and workspace summary pass.

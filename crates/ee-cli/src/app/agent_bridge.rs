@@ -56,6 +56,7 @@ use tokio_util::sync::CancellationToken;
 use super::*;
 
 use super::agents_mcp::ProxyRoute;
+use super::write_leases::{WriteLeaseId, WriteLeaseOwner};
 
 #[cfg(test)]
 type WriteVerificationTestHook = Box<dyn FnOnce(&mut App) + Send>;
@@ -1746,6 +1747,8 @@ pub(crate) struct ApprovalPrompt {
     /// Agent id of the requesting session (rule scoping; `None` for the
     /// MCP proxy session).
     agent_id: Option<String>,
+    write_lease: Option<WriteLeaseId>,
+    write_lease_owner: Option<WriteLeaseOwner>,
     pub(crate) title: String,
     pub(crate) detail: String,
     /// `(label, choice)` option list; the user picks one with Enter.
@@ -1799,6 +1802,8 @@ impl ApprovalPrompt {
             thread_index: None,
             session_id: SessionId::new("proxy").0.to_string(),
             agent_id: None,
+            write_lease: None,
+            write_lease_owner: None,
             title: operation.tool_name().to_string(),
             detail: operation.detail(),
             options: approval_options(None),
@@ -1849,6 +1854,8 @@ impl ApprovalPrompt {
             thread_index,
             session_id: session_id.0.to_string(),
             agent_id: None,
+            write_lease: None,
+            write_lease_owner: None,
             title,
             detail,
             options: approval_options(persistent_label),
@@ -1884,6 +1891,8 @@ impl ApprovalPrompt {
             thread_index: None,
             session_id: SessionId::new("proxy").0.to_string(),
             agent_id: None,
+            write_lease: None,
+            write_lease_owner: None,
             title,
             detail: mcp.as_ref().map(mcp_approval_detail).unwrap_or(detail),
             options: approval_options(persistent_label),
@@ -1929,6 +1938,8 @@ impl ApprovalPrompt {
             // A later stdio or ACP connection cannot reuse this decision.
             session_id: network_session_id,
             agent_id: None,
+            write_lease: None,
+            write_lease_owner: None,
             title: format!("network/{action}"),
             detail: match provider_label {
                 Some(provider) => format!("provider: {provider} · host: {current_host}"),
@@ -1982,6 +1993,8 @@ impl ApprovalPrompt {
             thread_index,
             session_id: session_id.0.to_string(),
             agent_id,
+            write_lease: None,
+            write_lease_owner: None,
             title: String::from("terminal/create"),
             detail: format!("{command} · cwd: {cwd} · env: {env_text}"),
             options: approval_options(
@@ -2318,6 +2331,7 @@ fn apply_planned_text_edits_to_content(
 impl App {
     /// Drains bridge requests forwarded by the host handler.
     pub(super) fn pump_bridge_requests(&mut self) {
+        self.prune_cancelled_bridge_approvals();
         while let Ok(message) = self.agents.bridge_rx.try_recv() {
             match message {
                 BridgeUiMessage::ReadFile { request, reply } => {
@@ -3378,6 +3392,196 @@ impl App {
         );
     }
 
+    pub(crate) fn prune_cancelled_bridge_approvals(&mut self) {
+        let mut retained = VecDeque::with_capacity(self.agents.approvals.len());
+        while let Some(mut prompt) = self.agents.approvals.pop_front() {
+            if prompt.reply.is_closed() {
+                self.release_prompt_write_lease(&mut prompt);
+            } else {
+                retained.push_back(prompt);
+            }
+        }
+        self.agents.approvals = retained;
+    }
+
+    fn record_write_lease_rejection(&self, prompt: &ApprovalPrompt) {
+        let paths = match &prompt.kind {
+            ApprovalKind::Write { path, .. } => vec![path.clone()],
+            ApprovalKind::WriteBatch { writes, .. } => {
+                writes.iter().map(|write| write.path.clone()).collect()
+            }
+            ApprovalKind::Filesystem { .. }
+            | ApprovalKind::TerminalCreate { .. }
+            | ApprovalKind::Network { .. } => return,
+        };
+        let revision = self
+            .evidence_revision_for_paths(&paths)
+            .unwrap_or_else(|_| EvidenceRevision::new("unavailable"));
+        self.observe_active_turn(
+            &prompt.session_id,
+            TurnObservation::Revision { revision: revision.clone() },
+        );
+        self.observe_active_turn(
+            &prompt.session_id,
+            TurnObservation::Write {
+                revision: revision.clone(),
+                outcome: WriteEvidenceOutcome::Conflicted,
+            },
+        );
+        self.observe_transaction_stage(
+            &prompt.session_id,
+            revision,
+            WriteTransactionStage::Read,
+            EvidenceCheck::Failed,
+        );
+    }
+
+    fn acquire_prompt_write_lease(
+        &mut self,
+        prompt: &mut ApprovalPrompt,
+    ) -> Result<(), AgentError> {
+        let scopes = match &prompt.kind {
+            ApprovalKind::Write { path, .. } => {
+                vec![self.canonical_workspace_write_target(path).ok_or_else(|| {
+                    AgentError::invalid_params("write target has no canonical workspace identity")
+                })?]
+            }
+            ApprovalKind::WriteBatch { writes, .. } => writes
+                .iter()
+                .map(|write| {
+                    self.canonical_workspace_write_target(&write.path).ok_or_else(|| {
+                        AgentError::invalid_params(
+                            "write target has no canonical workspace identity",
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            ApprovalKind::Filesystem { operation } => operation
+                .canonical_write_scopes(&self.allowed_fs_roots())
+                .map_err(|error| AgentError::invalid_params(error.to_string()))?,
+            ApprovalKind::TerminalCreate { .. } | ApprovalKind::Network { .. } => return Ok(()),
+        };
+
+        let blocks_dirty = match &prompt.kind {
+            ApprovalKind::Write { expectation, .. } => {
+                matches!(expectation, WriteExpectation::Blind | WriteExpectation::MustNotExist)
+            }
+            ApprovalKind::WriteBatch { writes, .. } => writes.iter().any(|write| {
+                matches!(
+                    write.expectation,
+                    WriteExpectation::Blind | WriteExpectation::MustNotExist
+                )
+            }),
+            ApprovalKind::Filesystem { .. } => true,
+            ApprovalKind::TerminalCreate { .. } | ApprovalKind::Network { .. } => false,
+        } && self.has_dirty_buffer(&scopes);
+        if blocks_dirty {
+            return Err(AgentError::invalid_params(
+                "dirty editor buffer conflicts with requested agent write scope",
+            ));
+        }
+
+        if prompt.agent_id.is_none() {
+            prompt.agent_id = prompt
+                .thread_index
+                .and_then(|index| self.agents.threads.get(index))
+                .map(|thread| thread.agent_id.clone());
+        }
+        let connection_id = prompt.agent_id.clone().unwrap_or_else(|| String::from("proxy"));
+        let turn_id = match &prompt.kind {
+            ApprovalKind::Write { tool_call_id: Some(id), .. } => id.clone(),
+            ApprovalKind::Write { tool_call_id: None, .. } => {
+                format!("write-{}", self.agents.next_write_turn_id)
+            }
+            ApprovalKind::WriteBatch { writes, .. } => writes
+                .iter()
+                .find_map(|write| write.tool_call_id.clone())
+                .unwrap_or_else(|| format!("write-{}", self.agents.next_write_turn_id)),
+            ApprovalKind::Filesystem { .. } => {
+                format!("filesystem-{}", self.agents.next_write_turn_id)
+            }
+            ApprovalKind::TerminalCreate { .. } | ApprovalKind::Network { .. } => unreachable!(),
+        };
+        self.agents.next_write_turn_id = self.agents.next_write_turn_id.wrapping_add(1);
+        let owner =
+            WriteLeaseOwner { connection_id, session_id: prompt.session_id.clone(), turn_id };
+        let revisions = self.write_scope_revisions(&scopes)?;
+        let id =
+            self.agents.write_leases.acquire(owner.clone(), scopes, revisions).map_err(
+                |conflict| AgentError::PermissionDenied { reason: conflict.to_string() },
+            )?;
+        prompt.write_lease = Some(id);
+        prompt.write_lease_owner = Some(owner);
+        Ok(())
+    }
+
+    fn write_scope_revisions(
+        &self,
+        scopes: &[PathBuf],
+    ) -> Result<BTreeMap<PathBuf, String>, AgentError> {
+        scopes.iter().map(|path| Ok((path.clone(), self.write_scope_revision(path)?))).collect()
+    }
+
+    fn write_scope_revision(&self, path: &Path) -> Result<String, AgentError> {
+        let dirty = self.backend.all_bufs().iter().any(|buffer| {
+            !buffer.pristine
+                && buffer.path.as_deref().is_some_and(|candidate| paths_equivalent(candidate, path))
+        });
+        if path.is_file() {
+            let revision =
+                self.current_text_revision(path)?.unwrap_or_else(|| String::from("missing"));
+            return Ok(format!("file:{revision}:dirty={dirty}"));
+        }
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(String::from("missing"));
+            }
+            Err(error) => {
+                return Err(AgentError::Io(format!(
+                    "cannot inspect write scope {}: {error}",
+                    path.display()
+                )));
+            }
+        };
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        Ok(format!(
+            "metadata:{}:{}:{}:{modified}:dirty={dirty}",
+            metadata.is_dir(),
+            metadata.is_file(),
+            metadata.len()
+        ))
+    }
+
+    fn validate_prompt_write_lease(&self, prompt: &ApprovalPrompt) -> Result<(), AgentError> {
+        let Some(id) = prompt.write_lease else {
+            return Ok(());
+        };
+        let owner = prompt.write_lease_owner.as_ref().ok_or_else(|| {
+            AgentError::PermissionDenied { reason: String::from("write lease owner is missing") }
+        })?;
+        let scopes = self.agents.write_leases.scopes(id).ok_or_else(|| {
+            AgentError::PermissionDenied { reason: String::from("write lease is no longer active") }
+        })?;
+        let revisions = self.write_scope_revisions(scopes)?;
+        self.agents
+            .write_leases
+            .validate(id, owner, &revisions)
+            .map_err(|reason| AgentError::PermissionDenied { reason: reason.to_string() })
+    }
+
+    fn release_prompt_write_lease(&mut self, prompt: &mut ApprovalPrompt) {
+        if let Some(id) = prompt.write_lease.take() {
+            self.agents.write_leases.release(id);
+        }
+        prompt.write_lease_owner = None;
+    }
+
     /// Queues an approval prompt (front of the queue wins) and notifies,
     /// unless the shared policy (session state first, then persistent
     /// rules) already resolves it without UI.
@@ -3426,6 +3630,15 @@ impl App {
         // Phase 6 audit: every automatic decision (allow or prompt fallback)
         // records redacted rule/category/reason/remaining-use metadata.
         self.push_trust_audit(&audited_operation, &decision, &session_id);
+        if matches!(decision.outcome, TrustOutcome::Deny) {
+            self.resolve_policy_deny(prompt, &decision);
+            return;
+        }
+        if let Err(error) = self.acquire_prompt_write_lease(&mut prompt) {
+            self.record_write_lease_rejection(&prompt);
+            let _ = prompt.reply.send(Err(error));
+            return;
+        }
         match &decision {
             TrustDecision {
                 outcome: TrustOutcome::Allow,
@@ -3468,10 +3681,7 @@ impl App {
                 self.resolve_approval(prompt, ApprovalChoice::AllowSession);
                 return;
             }
-            TrustDecision { outcome: TrustOutcome::Deny, .. } => {
-                self.resolve_policy_deny(prompt, &decision);
-                return;
-            }
+            TrustDecision { outcome: TrustOutcome::Deny, .. } => unreachable!(),
             _ => {}
         }
         let approval_mode =
@@ -4185,7 +4395,7 @@ impl App {
         paths_equivalent(&canonical, &canonical_vault)
     }
 
-    fn resolve_policy_deny(&mut self, prompt: ApprovalPrompt, decision: &TrustDecision) {
+    fn resolve_policy_deny(&mut self, mut prompt: ApprovalPrompt, decision: &TrustDecision) {
         let summary = if decision.reason == DecisionReason::BuiltInDeny {
             let rule_id = decision.rule_id.as_deref().unwrap_or("builtin.unknown");
             format!("blocked by non-overridable safeguard {rule_id}")
@@ -4217,6 +4427,7 @@ impl App {
         } else {
             AgentError::PermissionDenied { reason: summary.clone() }
         };
+        self.release_prompt_write_lease(&mut prompt);
         let _ = prompt.reply.send(Err(error));
         if let Some(thread_index) = prompt.thread_index
             && let Some(thread) = self.agents.threads.get_mut(thread_index)
@@ -4244,7 +4455,7 @@ impl App {
         Ok(rule_id)
     }
 
-    fn resolve_persistent_deny_choice(&mut self, prompt: ApprovalPrompt) {
+    fn resolve_persistent_deny_choice(&mut self, mut prompt: ApprovalPrompt) {
         self.record_denied_write(&prompt.session_id, &prompt.kind);
         self.record_denied_validation(&prompt.session_id, &prompt.kind);
         if let ApprovalKind::Network { current_host, call, .. } = &prompt.kind {
@@ -4265,6 +4476,7 @@ impl App {
                 "operation denied; workspace deny rule was not saved".to_string(),
             ),
         };
+        self.release_prompt_write_lease(&mut prompt);
         let _ = prompt.reply.send(Err(AgentError::PermissionDenied { reason }));
         if let Some(thread_index) = prompt.thread_index
             && let Some(thread) = self.agents.threads.get_mut(thread_index)
@@ -4298,12 +4510,17 @@ impl App {
         Ok(rule_id)
     }
 
-    fn resolve_persistent_allow_choice(&mut self, prompt: ApprovalPrompt, choice: ApprovalChoice) {
+    fn resolve_persistent_allow_choice(
+        &mut self,
+        mut prompt: ApprovalPrompt,
+        choice: ApprovalChoice,
+    ) {
         let Some(candidate) =
             prompt.allow_candidates.iter().find_map(|(candidate_choice, candidate)| {
                 (*candidate_choice == choice).then_some(candidate.clone())
             })
         else {
+            self.release_prompt_write_lease(&mut prompt);
             let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
                 reason: "persistent approval has no previewed bounded candidate".into(),
             }));
@@ -4313,6 +4530,7 @@ impl App {
             Ok(rule_id) => rule_id,
             Err(error) => {
                 self.record_denied_write(&prompt.session_id, &prompt.kind);
+                self.release_prompt_write_lease(&mut prompt);
                 let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
                     reason: format!("persistent approval unavailable: {error}"),
                 }));
@@ -4328,10 +4546,11 @@ impl App {
     }
 
     /// Resolves one approval with the chosen policy decision.
-    fn resolve_approval(&mut self, prompt: ApprovalPrompt, choice: ApprovalChoice) {
+    fn resolve_approval(&mut self, mut prompt: ApprovalPrompt, choice: ApprovalChoice) {
         // A disconnected proxy client has dropped its receiver. Do not record
         // approval state or dispatch a side effect without a live requester.
         if prompt.reply.is_closed() {
+            self.release_prompt_write_lease(&mut prompt);
             return;
         }
 
@@ -4366,6 +4585,7 @@ impl App {
                 };
                 self.record_web_failure(action, current_host, "denied");
             }
+            self.release_prompt_write_lease(&mut prompt);
             let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
                 reason: String::from("user denied the operation"),
             }));
@@ -4376,6 +4596,13 @@ impl App {
             }
             return;
         }
+        if let Err(error) = self.validate_prompt_write_lease(&prompt) {
+            self.release_prompt_write_lease(&mut prompt);
+            let _ = prompt.reply.send(Err(error));
+            return;
+        }
+        let write_lease = prompt.write_lease.take();
+        prompt.write_lease_owner = None;
         match prompt.kind {
             ApprovalKind::Write {
                 path,
@@ -4440,12 +4667,15 @@ impl App {
                 );
             }
         }
+        if let Some(id) = write_lease {
+            self.agents.write_leases.release(id);
+        }
     }
 
     /// Auto-resolves a prompt matched by a persisted host-local rule: the
     /// operation dispatches through the existing pipeline and the successful
     /// dispatch consumes one rule use.
-    fn resolve_persistent_allow(&mut self, prompt: ApprovalPrompt, rule_id: String) {
+    fn resolve_persistent_allow(&mut self, mut prompt: ApprovalPrompt, rule_id: String) {
         let session_id = prompt.session_id.clone();
         match &prompt.kind {
             ApprovalKind::TerminalCreate { .. } => match prompt.kind {
@@ -4491,6 +4721,7 @@ impl App {
                 _ => unreachable!(),
             },
             ApprovalKind::Filesystem { .. } => {
+                self.release_prompt_write_lease(&mut prompt);
                 let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
                     reason: String::from("persistent filesystem approval is not supported"),
                 }));
@@ -4500,8 +4731,15 @@ impl App {
 
     /// Dispatches an approved write or write batch and consumes the matched
     /// persistent rule use only after the write succeeds.
-    fn dispatch_write_prompt(&mut self, prompt: ApprovalPrompt, rule_id: Option<String>) {
+    fn dispatch_write_prompt(&mut self, mut prompt: ApprovalPrompt, rule_id: Option<String>) {
+        if let Err(error) = self.validate_prompt_write_lease(&prompt) {
+            self.release_prompt_write_lease(&mut prompt);
+            let _ = prompt.reply.send(Err(error));
+            return;
+        }
         let session_id = prompt.session_id.clone();
+        let write_lease = prompt.write_lease.take();
+        prompt.write_lease_owner = None;
         match prompt.kind {
             ApprovalKind::Write {
                 path,
@@ -4538,23 +4776,30 @@ impl App {
                 }));
             }
         }
+        if let Some(id) = write_lease {
+            self.agents.write_leases.release(id);
+        }
     }
 
     // ── Phase 5: native write normalization and bounded write grants ─────
 
-    /// Canonical in-workspace target for a native write: the final target
-    /// resolves through symlinks (an existing symlink escaping the workspace
-    /// normalizes outside and is ineligible), and a not-yet-existing target
-    /// resolves through its canonical parent so a symlinked parent cannot
-    /// smuggle the write outside.  Protected and secret-store targets never
-    /// qualify.
-    fn canonical_native_write_target(&self, path: &Path) -> Option<PathBuf> {
+    /// Canonical path identity shared by workspace validation, write leases,
+    /// and policy normalization.
+    fn canonical_workspace_write_target(&self, path: &Path) -> Option<PathBuf> {
         let candidate = if path.exists() {
             std::fs::canonicalize(path).ok()?
         } else {
             let parent = std::fs::canonicalize(path.parent()?).ok()?;
             parent.join(path.file_name()?)
         };
+        self.workspace_relative_segments(&candidate)?;
+        Some(candidate)
+    }
+
+    /// Canonical in-workspace target eligible for bounded native-write trust.
+    /// Protected and secret-store targets never qualify.
+    fn canonical_native_write_target(&self, path: &Path) -> Option<PathBuf> {
+        let candidate = self.canonical_workspace_write_target(path)?;
         let relative = self.workspace_relative_segments(&candidate)?;
         if is_protected_relative_path(&relative) || self.is_secret_store_path(&candidate) {
             return None;
@@ -4799,6 +5044,22 @@ impl App {
             None,
             reply,
         ));
+        receiver
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queue_session_write_approval_for_test(
+        &mut self,
+        agent_id: &str,
+        session_id: &str,
+        path: PathBuf,
+        content: &str,
+    ) -> oneshot::Receiver<ClientRequestResult> {
+        let request = WriteTextFileRequest::new(SessionId::new(session_id), path, content);
+        let (reply, receiver) = oneshot::channel();
+        let mut prompt = ApprovalPrompt::write(None, &request.session_id, &request, None, reply);
+        prompt.agent_id = Some(agent_id.to_string());
+        self.request_bridge_approval(prompt);
         receiver
     }
 

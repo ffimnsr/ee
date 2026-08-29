@@ -167,6 +167,7 @@ async fn spawn_host_with(
         handshake_timeout: TEST_TIMEOUT,
         request_timeout: TEST_TIMEOUT,
         ee_proxy_enabled: proxy_enabled,
+        ..AgentConnectionOptions::default()
     };
     let connection = AgentConnection::connect_with_transport(
         "fake".into(),

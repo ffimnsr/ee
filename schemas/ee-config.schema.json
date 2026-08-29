@@ -654,6 +654,15 @@
             "null"
           ]
         },
+        "max_concurrent_prompts": {
+          "description": "Per-connection prompt concurrency. Valid range: 1 through 32.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
         "servers": {
           "type": "object",
           "additionalProperties": {

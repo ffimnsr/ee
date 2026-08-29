@@ -638,7 +638,11 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         let state_label = match thread.state {
             ThreadUiState::Starting => "starting".into(),
             ThreadUiState::Ready => "ready".into(),
+            ThreadUiState::Queued => "queued".into(),
             ThreadUiState::Running => "running".into(),
+            ThreadUiState::AwaitingPermission => "awaiting permission".into(),
+            ThreadUiState::AwaitingElicitation => "awaiting elicitation".into(),
+            ThreadUiState::Cancelling => "cancelling".into(),
             ThreadUiState::PausedRecoverable => thread.pending_recovery.as_ref().map_or_else(
                 || std::borrow::Cow::Borrowed("paused (recoverable)"),
                 |pending| {
@@ -653,10 +657,42 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             .snapshot()
             .current_mode
             .map_or_else(|| String::from("unset"), |mode| mode.0.to_string());
+        let connection_active = app
+            .agents
+            .threads
+            .iter()
+            .filter(|candidate| {
+                candidate.agent_id == thread.agent_id
+                    && matches!(
+                        candidate.state,
+                        ThreadUiState::Running
+                            | ThreadUiState::AwaitingPermission
+                            | ThreadUiState::AwaitingElicitation
+                            | ThreadUiState::Cancelling
+                    )
+            })
+            .count();
+        let connection_queued = app
+            .agents
+            .threads
+            .iter()
+            .filter(|candidate| {
+                candidate.agent_id == thread.agent_id && candidate.state == ThreadUiState::Queued
+            })
+            .count();
+        let connection = if connection_queued == 0 {
+            format!("{connection_active}/{}", app.config.agents.max_concurrent_prompts)
+        } else {
+            format!(
+                "{connection_active}/{} +{connection_queued} queued",
+                app.config.agents.max_concurrent_prompts
+            )
+        };
         let footer_text = format!(
-            "{} [{}] | mode:{} | session:{} / {} | thoughts:{} | unread:{} | last:{}",
+            "{} [{}] | conn:{} | mode:{} | session:{} / {} | thoughts:{} | unread:{} | last:{}",
             thread.nick,
             state_label,
+            connection,
             current_mode,
             active_index + 1,
             app.agents.threads.len(),
@@ -668,7 +704,14 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
                 .map(crate::app::turn_metrics_label)
                 .unwrap_or_else(|| String::from("—")),
         );
-        let footer_style = if thread.state == ThreadUiState::Running {
+        let footer_style = if matches!(
+            thread.state,
+            ThreadUiState::Queued
+                | ThreadUiState::Running
+                | ThreadUiState::AwaitingPermission
+                | ThreadUiState::AwaitingElicitation
+                | ThreadUiState::Cancelling
+        ) {
             Style::default().fg(theme::FG_WARNING).bg(theme::BG_AGENT_STATUS)
         } else {
             Style::default().fg(theme::FG_AGENT_STATUS).bg(theme::BG_AGENT_STATUS)
@@ -709,7 +752,7 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             Span::styled("-!- ", theme_style(theme::FG_DIM)),
             Span::styled("no agent session", theme_style(theme::FG_WARNING)),
         ])];
-        if app.agents.pending_session.is_some() {
+        if !app.agents.pending_sessions.is_empty() {
             lines.push(Line::from(Span::styled(
                 "-!- starting session… type now; draft carries into session",
                 theme_style(theme::FG_DIM),
@@ -1091,7 +1134,7 @@ fn mode_selection_composer_lines(app: &App, _width: usize) -> Option<(Vec<Line<'
 /// prompt draft. Expanded approvals and mode selection use dedicated renderers instead.
 #[cfg(feature = "agents")]
 fn agents_composer_line(app: &App, thread: &crate::app::AgentThreadUi) -> Vec<Span<'static>> {
-    if let Some(permission) = &app.agents.permission {
+    if let Some(permission) = app.agents.permission() {
         let count = permission.options.len();
         let selected = permission.selected.min(count.saturating_sub(1));
         let option = permission
@@ -1109,7 +1152,7 @@ fn agents_composer_line(app: &App, thread: &crate::app::AgentThreadUi) -> Vec<Sp
             Span::styled(" (Enter confirm, ←/→ change, Esc back)", theme_style(theme::FG_DIM)),
         ];
     }
-    if let Some(elicitation) = &app.agents.elicitation {
+    if let Some(elicitation) = app.agents.elicitation() {
         let mut spans = vec![Span::styled("> ", Style::default().fg(theme::FG_KEY))];
         if let Some(url) = &elicitation.url {
             let choice = match elicitation.selected_choice {

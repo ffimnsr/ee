@@ -74,6 +74,8 @@ const AGENT_TERMINAL_OUTPUT_TAIL_BYTES: usize = 4 * 1024;
 const AGENT_TERMINAL_STOP_ALL_MAX: usize = 16;
 /// Safe mode explicitly negotiated when an agent omits session mode state.
 const DEFAULT_AGENT_MODE_ID: &str = "ask";
+/// Maximum concurrent create/load/resume operations from one pane.
+const AGENT_LIFECYCLE_CONCURRENCY: usize = 4;
 
 // ── Pane layout ──────────────────────────────────────────────────────────────
 
@@ -176,7 +178,11 @@ pub(crate) enum TranscriptItem {
 pub(crate) enum ThreadUiState {
     Starting,
     Ready,
+    Queued,
     Running,
+    AwaitingPermission,
+    AwaitingElicitation,
+    Cancelling,
     PausedRecoverable,
     Closed,
     Failed,
@@ -653,7 +659,7 @@ impl AgentThreadUi {
 /// A pending `session/request_permission` awaiting an explicit choice.
 #[derive(Debug)]
 pub(crate) struct PermissionPrompt {
-    pub(crate) thread_index: usize,
+    pub(crate) session_id: String,
     pub(crate) request_id: PermissionRequestId,
     #[allow(dead_code)]
     pub(crate) tool_title: String,
@@ -770,7 +776,8 @@ pub(crate) enum ElicitationFieldValue {
 /// A pending `elicitation/create` request awaiting user input.
 #[derive(Debug)]
 pub(crate) struct ElicitationPrompt {
-    pub(crate) thread_index: Option<usize>,
+    pub(crate) session_id: Option<String>,
+    pub(crate) agent_id: String,
     pub(crate) agent_label: String,
     pub(crate) message: String,
     pub(crate) url: Option<String>,
@@ -797,7 +804,8 @@ impl ElicitationPrompt {
 
     /// Builds a prompt from an ACP form-mode request.
     fn from_form(
-        thread_index: Option<usize>,
+        session_id: Option<String>,
+        agent_id: String,
         agent_label: String,
         message: String,
         schema: &ElicitationSchema,
@@ -832,7 +840,8 @@ impl ElicitationPrompt {
             unsupported.push(reason);
         }
         Self {
-            thread_index,
+            session_id,
+            agent_id,
             agent_label,
             message,
             url: None,
@@ -852,7 +861,8 @@ impl ElicitationPrompt {
 
     /// Builds a prompt from an ACP URL-mode request.
     fn from_url(
-        thread_index: Option<usize>,
+        session_id: Option<String>,
+        agent_id: String,
         agent_label: String,
         message: String,
         completion_id: String,
@@ -862,7 +872,8 @@ impl ElicitationPrompt {
         let url_host =
             Url::parse(&url).ok().and_then(|parsed| parsed.host_str().map(str::to_string));
         Self {
-            thread_index,
+            session_id,
+            agent_id,
             agent_label,
             message,
             url: Some(url),
@@ -1139,16 +1150,17 @@ async fn ensure_default_agent_mode(
 /// The whole loop runs inside `block_on` and awaits commands over a tokio
 /// channel, so the single-threaded runtime keeps driving spawned tasks
 /// (connection driver, permission responders, elicitation handler futures)
-/// even while no command is queued.  Commands execute sequentially so
-/// per-connection request ordering is preserved; every operation carries an
-/// internal timeout or cancellation path (host guarantees), so a hung agent
-/// can never wedge the worker.
+/// even while no command is queued. Lifecycle operations run in bounded tasks:
+/// connection drivers preserve protocol ordering while independent sessions
+/// can overlap without wedging later control commands.
 fn host_worker(
     runtime: tokio::runtime::Runtime,
     manager: AgentManager,
     mut rx: tokio_mpsc::UnboundedReceiver<HostCommand>,
 ) {
     runtime.block_on(async move {
+        let lifecycle_slots = Arc::new(tokio::sync::Semaphore::new(AGENT_LIFECYCLE_CONCURRENCY));
+        let mut lifecycle_tasks = tokio::task::JoinSet::new();
         while let Some(command) = rx.recv().await {
             match command {
                 HostCommand::NewSession {
@@ -1158,11 +1170,20 @@ fn host_worker(
                     ee_proxy_stdio_fallback,
                     reply,
                 } => {
-                    let result = manager
-                        .new_session(&agent_id, roots, mcp_servers, ee_proxy_stdio_fallback)
-                        .await;
-                    let result = ensure_default_agent_mode(result).await;
-                    let _ = reply.send(result.map_err(|error| error.to_string()));
+                    let manager = manager.clone();
+                    let lifecycle_slots = lifecycle_slots.clone();
+                    lifecycle_tasks.spawn(async move {
+                        let Ok(_slot) = lifecycle_slots.acquire_owned().await else {
+                            let _ =
+                                reply.send(Err(String::from("agent lifecycle scheduler stopped")));
+                            return;
+                        };
+                        let result = manager
+                            .new_session(&agent_id, roots, mcp_servers, ee_proxy_stdio_fallback)
+                            .await;
+                        let result = ensure_default_agent_mode(result).await;
+                        let _ = reply.send(result.map_err(|error| error.to_string()));
+                    });
                 }
                 HostCommand::ReconnectSession {
                     agent_id,
@@ -1172,38 +1193,47 @@ fn host_worker(
                     mcp_servers,
                     reply,
                 } => {
-                    // Prefer `session/load`: it replays the conversation into
-                    // the client.  Fall back to `session/resume` (no replay)
-                    // only when the agent does not advertise load.
-                    let session_id = ee_agent_protocol::SessionId::new(session_id);
-                    let result = match manager
-                        .load_session(
-                            &agent_id,
-                            session_id.clone(),
-                            cwd.clone(),
-                            additional_directories.clone(),
-                            mcp_servers.clone(),
-                        )
-                        .await
-                    {
-                        Ok(thread) => Ok(thread),
-                        Err(AgentError::CapabilityUnsupported { method })
-                            if method == "session/load" =>
+                    let manager = manager.clone();
+                    let lifecycle_slots = lifecycle_slots.clone();
+                    lifecycle_tasks.spawn(async move {
+                        let Ok(_slot) = lifecycle_slots.acquire_owned().await else {
+                            let _ =
+                                reply.send(Err(String::from("agent lifecycle scheduler stopped")));
+                            return;
+                        };
+                        // Prefer `session/load`: it replays the conversation into
+                        // the client. Fall back to `session/resume` only when load
+                        // is not advertised.
+                        let session_id = ee_agent_protocol::SessionId::new(session_id);
+                        let result = match manager
+                            .load_session(
+                                &agent_id,
+                                session_id.clone(),
+                                cwd.clone(),
+                                additional_directories.clone(),
+                                mcp_servers.clone(),
+                            )
+                            .await
                         {
-                            manager
-                                .resume_session(
-                                    &agent_id,
-                                    session_id,
-                                    cwd,
-                                    additional_directories,
-                                    mcp_servers,
-                                )
-                                .await
-                        }
-                        Err(error) => Err(error),
-                    };
-                    let result = ensure_default_agent_mode(result).await;
-                    let _ = reply.send(result.map_err(|error| error.to_string()));
+                            Ok(thread) => Ok(thread),
+                            Err(AgentError::CapabilityUnsupported { method })
+                                if method == "session/load" =>
+                            {
+                                manager
+                                    .resume_session(
+                                        &agent_id,
+                                        session_id,
+                                        cwd,
+                                        additional_directories,
+                                        mcp_servers,
+                                    )
+                                    .await
+                            }
+                            Err(error) => Err(error),
+                        };
+                        let result = ensure_default_agent_mode(result).await;
+                        let _ = reply.send(result.map_err(|error| error.to_string()));
+                    });
                 }
                 HostCommand::SendPrompt { thread, blocks } => {
                     // Detached: the turn streams through host events, and a
@@ -1235,6 +1265,7 @@ fn host_worker(
                 HostCommand::Shutdown => break,
             }
         }
+        lifecycle_tasks.shutdown().await;
         let _ = manager.shutdown().await;
     });
 }
@@ -1361,14 +1392,22 @@ impl Drop for AgentHostBridge {
 
 // ── Pane state ───────────────────────────────────────────────────────────────
 
-/// A session creation in flight (the reply is polled by [`App::pump_agents`]).
+type SessionLifecycleResult = Result<Result<AgentThread, String>, String>;
+
+/// Stable identity for one create/load/resume operation.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SessionLifecycleKey {
+    pub(crate) agent_id: String,
+    /// Known up front for reconnects; `None` for fresh `session/new`.
+    pub(crate) session_id: Option<String>,
+    pub(crate) operation_id: u64,
+}
+
+/// A session lifecycle operation in flight (polled by [`App::pump_agents`]).
 #[derive(Debug)]
 pub(crate) struct PendingSession {
-    pub(crate) agent_id: String,
-    /// Known up front for reconnects; `None` for fresh `session/new` (the id
-    /// arrives with the reply).
-    pub(crate) session_id: Option<String>,
     pub(crate) reply: std_mpsc::Receiver<Result<AgentThread, String>>,
+    fork: Option<PendingFork>,
 }
 
 /// One fresh ACP session seeded from redacted visible parent messages.
@@ -1445,6 +1484,8 @@ impl PersistedAgentWorkspaceDocument {
 struct WorkspaceRestore {
     active_session_id: Option<String>,
     sessions: VecDeque<PersistedAgentSession>,
+    order: BTreeMap<String, usize>,
+    in_flight: BTreeSet<String>,
     failed: bool,
 }
 
@@ -1458,18 +1499,22 @@ pub(crate) struct AgentPaneState {
     pub(crate) next_thread_index: usize,
     /// Whether streamed `agent_thought_chunk` messages are shown in transcript.
     pub(crate) show_thoughts: bool,
-    pub(crate) pending_session: Option<PendingSession>,
-    /// Fresh child session awaiting redacted local transcript seed dispatch.
-    pending_fork: Option<PendingFork>,
-    /// Workspace threads waiting for sequential ACP session restoration.
+    /// In-flight create/load/resume operations keyed by connection, session,
+    /// and stable local operation id.
+    pub(crate) pending_sessions: BTreeMap<SessionLifecycleKey, PendingSession>,
+    next_lifecycle_operation_id: u64,
+    /// Workspace threads waiting for bounded parallel ACP session restoration.
     workspace_restore: Option<WorkspaceRestore>,
     /// Composer text typed before a session exists or while session startup fails.
     pub(crate) pending_draft: String,
     /// External editor request consumed only by terminal-owning main loop.
     pending_external_editor: Option<ExternalEditorRequest>,
-    pub(crate) pending_cancel: Option<std_mpsc::Receiver<Result<(), String>>>,
+    /// In-flight cancellation replies, keyed by originating session id.
+    pub(crate) pending_cancels: BTreeMap<String, std_mpsc::Receiver<Result<(), String>>>,
+
     pub(crate) pending_thread_action: Option<std_mpsc::Receiver<Result<String, String>>>,
-    pub(crate) permission: Option<PermissionPrompt>,
+    /// Pending permission requests, FIFO within each session.
+    pub(crate) permissions: BTreeMap<String, VecDeque<PermissionPrompt>>,
     pub(crate) mode_selection: Option<ModeSelectionPrompt>,
     pub(crate) approval_mode_confirmation: Option<ApprovalModeConfirmation>,
     pub(crate) session_deletion_confirmation: Option<SessionDeletionConfirmation>,
@@ -1477,10 +1522,15 @@ pub(crate) struct AgentPaneState {
     pub(crate) terminal_stop_confirmation: Option<TerminalStopConfirmation>,
     /// Explicit user-approved extra roots. Session-local and never persisted.
     pub(crate) additional_workspace_roots: BTreeSet<PathBuf>,
-    pub(crate) elicitation: Option<ElicitationPrompt>,
+    /// Pending elicitation requests, FIFO within each session. Empty-string key
+    /// represents connection-scoped requests without ACP session identity.
+    pub(crate) elicitations: BTreeMap<String, VecDeque<ElicitationPrompt>>,
     /// Bridge approval queue (file writes, terminal creates); the front one
     /// is shown and answered first.
     pub(crate) approvals: VecDeque<super::agent_bridge::ApprovalPrompt>,
+    /// Canonical write scopes held from pre-approval until mutation resolves.
+    pub(crate) write_leases: super::write_leases::WriteLeaseCoordinator,
+    pub(crate) next_write_turn_id: u64,
     pub(crate) error: Option<String>,
     pub(crate) previous_editor_mode: Option<Mode>,
     pub(crate) host: Option<AgentHostBridge>,
@@ -1550,22 +1600,25 @@ impl Default for AgentPaneState {
             active_thread: None,
             next_thread_index: 0,
             show_thoughts: true,
-            pending_session: None,
-            pending_fork: None,
+            pending_sessions: BTreeMap::new(),
+            next_lifecycle_operation_id: 0,
             workspace_restore: None,
             pending_draft: String::new(),
             pending_external_editor: None,
-            pending_cancel: None,
+            pending_cancels: BTreeMap::new(),
+
             pending_thread_action: None,
-            permission: None,
+            permissions: BTreeMap::new(),
             mode_selection: None,
             approval_mode_confirmation: None,
             session_deletion_confirmation: None,
             additional_directory_confirmation: None,
             terminal_stop_confirmation: None,
             additional_workspace_roots: BTreeSet::new(),
-            elicitation: None,
+            elicitations: BTreeMap::new(),
             approvals: VecDeque::new(),
+            write_leases: super::write_leases::WriteLeaseCoordinator::default(),
+            next_write_turn_id: 0,
             error: None,
             previous_editor_mode: None,
             host: None,
@@ -1672,6 +1725,12 @@ impl App {
     fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::ConnectionStateChanged { agent_id, state } => {
+                if matches!(
+                    state,
+                    AgentConnectionState::Failed(_) | AgentConnectionState::Closed(_)
+                ) {
+                    self.agents.write_leases.release_connection(&agent_id);
+                }
                 for thread in &mut self.agents.threads {
                     if thread.agent_id != agent_id {
                         continue;
@@ -1734,6 +1793,7 @@ impl App {
                     self.agents.approval_mode_confirmation = None;
                 }
                 self.agents.usage_ledger.invalidate_session(session_id.0.as_ref());
+                self.agents.clear_session_interactions(session_id.0.as_ref());
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     let text = match reason {
                         ThreadCloseReason::HostClosed => String::from("session closed"),
@@ -1756,6 +1816,20 @@ impl App {
                     self.notify_unread(index);
                 }
             }
+            AgentEvent::TurnQueued { session_id, position } => {
+                if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
+                    self.agents.threads[index].state = ThreadUiState::Queued;
+                    self.agents.threads[index]
+                        .push_system(format!("provider prompt queued (position {position})"));
+                    self.notify_unread(index);
+                }
+            }
+            AgentEvent::TurnDispatched { session_id } => {
+                if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
+                    self.agents.threads[index].state = ThreadUiState::Running;
+                }
+            }
+
             AgentEvent::TurnEvidenceUpdated { session_id, summary } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     let thread = &mut self.agents.threads[index];
@@ -1823,7 +1897,7 @@ impl App {
             }
             AgentEvent::TurnFailed { session_id, error, metrics } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
-                    self.agents.threads[index].state = ThreadUiState::Ready;
+                    self.agents.threads[index].state = ThreadUiState::Failed;
                     self.agents.threads[index].optimistic_message = None;
                     self.agents.threads[index].turn_started_at = None;
                     self.agents.threads[index].record_turn_metrics(metrics);
@@ -1874,14 +1948,15 @@ impl App {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
                     self.agents.threads[index].push_system(notice);
                 }
-                if let Some(prompt) = &self.agents.permission
-                    && prompt.request_id == request_id
-                {
-                    self.agents.permission = None;
-                }
+                self.agents.remove_permission(session_id.0.as_ref(), request_id);
+                self.refresh_thread_runtime_state(session_id.0.as_ref());
             }
-            AgentEvent::ElicitationCompleted { elicitation_id } => {
-                self.handle_elicitation_completed(elicitation_id.0.as_ref());
+            AgentEvent::ElicitationCompleted { agent_id, session_id, elicitation_id } => {
+                self.handle_elicitation_completed(
+                    &agent_id,
+                    session_id.as_ref().map(|id| id.0.as_ref()),
+                    elicitation_id.0.as_ref(),
+                );
             }
             AgentEvent::ClientRequestDispatched { session_id, method } => {
                 let notice = format!("client request dispatched: {method}");
@@ -2057,13 +2132,16 @@ impl App {
             options: titles.clone(),
             at: SystemTime::now(),
         });
-        self.agents.permission = Some(PermissionPrompt {
-            thread_index,
-            request_id: request.request_id,
-            tool_title,
-            options,
-            selected: 0,
-        });
+        self.agents.permissions.entry(session_id.0.to_string()).or_default().push_back(
+            PermissionPrompt {
+                session_id: session_id.0.to_string(),
+                request_id: request.request_id,
+                tool_title,
+                options,
+                selected: 0,
+            },
+        );
+        self.agents.threads[thread_index].state = ThreadUiState::AwaitingPermission;
         self.notify_unread(thread_index);
     }
 
@@ -2074,23 +2152,30 @@ impl App {
         request: CreateElicitationRequest,
         reply: tokio::sync::oneshot::Sender<ClientRequestResult>,
     ) {
-        let thread_index =
-            session_id.as_ref().and_then(|id| self.agents.thread_index(id.0.as_ref()));
-        let agent_label = thread_index
-            .and_then(|index| {
-                self.agents.threads.get(index).map(|thread| thread.display_name.clone())
+        let session_id = session_id.map(|id| id.0.to_string());
+        let thread_index = session_id.as_deref().and_then(|id| self.agents.thread_index(id));
+        let (agent_id, agent_label) = thread_index
+            .and_then(|index| self.agents.threads.get(index))
+            .map(|thread| (thread.agent_id.clone(), thread.display_name.clone()))
+            .or_else(|| {
+                self.agents
+                    .active_thread_index()
+                    .and_then(|index| self.agents.threads.get(index))
+                    .map(|thread| (thread.agent_id.clone(), thread.display_name.clone()))
             })
-            .unwrap_or_else(|| String::from("agent"));
+            .unwrap_or_else(|| (String::new(), String::from("agent")));
         let prompt = match &request.mode {
             ElicitationMode::Form(mode) => ElicitationPrompt::from_form(
-                thread_index,
+                session_id.clone(),
+                agent_id.clone(),
                 agent_label.clone(),
                 request.message.clone(),
                 &mode.requested_schema,
                 reply,
             ),
             ElicitationMode::Url(mode) => ElicitationPrompt::from_url(
-                thread_index,
+                session_id.clone(),
+                agent_id.clone(),
                 agent_label.clone(),
                 request.message.clone(),
                 mode.elicitation_id.0.to_string(),
@@ -2122,6 +2207,7 @@ impl App {
                 url_host,
                 at: SystemTime::now(),
             });
+            self.agents.threads[thread_index].state = ThreadUiState::AwaitingElicitation;
             self.notify_unread(thread_index);
         }
         if let Some(reason) = &prompt.unsupported_reason {
@@ -2130,13 +2216,16 @@ impl App {
                 self.agents.threads[thread_index].push_system(notice);
             }
         }
-        self.agents.elicitation = Some(prompt);
+        let key = session_id
+            .clone()
+            .unwrap_or_else(|| AgentPaneState::CONNECTION_SCOPED_INTERACTION_KEY.to_string());
+        self.agents.elicitations.entry(key).or_default().push_back(prompt);
     }
 
-    fn push_elicitation_notice(&mut self, thread_index: Option<usize>, text: String) {
-        if let Some(thread_index) = thread_index {
-            if let Some(thread) = self.agents.threads.get_mut(thread_index) {
-                thread.push_system(text);
+    fn push_elicitation_notice(&mut self, session_id: Option<&str>, text: String) {
+        if let Some(session_id) = session_id {
+            if let Some(thread_index) = self.agents.thread_index(session_id) {
+                self.agents.threads[thread_index].push_system(text);
                 self.notify_unread(thread_index);
             }
             return;
@@ -2147,31 +2236,44 @@ impl App {
     }
 
     /// Handles agent `elicitation/complete` notifications.
-    fn handle_elicitation_completed(&mut self, elicitation_id: &str) {
-        let matches_prompt = self
-            .agents
-            .elicitation
-            .as_ref()
-            .is_some_and(|prompt| prompt.completion_id.as_deref() == Some(elicitation_id));
-        if !matches_prompt {
-            let thread_index =
-                self.agents.elicitation.as_ref().and_then(|prompt| prompt.thread_index);
+    fn handle_elicitation_completed(
+        &mut self,
+        agent_id: &str,
+        session_id: Option<&str>,
+        elicitation_id: &str,
+    ) {
+        let key =
+            session_id.unwrap_or(AgentPaneState::CONNECTION_SCOPED_INTERACTION_KEY).to_string();
+        let prompt = self.agents.elicitations.get_mut(&key).and_then(|queue| {
+            let position = queue.iter().position(|prompt| {
+                prompt.agent_id == agent_id
+                    && prompt.session_id.as_deref() == session_id
+                    && prompt.completion_id.as_deref() == Some(elicitation_id)
+            })?;
+            queue.remove(position)
+        });
+        let Some(prompt) = prompt else {
             self.push_elicitation_notice(
-                thread_index,
+                session_id,
                 format!("stale elicitation completion ignored: {elicitation_id}"),
             );
             return;
+        };
+        if self.agents.elicitations.get(&key).is_some_and(VecDeque::is_empty) {
+            self.agents.elicitations.remove(&key);
+        }
+        if let Some(session_id) = session_id {
+            self.refresh_thread_runtime_state(session_id);
         }
 
-        let prompt = self.agents.elicitation.take().expect("elicitation prompt matched");
-        let thread_index = prompt.thread_index;
+        let prompt_session_id = prompt.session_id.clone();
         let _ = prompt.reply.send(Ok(ClientRequestResponse::CreateElicitation(
             CreateElicitationResponse::new(ElicitationAction::Accept(
                 ElicitationAcceptAction::new(),
             )),
         )));
         self.push_elicitation_notice(
-            thread_index,
+            prompt_session_id.as_deref(),
             format!("elicitation completed: {elicitation_id}"),
         );
     }
@@ -2309,13 +2411,7 @@ impl App {
             session_title,
             session_updated_at,
         });
-        let restored_active = self
-            .agents
-            .workspace_restore
-            .as_ref()
-            .and_then(|restore| restore.active_session_id.as_deref())
-            == Some(session_id.as_str());
-        if self.agents.workspace_restore.is_none() || restored_active {
+        if self.agents.workspace_restore.is_none() {
             self.agents.active_thread = Some(self.agents.threads.len() - 1);
         }
         self.agents.error = None;
@@ -2368,17 +2464,50 @@ impl App {
         );
     }
 
-    /// Polls a pending new-session reply.
+    /// Polls every pending lifecycle reply without serializing unrelated sessions.
     fn pump_session_reply(&mut self) {
-        let result = match &self.agents.pending_session {
-            Some(pending) => pending.reply.try_recv(),
-            None => return,
-        };
+        let completed: Vec<(SessionLifecycleKey, SessionLifecycleResult)> = self
+            .agents
+            .pending_sessions
+            .iter()
+            .filter_map(|(key, pending)| match pending.reply.try_recv() {
+                Ok(result) => Some((key.clone(), Ok(result))),
+                Err(std_mpsc::TryRecvError::Empty) => None,
+                Err(std_mpsc::TryRecvError::Disconnected) => {
+                    Some((key.clone(), Err(String::from("agent host stopped"))))
+                }
+            })
+            .collect();
+        for (key, result) in completed {
+            let pending = self
+                .agents
+                .pending_sessions
+                .remove(&key)
+                .expect("completed lifecycle operation present");
+            self.finish_session_reply(key, pending, result);
+        }
+        self.start_next_workspace_restore();
+    }
+
+    fn finish_session_reply(
+        &mut self,
+        key: SessionLifecycleKey,
+        mut pending: PendingSession,
+        result: Result<Result<AgentThread, String>, String>,
+    ) {
+        let session_id = key.session_id.clone();
+        let agent_id = key.agent_id.clone();
         match result {
             Ok(Ok(thread)) => {
-                let pending = self.agents.pending_session.take().expect("pending session present");
-                let session_id = pending.session_id;
-                let agent_id = pending.agent_id;
+                let returned_session_id = thread.session_id().0.to_string();
+                if session_id.is_none() && self.agents.thread_index(&returned_session_id).is_some()
+                {
+                    self.record_session_lifecycle_failure(
+                        &key,
+                        format!("duplicate session id returned: {returned_session_id}"),
+                    );
+                    return;
+                }
                 if let Some(index) = session_id.as_ref().and_then(|id| self.agents.thread_index(id))
                 {
                     // Same-process reconnect: a thread for this session
@@ -2388,19 +2517,13 @@ impl App {
                     self.agents.threads[index].state = ThreadUiState::Ready;
                     self.agents.threads[index].push_system(String::from("session reconnected"));
                     self.sync_thread_snapshot_fields(index);
-                    let restored_active = self
-                        .agents
-                        .workspace_restore
-                        .as_ref()
-                        .and_then(|restore| restore.active_session_id.as_deref())
-                        == session_id.as_deref();
-                    if self.agents.workspace_restore.is_none() || restored_active {
+                    if self.agents.workspace_restore.is_none() {
                         self.agents.active_thread = Some(index);
                     }
                     self.persist_agent_workspace();
                 } else {
                     self.register_session_thread(&agent_id, thread);
-                    if let Some(fork) = self.agents.pending_fork.take() {
+                    if let Some(fork) = pending.fork.take() {
                         let child = self.agents.threads.len() - 1;
                         self.agents.threads[child].fork_parent_session_id =
                             Some(fork.parent_session_id.clone());
@@ -2420,14 +2543,14 @@ impl App {
                         self.persist_agent_workspace();
                     }
                 }
-                if let Some(session_id) = session_id {
+                if let Some(ref session_id) = session_id {
                     // Reconnect: apply the conversation replay updates that
                     // streamed while the thread was not registered yet, then
                     // restore the persisted last prompt for the resend path.
                     if let Some(index) = self
                         .agents
-                        .thread_index(&session_id)
-                        .zip(self.agents.pending_replay.remove(&session_id))
+                        .thread_index(session_id)
+                        .zip(self.agents.pending_replay.remove(session_id))
                     {
                         if index.1.iter().any(session_update_replays_transcript) {
                             self.agents.threads[index.0].clear_transcript_state();
@@ -2441,68 +2564,94 @@ impl App {
                             workspace
                                 .sessions
                                 .into_iter()
-                                .find(|record| record.session_id == session_id)
+                                .find(|record| record.session_id == *session_id)
                                 .and_then(|record| record.last_prompt)
                         })
-                        && let Some(index) = self.agents.thread_index(&session_id)
+                        && let Some(index) = self.agents.thread_index(session_id)
                     {
                         self.agents.threads[index].last_prompt =
                             Some(vec![ContentBlock::Text(TextContent::new(text))]);
                     }
                 }
             }
-            Ok(Err(message)) => {
-                self.agents.pending_fork = None;
-                if let Some(restore) = self.agents.workspace_restore.as_mut() {
-                    restore.failed = true;
-                }
-                let pending = self.agents.pending_session.take().expect("pending session present");
-                if let Some(session_id) = pending.session_id {
-                    self.agents.pending_replay.remove(&session_id);
-                }
-                self.agents.error = Some(message.clone());
-                let notice = format!("session start failed: {message}");
-                if let Some(active) = self.agents.active_thread_index() {
-                    self.agents.threads[active].push_system(notice);
-                }
-                self.backend.status_message = Some(message);
-            }
-            Err(std_mpsc::TryRecvError::Empty) => {}
-            Err(std_mpsc::TryRecvError::Disconnected) => {
-                self.agents.pending_session = None;
-                self.agents.pending_fork = None;
-                if let Some(restore) = self.agents.workspace_restore.as_mut() {
-                    restore.failed = true;
-                }
-                self.agents.pending_replay.clear();
-                self.agents.error = Some(String::from("agent host stopped"));
-            }
+            Ok(Err(message)) | Err(message) => self.record_session_lifecycle_failure(&key, message),
         }
-        if self.agents.pending_session.is_none() && self.agents.workspace_restore.is_some() {
-            self.start_next_workspace_restore();
+        if let Some(session_id) = session_id
+            && let Some(restore) = self.agents.workspace_restore.as_mut()
+        {
+            restore.in_flight.remove(&session_id);
         }
     }
 
-    /// Polls a pending `:agents_stop` reply.
-    fn pump_cancel_reply(&mut self) {
-        let result = match &self.agents.pending_cancel {
-            Some(reply) => reply.try_recv(),
-            None => return,
-        };
-        match result {
-            Ok(Ok(())) => {
-                self.agents.pending_cancel = None;
-                self.backend.status_message = Some(String::from("turn cancelled"));
-            }
-            Ok(Err(message)) => {
-                self.agents.pending_cancel = None;
-                self.backend.status_message = Some(message);
-            }
-            Err(std_mpsc::TryRecvError::Empty) => {}
-            Err(std_mpsc::TryRecvError::Disconnected) => {
-                self.agents.pending_cancel = None;
+    fn record_session_lifecycle_failure(&mut self, key: &SessionLifecycleKey, message: String) {
+        if let Some(session_id) = &key.session_id {
+            self.agents.pending_replay.remove(session_id);
+            if let Some(restore) = self.agents.workspace_restore.as_mut() {
+                restore.in_flight.remove(session_id);
+                restore.failed = true;
             }
         }
+        let attributed = match &key.session_id {
+            Some(session_id) => format!("session {session_id} lifecycle failed: {message}"),
+            None => format!("agent {} session start failed: {message}", key.agent_id),
+        };
+        self.agents.error = Some(attributed.clone());
+        self.backend.status_message = Some(attributed);
+    }
+
+    /// Polls all pending cancellation replies without letting one session
+    /// replace or delay another session's result.
+    fn pump_cancel_reply(&mut self) {
+        let completed: Vec<(String, Result<(), String>)> = self
+            .agents
+            .pending_cancels
+            .iter()
+            .filter_map(|(session_id, reply)| match reply.try_recv() {
+                Ok(result) => Some((session_id.clone(), result)),
+                Err(std_mpsc::TryRecvError::Empty) => None,
+                Err(std_mpsc::TryRecvError::Disconnected) => Some((
+                    session_id.clone(),
+                    Err(String::from("agent cancellation channel closed")),
+                )),
+            })
+            .collect();
+        for (session_id, result) in completed {
+            self.agents.pending_cancels.remove(&session_id);
+            let message = match result {
+                Ok(()) => String::from("turn cancelled"),
+                Err(message) => message,
+            };
+            if let Some(index) = self.agents.thread_index(&session_id) {
+                self.refresh_thread_runtime_state(&session_id);
+                self.agents.threads[index].push_system(message.clone());
+                if self.agents.active_thread_index() == Some(index) {
+                    self.backend.status_message = Some(message);
+                }
+            }
+        }
+    }
+
+    fn refresh_thread_runtime_state(&mut self, session_id: &str) {
+        let Some(index) = self.agents.thread_index(session_id) else {
+            return;
+        };
+        if matches!(
+            self.agents.threads[index].state,
+            ThreadUiState::Closed | ThreadUiState::Failed | ThreadUiState::PausedRecoverable
+        ) {
+            return;
+        }
+        self.agents.threads[index].state = if self.agents.pending_cancels.contains_key(session_id) {
+            ThreadUiState::Cancelling
+        } else if self.agents.permissions.get(session_id).is_some_and(|queue| !queue.is_empty()) {
+            ThreadUiState::AwaitingPermission
+        } else if self.agents.elicitations.get(session_id).is_some_and(|queue| !queue.is_empty()) {
+            ThreadUiState::AwaitingElicitation
+        } else if self.agents.threads[index].host.is_turn_running() {
+            ThreadUiState::Running
+        } else {
+            ThreadUiState::Ready
+        };
     }
 
     fn pump_thread_action_reply(&mut self) {
@@ -2528,6 +2677,18 @@ impl App {
 }
 
 impl AgentPaneState {
+    const CONNECTION_SCOPED_INTERACTION_KEY: &'static str = "";
+
+    fn next_lifecycle_key(
+        &mut self,
+        agent_id: String,
+        session_id: Option<String>,
+    ) -> SessionLifecycleKey {
+        let operation_id = self.next_lifecycle_operation_id;
+        self.next_lifecycle_operation_id = self.next_lifecycle_operation_id.wrapping_add(1);
+        SessionLifecycleKey { agent_id, session_id, operation_id }
+    }
+
     /// Index of the active thread, if any.
     pub(crate) fn active_thread_index(&self) -> Option<usize> {
         self.active_thread
@@ -2535,6 +2696,81 @@ impl AgentPaneState {
 
     pub(crate) fn thread_index(&self, session_id: &str) -> Option<usize> {
         self.threads.iter().position(|thread| thread.session_id == session_id)
+    }
+
+    fn active_session_id(&self) -> Option<&str> {
+        self.active_thread_index()
+            .and_then(|index| self.threads.get(index))
+            .map(|thread| thread.session_id.as_str())
+    }
+
+    pub(crate) fn permission(&self) -> Option<&PermissionPrompt> {
+        self.active_session_id()
+            .and_then(|session_id| self.permissions.get(session_id))
+            .and_then(VecDeque::front)
+    }
+
+    fn permission_mut(&mut self) -> Option<&mut PermissionPrompt> {
+        let session_id = self.active_session_id()?.to_string();
+        self.permissions.get_mut(&session_id).and_then(VecDeque::front_mut)
+    }
+
+    fn take_permission(&mut self) -> Option<PermissionPrompt> {
+        let session_id = self.active_session_id()?.to_string();
+        let prompt = self.permissions.get_mut(&session_id)?.pop_front();
+        if self.permissions.get(&session_id).is_some_and(VecDeque::is_empty) {
+            self.permissions.remove(&session_id);
+        }
+        prompt
+    }
+
+    fn remove_permission(&mut self, session_id: &str, request_id: PermissionRequestId) {
+        let Some(queue) = self.permissions.get_mut(session_id) else {
+            return;
+        };
+        queue.retain(|prompt| prompt.request_id != request_id);
+        if queue.is_empty() {
+            self.permissions.remove(session_id);
+        }
+    }
+
+    fn visible_elicitation_key(&self) -> Option<String> {
+        if let Some(session_id) = self.active_session_id()
+            && self.elicitations.get(session_id).is_some_and(|queue| !queue.is_empty())
+        {
+            return Some(session_id.to_string());
+        }
+        self.elicitations
+            .get(Self::CONNECTION_SCOPED_INTERACTION_KEY)
+            .filter(|queue| !queue.is_empty())
+            .map(|_| Self::CONNECTION_SCOPED_INTERACTION_KEY.to_string())
+    }
+
+    pub(crate) fn elicitation(&self) -> Option<&ElicitationPrompt> {
+        let key = self.visible_elicitation_key()?;
+        self.elicitations.get(&key).and_then(VecDeque::front)
+    }
+
+    fn elicitation_mut(&mut self) -> Option<&mut ElicitationPrompt> {
+        let key = self.visible_elicitation_key()?;
+        self.elicitations.get_mut(&key).and_then(VecDeque::front_mut)
+    }
+
+    fn take_elicitation(&mut self) -> Option<ElicitationPrompt> {
+        let key = self.visible_elicitation_key()?;
+        let prompt = self.elicitations.get_mut(&key)?.pop_front();
+        if self.elicitations.get(&key).is_some_and(VecDeque::is_empty) {
+            self.elicitations.remove(&key);
+        }
+        prompt
+    }
+
+    fn clear_session_interactions(&mut self, session_id: &str) {
+        self.permissions.remove(session_id);
+        self.elicitations.remove(session_id);
+        self.pending_cancels.remove(session_id);
+        self.approvals.retain(|prompt| prompt.session_id != session_id);
+        self.write_leases.release_session(session_id);
     }
 }
 
@@ -3016,7 +3252,11 @@ fn thread_state_label(state: ThreadUiState) -> &'static str {
     match state {
         ThreadUiState::Starting => "starting",
         ThreadUiState::Ready => "ready",
+        ThreadUiState::Queued => "queued",
         ThreadUiState::Running => "running",
+        ThreadUiState::AwaitingPermission => "awaiting permission",
+        ThreadUiState::AwaitingElicitation => "awaiting elicitation",
+        ThreadUiState::Cancelling => "cancelling",
         ThreadUiState::PausedRecoverable => "paused",
         ThreadUiState::Closed => "closed",
         ThreadUiState::Failed => "failed",
@@ -3212,11 +3452,11 @@ impl App {
         // MCP health/prompt browsing start lazily when the pane opens.
         self.start_mcp_servers();
         let restoring = self.agents.active_thread.is_none()
-            && self.agents.pending_session.is_none()
+            && self.agents.pending_sessions.is_empty()
             && self.agents.workspace_restore.is_none()
             && self.start_workspace_restore();
         if self.agents.active_thread.is_none()
-            && self.agents.pending_session.is_none()
+            && self.agents.pending_sessions.is_empty()
             && self.agents.workspace_restore.is_none()
         {
             let Some(agent_id) = self.default_agent_id() else {
@@ -3272,8 +3512,14 @@ impl App {
             self.backend.status_message = Some(String::from("no running turn to stop"));
             return;
         }
+        let session_id = self.agents.threads[active].session_id.clone();
+        if self.agents.pending_cancels.contains_key(&session_id) {
+            self.backend.status_message = Some(String::from("cancellation already pending"));
+            return;
+        }
         let reply = host.cancel(thread);
-        self.agents.pending_cancel = Some(reply);
+        self.agents.threads[active].state = ThreadUiState::Cancelling;
+        self.agents.pending_cancels.insert(session_id, reply);
         self.backend.status_message = Some(String::from("cancelling turn…"));
     }
 
@@ -3469,7 +3715,11 @@ impl App {
                 let thread = self.agents.threads[active].host.clone();
                 if thread.is_turn_running() {
                     let host = self.agents.host.as_ref().expect("host present");
-                    self.agents.pending_cancel = Some(host.cancel(thread));
+                    let session_id = self.agents.threads[active].session_id.clone();
+                    self.agents
+                        .pending_cancels
+                        .entry(session_id)
+                        .or_insert_with(|| host.cancel(thread));
                     self.backend.status_message = Some(format!(
                         "steering active turn; cancelling now, steer message dispatches next ({queued_count} queued)"
                     ));
@@ -3740,10 +3990,6 @@ impl App {
             self.backend.status_message = Some(self.agents_status_message());
             return;
         }
-        if self.agents.pending_session.is_some() {
-            self.backend.status_message = Some(String::from("agent session is already starting"));
-            return;
-        }
         if self.agents.layout == AgentPaneLayout::Closed {
             self.agents.layout = AgentPaneLayout::Full;
         }
@@ -3878,15 +4124,26 @@ impl App {
     }
 
     fn agents_thread_is_idle(&self, index: usize) -> bool {
-        self.agents.threads.get(index).is_some_and(|thread| {
-            thread.state == ThreadUiState::Ready
-                && !thread.host.is_turn_running()
-                && thread.pending_recovery.is_none()
-        }) && self.agents.permission.is_none()
-            && self.agents.mode_selection.is_none()
-            && self.agents.approval_mode_confirmation.is_none()
-            && self.agents.session_deletion_confirmation.is_none()
-            && self.agents.elicitation.is_none()
+        let Some(thread) = self.agents.threads.get(index) else {
+            return false;
+        };
+        thread.state == ThreadUiState::Ready
+            && !thread.host.is_turn_running()
+            && thread.pending_recovery.is_none()
+            && !self.agents.permissions.contains_key(&thread.session_id)
+            && !self.agents.elicitations.contains_key(&thread.session_id)
+            && !self.agents.pending_cancels.contains_key(&thread.session_id)
+            && self.agents.mode_selection.as_ref().is_none_or(|prompt| prompt.thread_index != index)
+            && self
+                .agents
+                .approval_mode_confirmation
+                .as_ref()
+                .is_none_or(|confirmation| confirmation.session_id != thread.session_id)
+            && self
+                .agents
+                .session_deletion_confirmation
+                .as_ref()
+                .is_none_or(|confirmation| confirmation.session_id != thread.session_id)
             && self.agents.approvals.is_empty()
     }
 
@@ -3897,7 +4154,9 @@ impl App {
             self.backend.status_message = Some(String::from("no active agent session to fork"));
             return;
         };
-        if !self.agents_thread_is_idle(active) || self.agents.pending_session.is_some() {
+        if !self.agents_thread_is_idle(active)
+            || self.agents.pending_sessions.values().any(|pending| pending.fork.is_some())
+        {
             self.backend.status_message = Some(String::from(
                 "session must be idle before fork; stop and resolve pending work first",
             ));
@@ -3909,8 +4168,10 @@ impl App {
         let seed = fork_seed(parent, &self.agents_secret_values());
         self.ensure_agents_host();
         self.start_mcp_servers();
-        self.start_session(agent_id);
-        self.agents.pending_fork = Some(PendingFork { parent_session_id, seed, activate_child });
+        self.start_session_with_fork(
+            agent_id,
+            Some(PendingFork { parent_session_id, seed, activate_child }),
+        );
         self.backend.status_message = Some(String::from(if activate_child {
             "starting seeded branch session…"
         } else {
@@ -4044,6 +4305,7 @@ impl App {
                 Some(String::from("session changed before delete confirmation"));
             return;
         }
+        self.agents.clear_session_interactions(&confirmation.session_id);
         let removed = self.agents.threads.remove(confirmation.thread_index);
         // Service cache is pane-owned today; clear all entries when any session
         // closes rather than retain cross-session external content.
@@ -4128,10 +4390,12 @@ impl App {
         // 2. Resolve pending approvals and elicitations as cancelled:
         //    dropping the reply senders makes the host resolve them.
         self.agents.approvals.clear();
+        self.agents.write_leases.clear();
         self.agents.mode_selection = None;
         self.agents.approval_mode_confirmation = None;
-        self.agents.elicitation = None;
-        self.agents.permission = None;
+        self.agents.elicitations.clear();
+        self.agents.permissions.clear();
+        self.agents.pending_cancels.clear();
         // 3. Kill agent-owned terminals.
         self.agents.terminals.kill_all();
         // 4. Stop MCP servers and the proxy listener.
@@ -4144,7 +4408,8 @@ impl App {
         self.agents.archived_threads.clear();
         self.agents.web_context_service = None;
         self.agents.web_context_config_fingerprint = None;
-        self.agents.pending_fork = None;
+        self.agents.pending_sessions.clear();
+        self.agents.workspace_restore = None;
         self.agents.approval_policy = super::agent_bridge::ApprovalPolicy::default();
         self.agents.approval_modes.clear();
         self.agents.usage_ledger = crate::policy::UsageLedger::default();
@@ -4165,7 +4430,11 @@ impl App {
                 let state = match thread.state {
                     ThreadUiState::Starting => "starting",
                     ThreadUiState::Ready => "ready",
+                    ThreadUiState::Queued => "queued",
                     ThreadUiState::Running => "running",
+                    ThreadUiState::AwaitingPermission => "awaiting permission",
+                    ThreadUiState::AwaitingElicitation => "awaiting elicitation",
+                    ThreadUiState::Cancelling => "cancelling",
                     ThreadUiState::PausedRecoverable => "paused (recoverable)",
                     ThreadUiState::Closed => "closed",
                     ThreadUiState::Failed => "failed",
@@ -4302,7 +4571,11 @@ impl App {
                 self.agents.bridge_tx.clone(),
                 self.agents.terminals.clone(),
             ));
-        let manager = AgentManager::new(config, handler, events_tx);
+        let options = ee_agent_host::AgentConnectionOptions {
+            max_concurrent_prompts: self.config.agents.max_concurrent_prompts,
+            ..ee_agent_host::AgentConnectionOptions::default()
+        };
+        let manager = AgentManager::with_options(config, handler, events_tx, options);
         self.agents.host = Some(AgentHostBridge::new(manager, events_rx));
     }
 
@@ -4327,6 +4600,10 @@ impl App {
 
     /// Requests a new session for `agent_id` (async; reply pumped later).
     fn start_session(&mut self, agent_id: String) {
+        self.start_session_with_fork(agent_id, None);
+    }
+
+    fn start_session_with_fork(&mut self, agent_id: String, fork: Option<PendingFork>) {
         let Some(host) = &self.agents.host else {
             return;
         };
@@ -4336,16 +4613,12 @@ impl App {
             self.agents.mcp.proxy.as_ref().map(super::agents_mcp::proxy_stdio_fallback_entry);
         let reply =
             host.request_new_session(agent_id.clone(), roots, mcp_servers, ee_proxy_stdio_fallback);
-        self.agents.pending_session = Some(PendingSession { agent_id, session_id: None, reply });
+        let key = self.agents.next_lifecycle_key(agent_id, None);
+        self.agents.pending_sessions.insert(key, PendingSession { reply, fork });
     }
 
     /// Reconnects selected session from this workspace's persisted thread list.
     pub(super) fn agents_reconnect(&mut self) {
-        if self.agents.pending_session.is_some() {
-            self.agents.error =
-                Some(String::from("a session start or reconnect is already in progress"));
-            return;
-        }
         let Some(workspace) = self.load_persisted_agent_workspace() else {
             self.agents.error =
                 Some(String::from("no persisted agent session for this workspace to reconnect"));
@@ -4380,34 +4653,75 @@ impl App {
         if workspace.sessions.is_empty() {
             return false;
         }
+        let order = workspace
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(index, record)| (record.session_id.clone(), index))
+            .collect();
         self.agents.workspace_restore = Some(WorkspaceRestore {
             active_session_id: workspace.active_session_id,
             sessions: workspace.sessions.into(),
+            order,
+            in_flight: BTreeSet::new(),
             failed: false,
         });
         self.start_next_workspace_restore();
         true
     }
 
-    /// Sends one queued restoration request. ACP connection ordering requires
-    /// that only one `session/load` or `session/resume` is active at a time.
+    /// Fills bounded restoration slots. Per-connection drivers retain ACP
+    /// ordering; independent sessions and connections may overlap.
     fn start_next_workspace_restore(&mut self) {
-        let next =
-            self.agents.workspace_restore.as_mut().and_then(|restore| restore.sessions.pop_front());
-        if let Some(record) = next {
+        loop {
+            let next = {
+                let Some(restore) = self.agents.workspace_restore.as_mut() else {
+                    return;
+                };
+                if restore.in_flight.len() >= AGENT_LIFECYCLE_CONCURRENCY {
+                    return;
+                }
+                restore.sessions.pop_front()
+            };
+            let Some(record) = next else {
+                break;
+            };
+            let duplicate = self.agents.thread_index(&record.session_id).is_some()
+                || self.agents.pending_sessions.keys().any(|key| {
+                    key.agent_id == record.agent_id
+                        && key.session_id.as_deref() == Some(record.session_id.as_str())
+                });
+            if duplicate {
+                if let Some(restore) = self.agents.workspace_restore.as_mut() {
+                    restore.failed = true;
+                }
+                self.agents.error =
+                    Some(format!("duplicate persisted session ignored: {}", record.session_id));
+                continue;
+            }
+            if let Some(restore) = self.agents.workspace_restore.as_mut() {
+                restore.in_flight.insert(record.session_id.clone());
+            }
             self.request_persisted_agent_reconnect(record);
+        }
+
+        let finished = self
+            .agents
+            .workspace_restore
+            .as_ref()
+            .is_some_and(|restore| restore.sessions.is_empty() && restore.in_flight.is_empty());
+        if !finished {
             return;
         }
-        let Some(restore) = self.agents.workspace_restore.take() else {
-            return;
-        };
-        if self.agents.active_thread.is_none() {
-            self.agents.active_thread = restore
-                .active_session_id
-                .as_deref()
-                .and_then(|session_id| self.agents.thread_index(session_id))
-                .or_else(|| (!self.agents.threads.is_empty()).then_some(0));
-        }
+        let restore = self.agents.workspace_restore.take().expect("finished restore present");
+        self.agents.threads.sort_by_key(|thread| {
+            restore.order.get(&thread.session_id).copied().unwrap_or(usize::MAX)
+        });
+        self.agents.active_thread = restore
+            .active_session_id
+            .as_deref()
+            .and_then(|session_id| self.agents.thread_index(session_id))
+            .or_else(|| (!self.agents.threads.is_empty()).then_some(0));
         if !restore.failed {
             self.persist_agent_workspace();
         }
@@ -4415,6 +4729,14 @@ impl App {
 
     /// Enqueues one reconnect through the existing load-then-resume pipeline.
     fn request_persisted_agent_reconnect(&mut self, record: PersistedAgentSession) {
+        if self.agents.pending_sessions.keys().any(|key| {
+            key.agent_id == record.agent_id
+                && key.session_id.as_deref() == Some(record.session_id.as_str())
+        }) {
+            self.agents.error =
+                Some(format!("session {} reconnect is already in progress", record.session_id));
+            return;
+        }
         self.ensure_agents_host();
         let Some(host) = &self.agents.host else {
             return;
@@ -4433,11 +4755,10 @@ impl App {
             additional_directories,
             mcp_servers,
         );
-        self.agents.pending_session = Some(PendingSession {
-            agent_id: record.agent_id.clone(),
-            session_id: Some(record.session_id.clone()),
-            reply,
-        });
+        let key = self
+            .agents
+            .next_lifecycle_key(record.agent_id.clone(), Some(record.session_id.clone()));
+        self.agents.pending_sessions.insert(key, PendingSession { reply, fork: None });
         self.backend.status_message =
             Some(format!("reconnecting session {}...", record.session_id));
     }
@@ -5856,15 +6177,27 @@ impl App {
 
     /// Submits the active thread's draft as a prompt turn.
     fn submit_prompt(&mut self) {
-        if self.agents.permission.is_some()
-            || self.agents.mode_selection.is_some()
-            || self.agents.approval_mode_confirmation.is_some()
-            || self.agents.elicitation.is_some()
-            || !self.agents.approvals.is_empty()
-        {
+        let active = self.agents.active_thread_index();
+        let active_has_modal = active.is_some_and(|index| {
+            self.agents.permission().is_some()
+                || self.agents.elicitation().is_some()
+                || self
+                    .agents
+                    .mode_selection
+                    .as_ref()
+                    .is_some_and(|prompt| prompt.thread_index == index)
+                || self.agents.approval_mode_confirmation.as_ref().is_some_and(|confirmation| {
+                    self.agents.threads[index].session_id == confirmation.session_id
+                })
+                || self
+                    .agents
+                    .session_deletion_confirmation
+                    .as_ref()
+                    .is_some_and(|confirmation| confirmation.thread_index == index)
+        });
+        if active_has_modal || !self.agents.approvals.is_empty() {
             return;
         }
-        let active = self.agents.active_thread_index();
         let draft = active
             .map(|index| self.agents.threads[index].draft.clone())
             .unwrap_or_else(|| self.agents.pending_draft.clone());
@@ -6056,7 +6389,12 @@ impl App {
             self.backend.status_message = Some(message);
             return;
         };
-        if self.agents.pending_session.is_none() {
+        if !self
+            .agents
+            .pending_sessions
+            .keys()
+            .any(|key| key.agent_id == agent_id && key.session_id.is_none())
+        {
             self.start_session(agent_id);
             self.backend.status_message = Some(String::from(
                 "starting agent session; prompt will send after session is ready",
@@ -6066,12 +6404,19 @@ impl App {
 
     /// Confirms the selected permission option.
     fn confirm_permission(&mut self) {
-        let Some(prompt) = &self.agents.permission else {
+        let Some(prompt) = self.agents.take_permission() else {
             return;
         };
-        let thread_index = prompt.thread_index;
         let request_id = prompt.request_id;
         let Some(option) = prompt.options.get(prompt.selected).cloned() else {
+            self.agents
+                .permissions
+                .entry(prompt.session_id.clone())
+                .or_default()
+                .push_front(prompt);
+            return;
+        };
+        let Some(thread_index) = self.agents.thread_index(&prompt.session_id) else {
             return;
         };
         let thread = self.agents.threads[thread_index].host.clone();
@@ -6086,7 +6431,7 @@ impl App {
                 if resolved { "sent" } else { "stale" }
             ));
         }
-        self.agents.permission = None;
+        self.refresh_thread_runtime_state(&prompt.session_id);
     }
 
     /// Applies the selected local mode and closes the composer picker.
@@ -6103,10 +6448,10 @@ impl App {
 
     /// Resolves pending elicitation with accept, decline, or cancel semantics.
     fn confirm_elicitation(&mut self, action: ElicitationAction) {
-        let Some(prompt) = self.agents.elicitation.take() else {
+        let Some(prompt) = self.agents.take_elicitation() else {
             return;
         };
-        let thread_index = prompt.thread_index;
+        let session_id = prompt.session_id.clone();
         let response = match action {
             ElicitationAction::Accept(_) => {
                 if prompt.url.is_some() {
@@ -6124,7 +6469,8 @@ impl App {
                             let message = format!("elicitation blocked locally: {error}");
                             self.agents.error = Some(message.clone());
                             self.backend.status_message = Some(message);
-                            self.agents.elicitation = Some(prompt);
+                            let key = prompt.session_id.clone().unwrap_or_default();
+                            self.agents.elicitations.entry(key).or_default().push_front(prompt);
                             return;
                         }
                     }
@@ -6141,7 +6487,8 @@ impl App {
             ))),
         };
         let _ = prompt.reply.send(response);
-        if let Some(thread_index) = thread_index
+        if let Some(thread_index) =
+            session_id.as_deref().and_then(|id| self.agents.thread_index(id))
             && let Some(thread) = self.agents.threads.get_mut(thread_index)
         {
             let notice = match action {
@@ -6151,6 +6498,9 @@ impl App {
                 _ => "elicitation cancelled",
             };
             thread.push_system(notice);
+        }
+        if let Some(session_id) = session_id {
+            self.refresh_thread_runtime_state(&session_id);
         }
     }
 
@@ -6373,7 +6723,7 @@ impl App {
         }
 
         // Permission selection: ←/→/Tab move, Enter confirms.
-        if self.agents.permission.is_some() {
+        if self.agents.permission().is_some() {
             match key.code {
                 KeyCode::Left | KeyCode::Tab | KeyCode::BackTab => {
                     self.move_permission_selection(-1);
@@ -6397,16 +6747,16 @@ impl App {
 
         // Elicitation widgets: ↑/↓ move fields, ←/→/Tab change values or URL choice,
         // Enter submits current choice, Ctrl-D declines, Esc cancels.
-        if self.agents.elicitation.is_some() {
+        if self.agents.elicitation().is_some() {
             match key.code {
                 KeyCode::Up => {
-                    if let Some(prompt) = &mut self.agents.elicitation {
+                    if let Some(prompt) = self.agents.elicitation_mut() {
                         prompt.selected_field = prompt.selected_field.saturating_sub(1);
                     }
                     return;
                 }
                 KeyCode::Down | KeyCode::Tab => {
-                    if let Some(prompt) = &mut self.agents.elicitation {
+                    if let Some(prompt) = self.agents.elicitation_mut() {
                         if prompt.url.is_some() {
                             prompt.selected_choice = (prompt.selected_choice + 1) % 3;
                         } else {
@@ -6417,7 +6767,7 @@ impl App {
                     return;
                 }
                 KeyCode::BackTab => {
-                    if let Some(prompt) = &mut self.agents.elicitation {
+                    if let Some(prompt) = self.agents.elicitation_mut() {
                         if prompt.url.is_some() {
                             prompt.selected_choice = (prompt.selected_choice + 2) % 3;
                         } else {
@@ -6428,7 +6778,7 @@ impl App {
                     return;
                 }
                 KeyCode::Left | KeyCode::Right => {
-                    if let Some(prompt) = &mut self.agents.elicitation {
+                    if let Some(prompt) = self.agents.elicitation_mut() {
                         if prompt.url.is_some() {
                             let delta = if key.code == KeyCode::Left { 2 } else { 1 };
                             prompt.selected_choice = (prompt.selected_choice + delta) % 3;
@@ -6445,8 +6795,7 @@ impl App {
                 KeyCode::Enter => {
                     let action = self
                         .agents
-                        .elicitation
-                        .as_ref()
+                        .elicitation()
                         .map(|prompt| {
                             if prompt.url.is_some() {
                                 prompt.submit_action(true)
@@ -6632,7 +6981,7 @@ impl App {
 
     /// Moves the permission option selection by `delta`.
     fn move_permission_selection(&mut self, delta: isize) {
-        if let Some(prompt) = &mut self.agents.permission {
+        if let Some(prompt) = self.agents.permission_mut() {
             let count = prompt.options.len().max(1) as isize;
             prompt.selected = (prompt.selected as isize + delta).rem_euclid(count) as usize;
         }
@@ -6821,7 +7170,7 @@ impl App {
     }
 
     fn agents_elicitation_type(&mut self, c: char) {
-        if let Some(prompt) = &mut self.agents.elicitation
+        if let Some(prompt) = self.agents.elicitation_mut()
             && let Some(field) = prompt.fields.get_mut(prompt.selected_field)
         {
             match &mut field.value {
@@ -6839,7 +7188,7 @@ impl App {
     }
 
     fn agents_elicitation_backspace(&mut self) {
-        if let Some(prompt) = &mut self.agents.elicitation
+        if let Some(prompt) = self.agents.elicitation_mut()
             && let Some(field) = prompt.fields.get_mut(prompt.selected_field)
         {
             match &mut field.value {

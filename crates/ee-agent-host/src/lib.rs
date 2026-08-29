@@ -32,7 +32,8 @@ pub mod web_context;
 pub mod fake;
 
 pub use connection::{
-    AgentConnection, AgentConnectionOptions, DEFAULT_HANDSHAKE_TIMEOUT, DEFAULT_REQUEST_TIMEOUT,
+    AgentConnection, AgentConnectionOptions, DEFAULT_HANDSHAKE_TIMEOUT,
+    DEFAULT_MAX_CONCURRENT_PROMPTS, DEFAULT_REQUEST_TIMEOUT,
 };
 pub use error::AgentError;
 pub use events::{

@@ -41,6 +41,8 @@ mod parsing;
 mod state;
 #[cfg(feature = "agents")]
 mod trust_manager;
+#[cfg(feature = "agents")]
+mod write_leases;
 
 const VLF_SOURCE_CONTROL_DISABLED_REASON: &str = "requires whole-buffer diff/blame scans";
 
