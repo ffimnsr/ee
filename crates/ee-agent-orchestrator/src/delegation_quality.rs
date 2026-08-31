@@ -118,7 +118,9 @@ impl ReportEvidence {
         }
     }
 
-    fn contains(&self, citation: &FindingEvidence) -> bool {
+    /// Whether this observed evidence contains `citation`.
+    #[must_use]
+    pub fn contains(&self, citation: &FindingEvidence) -> bool {
         match citation {
             FindingEvidence::File(path) => self.files.contains(path),
             FindingEvidence::Tool(name) => self.tools.contains(name),

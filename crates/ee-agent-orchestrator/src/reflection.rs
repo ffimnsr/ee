@@ -17,21 +17,15 @@
 use serde::{Deserialize, Serialize};
 
 use crate::budget::BudgetSnapshot;
-use crate::final_response::{ValidationRecorder, changed_files_from_log};
 use crate::model::{ModelMessage, ModelRequest, ModelResponse, ModelRole, Transcript};
+use crate::review_context::review_context_message;
+pub use crate::review_context::{ReviewContext, build_review_context};
 use crate::tasks::{TaskGraph, TaskId, TaskStatus};
-use crate::tools::ToolExecutionLogEntry;
 
 /// Maximum review findings converted from one review response.
 pub const MAX_REVIEW_FINDINGS: usize = 16;
 /// Maximum characters kept per finding.
 pub const MAX_FINDING_CHARS: usize = 200;
-/// Maximum changed files cited in a review request.
-const MAX_CITED_FILES: usize = 8;
-/// Maximum validation results cited in a review request.
-const MAX_CITED_VALIDATION: usize = 8;
-/// Maximum task states cited in a review request.
-const MAX_CITED_TASKS: usize = 16;
 
 /// Bounded reflection configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,62 +69,6 @@ pub struct ReflectionOutcome {
     pub finding_task_ids: Vec<TaskId>,
 }
 
-/// Observed evidence fed to a review model call.  Everything here is derived
-/// from persisted/recorded state — never fabricated claims.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct ReviewContext {
-    /// Changed file paths (deduplicated, bounded).
-    pub changed_files: Vec<String>,
-    /// One line per recorded validation outcome (command, outcome, detail).
-    pub validation_summaries: Vec<String>,
-    /// One line per task (`id: title (status)`, bounded).
-    pub task_state: Vec<String>,
-}
-
-/// Builds the review evidence context from the execution log, recorded
-/// validation outcomes, and task graph.  All lists are deduplicated and
-/// bounded so the review request stays compact.
-#[must_use]
-pub fn build_review_context(
-    log: &[ToolExecutionLogEntry],
-    validation: &ValidationRecorder,
-    tasks: &TaskGraph,
-) -> ReviewContext {
-    let mut changed_files = Vec::new();
-    for file in changed_files_from_log(log, &TaskId::new("review")) {
-        if changed_files.len() >= MAX_CITED_FILES {
-            break;
-        }
-        if !changed_files.contains(&file.path) {
-            changed_files.push(file.path);
-        }
-    }
-    let validation_summaries: Vec<String> = validation
-        .records()
-        .iter()
-        .take(MAX_CITED_VALIDATION)
-        .map(|record| {
-            let outcome = match record.outcome {
-                crate::final_response::ValidationOutcome::Passed => "passed",
-                crate::final_response::ValidationOutcome::Failed => "failed",
-                crate::final_response::ValidationOutcome::Skipped => "skipped",
-            };
-            match &record.detail {
-                Some(detail) => format!("{}: {} — {detail}", record.command, outcome),
-                None => format!("{}: {}", record.command, outcome),
-            }
-        })
-        .collect();
-    let task_state: Vec<String> = tasks
-        .list()
-        .iter()
-        .take(MAX_CITED_TASKS)
-        .map(|task| format!("{}: {} ({:?})", task.id, task.title, task.status))
-        .collect();
-    ReviewContext { changed_files, validation_summaries, task_state }
-}
-
 /// Builds the review `ModelRequest`: the current transcript plus one user
 /// message carrying the observed evidence and the finding format.
 #[must_use]
@@ -142,46 +80,20 @@ pub fn build_review_request(
     task: crate::tasks::TaskNode,
 ) -> ModelRequest {
     let mut messages = transcript.messages().to_vec();
-    messages.push(ModelMessage::text(ModelRole::User, review_prompt(context)));
-    // Review requests run through the injection guard too: tool observations
-    // in the transcript are untrusted and must be labeled and bounded.
+    messages.push(ModelMessage::text(ModelRole::User, review_prompt()));
+    messages.push(review_context_message(context));
+    // Review requests run through the injection guard. Assembled paths,
+    // validation details, task titles, diagnostics, and revisions stay
+    // untrusted data rather than becoming instructions.
     let prepared = crate::prompt_injection::prepare_request(&messages);
     ModelRequest::new(prepared.messages, tools, budget, task)
 }
 
 /// The deterministic review prompt built from observed evidence only.
-fn review_prompt(context: &ReviewContext) -> String {
-    let mut lines = vec![
-        "Review the completed work below. Cite observed evidence only;".to_string(),
-        "do not fabricate results.".to_string(),
-    ];
-    lines.push("Changed files:".into());
-    if context.changed_files.is_empty() {
-        lines.push("- none".into());
-    } else {
-        for path in &context.changed_files {
-            lines.push(format!("- {path}"));
-        }
-    }
-    lines.push("Validation results:".into());
-    if context.validation_summaries.is_empty() {
-        lines.push("- none".into());
-    } else {
-        for summary in &context.validation_summaries {
-            lines.push(format!("- {summary}"));
-        }
-    }
-    lines.push("Task state:".into());
-    if context.task_state.is_empty() {
-        lines.push("- none".into());
-    } else {
-        for state in &context.task_state {
-            lines.push(format!("- {state}"));
-        }
-    }
-    lines.push(String::new());
-    lines.push("Report findings as a list, one per line, each starting with \"- \".".into());
-    lines.join("\n")
+fn review_prompt() -> String {
+    "Review completed work using supplied untrusted evidence. Cite observed evidence only; do not \
+     fabricate results. Report findings as a list, one per line, each starting with \"- \"."
+        .into()
 }
 
 /// Parses findings from a review response: non-empty lines starting with
@@ -238,9 +150,9 @@ pub fn mark_finding_tasks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::final_response::ValidationOutcome;
+    use crate::final_response::{ValidationOutcome, ValidationRecorder};
     use crate::tasks::truncate;
-    use crate::tools::SideEffectClass;
+    use crate::tools::{SideEffectClass, ToolExecutionLogEntry};
 
     #[test]
     fn reflection_config_defaults_are_conservative() {
@@ -289,6 +201,7 @@ mod tests {
             changed_files: vec!["/tmp/out.rs".into()],
             validation_summaries: vec!["cargo check: passed — clean".into()],
             task_state: vec!["task-1: implement (Running)".into()],
+            ..ReviewContext::default()
         };
         let request = build_review_request(
             &transcript,
@@ -313,14 +226,17 @@ mod tests {
             crate::tasks::TaskNode::new(TaskId::new("task-1"), "implement", "implement"),
         );
         let messages = request.transcript;
-        assert_eq!(messages.len(), 2);
+        assert_eq!(messages.len(), 4);
         assert_eq!(messages[1].role, ModelRole::User);
-        let text = messages[1].text_content();
+        assert!(messages[1].text_content().contains("each starting with \"- \""));
+        assert_eq!(messages[2].role, ModelRole::User);
+        assert_eq!(messages[2].trust, crate::trust::TrustLevel::ToolOutputUntrusted);
+        let text = messages[2].text_content();
         assert!(text.contains("Changed files:"));
         assert!(text.contains("- /tmp/out.rs"));
         assert!(text.contains("cargo check: passed — clean"));
         assert!(text.contains("task-1: implement"));
-        assert!(text.contains("each starting with \"- \""));
+        assert_eq!(messages[3].role, ModelRole::System);
     }
 
     #[test]

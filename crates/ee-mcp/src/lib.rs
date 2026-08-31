@@ -90,8 +90,8 @@ pub use registry::{
     prompt_text,
 };
 pub use tool_governance::{
-    EE_TOOL_SCHEMA_VERSION, STABLE_TOOL_NAMES, ToolGovernance, ToolTransport, governance,
-    supports_transport, tool_names_for_transport,
+    EE_TOOL_SCHEMA_VERSION, STABLE_TOOL_NAMES, ToolGovernance, ToolTransport,
+    critic_read_only_tool_names, governance, supports_transport, tool_names_for_transport,
 };
 
 /// The MCP protocol version implemented by the ee MCP client.

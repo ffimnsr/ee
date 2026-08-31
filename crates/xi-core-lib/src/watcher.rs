@@ -196,15 +196,6 @@ impl FileWatcher {
                     warn!("unwatching error {:?}", e);
                 }
             }
-            //TODO: Ideally we would be tracking what paths we're watching with
-            // some prefix-tree-like structure, which would let us keep track
-            // of when some child path might need to be reregistered. How this
-            // works and when registration would be required is dependent on
-            // the underlying notification mechanism, however. There's an
-            // in-progress rewrite of the Notify crate which use under the
-            // hood, and a component of that rewrite is adding this
-            // functionality; so until that lands we're using a fairly coarse
-            // heuristic to determine if we need to re-watch subpaths.
 
             // if this was recursive, check if any child paths need to be
             // manually re-added

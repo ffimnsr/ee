@@ -25,16 +25,17 @@ use crate::observability::RedactedEvidenceRef;
 use crate::policy::PolicyEngine;
 use crate::runtime::OrchestratorRuntime;
 use crate::sensitive_data::is_secret_like;
+use crate::subagent_handoff::SubagentStatus;
 use crate::subagents::{SubagentId, SubagentResult};
 use crate::tasks::{TaskGraph, TaskId, TaskStatus};
 use crate::tools::SideEffectClass;
 
 /// Current checkpoint schema version; restore rejects everything else.
 ///
-/// v4 excludes transcripts, tool arguments, and tool summaries from durable
-/// payloads. Earlier checkpoint schemas fail closed and are never migrated
-/// silently.
-pub const CHECKPOINT_SCHEMA_VERSION: u32 = 4;
+/// v5 stores structured generic-subagent handoffs and excludes transcripts,
+/// tool arguments, and tool summaries from durable payloads. Earlier checkpoint
+/// schemas fail closed and are never migrated silently.
+pub const CHECKPOINT_SCHEMA_VERSION: u32 = 5;
 /// Maximum opaque context-source labels retained with one checkpoint.
 pub const MAX_CHECKPOINT_CONTEXT_SOURCES: usize = 16;
 /// Maximum opaque host evidence references retained with one checkpoint.
@@ -210,14 +211,17 @@ impl SubagentTreeState {
                     "subagent tree references root task {key}, which is not a child"
                 )));
             }
-            if !matches!(
-                node.status,
-                TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
-            ) {
-                return Err(OrchestratorError::InvalidState(format!(
-                    "subagent tree references non-terminal task {key}"
-                )));
-            }
+            let expected_status = match node.status {
+                TaskStatus::Completed => SubagentStatus::Completed,
+                TaskStatus::Failed => SubagentStatus::Failed,
+                TaskStatus::Cancelled => SubagentStatus::Cancelled,
+                _ => {
+                    return Err(OrchestratorError::InvalidState(format!(
+                        "subagent tree references non-terminal task {key}"
+                    )));
+                }
+            };
+            result.validate_against(key, None, Some(expected_status))?;
         }
         Ok(())
     }
@@ -605,7 +609,11 @@ impl OrchestratorCheckpoint {
         policy: PolicyEngine,
     ) -> Result<(OrchestratorRuntime, RestoreReport), OrchestratorError> {
         self.validate()?;
-        let runtime = OrchestratorRuntime::from_validated_checkpoint(self, model, policy)?;
+        let runtime = OrchestratorRuntime::from_validated_checkpoint(
+            self,
+            std::sync::Arc::new(crate::model_registry::ModelRegistry::single(model)),
+            policy,
+        )?;
         let report = RestoreReport {
             provenance: self.provenance.clone(),
             capture: self.capture.clone(),
@@ -755,7 +763,9 @@ mod tests {
     use crate::memory::MemoryItem;
     use crate::model::{ModelMessage, ModelRole};
     use crate::policy::{PolicyEngine, ToolPolicy};
-    use crate::subagents::{SubagentResult, SubagentStatus};
+    use crate::subagent_handoff::SubagentHandoff;
+    use crate::subagent_verifier::SubagentEvidence;
+    use crate::subagents::SubagentResult;
     use crate::tasks::{TaskStatus, TaskWorker};
     use crate::test_support::FakeModel;
 
@@ -778,12 +788,23 @@ mod tests {
         let mut subagents = SubagentTreeState::new();
         subagents.insert(SubagentResult {
             subagent_id: SubagentId::new(child.id.as_str()),
-            status: SubagentStatus::Completed,
-            summary: "done".into(),
+            handoff: SubagentHandoff::from_completed_output(
+                "summarizer",
+                child.id.as_str(),
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "summary": "done",
+                    "findings": [],
+                    "citations": {"files": [], "tools": []},
+                    "unresolved": [],
+                    "recommended_actions": []
+                })
+                .to_string(),
+                SubagentEvidence::default(),
+            ),
             produced_memory_items: Vec::new(),
             tool_call_count: 0,
             error_summary: None,
-            citations: crate::subagent_verifier::SubagentCitations::default(),
         });
 
         let transcript = vec![
@@ -839,7 +860,7 @@ mod tests {
 
     #[test]
     fn schema_version_is_current() {
-        assert_eq!(CHECKPOINT_SCHEMA_VERSION, 4);
+        assert_eq!(CHECKPOINT_SCHEMA_VERSION, 5);
         assert_eq!(sample_checkpoint().schema_version(), CHECKPOINT_SCHEMA_VERSION);
     }
 
@@ -1147,16 +1168,80 @@ mod tests {
         let mut tree = SubagentTreeState::new();
         let result = SubagentResult {
             subagent_id: SubagentId::new("task-2"),
-            status: SubagentStatus::Completed,
-            summary: "done".into(),
+            handoff: SubagentHandoff::from_completed_output(
+                "summarizer",
+                "task-2",
+                &serde_json::json!({
+                    "schema_version": 1,
+                    "summary": "done",
+                    "findings": [],
+                    "citations": {"files": [], "tools": []},
+                    "unresolved": [],
+                    "recommended_actions": []
+                })
+                .to_string(),
+                SubagentEvidence::default(),
+            ),
             produced_memory_items: Vec::new(),
             tool_call_count: 0,
             error_summary: None,
-            citations: crate::subagent_verifier::SubagentCitations::default(),
         };
         assert!(tree.insert(result.clone()));
         assert!(!tree.insert(result), "duplicate subagent id rejected");
         assert_eq!(tree.list().len(), 1);
+    }
+
+    #[test]
+    fn restore_rejects_invalid_subagent_handoff_identity_status_schema_and_bounds() {
+        let checkpoint = patched(&sample_checkpoint(), |value| {
+            value["subagents"]["subagents"]["task-2"]["handoff"]["subagent_id"] =
+                serde_json::json!("task-999");
+        });
+        let error = checkpoint.validate().expect_err("handoff id mismatch rejected");
+        assert!(
+            matches!(error, OrchestratorError::InvalidState(ref reason) if reason.contains("handoff id")),
+            "{error}"
+        );
+
+        let checkpoint = patched(&sample_checkpoint(), |value| {
+            value["subagents"]["subagents"]["task-2"]["handoff"]["status"] =
+                serde_json::json!("failed");
+        });
+        let error = checkpoint.validate().expect_err("handoff status mismatch rejected");
+        assert!(
+            matches!(error, OrchestratorError::InvalidState(ref reason) if reason.contains("does not match task status")),
+            "{error}"
+        );
+
+        let checkpoint = patched(&sample_checkpoint(), |value| {
+            value["subagents"]["subagents"]["task-2"]["handoff"]["schema_version"] =
+                serde_json::json!(999);
+        });
+        let error = checkpoint.validate().expect_err("handoff schema mismatch rejected");
+        assert!(
+            matches!(error, OrchestratorError::InvalidState(ref reason) if reason.contains("unsupported subagent handoff schema")),
+            "{error}"
+        );
+
+        let checkpoint = patched(&sample_checkpoint(), |value| {
+            value["subagents"]["subagents"]["task-2"]["handoff"]["output_format"] =
+                serde_json::json!("backend_terminal");
+        });
+        let error = checkpoint.validate().expect_err("completed backend terminal rejected");
+        assert!(
+            matches!(error, OrchestratorError::InvalidState(ref reason) if reason.contains("backend-terminal")),
+            "{error}"
+        );
+
+        let checkpoint = patched(&sample_checkpoint(), |value| {
+            value["subagents"]["subagents"]["task-2"]["handoff"]["summary"] =
+                serde_json::json!("x".repeat(crate::MAX_SUBAGENT_HANDOFF_BYTES * 2));
+        });
+        let error = checkpoint.validate().expect_err("oversized handoff rejected");
+        assert!(
+            matches!(error, OrchestratorError::InvalidState(ref reason) if reason.contains("not canonically bounded")),
+            "{error}"
+        );
     }
 
     #[test]

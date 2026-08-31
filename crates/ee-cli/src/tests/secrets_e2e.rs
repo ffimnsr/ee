@@ -83,7 +83,13 @@ fn env_value(raw: &str) -> AgentEnvValue {
 fn referencing_server() -> AgentServerSettings {
     let mut env = std::collections::BTreeMap::new();
     env.insert(String::from("OPENROUTER_API_KEY"), env_value(REFERENCE));
-    AgentServerSettings { command: String::from("unused"), args: Vec::new(), env, cwd: None }
+    AgentServerSettings {
+        label: None,
+        command: String::from("unused"),
+        args: Vec::new(),
+        env,
+        cwd: None,
+    }
 }
 
 // ── Positive fixture ─────────────────────────────────────────────────────────
@@ -307,8 +313,13 @@ fn secrets_e2e_agent_without_references_launches_through_existing_path() {
     let fixture = E2eStore::new();
     let mut env = std::collections::BTreeMap::new();
     env.insert(String::from("LANG"), env_value("en_US.UTF-8"));
-    let server =
-        AgentServerSettings { command: String::from("unused"), args: Vec::new(), env, cwd: None };
+    let server = AgentServerSettings {
+        label: None,
+        command: String::from("unused"),
+        args: Vec::new(),
+        env,
+        cwd: None,
+    };
     assert!(!resolve::agent_env_has_references(&server.env));
 
     // Works even though the vault has no key and the keychain is empty.

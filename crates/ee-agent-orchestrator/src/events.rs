@@ -65,8 +65,10 @@ pub enum OrchestratorEvent {
     SubagentStarted {
         /// Subagent id.
         subagent_id: String,
-        /// Registry model id the child runs on (resolved selection or parent
-        /// fallback).
+        /// Stable built-in or custom role name.
+        role: String,
+        /// Registry model id the child runs on (explicit selection, role route,
+        /// or parent fallback).
         model_id: Option<String>,
     },
     /// A subagent finished (subagent phase).
@@ -165,6 +167,8 @@ pub enum OrchestratorEvent {
         /// Stable stop classification.
         reason: String,
     },
+    /// Privacy-safe rubber-duck lifecycle event. Payload type cannot carry workspace content.
+    Critic(crate::critic_observability::CriticEvent),
     /// A completed write/execute/delegate call was reused instead of replayed
     /// (idempotency guard on resumed turns).
     ToolResultReused {
@@ -175,10 +179,27 @@ pub enum OrchestratorEvent {
     },
 }
 
+type EventObserver = Arc<dyn Fn(&OrchestratorEvent) + Send + Sync>;
+
 /// Thread-safe in-memory recorder of [`OrchestratorEvent`] values.
-#[derive(Debug, Clone, Default)]
+///
+/// Scoped recorders may attach an internal observer while sharing event
+/// storage. Observers receive event metadata only and run after recorder lock
+/// release, preventing registry/event lock inversion.
+#[derive(Clone, Default)]
 pub struct EventRecorder {
     events: Arc<Mutex<Vec<OrchestratorEvent>>>,
+    observer: Option<EventObserver>,
+}
+
+impl std::fmt::Debug for EventRecorder {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EventRecorder")
+            .field("event_count", &self.events.lock().map_or(0, |events| events.len()))
+            .field("has_observer", &self.observer.is_some())
+            .finish()
+    }
 }
 
 impl EventRecorder {
@@ -188,9 +209,28 @@ impl EventRecorder {
         Self::default()
     }
 
+    /// Creates a recorder sharing this event stream with an additional internal observer.
+    pub(crate) fn with_observer(
+        &self,
+        observer: impl Fn(&OrchestratorEvent) + Send + Sync + 'static,
+    ) -> Self {
+        let next: EventObserver = Arc::new(observer);
+        let observer = match self.observer.clone() {
+            Some(previous) => Arc::new(move |event: &OrchestratorEvent| {
+                previous(event);
+                next(event);
+            }) as EventObserver,
+            None => next,
+        };
+        Self { events: self.events.clone(), observer: Some(observer) }
+    }
+
     /// Appends one event.
     pub fn record(&self, event: OrchestratorEvent) {
-        self.events.lock().expect("event recorder poisoned").push(event);
+        self.events.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(event.clone());
+        if let Some(observer) = &self.observer {
+            observer(&event);
+        }
     }
 
     /// Snapshot of all recorded events in order.
@@ -236,6 +276,24 @@ mod tests {
     }
 
     #[test]
+    fn chained_observers_all_receive_events() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let first = EventRecorder::new().with_observer({
+            let observed = observed.clone();
+            move |_| observed.lock().expect("observer state poisoned").push("ancestor")
+        });
+        let second = first.with_observer({
+            let observed = observed.clone();
+            move |_| observed.lock().expect("observer state poisoned").push("child")
+        });
+
+        second.record(OrchestratorEvent::ModelResponded { iteration: 1 });
+
+        assert_eq!(*observed.lock().expect("observer state poisoned"), ["ancestor", "child"]);
+        assert_eq!(second.events().len(), 1);
+    }
+
+    #[test]
     fn events_serialize_deterministically() {
         let event = OrchestratorEvent::ToolFinished {
             tool_call_id: "tc-1".into(),
@@ -272,6 +330,7 @@ mod tests {
             },
             OrchestratorEvent::SubagentStarted {
                 subagent_id: "sub-1".into(),
+                role: "researcher".into(),
                 model_id: Some("default".into()),
             },
             OrchestratorEvent::SubagentFinished { subagent_id: "sub-1".into(), success: true },
@@ -313,6 +372,12 @@ mod tests {
                 reason: "selected_validation_failure".into(),
             },
             OrchestratorEvent::RepairStopped { reason: "attempts_exhausted".into() },
+            OrchestratorEvent::Critic(crate::critic_observability::CriticEvent::Skipped {
+                target: crate::critique::CritiqueTarget::Plan,
+                backend: None,
+                reason: crate::critic_observability::CriticSafeReason::Disabled,
+                policy_version: 1,
+            }),
             OrchestratorEvent::ToolResultReused {
                 tool_call_id: "tc-2".into(),
                 tool_name: "write_file".into(),

@@ -28,9 +28,7 @@ use crate::config::Table;
 #[derive(
     Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord, JsonSchema,
 )]
-#[allow(clippy::rc_buffer)] // suppress clippy;  TODO consider addressing
-// the warning by changing String to str
-pub struct LanguageId(#[schemars(with = "String")] Arc<String>);
+pub struct LanguageId(#[schemars(with = "String")] Arc<str>);
 
 /// Describes a `LanguageDefinition`. Although these are provided by plugins,
 /// they are a fundamental concept in core, used to determine things like
@@ -112,7 +110,7 @@ impl Borrow<str> for LanguageId {
 
 impl<'a> From<&'a str> for LanguageId {
     fn from(src: &'a str) -> LanguageId {
-        LanguageId(Arc::new(src.into()))
+        LanguageId(Arc::from(src))
     }
 }
 
@@ -133,6 +131,16 @@ impl LanguageDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn language_id_preserves_string_wire_format() {
+        let id = LanguageId::from("rust");
+        let cloned = id.clone();
+
+        assert!(Arc::ptr_eq(&id.0, &cloned.0));
+        assert_eq!(serde_json::to_string(&id).unwrap(), r#""rust""#);
+        assert_eq!(serde_json::from_str::<LanguageId>(r#""rust""#).unwrap(), id);
+    }
 
     #[test]
     pub fn language_for_path() {

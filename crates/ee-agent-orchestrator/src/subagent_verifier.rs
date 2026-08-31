@@ -12,11 +12,12 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::memory::MemoryStore;
-use crate::subagent_roles::requires_evidence_for_name;
-use crate::subagents::{
-    SUBAGENT_SUMMARY_MAX_CHARS, SubagentId, SubagentResult, SubagentRole, SubagentStatus,
+use crate::delegation_quality::{
+    DELEGATION_QUALITY_SCHEMA_VERSION, ReportEvidence, SubagentReport, SubagentReportVerifier,
 };
+use crate::memory::MemoryStore;
+use crate::subagent_handoff::SubagentStatus;
+use crate::subagents::{SUBAGENT_SUMMARY_MAX_CHARS, SubagentId, SubagentResult, SubagentRole};
 use crate::tasks::truncate;
 use crate::tools::{SideEffectClass, ToolExecutionLogEntry};
 
@@ -33,8 +34,8 @@ pub const MAX_CITATION_TOKEN_CHARS: usize = 512;
 
 /// Observed activity of one child run, projected from its execution log.
 ///
-/// Evidence records attempted operations (successful or not) in first-seen
-/// order, deduplicated and bounded; citations are checked against it.
+/// Evidence records successful observations only, in first-seen order,
+/// deduplicated and bounded; failed or denied attempts cannot prove claims.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct SubagentEvidence {
@@ -45,14 +46,17 @@ pub struct SubagentEvidence {
 }
 
 impl SubagentEvidence {
-    /// Builds evidence from a child execution log: `path` arguments of
-    /// read/write-class entries become accessed files, every entry contributes
-    /// its tool name, both deduplicated in first-seen order and bounded.
+    /// Builds evidence from successful child execution entries: `path`
+    /// arguments of read/write-class entries become accessed files, successful
+    /// entries contribute tool names, both deduplicated and bounded.
     #[must_use]
     pub fn from_execution_log(log: &[ToolExecutionLogEntry]) -> Self {
         let mut files = Vec::new();
         let mut tools = Vec::new();
         for entry in log {
+            if !entry.success {
+                continue;
+            }
             if !tools.contains(&entry.tool_name) && tools.len() < MAX_EVIDENCE_TOOLS {
                 tools.push(entry.tool_name.clone());
             }
@@ -210,7 +214,7 @@ impl SubagentResultVerifier {
     /// the summarizer do.
     #[must_use]
     pub fn role_requires_evidence(&self, role: &SubagentRole) -> bool {
-        requires_evidence_for_name(&role.name)
+        role.requires_evidence
     }
 
     /// Verifies a child result: only completed results of evidence-requiring
@@ -223,41 +227,57 @@ impl SubagentResultVerifier {
         result: &SubagentResult,
         evidence: &SubagentEvidence,
     ) -> SubagentVerification {
-        if result.status != SubagentStatus::Completed {
+        if result.handoff.status != SubagentStatus::Completed {
             return SubagentVerification::rejected(format!(
                 "child did not complete (status {:?})",
-                result.status
+                result.handoff.status
             ));
         }
         if !self.role_requires_evidence(role) {
             return SubagentVerification::verified();
         }
-        if result.citations.is_empty() {
+        if !result.handoff.findings.is_empty() {
+            let report = SubagentReport {
+                schema_version: DELEGATION_QUALITY_SCHEMA_VERSION,
+                role: result.handoff.role.clone(),
+                subagent_id: result.handoff.subagent_id.clone(),
+                findings: result.handoff.findings.clone(),
+            };
+            let verification = SubagentReportVerifier
+                .verify(&report, &ReportEvidence::from_subagent_evidence(evidence));
+            if !verification.accepted {
+                return SubagentVerification::rejected(format!(
+                    "structured findings rejected: {}",
+                    verification.rejected_reasons.join("; ")
+                ));
+            }
+        }
+        if result.handoff.claimed_citations.is_empty() {
             return SubagentVerification::rejected(
                 "summary includes no cited files or tools".to_string(),
             );
         }
-        if result.citations.files.len() > self.max_cited_files {
+        if result.handoff.claimed_citations.files.len() > self.max_cited_files {
             return SubagentVerification::rejected(format!(
                 "too many cited files ({} > {})",
-                result.citations.files.len(),
+                result.handoff.claimed_citations.files.len(),
                 self.max_cited_files
             ));
         }
-        if result.citations.tools.len() > self.max_cited_tools {
+        if result.handoff.claimed_citations.tools.len() > self.max_cited_tools {
             return SubagentVerification::rejected(format!(
                 "too many cited tools ({} > {})",
-                result.citations.tools.len(),
+                result.handoff.claimed_citations.tools.len(),
                 self.max_cited_tools
             ));
         }
         let mut missing = Vec::new();
-        for file in &result.citations.files {
+        for file in &result.handoff.claimed_citations.files {
             if !evidence.files_accessed.contains(file) {
                 missing.push(format!("file:{file}"));
             }
         }
-        for tool in &result.citations.tools {
+        for tool in &result.handoff.claimed_citations.tools {
             if !evidence.tools_executed.contains(tool) {
                 missing.push(format!("tool:{tool}"));
             }
@@ -327,8 +347,8 @@ impl SubagentQuarantine {
     pub fn quarantine(&mut self, result: &SubagentResult, reason: impl Into<String>) {
         let entry = QuarantineEntry {
             subagent_id: result.subagent_id.clone(),
-            status: result.status,
-            summary: truncate(&result.summary, SUBAGENT_SUMMARY_MAX_CHARS),
+            status: result.handoff.status,
+            summary: truncate(&result.handoff.summary, SUBAGENT_SUMMARY_MAX_CHARS),
             error_summary: result
                 .error_summary
                 .clone()
@@ -402,6 +422,7 @@ impl SubagentQuarantine {
 #[cfg(test)]
 mod tests {
     use crate::memory::MemoryItem;
+    use crate::subagent_handoff::SubagentHandoff;
 
     use super::*;
 
@@ -410,14 +431,28 @@ mod tests {
         citations: SubagentCitations,
         memory_items: Vec<MemoryItem>,
     ) -> SubagentResult {
+        let output = serde_json::json!({
+            "schema_version": 1,
+            "summary": summary,
+            "findings": [],
+            "citations": {"files": [], "tools": []},
+            "unresolved": [],
+            "recommended_actions": []
+        })
+        .to_string();
+        let mut handoff = SubagentHandoff::from_completed_output(
+            "worker",
+            "task-2",
+            &output,
+            SubagentEvidence::default(),
+        );
+        handoff.claimed_citations = citations;
         SubagentResult {
             subagent_id: SubagentId::new("task-2"),
-            status: SubagentStatus::Completed,
-            summary: summary.into(),
+            handoff,
             produced_memory_items: memory_items,
             tool_call_count: 2,
             error_summary: None,
-            citations,
         }
     }
 
@@ -554,7 +589,7 @@ mod tests {
     #[test]
     fn non_completed_results_are_never_verified() {
         let mut result = completed_result("x", SubagentCitations::default(), Vec::new());
-        result.status = SubagentStatus::Failed;
+        result.handoff.status = SubagentStatus::Failed;
         let verification =
             SubagentResultVerifier::new().verify(&researcher(), &result, &evidence());
         assert!(!verification.verified);
@@ -578,22 +613,18 @@ mod tests {
         let long = "x".repeat(SUBAGENT_SUMMARY_MAX_CHARS + 100);
         let failed = SubagentResult {
             subagent_id: SubagentId::new("task-2"),
-            status: SubagentStatus::Failed,
-            summary: String::new(),
+            handoff: SubagentHandoff::terminal("worker", "task-2", SubagentStatus::Failed),
             produced_memory_items: vec![MemoryItem::new("fact", "value")],
             tool_call_count: 1,
             error_summary: Some(long.clone()),
-            citations: SubagentCitations::default(),
         };
         quarantine.quarantine(&failed, "subagent failed");
         let cancelled = SubagentResult {
             subagent_id: SubagentId::new("task-1"),
-            status: SubagentStatus::Cancelled,
-            summary: String::new(),
+            handoff: SubagentHandoff::terminal("worker", "task-1", SubagentStatus::Cancelled),
             produced_memory_items: Vec::new(),
             tool_call_count: 0,
             error_summary: Some("cancelled".into()),
-            citations: SubagentCitations::default(),
         };
         quarantine.quarantine(&cancelled, "subagent cancelled");
 
@@ -622,12 +653,10 @@ mod tests {
         let mut quarantine = SubagentQuarantine::default();
         let failed = SubagentResult {
             subagent_id: SubagentId::new("task-2"),
-            status: SubagentStatus::Failed,
-            summary: String::new(),
+            handoff: SubagentHandoff::terminal("worker", "task-2", SubagentStatus::Failed),
             produced_memory_items: vec![MemoryItem::new("secret_fact", "leaked")],
             tool_call_count: 0,
             error_summary: Some("boom".into()),
-            citations: SubagentCitations::default(),
         };
         quarantine.quarantine(&failed, "subagent failed");
         let context = memory.compact_context();
@@ -643,12 +672,10 @@ mod tests {
         assert_eq!(quarantine.quarantine_summary(1024), None);
         let failed = SubagentResult {
             subagent_id: SubagentId::new("task-2"),
-            status: SubagentStatus::Failed,
-            summary: String::new(),
+            handoff: SubagentHandoff::terminal("worker", "task-2", SubagentStatus::Failed),
             produced_memory_items: Vec::new(),
             tool_call_count: 0,
             error_summary: Some("boom".into()),
-            citations: SubagentCitations::default(),
         };
         quarantine.quarantine(&failed, "subagent failed");
         quarantine.clear();
@@ -667,12 +694,10 @@ mod tests {
         quarantine.quarantine(
             &SubagentResult {
                 subagent_id: SubagentId::new("task-2"),
-                status: SubagentStatus::Cancelled,
-                summary: String::new(),
+                handoff: SubagentHandoff::terminal("worker", "task-2", SubagentStatus::Cancelled),
                 produced_memory_items: Vec::new(),
                 tool_call_count: 0,
                 error_summary: Some("cancelled".into()),
-                citations: SubagentCitations::default(),
             },
             "subagent cancelled",
         );

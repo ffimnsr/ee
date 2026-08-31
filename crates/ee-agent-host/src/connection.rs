@@ -54,7 +54,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use crate::error::AgentError;
 use crate::events::{AgentConnectionState, AgentEvent, ConnectionCloseReason, PermissionRequestId};
 use crate::inbound::{ClientRequest, ClientRequestHandler, HandlerCapabilities};
-use crate::mcp_over_acp::{EeProxyMode, McpOverAcpRegistry};
+use crate::mcp_over_acp::{EeProxyMode, EeProxyToolProfile, McpOverAcpRegistry};
 use crate::permission::PermissionBroker;
 use crate::process::{AgentProcess, AgentProcessConfig, spawn_stderr_reader};
 use crate::session::{AgentThread, ThreadShared};
@@ -81,6 +81,8 @@ pub struct AgentConnectionOptions {
     /// Maximum prompt requests sent concurrently on one agent connection.
     /// Additional cross-session prompts wait FIFO; same-session overlap rejects.
     pub max_concurrent_prompts: usize,
+    /// Connection-owned ee MCP tool exposure profile.
+    pub ee_proxy_tool_profile: EeProxyToolProfile,
 }
 
 impl Default for AgentConnectionOptions {
@@ -90,6 +92,7 @@ impl Default for AgentConnectionOptions {
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             ee_proxy_enabled: false,
             max_concurrent_prompts: DEFAULT_MAX_CONCURRENT_PROMPTS,
+            ee_proxy_tool_profile: EeProxyToolProfile::Full,
         }
     }
 }
@@ -361,6 +364,7 @@ impl AgentConnection {
             handler_capabilities,
             process.clone(),
             threads.clone(),
+            options.ee_proxy_tool_profile,
         );
 
         let inner = Arc::new(AgentConnectionInner {
@@ -494,6 +498,17 @@ impl AgentConnection {
     #[must_use]
     pub fn state(&self) -> AgentConnectionState {
         self.inner.state.borrow().clone()
+    }
+
+    /// Agent implementation metadata from initialize, once ready.
+    #[must_use]
+    pub fn agent_info(&self) -> Option<ee_agent_protocol::Implementation> {
+        match self.state() {
+            AgentConnectionState::Ready { agent_info, .. } => {
+                agent_info.map(|info| (*info).clone())
+            }
+            _ => None,
+        }
     }
 
     /// The agent's negotiated capabilities, once ready.

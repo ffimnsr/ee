@@ -18,6 +18,7 @@ memchr.workspace = true
 serde = { workspace = true, optional = true, features = ["derive"] }
 unicode-segmentation.workspace = true
 regex.workspace = true
+regex-syntax.workspace = true
 im = "15.1.0"
 
 [dev-dependencies]

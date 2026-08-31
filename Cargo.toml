@@ -28,7 +28,7 @@ rust-version = "1.95"
 [workspace.dependencies]
 agent-client-protocol = { version = "2.0.0", features = ["unstable_elicitation", "unstable_end_turn_token_usage", "unstable_mcp_over_acp"] }
 bytecount = "0.6.9"
-rmcp = { version = "3.1.0", default-features = false, features = ["client", "elicitation", "macros", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "3.2.0", default-features = false, features = ["client", "elicitation", "macros", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 cc = "1.2"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
@@ -56,6 +56,7 @@ jsonschema = "0.30"
 rand = "0.9"
 ratatui = "0.29"
 regex = "1.12.3"
+regex-syntax = "0.8.11"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip", "brotli", "deflate", "zstd"] }
 schemars = { version = "1.0", features = ["derive"] }
 semver = "1.0"

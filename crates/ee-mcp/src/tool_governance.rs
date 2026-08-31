@@ -305,6 +305,26 @@ pub fn tool_names_for_transport(transport: ToolTransport) -> Vec<&'static str> {
     STABLE_TOOL_NAMES.iter().copied().filter(|tool| supports_transport(tool, transport)).collect()
 }
 
+/// Returns approval-free read-only tool names suitable for critic use.
+///
+/// Terminal-backed reads are excluded even though their side-effect class is
+/// read, because they still expose command execution state.
+#[must_use]
+pub fn critic_read_only_tool_names(transport: ToolTransport) -> Vec<&'static str> {
+    STABLE_TOOL_NAMES
+        .iter()
+        .copied()
+        .filter(|tool| {
+            governance(tool).is_some_and(|entry| {
+                entry.transports.contains(&transport)
+                    && entry.side_effect == SideEffectClass::Read
+                    && entry.approval == "none"
+                    && !entry.required_capabilities.contains(&"terminal")
+            })
+        })
+        .collect()
+}
+
 /// Stable tool names. Keep this list in existing compatibility order.
 pub const STABLE_TOOL_NAMES: &[&str] = &[
     "ee_workspace_roots",
@@ -399,6 +419,21 @@ mod tests {
         assert!(!stdio.contains(&"ee_terminal_output"));
         assert!(!stdio.contains(&"ee_terminal_kill"));
         assert!(!stdio.contains(&"ee_turn_evidence_summary"));
+    }
+
+    #[test]
+    fn critic_read_only_filters_tools_by_governance() {
+        let tools = critic_read_only_tool_names(ToolTransport::Acp);
+
+        assert!(tools.contains(&"ee_workspace_roots"));
+        assert!(tools.contains(&"ee_get_diagnostics"));
+        assert!(tools.contains(&"ee_tools_manifest"));
+
+        assert!(!tools.contains(&"ee_replace_text"));
+        assert!(!tools.contains(&"ee_terminal_create"));
+        assert!(!tools.contains(&"ee_terminal_output"));
+        assert!(!tools.contains(&"ee_web_search"));
+        assert!(!tools.contains(&"unknown_tool"));
     }
 
     #[test]

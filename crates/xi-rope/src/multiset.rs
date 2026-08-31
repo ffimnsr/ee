@@ -269,7 +269,12 @@ impl Subset {
         self.transform(other, true)
     }
 
-    /// Transform subset through other coordinate transform, shrinking.
+    /// Transform subset through another coordinate transform, shrinking.
+    ///
+    /// Every region where `other` has a positive count is removed from the
+    /// coordinate space. Counts from `self` are preserved unchanged in retained
+    /// zero-count regions; count subtraction would be incorrect because
+    /// `other` describes removed coordinates, not multiplicity to subtract.
     /// The following equation is satisfied:
     ///
     /// C = A.transform_expand(B)
@@ -278,9 +283,8 @@ impl Subset {
     ///   A.delete_from_string(B.delete_from_string(s))
     pub fn transform_shrink(&self, other: &Subset) -> Subset {
         let mut sb = SubsetBuilder::new();
-        // discard ZipSegments where the shrinking set has positive count
+        // Discard regions removed from the coordinate space by `other`.
         for zseg in self.zip(other) {
-            // TODO: should this actually do something like subtract counts?
             if zseg.b_count == 0 {
                 sb.push_segment(zseg.len, zseg.a_count);
             }
@@ -609,6 +613,24 @@ mod tests {
         assert_eq!(result, str3);
         assert_eq!(str2, s1.transform_shrink(&s3).delete_from_string(&str3));
         assert_eq!(str2, s2.transform_union(&s1).delete_from_string(TEST_STR));
+    }
+
+    #[test]
+    fn transform_shrink_preserves_counts_in_retained_regions() {
+        let mut subset = SubsetBuilder::new();
+        subset.push_segment(2, 3);
+        subset.push_segment(2, 1);
+
+        let mut shrinking = SubsetBuilder::new();
+        shrinking.push_segment(1, 2);
+        shrinking.push_segment(1, 0);
+        shrinking.push_segment(1, 1);
+        shrinking.push_segment(1, 0);
+
+        assert_eq!(
+            subset.build().transform_shrink(&shrinking.build()).segments,
+            vec![Segment { len: 1, count: 3 }, Segment { len: 1, count: 1 }]
+        );
     }
 
     #[test]

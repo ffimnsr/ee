@@ -8,6 +8,8 @@
 //! unchanged — a round-trip failure means the frame would not be re-emitted
 //! byte-identically by the writer path.
 
+// Shared harness serves multiple integration-test crates; each uses a different subset.
+#[allow(dead_code)]
 mod common;
 
 use std::path::PathBuf;

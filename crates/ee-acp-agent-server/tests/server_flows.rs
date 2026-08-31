@@ -4,6 +4,8 @@
 //! The fake provider records every call, so tests can prove that malformed
 //! requests are rejected *before* any provider invocation.
 
+// Shared harness serves multiple integration-test crates; each uses a different subset.
+#[allow(dead_code)]
 mod common;
 
 use std::path::PathBuf;

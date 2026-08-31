@@ -197,9 +197,6 @@ impl PluginTerminationHandle {
 }
 
 impl Plugin {
-    //TODO: initialize should be sent automatically during launch,
-    //and should only send the plugin_id. We can just use the existing 'new_buffer'
-    // RPC for adding views
     pub fn initialize(&self, info: Vec<PluginBufferInfo>, plugin_config: &Table) {
         self.peer.send_rpc_notification(
             "initialize",
@@ -226,7 +223,6 @@ impl Plugin {
         self.peer.send_rpc_notification("shutdown", &json!({}));
     }
 
-    // TODO: rethink naming, does this need to be a vec?
     pub fn new_buffer(&self, info: &PluginBufferInfo) {
         self.peer.send_rpc_notification("new_buffer", &json!({ "buffer_info": [info] }))
     }

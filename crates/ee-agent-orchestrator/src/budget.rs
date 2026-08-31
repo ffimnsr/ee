@@ -241,6 +241,31 @@ impl BudgetTracker {
         Ok(())
     }
 
+    /// Atomically reserves one subagent and bounded model-call capacity.
+    /// Failure leaves both counters unchanged, so denied critic work creates
+    /// neither partial budget state nor child tasks.
+    pub fn try_reserve_subagent_and_model_calls(
+        &mut self,
+        model_calls: usize,
+    ) -> Result<(), OrchestratorError> {
+        self.check_deadline()?;
+        if self.subagents_used >= self.max_subagents {
+            return Err(OrchestratorError::BudgetExceeded(format!(
+                "max subagents per turn exceeded ({})",
+                self.max_subagents
+            )));
+        }
+        if self.model_calls_used.saturating_add(model_calls) > self.max_model_calls {
+            return Err(OrchestratorError::BudgetExceeded(format!(
+                "max model calls exceeded ({})",
+                self.max_model_calls
+            )));
+        }
+        self.subagents_used += 1;
+        self.model_calls_used += model_calls;
+        Ok(())
+    }
+
     /// Fails when no output-byte allowance remains; used before an operation
     /// that will produce output.  The actual bytes are recorded by
     /// [`BudgetTracker::record_model_usage`].
@@ -492,6 +517,26 @@ mod tests {
         );
         assert_eq!(tracker.snapshot().subagents_used, 2);
         assert_eq!(tracker.snapshot().subagents_max, 2);
+    }
+
+    #[test]
+    fn combined_critic_reservation_is_atomic() {
+        let config = OrchestratorConfig {
+            max_subagents: 1,
+            max_model_calls: 1,
+            ..OrchestratorConfig::default()
+        };
+        let mut tracker = BudgetTracker::new(&config);
+        let before = tracker.snapshot();
+        let error =
+            tracker.try_reserve_subagent_and_model_calls(2).expect_err("model capacity denied");
+        assert!(error.to_string().contains("max model calls"));
+        assert_eq!(tracker.snapshot().subagents_used, before.subagents_used);
+        assert_eq!(tracker.snapshot().model_calls_used, before.model_calls_used);
+
+        tracker.try_reserve_subagent_and_model_calls(1).expect("atomic success");
+        assert_eq!(tracker.snapshot().subagents_used, 1);
+        assert_eq!(tracker.snapshot().model_calls_used, 1);
     }
 
     #[test]

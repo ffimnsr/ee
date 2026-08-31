@@ -31,6 +31,8 @@ pub(crate) enum PickerKind {
     Locations,
     #[cfg(feature = "agents")]
     AgentThreads,
+    #[cfg(feature = "agents")]
+    AgentServers,
 }
 
 /// A single entry in a picker list.
@@ -257,6 +259,20 @@ impl PickerState {
         Self {
             kind: PickerKind::AgentThreads,
             title: String::from("Agent Sessions"),
+            query: String::new(),
+            cwd: PathBuf::from("."),
+            items,
+            filtered,
+            selected: 0,
+        }
+    }
+
+    #[cfg(feature = "agents")]
+    pub(crate) fn new_agent_servers(items: Vec<PickerItem>) -> Self {
+        let filtered = (0..items.len()).collect();
+        Self {
+            kind: PickerKind::AgentServers,
+            title: String::from("New Agent Session"),
             query: String::new(),
             cwd: PathBuf::from("."),
             items,

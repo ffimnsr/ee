@@ -48,6 +48,53 @@ pub fn insert<T: Into<Rope>>(base: &Rope, regions: &[SelRegion], text: T) -> Rop
     builder.build()
 }
 
+/// Replaces each region while adapting replacement casing to matched text.
+pub fn insert_preserving_case(base: &Rope, regions: &[SelRegion], text: &str) -> RopeDelta {
+    let mut builder = DeltaBuilder::new(base.len());
+    for region in regions {
+        let iv = Interval::new(region.min(), region.max());
+        let matched = base.slice_to_cow(iv);
+        builder.replace(iv, Rope::from(match_case(&matched, text)));
+    }
+
+    builder.build()
+}
+
+fn match_case(matched: &str, replacement: &str) -> String {
+    let cased: Vec<char> = matched
+        .chars()
+        .filter(|character| character.is_lowercase() || character.is_uppercase())
+        .collect();
+    if cased.is_empty() {
+        return replacement.to_owned();
+    }
+    if cased.iter().all(|character| character.is_uppercase()) {
+        return replacement.to_uppercase();
+    }
+    if cased.iter().all(|character| character.is_lowercase()) {
+        return replacement.to_lowercase();
+    }
+    if cased[0].is_uppercase() && cased[1..].iter().all(|character| character.is_lowercase()) {
+        let mut result = String::with_capacity(replacement.len());
+        let mut first_cased = true;
+        for character in replacement.chars() {
+            if character.is_lowercase() || character.is_uppercase() {
+                if first_cased {
+                    result.extend(character.to_uppercase());
+                    first_cased = false;
+                } else {
+                    result.extend(character.to_lowercase());
+                }
+            } else {
+                result.push(character);
+            }
+        }
+        return result;
+    }
+
+    replacement.to_owned()
+}
+
 /// Leaves the current selection untouched, but surrounds it with two insertions.
 pub fn surround<BT, AT>(
     base: &Rope,
@@ -112,8 +159,8 @@ pub fn duplicate_line(base: &Rope, regions: &[SelRegion], config: &BufferItems) 
 
 /// Used when the user presses the backspace key. If no delta is returned, then nothing changes.
 pub fn delete_backward(base: &Rope, regions: &[SelRegion], config: &BufferItems) -> RopeDelta {
-    // TODO: this function is workable but probably overall code complexity
-    // could be improved by implementing a "backspace" movement instead.
+    // Backspace stays separate from generic movement deletion because indentation-aware
+    // behavior depends on buffer configuration, not viewport movement semantics.
     let mut deletions = Selection::new();
     for region in regions {
         let start = offset_for_delete_backwards(region, base, config);
@@ -1386,8 +1433,8 @@ fn n_spaces(n: usize) -> &'static str {
 mod tests {
     use super::{
         align_it, align_selections, delete_backward, expand_tabs_in_lines, insert_newline,
-        insert_newline_with_context, reflow_lines, reverse_selection_contents,
-        rotate_selection_contents, sort_lines, transpose,
+        insert_newline_with_context, insert_preserving_case, reflow_lines,
+        reverse_selection_contents, rotate_selection_contents, sort_lines, transpose,
     };
     use crate::config::BufferItems;
     use crate::indent::SyntaxIndentContext;
@@ -1514,6 +1561,22 @@ mod tests {
             surrounding_pairs: Vec::new(),
             save_with_newline: false,
         }
+    }
+
+    #[test]
+    fn insert_preserving_case_handles_common_case_patterns() {
+        let text: Rope = "lower Title UPPER mIxEd 123".into();
+        let regions = [
+            SelRegion::new(0, 5),
+            SelRegion::new(6, 11),
+            SelRegion::new(12, 17),
+            SelRegion::new(18, 23),
+            SelRegion::new(24, 27),
+        ];
+
+        let delta = insert_preserving_case(&text, &regions, "rEpLaCe");
+
+        assert_eq!(String::from(delta.apply(&text)), "replace Replace REPLACE rEpLaCe rEpLaCe");
     }
 
     #[test]

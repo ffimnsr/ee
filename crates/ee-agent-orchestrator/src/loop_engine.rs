@@ -74,6 +74,9 @@ pub(crate) struct LoopOptions {
     /// Registry id of the adapter this loop runs on (diagnostic and used as
     /// the delegation fallback).
     pub model_id: Option<String>,
+    /// Exact model-visible tool names. `None` exposes normal registry surface;
+    /// a critic supplies a filtered set mirrored by execution policy.
+    pub visible_tool_names: Option<HashSet<String>>,
     /// Optional memory store for checkpoint captures; required (along with
     /// `checkpoint`) for recovery.
     pub memory: Option<Arc<Mutex<MemoryStore>>>,
@@ -108,6 +111,7 @@ impl Default for LoopOptions {
             graph: None,
             available_models: Vec::new(),
             model_id: None,
+            visible_tool_names: None,
             memory: None,
             checkpoint: None,
             resume_state: None,
@@ -369,7 +373,19 @@ impl LoopEngine {
                 budget.emit(&self.events);
                 snapshot
             };
-            let tools = self.tools.lock().expect("tool registry poisoned").definitions();
+            let tools = self
+                .tools
+                .lock()
+                .expect("tool registry poisoned")
+                .definitions()
+                .into_iter()
+                .filter(|tool| {
+                    self.options
+                        .visible_tool_names
+                        .as_ref()
+                        .is_none_or(|allowed| allowed.contains(&tool.name))
+                })
+                .collect();
 
             // Keep the transcript inside the memory budget; oldest messages
             // are dropped first, the newest context always survives.

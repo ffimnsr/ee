@@ -5,7 +5,7 @@ use clap::Parser;
 use ee_acp_agent_server::{AcpAgentServer, AcpAgentServerConfig};
 use ee_openrouter_agent::config::{Args, Config, setup_manifest};
 use ee_openrouter_agent::dotenv::load_dotenv;
-use ee_openrouter_agent::orchestrated::{OpenRouterModelAdapter, openrouter_orchestrated_provider};
+use ee_openrouter_agent::orchestrated::openrouter_multi_model_provider;
 use ee_openrouter_agent::provider::OpenRouterProvider;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -69,8 +69,11 @@ async fn run_orchestrated(
     config: Config,
     server_config: AcpAgentServerConfig,
 ) -> Result<(), String> {
-    let adapter = OpenRouterModelAdapter::new(config.clone())?;
-    let provider = openrouter_orchestrated_provider(&config, default_session_state_dir()?, adapter);
+    let (provider, critic_warning) =
+        openrouter_multi_model_provider(&config, default_session_state_dir()?)?;
+    if let Some(warning) = critic_warning {
+        eprintln!("ee-openrouter-agent: warning: {warning}");
+    }
     AcpAgentServer::new(provider, server_config)
         .run_stdio()
         .await
@@ -97,6 +100,10 @@ mod tests {
     fn config(orchestrated: bool) -> Config {
         Config {
             model: String::from("test/model"),
+            model_family: None,
+            rubber_duck_model: None,
+            rubber_duck_model_family: None,
+            rubber_duck: ee_agent_orchestrator::RubberDuckConfig::default(),
             api_url: String::from(DEFAULT_API_URL),
             api_key: Some(String::from("sk-test")),
             site_url: None,
@@ -136,6 +143,24 @@ mod tests {
 
         assert_eq!(orchestrator.max_loop_iterations, 64);
         assert_eq!(orchestrator.max_model_calls, 64);
+    }
+
+    #[test]
+    fn rubber_duck_policy_reaches_production_orchestrator_config() {
+        let mut config = config(true);
+        config.rubber_duck.mode = ee_agent_orchestrator::RubberDuckMode::Automatic;
+        config.rubber_duck.max_calls = 3;
+        config.rubber_duck.timeout = Duration::from_secs(5);
+
+        let orchestrator =
+            openrouter_orchestrator_config(&config, PathBuf::from("/tmp/ee-agent-sessions"))
+                .orchestrator;
+
+        assert_eq!(orchestrator.rubber_duck, config.rubber_duck);
+        assert_eq!(
+            orchestrator.rubber_duck_triggers.mode,
+            ee_agent_orchestrator::RubberDuckTriggerMode::Automatic
+        );
     }
 
     #[test]

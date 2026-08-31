@@ -19,13 +19,16 @@
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use ee_acp_agent_server::ProviderError;
 use ee_agent_orchestrator::{
-    ModelAdapter, ModelContent, ModelError, ModelFuture, ModelMessage, ModelRequest, ModelResponse,
-    ModelRole, ModelUsage, OrchestratorConfig, OrchestratorProvider, OrchestratorProviderConfig,
-    PolicyEngine, StreamSink, ToolDefinition, ToolIntent, ToolPolicy,
+    DEFAULT_MODEL_ID, ModelAdapter, ModelCapability, ModelContent, ModelError, ModelFamily,
+    ModelFuture, ModelIdentity, ModelMessage, ModelRegistration, ModelRequest, ModelResponse,
+    ModelRole, ModelTier, ModelUsage, OrchestratorConfig, OrchestratorProvider,
+    OrchestratorProviderConfig, PolicyEngine, RUBBER_DUCK_ROLE, StreamSink, ToolDefinition,
+    ToolIntent, ToolPolicy,
 };
 use ee_agent_protocol::Implementation;
 use serde_json::{Value, json};
@@ -73,6 +76,15 @@ pub fn openrouter_orchestrator_config(
             context_window_tokens: config.context_window,
             max_loop_iterations: config.max_iterations,
             max_model_calls: config.max_iterations,
+            rubber_duck: config.rubber_duck.clone(),
+            rubber_duck_triggers: ee_agent_orchestrator::RubberDuckTriggerConfig {
+                mode: if config.rubber_duck.mode == ee_agent_orchestrator::RubberDuckMode::Automatic
+                {
+                    ee_agent_orchestrator::RubberDuckTriggerMode::Automatic
+                } else {
+                    ee_agent_orchestrator::RubberDuckTriggerMode::ManualOnly
+                },
+            },
             // Recovery remains same-process only until EE_CHECKPOINT_DIR supplies
             // explicit durable storage; never imply crash recovery without it.
             recovery: match config.checkpoint_dir.clone() {
@@ -95,7 +107,7 @@ pub fn openrouter_orchestrated_provider(
     config: &Config,
     session_state_dir: PathBuf,
     adapter: OpenRouterModelAdapter,
-) -> OrchestratorProvider<OpenRouterModelAdapter> {
+) -> OrchestratorProvider {
     OrchestratorProvider::with_policy(
         openrouter_orchestrator_config(config, session_state_dir),
         Arc::new(adapter),
@@ -113,7 +125,7 @@ pub fn openrouter_orchestrated_provider_with_turn_timeout(
     session_state_dir: PathBuf,
     adapter: OpenRouterModelAdapter,
     turn_timeout: std::time::Duration,
-) -> OrchestratorProvider<OpenRouterModelAdapter> {
+) -> OrchestratorProvider {
     let mut provider_config = openrouter_orchestrator_config(config, session_state_dir);
     provider_config.orchestrator.turn_timeout = turn_timeout;
     OrchestratorProvider::with_policy(
@@ -121,6 +133,126 @@ pub fn openrouter_orchestrated_provider_with_turn_timeout(
         Arc::new(adapter),
         openrouter_orchestrated_policy(),
     )
+}
+
+/// Production registry build. Invalid or unsafe critic metadata degrades to
+/// root-only operation and returns one bounded, non-secret diagnostic.
+pub fn openrouter_multi_model_provider(
+    config: &Config,
+    session_state_dir: PathBuf,
+) -> Result<(OrchestratorProvider, Option<String>), String> {
+    let http = reqwest::Client::builder()
+        .timeout(config.timeout)
+        .build()
+        .map_err(|error| format!("failed to build HTTP client: {error}"))?;
+    let root = OpenRouterModelAdapter::with_http(config.clone(), http.clone());
+    let root_family = config
+        .model_family
+        .as_deref()
+        .map(ModelFamily::from_str)
+        .transpose()
+        .map_err(|error| format!("invalid OPENROUTER_MODEL_FAMILY: {error}"));
+
+    let mut registry = ee_agent_orchestrator::ModelRegistry::new();
+    let declared_root_family = root_family
+        .as_ref()
+        .ok()
+        .and_then(Clone::clone)
+        .unwrap_or_else(|| ModelFamily::Other("undeclared".into()));
+    let root_identity = ModelIdentity::new(
+        config.model.clone(),
+        "openrouter",
+        declared_root_family.clone(),
+        config.model.clone(),
+        [ModelCapability::ChatCompletion, ModelCapability::Tools, ModelCapability::Streaming],
+    )
+    .map_err(|error| error.to_string())?;
+    registry
+        .register_model(
+            DEFAULT_MODEL_ID,
+            Arc::new(root),
+            ModelRegistration::new(root_identity).tier(ModelTier::Strong),
+        )
+        .map_err(|error| error.to_string())?;
+
+    let critic_warning = match (
+        config.rubber_duck_model.as_deref(),
+        config.rubber_duck_model_family.as_deref(),
+        root_family,
+    ) {
+        (None, None, _) => Some("rubber duck unavailable: no critic model configured".to_string()),
+        (Some(_), None, _) | (None, Some(_), _) => Some(
+            "rubber duck unavailable: OPENROUTER_RUBBER_DUCK_MODEL and OPENROUTER_RUBBER_DUCK_MODEL_FAMILY must be set together"
+                .to_string(),
+        ),
+        (Some(_), Some(_), Err(error)) => Some(format!(
+            "rubber duck unavailable: invalid root model family metadata: {error}"
+        )),
+        (Some(model_id), Some(family), Ok(Some(root_family))) => {
+            match ModelFamily::from_str(family) {
+                Err(error) => Some(format!(
+                    "rubber duck unavailable: invalid critic model family metadata: {error}"
+                )),
+                Ok(_) if model_id == config.model => Some(
+                    "rubber duck unavailable: critic model id must differ from root model id"
+                        .to_string(),
+                ),
+                Ok(critic_family) if critic_family == root_family => Some(
+                    "rubber duck unavailable: critic model family must differ from root model family"
+                        .to_string(),
+                ),
+                Ok(critic_family) => register_openrouter_critic(
+                    &mut registry,
+                    config,
+                    model_id,
+                    critic_family,
+                    http,
+                )
+                .err()
+                .map(|error| format!("rubber duck unavailable: {error}")),
+            }
+        }
+        (Some(_), Some(_), Ok(None)) => Some(
+            "rubber duck unavailable: OPENROUTER_MODEL_FAMILY must be set explicitly"
+                .to_string(),
+        ),
+    };
+
+    let provider = OrchestratorProvider::with_model_registry(
+        openrouter_orchestrator_config(config, session_state_dir),
+        registry,
+        openrouter_orchestrated_policy(),
+    )
+    .map_err(|error| error.to_string())?;
+    Ok((provider, critic_warning))
+}
+
+fn register_openrouter_critic(
+    registry: &mut ee_agent_orchestrator::ModelRegistry,
+    config: &Config,
+    model_id: &str,
+    family: ModelFamily,
+    http: reqwest::Client,
+) -> Result<(), String> {
+    let identity = ModelIdentity::new(
+        model_id,
+        "openrouter",
+        family,
+        model_id,
+        [ModelCapability::ChatCompletion, ModelCapability::Tools, ModelCapability::Streaming],
+    )
+    .map_err(|error| format!("invalid critic model metadata: {error}"))?;
+    let critic = OpenRouterModelAdapter::with_http(
+        Config { model: model_id.to_string(), ..config.clone() },
+        http,
+    );
+    registry
+        .register_model(
+            RUBBER_DUCK_ROLE,
+            Arc::new(critic),
+            ModelRegistration::new(identity).for_roles(&[RUBBER_DUCK_ROLE]).tier(ModelTier::Strong),
+        )
+        .map_err(|error| format!("invalid critic model route: {error}"))
 }
 
 /// Boxed future returned by a completion client.
@@ -153,11 +285,15 @@ impl OpenRouterModelAdapter {
             .timeout(config.timeout)
             .build()
             .map_err(|error| format!("failed to build HTTP client: {error}"))?;
-        Ok(Self {
+        Ok(Self::with_http(config, http))
+    }
+
+    fn with_http(config: Config, http: reqwest::Client) -> Self {
+        Self {
             config,
             completion: real_completion(http.clone()),
             streaming: Some(real_streaming(http)),
-        })
+        }
     }
 
     /// Builds an adapter with an injected completion client (tests).
@@ -565,6 +701,10 @@ mod tests {
     fn test_config() -> Config {
         Config {
             model: String::from("test/model"),
+            model_family: None,
+            rubber_duck_model: None,
+            rubber_duck_model_family: None,
+            rubber_duck: ee_agent_orchestrator::RubberDuckConfig::default(),
             api_url: String::from(DEFAULT_API_URL),
             api_key: Some(String::from("sk-test")),
             site_url: None,
@@ -588,6 +728,86 @@ mod tests {
             context_window: crate::config::DEFAULT_CONTEXT_WINDOW_TOKENS,
             max_iterations: ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS,
         }
+    }
+
+    #[test]
+    fn production_registry_uses_distinct_declared_model_families() {
+        let mut config = test_config();
+        config.model = "anthropic/root".into();
+        config.model_family = Some("anthropic".into());
+        config.rubber_duck_model = Some("openai/critic".into());
+        config.rubber_duck_model_family = Some("openai".into());
+
+        let (provider, warning) = openrouter_multi_model_provider(
+            &config,
+            PathBuf::from("/tmp/ee-openrouter-model-registry-test"),
+        )
+        .expect("provider");
+        assert!(warning.is_none());
+        let models = provider.registered_models();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, DEFAULT_MODEL_ID);
+        assert_eq!(models[0].identity.model_id, "anthropic/root");
+        assert_eq!(models[0].identity.family, ModelFamily::Anthropic);
+        assert_eq!(models[1].id, RUBBER_DUCK_ROLE);
+        assert_eq!(models[1].identity.model_id, "openai/critic");
+        assert_eq!(models[1].identity.family, ModelFamily::OpenAi);
+        assert_ne!(models[0].identity.family, models[1].identity.family);
+    }
+
+    #[test]
+    fn unsafe_critic_configuration_degrades_to_root_only() {
+        let mut config = test_config();
+        config.model_family = Some("anthropic".into());
+        config.rubber_duck_model = Some(config.model.clone());
+        config.rubber_duck_model_family = Some("anthropic".into());
+
+        let (provider, warning) = openrouter_multi_model_provider(
+            &config,
+            PathBuf::from("/tmp/ee-openrouter-root-only-test"),
+        )
+        .expect("root provider remains usable");
+        assert_eq!(provider.registered_models().len(), 1);
+        assert!(warning.expect("warning").contains("model id must differ"));
+
+        config.rubber_duck_model = Some("anthropic/other".into());
+        let (provider, warning) = openrouter_multi_model_provider(
+            &config,
+            PathBuf::from("/tmp/ee-openrouter-same-family-test"),
+        )
+        .expect("root provider remains usable");
+        assert_eq!(provider.registered_models().len(), 1);
+        assert!(warning.expect("warning").contains("family must differ"));
+
+        config.rubber_duck_model = Some("bad model id".into());
+        config.rubber_duck_model_family = Some("openai".into());
+        let (provider, warning) = openrouter_multi_model_provider(
+            &config,
+            PathBuf::from("/tmp/ee-openrouter-malformed-critic-test"),
+        )
+        .expect("malformed critic does not stop root");
+        assert_eq!(provider.registered_models().len(), 1);
+        assert!(warning.expect("warning").contains("invalid critic model metadata"));
+    }
+
+    #[test]
+    fn single_model_configuration_reports_critic_unavailable() {
+        let config = test_config();
+        let (provider, warning) = openrouter_multi_model_provider(
+            &config,
+            PathBuf::from("/tmp/ee-openrouter-single-model-test"),
+        )
+        .expect("single-model provider");
+        assert_eq!(provider.registered_models().len(), 1);
+        assert!(warning.expect("warning").contains("no critic model configured"));
+    }
+
+    #[test]
+    fn config_debug_redacts_openrouter_api_key() {
+        let config = test_config();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("[redacted]"));
+        assert!(!debug.contains("sk-test"));
     }
 
     fn sample_transcript() -> Vec<ModelMessage> {
@@ -800,6 +1020,20 @@ mod tests {
         json!({
             "choices": [{ "message": { "content": text }, "finish_reason": "stop" }]
         })
+    }
+
+    fn response_with_handoff(summary: &str) -> Value {
+        response_with_text(
+            &json!({
+                "schema_version": 1,
+                "summary": summary,
+                "findings": [],
+                "citations": { "files": [], "tools": [] },
+                "unresolved": [],
+                "recommended_actions": [],
+            })
+            .to_string(),
+        )
     }
 
     fn response_with_reasoning(reasoning: &str, text: &str) -> Value {
@@ -1268,8 +1502,12 @@ mod tests {
     #[tokio::test]
     async fn orchestrated_mode_executes_delegate_task_in_write_mode() {
         let script = ScriptedCompletion::new(vec![
-            response_with_tool_args("call_1", "delegate_task", json!({ "prompt": "inspect" })),
-            response_with_text("child answer"),
+            response_with_tool_args(
+                "call_1",
+                "delegate_task",
+                json!({ "prompt": "inspect", "role_name": "summarizer" }),
+            ),
+            response_with_handoff("child answer"),
             response_with_text("parent done"),
         ]);
         let adapter =

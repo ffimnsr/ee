@@ -42,10 +42,8 @@ pub struct View<C> {
     pub(crate) config: BufferConfig,
     pub(crate) config_table: ConfigTable,
     plugin_id: PluginPid,
-    // TODO: this is only public to avoid changing the legacy async edit path
-    // this should go away with async edits
-    pub rev: u64,
-    pub undo_group: Option<usize>,
+    rev: u64,
+    undo_group: Option<usize>,
     buf_size: usize,
     active_view_id: ViewId,
     view_ids: Vec<ViewId>,
@@ -647,6 +645,32 @@ mod tests {
 
         assert!(!ack.applied);
         assert_eq!(ack.reason.as_deref(), Some("revision conflict"));
+    }
+
+    #[test]
+    fn edit_uses_latest_revision_and_undo_group() {
+        let peer = RecordingPeer::with_response(
+            "apply_edit",
+            json!({
+                "applied": true,
+                "rev": 9,
+                "reason": null
+            }),
+        );
+        let mut view = View::<ChunkCache>::new(
+            Box::new(peer.clone()),
+            serde_json::from_value(json!(3)).unwrap(),
+            buffer_info(valid_config()),
+        )
+        .expect("valid config should build view");
+        view.update(None, 12, 1, 9, Some(4));
+
+        view.try_edit(DeltaBuilder::new(12).build(), 2, false, false, "plugin".to_string())
+            .expect("edit ack should deserialize");
+
+        let request = &peer.requests()[0].1;
+        assert_eq!(request["edit"]["rev"], 9);
+        assert_eq!(request["edit"]["undo_group"], 4);
     }
 
     #[test]

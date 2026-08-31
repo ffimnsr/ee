@@ -46,6 +46,100 @@ pub fn redact_secret_values(text: &str, secrets: &[String]) -> String {
     redacted
 }
 
+/// Redacts common credential forms from untrusted free-form text when exact
+/// secret values are unavailable. This conservative pass complements
+/// `redact_secret_values`; callers should still apply known-value redaction first.
+#[must_use]
+pub fn redact_sensitive_text(text: &str) -> String {
+    let mut output = Vec::new();
+    let mut private_key = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("-----BEGIN ") && trimmed.ends_with(" PRIVATE KEY-----") {
+            private_key = true;
+            output.push(String::from("[REDACTED PRIVATE KEY]"));
+            continue;
+        }
+        if private_key {
+            if trimmed.starts_with("-----END ") && trimmed.ends_with(" PRIVATE KEY-----") {
+                private_key = false;
+            }
+            continue;
+        }
+        output.push(redact_sensitive_line(line));
+    }
+    output.join("\n")
+}
+
+fn redact_sensitive_line(line: &str) -> String {
+    let lower_line = line.to_ascii_lowercase();
+    let trimmed_lower = lower_line.trim_start();
+    if ["authorization:", "proxy-authorization:", "cookie:", "set-cookie:"]
+        .iter()
+        .any(|prefix| trimmed_lower.starts_with(prefix))
+        || [
+            "access_token=",
+            "refresh_token=",
+            "id_token=",
+            "api_key=",
+            "apikey=",
+            "password=",
+            "client_secret=",
+        ]
+        .iter()
+        .any(|marker| lower_line.contains(marker))
+    {
+        return String::from("[REDACTED SECRET-BEARING LINE]");
+    }
+
+    for separator in ['=', ':'] {
+        if let Some((key, _)) = line.split_once(separator)
+            && is_secret_key(key.trim().trim_matches(|character: char| {
+                !character.is_alphanumeric() && character != '_' && character != '-'
+            }))
+        {
+            return String::from("[REDACTED SECRET-LIKE ASSIGNMENT]");
+        }
+    }
+
+    let mut words = line.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+    for index in 0..words.len() {
+        let lower = words[index].to_ascii_lowercase();
+        if lower == "bearer" && index + 1 < words.len() {
+            words[index + 1] = String::from("***");
+            continue;
+        }
+        let token = words[index]
+            .trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .to_ascii_lowercase();
+        if ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "sk-", "xoxb-", "xoxp-"]
+            .iter()
+            .any(|prefix| token.starts_with(prefix))
+            || (token.starts_with("akia") && token.len() >= 16)
+        {
+            words[index] = String::from("***");
+            continue;
+        }
+        if let Some(scheme) = lower.find("://") {
+            let authority_start = scheme + 3;
+            if let Some(at) = words[index][authority_start..].find('@') {
+                let at = authority_start + at;
+                if words[index][authority_start..at].contains(':') {
+                    words[index].replace_range(authority_start..at, "***");
+                }
+            }
+        }
+        if is_secret_key(words[index].trim_matches(|character: char| {
+            !character.is_alphanumeric() && character != '_' && character != '-'
+        })) && index + 2 < words.len()
+            && matches!(words[index + 1].to_ascii_lowercase().as_str(), "is" | "was")
+        {
+            words[index + 2] = String::from("***");
+        }
+    }
+    words.join(" ")
+}
+
 /// Recursively redacts JSON values held by secret-like object keys.
 ///
 /// This preserves non-sensitive structure for diagnostics and exports without
@@ -172,5 +266,36 @@ mod tests {
     fn empty_secret_list_passes_text_through() {
         let text = "no secrets here";
         assert_eq!(redact_secret_values(text, &[]), text);
+    }
+
+    #[test]
+    fn free_form_redaction_covers_common_credential_shapes() {
+        let text = concat!(
+            "Authorization: Bearer abc.def.ghi\n",
+            "request uses Bearer standalone-token\n",
+            "fetch https://alice:password@example.test/data\n",
+            "callback https://example.test/?access_token=query-secret\n",
+            "Cookie: session=cookie-secret\n",
+            "github pat ghp_1234567890abcdef\n",
+            "API token is prose-secret\n",
+            "-----BEGIN PRIVATE KEY-----\n",
+            "private-key-material\n",
+            "-----END PRIVATE KEY-----\n",
+            "ordinary validation text stays"
+        );
+        let redacted = redact_sensitive_text(text);
+        for secret in [
+            "abc.def.ghi",
+            "standalone-token",
+            "alice:password",
+            "query-secret",
+            "cookie-secret",
+            "ghp_1234567890abcdef",
+            "prose-secret",
+            "private-key-material",
+        ] {
+            assert!(!redacted.contains(secret), "leaked {secret}");
+        }
+        assert!(redacted.contains("ordinary validation text stays"));
     }
 }

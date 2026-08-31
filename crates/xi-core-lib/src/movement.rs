@@ -74,13 +74,12 @@ fn vertical_motion(
     let (col, line) = selection_position(r, lo, text, line_delta < 0, modify);
     let n_lines = lo.line_of_offset(text, text.len());
 
-    // This code is quite careful to avoid integer overflow.
-    // TODO: write tests to verify
-    if line_delta < 0 && (-line_delta as usize) > line {
-        return (0, Some(col));
-    }
     let line = if line_delta < 0 {
-        line - (-line_delta as usize)
+        let lines_up = line_delta.unsigned_abs();
+        if lines_up > line {
+            return (0, Some(col));
+        }
+        line - lines_up
     } else {
         line.saturating_add(line_delta as usize)
     };
@@ -315,7 +314,7 @@ pub fn selection_movement(
 
 #[cfg(test)]
 mod tests {
-    use super::{Movement, region_movement};
+    use super::{Movement, region_movement, vertical_motion};
     use crate::line_offset::LogicalLines;
     use crate::selection::SelRegion;
     use xi_rope::Rope;
@@ -341,5 +340,17 @@ mod tests {
 
         assert_eq!(moved.min(), 6);
         assert_eq!(moved.max(), 6);
+    }
+
+    #[test]
+    fn vertical_motion_handles_extreme_line_deltas() {
+        let text: Rope = "abc\ndef\nghi".into();
+        let region = SelRegion::new(5, 5);
+
+        assert_eq!(vertical_motion(region, &LogicalLines, &text, isize::MIN, false), (0, Some(1)));
+        assert_eq!(
+            vertical_motion(region, &LogicalLines, &text, isize::MAX, false),
+            (text.len(), Some(1))
+        );
     }
 }

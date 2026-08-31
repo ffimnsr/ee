@@ -505,7 +505,7 @@ mod tests {
         find.set_find("(.*\n.*)+", true, true, false);
         find.update_find(&base_text, 0, base_text.len(), false);
         assert_eq!(find.occurrences().len(), 1);
-        assert_eq!(find.occurrences().first(), Some(&SelRegion::new(0, 12)));
+        assert_eq!(find.occurrences().first(), Some(&SelRegion::new(0, 24)));
     }
 
     #[test]
@@ -516,6 +516,8 @@ mod tests {
         find.set_find(".*", true, true, false);
         assert!(!find.is_multiline_regex());
         find.set_find("\\n", true, true, false);
+        assert!(find.is_multiline_regex());
+        find.set_find("(?s:.)", true, true, false);
         assert!(find.is_multiline_regex());
     }
 

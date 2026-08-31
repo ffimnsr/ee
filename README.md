@@ -188,7 +188,7 @@ Agents mode is an optional ACP v1 agent chat plus MCP integration. It is disable
 
 ACP v1 wire types come from the official [`agent-client-protocol`](https://crates.io/crates/agent-client-protocol) SDK, re-exported through `crates/ee-agent-protocol` (the only crate allowed to own ACP wire structs). `ee-agent-protocol` adds strict v1-only version negotiation, absolute-path and 1-based-line validation, session-update ordering checks, unknown-capability capture for diagnostics, and a typed method registry; unsupported protocol versions, relative paths, and unknown elicitation modes fail closed with JSON-RPC `invalid params` errors.
 
-Agent subprocesses are defined under `[agents.servers.<id>]`; `command` is required, `args`, `env`, and `cwd` are optional. MCP servers are shared configuration under `[mcp.servers.<id>]` with a required `transport` of `"stdio"` (requires `command`) or `"streamable_http"` (requires an `http(s)` `url`; optional `headers` and `timeout_ms`, default 30 000). Server ids must be non-empty and unique across `agents.servers` and `mcp.servers`.
+Agent subprocesses are defined under `[agents.servers.<id>]`; `command` is required, while frontend-only `label`, `args`, `env`, and `cwd` are optional. Configure any number of server entries and set `agents.default_agent` for unambiguous no-argument startup. MCP servers are shared configuration under `[mcp.servers.<id>]` with a required `transport` of `"stdio"` (requires `command`) or `"streamable_http"` (requires an `http(s)` `url`; optional `headers` and `timeout_ms`, default 30 000). Server ids must be non-empty and unique across `agents.servers` and `mcp.servers`.
 
 ```toml
 [agents]
@@ -196,8 +196,14 @@ enabled = true
 default_agent = "helper"
 
 [agents.servers.helper]
+label = "Local Helper"
 command = "ee-helper"
 args = ["serve"]
+
+[agents.servers.reviewer]
+label = "Review Agent"
+command = "review-agent"
+args = ["acp"]
 
 [mcp.servers.filesystem]
 transport = "stdio"
@@ -210,7 +216,11 @@ url = "https://example.com/mcp"
 timeout_ms = 5000
 ```
 
-Agents ex commands are lowercase snake_case only: `:agents`, `:agents_close`, `:agents_stop`, `:agents_new`, and `:agents_clear`. CamelCase aliases are rejected. In focused Agents composer, exact `/new` starts and focuses a fresh chat thread; exact `/quit` closes pane while keeping its sessions running. Slash commands with arguments remain normal agent prompts.
+Agents ex commands are lowercase snake_case only: `:agents`, `:agents_close`, `:agents_stop`, `:agents_new [agent_id]`, and `:agents_clear`. CamelCase aliases are rejected. In focused Agents composer, `/new [agent_id]` starts and focuses a fresh chat thread; `/quit` closes pane while keeping sessions running. Without agent id, configured default or sole server is used; otherwise picker opens. Unknown ids are rejected without starting any agent.
+
+Distinct agent ids launch isolated connections/processes, including same ACP binary configured twice with different model args or env. Start exact ids with `:agents_new <agent_id>`; use no argument for default/sole server or picker. Active session may change only provider-advertised config through `:agents_config_set <config_id> <value>`.
+
+Providers supporting contrasting-model critique may advertise exact `/rubber-duck [question]`. A configured `[agents.rubber_duck] external_agent_id` also enables this command in production Agents UI: EE starts one isolated ephemeral ACP critic session, verifies its bounded report, closes it, then asks root for one synthesis. Manual internal critique remains rollout default; automatic internal mode remains replay-gated, and external ACP critique remains manual-only without host-owned sandbox proof. Critique adds call/cost/latency and receives bounded, revision-checked, redacted workspace evidence. Internal critics have enforced read-only tools; external forwarding is read-only but agent-native tools remain outside EE control, shown as visible warning. Critic output stays advisory and never counts as validation evidence; root alone decides and writes. See [parallel agent sessions and rubber duck policy](docs/upgrades/parallel-agent-sessions.md) plus [agent configuration examples](wiki/config.md#agent-process-examples).
 
 #### ee MCP proxy contract
 
@@ -308,6 +318,19 @@ ee do agent trust revoke --profile terminal_readonly
 Repeat `--profile` to select several. Profile names are application-owned; config cannot add commands or tools. Trust writes only host-local state under `$XDG_STATE_HOME/ee/trust/`, bound to canonical workspace identity. It never reads authority from `.ee.toml`, global config, or agent-provided files.
 
 Grant covers `ee_*` safe-read tools on both stdio and ACP routes, exact workspace-root Git invocations (`git status`, `git diff`, `git log`, `git show`, and `git branch --show-current`), plus direct `pwd`, `ls`, `ls -a`, `ls -l`, `ls -la`, `ls -al`, and `cat <one workspace file>`. `cat` accepts only one relative regular file outside protected paths; flags, multiple paths, secret-like files, external paths, and symlink escapes still prompt. Shell wrappers, other Git arguments, writes, and VCS mutations still prompt. Agents should prefer `ee_list_directory`, `ee_read_text_file`, and `ee_search_*` when available.
+
+#### OpenRouter root and rubber-duck models
+
+`OPENROUTER_MODEL` remains root/default model. Orchestrated mode can register independent critic adapter using explicit, non-secret identity metadata:
+
+```sh
+export OPENROUTER_MODEL="anthropic/claude-sonnet-4"
+export OPENROUTER_MODEL_FAMILY="anthropic"
+export OPENROUTER_RUBBER_DUCK_MODEL="openai/gpt-5"
+export OPENROUTER_RUBBER_DUCK_MODEL_FAMILY="openai"
+```
+
+Known families: `openai`, `anthropic`, `google`, `deepseek`, `meta`, `mistral`, `qwen`, and `xai`. Custom families use `other:<identity>`. ee never infers family from model/display names. Critic id and family must both be configured and must differ from root id/family. Invalid, partial, same-id, or same-family critic configuration prints bounded warning and keeps root agent usable without critic. Root and critic share safe immutable OpenRouter HTTP configuration and account API key, so both models can incur provider billing; API key never enters registry metadata.
 
 #### LLM session compaction (`/compact`)
 

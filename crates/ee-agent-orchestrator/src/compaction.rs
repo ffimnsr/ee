@@ -13,8 +13,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::budget::BudgetSnapshot;
+use crate::events::OrchestratorEvent;
 use crate::memory::MemoryStore;
 use crate::memory_compaction::{MemoryCompactionConfig, is_protected_key};
+use crate::model::ModelMessage;
 use crate::sensitive_data::SensitiveDataGuard;
 use crate::tasks::{TaskGraph, TaskStatus};
 
@@ -23,6 +25,10 @@ pub const DEFAULT_COMPACT_MAX_INPUT_BYTES: usize = 64 * 1024;
 
 /// The memory key under which the model-derived summary is stored.
 pub const SESSION_SUMMARY_KEY: &str = "summary:session";
+/// Maximum recent conversation messages retained before byte bounding.
+const MAX_RECENT_MESSAGES: usize = 20;
+/// Maximum recent runtime events retained before byte bounding.
+const MAX_RECENT_EVENTS: usize = 50;
 
 /// Compaction knobs for `/compact` turns.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -30,8 +36,8 @@ pub struct CompactionConfig {
     /// Deterministic memory compaction settings (duplicate merging and
     /// pressure decay; protected keys are never touched).
     pub memory: MemoryCompactionConfig,
-    /// Maximum serialized bytes of the compaction context (task graph,
-    /// memory, validation facts, budget) sent to the model.
+    /// Maximum serialized bytes of compaction context (task graph, memory,
+    /// recent conversation/events, validation facts, budget) sent to model.
     pub max_input_bytes: usize,
 }
 
@@ -100,15 +106,17 @@ pub fn build_compaction_prompt(instructions: Option<&str>) -> String {
     prompt
 }
 
-/// Builds the provenance-rich compaction context: the task graph, memory
-/// facts with source/trust provenance, explicit validation facts, and the
-/// budget snapshot.  The output is bounded to `max_bytes` deterministically:
-/// oldest memory lines drop first, then validation lines, then the whole
-/// text is truncated at a char boundary.
+/// Builds the provenance-rich compaction context: task graph, memory facts,
+/// recent conversation, recent runtime events, explicit validation facts,
+/// and budget snapshot. Output is bounded to `max_bytes` deterministically:
+/// oldest memory, event, and conversation lines drop first, then validation
+/// lines, then whole text truncates at a char boundary.
 #[must_use]
 pub fn build_compaction_context(
     tasks: &TaskGraph,
     memory: &MemoryStore,
+    recent_messages: &[ModelMessage],
+    recent_events: &[OrchestratorEvent],
     budget: &BudgetSnapshot,
     max_bytes: usize,
 ) -> String {
@@ -160,26 +168,64 @@ pub fn build_compaction_context(
         validation_lines.push(String::from("- (none)"));
     }
 
-    let assemble = |memory_lines: &[String], validation_lines: &[String]| {
+    let guard = SensitiveDataGuard::new();
+    let mut message_lines = recent_messages
+        .iter()
+        .rev()
+        .take(MAX_RECENT_MESSAGES)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|message| format!("- {:?}: {}", message.role, guard.redact(&message.text_content())))
+        .collect::<Vec<_>>();
+    if message_lines.is_empty() {
+        message_lines.push(String::from("- (none)"));
+    }
+
+    let mut event_lines = recent_events
+        .iter()
+        .rev()
+        .take(MAX_RECENT_EVENTS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|event| format!("- {}", guard.redact(&format!("{event:?}"))))
+        .collect::<Vec<_>>();
+    if event_lines.is_empty() {
+        event_lines.push(String::from("- (none)"));
+    }
+
+    let assemble = |memory_lines: &[String],
+                    message_lines: &[String],
+                    event_lines: &[String],
+                    validation_lines: &[String]| {
         let sections = [
             task_section.clone(),
             format!("Memory facts:\n{}", memory_lines.join("\n")),
+            format!("Recent conversation:\n{}", message_lines.join("\n")),
+            format!("Recent runtime events:\n{}", event_lines.join("\n")),
             format!("Validation facts:\n{}", validation_lines.join("\n")),
             budget_section.clone(),
         ];
         sections.join("\n\n")
     };
 
-    let mut text = assemble(&memory_lines, &validation_lines);
-    // Oldest memory lines drop first, then validation lines, then the whole
-    // text is truncated at a char boundary.
+    let mut text = assemble(&memory_lines, &message_lines, &event_lines, &validation_lines);
     while text.len() > max_bytes && memory_lines.len() > 1 {
         memory_lines.remove(0);
-        text = assemble(&memory_lines, &validation_lines);
+        text = assemble(&memory_lines, &message_lines, &event_lines, &validation_lines);
+    }
+    while text.len() > max_bytes && event_lines.len() > 1 {
+        event_lines.remove(0);
+        text = assemble(&memory_lines, &message_lines, &event_lines, &validation_lines);
+    }
+    while text.len() > max_bytes && message_lines.len() > 1 {
+        message_lines.remove(0);
+        text = assemble(&memory_lines, &message_lines, &event_lines, &validation_lines);
     }
     while text.len() > max_bytes && validation_lines.len() > 1 {
         validation_lines.remove(0);
-        text = assemble(&memory_lines, &validation_lines);
+        text = assemble(&memory_lines, &message_lines, &event_lines, &validation_lines);
     }
     if text.len() > max_bytes {
         let mut end = max_bytes;
@@ -262,7 +308,7 @@ mod tests {
         let mut tasks = TaskGraph::new();
         tasks.create_root("fix parser", "make the parser correct");
         let store = store_with_items();
-        let context = build_compaction_context(&tasks, &store, &budget_snapshot(), 4_096);
+        let context = build_compaction_context(&tasks, &store, &[], &[], &budget_snapshot(), 4_096);
 
         assert!(context.contains("Task graph:"), "{context}");
         assert!(context.contains("fix parser"), "{context}");
@@ -279,6 +325,35 @@ mod tests {
     }
 
     #[test]
+    fn context_includes_bounded_recent_conversation_and_events() {
+        let tasks = TaskGraph::new();
+        let store = store_with_items();
+        let messages = vec![
+            crate::model::ModelMessage::text(crate::model::ModelRole::User, "earlier request"),
+            crate::model::ModelMessage::text(
+                crate::model::ModelRole::Assistant,
+                "recent answer token=secret-value",
+            ),
+        ];
+        let events = vec![OrchestratorEvent::ToolFinished {
+            tool_call_id: "tc-1".into(),
+            tool_name: "read_file".into(),
+            success: true,
+        }];
+
+        let context =
+            build_compaction_context(&tasks, &store, &messages, &events, &budget_snapshot(), 4_096);
+
+        assert!(context.contains("Recent conversation:"), "{context}");
+        assert!(context.contains("earlier request"), "{context}");
+        assert!(context.contains("recent answer"), "{context}");
+        assert!(!context.contains("secret-value"), "sensitive tail redacted: {context}");
+        assert!(context.contains("Recent runtime events:"), "{context}");
+        assert!(context.contains("ToolFinished"), "{context}");
+        assert!(context.contains("read_file"), "{context}");
+    }
+
+    #[test]
     fn context_is_bounded_by_dropping_oldest_lines_first() {
         let mut store = MemoryStore::new(4_096);
         for index in 0..50 {
@@ -286,7 +361,7 @@ mod tests {
         }
         store.insert(MemoryItem::new("decision:keep", "yes")).expect("inserts");
         let tasks = TaskGraph::new();
-        let context = build_compaction_context(&tasks, &store, &budget_snapshot(), 700);
+        let context = build_compaction_context(&tasks, &store, &[], &[], &budget_snapshot(), 700);
         assert!(context.len() <= 700, "bounded: {} bytes", context.len());
         // The newest memory line survives; the oldest dropped first.
         assert!(context.contains("obs:49"), "{context}");

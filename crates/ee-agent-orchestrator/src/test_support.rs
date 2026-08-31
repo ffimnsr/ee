@@ -133,16 +133,19 @@ pub fn tool_then_answer_script() -> Vec<ModelResponse> {
     ]
 }
 
-/// Script fixture: one `delegate_task` tool intent, then a completed answer.
+/// Contract-valid generic child handoff used by delegation replay fixtures.
+pub const DELEGATED_HANDOFF_OUTPUT: &str = r#"{"schema_version":1,"summary":"delegated","findings":[],"citations":{"files":[],"tools":[]},"unresolved":[],"recommended_actions":[]}"#;
+
+/// Script fixture: one `delegate_task` tool intent, then a completed handoff.
 #[must_use]
 pub fn delegate_then_answer_script() -> Vec<ModelResponse> {
     vec![
         ModelResponse::new().tool_intents(vec![ToolIntent::new(
             "tc-1",
             "delegate_task",
-            json!({ "prompt": "do the work" }),
+            json!({ "prompt": "do the work", "role_name": "summarizer" }),
         )]),
-        ModelResponse::new().text("delegated").completed(),
+        ModelResponse::new().text(DELEGATED_HANDOFF_OUTPUT).completed(),
     ]
 }
 

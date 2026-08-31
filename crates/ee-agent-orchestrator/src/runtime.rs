@@ -9,6 +9,8 @@
 
 use std::sync::{Arc, Mutex, RwLock};
 
+use sha2::{Digest, Sha256};
+
 use ee_acp_agent_server::{ClientBridge, PromptContext, PromptResult, UpdateSink};
 use ee_agent_protocol::{
     COMPACT_COMMAND_NAME, ContentBlock, RecoverableFault, SessionUpdate, UsageUpdate,
@@ -19,6 +21,7 @@ use tokio::sync::watch;
 use crate::budget::BudgetTracker;
 use crate::checkpoint::{CheckpointContextProvenance, OrchestratorCheckpoint, current_unix_millis};
 use crate::checkpoint_store::{CheckpointHandle, CheckpointStore};
+use crate::child_registry::{ChildCancelResult, ChildRegistry, ChildSnapshot};
 use crate::command_intelligence::ValidationCommandFailure;
 use crate::compaction::{
     CompactTurnReport, SESSION_SUMMARY_KEY, build_compaction_context, build_compaction_prompt,
@@ -27,6 +30,7 @@ use crate::config::OrchestratorConfig;
 use crate::context_planner::{
     ContextInvalidation, ContextPlan, ContextPlanCache, ContextPlanner, ContextPlannerConfig,
 };
+use crate::decision_log::DecisionLog;
 use crate::error::OrchestratorError;
 use crate::events::{EventRecorder, OrchestratorEvent};
 use crate::final_response::{
@@ -36,10 +40,12 @@ use crate::final_response::{
 use crate::loop_engine::{LoopEngine, LoopOptions, TurnSystemContext};
 use crate::memory::{MemoryItem, MemoryStore};
 use crate::memory_compaction::compact_memory;
+use crate::metrics::OrchestratorMetrics;
 use crate::model::{
     ModelAdapter, ModelMessage, ModelRequest, ModelRole, Transcript, prompt_result_with_usage,
 };
 use crate::model_registry::{DEFAULT_MODEL_ID, ModelRegistry};
+use crate::model_router::ModelRouter;
 use crate::plan_compiler::{PlanCompiler, PlanInput};
 use crate::policy::PolicyEngine;
 use crate::progress::ProgressTracker;
@@ -51,18 +57,29 @@ use crate::repair::{
 use crate::repair_context::{
     REPAIR_CONTEXT_TOOLS, RepairContextObservation, RepairContextSnapshot, build_repair_context,
 };
+use crate::review_context::{ReviewContextMetadata, build_review_context_with_metadata};
+use crate::rubber_duck::{
+    FindingDecision, RubberDuckFindingLedger, RubberDuckOutcome, RubberDuckRequest,
+    RubberDuckRunner, RubberDuckUnavailable,
+};
+use crate::rubber_duck_trigger::{
+    RubberDuckTrigger, RubberDuckTriggerController, RubberDuckTriggerDecision,
+    RubberDuckTriggerDisposition, RubberDuckTriggerFacts, RubberDuckTriggerKey,
+    RubberDuckTriggerPolicy, RubberDuckTriggerReason, RubberDuckTriggerSkipReason,
+};
 use crate::sensitive_data::SensitiveDataGuard;
 use crate::strategy::{
     StrategicInput, StrategyContext, StrategyExecutor, StrategyRun, StrategySelector, TurnResult,
     capability_aware_guidance,
 };
-use crate::subagents::{DelegateTool, SubagentManager};
-use crate::tasks::{TaskGraph, TaskId, TaskNode, truncate};
+use crate::subagents::{DelegateTool, SubagentManager, SubagentObservability, SubagentState};
+use crate::tasks::{TaskGraph, TaskId, TaskNode, TaskStatus, truncate};
 use crate::tools::{ServerTool, ToolExecutionLogEntry, ToolExecutor, ToolRegistry};
 use crate::validation::{
     ValidationPlanner, ValidationPlanningContext, ValidationResult, ValidationRunner,
     WorkspaceValidationConfig, finalize_validation_tasks,
 };
+use crate::{CritiqueTarget, ReportEvidence};
 
 /// Cap on the root task title derived from the prompt.
 const MAX_TASK_TITLE_CHARS: usize = 120;
@@ -71,6 +88,7 @@ const MAX_TASK_DESCRIPTION_CHARS: usize = 4_000;
 /// Title used when the prompt has no text blocks.
 const UNTITLED_TASK: &str = "untitled task";
 const REPAIR_CONTEXT_TOOL_CALL_PREFIX: &str = "repair-context";
+const MANUAL_RUBBER_DUCK_MAX_SYNTHESIS_BYTES: usize = 16 * 1024;
 
 /// Server-observed validation results available to the repair controller.
 /// They are not host-selected completion evidence.
@@ -98,6 +116,23 @@ struct RecoveryTurnMetadata {
 pub struct StrategicRecoveryTurn {
     pub prompt_result: PromptResult,
     pub final_response: FinalResponse,
+}
+
+/// Result of explicit `/rubber-duck`: verified critic evidence followed by one
+/// bounded root-owned synthesis. Raw critic transport output never appears here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManualRubberDuckTurn {
+    pub prompt_result: PromptResult,
+    pub critic_outcome: RubberDuckOutcome,
+    pub synthesis: Option<String>,
+    pub timeline_summary: String,
+}
+
+/// Outcome of one deterministic automatic trigger boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AutomaticRubberDuckTurn {
+    Ran { key: RubberDuckTriggerKey, reason: RubberDuckTriggerReason, outcome: RubberDuckOutcome },
+    Skipped(RubberDuckTriggerSkipReason),
 }
 
 /// Inputs shared by a fresh strategic recovery turn and a resumed one.
@@ -142,6 +177,10 @@ pub struct OrchestratorRuntime {
     policy: Arc<RwLock<PolicyEngine>>,
     checkpoints: Arc<CheckpointStore>,
     events: EventRecorder,
+    model_router: Arc<RwLock<Option<ModelRouter>>>,
+    metrics: Arc<Mutex<OrchestratorMetrics>>,
+    decisions: Arc<Mutex<DecisionLog>>,
+    children: Arc<ChildRegistry>,
     /// Final response facts from latest terminal recovery turn. These facts
     /// are server-observed tool records only; host evidence remains separate.
     last_turn_changed_files: Mutex<Vec<crate::final_response::ChangedFile>>,
@@ -153,6 +192,11 @@ pub struct OrchestratorRuntime {
     /// Revision-keyed fresh-context cache. It is invalidated conservatively on every
     /// host-observed mutation, diagnostics, VCS, and validation transition.
     context_cache: Mutex<ContextPlanCache>,
+    /// Internal same-session contrasting-model critic and root-owned findings.
+    rubber_duck: Arc<RubberDuckRunner>,
+    /// Automatic-boundary claims. Claimed before dispatch; terminal failures
+    /// remain claimed so equivalent evidence cannot form hidden retry loops.
+    rubber_duck_triggers: Mutex<RubberDuckTriggerController>,
     /// Typed terminal repair stop from latest production turn. This never upgrades
     /// host completion evidence; it only blocks unsupported completion claims.
     last_repair_stop: Mutex<Option<RepairStopReason>>,
@@ -180,7 +224,7 @@ impl OrchestratorRuntime {
         let memory = MemoryStore::new(config.memory_limit_bytes);
         Self::from_stores(
             config.clone(),
-            ModelRegistry::single(model),
+            Arc::new(ModelRegistry::single(model)),
             policy,
             Arc::new(Mutex::new(TaskGraph::new())),
             Arc::new(Mutex::new(memory)),
@@ -195,6 +239,16 @@ impl OrchestratorRuntime {
     pub fn with_model_registry(
         config: OrchestratorConfig,
         models: ModelRegistry,
+        policy: PolicyEngine,
+    ) -> Result<Self, OrchestratorError> {
+        Self::with_shared_model_registry(config, Arc::new(models), policy)
+    }
+
+    /// Creates a runtime from a process-owned shared registry. Adapters and
+    /// provider clients stay in memory and are never checkpointed.
+    pub fn with_shared_model_registry(
+        config: OrchestratorConfig,
+        models: Arc<ModelRegistry>,
         policy: PolicyEngine,
     ) -> Result<Self, OrchestratorError> {
         models.default_adapter()?;
@@ -222,7 +276,7 @@ impl OrchestratorRuntime {
     ) -> Self {
         Self::from_stores(
             config.clone(),
-            ModelRegistry::single(model),
+            Arc::new(ModelRegistry::single(model)),
             policy,
             Arc::new(Mutex::new(tasks)),
             Arc::new(Mutex::new(memory)),
@@ -240,14 +294,29 @@ impl OrchestratorRuntime {
         model: Arc<dyn ModelAdapter>,
         policy: PolicyEngine,
     ) -> Result<Self, OrchestratorError> {
-        checkpoint.validate()?;
-        Self::from_validated_checkpoint(checkpoint, model, policy)
+        Self::from_checkpoint_with_model_registry(
+            checkpoint,
+            Arc::new(ModelRegistry::single(model)),
+            policy,
+        )
     }
 
-    /// Shared restore path; `checkpoint` must already be validated.
+    /// Restores state against process-owned adapters. Registry metadata,
+    /// credentials, HTTP clients, and adapters never come from the checkpoint.
+    pub fn from_checkpoint_with_model_registry(
+        checkpoint: &crate::checkpoint::OrchestratorCheckpoint,
+        models: Arc<ModelRegistry>,
+        policy: PolicyEngine,
+    ) -> Result<Self, OrchestratorError> {
+        checkpoint.validate()?;
+        models.default_adapter()?;
+        Self::from_validated_checkpoint(checkpoint, models, policy)
+    }
+
+    /// Shared restore path; `checkpoint` and registry must already be validated.
     pub(crate) fn from_validated_checkpoint(
         checkpoint: &crate::checkpoint::OrchestratorCheckpoint,
-        model: Arc<dyn ModelAdapter>,
+        models: Arc<ModelRegistry>,
         policy: PolicyEngine,
     ) -> Result<Self, OrchestratorError> {
         let config = checkpoint.config.clone();
@@ -255,7 +324,7 @@ impl OrchestratorRuntime {
         budget.restore_used(&checkpoint.budget)?;
         Ok(Self::from_stores(
             config,
-            ModelRegistry::single(model),
+            models,
             policy,
             Arc::new(Mutex::new(checkpoint.tasks.clone())),
             Arc::new(Mutex::new(checkpoint.memory.clone())),
@@ -266,30 +335,45 @@ impl OrchestratorRuntime {
     /// Shared constructor: wires the stores, budget, and delegate tool.
     fn from_stores(
         config: OrchestratorConfig,
-        models: ModelRegistry,
+        models: Arc<ModelRegistry>,
         policy: PolicyEngine,
         tasks: Arc<Mutex<TaskGraph>>,
         memory: Arc<Mutex<MemoryStore>>,
         budget: BudgetTracker,
     ) -> Self {
         let budget = Arc::new(Mutex::new(budget));
-        let models = Arc::new(models);
         let tools = Arc::new(Mutex::new(ToolRegistry::new()));
         let checkpoints = Arc::new(CheckpointStore::new(&config.recovery));
         let events = EventRecorder::new();
+        let model_router = Arc::new(RwLock::new(None));
+        let metrics = Arc::new(Mutex::new(OrchestratorMetrics::new()));
+        let decisions = Arc::new(Mutex::new(DecisionLog::default()));
+        let children = Arc::new(ChildRegistry::default());
         let manager = Arc::new(SubagentManager::new(
             config.clone(),
             models.clone(),
             tools.clone(),
-            tasks.clone(),
-            memory.clone(),
-            budget.clone(),
+            SubagentState::new(tasks.clone(), memory.clone(), budget.clone(), children.clone()),
+            SubagentObservability::new(model_router.clone(), metrics.clone(), decisions.clone()),
         ));
         tools
             .lock()
             .expect("tool registry poisoned")
             .register(Arc::new(DelegateTool::new(manager)))
             .expect("registers delegate_task");
+        let rubber_duck = Arc::new(
+            RubberDuckRunner::with_config(
+                models.clone(),
+                tools.clone(),
+                tasks.clone(),
+                budget.clone(),
+                events.clone(),
+                config.rubber_duck.clone(),
+            )
+            .expect(
+                "orchestrator rubber-duck config must be validated before runtime construction",
+            ),
+        );
         Self {
             config,
             models,
@@ -300,11 +384,17 @@ impl OrchestratorRuntime {
             policy: Arc::new(RwLock::new(policy)),
             checkpoints,
             events,
+            model_router,
+            metrics,
+            decisions,
+            children,
             last_turn_changed_files: Mutex::new(Vec::new()),
             last_turn_validation: Mutex::new(ValidationRecorder::new()),
             validation_workspace: Mutex::new(WorkspaceValidationConfig::default()),
             validation_changed_symbols: Mutex::new(Vec::new()),
             context_cache: Mutex::new(ContextPlanCache::new()),
+            rubber_duck,
+            rubber_duck_triggers: Mutex::new(RubberDuckTriggerController::default()),
             last_repair_stop: Mutex::new(None),
         }
     }
@@ -325,6 +415,55 @@ impl OrchestratorRuntime {
     #[must_use]
     pub fn event_snapshot(&self) -> Vec<OrchestratorEvent> {
         self.events.events()
+    }
+
+    /// Bounded metadata-only snapshot of recent and active children.
+    #[must_use]
+    pub fn child_snapshot(&self, limit: usize) -> ChildSnapshot {
+        self.children.snapshot(limit)
+    }
+
+    /// Requests cancellation of one child without affecting its parent or siblings.
+    pub fn cancel_child(&self, id: &crate::subagents::SubagentId) -> ChildCancelResult {
+        self.children.cancel(id)
+    }
+
+    /// Requests cancellation of every active child owned by this runtime.
+    pub fn cancel_all_children(&self) -> usize {
+        self.children.cancel_all()
+    }
+
+    /// Installs deterministic model routing for future subagent spawns.
+    /// Every route must reference a model already present in the registry.
+    pub fn set_model_router(&self, router: ModelRouter) -> Result<(), OrchestratorError> {
+        for route in router.routes() {
+            if !self.models.contains(&route.adapter_id) {
+                return Err(OrchestratorError::InvalidState(format!(
+                    "model route {} references unknown adapter {}",
+                    route.route_id, route.adapter_id
+                )));
+            }
+        }
+        *self.model_router.write().expect("model router poisoned") = Some(router);
+        Ok(())
+    }
+
+    /// Removes configured role routing; children fall back to explicit or
+    /// parent model selection.
+    pub fn clear_model_router(&self) {
+        *self.model_router.write().expect("model router poisoned") = None;
+    }
+
+    /// Counter-only runtime metrics snapshot.
+    #[must_use]
+    pub fn metrics_snapshot(&self) -> OrchestratorMetrics {
+        self.metrics.lock().expect("orchestrator metrics poisoned").clone()
+    }
+
+    /// Bounded delegation decision-log snapshot.
+    #[must_use]
+    pub fn decision_log_snapshot(&self) -> DecisionLog {
+        self.decisions.lock().expect("decision log poisoned").clone()
     }
 
     /// The checkpoint store backing this runtime (same directory as every
@@ -393,6 +532,279 @@ impl OrchestratorRuntime {
     #[must_use]
     pub fn tasks(&self) -> TaskGraph {
         self.tasks.lock().expect("task graph poisoned").clone()
+    }
+
+    /// Runs internal contrasting-model critique and injects only verified,
+    /// canonical critic evidence into supplied root transcript.
+    pub async fn run_rubber_duck(
+        &self,
+        request: RubberDuckRequest,
+        transcript: &mut Transcript,
+        cancel: watch::Receiver<bool>,
+    ) -> RubberDuckOutcome {
+        self.rubber_duck.run(request, transcript, cancel).await
+    }
+
+    /// Runs explicit `/rubber-duck` before mutable per-prompt tool discovery.
+    /// Critic receives bounded observed state; root then gets exactly one
+    /// no-tools synthesis call over canonical verified evidence.
+    pub async fn run_manual_rubber_duck(
+        &self,
+        session_id: &str,
+        question: Option<String>,
+        history: Vec<ModelMessage>,
+        sink: UpdateSink,
+        cancel: watch::Receiver<bool>,
+    ) -> Result<ManualRubberDuckTurn, OrchestratorError> {
+        let target = question.as_ref().map_or(CritiqueTarget::Implementation, |question| {
+            CritiqueTarget::UserQuestion { question: question.clone() }
+        });
+        let goal = question.clone().unwrap_or_else(|| {
+            "Review current session work and identify overlooked risks or missing validation."
+                .to_string()
+        });
+        let root = {
+            let mut tasks = self.tasks.lock().expect("task graph poisoned");
+            tasks.create_root("manual rubber-duck review", &truncate(&goal, 4_000))
+        };
+        let root_id = root.id.clone();
+        let validation =
+            self.last_turn_validation.lock().expect("last turn validation poisoned").clone();
+        let changed_files =
+            self.last_turn_changed_files.lock().expect("last turn changed files poisoned").clone();
+        let tasks = self.tasks.lock().expect("task graph poisoned").clone();
+        let revision_payload = serde_json::to_vec(&(
+            session_id,
+            &target,
+            &changed_files,
+            validation.records(),
+            tasks.list(),
+        ))
+        .map_err(|error| OrchestratorError::InvalidState(error.to_string()))?;
+        let revision = format!("manual-{:x}", Sha256::digest(revision_payload));
+        let mut observed_context = build_review_context_with_metadata(
+            &[],
+            &validation,
+            &tasks,
+            ReviewContextMetadata { diagnostic_summaries: &[], revision: Some(&revision) },
+        );
+        observed_context.changed_files = changed_files
+            .iter()
+            .take(crate::review_context::MAX_REVIEW_CONTEXT_FILES)
+            .map(|file| truncate(&file.path, crate::review_context::MAX_REVIEW_CONTEXT_ITEM_CHARS))
+            .collect();
+        let observed_evidence = ReportEvidence {
+            files: observed_context.changed_files.iter().cloned().collect(),
+            tools: validation.records().iter().map(|record| record.command.clone()).collect(),
+        };
+        let active_task_or_plan = tasks
+            .list()
+            .iter()
+            .take(crate::review_context::MAX_REVIEW_CONTEXT_TASKS)
+            .map(|task| format!("{}: {} ({:?})", task.id, task.title, task.status))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut transcript = Transcript::new();
+        transcript.messages = history.into_iter().rev().take(32).collect::<Vec<_>>();
+        transcript.messages.reverse();
+        let outcome = self
+            .run_rubber_duck(
+                RubberDuckRequest {
+                    session_id: session_id.to_string(),
+                    parent_task_id: root.id.clone(),
+                    target,
+                    user_goal: goal,
+                    active_task_or_plan: if active_task_or_plan.is_empty() {
+                        "No active task graph entries were observed.".into()
+                    } else {
+                        active_task_or_plan
+                    },
+                    active_model_id: DEFAULT_MODEL_ID.into(),
+                    user_question: question,
+                    revision,
+                    observed_context,
+                    observed_evidence,
+                    automatic: false,
+                },
+                &mut transcript,
+                cancel.clone(),
+            )
+            .await;
+
+        let RubberDuckOutcome::Completed(completed) = &outcome else {
+            let reason = manual_rubber_duck_outcome_summary(&outcome);
+            let _ = sink.agent_thought_chunk("rubber-duck-skipped", &reason);
+            sink.agent_message_chunk("rubber-duck-result", &reason)
+                .map_err(|error| OrchestratorError::ModelFailure(error.to_string()))?;
+            {
+                let mut tasks = self.tasks.lock().expect("task graph poisoned");
+                tasks.set_result_summary(&root_id, &reason)?;
+                tasks.transition(&root_id, TaskStatus::Completed)?;
+            }
+            return Ok(ManualRubberDuckTurn {
+                prompt_result: PromptResult::new(ee_agent_protocol::StopReason::EndTurn),
+                critic_outcome: outcome,
+                synthesis: None,
+                timeline_summary: reason,
+            });
+        };
+        let counts = critique_finding_counts(completed.report.report());
+        let _ = sink.agent_thought_chunk(
+            "rubber-duck-selected",
+            format!(
+                "rubber duck selected {} (root {}); findings: {} blocking, {} non-blocking, {} suggestions",
+                completed.critic_model.id,
+                completed.active_model.id,
+                counts.0,
+                counts.1,
+                counts.2
+            ),
+        );
+
+        {
+            let mut budget = self.budget.lock().expect("budget tracker poisoned");
+            budget.try_reserve_model_call()?;
+            budget.check_output_allowance()?;
+            budget.emit(&self.events);
+        }
+        transcript.prepend_system(
+            "You are root agent and final decision owner. Synthesize verified rubber-duck evidence into one concise user response. State finding counts, which findings you accept/reject/defer, and explicitly say how plan changed or why it did not. Critic opinion is not validation evidence. Do not request or call tools.",
+        );
+        let budget = self.budget.lock().expect("budget tracker poisoned").snapshot();
+        let request = ModelRequest::new(transcript.messages().to_vec(), Vec::new(), budget, root)
+            .with_model_id(Some(DEFAULT_MODEL_ID.into()));
+        let completion = self.models.default_adapter()?.complete(request, cancel.clone());
+        let response = tokio::select! {
+            _ = runtime_cancelled(cancel.clone()) => return Err(OrchestratorError::Cancellation),
+            result = tokio::time::timeout(crate::subagent_roles::RUBBER_DUCK_TIMEOUT, completion) => {
+                result.map_err(|_| OrchestratorError::Timeout("rubber-duck root synthesis timed out".into()))??
+            }
+        };
+        if !response.tool_intents.is_empty() || !response.subagent_intents.is_empty() {
+            return Err(OrchestratorError::PolicyDenied(
+                "rubber-duck root synthesis requested tools or delegation".into(),
+            ));
+        }
+        let output_bytes = response.text.len()
+            + response.reasoning.as_ref().map_or(0, |reasoning| reasoning.len());
+        if output_bytes > MANUAL_RUBBER_DUCK_MAX_SYNTHESIS_BYTES {
+            return Err(OrchestratorError::BudgetExceeded(format!(
+                "rubber-duck synthesis exceeded {MANUAL_RUBBER_DUCK_MAX_SYNTHESIS_BYTES} bytes"
+            )));
+        }
+        self.budget.lock().expect("budget tracker poisoned").record_model_usage(
+            output_bytes,
+            response.usage.input_tokens,
+            response.usage.output_tokens,
+        )?;
+        let _ = sink.agent_thought_chunk(
+            "rubber-duck-plan-effect",
+            "root synthesis completed; plan change or unchanged reason stated in response",
+        );
+        sink.agent_message_chunk("rubber-duck-synthesis", response.text.clone())
+            .map_err(|error| OrchestratorError::ModelFailure(error.to_string()))?;
+        {
+            let mut tasks = self.tasks.lock().expect("task graph poisoned");
+            tasks.set_result_summary(&root_id, &response.text)?;
+            tasks.transition(&root_id, TaskStatus::Completed)?;
+        }
+        Ok(ManualRubberDuckTurn {
+            prompt_result: prompt_result_with_usage(
+                ee_agent_protocol::StopReason::EndTurn,
+                response.usage,
+            ),
+            critic_outcome: outcome,
+            timeline_summary: format!(
+                "rubber duck findings: {} blocking, {} non-blocking, {} suggestions; root synthesis completed",
+                counts.0, counts.1, counts.2
+            ),
+            synthesis: Some(response.text),
+        })
+    }
+
+    /// Evaluates, atomically claims, and runs one automatic boundary. Callers
+    /// must supply a request matching policy-selected session, target, and
+    /// revision; mismatch fails closed before model dispatch.
+    pub async fn run_automatic_rubber_duck(
+        &self,
+        trigger: RubberDuckTrigger,
+        facts: &RubberDuckTriggerFacts<'_>,
+        request: RubberDuckRequest,
+        transcript: &mut Transcript,
+        cancel: watch::Receiver<bool>,
+    ) -> AutomaticRubberDuckTurn {
+        let decision =
+            RubberDuckTriggerPolicy::new(self.config.rubber_duck_triggers).evaluate(trigger, facts);
+        let decision = self
+            .rubber_duck_triggers
+            .lock()
+            .expect("rubber-duck trigger controller poisoned")
+            .claim(decision);
+        let RubberDuckTriggerDecision::Run { key, reason } = decision else {
+            let RubberDuckTriggerDecision::Skip(reason) = decision else {
+                unreachable!("trigger decisions are run or skip")
+            };
+            return AutomaticRubberDuckTurn::Skipped(reason);
+        };
+        if request.session_id != key.session_id
+            || request.revision != key.revision
+            || request.target != key.target
+        {
+            self.rubber_duck_triggers
+                .lock()
+                .expect("rubber-duck trigger controller poisoned")
+                .finish(&key, RubberDuckTriggerDisposition::Failed);
+            return AutomaticRubberDuckTurn::Ran {
+                key,
+                reason,
+                outcome: RubberDuckOutcome::Failed {
+                    reason: "automatic trigger request does not match claimed key".into(),
+                },
+            };
+        }
+        let mut request = request;
+        request.automatic = true;
+        let outcome = self.run_rubber_duck(request, transcript, cancel).await;
+        let disposition = match &outcome {
+            RubberDuckOutcome::Completed(_) => RubberDuckTriggerDisposition::Completed,
+            RubberDuckOutcome::Unavailable(_) => RubberDuckTriggerDisposition::Unavailable,
+            RubberDuckOutcome::Quarantined { .. } => RubberDuckTriggerDisposition::Quarantined,
+            RubberDuckOutcome::Cancelled => RubberDuckTriggerDisposition::Cancelled,
+            RubberDuckOutcome::Failed { .. } => RubberDuckTriggerDisposition::Failed,
+        };
+        self.rubber_duck_triggers
+            .lock()
+            .expect("rubber-duck trigger controller poisoned")
+            .finish(&key, disposition);
+        AutomaticRubberDuckTurn::Ran { key, reason, outcome }
+    }
+
+    /// Snapshot of root-owned critic finding state.
+    #[must_use]
+    pub fn rubber_duck_findings(&self) -> RubberDuckFindingLedger {
+        self.rubber_duck.findings()
+    }
+
+    /// Applies root decisions and creates tasks only for accepted material findings.
+    pub fn reconcile_rubber_duck_findings(
+        &self,
+        parent: &TaskId,
+        session_id: &str,
+        revision: &str,
+        target: &CritiqueTarget,
+        decisions: &[FindingDecision],
+        root_evidence: &ReportEvidence,
+    ) -> Result<Vec<TaskId>, OrchestratorError> {
+        self.rubber_duck.reconcile(parent, session_id, revision, target, decisions, root_evidence)
+    }
+
+    /// Invalidates revision-sensitive planning and critic caches together.
+    pub fn invalidate_context(&self, invalidation: ContextInvalidation) {
+        self.context_cache
+            .lock()
+            .expect("context plan cache poisoned")
+            .invalidate(invalidation.clone());
+        self.rubber_duck.invalidate(&invalidation);
     }
 
     /// Validates and installs a concrete model plan as the session task graph.
@@ -514,7 +926,15 @@ impl OrchestratorRuntime {
             && command.name == COMPACT_COMMAND_NAME
         {
             let result = self
-                .run_compact_turn(ctx, sink, cancel, command.instructions, Some(system_context))
+                .run_compact_turn_recording(
+                    ctx,
+                    sink,
+                    cancel,
+                    command.instructions,
+                    Some(system_context),
+                    metadata.history,
+                    self.events.clone(),
+                )
                 .await?;
             return Ok(TurnOutcome::Completed(result));
         }
@@ -646,7 +1066,15 @@ impl OrchestratorRuntime {
             && command.name == COMPACT_COMMAND_NAME
         {
             return self
-                .run_compact_turn(ctx, sink, cancel, command.instructions, Some(system_context))
+                .run_compact_turn_recording(
+                    ctx,
+                    sink,
+                    cancel,
+                    command.instructions,
+                    Some(system_context),
+                    metadata.history,
+                    self.events.clone(),
+                )
                 .await;
         }
         let (title, description) = task_summary(&ctx);
@@ -827,6 +1255,18 @@ impl OrchestratorRuntime {
         if let Some(transaction) = &input.write_transaction {
             transaction.constrain_completion(&mut final_response.completion);
             final_response.can_finish = final_response.completion.is_verified();
+        }
+        if let Some(revision) =
+            input.completion_evidence.as_ref().map(|evidence| evidence.revision.as_str())
+        {
+            self.rubber_duck.constrain_completion(revision, &mut final_response.completion);
+            final_response.can_finish = final_response.completion.is_verified();
+            if !final_response.can_finish
+                && let Some(blocker) = final_response.completion.blocker.clone()
+                && blocker.starts_with("unresolved current-revision rubber-duck finding")
+            {
+                final_response.unresolved_risks.push(blocker);
+            }
         }
         if let Some(reason) = *self.last_repair_stop.lock().expect("last repair stop poisoned") {
             final_response.completion.state = crate::completion::CompletionState::Blocked;
@@ -1115,24 +1555,21 @@ impl OrchestratorRuntime {
     /// snapshot. Cache invalidation is cheap and stronger than selectively
     /// trusting state that may have changed outside this process.
     fn invalidate_repair_context(&self, session_id: &str, after_write: bool) {
-        let mut cache = self.context_cache.lock().expect("context plan cache poisoned");
         if after_write {
-            cache.invalidate(ContextInvalidation::Write { session_id: session_id.to_string() });
+            self.invalidate_context(ContextInvalidation::Write {
+                session_id: session_id.to_string(),
+            });
         }
-        cache
-            .invalidate(ContextInvalidation::BufferRevision { session_id: session_id.to_string() });
-        cache.invalidate(ContextInvalidation::DiagnosticsRevision {
-            session_id: session_id.to_string(),
-        });
-        cache.invalidate(ContextInvalidation::WorktreeRevision {
-            session_id: session_id.to_string(),
-        });
-        cache.invalidate(ContextInvalidation::CheckoutRevision {
-            session_id: session_id.to_string(),
-        });
-        cache.invalidate(ContextInvalidation::ValidationResult {
-            session_id: session_id.to_string(),
-        });
+        for invalidation in [
+            ContextInvalidation::BufferRevision { session_id: session_id.to_string() },
+            ContextInvalidation::DiagnosticsRevision { session_id: session_id.to_string() },
+            ContextInvalidation::WorktreeRevision { session_id: session_id.to_string() },
+            ContextInvalidation::CheckoutRevision { session_id: session_id.to_string() },
+            ContextInvalidation::ValidationResult { session_id: session_id.to_string() },
+            ContextInvalidation::GraphRevision { session_id: session_id.to_string() },
+        ] {
+            self.invalidate_context(invalidation);
+        }
     }
 
     /// Runs a repair loop against the existing root task and shared counters.
@@ -1441,7 +1878,15 @@ impl OrchestratorRuntime {
             && command.name == COMPACT_COMMAND_NAME
         {
             return self
-                .run_compact_turn(ctx, sink, cancel, command.instructions, system_context)
+                .run_compact_turn_recording(
+                    ctx,
+                    sink,
+                    cancel,
+                    command.instructions,
+                    system_context,
+                    Vec::new(),
+                    events,
+                )
                 .await;
         }
         let (title, description) = task_summary(&ctx);
@@ -1658,38 +2103,78 @@ impl OrchestratorRuntime {
         })
     }
 
-    /// Runs one `/compact` turn: deterministic memory compaction first, then
-    /// one tool-free model call over a provenance-rich bounded context, then
-    /// the model-derived summary stored as session memory (additive only —
-    /// protected keys are never deleted by LLM output).
+    /// Runs one `/compact` turn without provider-owned conversation history.
     pub async fn run_compact_turn(
+        &self,
+        ctx: PromptContext,
+        sink: UpdateSink,
+        cancel: watch::Receiver<bool>,
+        instructions: Option<String>,
+        system_context: Option<String>,
+    ) -> Result<PromptResult, OrchestratorError> {
+        self.run_compact_turn_with_history(
+            ctx,
+            sink,
+            cancel,
+            instructions,
+            system_context,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Runs one `/compact` turn with bounded provider-owned conversation
+    /// history included in compaction context. Memory changes commit only
+    /// after model response, usage validation, summary validation, and staged
+    /// summary insertion all succeed.
+    pub async fn run_compact_turn_with_history(
+        &self,
+        ctx: PromptContext,
+        sink: UpdateSink,
+        cancel: watch::Receiver<bool>,
+        instructions: Option<String>,
+        system_context: Option<String>,
+        recent_messages: Vec<ModelMessage>,
+    ) -> Result<PromptResult, OrchestratorError> {
+        self.run_compact_turn_recording(
+            ctx,
+            sink,
+            cancel,
+            instructions,
+            system_context,
+            recent_messages,
+            self.events.clone(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_compact_turn_recording(
         &self,
         _ctx: PromptContext,
         sink: UpdateSink,
         cancel: watch::Receiver<bool>,
         instructions: Option<String>,
         system_context: Option<String>,
+        recent_messages: Vec<ModelMessage>,
+        events: EventRecorder,
     ) -> Result<PromptResult, OrchestratorError> {
         if *cancel.borrow() {
             return Err(OrchestratorError::Cancellation);
         }
-        // 1. Deterministic memory compaction (merges duplicates, decays
-        //    low-value observations; protected keys survive by construction).
-        let deterministic = {
-            let mut memory = self.memory.lock().expect("memory store poisoned");
-            compact_memory(&mut memory, &self.config.compaction.memory)
-        };
-        // 2. Provenance-rich, byte-bounded compaction context from the task
-        //    graph, memory, validation facts, and budget state.
-        let (tasks, memory, budget_snapshot) = {
-            let tasks = self.tasks.lock().expect("task graph poisoned");
-            let memory = self.memory.lock().expect("memory store poisoned");
-            let budget = self.budget.lock().expect("budget tracker poisoned");
-            (tasks.clone(), memory.clone(), budget.snapshot())
-        };
+        // Stage every memory mutation. Failed compaction leaves live memory
+        // byte-for-byte unchanged.
+        let original_memory = self.memory.lock().expect("memory store poisoned").clone();
+        let mut staged_memory = original_memory.clone();
+        let deterministic = compact_memory(&mut staged_memory, &self.config.compaction.memory);
+        let tasks = self.tasks.lock().expect("task graph poisoned").clone();
+        let budget_snapshot = self.budget.lock().expect("budget tracker poisoned").snapshot();
+        let recent_events = events.events();
         let context = build_compaction_context(
             &tasks,
-            &memory,
+            &staged_memory,
+            &recent_messages,
+            &recent_events,
             &budget_snapshot,
             self.config.compaction.max_input_bytes,
         );
@@ -1727,7 +2212,12 @@ impl OrchestratorRuntime {
             .reset_deadline(self.config.turn_timeout);
         // The compaction model call consumes budget like any other call;
         // budget exhaustion or token caps fail closed.
-        self.budget.lock().expect("budget tracker poisoned").try_reserve_model_call()?;
+        {
+            let mut budget = self.budget.lock().expect("budget tracker poisoned");
+            budget.try_reserve_model_call()?;
+            budget.emit(&events);
+        }
+        events.record(OrchestratorEvent::ModelRequested { iteration: 1 });
         let request = ModelRequest::new(transcript, Vec::new(), budget_snapshot, task);
         let response = match tokio::time::timeout(
             self.config.turn_timeout,
@@ -1743,11 +2233,16 @@ impl OrchestratorRuntime {
                 ));
             }
         };
-        self.budget.lock().expect("budget tracker poisoned").record_model_usage(
-            response.text.len(),
-            response.usage.input_tokens,
-            response.usage.output_tokens,
-        )?;
+        events.record(OrchestratorEvent::ModelResponded { iteration: 1 });
+        {
+            let mut budget = self.budget.lock().expect("budget tracker poisoned");
+            budget.record_model_usage(
+                response.text.len(),
+                response.usage.input_tokens,
+                response.usage.output_tokens,
+            )?;
+            budget.emit(&events);
+        }
         // Context-window usage after the compaction model call; unknown
         // usage emits nothing.
         if let Some(input_tokens) = response.usage.input_tokens {
@@ -1770,13 +2265,18 @@ impl OrchestratorRuntime {
         let guard = SensitiveDataGuard::new();
         let item = MemoryItem::new(SESSION_SUMMARY_KEY, guard.redact(summary));
         let summary_bytes = item.byte_size();
+        staged_memory.insert(item).map_err(|error| {
+            OrchestratorError::InvalidState(format!("failed to store compaction summary: {error}"))
+        })?;
         {
             let mut memory = self.memory.lock().expect("memory store poisoned");
-            memory.insert(item).map_err(|error| {
-                OrchestratorError::InvalidState(format!(
-                    "failed to store compaction summary: {error}"
-                ))
-            })?;
+            if *memory != original_memory {
+                return Err(OrchestratorError::InvalidState(
+                    "memory changed during compaction; retry to avoid overwriting newer facts"
+                        .into(),
+                ));
+            }
+            *memory = staged_memory;
         }
         let retained_context_bytes = context.len();
         let report = CompactTurnReport {
@@ -1789,6 +2289,73 @@ impl OrchestratorRuntime {
         let _ = sink.agent_message_chunk("compact-report", report.to_status_text());
         Ok(prompt_result_with_usage(ee_agent_protocol::StopReason::EndTurn, response.usage))
     }
+}
+
+fn critique_finding_counts(report: &crate::CritiqueReport) -> (usize, usize, usize) {
+    report.findings.iter().fold((0, 0, 0), |mut counts, finding| {
+        match finding.severity {
+            crate::CritiqueSeverity::Blocking => counts.0 += 1,
+            crate::CritiqueSeverity::NonBlocking => counts.1 += 1,
+            crate::CritiqueSeverity::Suggestion => counts.2 += 1,
+        }
+        counts
+    })
+}
+
+fn contrast_unavailable_summary(reason: &crate::ContrastUnavailable) -> String {
+    match reason {
+        crate::ContrastUnavailable::UnknownActiveIdentity { active_id } => {
+            format!("unknown active model identity {active_id}")
+        }
+        crate::ContrastUnavailable::NoAlternative => "no alternative model is registered".into(),
+        crate::ContrastUnavailable::SameFamilyOnly { family } => {
+            format!("only same-family alternatives are registered ({family:?})")
+        }
+        crate::ContrastUnavailable::MissingCapability { required } => {
+            format!("alternative model lacks required capabilities {required:?}")
+        }
+        crate::ContrastUnavailable::DisabledRoute => "contrasting model route is disabled".into(),
+    }
+}
+
+fn manual_rubber_duck_outcome_summary(outcome: &RubberDuckOutcome) -> String {
+    match outcome {
+        RubberDuckOutcome::Completed(_) => "rubber duck completed".into(),
+        RubberDuckOutcome::Unavailable(reason) => match reason {
+            RubberDuckUnavailable::Disabled => "rubber duck disabled".into(),
+            RubberDuckUnavailable::AutomaticDisabled => {
+                "rubber duck skipped: automatic mode disabled".into()
+            }
+            RubberDuckUnavailable::ExternalBackendConfigured { agent_id } => {
+                format!("rubber duck skipped: external backend `{agent_id}` requires host broker")
+            }
+            RubberDuckUnavailable::CallLimitReached { max_calls } => {
+                format!("rubber duck skipped: session call limit {max_calls} reached")
+            }
+            RubberDuckUnavailable::CallAccountingCapacityReached { max_sessions } => {
+                format!("rubber duck skipped: session accounting capacity {max_sessions} reached")
+            }
+            RubberDuckUnavailable::Contrast(reason) => {
+                format!("rubber duck skipped: {}", contrast_unavailable_summary(reason))
+            }
+            RubberDuckUnavailable::BudgetDenied { reason }
+            | RubberDuckUnavailable::InvalidRequest { reason } => {
+                format!("rubber duck skipped: {reason}")
+            }
+        },
+        RubberDuckOutcome::Quarantined { reason } => {
+            format!("rubber duck quarantined: {reason}")
+        }
+        RubberDuckOutcome::Cancelled => "rubber duck cancelled".into(),
+        RubberDuckOutcome::Failed { reason } => format!("rubber duck failed: {reason}"),
+    }
+}
+
+async fn runtime_cancelled(mut cancel: watch::Receiver<bool>) {
+    if *cancel.borrow() {
+        return;
+    }
+    let _ = cancel.changed().await;
 }
 
 /// Builds checkpoint-safe metadata from host-provided strategic input. Context
@@ -2033,11 +2600,14 @@ mod tests {
     use super::*;
     use crate::events::OrchestratorEvent;
     use crate::model::{ModelResponse, ModelRole};
+    use crate::model_registry::{
+        ModelCapability, ModelFamily, ModelIdentity, ModelRegistration, RUBBER_DUCK_ROLE,
+    };
     use crate::policy::{PolicyEngine, ToolPolicy};
     use crate::strategy::StrategicInput;
     use crate::test_support::{
-        FakeModel, FakeTool, delegate_then_answer_script, endless_tool_loop_script,
-        simple_answer_script, tool_then_answer_script,
+        DELEGATED_HANDOFF_OUTPUT, FakeModel, FakeTool, delegate_then_answer_script,
+        endless_tool_loop_script, simple_answer_script, tool_then_answer_script,
     };
     use crate::tools::{SideEffectClass, ToolDefinition, ToolIntent, ToolResult};
 
@@ -2536,6 +3106,7 @@ mod tests {
                 budget_event(1, 1, 1, 1, 0), // subagent reservation
                 OrchestratorEvent::SubagentStarted {
                     subagent_id: "task-2".into(),
+                    role: "summarizer".into(),
                     model_id: Some("default".into()),
                 },
                 // The child runs its own loop over the shared script.
@@ -2546,7 +3117,7 @@ mod tests {
                 budget_event(1, 1, 0, 0, 0),
                 OrchestratorEvent::ModelRequested { iteration: 1 },
                 OrchestratorEvent::ModelResponded { iteration: 1 },
-                budget_event(1, 1, 0, 0, 9), // "delegated"
+                budget_event(1, 1, 0, 0, DELEGATED_HANDOFF_OUTPUT.len()),
                 OrchestratorEvent::TurnStopped { stop_reason: "end_turn".into() },
                 OrchestratorEvent::SubagentFinished { subagent_id: "task-2".into(), success: true },
                 OrchestratorEvent::ToolFinished {
@@ -2633,6 +3204,88 @@ mod tests {
         let (title, description) = task_summary(&ctx);
         assert_eq!(title, UNTITLED_TASK);
         assert_eq!(description, UNTITLED_TASK);
+    }
+
+    #[tokio::test]
+    async fn manual_rubber_duck_uses_critic_then_one_no_tools_root_synthesis() {
+        let root = FakeModel::new(vec![
+            ModelResponse::new()
+                .text("No blocking findings. Plan unchanged because review was clean.")
+                .completed(),
+        ]);
+        let critic = FakeModel::new(vec![
+            ModelResponse::new()
+                .text(
+                    serde_json::to_string(&crate::CritiqueReport::clean(
+                        CritiqueTarget::Implementation,
+                    ))
+                    .expect("report"),
+                )
+                .completed(),
+        ]);
+        let mut models = ModelRegistry::new();
+        models
+            .register_model(
+                DEFAULT_MODEL_ID,
+                Arc::new(root.clone()),
+                ModelRegistration::new(
+                    ModelIdentity::new(
+                        "root-model",
+                        "test",
+                        ModelFamily::OpenAi,
+                        "Root",
+                        [ModelCapability::ChatCompletion, ModelCapability::Tools],
+                    )
+                    .expect("root identity"),
+                ),
+            )
+            .expect("root route");
+        models
+            .register_model(
+                RUBBER_DUCK_ROLE,
+                Arc::new(critic.clone()),
+                ModelRegistration::new(
+                    ModelIdentity::new(
+                        "critic-model",
+                        "test",
+                        ModelFamily::Anthropic,
+                        "Critic",
+                        [ModelCapability::ChatCompletion, ModelCapability::Tools],
+                    )
+                    .expect("critic identity"),
+                )
+                .for_roles(&[RUBBER_DUCK_ROLE]),
+            )
+            .expect("critic route");
+        let runtime = OrchestratorRuntime::with_model_registry(
+            OrchestratorConfig::default(),
+            models,
+            PolicyEngine::default(),
+        )
+        .expect("runtime");
+        let (sink, _client, mut rx) = plumbing();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let turn = runtime
+            .run_manual_rubber_duck("s-1", None, Vec::new(), sink, cancel_rx)
+            .await
+            .expect("manual critique succeeds");
+
+        assert!(matches!(turn.critic_outcome, RubberDuckOutcome::Completed(_)));
+        assert_eq!(critic.call_count(), 1);
+        assert_eq!(root.call_count(), 1);
+        assert!(turn.synthesis.as_deref().is_some_and(|text| text.contains("Plan unchanged")));
+        assert!(root.requests()[0].tools.is_empty(), "root synthesis cannot mutate");
+        let mut update_text = String::new();
+        while let Ok(event) = rx.try_recv() {
+            if let OutboundEvent::Update { update, .. } = event
+                && let SessionUpdate::AgentMessageChunk(chunk) = *update
+                && let ContentBlock::Text(text) = chunk.content
+            {
+                update_text.push_str(&text.text);
+            }
+        }
+        assert!(update_text.contains("Plan unchanged"));
+        assert!(!update_text.contains("schema_version"), "raw critic report stays hidden");
     }
 
     // ── Strategic turn path ────────────────────────────────────────────────
@@ -3027,6 +3680,7 @@ mod tests {
     async fn compact_turn_rejects_empty_summary_without_memory_changes() {
         let model = Arc::new(FakeModel::new(vec![ModelResponse::new().completed()]));
         let runtime = compact_runtime(OrchestratorConfig::default(), model.clone());
+        let memory_before = runtime.memory();
         let (sink, client, _rx) = plumbing();
         let (_cancel_tx, cancel_rx) = watch::channel(false);
 
@@ -3039,9 +3693,11 @@ mod tests {
                 if reason.contains("compaction summary was empty")),
             "{error}"
         );
-        let memory = runtime.memory();
-        assert!(memory.query("summary:session").is_none(), "no summary stored");
-        assert!(memory.query("decision:api").is_some(), "protected keys untouched");
+        assert_eq!(
+            runtime.memory(),
+            memory_before,
+            "failed compaction must not commit duplicate merging or decay"
+        );
         assert_eq!(model.call_count(), 1);
     }
 

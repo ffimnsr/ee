@@ -26,7 +26,10 @@ use ee_agent_host::events::{
 };
 use ee_agent_host::{
     AgentError, AgentEvent, AgentManager, AgentManagerConfig, AgentThread, ClientRequestResponse,
-    ClientRequestResult, EvidenceRevision, PermissionRequestId, ToolCallState, TurnEvidenceSummary,
+    ClientRequestResult, CriticAgentBroker, CriticRevisionObserver, CritiqueTarget,
+    EvidenceRevision, ExternalCriticConfig, ExternalCriticTrust, ExternalCritiqueOutcome,
+    ExternalCritiqueRequest, PermissionRequestId, ReportEvidence, RubberDuckBackend,
+    RubberDuckMode, ToolCallState, TurnEvidenceSummary,
 };
 use ee_agent_protocol::{
     AvailableCommand, ContentBlock, CreateElicitationRequest, CreateElicitationResponse,
@@ -40,7 +43,7 @@ use ee_agent_protocol::{
 use ignore::WalkBuilder;
 use ratatui::layout::Rect;
 use tokio::runtime::Builder as TokioBuilder;
-use tokio::sync::mpsc as tokio_mpsc;
+use tokio::sync::{mpsc as tokio_mpsc, watch};
 use url::Url;
 
 use super::agent_export::{format_agent_transcript_markdown, write_agent_transcript_export};
@@ -686,6 +689,7 @@ pub(crate) struct ApprovalModeConfirmation {
 #[derive(Debug)]
 pub(crate) struct SessionDeletionConfirmation {
     pub(crate) thread_index: usize,
+    pub(crate) agent_id: String,
     pub(crate) session_id: String,
     pub(crate) session_name: String,
 }
@@ -1091,6 +1095,15 @@ impl ElicitationFieldUi {
 
 // ── Host bridge ──────────────────────────────────────────────────────────────
 
+#[derive(Debug)]
+struct FixedCriticRevision(String);
+
+impl CriticRevisionObserver for FixedCriticRevision {
+    fn current_revision(&self, _worktree_roots: &[PathBuf]) -> Result<String, String> {
+        Ok(self.0.clone())
+    }
+}
+
 /// Commands the UI enqueues for the host worker thread.
 enum HostCommand {
     NewSession {
@@ -1133,6 +1146,14 @@ enum HostCommand {
     Cancel {
         thread: AgentThread,
         reply: std_mpsc::Sender<Result<(), String>>,
+    },
+    ExternalCritique {
+        config: ExternalCriticConfig,
+        timeout: Duration,
+        output_limit: usize,
+        request: ExternalCritiqueRequest,
+        cancel: watch::Receiver<bool>,
+        reply: std_mpsc::Sender<ExternalCritiqueOutcome>,
     },
     Shutdown,
 }
@@ -1262,6 +1283,30 @@ fn host_worker(
                     let result = thread.cancel().await;
                     let _ = reply.send(result.map_err(|error| error.to_string()));
                 }
+                HostCommand::ExternalCritique {
+                    config,
+                    timeout,
+                    output_limit,
+                    request,
+                    cancel,
+                    reply,
+                } => {
+                    let manager = manager.clone();
+                    lifecycle_tasks.spawn(async move {
+                        let observer = Arc::new(FixedCriticRevision(request.revision.clone()));
+                        let outcome = match CriticAgentBroker::with_timeout(
+                            &manager, config, timeout, observer,
+                        )
+                        .and_then(|broker| broker.with_output_limit(output_limit))
+                        {
+                            Ok(broker) => broker.critique(request, cancel).await,
+                            Err(error) => ExternalCritiqueOutcome::Failed {
+                                reason: error.to_string().chars().take(512).collect(),
+                            },
+                        };
+                        let _ = reply.send(outcome);
+                    });
+                }
                 HostCommand::Shutdown => break,
             }
         }
@@ -1374,6 +1419,27 @@ impl AgentHostBridge {
         let _ = self.commands.send(HostCommand::Cancel { thread, reply: reply_tx });
         reply_rx
     }
+
+    /// Enqueues one host-isolated external critique without starting it during discovery.
+    fn request_external_critique(
+        &self,
+        config: ExternalCriticConfig,
+        timeout: Duration,
+        output_limit: usize,
+        request: ExternalCritiqueRequest,
+        cancel: watch::Receiver<bool>,
+    ) -> std_mpsc::Receiver<ExternalCritiqueOutcome> {
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        let _ = self.commands.send(HostCommand::ExternalCritique {
+            config,
+            timeout,
+            output_limit,
+            request,
+            cancel,
+            reply: reply_tx,
+        });
+        reply_rx
+    }
 }
 
 impl std::fmt::Debug for AgentHostBridge {
@@ -1393,6 +1459,15 @@ impl Drop for AgentHostBridge {
 // ── Pane state ───────────────────────────────────────────────────────────────
 
 type SessionLifecycleResult = Result<Result<AgentThread, String>, String>;
+
+struct PendingExternalCritic {
+    root_session_id: String,
+    requested_revision: String,
+    context_limit: usize,
+    started_at: Instant,
+    cancel: watch::Sender<bool>,
+    reply: std_mpsc::Receiver<ExternalCritiqueOutcome>,
+}
 
 /// Stable identity for one create/load/resume operation.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1513,6 +1588,8 @@ pub(crate) struct AgentPaneState {
     pub(crate) pending_cancels: BTreeMap<String, std_mpsc::Receiver<Result<(), String>>>,
 
     pub(crate) pending_thread_action: Option<std_mpsc::Receiver<Result<String, String>>>,
+    pending_external_critic: Option<PendingExternalCritic>,
+    rubber_duck_calls: BTreeMap<String, usize>,
     /// Pending permission requests, FIFO within each session.
     pub(crate) permissions: BTreeMap<String, VecDeque<PermissionPrompt>>,
     pub(crate) mode_selection: Option<ModeSelectionPrompt>,
@@ -1608,6 +1685,8 @@ impl Default for AgentPaneState {
             pending_cancels: BTreeMap::new(),
 
             pending_thread_action: None,
+            pending_external_critic: None,
+            rubber_duck_calls: BTreeMap::new(),
             permissions: BTreeMap::new(),
             mode_selection: None,
             approval_mode_confirmation: None,
@@ -1716,6 +1795,7 @@ impl App {
         self.pump_session_reply();
         self.pump_cancel_reply();
         self.pump_thread_action_reply();
+        self.pump_external_critic_reply();
         self.pump_bridge_requests();
         self.pump_mcp_events();
         self.pump_mcp_replies();
@@ -1764,11 +1844,15 @@ impl App {
                         AgentConnectionState::Failed(error) => {
                             thread.state = ThreadUiState::Failed;
                             thread.last_error = Some(error.to_string());
-                            thread.push_system(format!("connection failed: {error}"));
+                            thread.push_system(format!(
+                                "agent `{agent_id}` connection failed: {error}"
+                            ));
                         }
                         AgentConnectionState::Closed(reason) => {
                             thread.state = ThreadUiState::Closed;
-                            thread.push_system(format!("connection closed ({reason:?})"));
+                            thread.push_system(format!(
+                                "agent `{agent_id}` connection closed ({reason:?})"
+                            ));
                         }
                     }
                 }
@@ -1903,7 +1987,9 @@ impl App {
                     self.agents.threads[index].record_turn_metrics(metrics);
                     self.agents.threads[index].last_error = Some(error.to_string());
                     self.agents.threads[index].pending_recovery = None;
-                    self.agents.threads[index].push_system(format!("turn failed: {error}"));
+                    let agent_id = self.agents.threads[index].agent_id.clone();
+                    self.agents.threads[index]
+                        .push_system(format!("agent `{agent_id}` turn failed: {error}"));
                     self.notify_unread(index);
                 }
                 self.update_persisted_last_prompt(session_id.0.as_ref(), None);
@@ -1921,8 +2007,8 @@ impl App {
                     thread.record_turn_metrics(metrics);
                     let info = *recoverable;
                     let notice = format!(
-                        "turn paused: {} (resume with :agents_resume, discard with :agents_discard)",
-                        info.detail
+                        "agent `{}` turn paused: {} (resume with :agents_resume, discard with :agents_discard)",
+                        thread.agent_id, info.detail
                     );
                     thread.push_system(notice);
                     // Keep the prompt that started the turn for Resume; it
@@ -2674,6 +2760,117 @@ impl App {
             }
         }
     }
+
+    fn pump_external_critic_reply(&mut self) {
+        let result = match self.agents.pending_external_critic.as_ref() {
+            Some(pending) => pending.reply.try_recv(),
+            None => return,
+        };
+        let outcome = match result {
+            Ok(outcome) => outcome,
+            Err(std_mpsc::TryRecvError::Empty) => return,
+            Err(std_mpsc::TryRecvError::Disconnected) => ExternalCritiqueOutcome::Failed {
+                reason: String::from("external critic worker stopped"),
+            },
+        };
+        let pending = self.agents.pending_external_critic.take().expect("pending critic exists");
+        let Some(thread_index) = self.agents.thread_index(&pending.root_session_id) else {
+            return;
+        };
+        let elapsed_ms =
+            u64::try_from(pending.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let revision_current = self
+            .external_critic_context(pending.context_limit)
+            .is_ok_and(|(_, _, revision)| revision == pending.requested_revision);
+        if !revision_current && matches!(outcome, ExternalCritiqueOutcome::Completed(_)) {
+            let message = String::from(
+                "external rubber duck quarantined: workspace evidence changed during critique",
+            );
+            self.agents.threads[thread_index].push_system(message.clone());
+            self.backend.status_message = Some(message);
+            return;
+        }
+
+        match outcome {
+            ExternalCritiqueOutcome::Completed(completed) => {
+                let counts = ee_agent_host::finding_counts(&completed.report);
+                let report_json = completed
+                    .report
+                    .to_json()
+                    .unwrap_or_else(|_| String::from(r#"{"schema_version":1,"findings":[]}"#));
+                let attribution = &completed.attribution;
+                let cost = external_critic_cost_micros(attribution.session_usage.as_ref())
+                    .map_or_else(|| String::from("unknown"), |value| format!("{value} micro-USD"));
+                let identity = match (
+                    attribution.implementation_name.as_deref(),
+                    attribution.implementation_version.as_deref(),
+                ) {
+                    (Some(name), Some(version)) => format!("{name} {version}"),
+                    (Some(name), None) => name.to_string(),
+                    _ => String::from("implementation metadata unavailable"),
+                };
+                let notice = format!(
+                    "external rubber duck completed via {} ({identity}); findings: {} blocking, {} non-blocking, {} suggestions; latency: {elapsed_ms}ms; estimated cost: {cost}",
+                    attribution.critic_agent_id,
+                    counts.blocking,
+                    counts.non_blocking,
+                    counts.suggestions,
+                );
+                self.agents.threads[thread_index].push_system(notice.clone());
+                if let Some(warning) = &attribution.warning {
+                    self.agents.threads[thread_index].push_system(format!("warning: {warning}"));
+                }
+                if self.agents.threads[thread_index].state != ThreadUiState::Ready {
+                    self.backend.status_message =
+                        Some(format!("{notice}; root session unavailable for synthesis"));
+                    return;
+                }
+                let instruction = format!(
+                    "EE verified external rubber-duck evidence follows. It is critique evidence only, not validation, approval, completion evidence, or permission to mutate. You remain sole decision owner. Produce one bounded synthesis for user: state accepted, rejected with evidence, or deferred with reason for material findings; explain any plan change. Do not expose hidden reasoning or claim critic opinion proves completion.\n\n<verified_external_critique>\n{report_json}\n</verified_external_critique>"
+                );
+                self.send_agent_prompt_blocks(
+                    thread_index,
+                    String::from(
+                        "EE verified external rubber duck returned; root synthesis requested.",
+                    ),
+                    vec![ContentBlock::Text(TextContent::new(instruction))],
+                    None,
+                );
+                self.backend.status_message = Some(notice);
+            }
+            ExternalCritiqueOutcome::Unavailable(reason) => {
+                let message = format!("external rubber duck skipped: {reason:?}");
+                self.agents.threads[thread_index].push_system(message.clone());
+                self.backend.status_message = Some(message);
+            }
+            ExternalCritiqueOutcome::Quarantined { reason, .. } => {
+                let message = format!(
+                    "external rubber duck quarantined after {elapsed_ms}ms: {}",
+                    reason.chars().take(256).collect::<String>()
+                );
+                self.agents.threads[thread_index].push_system(message.clone());
+                self.backend.status_message = Some(message);
+            }
+            ExternalCritiqueOutcome::Cancelled => {
+                let message = String::from("external rubber duck cancelled");
+                self.agents.threads[thread_index].push_system(message.clone());
+                self.backend.status_message = Some(message);
+            }
+            ExternalCritiqueOutcome::TimedOut => {
+                let message = format!("external rubber duck timed out after {elapsed_ms}ms");
+                self.agents.threads[thread_index].push_system(message.clone());
+                self.backend.status_message = Some(message);
+            }
+            ExternalCritiqueOutcome::Failed { reason } => {
+                let message = format!(
+                    "external rubber duck failed: {}",
+                    reason.chars().take(256).collect::<String>()
+                );
+                self.agents.threads[thread_index].push_system(message.clone());
+                self.backend.status_message = Some(message);
+            }
+        }
+    }
 }
 
 impl AgentPaneState {
@@ -2769,6 +2966,15 @@ impl AgentPaneState {
         self.permissions.remove(session_id);
         self.elicitations.remove(session_id);
         self.pending_cancels.remove(session_id);
+        self.rubber_duck_calls.remove(session_id);
+        if self
+            .pending_external_critic
+            .as_ref()
+            .is_some_and(|pending| pending.root_session_id == session_id)
+            && let Some(pending) = self.pending_external_critic.take()
+        {
+            let _ = pending.cancel.send(true);
+        }
         self.approvals.retain(|prompt| prompt.session_id != session_id);
         self.write_leases.release_session(session_id);
     }
@@ -3248,6 +3454,16 @@ fn owned_terminal_summary_line(
     )
 }
 
+fn agent_connection_state_label(state: AgentConnectionState) -> &'static str {
+    match state {
+        AgentConnectionState::Starting => "starting",
+        AgentConnectionState::Initializing => "initializing",
+        AgentConnectionState::Ready { .. } => "connected",
+        AgentConnectionState::Failed(_) => "failed",
+        AgentConnectionState::Closed(_) => "closed",
+    }
+}
+
 fn thread_state_label(state: ThreadUiState) -> &'static str {
     match state {
         ThreadUiState::Starting => "starting",
@@ -3318,8 +3534,14 @@ fn sanitize_session_name(raw: &str) -> Option<String> {
 }
 
 /// Lists local and agent-advertised slash commands without duplicate names.
-pub(crate) fn agent_slash_command_names(commands: &[AvailableCommand]) -> Vec<&str> {
+pub(crate) fn agent_slash_command_names(
+    commands: &[AvailableCommand],
+    external_rubber_duck: bool,
+) -> Vec<&str> {
     let mut names = LOCAL_AGENT_SLASH_COMMANDS.to_vec();
+    if external_rubber_duck {
+        names.push("rubber-duck");
+    }
     for command in commands {
         let name = command.name.as_str();
         if !names.contains(&name) {
@@ -3330,6 +3552,29 @@ pub(crate) fn agent_slash_command_names(commands: &[AvailableCommand]) -> Vec<&s
 }
 
 /// Draft text for a cycled command, preserving any trailing user text.
+fn critic_context_revision(context: &str) -> String {
+    use sha2::Digest as _;
+
+    let digest = sha2::Sha256::digest(context.as_bytes());
+    let mut hex = String::with_capacity(digest.len() * 2 + 7);
+    hex.push_str("sha256:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    hex
+}
+
+fn external_critic_cost_micros(usage: Option<&serde_json::Value>) -> Option<u64> {
+    usage
+        .and_then(|value| value.get("cost"))
+        .and_then(serde_json::Value::as_f64)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| (value * 1_000_000.0).round())
+        .filter(|value| *value <= u64::MAX as f64)
+        .map(|value| value as u64)
+}
+
 fn slash_command_draft(command_name: &str, rest: &str) -> String {
     if rest.trim().is_empty() {
         format!("/{command_name}")
@@ -3378,7 +3623,7 @@ impl App {
                 true
             }
             "agents_new" => {
-                self.agents_new_session();
+                self.agents_new_session(tail);
                 true
             }
             "agents_threads" => {
@@ -3460,10 +3705,13 @@ impl App {
             && self.agents.workspace_restore.is_none()
         {
             let Some(agent_id) = self.default_agent_id() else {
-                let message =
-                    String::from("no agent configured (set `agents.default_agent` or add servers)");
-                self.agents.error = Some(message.clone());
-                self.backend.status_message = Some(message);
+                if self.config.agents.servers.is_empty() {
+                    let message = String::from("no agent configured (add `[agents.servers.<id>]`)");
+                    self.agents.error = Some(message.clone());
+                    self.backend.status_message = Some(message);
+                } else {
+                    self.open_agent_server_picker();
+                }
                 return true;
             };
             self.start_session(agent_id);
@@ -3503,6 +3751,15 @@ impl App {
             self.backend.status_message = Some(String::from("no active agent session"));
             return;
         };
+        if self.agents.pending_external_critic.as_ref().is_some_and(|pending| {
+            pending.root_session_id == self.agents.threads[active].session_id
+        }) {
+            if let Some(pending) = &self.agents.pending_external_critic {
+                let _ = pending.cancel.send(true);
+            }
+            self.backend.status_message = Some(String::from("cancelling external rubber duck…"));
+            return;
+        }
         let Some(host) = &self.agents.host else {
             self.backend.status_message = Some(String::from("no active agent session"));
             return;
@@ -3984,26 +4241,107 @@ impl App {
         self.stop_owned_terminals(&owner, &confirmation.terminal_ids);
     }
 
-    /// `:agents_new` — start a fresh session and switch to it.
-    pub(super) fn agents_new_session(&mut self) {
+    /// `:agents_new [agent-id]` — start a fresh session and switch to it.
+    pub(super) fn agents_new_session(&mut self, requested_agent_id: &str) {
         if !self.config.agents.enabled {
             self.backend.status_message = Some(self.agents_status_message());
             return;
         }
+        let requested_agent_id = requested_agent_id.trim();
+        if requested_agent_id.contains(char::is_whitespace) {
+            self.backend.status_message = Some(String::from("usage: :agents_new [agent_id]"));
+            return;
+        }
+        let selected = if requested_agent_id.is_empty() {
+            self.config
+                .agents
+                .default_agent
+                .as_deref()
+                .filter(|id| self.config.agents.servers.contains_key(*id))
+                .map(str::to_owned)
+                .or_else(|| {
+                    (self.config.agents.servers.len() == 1)
+                        .then(|| self.config.agents.servers.keys().next().cloned())
+                        .flatten()
+                })
+        } else if self.config.agents.servers.contains_key(requested_agent_id) {
+            Some(requested_agent_id.to_owned())
+        } else {
+            self.backend.status_message = Some(self.unknown_agent_message(requested_agent_id));
+            return;
+        };
+
+        if let Some(agent_id) = selected {
+            self.start_selected_agent_session(agent_id);
+        } else if self.config.agents.servers.is_empty() {
+            self.backend.status_message =
+                Some(String::from("no agent configured (add `[agents.servers.<id>]`)"));
+        } else {
+            if self.agents.layout == AgentPaneLayout::Closed {
+                self.agents.layout = AgentPaneLayout::Full;
+            }
+            self.enter_agent_focus();
+            self.open_agent_server_picker();
+        }
+    }
+
+    pub(crate) fn start_selected_agent_session(&mut self, agent_id: String) {
         if self.agents.layout == AgentPaneLayout::Closed {
             self.agents.layout = AgentPaneLayout::Full;
         }
         self.enter_agent_focus();
         self.ensure_agents_host();
         self.start_mcp_servers();
-        let Some(agent_id) = self.default_agent_id() else {
-            self.backend.status_message = Some(String::from(
-                "no agent configured (set `agents.default_agent` or add servers)",
-            ));
+        let Some(host) = self.agents.host.as_ref() else {
             return;
         };
+        if !host.manager.has_agent(&agent_id) {
+            self.backend.status_message = Some(format!(
+                "agent `{agent_id}` unavailable after secure launch configuration resolution"
+            ));
+            return;
+        }
         self.start_session(agent_id);
         self.backend.status_message = Some(String::from("starting new agent session…"));
+    }
+
+    fn unknown_agent_message(&self, requested: &str) -> String {
+        const MAX_LISTED: usize = 8;
+        let ids = self.config.agents.servers.keys().take(MAX_LISTED).cloned().collect::<Vec<_>>();
+        let suffix = if self.config.agents.servers.len() > MAX_LISTED { ", …" } else { "" };
+        format!("unknown agent `{requested}`; configured: {}{suffix}", ids.join(", "))
+    }
+
+    fn open_agent_server_picker(&mut self) {
+        let default = self.config.agents.default_agent.as_deref();
+        let items = self
+            .config
+            .agents
+            .servers
+            .iter()
+            .enumerate()
+            .map(|(index, (id, server))| {
+                let label = server.label.as_deref().unwrap_or(id);
+                let default_marker = if default == Some(id.as_str()) { " · default" } else { "" };
+                let state = self
+                    .agents
+                    .host
+                    .as_ref()
+                    .and_then(|host| host.manager.connection_state(id))
+                    .map_or("not started", agent_connection_state_label);
+                crate::picker::PickerItem {
+                    label: if label == id { id.clone() } else { format!("{label} ({id})") },
+                    detail: Some(format!("{state}{default_marker}")),
+                    path: None,
+                    buf_id: None,
+                    line: None,
+                    col: None,
+                    choice_index: Some(index),
+                }
+            })
+            .collect();
+        self.open_picker(crate::picker::PickerState::new_agent_servers(items));
+        self.backend.status_message = Some(String::from("select agent for new session"));
     }
 
     /// `:agents_next` / `:agents_prev` — switch threads.
@@ -4285,6 +4623,7 @@ impl App {
             .to_string();
         self.agents.session_deletion_confirmation = Some(SessionDeletionConfirmation {
             thread_index: active,
+            agent_id: thread.agent_id.clone(),
             session_id: thread.session_id.clone(),
             session_name,
         });
@@ -4396,6 +4735,9 @@ impl App {
         self.agents.elicitations.clear();
         self.agents.permissions.clear();
         self.agents.pending_cancels.clear();
+        if let Some(pending) = self.agents.pending_external_critic.take() {
+            let _ = pending.cancel.send(true);
+        }
         // 3. Kill agent-owned terminals.
         self.agents.terminals.kill_all();
         // 4. Stop MCP servers and the proxy listener.
@@ -4446,7 +4788,10 @@ impl App {
                 };
                 crate::picker::PickerItem {
                     label: thread.display_name.clone(),
-                    detail: Some(format!("{state}{unread} · {}", thread.session_id)),
+                    detail: Some(format!(
+                        "agent:{} · {state}{unread} · session:{}",
+                        thread.agent_id, thread.session_id
+                    )),
                     path: None,
                     buf_id: None,
                     line: None,
@@ -4494,6 +4839,19 @@ impl App {
             }
         }
         self.mode = Mode::Agent;
+    }
+
+    fn external_rubber_duck_available(&self) -> bool {
+        let settings = &self.config.agents.rubber_duck;
+        if settings.mode == crate::config::RubberDuckModeSetting::Off
+            || settings.internal_model_id.is_some()
+        {
+            return false;
+        }
+        let Some(agent_id) = settings.external_agent_id.as_deref() else {
+            return false;
+        };
+        self.agents.host.as_ref().is_some_and(|host| host.manager.has_agent(agent_id))
     }
 
     /// The agent id used for `:agents` / `:agents_new`.
@@ -5156,6 +5514,7 @@ impl App {
         let Some(active) = self.agents.active_thread_index() else {
             return false;
         };
+        let external_rubber_duck = self.external_rubber_duck_available();
         let thread = &mut self.agents.threads[active];
         let draft = thread.draft.clone();
         let (current_name, rest) = split_slash_command(&draft);
@@ -5165,7 +5524,8 @@ impl App {
         }
 
         let command_name = current_name.as_deref().unwrap_or_default();
-        let command_names = agent_slash_command_names(&thread.available_commands);
+        let command_names =
+            agent_slash_command_names(&thread.available_commands, external_rubber_duck);
         let current_index = command_names.iter().position(|name| *name == command_name);
         let matching_indices: Vec<usize> = if current_index.is_some() {
             (0..command_names.len()).collect()
@@ -5293,11 +5653,16 @@ impl App {
                 }
             })
             .collect::<Vec<_>>();
-        let local = LOCAL_AGENT_SLASH_HELP
+        let mut local = LOCAL_AGENT_SLASH_HELP
             .iter()
             .map(|(command, usage)| format!("{command} — {usage}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+            .collect::<Vec<_>>();
+        if self.external_rubber_duck_available() {
+            local.push(String::from(
+                "/rubber-duck [question] — run configured manual external critic, then root synthesis",
+            ));
+        }
+        let local = local.join("\n");
         let provider_config = PROVIDER_CONFIG_ALIASES
             .iter()
             .copied()
@@ -5459,6 +5824,188 @@ impl App {
                 "EE-local /init workflow. Inspect existing project instructions with `ee_project_instructions` before proposing changes. If an AGENTS.md or equivalent already exists, show a concise preview/diff only; do not overwrite it. If no project instruction exists, offer a compact AGENTS.md scaffold tailored to this workspace. Create it only through `ee_create_text_file`, which must receive normal file-write approval. Never use a shell write, overwrite, or bypass approval. Clearly label advice as agent-generated, not an EE-native initialization engine.",
             ),
         );
+    }
+
+    fn agents_submit_external_rubber_duck(&mut self, question: &str) {
+        let Some(active) = self.agents.active_thread_index() else {
+            self.backend.status_message = Some(String::from("no active agent session"));
+            return;
+        };
+        if self.agents.pending_external_critic.is_some() {
+            self.backend.status_message =
+                Some(String::from("external rubber duck already running"));
+            return;
+        }
+        if self.agents.threads[active].state != ThreadUiState::Ready {
+            self.backend.status_message = Some(String::from(
+                "root session must be ready before external rubber duck critique",
+            ));
+            return;
+        }
+        if question.chars().count() > 1_024 {
+            self.backend.status_message =
+                Some(String::from("rubber duck question must be at most 1024 characters"));
+            return;
+        }
+
+        let settings = self.config.agents.rubber_duck.clone();
+        let agent_ids = match self.agents.host.as_ref() {
+            Some(host) => host.manager.agent_ids().into_iter().collect::<BTreeSet<_>>(),
+            None => {
+                self.backend.status_message = Some(String::from("agent host not ready"));
+                return;
+            }
+        };
+        let resolved = match settings.resolve_backend_policy(&BTreeSet::new(), &agent_ids) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                self.backend.status_message = Some(format!("rubber duck config invalid: {error}"));
+                return;
+            }
+        };
+        if resolved.config.mode == RubberDuckMode::Off {
+            self.backend.status_message =
+                Some(String::from("rubber duck disabled by configuration"));
+            return;
+        }
+        if let Some(unavailable) = resolved.unavailable {
+            self.backend.status_message =
+                Some(format!("external rubber duck unavailable: {unavailable:?}"));
+            return;
+        }
+        let Some(RubberDuckBackend::ExternalAgent { agent_id }) = resolved.config.backend else {
+            self.backend.status_message = Some(String::from(
+                "external rubber duck unavailable: no external_agent_id configured",
+            ));
+            return;
+        };
+        let root_agent_id = self.agents.threads[active].agent_id.clone();
+        if root_agent_id == agent_id {
+            self.backend.status_message =
+                Some(String::from("external rubber duck must use a different configured agent id"));
+            return;
+        }
+        let root_session_id = self.agents.threads[active].session_id.clone();
+        let used = self.agents.rubber_duck_calls.get(&root_session_id).copied().unwrap_or(0);
+        if used >= resolved.config.max_calls {
+            self.backend.status_message = Some(format!(
+                "external rubber duck skipped: session call budget exhausted ({}/{})",
+                used, resolved.config.max_calls
+            ));
+            return;
+        }
+
+        let (context, observed_evidence, revision) =
+            match self.external_critic_context(resolved.config.max_context_bytes) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.backend.status_message =
+                        Some(format!("external rubber duck context unavailable: {error}"));
+                    return;
+                }
+            };
+        let worktree_roots = match self.external_critic_roots() {
+            Ok(roots) => roots,
+            Err(error) => {
+                self.backend.status_message =
+                    Some(format!("external rubber duck workspace unavailable: {error}"));
+                return;
+            }
+        };
+        let target = if question.is_empty() {
+            CritiqueTarget::Implementation
+        } else {
+            CritiqueTarget::UserQuestion { question: question.to_string() }
+        };
+        let request = ExternalCritiqueRequest {
+            root_agent_id,
+            target,
+            untrusted_context: context,
+            observed_evidence,
+            worktree_roots,
+            automatic: false,
+            revision: revision.clone(),
+        };
+        let critic_config = ExternalCriticConfig {
+            agent_id: agent_id.clone(),
+            trust: ExternalCriticTrust::HostForwardedReadOnly,
+            require_independent_agent: true,
+        };
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let reply =
+            self.agents.host.as_ref().expect("agent host validated").request_external_critique(
+                critic_config,
+                resolved.config.timeout,
+                resolved.config.max_output_bytes,
+                request,
+                cancel_rx,
+            );
+        self.agents.rubber_duck_calls.insert(root_session_id.clone(), used + 1);
+        self.agents.pending_external_critic = Some(PendingExternalCritic {
+            root_session_id,
+            requested_revision: revision,
+            context_limit: resolved.config.max_context_bytes,
+            started_at: Instant::now(),
+            cancel: cancel_tx,
+            reply,
+        });
+        let warning = "host-forwarded read-only only; agent-native filesystem and terminal tools remain outside EE control";
+        let notice = format!(
+            "external rubber duck selected: {agent_id}; extra provider/model call; timeout {}ms; estimated cost unknown; manual-only; warning: {warning}",
+            resolved.config.timeout.as_millis()
+        );
+        self.agents.threads[active].push_system(notice.clone());
+        self.backend.status_message = Some(notice);
+    }
+
+    fn external_critic_context(
+        &mut self,
+        max_bytes: usize,
+    ) -> Result<(String, ReportEvidence, String), String> {
+        let evidence = self.proxy_review_context().map_err(|error| error.to_string())?;
+        let files = evidence
+            .get("changed_files")
+            .and_then(|value| value.get("files"))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.get("path").and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        let secrets = self.agents_secret_values();
+        let redacted = ee_agent_host::redact::redact_json(&evidence);
+        let mut context =
+            serde_json::to_string_pretty(&redacted).map_err(|error| error.to_string())?;
+        context = ee_agent_host::redact::redact_secret_values(&context, &secrets);
+        if context.len() > max_bytes {
+            const MARKER: &str = "\n[EE external critic context truncated]";
+            let mut end = max_bytes.saturating_sub(MARKER.len());
+            while end > 0 && !context.is_char_boundary(end) {
+                end -= 1;
+            }
+            context.truncate(end);
+            if MARKER.len() <= max_bytes {
+                context.push_str(MARKER);
+            }
+        }
+        let mut observed_evidence = ReportEvidence::default();
+        observed_evidence.files = files.into_iter().filter(|path| context.contains(path)).collect();
+        let revision = critic_context_revision(&context);
+        Ok((context, observed_evidence, revision))
+    }
+
+    fn external_critic_roots(&self) -> Result<Vec<PathBuf>, String> {
+        let mut roots =
+            vec![std::fs::canonicalize(&self.working_dir).map_err(|error| error.to_string())?];
+        for root in &self.agents.additional_workspace_roots {
+            roots.push(std::fs::canonicalize(root).map_err(|error| error.to_string())?);
+        }
+        roots.sort();
+        roots.dedup();
+        if roots.len() > ee_agent_host::MAX_EXTERNAL_CRITIC_ROOTS {
+            roots.truncate(ee_agent_host::MAX_EXTERNAL_CRITIC_ROOTS);
+        }
+        Ok(roots)
     }
 
     /// Sends bounded, redacted local review evidence to current agent without persisting or rendering body.
@@ -5904,10 +6451,10 @@ impl App {
 
     /// Applies pane-local slash commands before forwarding prompt text to the agent.
     fn submit_agents_local_slash_command(&mut self, draft: &str) -> bool {
-        let (Some(command), args) = split_slash_command(draft) else {
+        let (Some(command), raw_args) = split_slash_command(draft) else {
             return false;
         };
-        let args = args.trim();
+        let args = raw_args.trim();
         let handled = match command.as_str() {
             "help" if args.is_empty() => {
                 self.agents_show_help();
@@ -5933,6 +6480,11 @@ impl App {
                 self.agents_submit_review_workflow(args, true);
                 true
             }
+            "rubber-duck" if self.config.agents.rubber_duck.external_agent_id.is_some() => {
+                self.agents_submit_external_rubber_duck(raw_args.trim_end());
+                true
+            }
+            "rubber-duck" => self.agents_require_advertised_provider_command("rubber-duck"),
             "diff" if args.is_empty() => {
                 self.open_workspace_git_diff();
                 true
@@ -5957,8 +6509,8 @@ impl App {
                 self.agents_export_transcript();
                 true
             }
-            "new" | "new_thread" if args.is_empty() => {
-                self.agents_new_session();
+            "new" | "new_thread" => {
+                self.agents_new_session(args);
                 true
             }
             "archive" => {
@@ -6214,6 +6766,14 @@ impl App {
             self.submit_without_session();
             return;
         };
+        if self.agents.pending_external_critic.as_ref().is_some_and(|pending| {
+            pending.root_session_id == self.agents.threads[active].session_id
+        }) {
+            self.backend.status_message = Some(String::from(
+                "external rubber duck is running; use /stop to cancel before another root turn",
+            ));
+            return;
+        }
         let (command, args) = split_slash_command(&draft);
         if let Some("mode") = command.as_deref() {
             self.agents.threads[active].draft.clear();
@@ -7296,7 +7856,10 @@ mod tests {
     #[test]
     fn agent_slash_command_names_include_local_and_advertised_commands() {
         assert_eq!(
-            agent_slash_command_names(&[compact_command(), AvailableCommand::new("quit", "")]),
+            agent_slash_command_names(
+                &[compact_command(), AvailableCommand::new("quit", "")],
+                false,
+            ),
             vec![
                 "quit",
                 "q",

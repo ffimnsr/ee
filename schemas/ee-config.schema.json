@@ -670,6 +670,17 @@
           },
           "default": {}
         },
+        "rubber_duck": {
+          "description": "Optional bounded critic policy.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RubberDuckToml"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "web_context": {
           "description": "Trusted configuration for optional agent web retrieval. Only user-global\nconfig can grant access; workspace files can only disable or restrict it.",
           "anyOf": [
@@ -688,6 +699,13 @@
       "description": "Raw `[agents.servers.<id>]` definition.",
       "type": "object",
       "properties": {
+        "label": {
+          "description": "Optional display label. Never used as subprocess identity.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "command": {
           "description": "Executable invoked to start the ACP agent subprocess.",
           "type": [
@@ -718,6 +736,65 @@
             "string",
             "null"
           ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "RubberDuckToml": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "description": "`off`, `manual`, or `automatic`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "internal_model_id": {
+          "description": "Explicit ee-owned model registry id. Mutually exclusive with external_agent_id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "external_agent_id": {
+          "description": "Explicit configured ACP agent id. Mutually exclusive with internal_model_id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_calls": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_context_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_output_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "timeout_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
         }
       },
       "additionalProperties": false

@@ -320,8 +320,8 @@ impl Lines {
         let old_hard_count = old_logical_end_line - logical_start_line;
         let new_hard_count = new_logical_end_line - logical_start_line;
 
-        //TODO: we should be able to avoid wrapping the whole para in most cases,
-        // but the logic is trickier.
+        // Rewrap the complete logical paragraph because each soft break depends
+        // on measured widths preceding it; a partial frontier cannot prove convergence.
         let prev_break = text.offset_of_line(logical_start_line);
         let next_hard_break = text.offset_of_line(new_logical_end_line);
 

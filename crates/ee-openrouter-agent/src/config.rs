@@ -9,6 +9,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{ArgAction, Parser, builder::BoolishValueParser};
+use ee_agent_orchestrator::{
+    DEFAULT_RUBBER_DUCK_CONTEXT_BYTES, DEFAULT_RUBBER_DUCK_MAX_CALLS,
+    DEFAULT_RUBBER_DUCK_OUTPUT_BYTES, DEFAULT_RUBBER_DUCK_TIMEOUT, MAX_RUBBER_DUCK_CONTEXT_BYTES,
+    MAX_RUBBER_DUCK_MAX_CALLS, MAX_RUBBER_DUCK_OUTPUT_BYTES, MAX_RUBBER_DUCK_TIMEOUT,
+    RubberDuckBackend, RubberDuckConfig, RubberDuckMode,
+};
 use ee_agent_protocol::setup::{
     SETUP_MANIFEST_SCHEMA_VERSION, SetupAgent, SetupEnvVar, SetupInput, SetupInputConfig,
     SetupManifest,
@@ -63,6 +69,60 @@ pub fn setup_manifest() -> SetupManifest {
                 config: SetupInputConfig { env: String::from("OPENROUTER_MODEL") },
             },
             SetupInput {
+                key: String::from("model_family"),
+                label: String::from("Model family"),
+                default: None,
+                config: SetupInputConfig { env: String::from("OPENROUTER_MODEL_FAMILY") },
+            },
+            SetupInput {
+                key: String::from("rubber_duck_model"),
+                label: String::from("Rubber duck model"),
+                default: None,
+                config: SetupInputConfig { env: String::from("OPENROUTER_RUBBER_DUCK_MODEL") },
+            },
+            SetupInput {
+                key: String::from("rubber_duck_model_family"),
+                label: String::from("Rubber duck model family"),
+                default: None,
+                config: SetupInputConfig {
+                    env: String::from("OPENROUTER_RUBBER_DUCK_MODEL_FAMILY"),
+                },
+            },
+            SetupInput {
+                key: String::from("rubber_duck_mode"),
+                label: String::from("Rubber duck mode (off, manual, automatic)"),
+                default: Some(String::from("manual")),
+                config: SetupInputConfig { env: String::from("OPENROUTER_RUBBER_DUCK_MODE") },
+            },
+            SetupInput {
+                key: String::from("rubber_duck_max_calls"),
+                label: String::from("Rubber duck maximum calls per session"),
+                default: Some(DEFAULT_RUBBER_DUCK_MAX_CALLS.to_string()),
+                config: SetupInputConfig { env: String::from("OPENROUTER_RUBBER_DUCK_MAX_CALLS") },
+            },
+            SetupInput {
+                key: String::from("rubber_duck_context_bytes"),
+                label: String::from("Rubber duck context byte limit"),
+                default: Some(DEFAULT_RUBBER_DUCK_CONTEXT_BYTES.to_string()),
+                config: SetupInputConfig {
+                    env: String::from("OPENROUTER_RUBBER_DUCK_CONTEXT_BYTES"),
+                },
+            },
+            SetupInput {
+                key: String::from("rubber_duck_output_bytes"),
+                label: String::from("Rubber duck output byte limit"),
+                default: Some(DEFAULT_RUBBER_DUCK_OUTPUT_BYTES.to_string()),
+                config: SetupInputConfig {
+                    env: String::from("OPENROUTER_RUBBER_DUCK_OUTPUT_BYTES"),
+                },
+            },
+            SetupInput {
+                key: String::from("rubber_duck_timeout_ms"),
+                label: String::from("Rubber duck timeout in milliseconds"),
+                default: Some(DEFAULT_RUBBER_DUCK_TIMEOUT.as_millis().to_string()),
+                config: SetupInputConfig { env: String::from("OPENROUTER_RUBBER_DUCK_TIMEOUT_MS") },
+            },
+            SetupInput {
                 key: String::from("max_iterations"),
                 label: String::from("Maximum iterations"),
                 default: Some(
@@ -78,6 +138,41 @@ fn parse_positive_usize(value: &str) -> Result<usize, String> {
     let value = value.parse::<usize>().map_err(|_| String::from("must be a positive integer"))?;
     if value == 0 {
         return Err(String::from("must be at least 1"));
+    }
+    Ok(value)
+}
+
+fn parse_rubber_duck_mode(value: &str) -> Result<RubberDuckMode, String> {
+    match value {
+        "off" => Ok(RubberDuckMode::Off),
+        "manual" => Ok(RubberDuckMode::Manual),
+        "automatic" => Ok(RubberDuckMode::Automatic),
+        _ => Err(String::from("must be off, manual, or automatic")),
+    }
+}
+
+fn parse_bounded_usize(value: &str, field: &str, max: usize) -> Result<usize, String> {
+    let value = parse_positive_usize(value)?;
+    (value <= max).then_some(value).ok_or_else(|| format!("{field} must be at most {max}"))
+}
+
+fn parse_rubber_duck_max_calls(value: &str) -> Result<usize, String> {
+    parse_bounded_usize(value, "rubber duck max calls", MAX_RUBBER_DUCK_MAX_CALLS)
+}
+
+fn parse_rubber_duck_context_bytes(value: &str) -> Result<usize, String> {
+    parse_bounded_usize(value, "rubber duck context bytes", MAX_RUBBER_DUCK_CONTEXT_BYTES)
+}
+
+fn parse_rubber_duck_output_bytes(value: &str) -> Result<usize, String> {
+    parse_bounded_usize(value, "rubber duck output bytes", MAX_RUBBER_DUCK_OUTPUT_BYTES)
+}
+
+fn parse_rubber_duck_timeout_ms(value: &str) -> Result<u64, String> {
+    let value = value.parse::<u64>().map_err(|_| String::from("must be a positive integer"))?;
+    let max = u64::try_from(MAX_RUBBER_DUCK_TIMEOUT.as_millis()).unwrap_or(u64::MAX);
+    if value == 0 || value > max {
+        return Err(format!("rubber duck timeout must be between 1 and {max} milliseconds"));
     }
     Ok(value)
 }
@@ -102,6 +197,55 @@ pub struct Args {
     /// OpenRouter model id, e.g. deepseek/deepseek-v4-flash-0731.
     #[arg(long, env = "OPENROUTER_MODEL", default_value = DEFAULT_MODEL)]
     model: String,
+    /// Declared root model family; required for trustworthy critic contrast.
+    #[arg(long, env = "OPENROUTER_MODEL_FAMILY")]
+    model_family: Option<String>,
+    /// Optional independent rubber-duck critic model id.
+    #[arg(long, env = "OPENROUTER_RUBBER_DUCK_MODEL")]
+    rubber_duck_model: Option<String>,
+    /// Declared critic family; required with `--rubber-duck-model`.
+    #[arg(long, env = "OPENROUTER_RUBBER_DUCK_MODEL_FAMILY")]
+    rubber_duck_model_family: Option<String>,
+    /// Rubber-duck execution mode.
+    #[arg(
+        long,
+        env = "OPENROUTER_RUBBER_DUCK_MODE",
+        default_value = "manual",
+        value_parser = parse_rubber_duck_mode,
+    )]
+    rubber_duck_mode: RubberDuckMode,
+    /// Maximum critic calls retained per session.
+    #[arg(
+        long,
+        env = "OPENROUTER_RUBBER_DUCK_MAX_CALLS",
+        default_value_t = DEFAULT_RUBBER_DUCK_MAX_CALLS,
+        value_parser = parse_rubber_duck_max_calls,
+    )]
+    rubber_duck_max_calls: usize,
+    /// Maximum bounded context bytes sent to critic.
+    #[arg(
+        long,
+        env = "OPENROUTER_RUBBER_DUCK_CONTEXT_BYTES",
+        default_value_t = DEFAULT_RUBBER_DUCK_CONTEXT_BYTES,
+        value_parser = parse_rubber_duck_context_bytes,
+    )]
+    rubber_duck_context_bytes: usize,
+    /// Maximum critic output bytes accepted for verification.
+    #[arg(
+        long,
+        env = "OPENROUTER_RUBBER_DUCK_OUTPUT_BYTES",
+        default_value_t = DEFAULT_RUBBER_DUCK_OUTPUT_BYTES,
+        value_parser = parse_rubber_duck_output_bytes,
+    )]
+    rubber_duck_output_bytes: usize,
+    /// Per-critique timeout in milliseconds.
+    #[arg(
+        long,
+        env = "OPENROUTER_RUBBER_DUCK_TIMEOUT_MS",
+        default_value_t = u64::try_from(DEFAULT_RUBBER_DUCK_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
+        value_parser = parse_rubber_duck_timeout_ms,
+    )]
+    rubber_duck_timeout_ms: u64,
     /// Chat completions endpoint.
     #[arg(long, env = "OPENROUTER_API_URL", default_value = DEFAULT_API_URL)]
     api_url: String,
@@ -179,10 +323,18 @@ pub struct Args {
 }
 
 /// Resolved agent configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     /// OpenRouter model id.
     pub model: String,
+    /// Explicit root model family identity.
+    pub model_family: Option<String>,
+    /// Optional independent rubber-duck critic model id.
+    pub rubber_duck_model: Option<String>,
+    /// Explicit critic model family identity.
+    pub rubber_duck_model_family: Option<String>,
+    /// Resolved internal critic mode and resource policy.
+    pub rubber_duck: RubberDuckConfig,
     /// Chat completions endpoint.
     pub api_url: String,
     /// OpenRouter API key; never logged, used only for the Authorization
@@ -226,6 +378,25 @@ pub struct Config {
     pub checkpoint_dir: Option<PathBuf>,
 }
 
+impl std::fmt::Debug for Config {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Config")
+            .field("model", &self.model)
+            .field("model_family", &self.model_family)
+            .field("rubber_duck_model", &self.rubber_duck_model)
+            .field("rubber_duck_model_family", &self.rubber_duck_model_family)
+            .field("rubber_duck", &self.rubber_duck)
+            .field("api_url", &self.api_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .field("site_url", &self.site_url)
+            .field("app_title", &self.app_title)
+            .field("timeout", &self.timeout)
+            .field("orchestrated", &self.orchestrated)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Config {
     /// Resolves a configuration from parsed arguments plus `.env` fallbacks
     /// for the variables that are not CLI flags (`OPENROUTER_API_KEY`,
@@ -233,6 +404,21 @@ impl Config {
     pub fn from_args_and_dotenv(args: Args, dotenv: &BTreeMap<String, String>) -> Self {
         Self {
             model: args.model,
+            model_family: args.model_family,
+            rubber_duck: RubberDuckConfig {
+                mode: args.rubber_duck_mode,
+                backend: args.rubber_duck_model.as_ref().map(|_| {
+                    RubberDuckBackend::InternalModel {
+                        model_id: ee_agent_orchestrator::RUBBER_DUCK_ROLE.to_string(),
+                    }
+                }),
+                max_calls: args.rubber_duck_max_calls,
+                max_context_bytes: args.rubber_duck_context_bytes,
+                max_output_bytes: args.rubber_duck_output_bytes,
+                timeout: Duration::from_millis(args.rubber_duck_timeout_ms),
+            },
+            rubber_duck_model: args.rubber_duck_model,
+            rubber_duck_model_family: args.rubber_duck_model_family,
             api_url: args.api_url,
             api_key: Self::env_or_dotenv("OPENROUTER_API_KEY", dotenv),
             site_url: args.site_url.or_else(|| Self::env_or_dotenv("OPENROUTER_SITE_URL", dotenv)),
@@ -327,6 +513,14 @@ mod tests {
         Args {
             ee_config: false,
             model: String::from("test/model"),
+            model_family: None,
+            rubber_duck_model: None,
+            rubber_duck_model_family: None,
+            rubber_duck_mode: RubberDuckMode::Manual,
+            rubber_duck_max_calls: DEFAULT_RUBBER_DUCK_MAX_CALLS,
+            rubber_duck_context_bytes: DEFAULT_RUBBER_DUCK_CONTEXT_BYTES,
+            rubber_duck_output_bytes: DEFAULT_RUBBER_DUCK_OUTPUT_BYTES,
+            rubber_duck_timeout_ms: u64::try_from(DEFAULT_RUBBER_DUCK_TIMEOUT.as_millis()).unwrap(),
             api_url: String::from(DEFAULT_API_URL),
             site_url: None,
             app_title: String::from("ee-test"),
@@ -354,6 +548,7 @@ mod tests {
         let config = Config::from_args_and_dotenv(parsed, &BTreeMap::new());
 
         assert_eq!(config.model, "test/model");
+        assert_eq!(config.rubber_duck, RubberDuckConfig::default());
         assert_eq!(config.api_url, DEFAULT_API_URL);
         assert_eq!(config.app_title, "ee-test");
         assert_eq!(config.timeout, Duration::from_millis(42_000));
@@ -394,12 +589,59 @@ mod tests {
         assert_eq!(manifest.inputs[0].key, "model");
         assert_eq!(manifest.inputs[0].default.as_deref(), Some(DEFAULT_MODEL));
         assert_eq!(manifest.inputs[0].config.env, "OPENROUTER_MODEL");
-        assert_eq!(manifest.inputs[1].key, "max_iterations");
+        assert_eq!(manifest.inputs.len(), 10);
+        assert_eq!(manifest.inputs[1].key, "model_family");
+        assert_eq!(manifest.inputs[1].config.env, "OPENROUTER_MODEL_FAMILY");
+        assert_eq!(manifest.inputs[2].key, "rubber_duck_model");
+        assert_eq!(manifest.inputs[2].config.env, "OPENROUTER_RUBBER_DUCK_MODEL");
+        assert_eq!(manifest.inputs[3].key, "rubber_duck_model_family");
+        assert_eq!(manifest.inputs[3].config.env, "OPENROUTER_RUBBER_DUCK_MODEL_FAMILY");
+        assert_eq!(manifest.inputs[4].key, "rubber_duck_mode");
+        assert_eq!(manifest.inputs[4].config.env, "OPENROUTER_RUBBER_DUCK_MODE");
+        assert_eq!(manifest.inputs[9].key, "max_iterations");
         assert_eq!(
-            manifest.inputs[1].default.as_deref(),
+            manifest.inputs[9].default.as_deref(),
             Some(ee_agent_orchestrator::config::DEFAULT_MAX_LOOP_ITERATIONS.to_string().as_str())
         );
-        assert_eq!(manifest.inputs[1].config.env, "OPENROUTER_MAX_ITERATIONS");
+        assert_eq!(manifest.inputs[9].config.env, "OPENROUTER_MAX_ITERATIONS");
+    }
+
+    #[test]
+    fn model_family_and_rubber_duck_cli_options_parse() {
+        let parsed = Args::try_parse_from([
+            "ee-openrouter-agent",
+            "--model-family",
+            "anthropic",
+            "--rubber-duck-model",
+            "openai/gpt-5",
+            "--rubber-duck-model-family",
+            "openai",
+            "--rubber-duck-mode",
+            "automatic",
+            "--rubber-duck-max-calls",
+            "3",
+            "--rubber-duck-context-bytes",
+            "4096",
+            "--rubber-duck-output-bytes",
+            "2048",
+            "--rubber-duck-timeout-ms",
+            "5000",
+        ])
+        .expect("model metadata parses");
+        assert_eq!(parsed.model_family.as_deref(), Some("anthropic"));
+        assert_eq!(parsed.rubber_duck_model.as_deref(), Some("openai/gpt-5"));
+        assert_eq!(parsed.rubber_duck_model_family.as_deref(), Some("openai"));
+        let config = Config::from_args_and_dotenv(parsed, &BTreeMap::new());
+        assert_eq!(config.rubber_duck.mode, RubberDuckMode::Automatic);
+        assert_eq!(config.rubber_duck.max_calls, 3);
+        assert_eq!(config.rubber_duck.max_context_bytes, 4096);
+        assert_eq!(config.rubber_duck.max_output_bytes, 2048);
+        assert_eq!(config.rubber_duck.timeout, Duration::from_secs(5));
+        assert!(matches!(
+            config.rubber_duck.backend,
+            Some(RubberDuckBackend::InternalModel { ref model_id })
+                if model_id == ee_agent_orchestrator::RUBBER_DUCK_ROLE
+        ));
     }
 
     #[test]

@@ -14,6 +14,9 @@ use crate::{AvailableCommand, AvailableCommandInput, UnstructuredCommandInput};
 /// The advertised slash-command name for LLM session compaction.
 pub const COMPACT_COMMAND_NAME: &str = "compact";
 
+/// The advertised slash-command name for bounded contrasting-model critique.
+pub const RUBBER_DUCK_COMMAND_NAME: &str = "rubber-duck";
+
 /// The advertised slash-command name for discarding a paused turn's pending
 /// checkpoint (manual-resume rejection).  Only meaningful when recovery is
 /// enabled and a recoverable interruption is pending.
@@ -70,6 +73,12 @@ pub fn is_compact_command(text: &str) -> bool {
     parse_slash_command(text).is_some_and(|command| command.name == COMPACT_COMMAND_NAME)
 }
 
+/// Whether the prompt is exactly `/rubber-duck` with optional question text.
+#[must_use]
+pub fn is_rubber_duck_command(text: &str) -> bool {
+    parse_slash_command(text).is_some_and(|command| command.name == RUBBER_DUCK_COMMAND_NAME)
+}
+
 /// The `/compact` command advertised by providers through
 /// `available_commands_update`: name, description, and an unstructured input
 /// hint shown as a draft placeholder by clients.
@@ -81,6 +90,19 @@ pub fn compact_available_command() -> AvailableCommand {
     )
     .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
         "optional instructions for what the summary must preserve",
+    )))
+}
+
+/// The `/rubber-duck` command advertised only by providers that support the
+/// verified contrasting-model critique flow.
+#[must_use]
+pub fn rubber_duck_available_command() -> AvailableCommand {
+    AvailableCommand::new(
+        RUBBER_DUCK_COMMAND_NAME,
+        "Request a bounded read-only second opinion, then let the root model summarize findings and any plan change.",
+    )
+    .input(AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
+        "optional focused question",
     )))
 }
 
@@ -190,6 +212,21 @@ mod tests {
     }
 
     #[test]
+    fn rubber_duck_detection_is_exact_and_preserves_question() {
+        assert!(is_rubber_duck_command("/rubber-duck"));
+        assert!(is_rubber_duck_command(" /rubber-duck   Why  this API? "));
+        assert!(!is_rubber_duck_command("/rubber-ducking"));
+        assert!(!is_rubber_duck_command("rubber-duck"));
+        assert_eq!(
+            parse_slash_command("/rubber-duck   Why  this API? "),
+            Some(SlashCommand {
+                name: RUBBER_DUCK_COMMAND_NAME.into(),
+                instructions: Some("Why  this API? ".into()),
+            })
+        );
+    }
+
+    #[test]
     fn resume_detection_matches_name_exactly() {
         assert!(is_resume_command("/resume"));
         assert!(is_resume_command("/resume keep going"));
@@ -210,6 +247,14 @@ mod tests {
         let restored: AvailableCommand = serde_json::from_str(&json).expect("parses");
         assert_eq!(restored, command);
         assert!(json.contains("resume"), "{json}");
+    }
+
+    #[test]
+    fn advertised_rubber_duck_command_carries_description_and_input_hint() {
+        let command = rubber_duck_available_command();
+        assert_eq!(command.name, RUBBER_DUCK_COMMAND_NAME);
+        assert!(!command.description.is_empty());
+        assert!(matches!(command.input, Some(AvailableCommandInput::Unstructured(_))));
     }
 
     #[test]

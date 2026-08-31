@@ -30,10 +30,6 @@ use crate::tabs::{BufferIdentifier, ViewId};
 use xi_rope::{LinesMetric, Rope, RopeDelta};
 use xi_rpc::RemoteError;
 
-//TODO: At the moment (May 08, 2017) this is all very much in flux.
-// At some point, it will be stabalized and then perhaps will live in another crate,
-// shared with the plugin lib.
-
 // ====================================================================
 // core -> plugin RPC method types + responses
 // ====================================================================
@@ -54,8 +50,6 @@ pub struct PluginBufferInfo {
     pub config: Table,
 }
 
-//TODO: very likely this should be merged with PluginDescription
-//TODO: also this does not belong here.
 /// Describes an available plugin to the client.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ClientPluginInfo {
@@ -487,8 +481,9 @@ impl PluginBufferInfo {
         syntax: LanguageId,
         config: Table,
     ) -> Self {
-        //TODO: do make any current assertions about paths being valid utf-8? do we want to?
-        let path = path.map(|p| p.to_string_lossy().into_owned());
+        // JSON cannot represent non-UTF-8 paths. Omitting one avoids exposing a
+        // lossy path that could identify a different file.
+        let path = path.and_then(|path| path.into_os_string().into_string().ok());
         let views = views.to_owned();
         PluginBufferInfo { buffer_id, views, rev, buf_size, nb_lines, path, syntax, config }
     }
@@ -581,6 +576,27 @@ mod tests {
         assert_eq!(val.rev, 1);
         assert_eq!(val.path, Some("some_path".to_owned()));
         assert_eq!(val.syntax, "toml".into());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plugin_buffer_info_omits_non_utf8_paths() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let info = PluginBufferInfo::new(
+            crate::tabs::BufferId(1),
+            &[ViewId(1)],
+            1,
+            0,
+            1,
+            Some(PathBuf::from(OsString::from_vec(vec![b'f', 0x80]))),
+            LanguageId::from("Plain Text"),
+            Table::new(),
+        );
+
+        assert_eq!(info.path, None);
+        assert!(serde_json::to_value(info).unwrap().get("path").is_none());
     }
 
     #[test]

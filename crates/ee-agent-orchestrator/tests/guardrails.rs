@@ -7,10 +7,9 @@
 //! denying writes, executes, and delegation unless explicitly configured.
 
 use ee_agent_orchestrator::{
-    ModelAdapter, ModelError, ModelFuture, ModelRequest, ModelResponse, OrchestratorConfig,
-    OrchestratorProvider, PolicyContext, PolicyEngine, SideEffectClass, ToolDefinition, ToolPolicy,
+    OrchestratorConfig, OrchestratorProvider, PolicyContext, PolicyEngine, SideEffectClass,
+    ToolDefinition, ToolPolicy,
 };
-use tokio::sync::watch;
 
 // ── Dependency boundaries ────────────────────────────────────────────────
 
@@ -51,24 +50,10 @@ fn examples_and_tests_stay_network_free_by_default() {
     }
 }
 
-/// Minimal model adapter used only to prove the adapter's `AgentProvider`
-/// implementation compiles against the framework trait.
-struct PlaceholderModel;
-
-impl ModelAdapter for PlaceholderModel {
-    fn complete(
-        &self,
-        _request: ModelRequest,
-        _cancel: watch::Receiver<bool>,
-    ) -> ModelFuture<Result<ModelResponse, ModelError>> {
-        Box::pin(async { Ok(ModelResponse::new().text("done").completed()) })
-    }
-}
-
 #[test]
 fn adapter_implements_framework_agent_provider() {
     fn assert_provider<P: ee_acp_agent_server::AgentProvider>() {}
-    assert_provider::<OrchestratorProvider<PlaceholderModel>>();
+    assert_provider::<OrchestratorProvider>();
 }
 
 // ── Default policy regression ────────────────────────────────────────────

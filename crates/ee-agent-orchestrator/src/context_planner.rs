@@ -554,12 +554,16 @@ pub enum ContextInvalidation {
     CheckoutRevision { session_id: String },
     /// Policy/instruction revision changed.
     PolicyChanged { session_id: String },
+    /// Active root model changed.
+    ModelChanged { session_id: String },
     /// Session ended; every session cache entry must be removed.
     SessionEnded { session_id: String },
 }
 
 impl ContextInvalidation {
-    fn session_id(&self) -> &str {
+    /// Session whose revision-sensitive caches must be invalidated.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
         match self {
             Self::Write { session_id }
             | Self::BufferRevision { session_id }
@@ -569,6 +573,7 @@ impl ContextInvalidation {
             | Self::WorktreeRevision { session_id }
             | Self::CheckoutRevision { session_id }
             | Self::PolicyChanged { session_id }
+            | Self::ModelChanged { session_id }
             | Self::SessionEnded { session_id } => session_id,
         }
     }

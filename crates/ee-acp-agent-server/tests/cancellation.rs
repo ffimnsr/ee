@@ -3,6 +3,8 @@
 //! prompt, concurrent-prompt rejection, parallel prompts across sessions,
 //! and cleanup after success, provider error, and cancellation.
 
+// Shared harness serves multiple integration-test crates; each uses a different subset.
+#[allow(dead_code)]
 mod common;
 
 use ee_agent_protocol::ListSessionsResponse;

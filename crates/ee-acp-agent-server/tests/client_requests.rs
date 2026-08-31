@@ -3,6 +3,8 @@
 //! error mapping, timeouts, transport-close cleanup, and validation that
 //! relative paths never reach the transport.
 
+// Shared harness serves multiple integration-test crates; each uses a different subset.
+#[allow(dead_code)]
 mod common;
 
 use std::time::Duration;

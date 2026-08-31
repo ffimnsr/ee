@@ -3358,6 +3358,14 @@ impl App {
                 let Some(index) = item.choice_index else { return };
                 self.focus_thread(index);
             }
+            #[cfg(feature = "agents")]
+            crate::picker::PickerKind::AgentServers => {
+                let Some(index) = item.choice_index else { return };
+                let Some(agent_id) = self.config.agents.servers.keys().nth(index).cloned() else {
+                    return;
+                };
+                self.start_selected_agent_session(agent_id);
+            }
             crate::picker::PickerKind::Symbols => {
                 let Some(path) = item.path else { return };
                 match self.backend.open_buffer(Some(path)) {

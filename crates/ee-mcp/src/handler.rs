@@ -1,29 +1,21 @@
 //! The ee client handler: rmcp `ClientHandler` implementation with policy.
 //!
 //! Wire handling is entirely rmcp's.  ee-owned policy lives here:
-//! - sampling (`create_message`) and roots (`list_roots`) requests are
-//!   answered with `method_not_found` — deprecated features are never
-//!   implemented as client features.
-//! - protocol `logging` notifications become diagnostics-only events.
+//! - SEP-2577-removed sampling, roots, and protocol logging capabilities are
+//!   not advertised or implemented by the `2026-07-28` client.
 //! - list-changed notifications invalidate the registry via events.
 //! - `elicitation/create` requests are forwarded to the host with a reply
 //!   channel; form fields requesting secret-like names are rejected without
 //!   ever reaching the host.
 //!
-//! Sampling/roots/logging types are deprecated by SEP-2577; ee references
-//! them only to reject them, so deprecation warnings are intentionally
-//! allowed here.
-#![allow(deprecated)]
-
 use std::future::Future;
 use std::time::Duration;
 
 use rmcp::ClientHandler;
 use rmcp::model::{
-    CancelledNotificationParam, ClientCapabilities, CreateMessageResult, CustomNotification,
-    CustomRequest, CustomResult, ElicitRequestParams, ElicitResult, ElicitationAction,
-    ElicitationCapability, ErrorData as McpErrorData, FormElicitationCapability, Implementation,
-    InitializeRequestParams, ListRootsResult, LoggingMessageNotificationParam,
+    CancelledNotificationParam, ClientCapabilities, CustomNotification, CustomRequest,
+    CustomResult, ElicitRequestParams, ElicitResult, ElicitationAction, ElicitationCapability,
+    ErrorData as McpErrorData, FormElicitationCapability, Implementation, InitializeRequestParams,
     ProgressNotificationParam, ProtocolVersion, ResourceUpdatedNotificationParam,
     UrlElicitationCapability,
 };
@@ -89,9 +81,6 @@ impl EeClientHandler {
 }
 
 impl ClientHandler for EeClientHandler {
-    // Sampling/roots/logging are deprecated by SEP-2577; ee implements their
-    // rejection, so referencing the deprecated types here is intentional.
-    #[allow(deprecated)]
     fn get_info(&self) -> InitializeRequestParams {
         let mut capabilities = ClientCapabilities::builder().enable_elicitation().build();
         // Field mutation is allowed for non-exhaustive structs; advertise both
@@ -115,30 +104,6 @@ impl ClientHandler for EeClientHandler {
         _context: RequestContext<RoleClient>,
     ) -> impl Future<Output = Result<(), McpErrorData>> + MaybeSendFuture + '_ {
         std::future::ready(Ok(()))
-    }
-
-    /// Sampling is deprecated; ee never fulfils `sampling/createMessage`.
-    #[allow(deprecated)]
-    fn create_message(
-        &self,
-        _params: rmcp::model::CreateMessageRequestParams,
-        _context: RequestContext<RoleClient>,
-    ) -> impl Future<Output = Result<CreateMessageResult, McpErrorData>> + MaybeSendFuture + '_
-    {
-        std::future::ready(Err(McpErrorData::method_not_found::<
-            rmcp::model::CreateMessageRequestMethod,
-        >()))
-    }
-
-    /// Roots are deprecated; ee never answers `roots/list`.
-    #[allow(deprecated)]
-    fn list_roots(
-        &self,
-        _context: RequestContext<RoleClient>,
-    ) -> impl Future<Output = Result<ListRootsResult, McpErrorData>> + MaybeSendFuture + '_ {
-        std::future::ready(Err(
-            McpErrorData::method_not_found::<rmcp::model::ListRootsRequestMethod>(),
-        ))
     }
 
     fn create_elicitation(
@@ -200,23 +165,6 @@ impl ClientHandler for EeClientHandler {
         _context: NotificationContext<RoleClient>,
     ) -> impl Future<Output = ()> + MaybeSendFuture + '_ {
         std::future::ready(())
-    }
-
-    /// Deprecated protocol `logging`: diagnostics-only, never a feature.
-    #[allow(deprecated)]
-    fn on_logging_message(
-        &self,
-        params: LoggingMessageNotificationParam,
-        _context: NotificationContext<RoleClient>,
-    ) -> impl Future<Output = ()> + MaybeSendFuture + '_ {
-        let server_id = self.server_id.clone();
-        let events = self.events.clone();
-        async move {
-            let _ = events.send(McpEvent::Diagnostics {
-                server_id,
-                message: format!("mcp logging ({:?}): {}", params.level, params.data),
-            });
-        }
     }
 
     fn on_resource_updated(
@@ -329,9 +277,30 @@ impl ElicitationBroker {
     }
 }
 
-/// List-changed and logging notifications flow through the handler callbacks
-/// above; no raw `ServerNotification` handling exists in ee-owned code.
+/// List-changed notifications flow through handler callbacks above; no raw
+/// `ServerNotification` handling exists in ee-owned code.
 #[allow(dead_code)]
 fn _notification_type_note() {
     let _ = "notifications handled via ClientHandler callbacks";
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_info_omits_removed_capabilities() {
+        let (events, _receiver) = mpsc::unbounded_channel();
+        let info = EeClientHandler::new("server", events).get_info();
+        let value = serde_json::to_value(info).expect("client info serializes");
+        let capabilities = value.get("capabilities").expect("capabilities object");
+
+        assert!(capabilities.get("roots").is_none());
+        assert!(capabilities.get("sampling").is_none());
+        assert!(capabilities.get("elicitation").is_some());
+        assert_eq!(
+            value.get("protocolVersion").and_then(serde_json::Value::as_str),
+            Some("2026-07-28")
+        );
+    }
 }

@@ -689,9 +689,10 @@ fn render_agents_pane(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             )
         };
         let footer_text = format!(
-            "{} [{}] | conn:{} | mode:{} | session:{} / {} | thoughts:{} | unread:{} | last:{}",
+            "{} [{}] | agent:{} | conn:{} | mode:{} | session:{} / {} | thoughts:{} | unread:{} | last:{}",
             thread.nick,
             state_label,
+            thread.agent_id,
             connection,
             current_mode,
             active_index + 1,
@@ -876,6 +877,10 @@ fn session_deletion_confirmation_composer_lines(app: &App) -> Option<(Vec<Line<'
             )),
             Line::from(Span::styled(
                 format!("  name: {}", confirmation.session_name),
+                theme_style(theme::FG_TEXT),
+            )),
+            Line::from(Span::styled(
+                format!("  agent: {}", confirmation.agent_id),
                 theme_style(theme::FG_TEXT),
             )),
             Line::from(Span::styled(
@@ -2731,6 +2736,8 @@ fn picker_kind_badge(kind: PickerKind) -> &'static str {
         PickerKind::Locations => " LOCATIONS ",
         #[cfg(feature = "agents")]
         PickerKind::AgentThreads => " AGENTS ",
+        #[cfg(feature = "agents")]
+        PickerKind::AgentServers => " NEW AGENT ",
     }
 }
 

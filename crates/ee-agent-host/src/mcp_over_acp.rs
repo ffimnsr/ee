@@ -91,6 +91,16 @@ pub const MCP_OVER_ACP_MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 /// the serve side gives up (mirrors the stdio proxy socket timeout).
 const MCP_OVER_ACP_APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Tool exposure profile for one connection-owned ee MCP proxy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EeProxyToolProfile {
+    /// Normal agent session: expose every handler-supported tool.
+    #[default]
+    Full,
+    /// External critic: expose only approval-free, non-terminal read tools.
+    CriticReadOnly,
+}
+
 /// How the ee proxy is exposed to one agent session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EeProxyMode {
@@ -1169,6 +1179,7 @@ pub(crate) struct McpOverAcpRegistry {
     threads: Arc<Mutex<HashMap<SessionId, Arc<ThreadShared>>>>,
     agent_id: String,
     proxy_discovery: bool,
+    tool_profile: EeProxyToolProfile,
 }
 
 impl McpOverAcpRegistry {
@@ -1182,6 +1193,7 @@ impl McpOverAcpRegistry {
         handler_capabilities: HandlerCapabilities,
         process: Arc<Mutex<Option<AgentProcess>>>,
         threads: Arc<Mutex<HashMap<SessionId, Arc<ThreadShared>>>>,
+        tool_profile: EeProxyToolProfile,
     ) -> Self {
         let (jobs_tx, jobs_rx) = mpsc::unbounded_channel();
         if enabled {
@@ -1199,6 +1211,7 @@ impl McpOverAcpRegistry {
             threads,
             agent_id: agent_id.to_owned(),
             proxy_discovery: handler_capabilities.proxy_discovery,
+            tool_profile,
         }
     }
 
@@ -1265,7 +1278,15 @@ impl McpOverAcpRegistry {
             threads: self.threads.clone(),
             agent_id: self.agent_id.clone(),
             scope: connection_id.to_string(),
-            supported_tools: (!self.proxy_discovery).then(Vec::new),
+            supported_tools: match self.tool_profile {
+                EeProxyToolProfile::Full => (!self.proxy_discovery).then(Vec::new),
+                EeProxyToolProfile::CriticReadOnly => Some(
+                    ee_mcp::critic_read_only_tool_names(ee_mcp::ToolTransport::Acp)
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
+                ),
+            },
         };
         let proxy = EeMcpProxy::new(Arc::new(backend));
         let transport = McpOverAcpTransport { rx: rx_rx, pending: pending.clone() };
@@ -1277,10 +1298,10 @@ impl McpOverAcpRegistry {
                 .build()
                 .expect("mcp-over-acp serve runtime");
             runtime.block_on(async move {
-                // `serve_server_with_ct` resolves after the initialize
-                // handshake and returns the running service; await it so
-                // the transport (and its rx channel) stays alive until
-                // the connection is cancelled or closed.
+                // `serve_server_with_ct` resolves after first-request
+                // `server/discover` negotiation and returns running service;
+                // await it so transport and rx channel stay alive until
+                // connection cancellation or closure.
                 if let Ok(running) =
                     rmcp::service::serve_server_with_ct(proxy, transport, shutdown.clone()).await
                 {
@@ -1425,8 +1446,8 @@ impl McpOverAcpRegistry {
         Ok(())
     }
 
-    /// Handles an `mcp/message` notification (inner MCP notification such as
-    /// `notifications/initialized`).  Unknown connections are dropped with a
+    /// Handles an `mcp/message` notification (for example,
+    /// `notifications/cancelled`). Unknown connections are dropped with a
     /// debug log (notifications carry no response channel); oversized frames
     /// fail closed and close the logical connection, like requests.
     pub(crate) fn handle_notification(&self, notification: MessageMcpNotification) {

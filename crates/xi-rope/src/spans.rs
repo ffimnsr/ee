@@ -161,7 +161,6 @@ impl<T: Clone> Spans<T> {
         base_end: usize,
         xform: &mut Transformer<N>,
     ) -> Self {
-        // TODO: maybe should take base as an Interval and figure out "after" from that
         let new_start = xform.transform(base_start, false);
         let new_end = xform.transform(base_end, true);
         let mut builder = SpansBuilder::new(new_end - new_start);
@@ -170,7 +169,6 @@ impl<T: Clone> Spans<T> {
             let end = xform.transform(iv.end() + base_start, false) - new_start;
             if start < end {
                 let iv = Interval::new(start, end);
-                // TODO: could imagine using a move iterator and avoiding clone, but it's not easy.
                 builder.add_span(iv, data.clone());
             }
         }
@@ -194,7 +192,6 @@ impl<T: Clone> Spans<T> {
         F: FnMut(&T, Option<&T>) -> O,
         O: Clone,
     {
-        //TODO: confirm that this is sensible behaviour
         assert_eq!(self.len(), other.len());
         let mut sb = SpansBuilder::new(self.len());
 
@@ -401,6 +398,15 @@ mod tests {
         assert_eq!(*val, 16);
 
         assert!(merged_iter.next().is_none());
+    }
+
+    #[test]
+    #[should_panic]
+    fn merge_rejects_different_base_lengths() {
+        let left = SpansBuilder::<u32>::new(1).build();
+        let right = SpansBuilder::<u32>::new(2).build();
+
+        let _ = left.merge(&right, |value, _| *value);
     }
 
     #[test]

@@ -15,6 +15,7 @@
 //! command methods; rendering lives in `ee-cli`.
 
 pub mod connection;
+pub mod critic;
 pub mod error;
 pub mod events;
 pub mod inbound;
@@ -35,6 +36,18 @@ pub use connection::{
     AgentConnection, AgentConnectionOptions, DEFAULT_HANDSHAKE_TIMEOUT,
     DEFAULT_MAX_CONCURRENT_PROMPTS, DEFAULT_REQUEST_TIMEOUT,
 };
+pub use critic::{
+    CriticAgentBroker, CriticBackendSelection, CriticRevisionObserver,
+    DEFAULT_EXTERNAL_CRITIC_TIMEOUT, ExternalCriticAttribution, ExternalCriticConfig,
+    ExternalCriticPreview, ExternalCriticTrust, ExternalCriticUnavailable,
+    ExternalCritiqueCompleted, ExternalCritiqueOutcome, ExternalCritiqueRequest,
+    MAX_EXTERNAL_CRITIC_CONTEXT_BYTES, MAX_EXTERNAL_CRITIC_ROOTS,
+};
+pub use ee_agent_orchestrator::{
+    CritiqueTarget, ReportEvidence, ResolvedRubberDuckConfig, RubberDuckBackend, RubberDuckConfig,
+    RubberDuckConfigError, RubberDuckConfigUnavailable, RubberDuckMode, VerifiedCritiqueReport,
+    finding_counts,
+};
 pub use error::AgentError;
 pub use events::{
     AgentConnectionState, AgentEvent, ConnectionCloseReason, PermissionRequestId,
@@ -47,7 +60,7 @@ pub use inbound::{
 #[cfg(feature = "test-utils")]
 pub use manager::FakeTransportFactory;
 pub use manager::{AgentManager, AgentManagerConfig};
-pub use mcp_over_acp::{EeProxyMode, MCP_OVER_ACP_MAX_FRAME_BYTES};
+pub use mcp_over_acp::{EeProxyMode, EeProxyToolProfile, MCP_OVER_ACP_MAX_FRAME_BYTES};
 pub use permission::PermissionBroker;
 pub use process::{AgentProcessConfig, STDERR_MAX_LINE_BYTES, STDERR_MAX_LINES, StderrCapture};
 pub use reducer::{

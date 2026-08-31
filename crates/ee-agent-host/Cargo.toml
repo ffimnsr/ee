@@ -16,6 +16,7 @@ test-utils = []
 
 [dependencies]
 ee-agent-protocol.workspace = true
+ee-agent-orchestrator.workspace = true
 ee-mcp.workspace = true
 base64.workspace = true
 futures.workspace = true
@@ -33,7 +34,7 @@ zeroize.workspace = true
 [dev-dependencies]
 ee-acp-agent-server = { workspace = true, features = ["test-utils"] }
 ee-agent-host = { path = ".", features = ["test-utils"] }
-# Test-only direction: live OpenRouter-orchestrated ACP provider exercised through host transport.
+# Live replay tests need orchestrator deterministic fakes.
 ee-agent-orchestrator = { path = "../ee-agent-orchestrator", features = ["test-utils"] }
 ee-openrouter-agent = { path = "../ee-openrouter-agent", features = ["test-utils"] }
 tempfile.workspace = true

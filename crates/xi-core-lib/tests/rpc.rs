@@ -356,9 +356,6 @@ fn selection_ranges_from_update(message: &Value) -> Option<Vec<[u64; 4]>> {
     )
 }
 
-//TODO: test saving rpc
-//TODO: test plugin rpc
-
 const MOVEMENT_RPCS: &str = r#"{"method":"edit","params":{"view_id":"view-id-1","method":"move_up","params":[]}}
 {"method":"edit","params":{"view_id":"view-id-1","method":"move_down","params":[]}}
 {"method":"edit","params":{"view_id":"view-id-1","method":"move_up_and_modify_selection","params":[]}}

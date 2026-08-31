@@ -118,6 +118,19 @@ impl AgentManager {
         self.config.agents.contains_key(agent_id)
     }
 
+    /// Current state of an already-live connection.
+    ///
+    /// Returns `None` without starting the configured agent when no connection
+    /// exists yet. Picker and status UIs use this to preserve lazy startup.
+    #[must_use]
+    pub fn connection_state(&self, agent_id: &str) -> Option<crate::events::AgentConnectionState> {
+        self.connections
+            .lock()
+            .expect("connections poisoned")
+            .get(agent_id)
+            .map(AgentConnection::state)
+    }
+
     /// The default agent id (`agents.default_agent` resolved by the caller),
     /// falling back to the single configured agent when unambiguous.
     #[must_use]
@@ -308,6 +321,47 @@ impl AgentManager {
         for (_, connection) in connections {
             connection.close().await;
         }
+    }
+
+    pub(crate) fn handler_for_isolated_connection(&self) -> Arc<dyn ClientRequestHandler> {
+        self.handler.clone()
+    }
+
+    pub(crate) fn connection_options(&self) -> AgentConnectionOptions {
+        self.options
+    }
+
+    /// Builds a lazy isolated manager for one configured agent using a distinct
+    /// inbound handler and connection profile. Used by host-owned ephemeral
+    /// critic work so root sessions and critic sessions never share process,
+    /// connection, permission, MCP, or thread state.
+    pub(crate) fn isolated_for_agent(
+        &self,
+        agent_id: &str,
+        handler: Arc<dyn ClientRequestHandler>,
+        options: AgentConnectionOptions,
+    ) -> Result<Self, AgentError> {
+        let process = self
+            .config
+            .agents
+            .get(agent_id)
+            .cloned()
+            .ok_or_else(|| AgentError::UnknownAgent(agent_id.to_string()))?;
+        let mut config = AgentManagerConfig {
+            agents: BTreeMap::from([(agent_id.to_string(), process)]),
+            ee_proxy_enabled: self.config.ee_proxy_enabled,
+            #[cfg(feature = "test-utils")]
+            fake_transports: BTreeMap::new(),
+        };
+        #[cfg(feature = "test-utils")]
+        if let Some(factory) = self.config.fake_transports.get(agent_id) {
+            config.fake_transports.insert(agent_id.to_string(), factory.clone());
+        }
+        // Ephemeral critic lifecycle must never appear as a root/editor thread.
+        // Dropped receiver intentionally makes critic events private; broker emits
+        // only verified, privacy-safe critic outcomes through its own channel.
+        let (events, _private_events) = mpsc::unbounded_channel();
+        Ok(Self::with_options(config, handler, events, options))
     }
 
     /// Number of live connections (tests and status lines).

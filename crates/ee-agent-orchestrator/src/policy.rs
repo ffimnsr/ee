@@ -4,7 +4,7 @@
 //! fail closed unless explicitly allowed.  Delegate tools are additionally
 //! bounded by subagent depth and parallel-count limits (subagent phase).
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -124,13 +124,23 @@ impl PolicyDecision {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyEngine {
     policy: ToolPolicy,
+    /// Exact optional dispatch allowlist. Used by immutable critic policy as a
+    /// second gate matching model-visible tool discovery.
+    allowed_tool_names: Option<BTreeSet<String>>,
 }
 
 impl PolicyEngine {
     /// Creates an engine from a policy.
     #[must_use]
     pub fn new(policy: ToolPolicy) -> Self {
-        Self { policy }
+        Self { policy, allowed_tool_names: None }
+    }
+
+    /// Restricts dispatch to exact names, independent of side-effect metadata.
+    #[must_use]
+    pub fn with_allowed_tool_names(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.allowed_tool_names = Some(names.into_iter().collect());
+        self
     }
 
     /// The active policy.
@@ -143,6 +153,11 @@ impl PolicyEngine {
     /// destructive-subclass gate.
     #[must_use]
     pub fn check(&self, tool: &ToolDefinition, context: PolicyContext) -> PolicyDecision {
+        if let Some(allowed) = &self.allowed_tool_names
+            && !allowed.contains(&tool.name)
+        {
+            return PolicyDecision::denied("tool is outside exact role allowlist");
+        }
         // Trusted ee proxy mutations and terminal operations are approved by
         // the editor host. Do not block their dispatch before that prompt.
         if self.policy.allow_host_approved_side_effects
@@ -350,6 +365,20 @@ mod tests {
             ..ToolPolicy::default()
         });
         assert!(!engine.check(&tool(SideEffectClass::Delegate), PolicyContext::default()).allow);
+    }
+
+    #[test]
+    fn exact_role_allowlist_denies_guessed_tools_before_host_approval() {
+        let engine = PolicyEngine::default().with_allowed_tool_names(["read_file".into()]);
+        let mut read = tool(SideEffectClass::Read);
+        read.name = "read_file".into();
+        assert!(engine.check(&read, PolicyContext::default()).allow);
+
+        let mut guessed = tool(SideEffectClass::Write).host_approval();
+        guessed.name = "write_file".into();
+        let decision = engine.check(&guessed, PolicyContext::default());
+        assert!(!decision.allow);
+        assert!(decision.reason.expect("reason").contains("exact role allowlist"));
     }
 
     #[test]

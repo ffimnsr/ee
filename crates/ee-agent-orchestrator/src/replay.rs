@@ -27,8 +27,8 @@ use crate::policy::{PolicyEngine, ToolPolicy};
 use crate::runtime::OrchestratorRuntime;
 use crate::tasks::{TaskGraph, TaskId, TaskNode, TaskStatus};
 use crate::test_support::{
-    FakeModel, FakeTool, delegate_then_answer_script, endless_tool_loop_script,
-    simple_answer_script, tool_then_answer_script,
+    DELEGATED_HANDOFF_OUTPUT, FakeModel, FakeTool, delegate_then_answer_script,
+    endless_tool_loop_script, simple_answer_script, tool_then_answer_script,
 };
 use crate::tools::{SideEffectClass, ToolDefinition, ToolResult};
 
@@ -243,7 +243,7 @@ fn running_root(title: &str) -> TaskNode {
 fn completed_child() -> TaskNode {
     TaskNode {
         id: TaskId::new("task-2"),
-        title: "worker".into(),
+        title: "summarizer".into(),
         description: "do the work".into(),
         parent: Some(TaskId::new("task-1")),
         dependencies: Vec::new(),
@@ -341,6 +341,7 @@ pub fn delegate_then_answer_replay() -> ReplayScript {
             budget_event(1, 1, 1, 1, 0), // subagent reservation
             OrchestratorEvent::SubagentStarted {
                 subagent_id: "task-2".into(),
+                role: "summarizer".into(),
                 model_id: Some("default".into()),
             },
             OrchestratorEvent::TurnStarted {
@@ -350,7 +351,7 @@ pub fn delegate_then_answer_replay() -> ReplayScript {
             budget_event(1, 1, 0, 0, 0),
             OrchestratorEvent::ModelRequested { iteration: 1 },
             OrchestratorEvent::ModelResponded { iteration: 1 },
-            budget_event(1, 1, 0, 0, 9), // "delegated"
+            budget_event(1, 1, 0, 0, DELEGATED_HANDOFF_OUTPUT.len()),
             OrchestratorEvent::TurnStopped { stop_reason: "end_turn".into() },
             OrchestratorEvent::SubagentFinished { subagent_id: "task-2".into(), success: true },
             OrchestratorEvent::ToolFinished {

@@ -4,11 +4,10 @@
 //! These tests exercise the real connection stack (SDK dispatch, driver,
 //! approval-executor bridge, rmcp serve loop, `EeMcpProxy` tool surface)
 //! over the scripted fake transport.  The fake agent advertises
-//! `mcp_capabilities.acp`, receives the ACP-native `ee` server entry in
-//! `session/new`, connects with `mcp/connect`, runs the inner MCP
-//! `initialize` handshake, and exchanges inner MCP messages with
-//! `mcp/message`; capture steps let the script use the host-generated
-//! server/connection ids.
+//! `mcp_capabilities.acp`, receives ACP-native `ee` server entry in
+//! `session/new`, connects with `mcp/connect`, negotiates through inner MCP
+//! `server/discover`, and exchanges messages with `mcp/message`; capture steps
+//! let the script use host-generated server/connection ids.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -17,8 +16,8 @@ use std::time::Duration;
 use ee_agent_host::fake::{CaptureSource, FakeAgent, FakeAgentScript};
 use ee_agent_host::{
     AgentConnection, AgentConnectionOptions, AgentError, ClientRequest, ClientRequestHandler,
-    ClientRequestResponse, ClientRequestResult, DenyAllHandler, EeProxyMode, HandlerCapabilities,
-    MCP_OVER_ACP_MAX_FRAME_BYTES, RecordingHandler,
+    ClientRequestResponse, ClientRequestResult, DenyAllHandler, EeProxyMode, EeProxyToolProfile,
+    HandlerCapabilities, MCP_OVER_ACP_MAX_FRAME_BYTES, RecordingHandler,
 };
 use ee_agent_protocol::{
     CreateTerminalRequest, McpServer, McpServerStdio, ReadTextFileRequest, ReadTextFileResponse,
@@ -161,12 +160,22 @@ async fn spawn_host_with(
     handler: Arc<dyn ee_agent_host::ClientRequestHandler>,
     proxy_enabled: bool,
 ) -> (FakeAgent, TestHost) {
+    spawn_host_with_profile(script, handler, proxy_enabled, EeProxyToolProfile::Full).await
+}
+
+async fn spawn_host_with_profile(
+    script: FakeAgentScript,
+    handler: Arc<dyn ee_agent_host::ClientRequestHandler>,
+    proxy_enabled: bool,
+    profile: EeProxyToolProfile,
+) -> (FakeAgent, TestHost) {
     let (fake, transport) = FakeAgent::spawn(script);
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let options = AgentConnectionOptions {
         handshake_timeout: TEST_TIMEOUT,
         request_timeout: TEST_TIMEOUT,
         ee_proxy_enabled: proxy_enabled,
+        ee_proxy_tool_profile: profile,
         ..AgentConnectionOptions::default()
     };
     let connection = AgentConnection::connect_with_transport(
@@ -204,34 +213,60 @@ fn emit_connect(id: i64) -> Value {
     })
 }
 
-/// An `mcp/message` emit with the captured `conn_id` substituted.
-fn emit_message(id: i64, method: &str, params: Option<Value>) -> Value {
-    let mut inner = serde_json::Map::new();
-    inner.insert(String::from("connectionId"), json!({ "$capture": "conn_id" }));
-    inner.insert(String::from("method"), json!(method));
-    if let Some(params) = params {
-        inner.insert(String::from("params"), params);
-    }
-    json!({ "jsonrpc": "2.0", "id": id, "method": "mcp/message", "params": inner })
-}
-
-/// Inner MCP `initialize` params (the agent is the MCP client and must run
-/// the handshake before any other inner message).
-fn inner_initialize_params() -> Value {
+/// Required MCP `2026-07-28` client context carried by every request.
+fn inner_request_meta() -> Value {
     json!({
-        "protocolVersion": "2026-07-28",
-        "capabilities": {},
-        "clientInfo": { "name": "fake-agent", "version": "0" }
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { "name": "fake-agent", "version": "0" },
+        "io.modelcontextprotocol/clientCapabilities": {}
     })
 }
 
-/// Script tail: connect, capture the connection id, and run the inner MCP
-/// `initialize` handshake (ids 200/201).  Follow-up messages start at 202.
-fn connect_and_init_script() -> FakeAgentScript {
+/// An `mcp/message` request with captured `conn_id` and required request metadata.
+fn emit_message(id: i64, method: &str, params: Option<Value>) -> Value {
+    let mut params = params.unwrap_or_else(|| json!({}));
+    params
+        .as_object_mut()
+        .expect("inner MCP request params must be an object")
+        .insert(String::from("_meta"), inner_request_meta());
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "mcp/message",
+        "params": {
+            "connectionId": { "$capture": "conn_id" },
+            "method": method,
+            "params": params
+        }
+    })
+}
+
+/// An inner MCP notification with latest-protocol request metadata.
+fn emit_notification(method: &str, params: Value) -> Value {
+    let mut params = params;
+    params
+        .as_object_mut()
+        .expect("inner MCP notification params must be an object")
+        .insert(String::from("_meta"), inner_request_meta());
+    json!({
+        "jsonrpc": "2.0",
+        "method": "mcp/message",
+        "params": {
+            "connectionId": { "$capture": "conn_id" },
+            "method": method,
+            "params": params
+        }
+    })
+}
+
+/// Script tail: connect, capture connection id, and negotiate inner MCP
+/// `2026-07-28` through `server/discover` (ids 200/201). Follow-up requests
+/// start at 202.
+fn connect_and_discover_script() -> FakeAgentScript {
     acp_base_script()
         .emit(emit_connect(200))
         .capture(CaptureSource::Response { id: 200 }, "result.connectionId", "conn_id")
-        .emit(emit_message(201, "initialize", Some(inner_initialize_params())))
+        .emit(emit_message(201, "server/discover", Some(json!({}))))
         .wait_for_response(201)
 }
 
@@ -379,7 +414,7 @@ async fn mcp_over_acp_direct_mcp_config_forwarding_works_independently() {
 
 #[tokio::test]
 async fn mcp_over_acp_workspace_roots_tool_round_trips_through_the_handler() {
-    let script = connect_and_init_script()
+    let script = connect_and_discover_script()
         .emit(emit_message(202, "tools/call", Some(json!({ "name": "ee_workspace_roots" }))))
         .wait_for_response(202);
     let handler = Arc::new(ScriptedHandler::default());
@@ -402,7 +437,7 @@ async fn mcp_over_acp_workspace_roots_tool_round_trips_through_the_handler() {
 
 #[tokio::test]
 async fn mcp_over_acp_filesystem_write_routes_through_the_handler() {
-    let script = connect_and_init_script()
+    let script = connect_and_discover_script()
         .emit(emit_message(
             202,
             "tools/call",
@@ -438,7 +473,7 @@ async fn mcp_over_acp_filesystem_write_routes_through_the_handler() {
 
 #[tokio::test]
 async fn mcp_over_acp_open_buffers_tool_round_trips_through_the_handler() {
-    let script = connect_and_init_script()
+    let script = connect_and_discover_script()
         .emit(emit_message(202, "tools/call", Some(json!({ "name": "ee_open_buffers" }))))
         .wait_for_response(202);
     let handler = Arc::new(ScriptedHandler::default());
@@ -461,7 +496,7 @@ async fn mcp_over_acp_open_buffers_tool_round_trips_through_the_handler() {
 
 #[tokio::test]
 async fn mcp_over_acp_connect_and_tools_list_round_trip() {
-    let script = connect_and_init_script()
+    let script = connect_and_discover_script()
         .emit(emit_message(202, "tools/list", None))
         .wait_for_response(202);
     let (fake, host) =
@@ -550,7 +585,7 @@ async fn mcp_over_acp_connect_and_tools_list_round_trip() {
 
 #[tokio::test]
 async fn mcp_over_acp_manifest_round_trips_complete_governance_metadata() {
-    let script = connect_and_init_script()
+    let script = connect_and_discover_script()
         .emit(emit_message(202, "tools/call", Some(json!({ "name": "ee_tools_manifest" }))))
         .wait_for_response(202);
     let (fake, host) =
@@ -698,7 +733,7 @@ async fn mcp_over_acp_repeated_connects_yield_distinct_connection_ids() {
 
 #[tokio::test]
 async fn mcp_over_acp_disconnect_closes_the_logical_connection() {
-    let script = connect_and_init_script()
+    let script = connect_and_discover_script()
         .emit(json!({
             "jsonrpc": "2.0",
             "id": 202,
@@ -725,7 +760,7 @@ async fn mcp_over_acp_disconnect_closes_the_logical_connection() {
 #[tokio::test]
 async fn mcp_over_acp_oversized_message_frame_fails_closed() {
     let huge = "x".repeat(MCP_OVER_ACP_MAX_FRAME_BYTES + 1);
-    let script = connect_and_init_script()
+    let script = connect_and_discover_script()
         .emit(emit_message(202, "tools/list", Some(json!({ "pad": huge }))))
         .emit(emit_message(203, "tools/list", None));
     let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
@@ -749,15 +784,8 @@ async fn mcp_over_acp_oversized_message_frame_fails_closed() {
 
 #[tokio::test]
 async fn mcp_over_acp_inner_notification_does_not_break_the_connection() {
-    let script = connect_and_init_script()
-        .emit(json!({
-            "jsonrpc": "2.0",
-            "method": "mcp/message",
-            "params": {
-                "connectionId": { "$capture": "conn_id" },
-                "method": "notifications/initialized"
-            }
-        }))
+    let script = connect_and_discover_script()
+        .emit(emit_notification("notifications/cancelled", json!({ "requestId": 999 })))
         .emit(emit_message(202, "tools/list", None))
         .wait_for_response(202);
     let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
@@ -779,7 +807,7 @@ async fn mcp_over_acp_inner_notification_does_not_break_the_connection() {
 #[tokio::test]
 async fn mcp_over_acp_write_tool_denial_leaves_buffer_and_disk_unchanged() {
     let handler = ScriptedHandler::default();
-    let script = connect_and_init_script()
+    let script = connect_and_discover_script()
         .emit(emit_message(
             202,
             "tools/call",
@@ -819,7 +847,7 @@ async fn mcp_over_acp_write_tool_denial_leaves_buffer_and_disk_unchanged() {
 #[tokio::test]
 async fn mcp_over_acp_terminal_create_denial_does_not_spawn_terminal() {
     let handler = ScriptedHandler::default();
-    let script = connect_and_init_script()
+    let script = connect_and_discover_script()
         .emit(emit_message(
             202,
             "tools/call",
@@ -850,7 +878,7 @@ async fn mcp_over_acp_terminal_create_denial_does_not_spawn_terminal() {
 #[tokio::test]
 async fn mcp_over_acp_read_tool_round_trips_through_the_handler() {
     let handler = ScriptedHandler::default();
-    let script = connect_and_init_script()
+    let script = connect_and_discover_script()
         .emit(emit_message(
             202,
             "tools/call",
@@ -884,11 +912,59 @@ async fn mcp_over_acp_read_tool_round_trips_through_the_handler() {
 }
 
 #[tokio::test]
+async fn critic_profile_filters_discovery_and_rejects_cached_mutation_calls() {
+    let handler = RecordingHandler::new(HandlerCapabilities::all());
+    let script = connect_and_discover_script()
+        .emit(emit_message(202, "tools/list", None))
+        .wait_for_response(202)
+        .emit(emit_message(
+            203,
+            "tools/call",
+            Some(json!({
+                "name": "ee_write_text_file",
+                "arguments": { "path": "/tmp/x", "content": "boom" }
+            })),
+        ))
+        .wait_for_response(203);
+    let (fake, host) = spawn_host_with_profile(
+        script,
+        Arc::new(handler.clone()),
+        true,
+        EeProxyToolProfile::CriticReadOnly,
+    )
+    .await;
+    let connection = ready_connection(&fake, &host).await;
+    connection
+        .new_session(vec![PathBuf::from("/work")], Vec::new(), Some(stdio_fallback()))
+        .await
+        .expect("session starts");
+
+    let list = await_response(&fake, 202).await;
+    let names = list["result"]["tools"]
+        .as_array()
+        .expect("tools list")
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    assert!(names.contains(&"ee_read_text_file"));
+    assert!(names.contains(&"ee_tools_manifest"));
+    assert!(!names.contains(&"ee_write_text_file"));
+    assert!(!names.contains(&"ee_terminal_output"));
+    assert!(!names.contains(&"ee_web_search"));
+
+    let rejected = await_response(&fake, 203).await;
+    assert_eq!(rejected["result"]["isError"], json!(true));
+    assert!(handler.seen().is_empty(), "cached mutation must not reach handler");
+    host.connection.close().await;
+    fake.join(TEST_TIMEOUT).await;
+}
+
+#[tokio::test]
 async fn mcp_over_acp_unadvertised_capabilities_are_rejected_before_the_handler() {
     // The capability gate lives in `proxy_executor`: a handler without
     // capabilities must fail closed before it is invoked.
     let handler = RecordingHandler::new(HandlerCapabilities::none());
-    let script = connect_and_init_script()
+    let script = connect_and_discover_script()
         .emit(emit_message(
             202,
             "tools/call",
@@ -915,7 +991,7 @@ async fn mcp_over_acp_unadvertised_capabilities_are_rejected_before_the_handler(
 
 #[tokio::test]
 async fn mcp_over_acp_diagnostics_tool_returns_bounded_redacted_stderr() {
-    let script = connect_and_init_script()
+    let script = connect_and_discover_script()
         .emit(emit_message(202, "tools/call", Some(json!({ "name": "ee_diagnostics" }))))
         .wait_for_response(202);
     let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;
@@ -936,7 +1012,7 @@ async fn mcp_over_acp_diagnostics_tool_returns_bounded_redacted_stderr() {
 
 #[tokio::test]
 async fn mcp_over_acp_turn_cancel_closes_logical_connections() {
-    let script = connect_and_init_script()
+    let script = connect_and_discover_script()
         .emit(emit_message(202, "tools/list", None))
         .wait_for_response(202)
         .wait_for("session/prompt")
@@ -988,7 +1064,7 @@ async fn mcp_over_acp_turn_cancel_closes_logical_connections() {
 
 #[tokio::test]
 async fn mcp_over_acp_host_close_closes_logical_connections_deterministically() {
-    let script = connect_and_init_script()
+    let script = connect_and_discover_script()
         .emit(emit_message(202, "tools/list", None))
         .wait_for_response(202);
     let (fake, host) = spawn_host(script, Arc::new(DenyAllHandler)).await;

@@ -401,15 +401,20 @@ impl DefaultMetric for RopeInfo {
     type DefaultMetric = BaseMetric;
 }
 
-//TODO: document metrics, based on https://github.com/google/xi-editor/issues/456
-//See ../docs/MetricsAndBoundaries.md for more information.
-/// This metric let us walk utf8 text by code point.
+/// Byte-offset metric used as rope's base coordinate system.
 ///
-/// `BaseMetric` implements the trait [Metric].  Both its _measured unit_ and
-/// its _base unit_ are utf8 code unit.
+/// Rope metrics convert between measured units and base units. Base units are
+/// UTF-8 bytes for every metric in this module. A metric boundary identifies a
+/// byte offset representable in that metric; `prev` and `next` walk adjacent
+/// boundaries. Metrics that can fragment may split content at internal metric
+/// boundaries, while atomic metrics keep each measured element intact.
 ///
-/// Offsets that do not correspond to codepoint boundaries are _invalid_, and
-/// calling functions that assume valid offsets with invalid offets will panic
+/// `BaseMetric` measures UTF-8 bytes. Valid boundaries are Unicode scalar-value
+/// boundaries, so walking this metric advances by one UTF-8 code point even
+/// though reported offsets remain byte offsets.
+///
+/// Offsets that do not correspond to code-point boundaries are _invalid_, and
+/// calling functions that assume valid offsets with invalid offsets will panic
 /// in debug mode.
 ///
 /// Boundary is atomic and determined by codepoint boundary.  Atomicity is
@@ -480,12 +485,14 @@ pub fn len_utf8_from_first_byte(b: u8) -> usize {
     }
 }
 
+/// Newline-count metric.
+///
+/// Measured units are newline bytes; base units are UTF-8 bytes. Boundaries are
+/// trailing, immediately after each `\n`. This metric can fragment because a
+/// rope slice may start or end between line boundaries.
 #[derive(Clone, Copy)]
-pub struct LinesMetric; // number of lines
+pub struct LinesMetric;
 
-/// Measured unit is newline amount.
-/// Base unit is utf8 code unit.
-/// Boundary is trailing and determined by a newline char.
 impl Metric<RopeInfo> for LinesMetric {
     fn measure(info: &RopeInfo, _: usize) -> usize {
         info.lines
@@ -529,6 +536,11 @@ impl Metric<RopeInfo> for LinesMetric {
     }
 }
 
+/// UTF-16 code-unit metric used by protocols such as LSP.
+///
+/// Measured units are UTF-16 code units; base units are UTF-8 bytes. Boundaries
+/// remain Unicode scalar-value boundaries, preventing offsets from splitting a
+/// surrogate pair or UTF-8 code point. This metric is atomic.
 #[derive(Clone, Copy)]
 pub struct Utf16CodeUnitsMetric;
 

@@ -539,12 +539,16 @@ impl View {
     /// fine-grained in the case of multiple cursors, but we also want this
     /// method to be fast even when the selection is large.
     fn invalidate_selection(&mut self, text: &Rope) {
-        // TODO: refine for upstream (caret appears on prev line)
         let (first, last) = match (self.selection.first(), self.selection.last()) {
             (Some(f), Some(l)) => (f, l),
             _ => return,
         };
         let first_line = self.line_of_offset(text, first.min());
+        let first_line = if first.is_upstream() && first.end == first.min() {
+            first_line.saturating_sub(1)
+        } else {
+            first_line
+        };
         let last_line = self.line_of_offset(text, last.max()) + 1;
         let all_caret = self.selection.iter().all(|region| region.is_caret());
         let invalid = if all_caret {
@@ -566,7 +570,6 @@ impl View {
         self.set_selection(text, sel);
     }
 
-    // TODO: insert from keyboard or input method shouldn't break undo group,
     pub fn update_annotations(
         &mut self,
         plugin: PluginId,
@@ -699,10 +702,6 @@ impl View {
 
         let start = (last.start, last.start);
         let new_region = self.range_region(text, start, offset, granularity);
-
-        // TODO: small nit, merged region should be backward if end < start.
-        // This could be done by explicitly overriding, or by tweaking the
-        // merge logic.
         sel.add_region(new_region);
         self.set_selection(text, sel);
     }
@@ -1528,7 +1527,6 @@ impl View {
         }
 
         if !selection.is_empty() {
-            // todo: invalidate so that nothing selected accidentally replaced
             self.set_selection(text, selection);
         }
     }
@@ -1764,6 +1762,48 @@ mod tests {
                 }
             }
         });
+    }
+
+    #[test]
+    fn upstream_caret_invalidates_previous_visual_line() {
+        let mut view = View::new(1.into(), BufferId::new(2));
+        let text = Rope::from("a\nb\nc");
+        let mut shadow = line_cache_shadow::Builder::new();
+        shadow.add_span(3, 0, line_cache_shadow::ALL_VALID);
+        view.lc_shadow = shadow.build();
+        view.selection = SelRegion::caret(2).with_affinity(Affinity::Upstream).into();
+
+        view.invalidate_selection(&text);
+
+        let plan = line_cache_shadow::RenderPlan {
+            spans: vec![(3, line_cache_shadow::RenderTactic::Render)],
+        };
+        let segments = view
+            .lc_shadow
+            .iter_with_plan(&plan)
+            .map(|segment| (segment.our_line_num, segment.n, segment.validity))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            segments,
+            vec![
+                (0, 2, line_cache_shadow::TEXT_VALID | line_cache_shadow::SYNTAX_VALID),
+                (2, 1, line_cache_shadow::ALL_VALID),
+            ]
+        );
+    }
+
+    #[test]
+    fn extending_backward_preserves_direction_when_regions_merge() {
+        let mut view = View::new(1.into(), BufferId::new(2));
+        let text = Rope::from("abcdefghi");
+        let mut selection = Selection::new();
+        selection.add_region(SelRegion::caret(2));
+        selection.add_region(SelRegion::new(4, 8));
+        view.selection = selection;
+
+        view.extend_selection(&text, 1, SelectionGranularity::Point);
+
+        assert_eq!(view.sel_regions(), &[SelRegion::new(4, 1)]);
     }
 
     #[test]

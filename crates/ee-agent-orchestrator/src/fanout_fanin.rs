@@ -3,7 +3,7 @@
 //! The coordinator splits the ready, independent children of a parent task
 //! into [`SubagentRequest`] values, runs them through an injected spawn
 //! function bounded by the configured parallelism, collects the child
-//! summaries in deterministic task order, merges completed summaries into the
+//! handoffs in deterministic task order, merges completed handoff JSON into the
 //! parent transcript, and marks the parent task blocked when a required child
 //! fails. A [`WriteScopeConflictDetector`] is active by default, so overlapping
 //! intended write scopes of concurrent children are rejected before any spawn;
@@ -16,8 +16,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::error::OrchestratorError;
 use crate::model::{ModelMessage, ModelRole};
-use crate::subagent_verifier::SubagentCitations;
-use crate::subagents::{SubagentId, SubagentRequest, SubagentResult, SubagentRole, SubagentStatus};
+use crate::subagent_handoff::{SubagentHandoff, SubagentStatus};
+
+use crate::subagents::{SubagentId, SubagentRequest, SubagentResult, SubagentRole};
 use crate::tasks::{TaskGraph, TaskId, TaskNode, TaskStatus};
 use crate::workspace_scope::WorkspaceScope;
 use crate::write_conflicts::WriteScopeConflictDetector;
@@ -166,16 +167,15 @@ impl FanOutFanInCoordinator {
             let outcomes = futures::future::join_all(futures).await;
             for (outcome, request) in outcomes.into_iter().zip(&requests[start..end]) {
                 let result = match outcome {
-                    Ok(result) => result,
-                    Err(error) => SubagentResult {
-                        subagent_id: SubagentId::new(request.child_task_id.as_str()),
-                        status: SubagentStatus::Failed,
-                        summary: String::new(),
-                        produced_memory_items: Vec::new(),
-                        tool_call_count: 0,
-                        error_summary: Some(error.to_string()),
-                        citations: SubagentCitations::default(),
+                    Ok(result) => match result.validate_against(
+                        request.child_task_id.as_str(),
+                        Some(&request.role.name),
+                        None,
+                    ) {
+                        Ok(()) => result,
+                        Err(error) => failed_result(request, error),
                     },
+                    Err(error) => failed_result(request, error),
                 };
                 results.push(result);
             }
@@ -187,8 +187,10 @@ impl FanOutFanInCoordinator {
         {
             let mut tasks = self.tasks.lock().expect("task graph poisoned");
             for (request, result) in requests.iter().zip(&results) {
-                let (status, summary) = match result.status {
-                    SubagentStatus::Completed => (TaskStatus::Completed, result.summary.clone()),
+                let (status, summary) = match result.handoff.status {
+                    SubagentStatus::Completed => {
+                        (TaskStatus::Completed, result.handoff.summary.clone())
+                    }
                     SubagentStatus::Failed => (
                         TaskStatus::Failed,
                         result.error_summary.clone().unwrap_or_else(|| "subagent failed".into()),
@@ -212,13 +214,16 @@ impl FanOutFanInCoordinator {
         results
     }
 
-    /// Appends the summaries of completed children to the parent transcript
+    /// Appends structured handoffs of completed children to the parent transcript
     /// as untrusted `Subagent` messages, in deterministic result order.
     /// Failed and cancelled children contribute nothing.
     pub fn merge_summaries(&self, transcript: &mut Vec<ModelMessage>, results: &[SubagentResult]) {
         for result in results {
-            if result.status == SubagentStatus::Completed && !result.summary.is_empty() {
-                transcript.push(ModelMessage::text(ModelRole::Subagent, result.summary.clone()));
+            if result.handoff.status == SubagentStatus::Completed
+                && !result.handoff.summary.is_empty()
+                && let Ok(handoff) = result.handoff.to_json()
+            {
+                transcript.push(ModelMessage::text(ModelRole::Subagent, handoff));
             }
         }
     }
@@ -231,13 +236,27 @@ impl FanOutFanInCoordinator {
         results: &[SubagentResult],
     ) -> Result<bool, OrchestratorError> {
         let failed = results.iter().any(|result| {
-            matches!(result.status, SubagentStatus::Failed | SubagentStatus::Cancelled)
+            matches!(result.handoff.status, SubagentStatus::Failed | SubagentStatus::Cancelled)
         });
         if failed {
             let mut tasks = self.tasks.lock().expect("task graph poisoned");
             tasks.transition(parent, TaskStatus::Blocked)?;
         }
         Ok(failed)
+    }
+}
+
+fn failed_result(request: &SubagentRequest, error: OrchestratorError) -> SubagentResult {
+    SubagentResult {
+        subagent_id: SubagentId::new(request.child_task_id.as_str()),
+        handoff: SubagentHandoff::terminal(
+            &request.role.name,
+            request.child_task_id.as_str(),
+            SubagentStatus::Failed,
+        ),
+        produced_memory_items: Vec::new(),
+        tool_call_count: 0,
+        error_summary: Some(error.to_string()),
     }
 }
 
@@ -269,26 +288,44 @@ mod tests {
     }
 
     fn completed(summary: &str, subagent_id: &SubagentId) -> SubagentResult {
+        completed_for_role(summary, subagent_id, "summarizer")
+    }
+
+    fn completed_for_role(summary: &str, subagent_id: &SubagentId, role: &str) -> SubagentResult {
+        let output = serde_json::json!({
+            "schema_version": 1,
+            "summary": summary,
+            "findings": [],
+            "citations": {"files": [], "tools": []},
+            "unresolved": [],
+            "recommended_actions": []
+        })
+        .to_string();
         SubagentResult {
             subagent_id: subagent_id.clone(),
-            status: SubagentStatus::Completed,
-            summary: summary.into(),
+            handoff: SubagentHandoff::from_completed_output(
+                role,
+                subagent_id.as_str(),
+                &output,
+                crate::subagent_verifier::SubagentEvidence::default(),
+            ),
             produced_memory_items: Vec::new(),
             tool_call_count: 1,
             error_summary: None,
-            citations: SubagentCitations::default(),
         }
     }
 
     fn failed(subagent_id: &SubagentId, reason: &str) -> SubagentResult {
         SubagentResult {
             subagent_id: subagent_id.clone(),
-            status: SubagentStatus::Failed,
-            summary: String::new(),
+            handoff: SubagentHandoff::terminal(
+                "worker",
+                subagent_id.as_str(),
+                SubagentStatus::Failed,
+            ),
             produced_memory_items: Vec::new(),
             tool_call_count: 0,
             error_summary: Some(reason.into()),
-            citations: SubagentCitations::default(),
         }
     }
 
@@ -355,8 +392,8 @@ mod tests {
         assert_eq!(results.len(), 5);
         for (index, result) in results.iter().enumerate() {
             assert_eq!(result.subagent_id.as_str(), requests[index].child_task_id.as_str());
-            assert_eq!(result.status, SubagentStatus::Completed);
-            assert!(result.summary.contains("done"));
+            assert_eq!(result.handoff.status, SubagentStatus::Completed);
+            assert!(result.handoff.summary.contains("done"));
         }
         assert_eq!(concurrency.lock().expect("probe").1, 2, "max parallel respected");
 
@@ -366,7 +403,7 @@ mod tests {
         for (index, message) in transcript.iter().enumerate() {
             assert_eq!(message.role, ModelRole::Subagent);
             assert!(
-                message.text_content().contains(&results[index].summary),
+                message.text_content().contains(&results[index].handoff.summary),
                 "merge order matches result order"
             );
         }
@@ -472,12 +509,68 @@ mod tests {
             }
         };
         let results = coordinator.run(requests, spawn).await;
-        assert_eq!(results[1].status, SubagentStatus::Failed);
+        assert_eq!(results[1].handoff.status, SubagentStatus::Failed);
         assert!(results[1].error_summary.as_ref().expect("reason").contains("spawn exploded"));
         assert_eq!(
             tasks.lock().expect("graph").get(&children[1].id).expect("child").status,
             TaskStatus::Failed
         );
+    }
+
+    #[tokio::test]
+    async fn injected_result_identity_role_or_format_mismatch_fails_closed() {
+        let (tasks, coordinator) = harness();
+        let (root, children) = root_with_children(&tasks, 3);
+        let requests = coordinator.plan_requests(
+            &root,
+            crate::subagent_roles::BuiltinSubagentRole::Summarizer.role(),
+            None,
+        );
+        let first = children[0].id.clone();
+        let second = children[1].id.clone();
+        let spawn = move |request: SubagentRequest| {
+            let first = first.clone();
+            let second = second.clone();
+            async move {
+                if request.child_task_id == first {
+                    Ok(completed("forged id", &SubagentId::new("task-999")))
+                } else if request.child_task_id == second {
+                    Ok(completed_for_role(
+                        "forged role",
+                        &SubagentId::new(request.child_task_id.as_str()),
+                        "implementer",
+                    ))
+                } else {
+                    Ok(SubagentResult {
+                        subagent_id: SubagentId::new(request.child_task_id.as_str()),
+                        handoff: SubagentHandoff::terminal(
+                            &request.role.name,
+                            request.child_task_id.as_str(),
+                            SubagentStatus::Completed,
+                        ),
+                        produced_memory_items: Vec::new(),
+                        tool_call_count: 0,
+                        error_summary: None,
+                    })
+                }
+            }
+        };
+
+        let results = coordinator.run(requests, spawn).await;
+        assert!(results.iter().all(|result| result.handoff.status == SubagentStatus::Failed));
+        assert!(
+            results[0].error_summary.as_deref().is_some_and(|error| error.contains("result id"))
+        );
+        assert!(results[1].error_summary.as_deref().is_some_and(|error| error.contains("role")));
+        assert!(
+            results[2]
+                .error_summary
+                .as_deref()
+                .is_some_and(|error| error.contains("backend-terminal"))
+        );
+        assert!(children.iter().all(|child| {
+            tasks.lock().expect("graph").get(&child.id).expect("child").status == TaskStatus::Failed
+        }));
     }
 
     #[tokio::test]
@@ -509,9 +602,10 @@ mod tests {
                 async move {
                     *spawns.lock().expect("spawns") += 1;
                     tokio::time::sleep(Duration::from_millis(5)).await;
-                    Ok(completed(
+                    Ok(completed_for_role(
                         &format!("done {}", request.child_task_id),
                         &SubagentId::new(request.child_task_id.as_str()),
+                        &request.role.name,
                     ))
                 }
             }
@@ -519,8 +613,8 @@ mod tests {
         let results = coordinator.run(requests, spawn).await;
 
         assert_eq!(*spawns.lock().expect("spawns"), 1, "conflicted child never spawns");
-        assert_eq!(results[0].status, SubagentStatus::Completed);
-        assert_eq!(results[1].status, SubagentStatus::Failed);
+        assert_eq!(results[0].handoff.status, SubagentStatus::Completed);
+        assert_eq!(results[1].handoff.status, SubagentStatus::Failed);
         assert!(results[1].error_summary.as_ref().expect("reason").contains("write scope overlap"));
         assert!(
             detector.lock().expect("detector").is_empty(),
@@ -567,16 +661,17 @@ mod tests {
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                     active.lock().expect("probe").0 -= 1;
-                    Ok(completed(
+                    Ok(completed_for_role(
                         &format!("done {}", request.child_task_id),
                         &SubagentId::new(request.child_task_id.as_str()),
+                        &request.role.name,
                     ))
                 }
             }
         };
         let results = coordinator.run(requests, spawn).await;
         assert_eq!(active.lock().expect("probe").1, 2, "disjoint scopes run concurrently");
-        assert!(results.iter().all(|result| result.status == SubagentStatus::Completed));
+        assert!(results.iter().all(|result| result.handoff.status == SubagentStatus::Completed));
         assert!(detector.lock().expect("detector").is_empty());
     }
 
@@ -604,26 +699,18 @@ mod tests {
             failed(&SubagentId::new("task-3"), "broke"),
             SubagentResult {
                 subagent_id: SubagentId::new("task-4"),
-                status: SubagentStatus::Cancelled,
-                summary: String::new(),
+                handoff: SubagentHandoff::terminal("worker", "task-4", SubagentStatus::Cancelled),
                 produced_memory_items: Vec::new(),
                 tool_call_count: 0,
                 error_summary: Some("cancelled".into()),
-                citations: SubagentCitations::default(),
             },
-            SubagentResult {
-                subagent_id: SubagentId::new("task-5"),
-                status: SubagentStatus::Completed,
-                summary: String::new(),
-                produced_memory_items: Vec::new(),
-                tool_call_count: 0,
-                error_summary: None,
-                citations: SubagentCitations::default(),
-            },
+            completed("", &SubagentId::new("task-5")),
         ];
         coordinator.merge_summaries(&mut transcript, &results);
         assert_eq!(transcript.len(), 1);
         assert_eq!(transcript[0].role, ModelRole::Subagent);
-        assert_eq!(transcript[0].text_content(), "one");
+        let handoff: SubagentHandoff =
+            serde_json::from_str(&transcript[0].text_content()).expect("structured handoff");
+        assert_eq!(handoff.summary, "one");
     }
 }

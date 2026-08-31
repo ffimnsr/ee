@@ -97,6 +97,7 @@ mod tests {
         env.insert(String::from("LANG"), env_value("en_US.UTF-8"));
         env.insert(String::from("URL"), env_value("https://x/secret://y"));
         let server = AgentServerSettings {
+            label: None,
             command: String::from("agent-bin"),
             args: vec![String::from("--serve")],
             env,
@@ -133,6 +134,7 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert(String::from("OPENROUTER_API_KEY"), env_value("secret://missing-key"));
         let server = AgentServerSettings {
+            label: None,
             command: String::from("agent-bin"),
             args: Vec::new(),
             env,
@@ -157,6 +159,7 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert(String::from("OPENROUTER_API_KEY"), env_value("secret://openrouter-api-key"));
         let server = AgentServerSettings {
+            label: None,
             command: String::from("agent-bin"),
             args: Vec::new(),
             env,
@@ -177,6 +180,7 @@ mod tests {
         let mut env = BTreeMap::new();
         env.insert(String::from("LANG"), env_value("en_US.UTF-8"));
         let server = AgentServerSettings {
+            label: None,
             command: String::from("agent-bin"),
             args: Vec::new(),
             env,

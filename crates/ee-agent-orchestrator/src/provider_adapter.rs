@@ -35,10 +35,11 @@ use ee_acp_agent_server::{
 };
 use ee_agent_protocol::{
     AgentCapabilities, COMPACT_COMMAND_NAME, ContentBlock, ContentChunk, DISCARD_COMMAND_NAME,
-    Implementation, McpCapabilities, MessageId, SessionCapabilities, SessionCloseCapabilities,
-    SessionId, SessionListCapabilities, SessionMode, SessionModeId, SessionModeState,
-    SessionResumeCapabilities, SessionUpdate, StopReason, TextContent, compact_available_command,
-    discard_available_command, is_resume_command, parse_slash_command, resume_available_command,
+    Implementation, McpCapabilities, MessageId, RUBBER_DUCK_COMMAND_NAME, SessionCapabilities,
+    SessionCloseCapabilities, SessionId, SessionListCapabilities, SessionMode, SessionModeId,
+    SessionModeState, SessionResumeCapabilities, SessionUpdate, StopReason, TextContent,
+    compact_available_command, discard_available_command, is_resume_command, parse_slash_command,
+    resume_available_command, rubber_duck_available_command,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -498,9 +499,9 @@ struct PersistedSession {
 /// Generic over the injected [`ModelAdapter`].  Instances are cheap to clone
 /// (all state is shared behind `Arc`), so providers can keep a probe handle
 /// alongside the one handed to the framework server.
-pub struct OrchestratorProvider<M> {
+pub struct OrchestratorProvider {
     config: OrchestratorProviderConfig,
-    model: Arc<M>,
+    models: Arc<crate::model_registry::ModelRegistry>,
     policy: PolicyEngine,
     sessions: Arc<Mutex<HashMap<String, SessionRuntime>>>,
     persisted: Arc<Mutex<HashMap<String, PersistedSession>>>,
@@ -514,11 +515,11 @@ pub struct OrchestratorProvider<M> {
     next_telemetry_turn: Arc<AtomicU64>,
 }
 
-impl<M> Clone for OrchestratorProvider<M> {
+impl Clone for OrchestratorProvider {
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
-            model: self.model.clone(),
+            models: self.models.clone(),
             policy: self.policy.clone(),
             sessions: self.sessions.clone(),
             persisted: self.persisted.clone(),
@@ -531,10 +532,10 @@ impl<M> Clone for OrchestratorProvider<M> {
     }
 }
 
-impl<M: ModelAdapter> OrchestratorProvider<M> {
+impl OrchestratorProvider {
     /// Creates an adapter with the default fail-closed policy (reads only).
     #[must_use]
-    pub fn new(config: OrchestratorProviderConfig, model: Arc<M>) -> Self {
+    pub fn new(config: OrchestratorProviderConfig, model: Arc<dyn ModelAdapter>) -> Self {
         Self::with_policy(config, model, PolicyEngine::default())
     }
 
@@ -542,9 +543,26 @@ impl<M: ModelAdapter> OrchestratorProvider<M> {
     #[must_use]
     pub fn with_policy(
         config: OrchestratorProviderConfig,
-        model: Arc<M>,
+        model: Arc<dyn ModelAdapter>,
         policy: PolicyEngine,
     ) -> Self {
+        Self::with_model_registry(
+            config,
+            crate::model_registry::ModelRegistry::single(model),
+            policy,
+        )
+        .expect("single-adapter registry always contains default")
+    }
+
+    /// Creates a provider owning one validated process-wide model registry.
+    /// Every new or restored session shares its adapters without serializing
+    /// adapters, clients, or credentials.
+    pub fn with_model_registry(
+        config: OrchestratorProviderConfig,
+        models: crate::model_registry::ModelRegistry,
+        policy: PolicyEngine,
+    ) -> Result<Self, ProviderError> {
+        models.default_adapter().map_err(ProviderError::from)?;
         let session_store = Arc::new(SessionStateStore::new(
             config.session_state_dir.clone(),
             config.max_session_state_bytes,
@@ -552,9 +570,9 @@ impl<M: ModelAdapter> OrchestratorProvider<M> {
         // Invalid user telemetry caps fail closed by disabling telemetry rather
         // than preventing the ACP provider from starting.
         let telemetry = TelemetryRecorder::new(config.telemetry.clone()).unwrap_or_default();
-        Self {
+        Ok(Self {
             config,
-            model,
+            models: Arc::new(models),
             policy,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             persisted: Arc::new(Mutex::new(HashMap::new())),
@@ -563,7 +581,13 @@ impl<M: ModelAdapter> OrchestratorProvider<M> {
             next_final_response: Arc::new(AtomicU64::new(1)),
             telemetry: Arc::new(Mutex::new(telemetry)),
             next_telemetry_turn: Arc::new(AtomicU64::new(1)),
-        }
+        })
+    }
+
+    /// Non-secret model metadata owned by this provider, in stable route order.
+    #[must_use]
+    pub fn registered_models(&self) -> Vec<crate::model_registry::ModelInfo> {
+        self.models.advertised()
     }
 
     /// Exports retained privacy-safe telemetry as local JSONL. This never
@@ -827,10 +851,10 @@ fn replay_conversation(
 /// Builds a runtime restored from a pending checkpoint, verifying the
 /// provider identity.  The checkpoint stays in the store (the resumed turn
 /// decides when to clear it).
-fn restore_runtime_from_checkpoint<M: ModelAdapter>(
+fn restore_runtime_from_checkpoint(
     checkpoint: &crate::checkpoint::OrchestratorCheckpoint,
     implementation_name: &str,
-    model: Arc<M>,
+    models: Arc<crate::model_registry::ModelRegistry>,
     policy: PolicyEngine,
 ) -> Result<Arc<OrchestratorRuntime>, ProviderError> {
     if checkpoint.provider != implementation_name {
@@ -839,15 +863,16 @@ fn restore_runtime_from_checkpoint<M: ModelAdapter>(
             checkpoint.provider, implementation_name
         )));
     }
-    OrchestratorRuntime::from_checkpoint(checkpoint, model, policy)
+    OrchestratorRuntime::from_checkpoint_with_model_registry(checkpoint, models, policy)
         .map(Arc::new)
         .map_err(ProviderError::from)
 }
 
-/// The initial slash commands advertised for a session: `/compact` always;
-/// `/discard` and `/resume` only when recovery is enabled.
+/// Initial slash commands for orchestrated sessions. `/rubber-duck` is
+/// advertised because this provider owns the verified critic flow; a registry
+/// without contrast still returns a typed unavailable reason.
 fn initial_commands(recovery_enabled: bool) -> Vec<ee_agent_protocol::AvailableCommand> {
-    let mut commands = vec![compact_available_command()];
+    let mut commands = vec![compact_available_command(), rubber_duck_available_command()];
     if recovery_enabled {
         commands.push(discard_available_command());
         commands.push(resume_available_command());
@@ -926,7 +951,7 @@ fn workspace_system_context(
     text
 }
 
-impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
+impl AgentProvider for OrchestratorProvider {
     fn info(&self) -> Implementation {
         self.config.implementation.clone()
     }
@@ -957,7 +982,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
         ctx: NewSessionContext,
     ) -> ProviderFuture<Result<SessionInit, ProviderError>> {
         let config = self.config.orchestrator.clone();
-        let model = self.model.clone();
+        let models = self.models.clone();
         let policy = self.policy.clone();
         let sessions = self.sessions.clone();
         let session_store = self.session_store.clone();
@@ -976,11 +1001,11 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
             let system_context = workspace_system_context(&ctx.cwd, &ctx.additional_directories);
             let mode = default_session_mode();
             let mcp_servers = validate_mcp_servers(&ctx.mcp_servers)?;
-            let runtime = Arc::new(OrchestratorRuntime::with_policy(
+            let runtime = Arc::new(OrchestratorRuntime::with_shared_model_registry(
                 config,
-                model,
+                models,
                 mode_policy(&policy, &mode)?,
-            ));
+            )?);
             runtime.register_builtins(&session_id).map_err(|error| {
                 ProviderError::BackendFailure(format!("failed to register built-in tools: {error}"))
             })?;
@@ -1016,7 +1041,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
     ) -> ProviderFuture<Result<SessionInit, ProviderError>> {
         let config = self.config.orchestrator.clone();
         let implementation = self.config.implementation.clone();
-        let model = self.model.clone();
+        let models = self.models.clone();
         let policy = self.policy.clone();
         let sessions = self.sessions.clone();
         let persisted = self.persisted.clone();
@@ -1053,11 +1078,11 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                 Some(state) => {
                     let mode = state.mode;
                     (
-                        Arc::new(OrchestratorRuntime::with_policy(
+                        Arc::new(OrchestratorRuntime::with_shared_model_registry(
                             config,
-                            model.clone(),
+                            models.clone(),
                             mode_policy(&policy, &mode)?,
-                        )),
+                        )?),
                         Vec::new(),
                         mode,
                     )
@@ -1089,7 +1114,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                     let runtime = restore_runtime_from_checkpoint(
                         &checkpoint,
                         &implementation.name,
-                        model.clone(),
+                        models.clone(),
                         mode_policy(&policy, &mode)?,
                     )?;
                     // Durable checkpoints contain no transcript content, so
@@ -1124,7 +1149,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
     ) -> ProviderFuture<Result<SessionInit, ProviderError>> {
         let config = self.config.orchestrator.clone();
         let implementation = self.config.implementation.clone();
-        let model = self.model.clone();
+        let models = self.models.clone();
         let policy = self.policy.clone();
         let sessions = self.sessions.clone();
         let session_id = ctx.session_id.clone();
@@ -1170,7 +1195,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                 let runtime = restore_runtime_from_checkpoint(
                     &checkpoint,
                     &implementation.name,
-                    model.clone(),
+                    models.clone(),
                     mode_policy(&policy, &mode)?,
                 )?;
                 runtime.register_builtins(&session_id).map_err(|error| {
@@ -1257,11 +1282,19 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                 })
                 .collect::<Vec<_>>()
                 .join(" ");
-            let is_compact = parse_slash_command(&prompt_text)
-                .is_some_and(|command| command.name == COMPACT_COMMAND_NAME);
-            if is_compact {
+            let compact_command = parse_slash_command(&prompt_text)
+                .filter(|command| command.name == COMPACT_COMMAND_NAME);
+            if let Some(command) = compact_command {
+                let history = model_history(&conversation);
                 let result = runtime
-                    .run_turn_with_system_context(ctx, sink, client, cancel, system_context)
+                    .run_compact_turn_with_history(
+                        ctx,
+                        sink,
+                        cancel,
+                        command.instructions,
+                        Some(system_context),
+                        history,
+                    )
                     .await
                     .map_err(ProviderError::from);
                 let events = runtime.event_snapshot();
@@ -1286,6 +1319,47 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                     &sessions,
                 )?;
                 return Ok(result);
+            }
+            // Manual critique is handled before MCP discovery and mutable tool
+            // registration. Existing built-ins remain registered but critic
+            // discovery/policy exposes read-only definitions only.
+            if let Some(command) = parse_slash_command(&prompt_text)
+                && command.name == RUBBER_DUCK_COMMAND_NAME
+            {
+                let history = model_history(&conversation);
+                record_user_message(&conversation, prompt_text.clone());
+                let turn = runtime
+                    .run_manual_rubber_duck(
+                        &session_id.to_string(),
+                        command.instructions,
+                        history,
+                        sink,
+                        cancel,
+                    )
+                    .await
+                    .map_err(ProviderError::from)?;
+                if let Some(synthesis) = &turn.synthesis {
+                    record_agent_message(&conversation, synthesis);
+                } else {
+                    record_agent_message(&conversation, &turn.timeline_summary);
+                }
+                let events = runtime.event_snapshot();
+                finish_provider_telemetry(
+                    &telemetry,
+                    &telemetry_turn,
+                    telemetry_started_at,
+                    &events[telemetry_event_start..],
+                    TelemetryTurnOutcome::Succeeded,
+                    None,
+                    Vec::new(),
+                );
+                persist_session_snapshot(
+                    &session_store,
+                    &implementation_name,
+                    &session_id,
+                    &sessions,
+                )?;
+                return Ok(turn.prompt_result);
             }
             // `/discard` rejects a paused turn's pending checkpoint: the
             // interrupted work is dropped instead of resumed.  Only valid
@@ -1583,11 +1657,19 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
         })
     }
 
-    fn cancel_session(&self, _session_id: SessionId) -> ProviderFuture<Result<(), ProviderError>> {
-        // The framework flips the prompt's cancellation watch before calling
-        // this hook, so the in-flight `run_turn` already observes the cancel.
-        // The adapter keeps no other active-turn state to release.
-        Box::pin(async { Ok(()) })
+    fn cancel_session(&self, session_id: SessionId) -> ProviderFuture<Result<(), ProviderError>> {
+        let sessions = self.sessions.clone();
+        Box::pin(async move {
+            // Framework cancellation reaches the parent watch; explicit child
+            // cancellation also covers queued children and targeted registry
+            // handles without relying on parent-future polling.
+            if let Some(session) =
+                sessions.lock().expect("adapter sessions poisoned").get(&session_id.to_string())
+            {
+                session.runtime.cancel_all_children();
+            }
+            Ok(())
+        })
     }
 
     fn close_session(&self, session_id: SessionId) -> ProviderFuture<Result<(), ProviderError>> {
@@ -1604,6 +1686,7 @@ impl<M: ModelAdapter> AgentProvider for OrchestratorProvider<M> {
                 // Idempotent: the session was never created here.
                 return Ok(());
             };
+            runtime.runtime.cancel_all_children();
             // Explicit close finalizes the session: pending recovery
             // checkpoints are deleted (the interrupted work is abandoned
             // unless the host loads the persisted state below).
@@ -1643,6 +1726,38 @@ mod tests {
         ModelAdapter, ModelError, ModelFuture, ModelRequest, ModelResponse, ModelRole,
     };
     use crate::test_support::FakeModel;
+
+    #[test]
+    fn orchestrated_sessions_advertise_rubber_duck_without_starting_models() {
+        let commands = initial_commands(false);
+        assert_eq!(
+            commands.iter().map(|command| command.name.as_str()).collect::<Vec<_>>(),
+            vec![COMPACT_COMMAND_NAME, RUBBER_DUCK_COMMAND_NAME]
+        );
+        let recovery_commands = initial_commands(true);
+        assert_eq!(
+            recovery_commands.iter().map(|command| command.name.as_str()).collect::<Vec<_>>(),
+            vec![
+                COMPACT_COMMAND_NAME,
+                RUBBER_DUCK_COMMAND_NAME,
+                DISCARD_COMMAND_NAME,
+                ee_agent_protocol::RESUME_COMMAND_NAME,
+            ]
+        );
+    }
+
+    #[test]
+    fn provider_registry_requires_default_adapter() {
+        let result = OrchestratorProvider::with_model_registry(
+            OrchestratorProviderConfig::default(),
+            crate::model_registry::ModelRegistry::new(),
+            PolicyEngine::default(),
+        );
+        assert!(matches!(
+            result,
+            Err(ProviderError::BackendFailure(reason)) if reason.contains("no default adapter")
+        ));
+    }
 
     const PLAN_PAYLOAD: &str = r#"<!-- ee-plan
 [
@@ -1725,10 +1840,7 @@ mod tests {
         }
     }
 
-    fn recovery_provider(
-        model: Arc<DelayedModel>,
-        auto_resume_max: u32,
-    ) -> OrchestratorProvider<DelayedModel> {
+    fn recovery_provider(model: Arc<DelayedModel>, auto_resume_max: u32) -> OrchestratorProvider {
         let mut recovery = RecoveryConfig::memory_only();
         recovery.auto_resume_max = auto_resume_max;
         OrchestratorProvider::with_policy(
@@ -1940,7 +2052,7 @@ mod tests {
     fn durable_recovery_provider(
         model: Arc<DelayedModel>,
         dir: &std::path::Path,
-    ) -> OrchestratorProvider<DelayedModel> {
+    ) -> OrchestratorProvider {
         let mut recovery = RecoveryConfig::durable(dir.to_path_buf());
         recovery.auto_resume_max = 0;
         OrchestratorProvider::with_policy(
@@ -2389,8 +2501,8 @@ mod tests {
         }
     }
 
-    fn spawn_server<M: ModelAdapter>(
-        provider: OrchestratorProvider<M>,
+    fn spawn_server(
+        provider: OrchestratorProvider,
     ) -> (Harness, tokio::task::JoinHandle<Result<(), AcpServerError>>) {
         let server = AcpAgentServer::new(provider, AcpAgentServerConfig::default());
         let (transport, handle) = MemoryTransport::new();
@@ -3546,11 +3658,31 @@ mod tests {
     async fn provider_adapter_compact_prompt_skips_mcp_discovery_and_tools() {
         let model =
             Arc::new(FakeModel::new(vec![ModelResponse::new().text("SUMMARY TEXT").completed()]));
-        let provider =
-            OrchestratorProvider::new(OrchestratorProviderConfig::default(), model.clone());
+        let provider = OrchestratorProvider::new(
+            OrchestratorProviderConfig {
+                telemetry: TelemetryConfig {
+                    enabled: true,
+                    max_turns: 2,
+                    max_events_per_turn: 16,
+                    max_bytes_per_turn: 4_096,
+                },
+                ..OrchestratorProviderConfig::default()
+            },
+            model.clone(),
+        );
         let probe = provider.clone();
         let (handle, task) = spawn_server(provider);
         let session_id = new_session(&handle, 1).await;
+        let conversation = probe
+            .sessions
+            .lock()
+            .expect("sessions")
+            .get(&session_id)
+            .expect("session")
+            .conversation
+            .clone();
+        record_user_message(&conversation, "recent user goal");
+        record_agent_message(&conversation, "recent agent result");
 
         handle.send(request(2, "session/prompt", prompt_params(&session_id, "/compact")));
         // No MCP diagnostics and no plan update: the compaction path bypasses
@@ -3575,9 +3707,17 @@ mod tests {
         let requests = model.requests();
         assert_eq!(requests.len(), 1);
         assert!(requests[0].tools.is_empty(), "no tools exposed during compaction");
+        let compaction_system = requests[0].transcript[0].text_content();
+        assert!(compaction_system.contains("Recent conversation:"), "{compaction_system}");
+        assert!(compaction_system.contains("recent user goal"), "{compaction_system}");
+        assert!(compaction_system.contains("recent agent result"), "{compaction_system}");
         let (tasks, memory) = probe.session_state(&session_id).expect("session state");
         assert_eq!(tasks.len(), 0, "no task graph entry for compaction");
         assert_eq!(memory.query("summary:session").expect("stored").value, "SUMMARY TEXT");
+        let telemetry = probe.export_telemetry_jsonl().expect("exports telemetry");
+        let record: Value = serde_json::from_str(telemetry.lines().next().expect("record"))
+            .expect("telemetry json");
+        assert_eq!(record["summary"]["modelCalls"], 1);
 
         handle.shutdown(task).await;
     }

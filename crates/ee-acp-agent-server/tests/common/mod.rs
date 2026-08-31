@@ -2,8 +2,6 @@
 //! provider with per-session prompt behaviors, a server-over-memory-
 //! transport spawner, and frame/response helpers.
 
-#![allow(dead_code)]
-
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
@@ -124,14 +122,6 @@ impl FakeProvider {
     /// Advertises this caller-selected mode state in every session init.
     pub fn with_modes(self, modes: SessionModeState) -> Self {
         *self.modes.lock().expect("fake provider modes poisoned") = Some(modes);
-        self
-    }
-
-    /// Makes `session/set_mode` fail with `message` after framework
-    /// validation reaches the provider.
-    pub fn with_set_mode_error(self, message: &str) -> Self {
-        *self.set_mode_error.lock().expect("fake provider set mode error poisoned") =
-            Some(message.to_string());
         self
     }
 

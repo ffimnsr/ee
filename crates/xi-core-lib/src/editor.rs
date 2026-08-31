@@ -41,9 +41,15 @@ use crate::selection::{InsertDrift, SelRegion, Selection};
 use crate::text_store::DocumentMode;
 use crate::view::{Replace, View};
 
-// TODO This could go much higher without issue but while developing it is
-// better to keep it low to expose bugs in the GC during casual testing.
-const MAX_UNDOS: usize = 20;
+/// Maximum retained undo groups before CRDT history garbage collection.
+const MAX_UNDOS: usize = 100;
+const CORE_EDIT_PRIORITY: usize = 0x10000;
+const MAX_PLUGIN_PRIORITY: usize = CORE_EDIT_PRIORITY - 1;
+
+fn plugin_edit_priority(priority: u64, after_cursor: bool) -> usize {
+    let priority = usize::try_from(priority).unwrap_or(usize::MAX).min(MAX_PLUGIN_PRIORITY);
+    if after_cursor { CORE_EDIT_PRIORITY + 1 + priority } else { priority }
+}
 
 pub struct Editor {
     /// The contents of the buffer.
@@ -61,8 +67,10 @@ pub struct Editor {
     /// Editor owns dirty/pristine revision state for this VLF backing.
     pub(crate) vlf_store: Option<Box<crate::vlf::store::VlfStore>>,
 
-    /// The most recent revision.
+    /// The most recent revision committed to views.
     last_rev_id: RevId,
+    /// Text corresponding to `last_rev_id`, cached to avoid revision synthesis.
+    last_text: Rope,
     /// The revision of the last save.
     pristine_rev_id: RevId,
     /// Monotonic VLF overlay revision counter.
@@ -110,10 +118,11 @@ impl Editor {
         let last_rev_id = engine.get_head_rev_id();
 
         Editor {
-            text: buffer,
+            text: buffer.clone(),
             rope_mode: mode,
             engine,
             last_rev_id,
+            last_text: buffer,
             pristine_rev_id: last_rev_id,
             vlf_head_revision: 0,
             vlf_pristine_revision: 0,
@@ -145,10 +154,11 @@ impl Editor {
         let buffer = engine.get_head().clone();
         let last_rev_id = engine.get_head_rev_id();
         Editor {
-            text: buffer,
+            text: buffer.clone(),
             rope_mode: DocumentMode::Vlf,
             engine,
             last_rev_id,
+            last_text: buffer,
             pristine_rev_id: last_rev_id,
             vlf_head_revision: 0,
             vlf_pristine_revision: 0,
@@ -360,8 +370,7 @@ impl Editor {
         let head_rev_id = self.engine.get_head_rev_id();
         let undo_group = self.calculate_undo_group();
         self.last_edit_type = self.this_edit_type;
-        let priority = 0x10000;
-        self.engine.edit_rev(priority, undo_group, head_rev_id.token(), delta);
+        self.engine.edit_rev(CORE_EDIT_PRIORITY, undo_group, head_rev_id.token(), delta);
         self.text = self.engine.get_head().clone();
     }
 
@@ -390,9 +399,10 @@ impl Editor {
     /// generates a delta from a plugin's response and applies it to the buffer.
     pub fn apply_plugin_edit(&mut self, edit: PluginEdit) -> PluginEditAck {
         let _t = tracing::trace_span!("Editor::apply_plugin_edit", categories = "core").entered();
-        //TODO: get priority working, so that plugin edits don't necessarily move cursor
-        let PluginEdit { rev, delta, priority, undo_group, .. } = edit;
-        let priority = priority as usize;
+        let PluginEdit { rev, delta, priority, after_cursor, undo_group, .. } = edit;
+        // Core edits occupy the middle priority. Plugin edits use bounded bands on
+        // either side so `after_cursor` controls concurrent insertion placement.
+        let priority = plugin_edit_priority(priority, after_cursor);
         let undo_group = undo_group.unwrap_or_else(|| self.calculate_undo_group());
         match self.engine.try_edit_rev(priority, undo_group, rev, delta) {
             Err(e) => {
@@ -419,9 +429,7 @@ impl Editor {
 
         let last_token = self.last_rev_id.token();
         let delta = self.engine.try_delta_rev_head(last_token).expect("last_rev not found");
-        // TODO (performance): it's probably quicker to stash last_text
-        // rather than resynthesize it.
-        let last_text = self.engine.get_rev(last_token).expect("last_rev not found");
+        let last_text = self.last_text.clone();
 
         // Transpose can rotate characters inside of a selection; this is why it's an Inside edit.
         // Surround adds characters on either side of a selection, that's why it's an Outside edit.
@@ -431,6 +439,7 @@ impl Editor {
             _ => InsertDrift::Default,
         };
         self.last_rev_id = self.engine.get_head_rev_id();
+        self.last_text = self.text.clone();
         Some((delta, last_text, drift))
     }
 
@@ -502,9 +511,8 @@ impl Editor {
     }
 
     fn do_replace(&mut self, view: &mut View, replace_all: bool) {
-        if let Some(Replace { chars, .. }) = view.get_replace() {
-            // todo: implement preserve case
-            // store old selection because in case nothing is found the selection will be preserved
+        if let Some(Replace { chars, preserve_case }) = view.get_replace() {
+            // Store old selection because in case nothing is found the selection will be preserved.
             let mut old_selection = Selection::new();
             for &region in view.sel_regions() {
                 old_selection.add_region(region);
@@ -518,7 +526,12 @@ impl Editor {
             }
 
             if last_selection_region(view.sel_regions()).is_some() {
-                self.add_delta(edit_ops::insert(&self.text, view.sel_regions(), chars));
+                let delta = if preserve_case {
+                    edit_ops::insert_preserving_case(&self.text, view.sel_regions(), &chars)
+                } else {
+                    edit_ops::insert(&self.text, view.sel_regions(), chars)
+                };
+                self.add_delta(delta);
             } else {
                 view.set_selection(&self.text, old_selection);
             }
@@ -729,11 +742,8 @@ impl Editor {
     }
 
     fn do_yank(&mut self, view: &View, kill_ring: &Rope) {
-        // TODO: if there are multiple cursors and the number of newlines
-        // is one less than the number of cursors, split and distribute one
-        // line per cursor.
-        let delta = edit_ops::insert(&self.text, view.sel_regions(), kill_ring.clone());
-        self.add_delta(delta);
+        let text = kill_ring.slice_to_cow(..);
+        self.do_paste(view, &text);
     }
 
     fn do_duplicate_line(&mut self, view: &View, config: &BufferItems) {
@@ -1085,6 +1095,65 @@ mod tests {
 
         editor.set_pristine();
         assert!(editor.is_pristine(), "successful VLF save should reset pristine state");
+    }
+
+    #[test]
+    fn commit_delta_returns_cached_previous_text() {
+        let mut editor = Editor::with_text("first");
+
+        insert_text(&mut editor, " second");
+        let mut builder = DeltaBuilder::new(editor.get_buffer().len());
+        builder.replace(editor.get_buffer().len()..editor.get_buffer().len(), " third".into());
+        editor.this_edit_type = EditType::InsertChars;
+        editor.add_delta(builder.build());
+
+        let (_, previous_text, _) = editor.commit_delta().expect("pending edit");
+        assert_eq!(String::from(previous_text), "first second");
+    }
+
+    #[test]
+    fn yank_distributes_lines_across_matching_carets() {
+        let mut editor = Editor::with_text("ab");
+        let mut view = View::new(1.into(), crate::tabs::BufferId::new(2));
+        let mut selection = Selection::new();
+        selection.add_region(SelRegion::caret(0));
+        selection.add_region(SelRegion::caret(2));
+        view.set_selection(editor.get_buffer(), selection);
+
+        editor.do_yank(&view, &Rope::from("one\ntwo"));
+
+        assert_eq!(editor.get_buffer().to_string(), "oneabtwo");
+    }
+
+    #[test]
+    fn plugin_after_cursor_selects_priority_band() {
+        assert!(plugin_edit_priority(u64::MAX, false) < CORE_EDIT_PRIORITY);
+        assert!(plugin_edit_priority(u64::MAX, true) > CORE_EDIT_PRIORITY);
+
+        fn apply_concurrent_plugin_edit(after_cursor: bool) -> String {
+            let mut editor = Editor::with_text("ab");
+            let plugin_rev = editor.get_head_rev_token();
+
+            let mut core_builder = DeltaBuilder::new(2);
+            core_builder.replace(1..1, "X".into());
+            editor.add_delta(core_builder.build());
+
+            let mut plugin_builder = DeltaBuilder::new(2);
+            plugin_builder.replace(1..1, "P".into());
+            let edit = PluginEdit {
+                rev: plugin_rev,
+                delta: plugin_builder.build(),
+                priority: 0,
+                after_cursor,
+                undo_group: None,
+                author: "plugin".into(),
+            };
+            assert!(editor.apply_plugin_edit(edit).applied);
+            editor.get_buffer().to_string()
+        }
+
+        assert_eq!(apply_concurrent_plugin_edit(false), "aPXb");
+        assert_eq!(apply_concurrent_plugin_edit(true), "aXPb");
     }
 
     #[test]

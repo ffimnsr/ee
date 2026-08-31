@@ -125,11 +125,11 @@ impl Diff<RopeInfo> for LineHashDiff {
             targ_line_offset += line.len();
         }
 
-        // we now have an ordered list of matches and their positions.
-        // to ensure that our delta only copies non-decreasing base regions,
-        // we take the longest increasing subsequence.
-        // TODO: a possible optimization here would be to expand matches
-        // to adjacent lines first? this would be at best a small win though..
+        // We now have an ordered list of matches and their positions. To ensure
+        // the delta only copies non-decreasing base regions, take the longest
+        // increasing subsequence. Match expansion happens after this selection;
+        // expanding every candidate first would add duplicate scans without
+        // improving the selected anchor order.
 
         let longest_subseq =
             if needs_subseq { longest_increasing_region_set(&matches) } else { matches };

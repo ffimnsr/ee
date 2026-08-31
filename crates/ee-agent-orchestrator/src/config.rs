@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::compaction::CompactionConfig;
 use crate::reflection::ReflectionConfig;
 use crate::repair::RepairConfig;
+use crate::rubber_duck_config::RubberDuckConfig;
+use crate::rubber_duck_trigger::RubberDuckTriggerConfig;
 use crate::stuck::StuckConfig;
 
 /// Default maximum loop iterations per turn.
@@ -28,6 +30,12 @@ pub const DEFAULT_TURN_TIMEOUT: Duration = Duration::from_secs(300);
 pub const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
 /// Default per-subagent wall-clock limit: 300 seconds.
 pub const DEFAULT_SUBAGENT_TIMEOUT: Duration = Duration::from_secs(300);
+/// Default maximum idle interval for a running subagent: 60 seconds.
+pub const DEFAULT_SUBAGENT_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn default_subagent_stall_timeout() -> Duration {
+    DEFAULT_SUBAGENT_STALL_TIMEOUT
+}
 /// Default memory byte limit: 1 MiB.
 pub const DEFAULT_MEMORY_LIMIT_BYTES: usize = 1024 * 1024;
 /// Default maximum model adapter calls per turn.
@@ -137,6 +145,10 @@ pub struct OrchestratorConfig {
     pub tool_timeout: Duration,
     /// Per-subagent wall-clock limit (subagent phase).
     pub subagent_timeout: Duration,
+    /// Maximum interval without model, tool, or task progress before a running
+    /// subagent is cancelled as stalled.
+    #[serde(default = "default_subagent_stall_timeout")]
+    pub subagent_stall_timeout: Duration,
     /// Memory store byte limit.
     pub memory_limit_bytes: usize,
     /// Maximum model adapter invocations per turn; the loop stops with a
@@ -166,6 +178,12 @@ pub struct OrchestratorConfig {
     pub compaction: CompactionConfig,
     /// Resumable-turn recovery knobs (feature-gated; disabled by default).
     pub recovery: RecoveryConfig,
+    /// Resolved frontend-owned rubber-duck mode, route, and resource bounds.
+    #[serde(default)]
+    pub rubber_duck: RubberDuckConfig,
+    /// Deterministic automatic trigger policy; manual-only until replay enables it.
+    #[serde(default)]
+    pub rubber_duck_triggers: RubberDuckTriggerConfig,
 }
 
 impl Default for OrchestratorConfig {
@@ -178,6 +196,7 @@ impl Default for OrchestratorConfig {
             turn_timeout: DEFAULT_TURN_TIMEOUT,
             tool_timeout: DEFAULT_TOOL_TIMEOUT,
             subagent_timeout: DEFAULT_SUBAGENT_TIMEOUT,
+            subagent_stall_timeout: DEFAULT_SUBAGENT_STALL_TIMEOUT,
             memory_limit_bytes: DEFAULT_MEMORY_LIMIT_BYTES,
             max_model_calls: DEFAULT_MAX_MODEL_CALLS,
             max_subagents: DEFAULT_MAX_SUBAGENTS_PER_TURN,
@@ -191,6 +210,8 @@ impl Default for OrchestratorConfig {
             repair: RepairConfig::default(),
             compaction: CompactionConfig::default(),
             recovery: RecoveryConfig::default(),
+            rubber_duck: RubberDuckConfig::default(),
+            rubber_duck_triggers: RubberDuckTriggerConfig::default(),
         }
     }
 }
@@ -209,6 +230,7 @@ mod tests {
         assert_eq!(config.turn_timeout, Duration::from_secs(300));
         assert_eq!(config.tool_timeout, Duration::from_secs(120));
         assert_eq!(config.subagent_timeout, Duration::from_secs(300));
+        assert_eq!(config.subagent_stall_timeout, Duration::from_secs(60));
         assert_eq!(config.memory_limit_bytes, 1024 * 1024);
         assert_eq!(config.max_model_calls, 16);
         assert_eq!(config.max_subagents, 8);
@@ -234,6 +256,8 @@ mod tests {
         assert_eq!(config.compaction, CompactionConfig::default());
         assert_eq!(config.recovery, RecoveryConfig::default());
         assert!(!config.recovery.enabled);
+        assert_eq!(config.rubber_duck, RubberDuckConfig::default());
+        assert_eq!(config.rubber_duck_triggers, RubberDuckTriggerConfig::default());
     }
 
     #[test]
@@ -246,6 +270,7 @@ mod tests {
             turn_timeout: Duration::from_secs(10),
             tool_timeout: Duration::from_secs(5),
             subagent_timeout: Duration::from_secs(20),
+            subagent_stall_timeout: Duration::from_secs(7),
             memory_limit_bytes: 4096,
             max_model_calls: 6,
             max_subagents: 3,
@@ -268,6 +293,10 @@ mod tests {
             repair: RepairConfig { max_attempts: 2 },
             compaction: CompactionConfig { max_input_bytes: 2048, ..CompactionConfig::default() },
             recovery: RecoveryConfig { enabled: true, ..RecoveryConfig::default() },
+            rubber_duck: RubberDuckConfig::default(),
+            rubber_duck_triggers: RubberDuckTriggerConfig {
+                mode: crate::rubber_duck_trigger::RubberDuckTriggerMode::Automatic,
+            },
         };
         let json = serde_json::to_string(&config).expect("config serializes");
         let restored: OrchestratorConfig = serde_json::from_str(&json).expect("config parses");
@@ -278,6 +307,7 @@ mod tests {
         assert_eq!(restored.turn_timeout, Duration::from_secs(10));
         assert_eq!(restored.tool_timeout, Duration::from_secs(5));
         assert_eq!(restored.subagent_timeout, Duration::from_secs(20));
+        assert_eq!(restored.subagent_stall_timeout, Duration::from_secs(7));
         assert_eq!(restored.memory_limit_bytes, 4096);
         assert_eq!(restored.max_model_calls, 6);
         assert_eq!(restored.max_subagents, 3);

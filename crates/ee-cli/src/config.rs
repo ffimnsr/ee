@@ -23,7 +23,8 @@ use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 
 #[cfg(any(feature = "agents", test))]
 use ee_agent_host::{
-    AgentWebContextConfig, WebContextLimits,
+    AgentWebContextConfig, ResolvedRubberDuckConfig, RubberDuckBackend, RubberDuckConfig,
+    RubberDuckMode, WebContextLimits,
     web_context::{
         BraveFreshness, BraveLlmContextOptions, BraveSafeSearchMode, BraveThresholdMode,
         ExaSearchMode, ExaSearchOptions, TavilySearchDepth, TavilySearchOptions, WebSearchProvider,
@@ -150,6 +151,16 @@ const CONFIG_TEMPLATE: &str = r#"# ee configuration
 # enabled = false
 # default_agent = "assistant"
 # max_concurrent_prompts = 4 # per configured agent connection; valid 1..32
+#
+# # Optional rubber duck. Select at most one backend.
+# # [agents.rubber_duck]
+# # mode = "manual" # "off", "manual", or "automatic"
+# # internal_model_id = "critic" # ee-owned agent model registry id
+# # external_agent_id = "critic-agent" # configured [agents.servers] id
+# # max_calls = 2
+# # max_context_bytes = 65536
+# # max_output_bytes = 32768
+# # timeout_ms = 90000
 #
 # # Web context is disabled by default. Put this only in user-global config;
 # # workspace .ee.toml files may disable or tighten it, never enable/widen it.
@@ -453,6 +464,8 @@ pub(crate) struct AgentsSettings {
     /// Maximum provider prompts in flight on each configured agent connection.
     pub max_concurrent_prompts: usize,
     pub servers: BTreeMap<String, AgentServerSettings>,
+    /// Frontend-resolved critic policy; translated to backend policy on use.
+    pub rubber_duck: RubberDuckSettings,
     /// Trusted web retrieval policy. This exists only in agents-enabled builds;
     /// raw config remains parseable in every build so schema validation is stable.
     #[cfg(any(feature = "agents", test))]
@@ -466,9 +479,83 @@ impl Default for AgentsSettings {
             default_agent: None,
             max_concurrent_prompts: DEFAULT_AGENT_MAX_CONCURRENT_PROMPTS,
             servers: BTreeMap::new(),
+            rubber_duck: RubberDuckSettings::default(),
             #[cfg(any(feature = "agents", test))]
             web_context: AgentWebContextConfig::default(),
         }
+    }
+}
+
+const DEFAULT_CRITIC_MAX_CALLS: usize = 2;
+const MAX_CRITIC_MAX_CALLS: usize = 16;
+const DEFAULT_CRITIC_CONTEXT_BYTES: usize = 64 * 1024;
+const MAX_CRITIC_CONTEXT_BYTES: usize = 64 * 1024;
+const DEFAULT_CRITIC_OUTPUT_BYTES: usize = 32 * 1024;
+const MAX_CRITIC_OUTPUT_BYTES: usize = 32 * 1024;
+const DEFAULT_CRITIC_TIMEOUT_MS: u64 = 90_000;
+const MAX_CRITIC_TIMEOUT_MS: u64 = 300_000;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum RubberDuckModeSetting {
+    Off,
+    #[default]
+    Manual,
+    Automatic,
+}
+
+/// Fully merged frontend-owned rubber-duck settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RubberDuckSettings {
+    pub mode: RubberDuckModeSetting,
+    pub internal_model_id: Option<String>,
+    pub external_agent_id: Option<String>,
+    pub max_calls: usize,
+    pub max_context_bytes: usize,
+    pub max_output_bytes: usize,
+    pub timeout_ms: u64,
+}
+
+impl Default for RubberDuckSettings {
+    fn default() -> Self {
+        Self {
+            mode: RubberDuckModeSetting::Manual,
+            internal_model_id: None,
+            external_agent_id: None,
+            max_calls: DEFAULT_CRITIC_MAX_CALLS,
+            max_context_bytes: DEFAULT_CRITIC_CONTEXT_BYTES,
+            max_output_bytes: DEFAULT_CRITIC_OUTPUT_BYTES,
+            timeout_ms: DEFAULT_CRITIC_TIMEOUT_MS,
+        }
+    }
+}
+
+#[cfg(any(feature = "agents", test))]
+impl RubberDuckSettings {
+    /// Translates frontend config into validated backend policy. Unknown optional
+    /// backend ids degrade critic only; ordinary agent operation remains usable.
+    pub(crate) fn resolve_backend_policy(
+        &self,
+        model_ids: &BTreeSet<String>,
+        agent_ids: &BTreeSet<String>,
+    ) -> Result<ResolvedRubberDuckConfig, String> {
+        let backend = RubberDuckBackend::from_optional_ids(
+            self.internal_model_id.clone(),
+            self.external_agent_id.clone(),
+        )
+        .map_err(|error| error.to_string())?;
+        let config = RubberDuckConfig {
+            mode: match self.mode {
+                RubberDuckModeSetting::Off => RubberDuckMode::Off,
+                RubberDuckModeSetting::Manual => RubberDuckMode::Manual,
+                RubberDuckModeSetting::Automatic => RubberDuckMode::Automatic,
+            },
+            backend,
+            max_calls: self.max_calls,
+            max_context_bytes: self.max_context_bytes,
+            max_output_bytes: self.max_output_bytes,
+            timeout: std::time::Duration::from_millis(self.timeout_ms),
+        };
+        config.resolve(model_ids, agent_ids).map_err(|error| error.to_string())
     }
 }
 
@@ -490,6 +577,8 @@ pub(crate) struct AgentEnvValue {
 /// Resolved ACP agent subprocess definition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentServerSettings {
+    /// Optional frontend-only label shown in agent pickers.
+    pub label: Option<String>,
     pub command: String,
     pub args: Vec<String>,
     pub env: BTreeMap<String, AgentEnvValue>,
@@ -1146,9 +1235,26 @@ pub(crate) struct AgentsToml {
     pub max_concurrent_prompts: Option<usize>,
     #[serde(default)]
     pub servers: BTreeMap<String, AgentServerToml>,
+    /// Optional bounded critic policy.
+    pub rubber_duck: Option<RubberDuckToml>,
     /// Trusted configuration for optional agent web retrieval. Only user-global
     /// config can grant access; workspace files can only disable or restrict it.
     pub web_context: Option<AgentWebContextToml>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RubberDuckToml {
+    /// `off`, `manual`, or `automatic`.
+    pub mode: Option<String>,
+    /// Explicit ee-owned model registry id. Mutually exclusive with external_agent_id.
+    pub internal_model_id: Option<String>,
+    /// Explicit configured ACP agent id. Mutually exclusive with internal_model_id.
+    pub external_agent_id: Option<String>,
+    pub max_calls: Option<usize>,
+    pub max_context_bytes: Option<usize>,
+    pub max_output_bytes: Option<usize>,
+    pub timeout_ms: Option<u64>,
 }
 
 /// Raw `[agents.web_context]` definition. A user-global opaque provider secret
@@ -1353,6 +1459,8 @@ pub(crate) struct WebContextLimitsToml {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AgentServerToml {
+    /// Optional display label. Never used as subprocess identity.
+    pub label: Option<String>,
     /// Executable invoked to start the ACP agent subprocess.
     pub command: Option<String>,
     pub args: Option<Vec<String>>,
@@ -1804,6 +1912,12 @@ impl EditorSettings {
                 );
             }
         }
+        if let Some(rubber_duck) = &patch.rubber_duck {
+            match merge_rubber_duck(&self.agents.rubber_duck, rubber_duck) {
+                Ok(resolved) => self.agents.rubber_duck = resolved,
+                Err(error) => eprintln!("ee: warning: invalid agents.rubber_duck: {error}"),
+            }
+        }
         for (id, server) in &patch.servers {
             let existing = self.agents.servers.get(id);
             match merge_agent_server(id, server, existing, kind) {
@@ -1825,6 +1939,21 @@ impl EditorSettings {
             }
             true
         });
+        #[cfg(any(feature = "agents", test))]
+        {
+            // External ids are frontend-known. Internal model existence is
+            // process-owned and revalidated by ee-owned provider registry.
+            let model_ids =
+                self.agents.rubber_duck.internal_model_id.iter().cloned().collect::<BTreeSet<_>>();
+            let agent_ids = self.agents.servers.keys().cloned().collect::<BTreeSet<_>>();
+            match self.agents.rubber_duck.resolve_backend_policy(&model_ids, &agent_ids) {
+                Ok(resolved) if resolved.unavailable.is_some() => eprintln!(
+                    "ee: warning: configured rubber duck backend is unavailable; ordinary agent operation remains enabled"
+                ),
+                Ok(_) => {}
+                Err(error) => eprintln!("ee: warning: invalid agents.rubber_duck: {error}"),
+            }
+        }
     }
 
     fn merge_mcp_toml(&mut self, patch: &McpToml) {
@@ -1844,12 +1973,84 @@ impl EditorSettings {
     }
 }
 
+fn merge_rubber_duck(
+    existing: &RubberDuckSettings,
+    patch: &RubberDuckToml,
+) -> Result<RubberDuckSettings, String> {
+    validate_rubber_duck_toml(patch)?;
+    let mut resolved = existing.clone();
+    if let Some(mode) = patch.mode.as_deref() {
+        resolved.mode = match mode {
+            "off" => RubberDuckModeSetting::Off,
+            "manual" => RubberDuckModeSetting::Manual,
+            "automatic" => RubberDuckModeSetting::Automatic,
+            _ => return Err(String::from("mode must be off, manual, or automatic")),
+        };
+    }
+    if let Some(model_id) = &patch.internal_model_id {
+        resolved.internal_model_id = Some(model_id.clone());
+    }
+    if let Some(agent_id) = &patch.external_agent_id {
+        resolved.external_agent_id = Some(agent_id.clone());
+    }
+    if resolved.internal_model_id.is_some() && resolved.external_agent_id.is_some() {
+        return Err(String::from("internal_model_id and external_agent_id are mutually exclusive"));
+    }
+    if let Some(value) = patch.max_calls {
+        resolved.max_calls = value;
+    }
+    if let Some(value) = patch.max_context_bytes {
+        resolved.max_context_bytes = value;
+    }
+    if let Some(value) = patch.max_output_bytes {
+        resolved.max_output_bytes = value;
+    }
+    if let Some(value) = patch.timeout_ms {
+        resolved.timeout_ms = value;
+    }
+    Ok(resolved)
+}
+
+fn validate_rubber_duck_toml(config: &RubberDuckToml) -> Result<(), String> {
+    if config.internal_model_id.is_some() && config.external_agent_id.is_some() {
+        return Err(String::from("internal_model_id and external_agent_id are mutually exclusive"));
+    }
+    for (field, value) in [
+        ("internal_model_id", config.internal_model_id.as_deref()),
+        ("external_agent_id", config.external_agent_id.as_deref()),
+    ] {
+        if value.is_some_and(|value| value.trim().is_empty()) {
+            return Err(format!("{field} must not be empty"));
+        }
+    }
+    if let Some(value) = config.max_calls
+        && !(1..=MAX_CRITIC_MAX_CALLS).contains(&value)
+    {
+        return Err(format!("max_calls must be between 1 and {MAX_CRITIC_MAX_CALLS}"));
+    }
+    for (field, value, max) in [
+        ("max_context_bytes", config.max_context_bytes, MAX_CRITIC_CONTEXT_BYTES),
+        ("max_output_bytes", config.max_output_bytes, MAX_CRITIC_OUTPUT_BYTES),
+    ] {
+        if value.is_some_and(|value| value == 0 || value > max) {
+            return Err(format!("{field} must be between 1 and {max}"));
+        }
+    }
+    if config.timeout_ms.is_some_and(|value| value == 0 || value > MAX_CRITIC_TIMEOUT_MS) {
+        return Err(format!("timeout_ms must be between 1 and {MAX_CRITIC_TIMEOUT_MS}"));
+    }
+    Ok(())
+}
+
 fn validate_agent_server(id: &str, server: &AgentServerToml) -> Result<(), String> {
     if id.trim().is_empty() {
         return Err(String::from("agent server id must not be empty"));
     }
     if server.command.as_deref().is_some_and(|command| command.trim().is_empty()) {
         return Err(String::from("agent server command must not be empty"));
+    }
+    if server.label.as_deref().is_some_and(|label| label.trim().is_empty()) {
+        return Err(String::from("agent server label must not be empty"));
     }
     for (key, value) in &server.env {
         if crate::secrets::is_secret_reference_text(value) {
@@ -1896,6 +2097,12 @@ fn merge_agent_server(
     }
 
     Ok(AgentServerSettings {
+        label: server
+            .label
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_owned)
+            .or_else(|| existing.and_then(|server| server.label.clone())),
         command,
         args,
         env,
@@ -2807,6 +3014,22 @@ fn agents_settings_to_toml(agents: &AgentsSettings) -> Option<AgentsToml> {
         enabled: Some(agents.enabled),
         default_agent: agents.default_agent.clone(),
         max_concurrent_prompts: Some(agents.max_concurrent_prompts),
+        rubber_duck: Some(RubberDuckToml {
+            mode: Some(
+                match agents.rubber_duck.mode {
+                    RubberDuckModeSetting::Off => "off",
+                    RubberDuckModeSetting::Manual => "manual",
+                    RubberDuckModeSetting::Automatic => "automatic",
+                }
+                .into(),
+            ),
+            internal_model_id: agents.rubber_duck.internal_model_id.clone(),
+            external_agent_id: agents.rubber_duck.external_agent_id.clone(),
+            max_calls: Some(agents.rubber_duck.max_calls),
+            max_context_bytes: Some(agents.rubber_duck.max_context_bytes),
+            max_output_bytes: Some(agents.rubber_duck.max_output_bytes),
+            timeout_ms: Some(agents.rubber_duck.timeout_ms),
+        }),
         web_context: {
             #[cfg(any(feature = "agents", test))]
             {
@@ -2824,6 +3047,7 @@ fn agents_settings_to_toml(agents: &AgentsSettings) -> Option<AgentsToml> {
                 (
                     id.clone(),
                     AgentServerToml {
+                        label: server.label.clone(),
                         command: Some(server.command.clone()),
                         args: Some(server.args.clone()),
                         // Display paths keep the raw text: literals and
@@ -3069,6 +3293,9 @@ fn validate_agents_mcp_config(parsed: &EeToml) -> Result<(), String> {
     if let Some(agents) = &parsed.agents {
         if let Some(web_context) = &agents.web_context {
             validate_agent_web_context_config(web_context)?;
+        }
+        if let Some(rubber_duck) = &agents.rubber_duck {
+            validate_rubber_duck_toml(rubber_duck)?;
         }
         for (id, server) in &agents.servers {
             // Validation checks shape and reference grammar only; layer
@@ -4932,6 +5159,7 @@ default_agent = "helper"
 max_concurrent_prompts = 2
 
 [agents.servers.helper]
+label = "Local Helper"
 command = "ee-helper"
 args = ["serve"]
 env = { EE_AGENT_MODE = "1" }
@@ -4950,6 +5178,7 @@ command = "other-agent"
         assert_eq!(settings.agents.default_agent.as_deref(), Some("helper"));
         assert_eq!(settings.agents.max_concurrent_prompts, 2);
         let helper = settings.agents.servers.get("helper").unwrap();
+        assert_eq!(helper.label.as_deref(), Some("Local Helper"));
         assert_eq!(helper.command, "ee-helper");
         assert_eq!(helper.args, vec!["serve"]);
         assert_eq!(helper.env.get("EE_AGENT_MODE").map(|v| v.raw.as_str()), Some("1"));
@@ -5481,6 +5710,7 @@ env = { OPENROUTER_API_KEY = "global-literal" }
     #[test]
     fn validate_agent_server_rejects_malformed_secret_reference_with_field_path() {
         let server = AgentServerToml {
+            label: None,
             command: Some(String::from("agent-bin")),
             args: None,
             env: BTreeMap::from([(
@@ -5497,6 +5727,7 @@ env = { OPENROUTER_API_KEY = "global-literal" }
     #[test]
     fn agent_env_secret_reference_substring_stays_literal() {
         let server = AgentServerToml {
+            label: None,
             command: Some(String::from("agent-bin")),
             args: None,
             env: BTreeMap::from([
@@ -5825,6 +6056,44 @@ enabled = true
 
         assert!(text.contains("enabled = false"));
         assert!(!text.contains("[mcp]"));
+    }
+
+    #[test]
+    fn rubber_duck_config_rejects_ambiguous_backend_and_roundtrips_limits() {
+        let ambiguous = RubberDuckToml {
+            internal_model_id: Some("critic-model".into()),
+            external_agent_id: Some("critic-agent".into()),
+            ..RubberDuckToml::default()
+        };
+        assert!(validate_rubber_duck_toml(&ambiguous).unwrap_err().contains("mutually exclusive"));
+
+        let patch = RubberDuckToml {
+            mode: Some("automatic".into()),
+            external_agent_id: Some("critic-agent".into()),
+            max_calls: Some(3),
+            max_context_bytes: Some(4096),
+            max_output_bytes: Some(2048),
+            timeout_ms: Some(5000),
+            ..RubberDuckToml::default()
+        };
+        let settings = merge_rubber_duck(&RubberDuckSettings::default(), &patch).unwrap();
+        assert_eq!(settings.mode, RubberDuckModeSetting::Automatic);
+        assert_eq!(settings.external_agent_id.as_deref(), Some("critic-agent"));
+        assert_eq!(settings.max_calls, 3);
+    }
+
+    #[cfg(any(feature = "agents", test))]
+    #[test]
+    fn rubber_duck_resolution_degrades_unknown_optional_agent_only() {
+        let settings = RubberDuckSettings {
+            external_agent_id: Some("missing".into()),
+            ..RubberDuckSettings::default()
+        };
+        let resolved = settings
+            .resolve_backend_policy(&BTreeSet::new(), &BTreeSet::from(["root".into()]))
+            .unwrap();
+        assert!(resolved.unavailable.is_some());
+        assert!(!resolved.critic_available());
     }
 
     #[cfg(feature = "agents")]

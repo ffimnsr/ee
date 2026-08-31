@@ -511,6 +511,10 @@ mod tests {
     fn test_config() -> Config {
         Config {
             model: String::from("test/model"),
+            model_family: None,
+            rubber_duck_model: None,
+            rubber_duck_model_family: None,
+            rubber_duck: ee_agent_orchestrator::RubberDuckConfig::default(),
             api_url: String::from("http://localhost:1/v1/chat/completions"),
             api_key: Some(String::from("sk-test")),
             site_url: None,

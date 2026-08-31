@@ -391,8 +391,6 @@ impl CoreState {
     pub(crate) fn client_request(&mut self, cmd: CoreRequest) -> Result<Value, RemoteError> {
         use self::CoreRequest::*;
         match cmd {
-            //TODO: make file_path be an Option<PathBuf>
-            //TODO: make this a notification
             NewView { file_path } => self.do_new_view(file_path.map(PathBuf::from)),
             SubstitutePreview {
                 view_id,

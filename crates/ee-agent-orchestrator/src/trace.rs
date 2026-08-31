@@ -106,6 +106,7 @@ mod tests {
             },
             OrchestratorEvent::SubagentStarted {
                 subagent_id: "task-2".into(),
+                role: "researcher".into(),
                 model_id: Some("strong".into()),
             },
             OrchestratorEvent::BudgetUpdated {
@@ -147,7 +148,11 @@ mod tests {
                 tool_name: "read_file".into(),
                 success: false,
             },
-            OrchestratorEvent::SubagentStarted { subagent_id: "task-2".into(), model_id: None },
+            OrchestratorEvent::SubagentStarted {
+                subagent_id: "task-2".into(),
+                role: "researcher".into(),
+                model_id: None,
+            },
             OrchestratorEvent::SubagentFinished { subagent_id: "task-2".into(), success: true },
             OrchestratorEvent::BudgetUpdated {
                 iterations_used: 1,

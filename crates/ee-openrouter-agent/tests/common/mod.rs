@@ -3,8 +3,6 @@
 //! transport spawner with a non-destructive frame pump, and response
 //! helpers.
 
-#![allow(dead_code)]
-
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -24,7 +22,6 @@ use serde_json::{Value, json};
 /// next canned response; request bodies are captured for assertions.
 pub struct MockOpenRouter {
     listener: TcpListener,
-    responses: Arc<Mutex<VecDeque<Value>>>,
     bodies: Arc<Mutex<Vec<Value>>>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
@@ -55,7 +52,7 @@ impl MockOpenRouter {
                 }
             })
         };
-        Self { listener, responses, bodies, stop, thread: Some(thread) }
+        Self { listener, bodies, stop, thread: Some(thread) }
     }
 
     /// The chat-completions URL to point the provider at.

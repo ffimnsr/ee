@@ -37,7 +37,9 @@
 //! - [`policy`] — the conservative default tool policy.
 //! - [`events`] — loop event types and the test recorder.
 //! - [`subagents`] — logical in-process subagents with depth/parallelism
-//!   limits, scoped roles, and bounded summaries.
+//!   limits, scoped roles, and bounded structured handoffs.
+//! - [`subagent_handoff`] — generic child JSON parsing, backend evidence
+//!   attachment, deterministic bounds, and parent payload serialization.
 //! - [`subagent_roles`] — the built-in role library: researcher, code_reader,
 //!   implementer, test_runner, reviewer, and summarizer tool scopes.
 //! - [`subagent_verifier`] — citation verification of child summaries against
@@ -158,12 +160,15 @@
 pub mod budget;
 pub mod checkpoint;
 pub mod checkpoint_store;
+mod child_registry;
 pub mod command_intelligence;
 pub mod compaction;
 pub mod completion;
 pub mod config;
 pub mod context_pack;
 pub mod context_planner;
+pub mod critic_observability;
+pub mod critique;
 pub mod decision_log;
 pub mod delegation_quality;
 pub mod destructive_policy;
@@ -200,6 +205,12 @@ pub mod repair_context;
 #[cfg(feature = "test-utils")]
 pub mod replay;
 pub mod retries;
+pub mod review_context;
+pub mod rubber_duck;
+pub mod rubber_duck_config;
+#[cfg(feature = "test-utils")]
+pub mod rubber_duck_evaluation;
+pub mod rubber_duck_trigger;
 pub mod runtime;
 pub mod semantic_memory;
 pub mod sensitive_data;
@@ -207,6 +218,7 @@ pub mod session_store;
 pub mod strategy;
 pub mod streaming;
 pub mod stuck;
+pub mod subagent_handoff;
 pub mod subagent_roles;
 pub mod subagent_verifier;
 pub mod subagents;
@@ -235,6 +247,10 @@ pub use checkpoint::{
     RestoreReport, ResumeState, SubagentTreeState, TranscriptSummary, current_unix_millis,
 };
 pub use checkpoint_store::{CheckpointMeta, CheckpointStore};
+pub use child_registry::{
+    ChildCancelResult, ChildProgress, ChildSnapshot, ChildSnapshotEntry, ChildState,
+    DEFAULT_CHILD_SNAPSHOT_LIMIT,
+};
 pub use command_intelligence::{
     VALIDATION_COMMAND_SCHEMA_VERSION, ValidationApprovalClass, ValidationCommandFailure,
     ValidationCommandMetadata, ValidationEscalation, ValidationScope,
@@ -262,6 +278,18 @@ pub use context_planner::{
     DEFAULT_CONTEXT_PLAN_CACHE_MAX_ENTRIES, DEFAULT_CONTEXT_PLAN_MAX_EXCERPT_CHARS,
     DEFAULT_CONTEXT_PLAN_MAX_ITEMS, DEFAULT_CONTEXT_PLAN_MAX_TOKENS, OmittedContextItem,
     PlannedContextItem,
+};
+pub use critic_observability::{
+    CriticBackendIdentity, CriticEvent, CriticEventRecorder, CriticFindingCounts, CriticSafeReason,
+    CriticUsage, RUBBER_DUCK_PROMPT_VERSION, RUBBER_DUCK_ROUTING_VERSION, SafeFindingResolution,
+    finding_counts,
+};
+pub use critique::{
+    CRITIQUE_REPORT_SCHEMA_VERSION, CritiqueFinding, CritiqueReport, CritiqueReportError,
+    CritiqueReportVerifier, CritiqueSeverity, CritiqueTarget, MAX_CRITIQUE_EVIDENCE_CHARS,
+    MAX_CRITIQUE_EVIDENCE_PER_FINDING, MAX_CRITIQUE_FINDINGS, MAX_CRITIQUE_KEY_CHARS,
+    MAX_CRITIQUE_OUTPUT_BYTES, MAX_CRITIQUE_QUESTION_CHARS, MAX_CRITIQUE_TEXT_CHARS,
+    VerifiedCritiqueReport, build_critique_messages, critique_report_instructions,
 };
 pub use decision_log::{
     DECISION_DETAIL_MAX_CHARS, DEFAULT_MAX_DECISION_LOG_ENTRIES, DecisionEntry, DecisionKind,
@@ -312,7 +340,10 @@ pub use model::{
     ModelAdapter, ModelContent, ModelError, ModelFuture, ModelMessage, ModelRequest, ModelResponse,
     ModelRole, ModelUsage, Transcript, TranscriptTruncation,
 };
-pub use model_registry::{DEFAULT_MODEL_ID, ModelInfo, ModelRegistry};
+pub use model_registry::{
+    ContrastUnavailable, ContrastingModel, DEFAULT_MODEL_ID, ModelCapability, ModelFamily,
+    ModelIdentity, ModelInfo, ModelRegistration, ModelRegistry, RUBBER_DUCK_ROLE,
+};
 pub use model_router::{ModelRoute, ModelRouter, ModelTier, TaskKind, preferred_tier};
 pub use observability::{
     DEFAULT_TELEMETRY_MAX_BYTES_PER_TURN, DEFAULT_TELEMETRY_MAX_EVENTS_PER_TURN,
@@ -341,8 +372,8 @@ pub use provider_adapter::{
 pub use rate_limit::{RateLimitClock, RateLimitConfig, RateLimitPermit, RateLimiter, TokioClock};
 pub use recovery::{RecoverableInterruption, TurnOutcome, session_timeout_expired};
 pub use reflection::{
-    ReflectionConfig, ReflectionOutcome, ReviewContext, ReviewFinding, build_review_context,
-    build_review_request, create_finding_tasks, findings_from_response, mark_finding_tasks,
+    ReflectionConfig, ReflectionOutcome, ReviewFinding, build_review_request, create_finding_tasks,
+    findings_from_response, mark_finding_tasks,
 };
 pub use repair::{
     DEFAULT_MAX_REPAIR_ATTEMPTS, MAX_REPAIR_ATTEMPTS, RepairAttempt, RepairConfig,
@@ -355,8 +386,59 @@ pub use repair_context::{
 pub use retries::{
     BackoffStrategy, RetryErrorClass, RetryPolicy, ToolRetrier, classify_tool_error,
 };
+pub use review_context::{
+    MAX_REVIEW_CONTEXT_BYTES, MAX_REVIEW_CONTEXT_DIAGNOSTICS, MAX_REVIEW_CONTEXT_FILES,
+    MAX_REVIEW_CONTEXT_ITEM_CHARS, MAX_REVIEW_CONTEXT_REVISION_CHARS, MAX_REVIEW_CONTEXT_TASKS,
+    MAX_REVIEW_CONTEXT_VALIDATIONS, ReviewContext, ReviewContextMetadata, build_review_context,
+    build_review_context_with_metadata, render_review_context, review_context_message,
+};
+pub use rubber_duck::{
+    FindingDecision, FindingResolution, MAX_RUBBER_DUCK_CACHE_ENTRIES, MAX_RUBBER_DUCK_FINDINGS,
+    MAX_RUBBER_DUCK_INPUT_CHARS, RUBBER_DUCK_POLICY_VERSION, RecordedCritiqueFinding,
+    RootFindingReconciliation, RubberDuckCompleted, RubberDuckFindingLedger, RubberDuckOutcome,
+    RubberDuckRequest, RubberDuckRunner, RubberDuckUnavailable,
+};
+pub use rubber_duck_config::{
+    DEFAULT_RUBBER_DUCK_CONTEXT_BYTES, DEFAULT_RUBBER_DUCK_MAX_CALLS,
+    DEFAULT_RUBBER_DUCK_OUTPUT_BYTES, DEFAULT_RUBBER_DUCK_TIMEOUT, MAX_RUBBER_DUCK_CONTEXT_BYTES,
+    MAX_RUBBER_DUCK_MAX_CALLS, MAX_RUBBER_DUCK_OUTPUT_BYTES, MAX_RUBBER_DUCK_TIMEOUT,
+    ResolvedRubberDuckConfig, RubberDuckBackend, RubberDuckConfig, RubberDuckConfigError,
+    RubberDuckConfigUnavailable, RubberDuckMode,
+};
+#[cfg(feature = "test-utils")]
+pub use rubber_duck_evaluation::{
+    DEFAULT_RUBBER_DUCK_ROLLOUT, PINNED_RUBBER_DUCK_GATE_THRESHOLDS,
+    REQUIRED_EXTERNAL_FIXTURE_COUNT, REQUIRED_INTERNAL_FIXTURE_COUNT,
+    REQUIRED_RUBBER_DUCK_BASELINE, REQUIRED_RUBBER_DUCK_FIXTURE_SUITE,
+    RUBBER_DUCK_EVALUATION_SCHEMA_VERSION, ReplayCriticBackend, ReplayCriticTerminal,
+    ReplayFindingResolution, ReplayMetric, ReplayObservedEvidence, ReplayOracle, ReplayResource,
+    ReplayTriggerExpectation, ReplayTriggerFacts, RubberDuckAggregate,
+    RubberDuckEvaluationBaseline, RubberDuckEvaluationError, RubberDuckEvaluationFixture,
+    RubberDuckGateFailure, RubberDuckGateReport, RubberDuckGateThresholds, RubberDuckReplayMetrics,
+    RubberDuckReplayRun, RubberDuckReplaySummary, RubberDuckRollout, RubberDuckScenario,
+    ScriptedCriticCounters, ScriptedCriticOutcome, aggregate_rubber_duck_runs,
+    checked_in_rubber_duck_rollout_eligibility, evaluate_rubber_duck_gate,
+    load_rubber_duck_baseline, load_rubber_duck_fixture_suite, require_rubber_duck_gate_pass,
+    required_rubber_duck_baseline, required_rubber_duck_fixture_suite,
+    rubber_duck_rollout_eligibility, run_required_rubber_duck_suite, run_rubber_duck_fixture,
+    summarize_rubber_duck_runs,
+};
+pub use subagent_handoff::{
+    GENERIC_HANDOFF_INSTRUCTIONS, HandoffOutputFormat, MAX_HANDOFF_EVIDENCE_ITEMS,
+    MAX_HANDOFF_FINDING_CLAIM_CHARS, MAX_HANDOFF_FINDING_KEY_CHARS, MAX_HANDOFF_FINDINGS,
+    MAX_HANDOFF_ITEM_CHARS, MAX_HANDOFF_LIST_ITEMS, MAX_HANDOFF_SUMMARY_CHARS,
+    MAX_SUBAGENT_HANDOFF_BYTES, SUBAGENT_HANDOFF_SCHEMA_VERSION, SubagentHandoff, SubagentStatus,
+};
+
+pub use rubber_duck_trigger::{
+    RubberDuckTrigger, RubberDuckTriggerConfig, RubberDuckTriggerController,
+    RubberDuckTriggerDecision, RubberDuckTriggerDisposition, RubberDuckTriggerFacts,
+    RubberDuckTriggerKey, RubberDuckTriggerMode, RubberDuckTriggerPolicy, RubberDuckTriggerReason,
+    RubberDuckTriggerSkipReason, WorkImpact,
+};
 pub use runtime::{
-    OrchestratorRuntime, StrategicRecoveryContext, StrategicRecoveryTurn, StrategicTurnOutcome,
+    AutomaticRubberDuckTurn, ManualRubberDuckTurn, OrchestratorRuntime, StrategicRecoveryContext,
+    StrategicRecoveryTurn, StrategicTurnOutcome,
 };
 pub use semantic_memory::{
     DEFAULT_MAX_SEMANTIC_HITS, DEFAULT_SEMANTIC_LIMIT, SEMANTIC_VALUE_MAX_CHARS, SemanticMemory,
@@ -373,15 +455,18 @@ pub use streaming::{
     StreamingModelFuture, run_streaming, run_streaming_response, stream_channel,
 };
 pub use stuck::{StuckConfig, StuckDetector, StuckReason};
-pub use subagent_roles::{BuiltinSubagentRole, requires_evidence_for_name};
+pub use subagent_roles::{
+    BuiltinSubagentRole, RUBBER_DUCK_MAX_CONTEXT_BYTES, RUBBER_DUCK_MAX_ITERATIONS,
+    RUBBER_DUCK_MAX_MODEL_CALLS, RUBBER_DUCK_MAX_OUTPUT_BYTES, RUBBER_DUCK_MAX_RECURSION_DEPTH,
+    RUBBER_DUCK_MAX_TOOL_CALLS, RUBBER_DUCK_TIMEOUT, RUBBER_DUCK_TOOL_TIMEOUT,
+    requires_evidence_for_name, rubber_duck_allows_tool,
+};
 pub use subagent_verifier::{
     DEFAULT_MAX_CITED_FILES, DEFAULT_MAX_CITED_TOOLS, MAX_CITATION_TOKEN_CHARS, MAX_EVIDENCE_FILES,
     MAX_EVIDENCE_TOOLS, QuarantineEntry, SubagentCitations, SubagentEvidence, SubagentQuarantine,
     SubagentResultVerifier, SubagentVerification,
 };
-pub use subagents::{
-    SubagentId, SubagentIntent, SubagentRequest, SubagentResult, SubagentRole, SubagentStatus,
-};
+pub use subagents::{SubagentId, SubagentIntent, SubagentRequest, SubagentResult, SubagentRole};
 pub use tasks::{TaskGraph, TaskId, TaskNode, TaskStatus, TaskWorker};
 pub use tool_cache::{DEFAULT_CACHE_MAX_ENTRIES, ToolCacheKey, ToolResultCache, cache_key};
 pub use tool_dependencies::{PlannedTool, ToolDataClass, ToolDependency, ToolDependencyGraph};

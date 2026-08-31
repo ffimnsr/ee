@@ -213,9 +213,6 @@ impl<N: NodeInfo> Delta<N> {
     ///     assert_eq!(String::from(d2.apply(r)), String::from(d.apply(r)));
     /// }
     /// ```
-    // For if last_old.is_some() && last_old.unwrap().0 <= beg {. Clippy complaints
-    // about not using if-let, but that'd change the meaning of the conditional.
-    #[allow(clippy::unnecessary_unwrap)]
     pub fn synthesize(tombstones: &Node<N>, from_dels: &Subset, to_dels: &Subset) -> Delta<N> {
         let base_len = from_dels.len_after_delete();
         let mut els = Vec::new();
@@ -237,8 +234,7 @@ impl<N: NodeInfo> Delta<N> {
                     last_old = old_ranges.next();
                 }
                 // If we have a range in the old text with the character at beg, then we Copy
-                if last_old.is_some() && last_old.unwrap().0 <= beg {
-                    let (ib, ie) = last_old.unwrap();
+                if let Some((ib, ie)) = last_old.filter(|(ib, _)| *ib <= beg) {
                     let end = min(e, ie);
                     // Try to merge contiguous Copys in the output
                     let xbeg = beg + x - ib; // "beg - ib + x" better for overflow?
@@ -385,73 +381,77 @@ where
 }
 
 impl<N: NodeInfo> InsertDelta<N> {
-    #![allow(clippy::many_single_char_names)]
-    /// Do a coordinate transformation on an insert-only delta. The `after` parameter
-    /// controls whether the insertions in `self` come after those specific in the
-    /// coordinate transform.
-    //
-    // TODO: write accurate equations
+    /// Expands this insert-only delta from the document selected by `xform`
+    /// into `xform`'s full coordinate space.
+    ///
+    /// `xform.len_after_delete()` must equal this delta's base length. Applying
+    /// the returned delta to the full document produces the same visible edit
+    /// as deleting `xform` first and applying `self`. When both transformations
+    /// insert at one coordinate, `after` selects whether `self`'s insertion is
+    /// ordered after or before `xform`'s insertion.
     pub fn transform_expand(&self, xform: &Subset, after: bool) -> InsertDelta<N> {
-        let cur_els = &self.0.els;
-        let mut els = Vec::new();
-        let mut x = 0; // coordinate within self
-        let mut y = 0; // coordinate within xform
-        let mut i = 0; // index into self.els
-        let mut b1 = 0;
+        let current_elements = &self.0.els;
+        let mut elements = Vec::new();
+        let mut source_coordinate = 0;
+        let mut expanded_coordinate = 0;
+        let mut element_index = 0;
+        let mut copy_start = 0;
         let mut xform_ranges = xform.complement_iter();
-        let mut last_xform = xform_ranges.next();
-        let l = xform.count(CountMatcher::All);
-        while y < l || i < cur_els.len() {
-            let next_iv_beg = if let Some((xb, _)) = last_xform { xb } else { l };
-            if after && y < next_iv_beg {
-                y = next_iv_beg;
+        let mut current_xform_range = xform_ranges.next();
+        let expanded_len = xform.count(CountMatcher::All);
+        while expanded_coordinate < expanded_len || element_index < current_elements.len() {
+            let next_range_start =
+                current_xform_range.map_or(expanded_len, |(range_start, _)| range_start);
+            if after && expanded_coordinate < next_range_start {
+                expanded_coordinate = next_range_start;
             }
-            while i < cur_els.len() {
-                match cur_els[i] {
-                    DeltaElement::Insert(ref n) => {
-                        if y > b1 {
-                            els.push(DeltaElement::Copy(b1, y));
+            while element_index < current_elements.len() {
+                match current_elements[element_index] {
+                    DeltaElement::Insert(ref node) => {
+                        if expanded_coordinate > copy_start {
+                            elements.push(DeltaElement::Copy(copy_start, expanded_coordinate));
                         }
-                        b1 = y;
-                        els.push(DeltaElement::Insert(n.clone()));
-                        i += 1;
+                        copy_start = expanded_coordinate;
+                        elements.push(DeltaElement::Insert(node.clone()));
+                        element_index += 1;
                     }
-                    DeltaElement::Copy(_b, e) => {
-                        if y >= next_iv_beg {
-                            let mut next_y = e + y - x;
-                            if let Some((_, xe)) = last_xform {
-                                next_y = min(next_y, xe);
+                    DeltaElement::Copy(_, copy_end) => {
+                        if expanded_coordinate >= next_range_start {
+                            let mut next_expanded =
+                                copy_end + expanded_coordinate - source_coordinate;
+                            if let Some((_, range_end)) = current_xform_range {
+                                next_expanded = min(next_expanded, range_end);
                             }
-                            x += next_y - y;
-                            y = next_y;
-                            if x == e {
-                                i += 1;
+                            source_coordinate += next_expanded - expanded_coordinate;
+                            expanded_coordinate = next_expanded;
+                            if source_coordinate == copy_end {
+                                element_index += 1;
                             }
-                            if let Some((_, xe)) = last_xform {
-                                if y == xe {
-                                    last_xform = xform_ranges.next();
-                                }
+                            if current_xform_range
+                                .is_some_and(|(_, range_end)| expanded_coordinate == range_end)
+                            {
+                                current_xform_range = xform_ranges.next();
                             }
                         }
                         break;
                     }
                 }
             }
-            if !after && y < next_iv_beg {
-                y = next_iv_beg;
+            if !after && expanded_coordinate < next_range_start {
+                expanded_coordinate = next_range_start;
             }
         }
-        if y > b1 {
-            els.push(DeltaElement::Copy(b1, y));
+        if expanded_coordinate > copy_start {
+            elements.push(DeltaElement::Copy(copy_start, expanded_coordinate));
         }
-        InsertDelta(Delta { els, base_len: l })
+        InsertDelta(Delta { els: elements, base_len: expanded_len })
     }
 
-    // TODO: it is plausible this method also works on Deltas with deletes
-    /// Shrink a delta through a deletion of some of its copied regions with
-    /// the same base. For example, if `self` applies to a union string, and
-    /// `xform` is the deletions from that union, the resulting Delta will
-    /// apply to the text.
+    /// Shrink this insert-only delta through deletion of copied regions with
+    /// the same base. For example, if `self` applies to a union string and
+    /// `xform` contains deletions from that union, resulting delta applies to
+    /// visible text. Restricting this operation to [`InsertDelta`] guarantees
+    /// inserted nodes remain valid while copied coordinates are remapped.
     pub fn transform_shrink(&self, xform: &Subset) -> InsertDelta<N> {
         let mut m = xform.mapper(CountMatcher::Zero);
         let els = self
@@ -498,45 +498,58 @@ impl<N: NodeInfo> Deref for InsertDelta<N> {
     }
 }
 
-/// A mapping from coordinates in the source sequence to coordinates in the sequence after
-/// the delta is applied.
-// TODO: this doesn't need the new strings, so it should either be based on a new structure
-// like Delta but missing the strings, or perhaps the two subsets it's synthesized from.
+/// A mapping from coordinates in source sequence to coordinates after delta application.
+///
+/// Transformer borrows delta because copied ranges and inserted node lengths
+/// jointly define mapping. It caches traversal state for nondecreasing queries
+/// and resets automatically when callers query earlier coordinates.
 pub struct Transformer<'a, N: NodeInfo + 'a> {
     delta: &'a Delta<N>,
+    element_index: usize,
+    transformed_offset: usize,
+    last_query: Option<(usize, bool)>,
 }
 
 impl<'a, N: NodeInfo + 'a> Transformer<'a, N> {
     /// Create a new transformer from a delta.
     pub fn new(delta: &'a Delta<N>) -> Self {
-        Transformer { delta }
+        Transformer { delta, element_index: 0, transformed_offset: 0, last_query: None }
     }
 
     /// Transform a single coordinate. The `after` parameter indicates whether it
-    /// it should land before or after an inserted region.
-    // TODO: implement a cursor so we're not scanning from the beginning every time.
+    /// should land before or after an inserted region.
     pub fn transform(&mut self, ix: usize, after: bool) -> usize {
+        let must_reset = self.last_query.is_some_and(|(last_ix, last_after)| {
+            ix < last_ix || (ix == last_ix && last_after && !after)
+        });
+        if must_reset {
+            self.element_index = 0;
+            self.transformed_offset = 0;
+        }
+        self.last_query = Some((ix, after));
+
         if ix == 0 && !after {
             return 0;
         }
-        let mut result = 0;
-        for el in &self.delta.els {
-            match *el {
+
+        while let Some(element) = self.delta.els.get(self.element_index) {
+            match *element {
                 DeltaElement::Copy(beg, end) => {
                     if ix <= beg {
-                        return result;
+                        return self.transformed_offset;
                     }
                     if ix < end || (ix == end && !after) {
-                        return result + ix - beg;
+                        return self.transformed_offset + ix - beg;
                     }
-                    result += end - beg;
+                    self.transformed_offset += end - beg;
                 }
-                DeltaElement::Insert(ref n) => {
-                    result += n.len();
+                DeltaElement::Insert(ref node) => {
+                    self.transformed_offset += node.len();
                 }
             }
+            self.element_index += 1;
         }
-        result
+        self.transformed_offset
     }
 
     /// Determine whether a given interval is untouched by the transformation.
@@ -699,7 +712,7 @@ impl<'a, N: NodeInfo> Iterator for DeletionsIter<'a, N> {
 
 #[cfg(test)]
 mod tests {
-    use crate::delta::{Builder, Delta, DeltaElement, DeltaRegion};
+    use crate::delta::{Builder, Delta, DeltaElement, DeltaRegion, Transformer};
     use crate::interval::Interval;
     use crate::rope::{Rope, RopeInfo};
     use crate::test_helpers::find_deletions;
@@ -804,6 +817,35 @@ mod tests {
             "0123456789ABCDEFGHIJKLMNOP+QRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
             d4.apply_to_string(TEST_STR)
         );
+    }
+
+    #[test]
+    fn transformer_cursor_matches_fresh_transformer_for_mixed_query_order() {
+        let mut builder = Builder::new(12);
+        builder.replace(Interval::new(2, 4), Rope::from("ab"));
+        builder.replace(Interval::new(7, 7), Rope::from("+"));
+        builder.delete(Interval::new(9, 11));
+        let delta = builder.build();
+        let queries = [
+            (0, false),
+            (2, false),
+            (2, true),
+            (8, true),
+            (3, false),
+            (3, true),
+            (12, false),
+            (1, false),
+        ];
+        let mut cached = Transformer::new(&delta);
+
+        for (coordinate, after) in queries {
+            let expected = Transformer::new(&delta).transform(coordinate, after);
+            assert_eq!(
+                expected,
+                cached.transform(coordinate, after),
+                "coordinate={coordinate}, after={after}"
+            );
+        }
     }
 
     #[test]

@@ -21,6 +21,7 @@ use memchr::{memchr, memchr2, memchr3};
 use crate::rope::{BaseMetric, LinesRaw, RopeInfo, RopeSliceCursor};
 use crate::tree::Cursor;
 use regex::Regex;
+use regex_syntax::hir::{Class, Hir, HirKind};
 use std::borrow::Cow;
 use std::str;
 
@@ -436,13 +437,27 @@ fn compare_cursor_regex_impl(
     }
 }
 
-/// Checks if a regular expression can match multiple lines.
+/// Checks whether a regular expression can consume an LF line boundary.
+///
+/// This inspects parsed regex semantics instead of pattern text, covering
+/// escaped line breaks, whitespace and negated classes, and dot-all mode.
+/// Multiline mode (`m`) changes anchor behavior only and does not by itself
+/// allow a match to cross line boundaries.
 pub fn is_multiline_regex(regex: &str) -> bool {
-    // regex characters that match line breaks
-    // todo: currently multiline mode is ignored
-    let multiline_indicators = [r"\n", r"\r", r"[[:space:]]"];
+    regex_syntax::Parser::new().parse(regex).is_ok_and(|hir| hir_can_match_line_break(&hir))
+}
 
-    multiline_indicators.iter().any(|&i| regex.contains(i))
+fn hir_can_match_line_break(hir: &Hir) -> bool {
+    match hir.kind() {
+        HirKind::Literal(literal) => literal.0.contains(&b'\n'),
+        HirKind::Class(Class::Unicode(class)) => {
+            class.ranges().iter().any(|range| range.start() <= '\n' && '\n' <= range.end())
+        }
+        HirKind::Class(Class::Bytes(class)) => {
+            class.ranges().iter().any(|range| range.start() <= b'\n' && b'\n' <= range.end())
+        }
+        kind => kind.subs().iter().any(hir_can_match_line_break),
+    }
 }
 
 /// Scan for a codepoint that, after conversion to lowercase, matches the probe.
@@ -464,6 +479,29 @@ mod tests {
     use regex::RegexBuilder;
 
     const REGEX_SIZE_LIMIT: usize = 1000000;
+
+    #[test]
+    fn multiline_regex_detection_uses_parsed_semantics() {
+        for pattern in ["\n", r"\n", r"\s", r"[[:space:]]", r"[^a]", r"(?s:.)"] {
+            assert!(is_multiline_regex(pattern), "expected multiline regex: {pattern}");
+        }
+        for pattern in [r".", r"\r", r"(?m)^foo$", r"\\n", r"[a-z]", r"("] {
+            assert!(!is_multiline_regex(pattern), "expected single-line regex: {pattern}");
+        }
+    }
+
+    #[test]
+    fn dot_all_regex_finds_match_across_lines() {
+        let rope = Rope::from("First line\nSecond line");
+        let regex = RegexBuilder::new(r"(?s:First.*Second)").build().expect("valid regex");
+        let mut cursor = Cursor::new(&rope, 0);
+        let mut lines = rope.lines_raw(..);
+
+        assert_eq!(
+            compare_cursor_regex(&mut cursor, &mut lines, r"(?s:First.*Second)", &regex),
+            Some(0)
+        );
+    }
 
     #[test]
     fn find_small() {

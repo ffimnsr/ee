@@ -241,9 +241,28 @@ default_agent = "fake"
 command = "unused"
 "#;
 
+const TWO_AGENTS_TOML: &str = r#"
+root = true
+
+[agents]
+enabled = true
+
+[agents.servers.alpha]
+label = "Alpha Agent"
+command = "unused-alpha"
+
+[agents.servers.beta]
+label = "Beta Agent"
+command = "unused-beta"
+"#;
+
 fn openrouter_fixture_config() -> OpenRouterConfig {
     OpenRouterConfig {
         model: String::from("test/model"),
+        model_family: Some(String::from("other:test-root")),
+        rubber_duck_model: None,
+        rubber_duck_model_family: None,
+        rubber_duck: ee_agent_orchestrator::RubberDuckConfig::default(),
         api_url: String::from("https://openrouter.invalid/api/v1"),
         api_key: Some(String::from("sk-hermetic-test-key")),
         site_url: None,
@@ -311,6 +330,39 @@ fn fake_agents_app(script: FakeAgentScript) -> (App, tempfile::TempDir, Scripted
     let temp = tempfile::tempdir().unwrap();
     let (app, fake) = fake_agents_app_in(temp.path(), script);
     (app, temp, fake)
+}
+
+fn two_fake_agents_app() -> (App, tempfile::TempDir, ScriptedFake, ScriptedFake) {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(temp.path().join(".ee.toml"), TWO_AGENTS_TOML).unwrap();
+    let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let _cwd_restore = CurrentDirGuard::capture();
+    std::env::set_current_dir(temp.path()).unwrap();
+    let mut app = App::from_path(None).unwrap();
+    drop(_cwd_restore);
+    drop(_cwd_lock);
+
+    let alpha = ScriptedFake::new(
+        FakeAgentScript::new()
+            .wait_for("initialize")
+            .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+            .wait_for("session/new")
+            .respond(json!({ "sessionId": "alpha-session" }))
+            .wait_for("session/set_mode")
+            .respond(json!({})),
+    );
+    let beta = ScriptedFake::new(
+        FakeAgentScript::new()
+            .wait_for("initialize")
+            .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+            .wait_for("session/new")
+            .respond(json!({ "sessionId": "beta-session" }))
+            .wait_for("session/set_mode")
+            .respond(json!({})),
+    );
+    app.agents.test_fake_transports.insert(String::from("alpha"), Arc::new(alpha.clone()));
+    app.agents.test_fake_transports.insert(String::from("beta"), Arc::new(beta.clone()));
+    (app, temp, alpha, beta)
 }
 
 /// Pumps agents + backend until `condition` holds or the timeout fires.
@@ -602,6 +654,170 @@ fn agents_enabled_creates_pane_and_sends_lazy_session_new() {
     run_ex(&mut app, "agents");
     wait_until(&mut app, "session count stays one", |app| app.agents.threads.len() == 1);
     assert_eq!(agent.requests_by_method("session/new").len(), 1);
+}
+
+#[test]
+fn explicit_agent_selection_starts_only_selected_process() {
+    let (mut app, _temp, alpha, beta) = two_fake_agents_app();
+
+    run_ex(&mut app, "agents_new beta");
+    wait_until(&mut app, "beta thread ready", |app| {
+        app.agents.threads.len() == 1 && app.agents.threads[0].state == ThreadUiState::Ready
+    });
+
+    assert_eq!(app.agents.threads[0].agent_id, "beta");
+    assert_eq!(beta.agent().requests_by_method("initialize").len(), 1);
+    assert_eq!(beta.agent().requests_by_method("session/new").len(), 1);
+    assert!(alpha.handle.lock().expect("alpha handle poisoned").is_none());
+}
+
+#[test]
+fn external_rubber_duck_uses_isolated_agent_then_root_synthesizes_verified_report() {
+    let temp = tempfile::tempdir().unwrap();
+    fs::write(
+        temp.path().join(".ee.toml"),
+        r#"
+root = true
+
+[agents]
+enabled = true
+
+[agents.rubber_duck]
+mode = "manual"
+external_agent_id = "beta"
+max_calls = 1
+timeout_ms = 5000
+
+[agents.servers.alpha]
+command = "unused-alpha"
+
+[agents.servers.beta]
+command = "unused-beta"
+"#,
+    )
+    .unwrap();
+    fs::write(temp.path().join("lib.rs"), "pub fn value() -> u8 { 1 }\n").unwrap();
+    commit_git_baseline(temp.path());
+    fs::write(temp.path().join("lib.rs"), "pub fn value() -> u8 { 2 }\n").unwrap();
+
+    let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+    let _cwd_restore = CurrentDirGuard::capture();
+    std::env::set_current_dir(temp.path()).unwrap();
+    let mut app = App::from_path(None).unwrap();
+    drop(_cwd_restore);
+    drop(_cwd_lock);
+
+    let alpha = ScriptedFake::new(
+        FakeAgentScript::new()
+            .wait_for("initialize")
+            .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+            .wait_for("session/new")
+            .respond(json!({ "sessionId": "alpha-root" }))
+            .wait_for("session/set_mode")
+            .respond(json!({}))
+            .wait_for("session/prompt")
+            .emit(wire::session_update(
+                "alpha-root",
+                wire::agent_message_chunk("root-synthesis", "Root synthesis: no findings."),
+            ))
+            .respond(json!({ "stopReason": "end_turn" })),
+    );
+    let report = r#"{"schema_version":1,"target":{"kind":"implementation"},"findings":[]}"#;
+    let beta = ScriptedFake::new(
+        FakeAgentScript::new()
+            .wait_for("initialize")
+            .respond(json!({ "protocolVersion": 1, "agentCapabilities": {} }))
+            .wait_for("session/new")
+            .respond(json!({ "sessionId": "beta-critic" }))
+            .wait_for("session/prompt")
+            .emit(wire::session_update(
+                "beta-critic",
+                wire::agent_message_chunk("critic-report", report),
+            ))
+            .respond(json!({ "stopReason": "end_turn" })),
+    );
+    app.agents.test_fake_transports.insert(String::from("alpha"), Arc::new(alpha.clone()));
+    app.agents.test_fake_transports.insert(String::from("beta"), Arc::new(beta.clone()));
+
+    run_ex(&mut app, "agents_new alpha");
+    wait_until(&mut app, "root thread ready", |app| {
+        app.agents.threads.len() == 1 && app.agents.threads[0].state == ThreadUiState::Ready
+    });
+    assert!(beta.handle.lock().unwrap().is_none(), "critic must remain lazy before invocation");
+
+    type_text(&mut app, "/rubber-duck");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "root synthesis completed", |app| {
+        app.agents.threads.len() == 1
+            && app.agents.threads[0].state == ThreadUiState::Ready
+            && app.agents.threads[0]
+                .message_pairs()
+                .iter()
+                .any(|(_, text)| text.contains("Root synthesis: no findings"))
+    });
+
+    assert_eq!(alpha.agent().requests_by_method("initialize").len(), 1);
+    assert_eq!(beta.agent().requests_by_method("initialize").len(), 1);
+    assert_eq!(beta.agent().requests_by_method("session/new").len(), 1);
+    assert_eq!(beta.agent().requests_by_method("session/prompt").len(), 1);
+    assert_eq!(alpha.agent().requests_by_method("session/prompt").len(), 1);
+    assert_eq!(app.agents.threads.len(), 1, "ephemeral critic must not become an editor thread");
+
+    let critic_prompt = beta.agent().requests_by_method("session/prompt")[0].to_string();
+    assert!(critic_prompt.contains("<untrusted_review_context>"));
+    assert!(critic_prompt.contains("schema_version 1"));
+    let synthesis_prompt = alpha.agent().requests_by_method("session/prompt")[0].to_string();
+    assert!(synthesis_prompt.contains("<verified_external_critique>"));
+    assert!(synthesis_prompt.contains("not validation, approval, completion evidence"));
+    assert!(
+        app.agents.threads[0]
+            .system_notices()
+            .iter()
+            .any(|notice| notice.contains("host-forwarded read-only only"))
+    );
+}
+
+#[test]
+fn ambiguous_new_session_uses_lazy_picker_then_local_new_accepts_agent_id() {
+    let (mut app, _temp, alpha, beta) = two_fake_agents_app();
+
+    run_ex(&mut app, "agents_new");
+    let picker = app.picker.as_ref().expect("ambiguous selection opens picker");
+    assert_eq!(picker.kind, crate::picker::PickerKind::AgentServers);
+    assert_eq!(picker.visible_count(), 2);
+    assert!(picker.visible_items_range(0, 2)[0].contains("Alpha Agent (alpha)"));
+    assert!(alpha.handle.lock().expect("alpha handle poisoned").is_none());
+    assert!(beta.handle.lock().expect("beta handle poisoned").is_none());
+
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "alpha picker thread ready", |app| {
+        app.agents.threads.len() == 1 && app.agents.threads[0].state == ThreadUiState::Ready
+    });
+    assert_eq!(app.agents.threads[0].agent_id, "alpha");
+    assert!(beta.handle.lock().expect("beta handle poisoned").is_none());
+
+    type_text(&mut app, "/new beta");
+    press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "beta local-new thread ready", |app| {
+        app.agents.threads.len() == 2 && app.agents.threads[1].state == ThreadUiState::Ready
+    });
+    assert_eq!(app.agents.threads[1].agent_id, "beta");
+    assert_eq!(alpha.agent().requests_by_method("session/new").len(), 1);
+    assert_eq!(beta.agent().requests_by_method("session/new").len(), 1);
+}
+
+#[test]
+fn unknown_agent_id_is_bounded_and_starts_nothing() {
+    let (mut app, _temp, alpha, beta) = two_fake_agents_app();
+
+    run_ex(&mut app, "agents_new missing");
+
+    assert_eq!(
+        app.backend.status_message.as_deref(),
+        Some("unknown agent `missing`; configured: alpha, beta")
+    );
+    assert!(alpha.handle.lock().expect("alpha handle poisoned").is_none());
+    assert!(beta.handle.lock().expect("beta handle poisoned").is_none());
 }
 
 #[test]
@@ -4950,21 +5166,19 @@ fn new_thread_slash_command_starts_and_focuses_thread_locally() {
 }
 
 #[test]
-fn new_slash_command_with_arguments_is_sent_to_agent() {
-    let script =
-        base_script().wait_for("session/prompt").respond(json!({ "stopReason": "end_turn" }));
-    let (mut app, _temp, fake) = fake_agents_app(script);
+fn new_slash_command_rejects_unknown_agent_without_forwarding_prompt() {
+    let (mut app, _temp, fake) = fake_agents_app(base_script());
     open_pane_and_wait_ready(&mut app);
 
-    type_text(&mut app, "/new project context");
+    type_text(&mut app, "/new missing");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
-    wait_until(&mut app, "slash prompt sent", |_| {
-        fake.agent().requests_by_method("session/prompt").len() == 1
-    });
-    let prompt = &fake.agent().requests_by_method("session/prompt")[0];
-    assert_eq!(prompt["params"]["prompt"][0]["text"], "/new project context");
+    assert_eq!(
+        app.backend.status_message.as_deref(),
+        Some("unknown agent `missing`; configured: fake")
+    );
     assert_eq!(fake.agent().requests_by_method("session/new").len(), 1);
+    assert!(fake.agent().requests_by_method("session/prompt").is_empty());
 }
 
 #[test]

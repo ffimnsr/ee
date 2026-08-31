@@ -4,6 +4,8 @@
 //! teardown (active prompts cancelled, writer path closed, pending requests
 //! failed).
 
+// Shared harness serves multiple integration-test crates; each uses a different subset.
+#[allow(dead_code)]
 mod common;
 
 use std::sync::{Arc, Mutex};

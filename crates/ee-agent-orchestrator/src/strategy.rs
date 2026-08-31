@@ -1658,20 +1658,24 @@ mod tests {
         assert_eq!(outcome.findings[0].detail, "missing error handling");
         assert_eq!(outcome.findings[0].task_id, Some(TaskId::new("task-2")));
 
-        // The review request cited observed evidence only; the review prompt
-        // is the last user message (the injection guard may append a policy
-        // reminder after it when the transcript carries untrusted tool
-        // output).
+        // Trusted review instructions stay separate from bounded untrusted
+        // evidence; injection preparation wraps only evidence.
         let review_request = &model.requests()[2];
-        let review_message = review_request
+        let user_messages: Vec<_> = review_request
             .transcript
             .iter()
-            .rev()
-            .find(|message| message.role == ModelRole::User)
-            .expect("review prompt message");
-        let last_text = review_message.text_content();
-        assert!(last_text.contains("Review the completed work"));
-        assert!(last_text.contains("- /tmp/out.rs"));
+            .filter(|message| message.role == ModelRole::User)
+            .collect();
+        assert!(
+            user_messages
+                .iter()
+                .any(|message| message.text_content().contains("Review completed work"))
+        );
+        let evidence = user_messages
+            .iter()
+            .find(|message| message.trust == crate::trust::TrustLevel::ToolOutputUntrusted)
+            .expect("untrusted review evidence");
+        assert!(evidence.text_content().contains("- /tmp/out.rs"));
 
         // The finding became a completed task item after the fix loop.
         let graph = tasks.lock().expect("task graph poisoned");
