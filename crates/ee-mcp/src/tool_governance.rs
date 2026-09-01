@@ -11,7 +11,7 @@ use crate::classify::SideEffectClass;
 ///
 /// Bump only when adding a compatible manifest field or tool. An incompatible
 /// argument or result change must use a new tool name instead.
-pub const EE_TOOL_SCHEMA_VERSION: u64 = 3;
+pub const EE_TOOL_SCHEMA_VERSION: u64 = 6;
 
 /// MCP routes over which one tool is implemented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -233,6 +233,14 @@ pub fn governance(tool: &str) -> Option<ToolGovernance> {
         | "ee_read_notes"
         | "ee_tools_manifest"
         | "ee_diagnostics" => read(NO_CAPABILITIES, "result_items", 500),
+        "ee_recall_workspace_facts" => read(NO_CAPABILITIES, "result_items", 8),
+        "ee_read_workspace_fact" => read(NO_CAPABILITIES, "result_items", 1),
+        "ee_list_workspace_facts" => read(NO_CAPABILITIES, "result_items", 256),
+        "ee_export_workspace_memory" => {
+            let mut entry = read(NO_CAPABILITIES, "bytes", 512 * 1024);
+            entry.approval = "required";
+            entry
+        }
         "ee_list_directory"
         | "ee_list_directory_all"
         | "ee_search_files"
@@ -286,6 +294,21 @@ pub fn governance(tool: &str) -> Option<ToolGovernance> {
         | "ee_rename_symbol"
         | "ee_write_text_file"
         | "ee_save_note" => write(),
+        "ee_remember_workspace_fact"
+        | "ee_forget_workspace_fact"
+        | "ee_retract_workspace_fact"
+        | "ee_import_workspace_memory"
+        | "ee_clear_workspace_memory" => {
+            let mut entry = write();
+            entry.output_cap = 1;
+            entry
+        }
+        "ee_verify_workspace_fact" => {
+            let mut entry = write();
+            entry.transports = ACP_ONLY;
+            entry.output_cap = 1;
+            entry
+        }
         "ee_terminal_create" => execute(ALL_TRANSPORTS),
         "ee_terminal_kill" | "ee_terminal_release" => execute(ACP_ONLY),
         _ => return None,
@@ -383,6 +406,16 @@ pub const STABLE_TOOL_NAMES: &[&str] = &[
     "ee_save_note",
     "ee_read_notes",
     "ee_read_note",
+    "ee_remember_workspace_fact",
+    "ee_verify_workspace_fact",
+    "ee_recall_workspace_facts",
+    "ee_read_workspace_fact",
+    "ee_forget_workspace_fact",
+    "ee_list_workspace_facts",
+    "ee_retract_workspace_fact",
+    "ee_export_workspace_memory",
+    "ee_import_workspace_memory",
+    "ee_clear_workspace_memory",
     "ee_file_dependency_map",
     "ee_symbol_dependency_map",
     "ee_tools_manifest",
@@ -410,6 +443,44 @@ mod tests {
             assert_eq!(entry.approval, "required", "{tool}");
             assert_eq!(entry.transports, ALL_TRANSPORTS, "{tool}");
         }
+    }
+
+    #[test]
+    fn workspace_memory_tools_have_required_governance_on_both_transports() {
+        for tool in
+            ["ee_recall_workspace_facts", "ee_read_workspace_fact", "ee_list_workspace_facts"]
+        {
+            let entry = governance(tool).expect("workspace-memory read governance");
+            assert_eq!(entry.side_effect, SideEffectClass::Read, "{tool}");
+            assert_eq!(entry.approval, "none", "{tool}");
+            assert_eq!(entry.transports, ALL_TRANSPORTS, "{tool}");
+            assert_eq!(
+                entry.output_cap,
+                match tool {
+                    "ee_recall_workspace_facts" => 8,
+                    "ee_list_workspace_facts" => 256,
+                    _ => 1,
+                }
+            );
+        }
+        for tool in [
+            "ee_remember_workspace_fact",
+            "ee_forget_workspace_fact",
+            "ee_retract_workspace_fact",
+            "ee_import_workspace_memory",
+            "ee_clear_workspace_memory",
+        ] {
+            let entry = governance(tool).expect("workspace-memory write governance");
+            assert_eq!(entry.side_effect, SideEffectClass::Write, "{tool}");
+            assert_eq!(entry.approval, "required", "{tool}");
+            assert_eq!(entry.transports, ALL_TRANSPORTS, "{tool}");
+            assert_eq!(entry.output_cap, 1, "{tool}");
+        }
+        let export = governance("ee_export_workspace_memory").expect("export governance");
+        assert_eq!(export.side_effect, SideEffectClass::Read);
+        assert_eq!(export.approval, "required");
+        assert_eq!(export.transports, ALL_TRANSPORTS);
+        assert_eq!(export.output_cap, 512 * 1024);
     }
 
     #[test]

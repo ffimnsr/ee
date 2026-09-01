@@ -581,9 +581,35 @@ pub(crate) fn proxy_stdio_fallback_entry(info: &ProxyInfo) -> McpServerStdio {
 // ── Proxy IPC ────────────────────────────────────────────────────────────────
 
 /// One proxy tool call (socket + stdio subprocess share this shape).
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "method", rename_all = "snake_case")]
 pub(crate) enum ProxyCall {
+    RememberWorkspaceFact {
+        key: String,
+        value: String,
+    },
+    RecallWorkspaceFacts {
+        query: String,
+    },
+    ReadWorkspaceFact {
+        key: String,
+    },
+    ForgetWorkspaceFact {
+        key: String,
+    },
+    ListWorkspaceFacts {
+        limit: u32,
+    },
+    RetractWorkspaceFact {
+        key: String,
+    },
+    ExportWorkspaceMemory {
+        include_values: bool,
+    },
+    ImportWorkspaceMemory {
+        export_json: String,
+    },
+    ClearWorkspaceMemory,
     WorkspaceRoots,
     ListDirectory {
         path: String,
@@ -807,8 +833,33 @@ async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(
 /// A proxy tool call forwarded to the pane (bridge message payload).  The
 /// requests use the same ACP wire types as direct client methods so the
 /// approval and bridge paths are shared verbatim.
-#[derive(Debug)]
 pub(crate) enum ProxyToolCall {
+    RememberWorkspaceFact {
+        key: String,
+        value: String,
+    },
+    RecallWorkspaceFacts {
+        query: String,
+    },
+    ReadWorkspaceFact {
+        key: String,
+    },
+    ForgetWorkspaceFact {
+        key: String,
+    },
+    ListWorkspaceFacts {
+        limit: u32,
+    },
+    RetractWorkspaceFact {
+        key: String,
+    },
+    ExportWorkspaceMemory {
+        include_values: bool,
+    },
+    ImportWorkspaceMemory {
+        export_json: String,
+    },
+    ClearWorkspaceMemory,
     WorkspaceRoots,
     ListDirectory {
         path: String,
@@ -1048,6 +1099,21 @@ fn start_proxy_call_to_bridge(
 ) -> Result<oneshot::Receiver<ClientRequestResult>, ProxyReply> {
     let session_id = SessionId::new("proxy");
     let call = match call {
+        ProxyCall::RememberWorkspaceFact { key, value } => {
+            ProxyToolCall::RememberWorkspaceFact { key, value }
+        }
+        ProxyCall::RecallWorkspaceFacts { query } => ProxyToolCall::RecallWorkspaceFacts { query },
+        ProxyCall::ReadWorkspaceFact { key } => ProxyToolCall::ReadWorkspaceFact { key },
+        ProxyCall::ForgetWorkspaceFact { key } => ProxyToolCall::ForgetWorkspaceFact { key },
+        ProxyCall::ListWorkspaceFacts { limit } => ProxyToolCall::ListWorkspaceFacts { limit },
+        ProxyCall::RetractWorkspaceFact { key } => ProxyToolCall::RetractWorkspaceFact { key },
+        ProxyCall::ExportWorkspaceMemory { include_values } => {
+            ProxyToolCall::ExportWorkspaceMemory { include_values }
+        }
+        ProxyCall::ImportWorkspaceMemory { export_json } => {
+            ProxyToolCall::ImportWorkspaceMemory { export_json }
+        }
+        ProxyCall::ClearWorkspaceMemory => ProxyToolCall::ClearWorkspaceMemory,
         ProxyCall::WorkspaceRoots => ProxyToolCall::WorkspaceRoots,
         ProxyCall::ListDirectory { path } => ProxyToolCall::ListDirectory { path },
         ProxyCall::ListDirectoryAll { path } => ProxyToolCall::ListDirectoryAll { path },
@@ -1319,6 +1385,88 @@ fn proxy_value<T: serde::de::DeserializeOwned>(
 }
 
 impl ee_mcp::EeProxyBackend for SocketProxyBackend {
+    fn remember_workspace_fact(
+        &self,
+        key: String,
+        value: String,
+    ) -> Result<ee_mcp::WorkspaceFactMutationResult, ee_mcp::ProxyToolError> {
+        proxy_value(
+            &self.call_value(ProxyCall::RememberWorkspaceFact { key, value }),
+            "remember_workspace_fact",
+        )
+    }
+
+    fn recall_workspace_facts(
+        &self,
+        query: String,
+    ) -> Result<ee_mcp::WorkspaceFactsResult, ee_mcp::ProxyToolError> {
+        proxy_value(
+            &self.call_value(ProxyCall::RecallWorkspaceFacts { query }),
+            "recall_workspace_facts",
+        )
+    }
+
+    fn read_workspace_fact(
+        &self,
+        key: String,
+    ) -> Result<ee_mcp::WorkspaceFact, ee_mcp::ProxyToolError> {
+        proxy_value(&self.call_value(ProxyCall::ReadWorkspaceFact { key }), "read_workspace_fact")
+    }
+
+    fn forget_workspace_fact(
+        &self,
+        key: String,
+    ) -> Result<ee_mcp::WorkspaceFactMutationResult, ee_mcp::ProxyToolError> {
+        proxy_value(
+            &self.call_value(ProxyCall::ForgetWorkspaceFact { key }),
+            "forget_workspace_fact",
+        )
+    }
+
+    fn list_workspace_facts(
+        &self,
+        limit: u32,
+    ) -> Result<ee_mcp::WorkspaceFactsResult, ee_mcp::ProxyToolError> {
+        proxy_value(
+            &self.call_value(ProxyCall::ListWorkspaceFacts { limit }),
+            "list_workspace_facts",
+        )
+    }
+
+    fn retract_workspace_fact(
+        &self,
+        key: String,
+    ) -> Result<ee_mcp::WorkspaceFactMutationResult, ee_mcp::ProxyToolError> {
+        proxy_value(
+            &self.call_value(ProxyCall::RetractWorkspaceFact { key }),
+            "retract_workspace_fact",
+        )
+    }
+
+    fn export_workspace_memory(
+        &self,
+        include_values: bool,
+    ) -> Result<serde_json::Value, ee_mcp::ProxyToolError> {
+        proxy_value(
+            &self.call_value(ProxyCall::ExportWorkspaceMemory { include_values }),
+            "export_workspace_memory",
+        )
+    }
+
+    fn import_workspace_memory(
+        &self,
+        export_json: String,
+    ) -> Result<serde_json::Value, ee_mcp::ProxyToolError> {
+        proxy_value(
+            &self.call_value(ProxyCall::ImportWorkspaceMemory { export_json }),
+            "import_workspace_memory",
+        )
+    }
+
+    fn clear_workspace_memory(&self) -> Result<serde_json::Value, ee_mcp::ProxyToolError> {
+        proxy_value(&self.call_value(ProxyCall::ClearWorkspaceMemory), "clear_workspace_memory")
+    }
+
     fn web_search(
         &self,
         request: ee_mcp::WebSearchRequest,
@@ -2477,6 +2625,103 @@ mod tests {
             .await
             .expect("proxy disconnect cancels in-flight web request");
         serving.await.expect("proxy connection task completes");
+    }
+
+    #[test]
+    fn stdio_tool_list_contains_exact_workspace_memory_surface() {
+        let names = ee_mcp::tool_names_for_transport(ee_mcp::ToolTransport::Stdio);
+        for name in [
+            "ee_remember_workspace_fact",
+            "ee_recall_workspace_facts",
+            "ee_read_workspace_fact",
+            "ee_forget_workspace_fact",
+            "ee_list_workspace_facts",
+            "ee_retract_workspace_fact",
+            "ee_export_workspace_memory",
+            "ee_import_workspace_memory",
+            "ee_clear_workspace_memory",
+        ] {
+            assert!(names.contains(&name), "missing stdio workspace-memory tool {name}");
+        }
+    }
+
+    #[test]
+    fn workspace_memory_stdio_calls_route_all_exact_tools() {
+        let calls = [
+            ProxyCall::RememberWorkspaceFact {
+                key: String::from("key"),
+                value: String::from("secret-value"),
+            },
+            ProxyCall::RecallWorkspaceFacts { query: String::from("build") },
+            ProxyCall::ReadWorkspaceFact { key: String::from("key") },
+            ProxyCall::ForgetWorkspaceFact { key: String::from("key") },
+            ProxyCall::ListWorkspaceFacts { limit: 8 },
+            ProxyCall::RetractWorkspaceFact { key: String::from("key") },
+            ProxyCall::ExportWorkspaceMemory { include_values: true },
+            ProxyCall::ImportWorkspaceMemory { export_json: String::from("{\"facts\":[]}") },
+            ProxyCall::ClearWorkspaceMemory,
+        ];
+        let expected_methods = [
+            "remember_workspace_fact",
+            "recall_workspace_facts",
+            "read_workspace_fact",
+            "forget_workspace_fact",
+            "list_workspace_facts",
+            "retract_workspace_fact",
+            "export_workspace_memory",
+            "import_workspace_memory",
+            "clear_workspace_memory",
+        ];
+        for (call, expected_method) in calls.into_iter().zip(expected_methods) {
+            let encoded = serde_json::to_value(&call).unwrap();
+            assert_eq!(encoded["method"], expected_method);
+            let (bridge_tx, bridge_rx) = std::sync::mpsc::channel();
+            let pending = start_proxy_call_to_bridge(
+                call,
+                "scope",
+                tokio_util::sync::CancellationToken::new(),
+                &bridge_tx,
+            )
+            .expect("workspace memory call reaches bridge");
+            let BridgeUiMessage::ProxyTool { call, route, reply } =
+                bridge_rx.recv_timeout(Duration::from_secs(1)).unwrap()
+            else {
+                panic!("workspace memory call must use proxy bridge");
+            };
+            assert_eq!(route, ProxyRoute::Stdio);
+            match (expected_method, call) {
+                (
+                    "remember_workspace_fact",
+                    ProxyToolCall::RememberWorkspaceFact { key, value },
+                ) => {
+                    assert_eq!(key, "key");
+                    assert_eq!(value, "secret-value");
+                }
+                ("recall_workspace_facts", ProxyToolCall::RecallWorkspaceFacts { query }) => {
+                    assert_eq!(query, "build");
+                }
+                ("read_workspace_fact", ProxyToolCall::ReadWorkspaceFact { key })
+                | ("forget_workspace_fact", ProxyToolCall::ForgetWorkspaceFact { key })
+                | ("retract_workspace_fact", ProxyToolCall::RetractWorkspaceFact { key }) => {
+                    assert_eq!(key, "key");
+                }
+                ("list_workspace_facts", ProxyToolCall::ListWorkspaceFacts { limit }) => {
+                    assert_eq!(limit, 8);
+                }
+                (
+                    "export_workspace_memory",
+                    ProxyToolCall::ExportWorkspaceMemory { include_values },
+                ) => assert!(include_values),
+                (
+                    "import_workspace_memory",
+                    ProxyToolCall::ImportWorkspaceMemory { export_json },
+                ) => assert_eq!(export_json, "{\"facts\":[]}"),
+                ("clear_workspace_memory", ProxyToolCall::ClearWorkspaceMemory) => {}
+                _ => panic!("workspace memory call changed route"),
+            }
+            drop(reply);
+            assert!(matches!(pending.blocking_recv(), Err(_) | Ok(Err(AgentError::Cancelled))));
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

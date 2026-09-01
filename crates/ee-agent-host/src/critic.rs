@@ -559,6 +559,7 @@ impl ClientRequestHandler for CriticReadOnlyHandler {
             elicitation_url: false,
             session_config_boolean: inner.session_config_boolean,
             proxy_discovery: inner.proxy_discovery,
+            workspace_memory_mutation_approval: false,
         }
     }
 

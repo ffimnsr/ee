@@ -290,6 +290,148 @@ Expose project guidance and bounded session context so agents follow repo rules 
 - [x] LLM can retrieve current project rules and task memory through structured, bounded tools.
 - [x] Knowledge tools degrade safely when no index or saved context exists.
 
+### Phase 6A: Persistent shared workspace knowledge memory
+
+Persist bounded, evidence-backed project facts across agent threads, sessions, and ee process restarts without storing transcripts, prompts, raw terminal output, or other reconstructible session history.
+
+Overview: replace the TUI-owned runtime-only `ProjectKnowledge` map with a backend-owned workspace fact service. Keep session notes separate. Store authoritative facts in a local transactional database keyed by canonical workspace identity, retrieve only relevant bounded facts, and treat every recalled fact as provenance-labeled untrusted context.
+
+#### Rules
+
+- [x] Store facts, constraints, decisions, conventions, ownership, validated workflows, and revision-bound verification results only.
+- [x] Never store transcripts, prompts, model reasoning, raw terminal output, environment values, credentials, tokens, or secret-like content.
+- [x] Keep workspace persistence disabled until explicit user opt-in.
+- [x] Require approval for every persistent remember, replace, retract, forget, import, or clear operation.
+- [x] Treat model and subagent claims as candidates; only explicit user assertions or host-verified evidence may become active durable facts.
+- [x] Parent must verify subagent facts before promotion, and failed or cancelled turns must never promote facts.
+- [x] Treat recalled facts as untrusted data, never system policy or instructions, regardless of authority.
+- [x] Require provenance, authority, freshness, and stable source identity for every active fact.
+- [x] Mark revision-bound facts stale when their source revision, file fingerprint, buffer revision, graph revision, or validation evidence no longer matches.
+- [x] Keep SQLite facts authoritative; full-text and semantic indexes must remain optional rebuildable retrieval sidecars.
+- [x] Query exact keys and deterministic metadata before full-text or semantic retrieval.
+- [x] Never inject the complete workspace store into model context; select and budget relevant facts only.
+- [x] Use canonical workspace identities for every persisted key, cache key, query, migration, and deduplication operation.
+- [x] Partition multi-root workspaces by canonical root and query an explicit root set.
+- [x] Keep behavior backend-owned and frontend agnostic; `ee-cli` owns consent, commands, and rendering only.
+- [x] Do not add a generic graph database until typed fact relations have demonstrated retrieval or lifecycle value.
+
+#### Work items
+
+- [x] Define workspace-memory scope and data contract.
+  - [x] Define local sharing across threads, sessions, agents, and ee processes for the same canonical workspace.
+  - [x] Keep cross-machine and team synchronization out of initial scope.
+  - [x] Define `WorkspaceFact`, `FactId`, `FactKind`, `FactAuthority`, `FactFreshness`, `FactState`, `FactProvenance`, `FactQuery`, and typed errors.
+  - [x] Include namespace, normalized key, bounded value, source kind, opaque source id, source revision/fingerprint, created/updated/verified timestamps, optional expiry, content hash, and schema version.
+  - [x] Define fact kinds for architecture, constraint, convention, decision, command, validation, ownership, dependency, environment requirement, and user preference.
+  - [x] Define authority levels for `user_asserted`, `host_verified`, and `agent_candidate`.
+  - [x] Define lifecycle states for `active`, `stale`, `superseded`, and `retracted`.
+  - [x] Define optional typed relations for `supersedes`, `applies_to`, `depends_on`, and `contradicts` without requiring graph traversal.
+- [x] Add backend-owned `ee-agent-memory` crate.
+  - [x] Keep crate independent from terminal, ratatui, keybindings, prompt buffers, and frontend layout.
+  - [x] Move or expose canonical `WorkspaceIdentity` through a shared backend API instead of duplicating TUI path hashing.
+  - [x] Use one fail-closed shared backend canonical workspace identity API for every path-derived identity; do not duplicate frontend path hashing or normalization.
+  - [x] Fail closed when workspace canonicalization or identity validation fails.
+  - [x] Reuse existing sensitive-data guards, bounded context types, and provenance types where dependency direction permits.
+  - [x] Keep `ee-agent-orchestrator::MemoryStore` per-session and project selected durable facts into it or directly into `ContextPack`; never turn it into the database.
+- [x] Implement durable transactional storage.
+  - [x] Store database under the platform ee state directory, not inside the repository.
+  - [x] Add versioned SQLite migrations for workspaces, facts, and optional fact relations.
+  - [x] Use transactions for insert, replace, supersede, retract, delete, migration, and retention operations.
+  - [x] Preserve prior fact versions as superseded records instead of silently overwriting provenance.
+  - [x] Add exact-key, namespace-prefix, bounded-list, retract, forget, workspace-clear, and metadata-filter APIs.
+  - [x] Enforce restrictive file permissions, WAL where supported, bounded busy timeout, and multi-process-safe access.
+  - [x] Add per-fact, per-workspace, result-count, and total-byte quotas with deterministic typed errors.
+  - [x] Add corruption detection, quarantine, and safe migration failure behavior.
+  - [x] Never log fact values, prompts, secret candidates, embeddings, or raw evidence payloads.
+- [x] Integrate workspace memory through `ee-agent-host`.
+  - [x] Make host own service lifecycle and workspace-memory access for every frontend and transport.
+  - [x] Resolve and validate explicit canonical workspace roots before every read or write.
+  - [x] Replace TUI-owned persistent responsibilities in `ProjectKnowledge`; keep existing runtime session notes separate.
+  - [x] Never round-trip the complete database through `ee-cli` state or serialize it into session checkpoints.
+  - [x] Route persistent mutations through existing approval, cancellation, timeout, redaction, and typed-error paths.
+  - [x] Keep reads bounded and approval-free after workspace-memory opt-in.
+- [x] Add explicit MCP workspace-memory tools.
+  - [x] Add `ee_remember_workspace_fact` with required `key` and `value` only.
+  - [x] Add `ee_recall_workspace_facts` with required `query` only.
+  - [x] Add `ee_read_workspace_fact` with required `key` only.
+  - [x] Add `ee_forget_workspace_fact` with required `key` only.
+  - [x] Return authority, freshness, state, provenance, selection reason, totals, omitted counts, and truncation metadata.
+  - [x] Keep `ee_save_note`, `ee_read_note`, and `ee_read_notes` session-scoped; do not silently change their persistence or sharing semantics.
+  - [x] Add manifest entries, capability flags, side-effect classes, approval metadata, examples, and compatibility snapshots.
+  - [x] Add separate list, verify, retract, export, import, and clear tools only when their single-purpose workflows are implemented.
+- [x] Add TUI configuration and management commands.
+  - [x] Add disabled-by-default `[agents.workspace_memory]` configuration with resolved semantic values passed to backend.
+  - [x] Add explicit enable/disable flow explaining local persistence, scope, retention, and deletion behavior.
+  - [x] Add `/memory status`, `/memory list`, `/memory search <query>`, `/memory show <key>`, and `/memory forget <key>`.
+  - [x] Require explicit confirmation for clear, import, export containing values, or disabling with deletion.
+  - [x] Show authority, freshness, source, last verification, and stale/retracted state without exposing hidden source payloads.
+- [x] Integrate bounded recall into context planning.
+  - [x] Add dedicated `WorkspaceMemory` source/provenance kind instead of labeling durable facts as session memory.
+  - [x] Build queries from active task, current user request, active files, resolved symbols, and explicit focus keys.
+  - [x] Retrieve exact and prefix matches first, then deterministic SQLite full-text matches, then optional semantic reranking.
+  - [x] Filter stale, retracted, expired, secret-like, and workspace-mismatched facts before context assembly.
+  - [x] Include potentially stale facts only with an explicit freshness warning when policy allows.
+  - [x] Re-trim merged facts to configured context-pack byte and hit budgets.
+  - [x] Record why each fact was selected and expose bounded recall diagnostics.
+  - [x] Fail closed with no recalled facts when storage, migration, identity, or semantic lookup fails.
+- [x] Add verified fact promotion and invalidation.
+  - [x] Derive narrow host-verified candidates from complete, current-revision `TurnEvidence`; never persist the ledger wholesale.
+  - [x] Require non-truncated changed-file evidence, current revision, successful prompt terminal state, and applicable selected validation before promotion.
+  - [x] Promote explicit user assertions through approval without pretending they are host-verified.
+  - [x] Keep agent-authored facts as candidates until user or host verification.
+  - [x] Detect compatible repeated facts and merge provenance deterministically.
+  - [x] Detect conflicting values for the same active key and require explicit resolution instead of last-write-wins.
+  - [x] Mark revision-bound facts stale when checkout, file, buffer, graph, diagnostics, or validation identities change.
+  - [x] Preserve stable user-approved conventions and decisions until superseded, retracted, expired, or explicitly forgotten.
+- [x] Add deterministic and optional semantic retrieval.
+  - [x] Add SQLite full-text search with workspace, namespace, kind, authority, state, and freshness filters.
+  - [x] Extend `SemanticMemoryAdapter` or add a compatible structured adapter for workspace-scoped queries and rich hit metadata.
+  - [x] Keep embeddings optional and avoid any required network, embedding, or vector-database dependency.
+  - [x] Rebuild semantic sidecars from authoritative facts after loss, corruption, migration, or model change.
+  - [x] Never use model-reported confidence or vector similarity as authority.
+- [x] Add retention, privacy, and lifecycle controls.
+  - [x] Add configurable expiry and deterministic pruning for stale candidates and superseded history.
+  - [x] Add inspect, retract, forget, workspace-clear, and local export/import operations.
+  - [x] Keep export/import explicit, versioned, bounded, redacted, and approval-gated.
+  - [x] Document local database path, quotas, retention, backup behavior, and deletion guarantees.
+  - [x] Keep repository-local memory and remote synchronization disabled unless a separate reviewed design adds trust and conflict semantics.
+
+#### Implementation notes
+
+- [x] Start with typed key/value facts plus metadata; add richer graph relations only after concrete query requirements exist.
+- [x] Persist expensive-to-rediscover, stable, evidence-backed knowledge; recompute cheap or volatile editor, SCM, diagnostics, and graph state.
+- [x] Prefer exact and full-text retrieval for deterministic behavior; use semantic retrieval only as optional recall expansion or reranking.
+- [x] Apply secret detection before storage and again before model-context projection.
+- [x] Use values small enough for deterministic review and context budgeting; initial targets are 4 KiB per fact, 256 facts and 512 KiB per workspace, and 8 recalled facts per context pack.
+- [x] Keep stale records auditable until retention policy removes them; freshness changes must not silently rewrite history.
+- [x] Preserve frontend/backend ownership from `RULE.md`: backend owns fact semantics and storage, TUI owns opt-in and presentation.
+
+#### Tests
+
+- [x] Add unit tests for fact validation, authority transitions, lifecycle transitions, deduplication, conflicts, quotas, redaction, and secret rejection.
+- [x] Add canonical identity tests for symlinks, aliases, multiple roots, non-UTF-8 paths where supported, and canonicalization failure.
+- [x] Add SQLite migration, rollback, corruption, quarantine, permission, busy-timeout, transaction, and concurrent-process tests.
+- [x] Add host integration tests proving workspace isolation and sharing across two sessions, two agents, process restart, and supported transports.
+- [x] Add approval tests proving persistent mutations cannot bypass user consent.
+- [x] Add evidence-promotion tests proving failed, cancelled, stale, incomplete, truncated, or unselected validation cannot activate facts.
+- [x] Add retrieval tests for exact precedence, prefix ordering, full-text ordering, freshness filtering, bounds, omitted counts, and deterministic ties.
+- [x] Add context-pack tests proving recalled facts retain provenance, trust labels, selection reasons, and byte-budget limits.
+- [x] Add prompt-injection tests proving recalled facts cannot become policy or instructions.
+- [x] Add security tests for cross-workspace access, path aliasing, malicious keys, oversized values, secret-like content, poisoned imports, and database replacement.
+- [x] Add optional semantic adapter tests for disabled behavior, backend failure, stale sidecar, deterministic caps, and authoritative-store fallback.
+
+#### Exit criteria
+
+- [x] Two agent sessions in the same canonical workspace can recall the same approved fact after ee restarts.
+- [x] Different canonical workspaces cannot read, mutate, infer, or delete each other's facts.
+- [x] No transcript, prompt, reasoning, raw terminal output, environment value, token, or secret-like value reaches durable workspace memory.
+- [x] Agent and subagent claims remain candidates until explicit user or host verification.
+- [x] Revision-bound facts become stale when their source identity changes and are excluded from normal recall.
+- [x] Context packs remain bounded, deterministic, provenance-rich, and safe when storage or optional semantic retrieval fails.
+- [x] Every persistent mutation uses approval and every workspace-memory operation works through supported MCP transports.
+- [x] Users can inspect, retract, forget, clear, export, and disable workspace memory with documented local deletion behavior.
+- [x] `ee-cli` contains no authoritative workspace-memory semantics or durable fact store.
+
 ### Phase 7: Tool governance, schemas, and compatibility
 
 Harden the expanded tool surface before enabling it by default.

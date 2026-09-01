@@ -3,6 +3,7 @@ resolver = "3"
 members = [
   "crates/ee-acp-agent-server",
   "crates/ee-agent-host",
+  "crates/ee-agent-memory",
   "crates/ee-agent-orchestrator",
   "crates/ee-agent-protocol",
   "crates/ee-cli",
@@ -34,7 +35,7 @@ rmcp = { version = "3.2.0", default-features = false, features = ["client", "eli
 cc = "1.2"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
-chrono = "0.4.44"
+chrono = { version = "0.4.44", features = ["serde"] }
 criterion = "0.8.2"
 crossterm = "0.28"
 dirs = "6.0.0"
@@ -60,17 +61,19 @@ ratatui = "0.29"
 regex = "1.12.3"
 regex-syntax = "0.8.11"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip", "brotli", "deflate", "zstd"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "chrono"] }
 schemars = { version = "1.0", features = ["derive"] }
 semver = "1.0"
 signal-hook = "0.3"
 similar = "3.2.0"
-serde = "1.0.228"
+serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 seccompiler = "0.5.0"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.20"
 tar = "0.4"
 tempfile = "3"
+thiserror = "2.0.17"
 tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "time", "net"] }
 tokio-util = { version = "0.7.19", features = ["compat"] }
 toml = "1.1.4"
@@ -115,6 +118,7 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Syste
 
 ee-acp-agent-server = { package = "ee-acp-agent-server", path = "crates/ee-acp-agent-server", version = "0.11.5" }
 ee-agent-host = { package = "ee-agent-host", path = "crates/ee-agent-host", version = "0.11.5" }
+ee-agent-memory = { package = "ee-agent-memory", path = "crates/ee-agent-memory", version = "0.11.5" }
 ee-agent-orchestrator = { package = "ee-agent-orchestrator", path = "crates/ee-agent-orchestrator", version = "0.11.5" }
 ee-agent-protocol = { package = "ee-agent-protocol", path = "crates/ee-agent-protocol", version = "0.11.5" }
 ee-mcp = { package = "ee-mcp", path = "crates/ee-mcp", version = "0.11.5" }

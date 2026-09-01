@@ -268,8 +268,12 @@ pub use context_pack::{
     ActiveTaskSummary, ContextItemProvenance, ContextMemoryItem, ContextPack, ContextPackBuilder,
     ContextPackConfig, ContextTruncation, DEFAULT_CONTEXT_PACK_MAX_BYTES,
     DEFAULT_MAX_FILE_REFERENCES, DEFAULT_MAX_MEMORY_ITEMS, DEFAULT_MAX_TOOL_SUMMARIES,
-    FILE_REFERENCE_SUMMARY_MAX_CHARS, FileReference, ProvenanceSourceKind, TOOL_SUMMARY_MAX_CHARS,
-    ToolSummaryEntry,
+    DEFAULT_MAX_WORKSPACE_MEMORY_FACTS, FILE_REFERENCE_SUMMARY_MAX_CHARS, FileReference,
+    MAX_WORKSPACE_RECALL_QUERIES, MAX_WORKSPACE_RECALL_QUERIES_PER_SOURCE,
+    MAX_WORKSPACE_RECALL_QUERY_CHARS, POTENTIALLY_STALE_WORKSPACE_MEMORY_WARNING,
+    ProvenanceSourceKind, TOOL_SUMMARY_MAX_CHARS, ToolSummaryEntry, WorkspaceContextFact,
+    WorkspaceFactAuthority, WorkspaceFactFreshness, WorkspaceFactSelectionReason,
+    WorkspaceFactState, WorkspaceRecallContext, WorkspaceRecallFreshnessPolicy,
 };
 pub use context_planner::{
     ContextCandidate, ContextFreshness, ContextInvalidation, ContextPlan, ContextPlanCache,
@@ -422,6 +426,16 @@ pub use rubber_duck_evaluation::{
     required_rubber_duck_baseline, required_rubber_duck_fixture_suite,
     rubber_duck_rollout_eligibility, run_required_rubber_duck_suite, run_rubber_duck_fixture,
     summarize_rubber_duck_runs,
+};
+pub use semantic_memory::{
+    DEFAULT_WORKSPACE_SEMANTIC_HIT_CAP, MAX_WORKSPACE_SEMANTIC_SIMILARITY,
+    WORKSPACE_SEMANTIC_PROJECTION_SCHEMA_VERSION, WorkspaceDigestId, WorkspaceRootSetId,
+    WorkspaceSemanticFactProjection, WorkspaceSemanticMemory, WorkspaceSemanticMemoryAdapter,
+    WorkspaceSemanticMemoryConfig, WorkspaceSemanticMemoryFilters, WorkspaceSemanticMemoryHit,
+    WorkspaceSemanticMemoryQuery, WorkspaceSemanticMemorySearchResult,
+    WorkspaceSemanticRebuildReason, WorkspaceSemanticRebuildRequest,
+    WorkspaceSemanticSidecarIdentity, WorkspaceSemanticSidecarMetadata,
+    WorkspaceSemanticSidecarStaleness,
 };
 pub use subagent_handoff::{
     GENERIC_HANDOFF_INSTRUCTIONS, HandoffOutputFormat, MAX_HANDOFF_EVIDENCE_ITEMS,

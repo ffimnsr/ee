@@ -13,7 +13,7 @@
 //! message.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc as std_mpsc;
@@ -3343,6 +3343,7 @@ const LOCAL_AGENT_SLASH_COMMANDS: &[&str] = &[
     "thoughts",
     "config",
     "mcp",
+    "memory",
     "approval",
     "permissions",
     "context",
@@ -3408,6 +3409,10 @@ const LOCAL_AGENT_SLASH_HELP: &[(&str, &str)] = &[
     ("/thoughts", "on|off|toggle"),
     ("/config", "show or change advertised options"),
     ("/mcp", "show local MCP state"),
+    (
+        "/memory enable|disable [--delete]|status|list|search <query>|show <key>|forget <key>|retract <key>|clear|export [--with-values]|import <path>",
+        "persist local canonical-workspace memory policy; deletion and mutations confirm once",
+    ),
     ("/approval", "default|autopilot|bypass; bypass keeps validation"),
     (
         "/permissions",
@@ -4919,6 +4924,30 @@ impl App {
         // Always host policy-governed editor MCP for ACP-native agents. Explicit
         // proxy configuration remains required only for stdio fallback.
         config.ee_proxy_enabled = true;
+        let memory = &self.config.agents.workspace_memory;
+        config.workspace_memory = ee_agent_host::WorkspaceMemoryHostConfig {
+            enabled: memory.enabled,
+            trusted_roots: self.canonical_workspace_roots(),
+            database_path: None,
+            quotas: ee_agent_host::WorkspaceMemoryQuotas {
+                max_value_bytes: memory.max_value_bytes,
+                max_active_facts: memory.max_active_facts,
+                max_active_bytes: memory.max_active_bytes,
+                max_total_facts: memory.max_total_facts,
+                max_total_bytes: memory.max_total_bytes,
+                max_recall_results: memory.max_recall_results,
+            },
+            busy_timeout: Duration::from_millis(memory.busy_timeout_ms),
+            retention: ee_agent_host::MemoryRetention {
+                default_expiry: (memory.default_expiry_days != 0)
+                    .then(|| Duration::from_secs(memory.default_expiry_days * 86_400)),
+                candidate_retention: Duration::from_secs(memory.candidate_retention_days * 86_400),
+                stale_retention: Duration::from_secs(memory.stale_retention_days * 86_400),
+                superseded_retention: Duration::from_secs(
+                    memory.superseded_retention_days * 86_400,
+                ),
+            },
+        };
         #[cfg(test)]
         for (id, factory) in &self.agents.test_fake_transports {
             config.fake_transports.insert(id.clone(), factory.clone());
@@ -6434,6 +6463,257 @@ impl App {
         ));
     }
 
+    fn push_workspace_memory_system(&mut self, mut text: String) {
+        const MAX_MESSAGE_BYTES: usize = 32 * 1024;
+        if text.len() > MAX_MESSAGE_BYTES {
+            let mut end = MAX_MESSAGE_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+            text.push_str("\n[workspace memory output truncated]");
+        }
+        if let Some(index) = self.agents.active_thread_index() {
+            self.agents.threads[index].push_system(text);
+        } else {
+            self.backend.status_message = Some(text);
+        }
+    }
+
+    fn render_workspace_fact(fact: &ee_mcp::WorkspaceFact) -> String {
+        const MAX_VALUE_BYTES: usize = 2 * 1024;
+        let mut value = fact.value.clone();
+        if value.len() > MAX_VALUE_BYTES {
+            let mut end = MAX_VALUE_BYTES;
+            while !value.is_char_boundary(end) {
+                end -= 1;
+            }
+            value.truncate(end);
+            value.push('…');
+        }
+        format!(
+            "key: {}\nvalue: {}\nauthority: {} · freshness: {} · state: {}\nsource: {}:{} · verified: {} · selection: {}",
+            fact.key,
+            value,
+            fact.authority,
+            fact.freshness,
+            fact.state,
+            fact.provenance.source_kind,
+            fact.provenance.source_id,
+            fact.provenance.verified_at.as_deref().unwrap_or("unverified"),
+            fact.selection_reason.as_deref().unwrap_or("exact read")
+        )
+    }
+
+    fn render_workspace_facts(result: &ee_mcp::WorkspaceFactsResult) -> String {
+        let mut text = format!(
+            "workspace memory: {} shown · {} total · {} omitted · truncated: {}",
+            result.facts.len(),
+            result.total,
+            result.omitted,
+            result.truncated
+        );
+        for fact in &result.facts {
+            text.push_str("\n\n");
+            text.push_str(&Self::render_workspace_fact(fact));
+        }
+        text
+    }
+
+    fn read_workspace_memory_import(
+        &self,
+        argument: &str,
+    ) -> Result<(PathBuf, ee_agent_host::WorkspaceMemoryExportDto), String> {
+        const MAX_IMPORT_BYTES: u64 = 16 * 1024 * 1024;
+        let requested = PathBuf::from(argument);
+        let path =
+            if requested.is_absolute() { requested } else { self.working_dir.join(requested) };
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("cannot inspect {}: {error}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(format!(
+                "import path must be a regular non-symlink file: {}",
+                path.display()
+            ));
+        }
+        if metadata.len() > MAX_IMPORT_BYTES {
+            return Err(format!(
+                "workspace memory import exceeds {MAX_IMPORT_BYTES} bytes: {}",
+                path.display()
+            ));
+        }
+        let file = std::fs::File::open(&path)
+            .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.take(MAX_IMPORT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        if bytes.len() as u64 > MAX_IMPORT_BYTES {
+            return Err(format!(
+                "workspace memory import exceeds {MAX_IMPORT_BYTES} bytes: {}",
+                path.display()
+            ));
+        }
+        let export = serde_json::from_slice(&bytes).map_err(|error| {
+            format!("invalid workspace memory export {}: {error}", path.display())
+        })?;
+        Ok((path, export))
+    }
+
+    fn workspace_memory_config_path(&self) -> PathBuf {
+        self.working_dir.join(".ee.toml")
+    }
+
+    fn persist_workspace_memory_switch(&mut self, enabled: bool) {
+        let path = self.workspace_memory_config_path();
+        if let Err(error) = crate::config::persist_workspace_memory_enabled(&path, enabled) {
+            self.backend.status_message =
+                Some(format!("workspace memory config update failed: {error}"));
+            return;
+        }
+        let host_was_initialized = self.agents.host.is_some();
+        self.config.agents.workspace_memory.enabled = enabled;
+        let state = if enabled { "enabled" } else { "disabled" };
+        let data = if enabled {
+            "Existing local facts become available after backend activation."
+        } else {
+            "Local database and facts were kept. Use `/memory disable --delete` while memory is active to clear this canonical workspace first."
+        };
+        let activation = if host_was_initialized {
+            " Running agent host cannot reconfigure workspace memory; restart ee to apply backend state."
+        } else {
+            " Setting applies when agent host starts."
+        };
+        self.push_workspace_memory_system(format!(
+            "workspace memory {state}: persisted explicit `enabled = {enabled}` in {}. {data}{activation}",
+            path.display()
+        ));
+    }
+
+    fn agents_memory_command(&mut self, args: &str) {
+        let mut parts = args.splitn(2, char::is_whitespace);
+        let operation = parts.next().unwrap_or_default();
+        let argument = parts.next().unwrap_or_default().trim();
+        match (operation, argument) {
+            ("enable", "") => {
+                self.persist_workspace_memory_switch(true);
+                return;
+            }
+            ("disable", "") => {
+                self.persist_workspace_memory_switch(false);
+                return;
+            }
+            ("disable", "--delete") => {
+                self.ensure_agents_host();
+                let Some(host) = self.agents.host.as_ref() else {
+                    self.backend.status_message =
+                        Some(String::from("workspace memory host unavailable; nothing changed"));
+                    return;
+                };
+                if !host.manager.workspace_memory_status().enabled {
+                    self.backend.status_message = Some(String::from(
+                        "workspace memory backend is not active; enable it and restart ee before disabling with deletion",
+                    ));
+                    return;
+                }
+                self.queue_workspace_memory_disable_delete(self.workspace_memory_config_path());
+                return;
+            }
+            _ => {}
+        }
+        if operation == "status" && argument.is_empty() {
+            self.ensure_agents_host();
+            let Some(host) = self.agents.host.as_ref() else {
+                self.backend.status_message =
+                    Some(String::from("workspace memory host unavailable"));
+                return;
+            };
+            let status = host.manager.workspace_memory_status();
+            self.push_workspace_memory_system(format!(
+                "workspace memory: enabled={} · availability={:?}\nactive: {} facts / {} bytes · trusted canonical roots: {} · workspace id: {}\nquotas: value={} bytes · active facts={} · active bytes={} · total facts={} · total bytes={} · recall={}\nretention: default expiry={} days · candidates={} days · stale/retracted={} days · superseded={} days\npersistence: local ee state directory, shared only by threads, sessions, agents, and ee processes using this canonical workspace identity; no repository storage or remote sync. Transcripts are never stored. Plain disable persists `enabled = false` and keeps database. `disable --delete` requires one-time confirmation, clears this workspace in backend first, then persists disable; clear failure leaves config enabled. Trust rules, autopilot, and bypass cannot skip confirmation. `forget` deletes every stored version; `retract` preserves retained history.",
+                status.enabled,
+                status.availability,
+                status.active_facts,
+                status.active_bytes,
+                status.trusted_root_count,
+                status.primary_workspace_id.as_deref().unwrap_or("unavailable"),
+                status.quotas.max_value_bytes,
+                status.quotas.max_active_facts,
+                status.quotas.max_active_bytes,
+                status.quotas.max_total_facts,
+                status.quotas.max_total_bytes,
+                status.quotas.max_recall_results,
+                self.config.agents.workspace_memory.default_expiry_days,
+                self.config.agents.workspace_memory.candidate_retention_days,
+                self.config.agents.workspace_memory.stale_retention_days,
+                self.config.agents.workspace_memory.superseded_retention_days,
+            ));
+            return;
+        }
+        if !self.config.agents.workspace_memory.enabled {
+            self.backend.status_message = Some(String::from(
+                "workspace memory disabled; explicitly set [agents.workspace_memory] enabled = true",
+            ));
+            return;
+        }
+        self.ensure_agents_host();
+        let Some(host) = self.agents.host.as_ref() else {
+            self.backend.status_message = Some(String::from("workspace memory host unavailable"));
+            return;
+        };
+        let limit = self.config.agents.workspace_memory.max_recall_results;
+        match (operation, argument) {
+            ("list", "") => match host.manager.workspace_memory_list(limit) {
+                Ok(result) => {
+                    self.push_workspace_memory_system(Self::render_workspace_facts(&result))
+                }
+                Err(error) => {
+                    self.backend.status_message =
+                        Some(format!("workspace memory list failed: {error}"))
+                }
+            },
+            ("search", query) if !query.is_empty() => {
+                match host.manager.workspace_memory_recall(query, limit) {
+                    Ok(result) => {
+                        self.push_workspace_memory_system(Self::render_workspace_facts(&result))
+                    }
+                    Err(error) => {
+                        self.backend.status_message =
+                            Some(format!("workspace memory search failed: {error}"))
+                    }
+                }
+            }
+            ("show", key) if !key.is_empty() => match host.manager.workspace_memory_read(key) {
+                Ok(fact) => self.push_workspace_memory_system(Self::render_workspace_fact(&fact)),
+                Err(error) => {
+                    self.backend.status_message =
+                        Some(format!("workspace memory read failed: {error}"))
+                }
+            },
+            ("forget", key) if !key.is_empty() => {
+                self.queue_workspace_memory_forget(key.to_string())
+            }
+            ("retract", key) if !key.is_empty() => {
+                self.queue_workspace_memory_retract(key.to_string())
+            }
+            ("clear", "") => self.queue_workspace_memory_clear(),
+            ("export", "") => self.queue_workspace_memory_export(false),
+            ("export", "--with-values") => self.queue_workspace_memory_export(true),
+            ("import", path) if !path.is_empty() => match self.read_workspace_memory_import(path) {
+                Ok((path, export)) => self.queue_workspace_memory_import(&path, export),
+                Err(error) => {
+                    self.backend.status_message =
+                        Some(format!("workspace memory import failed: {error}"))
+                }
+            },
+            _ => {
+                self.backend.status_message = Some(String::from(
+                    "usage: /memory enable|disable [--delete]|status|list|search <query>|show <key>|forget <key>|retract <key>|clear|export [--with-values]|import <path>",
+                ))
+            }
+        }
+    }
+
     fn agents_context_command(&mut self, args: &str) {
         let mut parts = args.splitn(2, char::is_whitespace);
         match (parts.next().unwrap_or_default(), parts.next().unwrap_or_default().trim()) {
@@ -6466,6 +6746,10 @@ impl App {
             }
             "doctor" if args.is_empty() => {
                 self.agents_doctor();
+                true
+            }
+            "memory" => {
+                self.agents_memory_command(args);
                 true
             }
             "init" if args.is_empty() => {
@@ -7894,6 +8178,7 @@ mod tests {
                 "thoughts",
                 "config",
                 "mcp",
+                "memory",
                 "approval",
                 "permissions",
                 "context",
@@ -7910,6 +8195,109 @@ mod tests {
                 "compact",
             ]
         );
+    }
+
+    fn app_with_workspace_memory(temp: &tempfile::TempDir, enabled: bool) -> App {
+        std::fs::write(
+            temp.path().join(".ee.toml"),
+            format!(
+                "# preserve me\n[agents]\nenabled = true\n\n[agents.workspace_memory]\nenabled = {enabled}\ncandidate_retention_days = 11\n"
+            ),
+        )
+        .unwrap();
+        let _cwd_lock = crate::config::test_cwd_lock().lock().unwrap();
+        let original = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp.path()).unwrap();
+        let app = App::from_path(None).unwrap();
+        std::env::set_current_dir(original).unwrap();
+        drop(_cwd_lock);
+        app
+    }
+
+    #[test]
+    fn workspace_memory_enable_and_plain_disable_persist_without_deletion() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = app_with_workspace_memory(&temp, false);
+
+        app.agents_memory_command("enable");
+        assert!(app.config.agents.workspace_memory.enabled);
+        let enabled = std::fs::read_to_string(temp.path().join(".ee.toml")).unwrap();
+        assert!(enabled.contains("# preserve me"));
+        assert!(enabled.contains("enabled = true\ncandidate_retention_days = 11"));
+
+        app.agents_memory_command("disable");
+        assert!(!app.config.agents.workspace_memory.enabled);
+        let disabled = std::fs::read_to_string(temp.path().join(".ee.toml")).unwrap();
+        assert!(disabled.contains("enabled = false\ncandidate_retention_days = 11"));
+        assert!(app.agents.approvals.is_empty());
+        assert!(
+            app.backend.status_message.as_deref().is_some_and(|message| message.contains("kept"))
+        );
+    }
+
+    #[test]
+    fn workspace_memory_disable_delete_queues_one_time_confirmation_before_config_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut app = app_with_workspace_memory(&temp, true);
+
+        app.queue_workspace_memory_disable_delete(temp.path().join(".ee.toml"));
+
+        assert_eq!(app.agents.approvals.len(), 1);
+        let prompt = app.agents.approvals.front().unwrap();
+        assert!(prompt.detail.contains("operation: disable --delete"));
+        assert_eq!(
+            prompt.options,
+            vec![
+                (String::from("Allow once"), super::super::agent_bridge::ApprovalChoice::AllowOnce),
+                (String::from("Deny"), super::super::agent_bridge::ApprovalChoice::DenyOnce),
+            ]
+        );
+        let contents = std::fs::read_to_string(temp.path().join(".ee.toml")).unwrap();
+        assert!(contents.contains("enabled = true\ncandidate_retention_days = 11"));
+    }
+
+    #[test]
+    fn workspace_memory_slash_registry_and_rendering_include_metadata() {
+        assert!(LOCAL_AGENT_SLASH_COMMANDS.contains(&"memory"));
+        assert!(
+            LOCAL_AGENT_SLASH_HELP
+                .iter()
+                .any(|(command, _)| { command.starts_with("/memory enable|disable") })
+        );
+        let fact = ee_mcp::WorkspaceFact {
+            id: 1,
+            namespace: String::from("default"),
+            key: String::from("build.command"),
+            value: String::from("cargo test --quiet"),
+            kind: String::from("command"),
+            authority: String::from("user_asserted"),
+            freshness: String::from("current"),
+            state: String::from("active"),
+            provenance: ee_mcp::WorkspaceFactProvenance {
+                source_kind: String::from("user"),
+                source_id: String::from("approval"),
+                revision: None,
+                fingerprint: None,
+                verified_at: Some(String::from("2026-09-01T00:00:00Z")),
+            },
+            selection_reason: Some(String::from("exact_key")),
+            created_at: String::from("2026-09-01T00:00:00Z"),
+            updated_at: String::from("2026-09-01T00:00:00Z"),
+            expires_at: None,
+            content_hash: String::from("hash"),
+            schema_version: 1,
+        };
+        let rendered = App::render_workspace_fact(&fact);
+        for metadata in [
+            "authority: user_asserted",
+            "freshness: current",
+            "state: active",
+            "source: user:approval",
+            "verified: 2026-09-01T00:00:00Z",
+            "selection: exact_key",
+        ] {
+            assert!(rendered.contains(metadata), "missing {metadata}: {rendered}");
+        }
     }
 
     #[test]

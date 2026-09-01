@@ -1,0 +1,3097 @@
+{
+  "manifestVersion": 4,
+  "tools": [
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {},
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "ee_workspace_roots",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "ee_list_directory",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "ee_list_directory_all",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "pattern": "*.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "pattern": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "name": "ee_search_files",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "pattern": "*.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "pattern": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "name": "ee_search_files_all",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "query": "example"
+      },
+      "inputSchema": {
+        "properties": {
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "ee_search_text",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 200
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "pattern": "*.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "pattern": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "name": "ee_search_text_regex",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 200
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "file_glob": "*.rs",
+        "query": "example"
+      },
+      "inputSchema": {
+        "properties": {
+          "file_glob": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "file_glob"
+        ],
+        "type": "object"
+      },
+      "name": "ee_search_text_in_files",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 200
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "web_disabled",
+        "web_search_unavailable",
+        "network_approval_required",
+        "url_rejected",
+        "dns_rejected",
+        "redirect_rejected",
+        "unsupported_content_type",
+        "response_too_large",
+        "network_timeout",
+        "network_failure"
+      ],
+      "example": {
+        "query": "example"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "ee_web_search",
+      "outputCaps": [
+        {
+          "kind": "response_bytes",
+          "max": 1048576
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics",
+        "external_content_untrusted",
+        "external_content_not_instructions",
+        "session_local_cache_normalized_public_fields_only_60_seconds"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "web_context",
+        "ExternalNetwork"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "web_disabled",
+        "web_search_unavailable",
+        "network_approval_required",
+        "url_rejected",
+        "dns_rejected",
+        "redirect_rejected",
+        "unsupported_content_type",
+        "response_too_large",
+        "network_timeout",
+        "network_failure"
+      ],
+      "example": {
+        "url": "example"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "name": "ee_fetch_url",
+      "outputCaps": [
+        {
+          "kind": "response_bytes",
+          "max": 1048576
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics",
+        "external_content_untrusted",
+        "external_content_not_instructions",
+        "session_local_cache_normalized_public_fields_only_60_seconds"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "web_context",
+        "ExternalNetwork"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "web_disabled",
+        "web_search_unavailable",
+        "network_approval_required",
+        "url_rejected",
+        "dns_rejected",
+        "redirect_rejected",
+        "unsupported_content_type",
+        "response_too_large",
+        "network_timeout",
+        "network_failure"
+      ],
+      "example": {
+        "url": "example"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "name": "ee_browser_run_content",
+      "outputCaps": [
+        {
+          "kind": "response_bytes",
+          "max": 1048576
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics",
+        "external_content_untrusted",
+        "external_content_not_instructions",
+        "session_local_cache_normalized_public_fields_only_60_seconds"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "web_context",
+        "ExternalNetwork"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "web_disabled",
+        "web_search_unavailable",
+        "network_approval_required",
+        "url_rejected",
+        "dns_rejected",
+        "redirect_rejected",
+        "unsupported_content_type",
+        "response_too_large",
+        "network_timeout",
+        "network_failure"
+      ],
+      "example": {
+        "url": "example"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "name": "ee_browser_run_screenshot",
+      "outputCaps": [
+        {
+          "kind": "response_bytes",
+          "max": 1048576
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics",
+        "external_content_untrusted",
+        "external_content_not_instructions",
+        "session_local_cache_normalized_public_fields_only_60_seconds"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "web_context",
+        "ExternalNetwork"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "web_disabled",
+        "web_search_unavailable",
+        "network_approval_required",
+        "url_rejected",
+        "dns_rejected",
+        "redirect_rejected",
+        "unsupported_content_type",
+        "response_too_large",
+        "network_timeout",
+        "network_failure"
+      ],
+      "example": {
+        "url": "example"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "name": "ee_browser_run_markdown",
+      "outputCaps": [
+        {
+          "kind": "response_bytes",
+          "max": 1048576
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics",
+        "external_content_untrusted",
+        "external_content_not_instructions",
+        "session_local_cache_normalized_public_fields_only_60_seconds"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "web_context",
+        "ExternalNetwork"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "web_disabled",
+        "web_search_unavailable",
+        "network_approval_required",
+        "url_rejected",
+        "dns_rejected",
+        "redirect_rejected",
+        "unsupported_content_type",
+        "response_too_large",
+        "network_timeout",
+        "network_failure"
+      ],
+      "example": {
+        "selector": "example",
+        "url": "example"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "selector": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "url": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "selector"
+        ],
+        "type": "object"
+      },
+      "name": "ee_browser_run_scrape",
+      "outputCaps": [
+        {
+          "kind": "response_bytes",
+          "max": 1048576
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics",
+        "external_content_untrusted",
+        "external_content_not_instructions",
+        "session_local_cache_normalized_public_fields_only_60_seconds"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "web_context",
+        "ExternalNetwork"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "web_disabled",
+        "web_search_unavailable",
+        "network_approval_required",
+        "url_rejected",
+        "dns_rejected",
+        "redirect_rejected",
+        "unsupported_content_type",
+        "response_too_large",
+        "network_timeout",
+        "network_failure"
+      ],
+      "example": {
+        "prompt": "example",
+        "url": "example"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "prompt": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "url": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "name": "ee_browser_run_json",
+      "outputCaps": [
+        {
+          "kind": "response_bytes",
+          "max": 1048576
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics",
+        "external_content_untrusted",
+        "external_content_not_instructions",
+        "session_local_cache_normalized_public_fields_only_60_seconds"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "web_context",
+        "ExternalNetwork"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "web_disabled",
+        "web_search_unavailable",
+        "network_approval_required",
+        "url_rejected",
+        "dns_rejected",
+        "redirect_rejected",
+        "unsupported_content_type",
+        "response_too_large",
+        "network_timeout",
+        "network_failure"
+      ],
+      "example": {
+        "url": "example"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "name": "ee_browser_run_links",
+      "outputCaps": [
+        {
+          "kind": "response_bytes",
+          "max": 1048576
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics",
+        "external_content_untrusted",
+        "external_content_not_instructions",
+        "session_local_cache_normalized_public_fields_only_60_seconds"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "web_context",
+        "ExternalNetwork"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "new_text": "new",
+        "old_text": "old",
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "new_text": {
+            "type": "string"
+          },
+          "old_text": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "old_text",
+          "new_text"
+        ],
+        "type": "object"
+      },
+      "name": "ee_replace_text",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "edits": [],
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "edits": {
+            "items": {
+              "properties": {
+                "new_text": {
+                  "type": "string"
+                },
+                "old_text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "old_text",
+                "new_text"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "edits"
+        ],
+        "type": "object"
+      },
+      "name": "ee_apply_patch",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "content": "example",
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      },
+      "name": "ee_create_text_file",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "content": "example",
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      },
+      "name": "ee_overwrite_text_file",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "ee_create_directory",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "ee_delete_path",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "destination_path": "example",
+        "source_path": "example"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "destination_path": {
+            "type": "string"
+          },
+          "source_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_path",
+          "destination_path"
+        ],
+        "type": "object"
+      },
+      "name": "ee_copy_path",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "destination_path": "example",
+        "source_path": "example"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "destination_path": {
+            "type": "string"
+          },
+          "source_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_path",
+          "destination_path"
+        ],
+        "type": "object"
+      },
+      "name": "ee_move_path",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "ee_read_buffer",
+      "outputCaps": [
+        {
+          "kind": "bytes",
+          "max": 1048576
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "limit": 1,
+        "line": 1,
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "limit": {
+            "type": "integer"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "line",
+          "limit"
+        ],
+        "type": "object"
+      },
+      "name": "ee_read_buffer_lines",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {},
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "ee_open_buffers",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {},
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "ee_get_diagnostics",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "language_server"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "ee_get_file_diagnostics",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "language_server"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "ee_document_symbols",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "language_server"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "character": 1,
+        "line": 1,
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "character": {
+            "type": "integer"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "line",
+          "character"
+        ],
+        "type": "object"
+      },
+      "name": "ee_references",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "language_server"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "character": 1,
+        "line": 1,
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "character": {
+            "type": "integer"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "line",
+          "character"
+        ],
+        "type": "object"
+      },
+      "name": "ee_list_code_actions",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "language_server"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "action_id": "action-1",
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "action_id": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "action_id"
+        ],
+        "type": "object"
+      },
+      "name": "ee_apply_code_action",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "ee_format_file",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "character": 1,
+        "line": 1,
+        "new_name": "renamed",
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "character": {
+            "type": "integer"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "new_name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "line",
+          "character",
+          "new_name"
+        ],
+        "type": "object"
+      },
+      "name": "ee_preview_rename_symbol",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "language_server"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "character": 1,
+        "line": 1,
+        "new_name": "renamed",
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "character": {
+            "type": "integer"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "new_name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "line",
+          "character",
+          "new_name"
+        ],
+        "type": "object"
+      },
+      "name": "ee_rename_symbol",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "limit": {
+            "type": "integer"
+          },
+          "line": {
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "ee_read_text_file",
+      "outputCaps": [
+        {
+          "kind": "bytes",
+          "max": 1048576
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "content": "example",
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      },
+      "name": "ee_write_text_file",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "terminal_not_owned",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "command": "pwd"
+      },
+      "inputSchema": {
+        "properties": {
+          "args": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "command": {
+            "type": "string"
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "env": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      },
+      "name": "ee_terminal_create",
+      "outputCaps": [
+        {
+          "kind": "bytes",
+          "max": 1048576
+        }
+      ],
+      "redactionRules": [
+        "secret_like_environment_values",
+        "secret_like_environment_keys",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "terminal"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "execute",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "terminal_not_owned",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "terminal_id": "terminal-1"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "terminal_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "terminal_id"
+        ],
+        "type": "object"
+      },
+      "name": "ee_terminal_output",
+      "outputCaps": [
+        {
+          "kind": "bytes",
+          "max": 1048576
+        }
+      ],
+      "redactionRules": [
+        "secret_like_environment_values",
+        "secret_like_environment_keys",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "terminal"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "terminal_not_owned",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "since_seq": 0,
+        "terminal_id": "terminal-1"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "since_seq": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "terminal_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "terminal_id",
+          "since_seq"
+        ],
+        "type": "object"
+      },
+      "name": "ee_terminal_output_since",
+      "outputCaps": [
+        {
+          "kind": "bytes",
+          "max": 1048576
+        }
+      ],
+      "redactionRules": [
+        "secret_like_environment_values",
+        "secret_like_environment_keys",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "terminal"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "terminal_not_owned",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "terminal_id": "terminal-1"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "terminal_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "terminal_id"
+        ],
+        "type": "object"
+      },
+      "name": "ee_terminal_wait",
+      "outputCaps": [
+        {
+          "kind": "bytes",
+          "max": 1048576
+        }
+      ],
+      "redactionRules": [
+        "secret_like_environment_values",
+        "secret_like_environment_keys",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "terminal"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "terminal_not_owned",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "terminal_id": "terminal-1",
+        "timeout_ms": 1
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "terminal_id": {
+            "type": "string"
+          },
+          "timeout_ms": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "terminal_id",
+          "timeout_ms"
+        ],
+        "type": "object"
+      },
+      "name": "ee_terminal_wait_long",
+      "outputCaps": [
+        {
+          "kind": "bytes",
+          "max": 1048576
+        }
+      ],
+      "redactionRules": [
+        "secret_like_environment_values",
+        "secret_like_environment_keys",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "terminal"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "terminal_not_owned",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "terminal_id": "terminal-1"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "terminal_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "terminal_id"
+        ],
+        "type": "object"
+      },
+      "name": "ee_terminal_kill",
+      "outputCaps": [
+        {
+          "kind": "bytes",
+          "max": 1048576
+        }
+      ],
+      "redactionRules": [
+        "secret_like_environment_values",
+        "secret_like_environment_keys",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "terminal"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "execute",
+      "transportAvailability": [
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "terminal_not_owned",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "terminal_id": "terminal-1"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "terminal_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "terminal_id"
+        ],
+        "type": "object"
+      },
+      "name": "ee_terminal_release",
+      "outputCaps": [
+        {
+          "kind": "bytes",
+          "max": 1048576
+        }
+      ],
+      "redactionRules": [
+        "secret_like_environment_values",
+        "secret_like_environment_keys",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "terminal"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "execute",
+      "transportAvailability": [
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {},
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "ee_git_status",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "git"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {},
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "ee_git_diff",
+      "outputCaps": [
+        {
+          "kind": "bytes",
+          "max": 262144
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "git"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {},
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "ee_git_diff_staged",
+      "outputCaps": [
+        {
+          "kind": "bytes",
+          "max": 262144
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "git"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "ee_git_diff_file",
+      "outputCaps": [
+        {
+          "kind": "bytes",
+          "max": 262144
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "git"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {},
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "ee_changed_files",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {},
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "ee_review_context",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "evidence_unavailable",
+        "backend_failure"
+      ],
+      "example": {},
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "turn_id": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "ee_turn_evidence_summary",
+      "outputCaps": [
+        {
+          "kind": "evidence_ids",
+          "max": 128
+        }
+      ],
+      "redactionRules": [
+        "host_owned_evidence_summary_only",
+        "no_transcript",
+        "no_raw_paths",
+        "no_prompts",
+        "no_terminal_output",
+        "secret_like_values"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {},
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "ee_project_instructions",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "content": "example",
+        "key": "project.architecture"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "content"
+        ],
+        "type": "object"
+      },
+      "name": "ee_save_note",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {},
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "ee_read_notes",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "key": "project.architecture"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "type": "object"
+      },
+      "name": "ee_read_note",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "key": "project.architecture",
+        "value": "example"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "value": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "value"
+        ],
+        "type": "object"
+      },
+      "name": "ee_remember_workspace_fact",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 1
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "query": "example"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "ee_recall_workspace_facts",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 8
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "key": "project.architecture"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "type": "object"
+      },
+      "name": "ee_read_workspace_fact",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 1
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "required",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "stale_revision",
+        "backend_failure"
+      ],
+      "example": {
+        "key": "project.architecture"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "type": "object"
+      },
+      "name": "ee_forget_workspace_fact",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 1
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "write",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "ee_file_dependency_map",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "dependency_index"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "dependency_index_unavailable",
+        "dependency_index_stale",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {
+        "character": 1,
+        "line": 1,
+        "path": "/workspace/example.rs"
+      },
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "character": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "line": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "line",
+          "character"
+        ],
+        "type": "object"
+      },
+      "name": "ee_symbol_dependency_map",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [
+        "dependency_index"
+      ],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {},
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "ee_tools_manifest",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    },
+    {
+      "approval": "none",
+      "deprecated": false,
+      "errorClasses": [
+        "invalid_arguments",
+        "unsupported_tool",
+        "permission_denied",
+        "backend_failure",
+        "output_truncated"
+      ],
+      "example": {},
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "ee_diagnostics",
+      "outputCaps": [
+        {
+          "kind": "result_items",
+          "max": 500
+        }
+      ],
+      "redactionRules": [
+        "secret_like_values",
+        "sensitive_diagnostics"
+      ],
+      "replacement": null,
+      "requiredCapabilities": [],
+      "schemaVersion": 4,
+      "sideEffect": "read",
+      "transportAvailability": [
+        "stdio",
+        "acp"
+      ]
+    }
+  ]
+}

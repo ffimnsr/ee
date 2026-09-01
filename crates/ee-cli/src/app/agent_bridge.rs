@@ -929,6 +929,14 @@ pub(crate) enum BridgeUiMessage {
         request: CreateElicitationRequest,
         reply: oneshot::Sender<ClientRequestResult>,
     },
+    WorkspaceMemoryApproval {
+        operation: ee_agent_host::WorkspaceMemoryMutationOperation,
+        key: String,
+        reply: oneshot::Sender<ClientRequestResult>,
+    },
+    WorkspaceMemorySlashResult {
+        text: String,
+    },
     /// A tool call from the ee MCP proxy (Phase 6).  Writes and terminal
     /// creates queue the same approval prompts as direct ACP client methods;
     /// reads and diagnostics are served immediately.  `route` carries the
@@ -992,6 +1000,7 @@ impl BridgeUiHandler {
             elicitation_url: true,
             session_config_boolean: true,
             proxy_discovery: true,
+            workspace_memory_mutation_approval: true,
         }
     }
 }
@@ -1007,6 +1016,12 @@ impl ClientRequestHandler for BridgeUiHandler {
     ) -> Pin<Box<dyn std::future::Future<Output = ClientRequestResult> + Send + '_>> {
         Box::pin(async move {
             match request {
+                ClientRequest::ApproveWorkspaceMemoryMutation { operation, key } => {
+                    forward_and_await(self.tx.clone(), |reply| {
+                        BridgeUiMessage::WorkspaceMemoryApproval { operation, key, reply }
+                    })
+                    .await
+                }
                 ClientRequest::ProxyWorkspaceRoots => {
                     forward_and_await(self.tx.clone(), |reply| BridgeUiMessage::ProxyTool {
                         route: ProxyRoute::AcpNative,
@@ -1548,6 +1563,67 @@ impl std::fmt::Debug for WebApprovalCall {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum WorkspaceMemoryApprovalOperation {
+    Remember,
+    Verify,
+    Forget,
+    Retract,
+    Clear,
+    DisableDelete,
+    Export,
+    Import,
+}
+
+impl WorkspaceMemoryApprovalOperation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Remember => "remember",
+            Self::Verify => "verify",
+            Self::Forget => "forget",
+            Self::Retract => "retract",
+            Self::Clear => "clear",
+            Self::DisableDelete => "disable --delete",
+            Self::Export => "export",
+            Self::Import => "import",
+        }
+    }
+}
+
+enum WorkspaceMemoryApprovalTarget {
+    ApprovalOnly,
+    Remember { value: String },
+    Forget,
+    Retract,
+    RetractKey { key: String },
+    Clear,
+    DisableDelete { config_path: PathBuf },
+    Export { include_values: bool },
+    ExportValue { include_values: bool },
+    Import { export: Box<ee_agent_host::WorkspaceMemoryExportDto> },
+}
+
+impl std::fmt::Debug for WorkspaceMemoryApprovalTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ApprovalOnly => formatter.write_str("ApprovalOnly"),
+            Self::Remember { .. } => formatter.write_str("Remember { value: [redacted] }"),
+            Self::Forget => formatter.write_str("Forget"),
+            Self::Retract => formatter.write_str("Retract"),
+            Self::RetractKey { .. } => formatter.write_str("RetractKey { key: [redacted] }"),
+            Self::Clear => formatter.write_str("Clear"),
+            Self::DisableDelete { config_path } => {
+                formatter.debug_struct("DisableDelete").field("config_path", config_path).finish()
+            }
+            Self::Export { .. } => formatter.write_str("Export { include_values: [redacted] }"),
+            Self::ExportValue { .. } => {
+                formatter.write_str("ExportValue { include_values: [redacted] }")
+            }
+            Self::Import { .. } => formatter.write_str("Import { export: [redacted] }"),
+        }
+    }
+}
+
 #[derive(Debug)]
 enum ApprovalKind {
     Write {
@@ -1570,6 +1646,11 @@ enum ApprovalKind {
     },
     /// External network approval carries only host/route in visible or
     /// persisted session state. Query and URL remain private call payloads.
+    WorkspaceMemoryApproval {
+        operation: WorkspaceMemoryApprovalOperation,
+        key: String,
+        target: WorkspaceMemoryApprovalTarget,
+    },
     Network {
         route: ProxyRoute,
         /// Canonical host at original tool invocation.
@@ -1683,6 +1764,9 @@ fn approval_fingerprint(kind: &ApprovalKind) -> String {
                 .join("|")
         ),
         ApprovalKind::Filesystem { operation } => operation.fingerprint(),
+        ApprovalKind::WorkspaceMemoryApproval { operation, key, .. } => {
+            format!("workspace-memory:{operation:?}:{key}")
+        }
         ApprovalKind::TerminalCreate { request } => {
             let command = [request.command.clone()]
                 .into_iter()
@@ -1792,6 +1876,68 @@ impl ApprovalPrompt {
             persistent_label,
             reply,
         )
+    }
+
+    fn workspace_memory(
+        operation: ee_agent_host::WorkspaceMemoryMutationOperation,
+        key: String,
+        target: WorkspaceMemoryApprovalTarget,
+        reply: oneshot::Sender<ClientRequestResult>,
+    ) -> Self {
+        let operation = match operation {
+            ee_agent_host::WorkspaceMemoryMutationOperation::Remember => {
+                WorkspaceMemoryApprovalOperation::Remember
+            }
+            ee_agent_host::WorkspaceMemoryMutationOperation::Verify => {
+                WorkspaceMemoryApprovalOperation::Verify
+            }
+            ee_agent_host::WorkspaceMemoryMutationOperation::Forget => {
+                WorkspaceMemoryApprovalOperation::Forget
+            }
+        };
+        Self::workspace_memory_management(operation, key, target, reply)
+    }
+
+    fn workspace_memory_management(
+        operation: WorkspaceMemoryApprovalOperation,
+        key: String,
+        target: WorkspaceMemoryApprovalTarget,
+        reply: oneshot::Sender<ClientRequestResult>,
+    ) -> Self {
+        let operation_label = operation.label();
+        Self {
+            thread_index: None,
+            session_id: SessionId::new("workspace-memory").0.to_string(),
+            agent_id: None,
+            write_lease: None,
+            write_lease_owner: None,
+            title: String::from("workspace memory mutation"),
+            detail: format!("operation: {operation_label}\nkey: {key}"),
+            options: vec![
+                (String::from("Allow once"), ApprovalChoice::AllowOnce),
+                (String::from("Deny"), ApprovalChoice::DenyOnce),
+            ],
+            selected: 0,
+            kind: ApprovalKind::WorkspaceMemoryApproval { operation, key, target },
+            mcp: None,
+            allow_candidates: Vec::new(),
+            confirming_allow: None,
+            deny_candidate: None,
+            confirming_deny: false,
+            mandatory_confirmation: None,
+            reply,
+        }
+    }
+
+    fn workspace_memory_proxy(
+        operation: WorkspaceMemoryApprovalOperation,
+        target: WorkspaceMemoryApprovalTarget,
+        reply: oneshot::Sender<ClientRequestResult>,
+    ) -> Self {
+        let mut prompt =
+            Self::workspace_memory_management(operation, String::from("[redacted]"), target, reply);
+        prompt.detail = format!("operation: {}\npayload: [redacted]", operation.label());
+        prompt
     }
 
     fn filesystem(
@@ -2381,6 +2527,21 @@ impl App {
                 BridgeUiMessage::Elicitation { session_id, request, reply } => {
                     self.present_elicitation(session_id, request, reply);
                 }
+                BridgeUiMessage::WorkspaceMemoryApproval { operation, key, reply } => {
+                    self.request_workspace_memory_approval(ApprovalPrompt::workspace_memory(
+                        operation,
+                        key,
+                        WorkspaceMemoryApprovalTarget::ApprovalOnly,
+                        reply,
+                    ));
+                }
+                BridgeUiMessage::WorkspaceMemorySlashResult { text } => {
+                    if let Some(index) = self.agents.active_thread_index() {
+                        self.agents.threads[index].push_system(text);
+                    } else {
+                        self.backend.status_message = Some(text);
+                    }
+                }
                 BridgeUiMessage::ProxyTool { call, route, reply } => {
                     self.handle_proxy_tool(call, route, reply);
                 }
@@ -2392,6 +2553,151 @@ impl App {
                 }
             }
         }
+    }
+
+    fn workspace_memory_value<T: serde::Serialize>(
+        result: Result<T, ee_agent_host::WorkspaceMemoryHostError>,
+    ) -> Result<serde_json::Value, AgentError> {
+        result.map_err(|error| AgentError::HandlerError(error.to_string())).and_then(|value| {
+            serde_json::to_value(value).map_err(|error| AgentError::HandlerError(error.to_string()))
+        })
+    }
+
+    fn workspace_memory_remember(
+        &self,
+        key: &str,
+        value: &str,
+    ) -> Result<serde_json::Value, AgentError> {
+        let manager = self
+            .agents
+            .host
+            .as_ref()
+            .ok_or_else(|| AgentError::HandlerError(String::from("agent host unavailable")))?;
+        Self::workspace_memory_value(manager.manager.workspace_memory_remember_approved(
+            key,
+            value,
+            ee_agent_host::WorkspaceMemoryMutationApproval::Approved,
+        ))
+    }
+
+    fn workspace_memory_forget(&self, key: &str) -> Result<serde_json::Value, AgentError> {
+        let manager = self
+            .agents
+            .host
+            .as_ref()
+            .ok_or_else(|| AgentError::HandlerError(String::from("agent host unavailable")))?;
+        Self::workspace_memory_value(manager.manager.workspace_memory_forget_approved(
+            key,
+            ee_agent_host::WorkspaceMemoryMutationApproval::Approved,
+        ))
+    }
+
+    fn workspace_memory_retract(&self, key: &str) -> Result<serde_json::Value, AgentError> {
+        let manager = self
+            .agents
+            .host
+            .as_ref()
+            .ok_or_else(|| AgentError::HandlerError(String::from("agent host unavailable")))?;
+        Self::workspace_memory_value(manager.manager.workspace_memory_retract_approved(
+            key,
+            ee_agent_host::WorkspaceMemoryMutationApproval::Approved,
+        ))
+    }
+
+    fn workspace_memory_clear(&self) -> Result<serde_json::Value, AgentError> {
+        let manager = self
+            .agents
+            .host
+            .as_ref()
+            .ok_or_else(|| AgentError::HandlerError(String::from("agent host unavailable")))?;
+        Self::workspace_memory_value(manager.manager.workspace_memory_clear_approved(
+            ee_agent_host::WorkspaceMemoryMutationApproval::Approved,
+        ))
+    }
+
+    fn workspace_memory_disable_delete(
+        &mut self,
+        config_path: &Path,
+    ) -> Result<serde_json::Value, AgentError> {
+        let cleared = self.workspace_memory_clear()?;
+        crate::config::persist_workspace_memory_enabled(config_path, false)
+            .map_err(AgentError::HandlerError)?;
+        self.config.agents.workspace_memory.enabled = false;
+        Ok(serde_json::json!({
+            "enabled": false,
+            "cleared": cleared,
+            "restart_required": true,
+        }))
+    }
+
+    fn workspace_memory_export_value(
+        &self,
+        include_values: bool,
+    ) -> Result<serde_json::Value, AgentError> {
+        let manager = self
+            .agents
+            .host
+            .as_ref()
+            .ok_or_else(|| AgentError::HandlerError(String::from("agent host unavailable")))?;
+        Self::workspace_memory_value(manager.manager.workspace_memory_export_approved(
+            include_values,
+            ee_agent_host::WorkspaceMemoryMutationApproval::Approved,
+        ))
+    }
+
+    fn workspace_memory_export(
+        &self,
+        include_values: bool,
+    ) -> Result<serde_json::Value, AgentError> {
+        let manager = self
+            .agents
+            .host
+            .as_ref()
+            .ok_or_else(|| AgentError::HandlerError(String::from("agent host unavailable")))?;
+        let export = manager
+            .manager
+            .workspace_memory_export_approved(
+                include_values,
+                ee_agent_host::WorkspaceMemoryMutationApproval::Approved,
+            )
+            .map_err(|error| AgentError::HandlerError(error.to_string()))?;
+        #[cfg(test)]
+        let directory =
+            self.agents.test_export_base.as_ref().map(|base| base.join("workspace-memory-exports"));
+        #[cfg(not(test))]
+        let directory: Option<PathBuf> = None;
+        let directory = match directory {
+            Some(directory) => directory,
+            None => crate::logs::state_dir()
+                .map(|base| base.join("workspace-memory-exports"))
+                .ok_or_else(|| {
+                    AgentError::Io(String::from("platform state directory is unavailable"))
+                })?,
+        };
+        let fact_count = export.facts.len();
+        let redacted = export.redacted;
+        let path = super::agent_export::write_workspace_memory_export(&directory, &export)
+            .map_err(|error| AgentError::Io(error.to_string()))?;
+        Ok(serde_json::json!({
+            "path": path,
+            "redacted": redacted,
+            "facts": fact_count,
+        }))
+    }
+
+    fn workspace_memory_import(
+        &self,
+        export: ee_agent_host::WorkspaceMemoryExportDto,
+    ) -> Result<serde_json::Value, AgentError> {
+        let manager = self
+            .agents
+            .host
+            .as_ref()
+            .ok_or_else(|| AgentError::HandlerError(String::from("agent host unavailable")))?;
+        Self::workspace_memory_value(manager.manager.workspace_memory_import_approved(
+            export,
+            ee_agent_host::WorkspaceMemoryMutationApproval::Approved,
+        ))
     }
 
     /// Answers one proxy tool call through the same approval/bridge paths as
@@ -2406,6 +2712,99 @@ impl App {
     ) {
         let session_id = SessionId::new("proxy");
         match call {
+            super::agents_mcp::ProxyToolCall::RememberWorkspaceFact { key, value } => {
+                self.request_workspace_memory_approval(ApprovalPrompt::workspace_memory(
+                    ee_agent_host::WorkspaceMemoryMutationOperation::Remember,
+                    key,
+                    WorkspaceMemoryApprovalTarget::Remember { value },
+                    reply,
+                ));
+            }
+            super::agents_mcp::ProxyToolCall::RecallWorkspaceFacts { query } => {
+                let result = self
+                    .agents
+                    .host
+                    .as_ref()
+                    .ok_or_else(|| AgentError::HandlerError(String::from("agent host unavailable")))
+                    .and_then(|host| {
+                        Self::workspace_memory_value(host.manager.workspace_memory_recall(
+                            query,
+                            self.config.agents.workspace_memory.max_recall_results,
+                        ))
+                    });
+                let _ = reply.send(result.map(ClientRequestResponse::ProxyValue));
+            }
+            super::agents_mcp::ProxyToolCall::ReadWorkspaceFact { key } => {
+                let result = self
+                    .agents
+                    .host
+                    .as_ref()
+                    .ok_or_else(|| AgentError::HandlerError(String::from("agent host unavailable")))
+                    .and_then(|host| {
+                        Self::workspace_memory_value(host.manager.workspace_memory_read(key))
+                    });
+                let _ = reply.send(result.map(ClientRequestResponse::ProxyValue));
+            }
+            super::agents_mcp::ProxyToolCall::ForgetWorkspaceFact { key } => {
+                self.request_workspace_memory_approval(ApprovalPrompt::workspace_memory(
+                    ee_agent_host::WorkspaceMemoryMutationOperation::Forget,
+                    key,
+                    WorkspaceMemoryApprovalTarget::Forget,
+                    reply,
+                ));
+            }
+            super::agents_mcp::ProxyToolCall::ListWorkspaceFacts { limit } => {
+                let result = self
+                    .agents
+                    .host
+                    .as_ref()
+                    .ok_or_else(|| AgentError::HandlerError(String::from("agent host unavailable")))
+                    .and_then(|host| {
+                        Self::workspace_memory_value(
+                            host.manager.workspace_memory_list(limit as usize),
+                        )
+                    });
+                let _ = reply.send(result.map(ClientRequestResponse::ProxyValue));
+            }
+            super::agents_mcp::ProxyToolCall::RetractWorkspaceFact { key } => {
+                self.request_workspace_memory_approval(ApprovalPrompt::workspace_memory_proxy(
+                    WorkspaceMemoryApprovalOperation::Retract,
+                    WorkspaceMemoryApprovalTarget::RetractKey { key },
+                    reply,
+                ));
+            }
+            super::agents_mcp::ProxyToolCall::ExportWorkspaceMemory { include_values } => {
+                self.request_workspace_memory_approval(ApprovalPrompt::workspace_memory_proxy(
+                    WorkspaceMemoryApprovalOperation::Export,
+                    WorkspaceMemoryApprovalTarget::ExportValue { include_values },
+                    reply,
+                ));
+            }
+            super::agents_mcp::ProxyToolCall::ImportWorkspaceMemory { export_json } => {
+                let export = match serde_json::from_str::<ee_agent_host::WorkspaceMemoryExportDto>(
+                    &export_json,
+                ) {
+                    Ok(export) => export,
+                    Err(_) => {
+                        let _ = reply.send(Err(AgentError::HandlerError(String::from(
+                            "workspace-memory import payload is invalid",
+                        ))));
+                        return;
+                    }
+                };
+                self.request_workspace_memory_approval(ApprovalPrompt::workspace_memory_proxy(
+                    WorkspaceMemoryApprovalOperation::Import,
+                    WorkspaceMemoryApprovalTarget::Import { export: Box::new(export) },
+                    reply,
+                ));
+            }
+            super::agents_mcp::ProxyToolCall::ClearWorkspaceMemory => {
+                self.request_workspace_memory_approval(ApprovalPrompt::workspace_memory_proxy(
+                    WorkspaceMemoryApprovalOperation::Clear,
+                    WorkspaceMemoryApprovalTarget::Clear,
+                    reply,
+                ));
+            }
             super::agents_mcp::ProxyToolCall::WorkspaceRoots => {
                 let _ =
                     reply.send(self.proxy_workspace_roots().map(ClientRequestResponse::ProxyValue));
@@ -3137,7 +3536,7 @@ impl App {
                     ));
                 }
             }
-            ApprovalKind::Filesystem { .. } => {}
+            ApprovalKind::Filesystem { .. } | ApprovalKind::WorkspaceMemoryApproval { .. } => {}
         }
         for (choice, label, candidate) in candidates {
             prompt.options.push((label, choice));
@@ -3412,6 +3811,7 @@ impl App {
             }
             ApprovalKind::Filesystem { .. }
             | ApprovalKind::TerminalCreate { .. }
+            | ApprovalKind::WorkspaceMemoryApproval { .. }
             | ApprovalKind::Network { .. } => return,
         };
         let revision = self
@@ -3459,7 +3859,9 @@ impl App {
             ApprovalKind::Filesystem { operation } => operation
                 .canonical_write_scopes(&self.allowed_fs_roots())
                 .map_err(|error| AgentError::invalid_params(error.to_string()))?,
-            ApprovalKind::TerminalCreate { .. } | ApprovalKind::Network { .. } => return Ok(()),
+            ApprovalKind::TerminalCreate { .. }
+            | ApprovalKind::WorkspaceMemoryApproval { .. }
+            | ApprovalKind::Network { .. } => return Ok(()),
         };
 
         let blocks_dirty = match &prompt.kind {
@@ -3473,7 +3875,9 @@ impl App {
                 )
             }),
             ApprovalKind::Filesystem { .. } => true,
-            ApprovalKind::TerminalCreate { .. } | ApprovalKind::Network { .. } => false,
+            ApprovalKind::TerminalCreate { .. }
+            | ApprovalKind::WorkspaceMemoryApproval { .. }
+            | ApprovalKind::Network { .. } => false,
         } && self.has_dirty_buffer(&scopes);
         if blocks_dirty {
             return Err(AgentError::invalid_params(
@@ -3500,7 +3904,9 @@ impl App {
             ApprovalKind::Filesystem { .. } => {
                 format!("filesystem-{}", self.agents.next_write_turn_id)
             }
-            ApprovalKind::TerminalCreate { .. } | ApprovalKind::Network { .. } => unreachable!(),
+            ApprovalKind::TerminalCreate { .. }
+            | ApprovalKind::WorkspaceMemoryApproval { .. }
+            | ApprovalKind::Network { .. } => unreachable!(),
         };
         self.agents.next_write_turn_id = self.agents.next_write_turn_id.wrapping_add(1);
         let owner =
@@ -3580,6 +3986,110 @@ impl App {
             self.agents.write_leases.release(id);
         }
         prompt.write_lease_owner = None;
+    }
+
+    pub(super) fn queue_workspace_memory_forget(&mut self, key: String) {
+        let (reply, receiver) = oneshot::channel();
+        self.request_workspace_memory_approval(ApprovalPrompt::workspace_memory(
+            ee_agent_host::WorkspaceMemoryMutationOperation::Forget,
+            key,
+            WorkspaceMemoryApprovalTarget::Forget,
+            reply,
+        ));
+        self.forward_workspace_memory_slash_result("forget", receiver);
+    }
+
+    pub(super) fn queue_workspace_memory_retract(&mut self, key: String) {
+        self.queue_workspace_memory_management(
+            WorkspaceMemoryApprovalOperation::Retract,
+            key,
+            WorkspaceMemoryApprovalTarget::Retract,
+        );
+    }
+
+    pub(super) fn queue_workspace_memory_clear(&mut self) {
+        self.queue_workspace_memory_management(
+            WorkspaceMemoryApprovalOperation::Clear,
+            String::from("all facts in primary canonical workspace"),
+            WorkspaceMemoryApprovalTarget::Clear,
+        );
+    }
+
+    pub(super) fn queue_workspace_memory_disable_delete(&mut self, config_path: PathBuf) {
+        self.queue_workspace_memory_management(
+            WorkspaceMemoryApprovalOperation::DisableDelete,
+            String::from(
+                "all facts in primary canonical workspace; persist enabled = false only after clear",
+            ),
+            WorkspaceMemoryApprovalTarget::DisableDelete { config_path },
+        );
+    }
+
+    pub(super) fn queue_workspace_memory_export(&mut self, include_values: bool) {
+        let scope = if include_values {
+            "all facts including values"
+        } else {
+            "all facts with values redacted"
+        };
+        self.queue_workspace_memory_management(
+            WorkspaceMemoryApprovalOperation::Export,
+            scope.to_string(),
+            WorkspaceMemoryApprovalTarget::Export { include_values },
+        );
+    }
+
+    pub(super) fn queue_workspace_memory_import(
+        &mut self,
+        path: &Path,
+        export: ee_agent_host::WorkspaceMemoryExportDto,
+    ) {
+        self.queue_workspace_memory_management(
+            WorkspaceMemoryApprovalOperation::Import,
+            path.display().to_string(),
+            WorkspaceMemoryApprovalTarget::Import { export: Box::new(export) },
+        );
+    }
+
+    fn queue_workspace_memory_management(
+        &mut self,
+        operation: WorkspaceMemoryApprovalOperation,
+        key: String,
+        target: WorkspaceMemoryApprovalTarget,
+    ) {
+        let (reply, receiver) = oneshot::channel();
+        self.request_workspace_memory_approval(ApprovalPrompt::workspace_memory_management(
+            operation, key, target, reply,
+        ));
+        self.forward_workspace_memory_slash_result(operation.label(), receiver);
+    }
+
+    fn forward_workspace_memory_slash_result(
+        &self,
+        operation: &'static str,
+        receiver: oneshot::Receiver<ClientRequestResult>,
+    ) {
+        let bridge = self.agents.bridge_tx.clone();
+        let thread_name = format!("ee-workspace-memory-{operation}");
+        let _ = std::thread::Builder::new().name(thread_name).spawn(move || {
+            let text = match receiver.blocking_recv() {
+                Ok(Ok(ClientRequestResponse::ProxyValue(value))) => {
+                    format!("workspace memory {operation} completed: {value}")
+                }
+                Ok(Ok(_)) => format!("workspace memory {operation} completed"),
+                Ok(Err(error)) => format!("workspace memory {operation} failed: {error}"),
+                Err(_) => format!("workspace memory {operation} cancelled"),
+            };
+            let _ = bridge.send(BridgeUiMessage::WorkspaceMemorySlashResult { text });
+        });
+    }
+
+    fn request_workspace_memory_approval(&mut self, prompt: ApprovalPrompt) {
+        self.agents.approvals.push_back(prompt);
+        self.backend.status_message = Some(if self.agents.layout == AgentPaneLayout::Closed {
+            String::from("workspace memory approval required (open :agents)")
+        } else {
+            String::from("workspace memory approval required")
+        });
     }
 
     /// Queues an approval prompt (front of the queue wins) and notifies,
@@ -3753,6 +4263,9 @@ impl App {
         prompt: &ApprovalPrompt,
         operation: &TrustOperation,
     ) -> bool {
+        if matches!(prompt.kind, ApprovalKind::WorkspaceMemoryApproval { .. }) {
+            return false;
+        }
         if operation.is_unknown() {
             return false;
         }
@@ -3777,7 +4290,9 @@ impl App {
                 ApprovalKind::TerminalCreate { request } => {
                     self.profile_id_for_request(request).is_some()
                 }
-                ApprovalKind::Filesystem { .. } | ApprovalKind::Network { .. } => false,
+                ApprovalKind::Filesystem { .. }
+                | ApprovalKind::WorkspaceMemoryApproval { .. }
+                | ApprovalKind::Network { .. } => false,
             },
             ToolApprovalMode::Bypass => true,
         }
@@ -3792,6 +4307,9 @@ impl App {
     fn trust_operation_for_prompt(&self, prompt: &ApprovalPrompt) -> TrustOperation {
         let workspace = self.primary_workspace_identity();
         let (category, identity) = match &prompt.kind {
+            ApprovalKind::WorkspaceMemoryApproval { .. } => {
+                unreachable!("workspace memory approvals bypass trust policy")
+            }
             ApprovalKind::Write { .. } | ApprovalKind::WriteBatch { .. } => {
                 // Phase 3: eligible proxy tool calls carry a validated MCP
                 // invocation; everything else normalizes as a native write.
@@ -3945,7 +4463,7 @@ impl App {
                 }
                 paths.into_iter().find_map(|path| self.inspect_mutation_path(path))
             }
-            ApprovalKind::Network { .. } => None,
+            ApprovalKind::WorkspaceMemoryApproval { .. } | ApprovalKind::Network { .. } => None,
         }
     }
 
@@ -4554,6 +5072,73 @@ impl App {
             return;
         }
 
+        if matches!(prompt.kind, ApprovalKind::WorkspaceMemoryApproval { .. }) {
+            let approved = choice == ApprovalChoice::AllowOnce;
+            let ApprovalKind::WorkspaceMemoryApproval { key, target, .. } = prompt.kind else {
+                unreachable!()
+            };
+            let result = if !approved {
+                match target {
+                    WorkspaceMemoryApprovalTarget::ApprovalOnly => {
+                        Ok(ClientRequestResponse::WorkspaceMemoryApproval { approved: false })
+                    }
+                    WorkspaceMemoryApprovalTarget::Remember { .. }
+                    | WorkspaceMemoryApprovalTarget::Forget
+                    | WorkspaceMemoryApprovalTarget::Retract
+                    | WorkspaceMemoryApprovalTarget::RetractKey { .. }
+                    | WorkspaceMemoryApprovalTarget::Clear
+                    | WorkspaceMemoryApprovalTarget::DisableDelete { .. }
+                    | WorkspaceMemoryApprovalTarget::Export { .. }
+                    | WorkspaceMemoryApprovalTarget::ExportValue { .. }
+                    | WorkspaceMemoryApprovalTarget::Import { .. } => {
+                        Err(AgentError::PermissionDenied {
+                            reason: String::from("user denied workspace memory operation"),
+                        })
+                    }
+                }
+            } else {
+                match target {
+                    WorkspaceMemoryApprovalTarget::ApprovalOnly => {
+                        Ok(ClientRequestResponse::WorkspaceMemoryApproval { approved: true })
+                    }
+                    WorkspaceMemoryApprovalTarget::Remember { value } => self
+                        .workspace_memory_remember(&key, &value)
+                        .map(ClientRequestResponse::ProxyValue),
+                    WorkspaceMemoryApprovalTarget::Forget => {
+                        self.workspace_memory_forget(&key).map(ClientRequestResponse::ProxyValue)
+                    }
+                    WorkspaceMemoryApprovalTarget::Retract => {
+                        self.workspace_memory_retract(&key).map(ClientRequestResponse::ProxyValue)
+                    }
+                    WorkspaceMemoryApprovalTarget::RetractKey { key } => {
+                        self.workspace_memory_retract(&key).map(ClientRequestResponse::ProxyValue)
+                    }
+                    WorkspaceMemoryApprovalTarget::Clear => {
+                        self.workspace_memory_clear().map(ClientRequestResponse::ProxyValue)
+                    }
+                    WorkspaceMemoryApprovalTarget::DisableDelete { config_path } => self
+                        .workspace_memory_disable_delete(&config_path)
+                        .map(ClientRequestResponse::ProxyValue),
+                    WorkspaceMemoryApprovalTarget::Export { include_values } => self
+                        .workspace_memory_export(include_values)
+                        .map(ClientRequestResponse::ProxyValue),
+                    WorkspaceMemoryApprovalTarget::ExportValue { include_values } => self
+                        .workspace_memory_export_value(include_values)
+                        .map(ClientRequestResponse::ProxyValue),
+                    WorkspaceMemoryApprovalTarget::Import { export } => {
+                        self.workspace_memory_import(*export).map(ClientRequestResponse::ProxyValue)
+                    }
+                }
+            };
+            let _ = prompt.reply.send(result);
+            self.backend.status_message = Some(if approved {
+                String::from("workspace memory mutation approved once")
+            } else {
+                String::from("workspace memory mutation denied")
+            });
+            return;
+        }
+
         if choice == ApprovalChoice::DenyPersistent {
             self.resolve_persistent_deny_choice(prompt);
             return;
@@ -4647,6 +5232,7 @@ impl App {
             ApprovalKind::Filesystem { operation } => {
                 self.apply_proxy_filesystem(operation, prompt.reply);
             }
+            ApprovalKind::WorkspaceMemoryApproval { .. } => unreachable!(),
             ApprovalKind::Network {
                 route,
                 requested_host,
@@ -4720,6 +5306,7 @@ impl App {
                 }
                 _ => unreachable!(),
             },
+            ApprovalKind::WorkspaceMemoryApproval { .. } => unreachable!(),
             ApprovalKind::Filesystem { .. } => {
                 self.release_prompt_write_lease(&mut prompt);
                 let _ = prompt.reply.send(Err(AgentError::PermissionDenied {
@@ -5956,6 +6543,7 @@ impl App {
             }
             ApprovalKind::Filesystem { .. }
             | ApprovalKind::TerminalCreate { .. }
+            | ApprovalKind::WorkspaceMemoryApproval { .. }
             | ApprovalKind::Network { .. } => return,
         };
         let revision = self
@@ -6229,7 +6817,7 @@ impl App {
         self.allowed_fs_roots().iter().any(|root| canonical.starts_with(root))
     }
 
-    fn canonical_workspace_roots(&self) -> Vec<PathBuf> {
+    pub(super) fn canonical_workspace_roots(&self) -> Vec<PathBuf> {
         let mut roots = BTreeSet::new();
         for root in self.agents_workspace_roots() {
             if !root.is_absolute() {
@@ -9161,6 +9749,128 @@ mod tests {
         assert_eq!(fetch["provenance"], "https://docs.example/final");
         assert_eq!(fetch["trust"], "untrusted_external_content");
         assert_eq!(fetch["truncated"], true);
+    }
+
+    #[test]
+    fn workspace_memory_approval_is_one_time_and_redacts_value() {
+        let secret = "do-not-show-this-value";
+        let (reply, _receiver) = oneshot::channel();
+        let prompt = ApprovalPrompt::workspace_memory(
+            ee_agent_host::WorkspaceMemoryMutationOperation::Remember,
+            String::from("build.command"),
+            WorkspaceMemoryApprovalTarget::Remember { value: String::from(secret) },
+            reply,
+        );
+
+        assert_eq!(prompt.detail, "operation: remember\nkey: build.command");
+        assert_eq!(
+            prompt.options,
+            vec![
+                (String::from("Allow once"), ApprovalChoice::AllowOnce),
+                (String::from("Deny"), ApprovalChoice::DenyOnce),
+            ]
+        );
+        let rendered = format!("{prompt:?}");
+        assert!(!rendered.contains(secret));
+        assert!(!prompt.options.iter().any(|(_, choice)| matches!(
+            choice,
+            ApprovalChoice::AllowSession
+                | ApprovalChoice::AllowPersistent
+                | ApprovalChoice::AllowPersistentShort
+                | ApprovalChoice::AllowPersistentPrefix(_)
+                | ApprovalChoice::AllowPersistentPrefixShort(_)
+        )));
+        assert!(BridgeUiHandler::editor_capabilities().workspace_memory_mutation_approval);
+    }
+
+    #[test]
+    fn workspace_memory_management_approvals_are_one_time_and_redact_import_values() {
+        let secret = "imported-secret-value";
+        let export = ee_agent_host::WorkspaceMemoryExportDto {
+            schema_version: 1,
+            workspace_id: String::from("workspace"),
+            redacted: false,
+            facts: vec![ee_agent_host::WorkspaceMemoryExportedFact {
+                namespace: String::from("default"),
+                key: String::from("build.command"),
+                value: Some(secret.to_string()),
+                kind: String::from("command"),
+                authority: String::from("user_asserted"),
+                freshness: String::from("current"),
+                provenance: ee_agent_host::WorkspaceMemoryExportProvenance {
+                    source_kind: String::from("user"),
+                    source_id: String::from("import"),
+                    revision: None,
+                    fingerprint: None,
+                    verified_at: None,
+                },
+                expires_at: None,
+                content_hash: String::from("hash"),
+            }],
+        };
+        let operations = [
+            (WorkspaceMemoryApprovalOperation::Clear, WorkspaceMemoryApprovalTarget::Clear),
+            (
+                WorkspaceMemoryApprovalOperation::DisableDelete,
+                WorkspaceMemoryApprovalTarget::DisableDelete {
+                    config_path: PathBuf::from(".ee.toml"),
+                },
+            ),
+            (
+                WorkspaceMemoryApprovalOperation::Export,
+                WorkspaceMemoryApprovalTarget::Export { include_values: true },
+            ),
+            (
+                WorkspaceMemoryApprovalOperation::Import,
+                WorkspaceMemoryApprovalTarget::Import { export: Box::new(export) },
+            ),
+        ];
+
+        for (operation, target) in operations {
+            let (reply, _receiver) = oneshot::channel();
+            let prompt = ApprovalPrompt::workspace_memory_management(
+                operation,
+                String::from("explicit scope"),
+                target,
+                reply,
+            );
+            assert_eq!(
+                prompt.options,
+                vec![
+                    (String::from("Allow once"), ApprovalChoice::AllowOnce),
+                    (String::from("Deny"), ApprovalChoice::DenyOnce),
+                ]
+            );
+            assert!(!format!("{prompt:?}").contains(secret));
+        }
+
+        for (operation, target, hidden) in [
+            (
+                WorkspaceMemoryApprovalOperation::Retract,
+                WorkspaceMemoryApprovalTarget::RetractKey { key: secret.to_string() },
+                secret,
+            ),
+            (
+                WorkspaceMemoryApprovalOperation::Export,
+                WorkspaceMemoryApprovalTarget::ExportValue { include_values: true },
+                "true",
+            ),
+        ] {
+            let (reply, _receiver) = oneshot::channel();
+            let prompt = ApprovalPrompt::workspace_memory_proxy(operation, target, reply);
+            assert_eq!(
+                prompt.detail,
+                format!("operation: {}\npayload: [redacted]", operation.label())
+            );
+            assert!(!format!("{prompt:?}").contains(hidden));
+            assert_eq!(
+                prompt.options,
+                vec![
+                    (String::from("Allow once"), ApprovalChoice::AllowOnce),
+                    (String::from("Deny"), ApprovalChoice::DenyOnce),
+                ]
+            );
+        }
     }
 
     #[test]

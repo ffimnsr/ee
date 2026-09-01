@@ -72,6 +72,10 @@ mod tests {
             "ee_document_symbols",
             "ee_terminal_output",
             "ee_terminal_wait",
+            "ee_recall_workspace_facts",
+            "ee_read_workspace_fact",
+            "ee_list_workspace_facts",
+            "ee_export_workspace_memory",
             "ee_diagnostics",
         ] {
             assert_eq!(side_effect_class(tool), SideEffectClass::Read, "{tool}");
@@ -93,6 +97,12 @@ mod tests {
             "ee_format_file",
             "ee_rename_symbol",
             "ee_write_text_file",
+            "ee_remember_workspace_fact",
+            "ee_verify_workspace_fact",
+            "ee_forget_workspace_fact",
+            "ee_retract_workspace_fact",
+            "ee_import_workspace_memory",
+            "ee_clear_workspace_memory",
         ] {
             assert_eq!(side_effect_class(tool), SideEffectClass::Write, "{tool}");
         }
@@ -121,8 +131,8 @@ mod tests {
     }
 
     #[test]
-    fn manifest_schema_version_is_three() {
-        assert_eq!(EE_TOOL_SCHEMA_VERSION, 3);
+    fn manifest_schema_version_is_six() {
+        assert_eq!(EE_TOOL_SCHEMA_VERSION, 6);
     }
 
     #[test]

@@ -681,6 +681,17 @@
             }
           ]
         },
+        "workspace_memory": {
+          "description": "Explicit opt-in and quotas for durable canonical-workspace memory.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceMemoryToml"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "web_context": {
           "description": "Trusted configuration for optional agent web retrieval. Only user-global\nconfig can grant access; workspace files can only disable or restrict it.",
           "anyOf": [
@@ -789,6 +800,118 @@
           "minimum": 0
         },
         "timeout_ms": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "WorkspaceMemoryToml": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "Enables local durable workspace memory. Defaults to `false`.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "max_value_bytes": {
+          "description": "Maximum UTF-8 bytes in one fact value.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_active_facts": {
+          "description": "Maximum active facts in one canonical workspace scope.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_active_bytes": {
+          "description": "Maximum combined UTF-8 bytes across active facts.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_total_facts": {
+          "description": "Maximum retained fact rows, including candidates and history.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_total_bytes": {
+          "description": "Maximum retained fact value bytes, including candidates and history.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "max_recall_results": {
+          "description": "Maximum facts returned by one recall operation.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "busy_timeout_ms": {
+          "description": "SQLite busy timeout in milliseconds.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "default_expiry_days": {
+          "description": "Default fact lifetime in days. `0` disables implicit expiry.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "candidate_retention_days": {
+          "description": "Days to retain unverified agent candidates.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "stale_retention_days": {
+          "description": "Days to retain stale and retracted facts.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "superseded_retention_days": {
+          "description": "Days to retain superseded fact history.",
           "type": [
             "integer",
             "null"

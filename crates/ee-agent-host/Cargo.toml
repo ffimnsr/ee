@@ -17,8 +17,10 @@ test-utils = []
 [dependencies]
 ee-agent-protocol.workspace = true
 ee-agent-orchestrator.workspace = true
+ee-agent-memory.workspace = true
 ee-mcp.workspace = true
 base64.workspace = true
+chrono.workspace = true
 futures.workspace = true
 rmcp = { workspace = true, features = ["server"] }
 reqwest.workspace = true
@@ -37,4 +39,5 @@ ee-agent-host = { path = ".", features = ["test-utils"] }
 # Live replay tests need orchestrator deterministic fakes.
 ee-agent-orchestrator = { path = "../ee-agent-orchestrator", features = ["test-utils"] }
 ee-openrouter-agent = { path = "../ee-openrouter-agent", features = ["test-utils"] }
+rusqlite.workspace = true
 tempfile.workspace = true

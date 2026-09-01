@@ -28,6 +28,8 @@ pub mod reducer;
 pub mod session;
 pub mod turn_evidence;
 pub mod web_context;
+mod workspace_memory;
+mod workspace_verified_facts;
 
 #[cfg(feature = "test-utils")]
 pub mod fake;
@@ -43,6 +45,7 @@ pub use critic::{
     ExternalCritiqueCompleted, ExternalCritiqueOutcome, ExternalCritiqueRequest,
     MAX_EXTERNAL_CRITIC_CONTEXT_BYTES, MAX_EXTERNAL_CRITIC_ROOTS,
 };
+pub use ee_agent_memory::MemoryRetention;
 pub use ee_agent_orchestrator::{
     CritiqueTarget, ReportEvidence, ResolvedRubberDuckConfig, RubberDuckBackend, RubberDuckConfig,
     RubberDuckConfigError, RubberDuckConfigUnavailable, RubberDuckMode, VerifiedCritiqueReport,
@@ -56,10 +59,11 @@ pub use events::{
 pub use inbound::{
     ClientRequest, ClientRequestHandler, ClientRequestResponse, ClientRequestResult,
     DenyAllHandler, HandlerCapabilities, ProxyTextEdit, RecordingHandler,
+    WorkspaceMemoryMutationOperation,
 };
 #[cfg(feature = "test-utils")]
 pub use manager::FakeTransportFactory;
-pub use manager::{AgentManager, AgentManagerConfig};
+pub use manager::{AgentManager, AgentManagerConfig, build_context_pack_with_workspace_recaller};
 pub use mcp_over_acp::{EeProxyMode, EeProxyToolProfile, MCP_OVER_ACP_MAX_FRAME_BYTES};
 pub use permission::PermissionBroker;
 pub use process::{AgentProcessConfig, STDERR_MAX_LINE_BYTES, STDERR_MAX_LINES, StderrCapture};
@@ -78,6 +82,20 @@ pub use web_context::{
     WebContextError, WebContextErrorCode, WebContextLimits, WebContextService, WebFetchRequest,
     WebFetchResponse, WebSearchProvenance, WebSearchRequest, WebSearchResponse, WebSearchResult,
     WebTransport, WebTransportRequest, WebTransportResponse,
+};
+pub use workspace_memory::{
+    DEFAULT_WORKSPACE_MEMORY_CANDIDATE_RETENTION_DAYS, DEFAULT_WORKSPACE_MEMORY_EXPIRY_DAYS,
+    DEFAULT_WORKSPACE_MEMORY_STALE_RETENTION_DAYS,
+    DEFAULT_WORKSPACE_MEMORY_SUPERSEDED_RETENTION_DAYS, WorkspaceMemoryAvailability,
+    WorkspaceMemoryBulkMutationResult, WorkspaceMemoryExportDto, WorkspaceMemoryExportProvenance,
+    WorkspaceMemoryExportedFact, WorkspaceMemoryHostConfig, WorkspaceMemoryHostError,
+    WorkspaceMemoryHostErrorCode, WorkspaceMemoryHostStatus, WorkspaceMemoryMutationApproval,
+    WorkspaceMemoryQuotas,
+};
+pub use workspace_verified_facts::{
+    WorkspaceVerifiedFactAuthority, WorkspaceVerifiedFactCandidate,
+    WorkspaceVerifiedFactCandidateError, WorkspaceVerifiedFactFreshness,
+    WorkspaceVerifiedSourceIdentity, derive_workspace_verified_fact_candidates,
 };
 
 /// ACP version the host speaks.

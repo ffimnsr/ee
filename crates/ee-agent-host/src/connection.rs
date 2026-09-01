@@ -58,6 +58,7 @@ use crate::mcp_over_acp::{EeProxyMode, EeProxyToolProfile, McpOverAcpRegistry};
 use crate::permission::PermissionBroker;
 use crate::process::{AgentProcess, AgentProcessConfig, spawn_stderr_reader};
 use crate::session::{AgentThread, ThreadShared};
+use crate::workspace_memory::WorkspaceMemoryHost;
 
 /// Default timeout for the ACP `initialize` handshake.
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -158,6 +159,7 @@ pub(crate) struct AgentConnectionInner {
     pub events: mpsc::UnboundedSender<AgentEvent>,
     pub handler: Arc<dyn ClientRequestHandler>,
     pub handler_capabilities: HandlerCapabilities,
+    pub workspace_memory: Arc<WorkspaceMemoryHost>,
     pub process: Arc<Mutex<Option<AgentProcess>>>,
     pub threads: Arc<Mutex<HashMap<SessionId, Arc<ThreadShared>>>>,
     /// ACP-native MCP-over-ACP hosting for the ee proxy (Phase 6b).
@@ -323,7 +325,42 @@ impl AgentConnection {
             ee_agent_protocol::ByteStreams::new(stdin.compat_write(), stdout.compat())
         };
 
-        Self::start_connection(agent_id, Some(process), handler, events, options, transport)
+        Self::start_connection(
+            agent_id,
+            Some(process),
+            handler,
+            events,
+            options,
+            WorkspaceMemoryHost::disabled(),
+            transport,
+        )
+    }
+
+    pub(crate) async fn connect_with_workspace_memory(
+        agent_id: String,
+        config: AgentProcessConfig,
+        handler: Arc<dyn ClientRequestHandler>,
+        events: mpsc::UnboundedSender<AgentEvent>,
+        options: AgentConnectionOptions,
+        workspace_memory: Arc<WorkspaceMemoryHost>,
+    ) -> Result<Self, AgentError> {
+        let mut process = AgentProcess::spawn(&config).await?;
+        let stderr = process.take_stderr();
+        let stderr_state = process.stderr_state();
+        spawn_stderr_reader(stderr, stderr_state, agent_id.clone(), events.clone());
+        let transport = ee_agent_protocol::ByteStreams::new(
+            process.take_stdin().compat_write(),
+            process.take_stdout().compat(),
+        );
+        Self::start_connection(
+            agent_id,
+            Some(process),
+            handler,
+            events,
+            options,
+            workspace_memory,
+            transport,
+        )
     }
 
     /// Connects over an injected transport instead of a subprocess (fake
@@ -337,7 +374,35 @@ impl AgentConnection {
         options: AgentConnectionOptions,
         transport: impl ee_agent_protocol::ConnectTo<ClientRole> + 'static,
     ) -> Result<Self, AgentError> {
-        Self::start_connection(agent_id, None, handler, events, options, transport)
+        Self::start_connection(
+            agent_id,
+            None,
+            handler,
+            events,
+            options,
+            WorkspaceMemoryHost::disabled(),
+            transport,
+        )
+    }
+
+    #[cfg(feature = "test-utils")]
+    pub(crate) fn connect_with_transport_and_workspace_memory(
+        agent_id: String,
+        handler: Arc<dyn ClientRequestHandler>,
+        events: mpsc::UnboundedSender<AgentEvent>,
+        options: AgentConnectionOptions,
+        workspace_memory: Arc<WorkspaceMemoryHost>,
+        transport: impl ee_agent_protocol::ConnectTo<ClientRole> + 'static,
+    ) -> Result<Self, AgentError> {
+        Self::start_connection(
+            agent_id,
+            None,
+            handler,
+            events,
+            options,
+            workspace_memory,
+            transport,
+        )
     }
 
     /// Shared connection bootstrap: channels, state, driver, and handshake.
@@ -347,6 +412,7 @@ impl AgentConnection {
         handler: Arc<dyn ClientRequestHandler>,
         events: mpsc::UnboundedSender<AgentEvent>,
         options: AgentConnectionOptions,
+        workspace_memory: Arc<WorkspaceMemoryHost>,
         transport: impl ee_agent_protocol::ConnectTo<ClientRole> + 'static,
     ) -> Result<Self, AgentError> {
         let (commands_tx, commands_rx) = mpsc::unbounded_channel();
@@ -361,9 +427,9 @@ impl AgentConnection {
             options.ee_proxy_enabled,
             &agent_id,
             handler.clone(),
-            handler_capabilities,
             process.clone(),
             threads.clone(),
+            workspace_memory.clone(),
             options.ee_proxy_tool_profile,
         );
 
@@ -375,6 +441,7 @@ impl AgentConnection {
             events: events.clone(),
             handler: handler.clone(),
             handler_capabilities,
+            workspace_memory,
             process,
             threads,
             mcp,

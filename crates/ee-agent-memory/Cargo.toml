@@ -1,0 +1,23 @@
+[package]
+name = "ee-agent-memory"
+version = "0.11.5"
+license = "Apache-2.0"
+authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
+description = "Backend workspace-scoped durable fact memory for ee agents."
+categories = ["development-tools"]
+homepage = "https://github.com/ffimnsr/ee"
+repository = "https://github.com/ffimnsr/ee"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+dirs.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

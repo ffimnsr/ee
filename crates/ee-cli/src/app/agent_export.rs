@@ -236,6 +236,37 @@ fn create_private_export_file(_path: &Path) -> io::Result<fs::File> {
     ))
 }
 
+/// Writes workspace memory JSON without replacing existing exports.
+pub(super) fn write_workspace_memory_export(
+    dir: &Path,
+    export: &ee_agent_host::WorkspaceMemoryExportDto,
+) -> io::Result<PathBuf> {
+    ensure_private_export_dir(dir)?;
+    let bytes = serde_json::to_vec_pretty(export)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    for sequence in 0..1_000 {
+        let suffix = if sequence == 0 { String::new() } else { format!("-{sequence}") };
+        let path = dir.join(format!("workspace-memory-{timestamp}{suffix}.json"));
+        match create_private_export_file(&path) {
+            Ok(mut file) => {
+                let result = file.write_all(&bytes).and_then(|_| file.sync_all());
+                if let Err(error) = result {
+                    let _ = fs::remove_file(&path);
+                    return Err(error);
+                }
+                return Ok(path);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "workspace memory export filename space exhausted",
+    ))
+}
+
 /// Writes a complete transcript without replacing existing exports.
 pub(super) fn write_agent_transcript_export(
     dir: &Path,
@@ -268,6 +299,44 @@ pub(super) fn write_agent_transcript_export(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_memory_export_is_private_and_preserves_values_when_requested() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("memory");
+        let export = ee_agent_host::WorkspaceMemoryExportDto {
+            schema_version: 1,
+            workspace_id: String::from("workspace"),
+            redacted: false,
+            facts: vec![ee_agent_host::WorkspaceMemoryExportedFact {
+                namespace: String::from("default"),
+                key: String::from("build.command"),
+                value: Some(String::from("cargo test --quiet")),
+                kind: String::from("command"),
+                authority: String::from("user_asserted"),
+                freshness: String::from("current"),
+                provenance: ee_agent_host::WorkspaceMemoryExportProvenance {
+                    source_kind: String::from("user"),
+                    source_id: String::from("approval"),
+                    revision: None,
+                    fingerprint: None,
+                    verified_at: None,
+                },
+                expires_at: None,
+                content_hash: String::from("hash"),
+            }],
+        };
+
+        let path = write_workspace_memory_export(&directory, &export).unwrap();
+        assert_eq!(fs::metadata(&directory).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let decoded: ee_agent_host::WorkspaceMemoryExportDto =
+            serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(decoded, export);
+    }
 
     #[test]
     fn fetch_payloads_are_omitted_from_export() {

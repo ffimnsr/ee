@@ -47,6 +47,8 @@ pub struct HandlerCapabilities {
     pub session_config_boolean: bool,
     /// Proxy-only ee MCP discovery tools (`_ee/*` local bridge methods).
     pub proxy_discovery: bool,
+    /// Host UI can approve durable workspace-memory mutations.
+    pub workspace_memory_mutation_approval: bool,
 }
 
 impl HandlerCapabilities {
@@ -61,6 +63,7 @@ impl HandlerCapabilities {
             elicitation_url: false,
             session_config_boolean: false,
             proxy_discovery: false,
+            workspace_memory_mutation_approval: false,
         }
     }
 
@@ -75,6 +78,7 @@ impl HandlerCapabilities {
             elicitation_url: true,
             session_config_boolean: true,
             proxy_discovery: true,
+            workspace_memory_mutation_approval: true,
         }
     }
 
@@ -90,6 +94,7 @@ impl HandlerCapabilities {
             | TERMINAL_KILL_METHOD_NAME
             | TERMINAL_RELEASE_METHOD_NAME => self.terminal,
             ELICITATION_CREATE_METHOD_NAME => self.elicitation_form || self.elicitation_url,
+            "_ee/approve_workspace_memory_mutation" => self.workspace_memory_mutation_approval,
             "_ee/workspace_roots"
             | "_ee/list_directory"
             | "_ee/list_directory_all"
@@ -159,8 +164,21 @@ pub struct ProxyTextEdit {
     pub new_text: String,
 }
 
+/// Durable workspace-memory mutation requiring explicit user approval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceMemoryMutationOperation {
+    Remember,
+    Verify,
+    Forget,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientRequest {
+    /// Approval request contains operation and key only. Fact value never crosses this boundary.
+    ApproveWorkspaceMemoryMutation {
+        operation: WorkspaceMemoryMutationOperation,
+        key: String,
+    },
     ProxyWorkspaceRoots,
     ProxyListDirectory {
         path: String,
@@ -322,6 +340,7 @@ impl ClientRequest {
     #[must_use]
     pub fn method(&self) -> &'static str {
         match self {
+            Self::ApproveWorkspaceMemoryMutation { .. } => "_ee/approve_workspace_memory_mutation",
             Self::ProxyWorkspaceRoots => "_ee/workspace_roots",
             Self::ProxyListDirectory { .. } => "_ee/list_directory",
             Self::ProxyListDirectoryAll { .. } => "_ee/list_directory_all",
@@ -383,7 +402,8 @@ impl ClientRequest {
     #[must_use]
     pub fn session_id(&self) -> Option<&ee_agent_protocol::SessionId> {
         match self {
-            Self::ProxyWorkspaceRoots
+            Self::ApproveWorkspaceMemoryMutation { .. }
+            | Self::ProxyWorkspaceRoots
             | Self::ProxyListDirectory { .. }
             | Self::ProxyListDirectoryAll { .. }
             | Self::ProxySearchFiles { .. }
@@ -455,6 +475,10 @@ impl ClientRequest {
 /// The typed response for a handled [`ClientRequest`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientRequestResponse {
+    /// Typed answer for one workspace-memory mutation approval request.
+    WorkspaceMemoryApproval {
+        approved: bool,
+    },
     ProxyValue(serde_json::Value),
     ReadTextFile(ReadTextFileResponse),
     WriteTextFile(WriteTextFileResponse),
@@ -471,6 +495,9 @@ impl ClientRequestResponse {
     /// enum tag).
     pub fn into_value(self) -> Result<serde_json::Value, serde_json::Error> {
         match self {
+            Self::WorkspaceMemoryApproval { approved } => {
+                serde_json::to_value(serde_json::json!({ "approved": approved }))
+            }
             Self::ProxyValue(response) => Ok(response),
             Self::ReadTextFile(response) => serde_json::to_value(response),
             Self::WriteTextFile(response) => serde_json::to_value(response),
