@@ -21,18 +21,25 @@ name = "ee"
 path = "src/main.rs"
 
 [features]
-# Agents mode is opt-in at compile time; the default build ships no agent code.
-default = []
+# Agents mode ships by default; use `--no-default-features` for agent-free builds.
+default = ["agents"]
 agents = [
+    "dep:bzip2",
     "dep:ee-agent-protocol",
+    "dep:flate2",
     "dep:ee-agent-host",
     "dep:ee-mcp",
+    "dep:reqwest",
     "dep:rmcp",
+    "dep:tar",
+    "dep:tempfile",
     "dep:tracing",
+    "dep:zip",
 ]
 
 [dependencies]
 base64.workspace = true
+bzip2 = { workspace = true, optional = true }
 chacha20poly1305.workspace = true
 chrono.workspace = true
 clap.workspace = true
@@ -42,6 +49,7 @@ dirs.workspace = true
 ee-agent-host = { workspace = true, optional = true }
 ee-agent-protocol = { workspace = true, optional = true }
 ee-mcp = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
 rmcp = { workspace = true, features = ["server"], optional = true }
 git2.workspace = true
 globset.workspace = true
@@ -53,12 +61,15 @@ libc.workspace = true
 rand.workspace = true
 ratatui.workspace = true
 regex.workspace = true
+reqwest = { workspace = true, features = ["blocking"], optional = true }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 signal-hook.workspace = true
 similar.workspace = true
+tar = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["net", "io-util"] }
 tokio-util.workspace = true
@@ -67,6 +78,7 @@ unicode-width.workspace = true
 url.workspace = true
 windows-sys = { workspace = true, features = ["Win32_System_Registry"] }
 zeroize.workspace = true
+zip = { workspace = true, optional = true }
 xi-lsp-lib.workspace = true
 xi-rpc.workspace = true
 xi-core-lib.workspace = true

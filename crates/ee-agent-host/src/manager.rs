@@ -347,16 +347,17 @@ impl AgentManager {
             .get(agent_id)
             .cloned()
             .ok_or_else(|| AgentError::UnknownAgent(agent_id.to_string()))?;
-        let mut config = AgentManagerConfig {
+        let config = AgentManagerConfig {
             agents: BTreeMap::from([(agent_id.to_string(), process)]),
             ee_proxy_enabled: self.config.ee_proxy_enabled,
             #[cfg(feature = "test-utils")]
-            fake_transports: BTreeMap::new(),
+            fake_transports: self
+                .config
+                .fake_transports
+                .get(agent_id)
+                .map(|factory| BTreeMap::from([(agent_id.to_string(), factory.clone())]))
+                .unwrap_or_default(),
         };
-        #[cfg(feature = "test-utils")]
-        if let Some(factory) = self.config.fake_transports.get(agent_id) {
-            config.fake_transports.insert(agent_id.to_string(), factory.clone());
-        }
         // Ephemeral critic lifecycle must never appear as a root/editor thread.
         // Dropped receiver intentionally makes critic events private; broker emits
         // only verified, privacy-safe critic outcomes through its own channel.

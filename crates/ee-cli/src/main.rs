@@ -31,6 +31,8 @@ use xi_core_lib::vlf::store::VlfStore;
 use xi_core_lib::{plugin_manifest, plugins::PluginCatalog};
 
 #[cfg(feature = "agents")]
+mod agent_registry;
+#[cfg(feature = "agents")]
 mod agent_setup;
 mod app;
 mod backend;

@@ -3380,11 +3380,13 @@ pub(crate) fn set_config_value(
 pub(crate) fn configure_global_agent_server(
     agent_id: &str,
     command: &Path,
+    args: &[String],
     env_values: &BTreeMap<String, String>,
 ) -> Result<PathBuf, String> {
     configure_global_agent_server_with_env(
         agent_id,
         command,
+        args,
         env_values,
         &ConfigEnvironment::from_process(),
     )
@@ -3394,6 +3396,7 @@ pub(crate) fn configure_global_agent_server(
 fn configure_global_agent_server_with_env(
     agent_id: &str,
     command: &Path,
+    args: &[String],
     env_values: &BTreeMap<String, String>,
     env: &ConfigEnvironment,
 ) -> Result<PathBuf, String> {
@@ -3424,7 +3427,10 @@ fn configure_global_agent_server_with_env(
     };
     let mut server = toml::map::Map::new();
     server.insert(String::from("command"), toml::Value::String(command.to_owned()));
-    server.insert(String::from("args"), toml::Value::Array(Vec::new()));
+    server.insert(
+        String::from("args"),
+        toml::Value::Array(args.iter().cloned().map(toml::Value::String).collect()),
+    );
     server.insert(
         String::from("env"),
         toml::Value::Table(
@@ -6120,6 +6126,7 @@ enabled = true
         let path = configure_global_agent_server_with_env(
             "openrouter",
             Path::new("/home/example/.local/bin/ee-openrouter-agent"),
+            &[String::from("--stdio")],
             &values,
             &env,
         )
@@ -6135,6 +6142,10 @@ enabled = true
         assert_eq!(
             document["agents"]["servers"]["openrouter"]["command"].as_str(),
             Some("/home/example/.local/bin/ee-openrouter-agent")
+        );
+        assert_eq!(
+            document["agents"]["servers"]["openrouter"]["args"],
+            toml::Value::Array(vec![toml::Value::String(String::from("--stdio"))])
         );
         assert_eq!(
             document["agents"]["servers"]["openrouter"]["env"]["OPENROUTER_API_KEY"].as_str(),

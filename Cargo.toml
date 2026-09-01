@@ -28,6 +28,8 @@ rust-version = "1.95"
 [workspace.dependencies]
 agent-client-protocol = { version = "2.0.0", features = ["unstable_elicitation", "unstable_end_turn_token_usage", "unstable_mcp_over_acp"] }
 bytecount = "0.6.9"
+bzip2 = "0.6"
+flate2 = "1"
 rmcp = { version = "3.2.0", default-features = false, features = ["client", "elicitation", "macros", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 cc = "1.2"
 clap = { version = "4", features = ["derive", "env"] }
@@ -67,6 +69,7 @@ serde_json = "1.0.149"
 seccompiler = "0.5.0"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.20"
+tar = "0.4"
 tempfile = "3"
 tokio = { version = "1.53.1", features = ["macros", "rt", "sync", "time", "net"] }
 tokio-util = { version = "0.7.19", features = ["compat"] }
@@ -97,6 +100,7 @@ unicode-segmentation = "1.13.2"
 unicode-width = "=0.2.0"
 url = "2.5.8"
 wasmtime = { version = "44.0.0", default-features = false, features = ["cranelift", "runtime", "std", "wat"] }
+zip = { version = "4", default-features = false, features = ["deflate"] }
 # Secrets store (ISSUES.md "Host-Bound Encrypted Secrets Store", phases 1-6).
 # Phase 1 uses `zeroize`; the rest are declared for phases 2-3 and are added
 # to crate dependencies as the implementation lands.

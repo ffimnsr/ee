@@ -271,8 +271,19 @@ fn stdio_proxy_mcp_frames_cover_read_write_and_execute_classes() {
                 reader: &mut tokio::io::Lines<tokio::io::BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>,
                 id: u64,
                 method: &str,
-                params: Value,
+                mut params: Value,
             ) -> Value {
+                params.as_object_mut().expect("request params object").insert(
+                    String::from("_meta"),
+                    json!({
+                        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                        "io.modelcontextprotocol/clientInfo": {
+                            "name": "stdio-test",
+                            "version": "1"
+                        },
+                        "io.modelcontextprotocol/clientCapabilities": {}
+                    }),
+                );
                 let request = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
                 writer.write_all(request.to_string().as_bytes()).await.unwrap();
                 writer.write_all(b"\n").await.unwrap();
@@ -281,18 +292,8 @@ fn stdio_proxy_mcp_frames_cover_read_write_and_execute_classes() {
                 serde_json::from_str(&line).unwrap()
             }
 
-            let initialized = request(
-                &mut writer,
-                &mut reader,
-                1,
-                "initialize",
-                json!({
-                    "protocolVersion": "2026-07-28",
-                    "capabilities": {},
-                    "clientInfo": { "name": "stdio-test", "version": "1" }
-                }),
-            )
-            .await;
+            let discovered =
+                request(&mut writer, &mut reader, 1, "server/discover", json!({})).await;
             let list = request(&mut writer, &mut reader, 2, "tools/list", json!({})).await;
             let manifest = request(
                 &mut writer,
@@ -326,7 +327,7 @@ fn stdio_proxy_mcp_frames_cover_read_write_and_execute_classes() {
                 json!({ "name": "ee_terminal_create", "arguments": { "command": "true" } }),
             )
             .await;
-            (initialized, list, manifest, read, write, execute)
+            (discovered, list, manifest, read, write, execute)
         });
         result_tx.send(result).unwrap();
     });
@@ -347,8 +348,12 @@ fn stdio_proxy_mcp_frames_cover_read_write_and_execute_classes() {
     client.join().expect("stdio client thread");
     server.join().expect("stdio server thread");
 
-    let (initialized, list, manifest, read, write, execute) = responses;
-    assert_eq!(initialized["result"]["protocolVersion"], json!("2026-07-28"));
+    let (discovered, list, manifest, read, write, execute) = responses;
+    assert!(
+        discovered["result"]["supportedVersions"]
+            .as_array()
+            .is_some_and(|versions| versions.contains(&json!("2026-07-28")))
+    );
     let names: Vec<&str> = list["result"]["tools"]
         .as_array()
         .expect("tool list")
@@ -1332,9 +1337,19 @@ pub(crate) fn acp_agent_script() -> FakeAgentScript {
         .delay(25)
 }
 
-/// Script tail: `mcp/connect` (200), capture the connection id, run the
-/// inner MCP `initialize` (201), then one `tools/call` (202).
-pub(crate) fn acp_connect_script(tool_call: Value) -> FakeAgentScript {
+/// Script tail: `mcp/connect` (200), capture the connection id, run MCP
+/// `server/discover` (201), then one `tools/call` (202).
+pub(crate) fn acp_connect_script(mut tool_call: Value) -> FakeAgentScript {
+    let request_meta = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { "name": "fake-agent", "version": "0" },
+        "io.modelcontextprotocol/clientCapabilities": {}
+    });
+    tool_call
+        .as_object_mut()
+        .expect("tool call params object")
+        .insert(String::from("_meta"), request_meta.clone());
+
     acp_agent_script()
         .emit(json!({
             "jsonrpc": "2.0",
@@ -1353,12 +1368,8 @@ pub(crate) fn acp_connect_script(tool_call: Value) -> FakeAgentScript {
             "method": "mcp/message",
             "params": {
                 "connectionId": { "$capture": "conn_id" },
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2026-07-28",
-                    "capabilities": {},
-                    "clientInfo": { "name": "fake-agent", "version": "0" }
-                }
+                "method": "server/discover",
+                "params": { "_meta": request_meta }
             }
         }))
         .wait_for_response(201)

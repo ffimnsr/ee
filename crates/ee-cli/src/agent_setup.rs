@@ -1,8 +1,8 @@
-//! Interactive setup for locally installed ACP agent servers.
+//! Interactive setup for local and ACP Registry agent servers.
 //!
-//! Only agents installed in the per-user `~/.local/bin` directory are
-//! considered. Each candidate must print a bounded versioned manifest on
-//! `--ee-config`; the manifest determines every prompt and config mapping.
+//! Local `ee-*-agent` candidates provide a bounded versioned `--ee-config`
+//! manifest. Registry agents use registry launch metadata only; authentication
+//! and provider configuration remain owned by each external agent.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use ee_agent_protocol::setup::{SETUP_MANIFEST_SCHEMA_VERSION, SetupManifest};
 
+use crate::agent_registry::{self, RegistryAgent};
 use crate::{config, secrets};
 
 const AGENT_BIN_DIRECTORY: [&str; 2] = [".local", "bin"];
@@ -27,29 +28,99 @@ struct AgentCandidate {
     file_name: String,
 }
 
+#[derive(Debug, Clone)]
+enum SetupCandidate {
+    Local(AgentCandidate),
+    Registry(Box<RegistryAgent>),
+}
+
 pub(crate) fn run() -> Result<(), String> {
     let directory = dirs::home_dir()
         .map(|home| AGENT_BIN_DIRECTORY.iter().fold(home, |path, part| path.join(part)))
         .ok_or_else(|| String::from("cannot resolve home directory for agent setup"))?;
-    let candidates = discover_agents(&directory)?;
+    let local = discover_agents(&directory)?;
+    let registry = match agent_registry::fetch_agents() {
+        Ok(agents) => agents,
+        Err(error) if !local.is_empty() => {
+            eprintln!("warning: {error}; showing local agent servers only");
+            Vec::new()
+        }
+        Err(error) => return Err(error),
+    };
+    let mut candidates = registry
+        .into_iter()
+        .map(|agent| SetupCandidate::Registry(Box::new(agent)))
+        .chain(local.into_iter().map(SetupCandidate::Local))
+        .collect::<Vec<_>>();
+    candidates.sort_by_cached_key(candidate_sort_key);
     let candidate = select_agent(&candidates)?;
-    let manifest = read_manifest(&candidate.path)?;
+    match candidate {
+        SetupCandidate::Local(candidate) => setup_local_agent(candidate),
+        SetupCandidate::Registry(agent) => setup_registry_agent(agent),
+    }
+}
 
+fn setup_local_agent(candidate: &AgentCandidate) -> Result<(), String> {
+    let manifest = read_manifest(&candidate.path)?;
     println!("Setting up {}.", manifest.agent.display_name);
     let env = collect_setup_values(&manifest)?;
-    let path = config::configure_global_agent_server(&manifest.agent.id, &candidate.path, &env)?;
-
-    println!("Configured agent `{}` in {}.", manifest.agent.id, path.display());
-    println!("Agents mode enabled. Default agent: {}.", manifest.agent.id);
+    let path =
+        config::configure_global_agent_server(&manifest.agent.id, &candidate.path, &[], &env)?;
+    print_configured(&manifest.agent.id, &path);
     Ok(())
+}
+
+fn setup_registry_agent(agent: &RegistryAgent) -> Result<(), String> {
+    println!("{} {}", agent.name, agent.version);
+    if !agent.description.trim().is_empty() {
+        println!("{}", agent.description.trim());
+    }
+    if !agent.license.trim().is_empty() {
+        println!("License: {}", agent.license);
+    }
+    if let Some(source) = agent.source_url() {
+        println!("Source: {source}");
+    }
+    if agent.uses_package_runner() {
+        println!("Package runner may download pinned registry package on first launch.");
+    } else if !agent.is_download_verified() {
+        eprintln!("warning: registry binary has no SHA-256 checksum");
+    }
+    if !confirm("Configure this external agent? [y/N]: ")? {
+        return Err(String::from("agent setup cancelled"));
+    }
+
+    let prepared = agent.prepare()?;
+    let path = config::configure_global_agent_server(
+        &prepared.id,
+        &prepared.command,
+        &prepared.args,
+        &prepared.env,
+    )?;
+    println!(
+        "Configured external agent {}. Authentication remains agent-owned.",
+        prepared.display_name
+    );
+    print_configured(&prepared.id, &path);
+    Ok(())
+}
+
+fn print_configured(agent_id: &str, path: &Path) {
+    println!("Configured agent `{agent_id}` in {}.", path.display());
+    println!("Agents mode enabled. Default agent: {agent_id}.");
+}
+
+fn candidate_sort_key(candidate: &SetupCandidate) -> (u8, String) {
+    match candidate {
+        SetupCandidate::Local(candidate) => (0, candidate.file_name.to_ascii_lowercase()),
+        SetupCandidate::Registry(agent) => (1, agent.name.to_ascii_lowercase()),
+    }
 }
 
 fn discover_agents(directory: &Path) -> Result<Vec<AgentCandidate>, String> {
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Err(format!("no agent servers found in {}", directory.display()));
-        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(format!("cannot read {}: {error}", directory.display())),
     };
 
@@ -68,9 +139,6 @@ fn discover_agents(directory: &Path) -> Result<Vec<AgentCandidate>, String> {
     }
     candidates.sort_by(|left, right| left.file_name.cmp(&right.file_name));
 
-    if candidates.is_empty() {
-        return Err(format!("no agent servers found in {}", directory.display()));
-    }
     Ok(candidates)
 }
 
@@ -99,10 +167,20 @@ fn is_executable_file(path: &Path) -> Result<bool, String> {
     }
 }
 
-fn select_agent(candidates: &[AgentCandidate]) -> Result<&AgentCandidate, String> {
+fn select_agent(candidates: &[SetupCandidate]) -> Result<&SetupCandidate, String> {
+    if candidates.is_empty() {
+        return Err(String::from("no compatible agent servers found"));
+    }
     println!("Available agent servers:");
     for (index, candidate) in candidates.iter().enumerate() {
-        println!("  {}) {}", index + 1, candidate.file_name);
+        match candidate {
+            SetupCandidate::Local(candidate) => {
+                println!("  {}) {} (local)", index + 1, candidate.file_name);
+            }
+            SetupCandidate::Registry(agent) => {
+                println!("  {}) {} {} (ACP Registry)", index + 1, agent.name, agent.version);
+            }
+        }
     }
 
     loop {
@@ -330,6 +408,10 @@ fn prompt_value(
     }
 }
 
+fn confirm(prompt: &str) -> Result<bool, String> {
+    Ok(matches!(prompt_line(prompt)?.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
+}
+
 fn prompt_line(prompt: &str) -> Result<String, String> {
     print!("{prompt}");
     io::stdout().flush().map_err(|error| format!("cannot write setup prompt: {error}"))?;
@@ -350,6 +432,26 @@ mod tests {
     use ee_agent_protocol::setup::{SetupAgent, SetupEnvVar, SetupInput, SetupInputConfig};
 
     use super::*;
+
+    #[test]
+    fn candidates_sort_local_first_then_by_name() {
+        let registry: RegistryAgent = serde_json::from_str(
+            r#"{"id":"alpha","name":"Alpha","version":"1.0.0","distribution":{"npx":{"package":"alpha@1.0.0"}}}"#,
+        )
+        .unwrap();
+        let mut candidates = [
+            SetupCandidate::Registry(Box::new(registry)),
+            SetupCandidate::Local(AgentCandidate {
+                path: PathBuf::from("/tmp/ee-zulu-agent"),
+                file_name: String::from("ee-zulu-agent"),
+            }),
+        ];
+
+        candidates.sort_by_cached_key(candidate_sort_key);
+
+        assert!(matches!(candidates[0], SetupCandidate::Local(_)));
+        assert!(matches!(candidates[1], SetupCandidate::Registry(_)));
+    }
 
     #[test]
     fn agent_file_name_requires_nonempty_ee_name_agent_pattern() {
