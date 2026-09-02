@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.11.7 - 2026-09-03
+
+### Features
+
+- parallel agent sessions (`50484ac`)
+- add rubber duck mode improvements (`ea1d6ca`)
+- add agent registry for agent config (`45f09b5`)
+- add workspace persistent memory (`1f9b896`)
+- add macos fix for linker (`a36a7f7`)
+- fix lots of test for macos (`24e33b3`)
+- bump package versions and update release script to not dupe steps (`6d5fc97`)
+
+
+### Fixes
+
+- macos test errors and config warnings on incomplete servers (`b37d9ba`)
+- unit tests and macos CI tests (`6cc34bb`)
+- cache tests that has errors (`bcce7b3`)
+- macos 20 second deadline on one test (`355c7cc`)
+- second update for fixing the macos cache bug (`6c81d4e`)
+- third update for macos CI error (`74595ef`)
+- fourth update on macos CI errors (`97c1047`)
+
+
+### Tests
+
+- fix the offending macos temp dir failures (`cd54bbf`)
+
+
 ## 0.11.6 - 2026-09-03
 
 ### Features

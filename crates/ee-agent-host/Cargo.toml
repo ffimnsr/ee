@@ -1,6 +1,6 @@
 [package]
 name = "ee-agent-host"
-version = "0.11.6"
+version = "0.11.7"
 license = "Apache-2.0"
 authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
 description = "Agent host for ee agents mode: session lifecycle, approvals, and MCP startup."
