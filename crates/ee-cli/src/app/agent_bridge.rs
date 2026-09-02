@@ -5925,9 +5925,8 @@ impl App {
                         }))
                     }
                 };
-                // A successful response confirms only this completed write.
-                // Host-owned diagnostics and validation evidence continue below.
-                let _ = reply.send(Ok(response));
+                // Publish host-owned revision and verification evidence before replying.
+                // A fast provider may complete the turn as soon as it receives the response.
                 let post_write_revision = self
                     .evidence_revision_for_paths(&paths)
                     .unwrap_or_else(|_| EvidenceRevision::new(&outcome.new_revision));
@@ -5966,6 +5965,7 @@ impl App {
                     self.agents.threads[thread]
                         .push_system(format!("agent wrote: {}", path.display()));
                 }
+                let _ = reply.send(Ok(response));
             }
             Err(error) => {
                 let revision = self
