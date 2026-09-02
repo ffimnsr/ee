@@ -48,6 +48,8 @@ use xi_lsp_lib::{
     LanguageConfig as PluginLanguageConfig,
 };
 
+mod agents;
+
 use crate::keymap::{self, KeymapOperation, KeymapSettings, SequenceBinding};
 
 const SYSTEM_CONFIG_PATH: &str = "/etc/ee/config.toml";
@@ -2035,15 +2037,11 @@ impl EditorSettings {
     }
 
     fn finalize_agents(&mut self) {
-        self.agents.servers.retain(|id, server| {
-            if server.command.trim().is_empty() {
-                eprintln!(
-                    "ee: warning: invalid agents server `{id}`: agent server command must not be empty"
-                );
-                return false;
-            }
-            true
-        });
+        for id in agents::remove_incomplete_servers(self.agents.enabled, &mut self.agents.servers) {
+            eprintln!(
+                "ee: warning: invalid agents server `{id}`: agent server command must not be empty"
+            );
+        }
         #[cfg(any(feature = "agents", test))]
         {
             // External ids are frontend-known. Internal model existence is

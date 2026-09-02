@@ -87,14 +87,30 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn symlink_and_non_utf8_aliases_share_identity() {
+    fn symlink_aliases_share_identity() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        let link = temp.path().join("link");
+        symlink(&root, &link).unwrap();
+
+        assert_eq!(WorkspaceIdentity::new(root).unwrap(), WorkspaceIdentity::new(link).unwrap());
+    }
+
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    #[test]
+    fn non_utf8_aliases_share_identity() {
         use std::os::unix::{ffi::OsStringExt, fs::symlink};
+
         let temp = tempdir().unwrap();
         let raw = std::ffi::OsString::from_vec(b"root-\xff".to_vec());
         let root = temp.path().join(raw);
         std::fs::create_dir(&root).unwrap();
         let link = temp.path().join("link");
         symlink(&root, &link).unwrap();
+
         assert_eq!(WorkspaceIdentity::new(root).unwrap(), WorkspaceIdentity::new(link).unwrap());
     }
 
