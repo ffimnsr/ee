@@ -1686,14 +1686,45 @@ fn phase_six_live_openrouter_pane_write_collects_post_write_evidence() {
 
     type_text(&mut app, "make live editor write");
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    wait_until(&mut app, "live write turn started", |app| {
+        app.agents.threads[0].host.active_turn_key().is_some()
+    });
+    let turn_id =
+        app.agents.threads[0].host.active_turn_key().expect("live write turn key").turn_id();
     wait_until(&mut app, "real write approval", |app| app.agents.approvals.len() == 1);
     let approval_count = app.agents.approvals.len();
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-    wait_until(&mut app, "pane terminal write evidence", |app| {
-        app.agents.threads[0].terminal_evidence.as_ref().is_some_and(|summary| {
-            summary.status == TurnTerminalStatus::PartiallyVerified
-                && summary.blocker == Some(TurnBlocker::MissingSelectedValidation)
-                && summary.safe_follow_up == SafeFollowUp::RunSelectedValidation
+    wait_until(&mut app, "host post-write evidence", |app| {
+        app.agents.threads[0].host.turn_evidence(turn_id).is_some_and(|evidence| {
+            let records = evidence.records();
+            evidence.current_revision().is_some()
+                && records.iter().any(|record| {
+                    matches!(
+                        record.observation(),
+                        TurnObservation::Write {
+                            outcome: ee_agent_host::WriteEvidenceOutcome::Applied,
+                            ..
+                        }
+                    )
+                })
+                && records.iter().any(|record| {
+                    matches!(
+                        record.observation(),
+                        TurnObservation::ChangedFiles { truncated: false, .. }
+                    )
+                })
+                && records.iter().any(|record| {
+                    matches!(
+                        record.observation(),
+                        TurnObservation::Diagnostics { outcome: EvidenceCheck::Passed, .. }
+                    )
+                })
+                && records.iter().any(|record| {
+                    matches!(
+                        record.observation(),
+                        TurnObservation::DiffReview { outcome: EvidenceCheck::Passed, .. }
+                    )
+                })
         })
     });
 
@@ -1702,7 +1733,10 @@ fn phase_six_live_openrouter_pane_write_collects_post_write_evidence() {
     });
 
     let thread = &app.agents.threads[0];
-    let summary = thread.terminal_evidence.as_ref().expect("post-write pane evidence");
+    let summary = thread.host.turn_evidence_summary(turn_id).expect("post-write host evidence");
+    assert_eq!(summary.status, TurnTerminalStatus::PartiallyVerified);
+    assert_eq!(summary.blocker, Some(TurnBlocker::MissingSelectedValidation));
+    assert_eq!(summary.safe_follow_up, SafeFollowUp::RunSelectedValidation);
     assert_eq!(fs::read_to_string(&target).expect("read agent write"), "after\n");
     assert_eq!(thread.state, ThreadUiState::Ready);
     assert_eq!(app.backend.active().whole_text().as_deref(), Some("after\n"));
