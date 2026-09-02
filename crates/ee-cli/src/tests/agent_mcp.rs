@@ -717,6 +717,8 @@ fn proxy_workspace_roots_and_search_text_return_structured_results() {
 
     let target = temp.path().join("search.txt");
     fs::write(&target, "alpha\nneedle beta\n").unwrap();
+    let canonical_root = fs::canonicalize(temp.path()).unwrap();
+    let canonical_target = fs::canonicalize(&target).unwrap();
     let mut stream = connect_proxy(&app);
 
     proxy_send(&mut stream, 1, json!({ "method": "workspace_roots" }));
@@ -724,7 +726,7 @@ fn proxy_workspace_roots_and_search_text_return_structured_results() {
     let roots_reply = proxy_recv(&mut stream);
     assert_eq!(
         roots_reply["result"]["value"]["roots"][0],
-        json!(temp.path().display().to_string())
+        json!(canonical_root.display().to_string())
     );
 
     proxy_send(&mut stream, 2, json!({ "method": "search_text", "query": "needle" }));
@@ -732,7 +734,7 @@ fn proxy_workspace_roots_and_search_text_return_structured_results() {
     let search_reply = proxy_recv(&mut stream);
     let matches = search_reply["result"]["value"]["matches"].as_array().unwrap();
     assert_eq!(matches.len(), 1, "search reply: {search_reply}");
-    assert_eq!(matches[0]["path"], json!(target.display().to_string()));
+    assert_eq!(matches[0]["path"], json!(canonical_target.display().to_string()));
     assert_eq!(matches[0]["line"], json!(2));
     assert_eq!(matches[0]["context"], json!("needle beta"));
 }
@@ -749,30 +751,43 @@ fn proxy_phase1_extras_return_structured_results() {
     fs::write(&visible, "alpha\nregex-hit\nneedle\n").unwrap();
     fs::write(&hidden, "regex-hit hidden\n").unwrap();
     fs::write(&ignored, "needle ignored\n").unwrap();
+    let canonical_visible = fs::canonicalize(&visible).unwrap();
+    let canonical_hidden = fs::canonicalize(&hidden).unwrap();
+    let canonical_ignored = fs::canonicalize(&ignored).unwrap();
     let mut stream = connect_proxy(&app);
 
     proxy_send(&mut stream, 1, json!({ "method": "list_directory_all", "path": temp.path() }));
     settle(&mut app);
     let list_reply = proxy_recv(&mut stream);
     let entries = list_reply["result"]["value"]["entries"].as_array().unwrap();
-    assert!(entries.iter().any(|entry| entry["path"] == json!(hidden.display().to_string())
-        && entry["hidden"] == json!(true)));
-    assert!(entries.iter().any(|entry| entry["path"] == json!(ignored.display().to_string())
-        && entry["ignored"] == json!(true)));
+    assert!(
+        entries.iter().any(|entry| entry["path"] == json!(canonical_hidden.display().to_string())
+            && entry["hidden"] == json!(true))
+    );
+    assert!(
+        entries.iter().any(|entry| entry["path"] == json!(canonical_ignored.display().to_string())
+            && entry["ignored"] == json!(true))
+    );
 
     proxy_send(&mut stream, 2, json!({ "method": "search_files_all", "pattern": "*.rs" }));
     settle(&mut app);
     let files_reply = proxy_recv(&mut stream);
     let file_matches = files_reply["result"]["value"]["matches"].as_array().unwrap();
-    assert!(file_matches.iter().any(|entry| entry["path"] == json!(hidden.display().to_string())
-        && entry["hidden"] == json!(true)));
+    assert!(
+        file_matches
+            .iter()
+            .any(|entry| entry["path"] == json!(canonical_hidden.display().to_string())
+                && entry["hidden"] == json!(true))
+    );
 
     proxy_send(&mut stream, 3, json!({ "method": "search_text_regex", "pattern": "regex-hit" }));
     settle(&mut app);
     let regex_reply = proxy_recv(&mut stream);
     let regex_matches = regex_reply["result"]["value"]["matches"].as_array().unwrap();
     assert!(
-        regex_matches.iter().any(|entry| entry["path"] == json!(visible.display().to_string()))
+        regex_matches
+            .iter()
+            .any(|entry| entry["path"] == json!(canonical_visible.display().to_string()))
     );
 
     proxy_send(
@@ -784,7 +799,7 @@ fn proxy_phase1_extras_return_structured_results() {
     let scoped_reply = proxy_recv(&mut stream);
     let scoped_matches = scoped_reply["result"]["value"]["matches"].as_array().unwrap();
     assert_eq!(scoped_matches.len(), 1, "scoped reply: {scoped_reply}");
-    assert_eq!(scoped_matches[0]["path"], json!(visible.display().to_string()));
+    assert_eq!(scoped_matches[0]["path"], json!(canonical_visible.display().to_string()));
 }
 
 #[test]

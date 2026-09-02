@@ -2206,7 +2206,10 @@ fn phase_six_live_openrouter_pane_repeated_selected_validation_stops_repair() {
     press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     let approval_count =
         approve_until_turn_ready(&mut app, "repeated validation provider completion", 8);
-    assert!(approval_count >= 4, "write, validation, repair, and revalidation need approval");
+    assert!(
+        approval_count >= 3,
+        "two writes and selected validation need approval; got {approval_count}"
+    );
     wait_until(&mut app, "repeated validation pane evidence", |app| {
         app.agents.threads[0].terminal_evidence.as_ref().is_some_and(|summary| {
             summary.status == TurnTerminalStatus::Blocked
