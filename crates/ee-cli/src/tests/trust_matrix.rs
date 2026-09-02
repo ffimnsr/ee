@@ -871,10 +871,9 @@ mod e2e {
         let (mut app, fake) = crate::tests::agent_bridge::agents_app_in(&temp, script);
         app.agents.test_trust_store_base = Some(state_dir.clone());
         open_pane_and_wait_ready(&mut app);
-        wait_until(&mut app, "covered write auto-allowed", |_| {
-            fake.agent().response_with_id(103).is_some()
+        wait_until(&mut app, "covered write auto-allowed and usage recorded", |app| {
+            fake.agent().response_with_id(103).is_some() && !app.agents.usage_ledger.is_empty()
         });
-        assert!(!app.agents.usage_ledger.is_empty(), "persistent use recorded");
 
         // Session-scoped state: an allow-session decision and an extra usage
         // row for the same session.
@@ -1098,8 +1097,12 @@ mod e2e {
         let (mut app, fake) = crate::tests::agent_bridge::agents_app_in(&temp, script);
         app.agents.test_trust_store_base = Some(state_dir.clone());
         open_pane_and_wait_ready(&mut app);
-        wait_until(&mut app, "secret-bearing write dispatched", |_| {
+        wait_until(&mut app, "secret-bearing write completed and audited", |app| {
             fake.agent().response_with_id(103).is_some()
+                && app
+                    .agents_action_log()
+                    .iter()
+                    .any(|entry| matches!(entry, crate::app::ActionLogEntry::TrustDecision { .. }))
         });
         assert!(fs::read_to_string(&target).unwrap().contains("FIXTURE_API_TOKEN"));
 

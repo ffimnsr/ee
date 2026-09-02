@@ -178,7 +178,7 @@ fn read_machine_id_file(path: &Path) -> Result<Vec<u8>, SecretStoreError> {
 /// IOKit `IOPlatformUUID`).
 #[cfg(target_os = "macos")]
 fn read_macos_hardware_uuid() -> Result<Vec<u8>, SecretStoreError> {
-    let name = b"hw.uuid\0".as_ptr().cast::<libc::c_char>();
+    let name = c"hw.uuid".as_ptr();
     let mut size: libc::size_t = 0;
     // First call queries the required buffer size.
     if unsafe { libc::sysctlbyname(name, std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) }

@@ -149,8 +149,12 @@ fn builtin_tool_safeguards_protect_trust_store_and_workspace_root_delete() {
 fn builtin_tool_safeguards_deny_special_files_and_path_escapes() {
     use std::os::unix::net::UnixListener;
 
-    let (mut app, temp, _state_dir) = app_with_store();
-    let socket = temp.path().join("agent.sock");
+    let (mut app, _temp, _state_dir) = app_with_store();
+    let socket_dir = tempfile::Builder::new()
+        .prefix("ee-sock-")
+        .tempdir_in("/tmp")
+        .expect("short socket tempdir");
+    let socket = socket_dir.path().join("agent.sock");
     let _listener = UnixListener::bind(&socket).expect("bind Unix socket");
 
     let mut socket_reply = app.queue_write_approval_for_test(socket.clone(), "data");

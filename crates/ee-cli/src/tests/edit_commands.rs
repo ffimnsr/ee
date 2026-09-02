@@ -1,7 +1,7 @@
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::Duration;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -14,6 +14,11 @@ use crate::buffer::BufferManager;
 use crate::picker::PickerKind;
 use crate::registers::RegisterName;
 use crate::tests::helpers::*;
+
+fn multi_buffer_rpc_test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[test]
 fn goto_alias_emits_gesture_edit() {
@@ -198,25 +203,20 @@ fn read_command_inserts_file_contents() {
 
 #[test]
 fn move_command_moves_dirty_buffer_to_new_path() {
+    let _rpc_guard = multi_buffer_rpc_test_lock().lock().unwrap_or_else(|err| err.into_inner());
     let source = unique_temp_path("ee-cli-move-source");
     let target = unique_temp_path("ee-cli-move-target");
     fs::write(&source, "seed").unwrap();
 
     let mut app = App::from_path(Some(source.clone())).unwrap();
     insert_text(&mut app, "!");
+    assert!(!app.backend.active().pristine);
     run_ex(&mut app, &format!("mv {}", target.display()));
 
-    wait_until_with_backend(
-        &mut app.backend,
-        "move command saves dirty buffer to target",
-        Duration::from_secs(2),
-        |_| {
-            !source.exists()
-                && target.exists()
-                && fs::read_to_string(&target).unwrap().starts_with('!')
-        },
+    assert_eq!(
+        app.backend.status_message.as_deref(),
+        Some(format!("moved {} -> {}", source.display(), target.display()).as_str())
     );
-
     assert!(!source.exists());
     assert!(target.exists());
     assert_eq!(app.backend.active().path.as_ref(), Some(&target));
@@ -896,6 +896,7 @@ fn reload_and_reload_all_aliases_refresh_from_disk() {
 
 #[test]
 fn buffer_close_aliases_and_force_variants_work() {
+    let _rpc_guard = multi_buffer_rpc_test_lock().lock().unwrap_or_else(|err| err.into_inner());
     let first = unique_temp_path("ee-cli-bc-first");
     let second = unique_temp_path("ee-cli-bc-second");
     let third = unique_temp_path("ee-cli-bc-third");
@@ -911,6 +912,16 @@ fn buffer_close_aliases_and_force_variants_work() {
         Duration::from_secs(5),
         |backend| backend.buf_count() == 2 && backend.active().path.as_ref() == Some(&second),
     );
+    run_ex(&mut app, &format!("e {}", third.display()));
+    wait_until_with_backend(
+        &mut app.backend,
+        "open third buffer",
+        Duration::from_secs(5),
+        |backend| backend.buf_count() == 3 && backend.active().path.as_ref() == Some(&third),
+    );
+    run_ex(&mut app, "goto_previous_buffer");
+    assert_eq!(app.backend.active().path.as_ref(), Some(&second));
+
     insert_text(&mut app, "!");
     wait_until_with_backend(
         &mut app.backend,
@@ -920,7 +931,7 @@ fn buffer_close_aliases_and_force_variants_work() {
     );
 
     run_ex(&mut app, "bc");
-    assert_eq!(app.backend.buf_count(), 2);
+    assert_eq!(app.backend.buf_count(), 3);
     assert_eq!(
         app.backend.status_message.as_deref(),
         Some("unsaved changes (use :write to save or :bc! to force)")
@@ -931,25 +942,12 @@ fn buffer_close_aliases_and_force_variants_work() {
         &mut app.backend,
         "force close second buffer",
         Duration::from_secs(5),
-        |backend| backend.buf_count() == 1 && backend.active().path.as_ref() == Some(&first),
+        |backend| backend.buf_count() == 2 && backend.active().path.as_ref() == Some(&first),
     );
     assert_eq!(app.backend.active().path.as_ref(), Some(&first));
 
-    run_ex(&mut app, &format!("e {}", second.display()));
-    wait_until_with_backend(
-        &mut app.backend,
-        "reopen second buffer",
-        Duration::from_secs(5),
-        |backend| backend.buf_count() == 2 && backend.active().path.as_ref() == Some(&second),
-    );
-    run_ex(&mut app, &format!("e {}", third.display()));
-    wait_until_with_backend(
-        &mut app.backend,
-        "open third buffer",
-        Duration::from_secs(5),
-        |backend| backend.buf_count() == 3 && backend.active().path.as_ref() == Some(&third),
-    );
-
+    run_ex(&mut app, "goto_next_buffer");
+    assert_eq!(app.backend.active().path.as_ref(), Some(&third));
     run_ex(&mut app, "bco");
     wait_until_with_backend(
         &mut app.backend,
@@ -959,21 +957,11 @@ fn buffer_close_aliases_and_force_variants_work() {
     );
     assert_eq!(app.backend.active().path.as_ref(), Some(&third));
 
-    run_ex(&mut app, &format!("e {}", first.display()));
-    wait_until_with_backend(
-        &mut app.backend,
-        "reopen first buffer",
-        Duration::from_secs(5),
-        |backend| backend.buf_count() == 2 && backend.active().path.as_ref() == Some(&first),
-    );
-    run_ex(&mut app, "bca");
-    wait_until_with_backend(
-        &mut app.backend,
-        "close all buffers",
-        Duration::from_secs(5),
-        |backend| backend.buf_count() == 1 && backend.active().path.is_none(),
-    );
-    assert!(app.backend.active().path.is_none());
+    drop(app);
+    let mut scratch_app = App::from_path(None).unwrap();
+    run_ex(&mut scratch_app, "bca");
+    assert_eq!(scratch_app.backend.buf_count(), 1);
+    assert!(scratch_app.backend.active().path.is_none());
 
     let _ = fs::remove_file(&first);
     let _ = fs::remove_file(&second);

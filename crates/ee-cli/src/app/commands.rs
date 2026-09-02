@@ -4097,6 +4097,10 @@ mod tests {
         std::env::set_current_dir(original).unwrap();
         drop(_cwd_guard);
         let mut app = app.unwrap();
+        // User-level agent servers can contain secret references. This test only
+        // verifies runtime enablement opens the pane, so keep host setup hermetic.
+        app.config.agents.servers.clear();
+        app.config.agents.default_agent = None;
 
         app.command_buffer = String::from("agents");
         app.execute_command();

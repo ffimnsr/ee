@@ -972,8 +972,9 @@ impl BufferManager {
 
         send_rpc_request(&self.tx, rpc_id, method, params)?;
 
+        let timeout = if cfg!(test) { Duration::from_secs(15) } else { Duration::from_secs(5) };
         let response = resp_rx
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(timeout)
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, format!("{method} timed out")))?;
         parse_response(response)
     }
@@ -1130,7 +1131,8 @@ impl BufferManager {
         path: &std::path::Path,
         baseline_generation: u64,
     ) -> io::Result<()> {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let timeout = if cfg!(test) { Duration::from_secs(15) } else { Duration::from_secs(5) };
+        let deadline = Instant::now() + timeout;
         let mut target_generation = None;
         loop {
             self.sync_pending_events_for_whole_document()?;

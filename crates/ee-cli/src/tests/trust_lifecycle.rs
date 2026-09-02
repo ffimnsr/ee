@@ -536,13 +536,14 @@ mod e2e {
         }
         press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
-        wait_until(&mut app, "audited write and trust notice recorded", |app| {
+        wait_until(&mut app, "audited write and completed turn recorded", |app| {
             fake.agent().response_with_id(103).is_some()
                 && app.agents.threads.iter().any(|thread| {
-                    thread
-                        .system_notices()
-                        .iter()
-                        .any(|notice| notice.contains("trusted by write_audit"))
+                    thread.state == crate::app::ThreadUiState::Ready
+                        && thread
+                            .system_notices()
+                            .iter()
+                            .any(|notice| notice.contains("trusted by write_audit"))
                 })
         });
         let response = fake.agent().response_with_id(103).expect("write answered");

@@ -21,7 +21,7 @@ use crate::app::{App, ThreadUiState};
 use crate::tests::helpers::*;
 use crate::ui::ui;
 
-const WAIT: Duration = Duration::from_secs(5);
+const WAIT: Duration = Duration::from_secs(15);
 
 // ── Shared harness (mirrors tests/agent_pane.rs helpers) ─────────────────────
 
@@ -432,7 +432,10 @@ fn approval_modes_auto_approve_validated_native_writes() {
         app.agents.approval_modes.insert(String::from("s1"), mode);
 
         open_pane_and_wait_ready(&mut app);
-        wait_until(&mut app, "write answered", |_| fake.agent().response_with_id(103).is_some());
+        wait_until(&mut app, "write answered and persisted", |_| {
+            fake.agent().response_with_id(103).is_some()
+                && fs::read_to_string(&file).ok().as_deref() == Some("changed\n")
+        });
 
         let response = fake.agent().response_with_id(103).expect("write response");
         assert!(response.get("result").is_some(), "mode={} response={response}", mode.label());

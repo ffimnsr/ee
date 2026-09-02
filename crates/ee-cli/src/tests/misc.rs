@@ -510,8 +510,32 @@ fn reverse_transpose_and_window_close_commands_manage_views() {
     fs::write(&third, "three\n").unwrap();
 
     let mut app = App::from_path(Some(first.clone())).unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "first view open",
+        Duration::from_secs(5),
+        |backend| backend.lines.first().map(String::as_str) == Some("one"),
+    );
     run_ex(&mut app, &format!("vs {}", second.display()));
+    wait_until_with_backend(
+        &mut app.backend,
+        "second view open",
+        Duration::from_secs(5),
+        |backend| {
+            backend.active().path.as_ref() == Some(&second)
+                && backend.lines.first().map(String::as_str) == Some("two")
+        },
+    );
     run_ex(&mut app, &format!("vs {}", third.display()));
+    wait_until_with_backend(
+        &mut app.backend,
+        "third view open",
+        Duration::from_secs(5),
+        |backend| {
+            backend.active().path.as_ref() == Some(&third)
+                && backend.lines.first().map(String::as_str) == Some("three")
+        },
+    );
 
     run_ex(&mut app, "rotate_view_reverse");
     assert_eq!(app.backend.active().path.as_ref(), Some(&second));
@@ -544,8 +568,32 @@ fn swap_view_commands_reorder_windows_on_matching_axis() {
     fs::write(&fourth, "four\n").unwrap();
 
     let mut vertical = App::from_path(Some(first.clone())).unwrap();
+    wait_until_with_backend(
+        &mut vertical.backend,
+        "vertical first view open",
+        Duration::from_secs(5),
+        |backend| backend.lines.first().map(String::as_str) == Some("one"),
+    );
     run_ex(&mut vertical, &format!("vs {}", second.display()));
+    wait_until_with_backend(
+        &mut vertical.backend,
+        "vertical second view open",
+        Duration::from_secs(5),
+        |backend| {
+            backend.active().path.as_ref() == Some(&second)
+                && backend.lines.first().map(String::as_str) == Some("two")
+        },
+    );
     run_ex(&mut vertical, &format!("vs {}", third.display()));
+    wait_until_with_backend(
+        &mut vertical.backend,
+        "vertical third view open",
+        Duration::from_secs(5),
+        |backend| {
+            backend.active().path.as_ref() == Some(&third)
+                && backend.lines.first().map(String::as_str) == Some("three")
+        },
+    );
     run_ex(&mut vertical, "swap_view_left");
     assert_eq!(window_paths(&vertical), vec![first.clone(), third.clone(), second.clone()]);
     assert_eq!(vertical.backend.active().path.as_ref(), Some(&third));
@@ -555,8 +603,32 @@ fn swap_view_commands_reorder_windows_on_matching_axis() {
     assert_eq!(vertical.backend.active().path.as_ref(), Some(&third));
 
     let mut horizontal = App::from_path(Some(first.clone())).unwrap();
+    wait_until_with_backend(
+        &mut horizontal.backend,
+        "horizontal first view open",
+        Duration::from_secs(5),
+        |backend| backend.lines.first().map(String::as_str) == Some("one"),
+    );
     run_ex(&mut horizontal, &format!("hs {}", fourth.display()));
+    wait_until_with_backend(
+        &mut horizontal.backend,
+        "horizontal fourth view open",
+        Duration::from_secs(5),
+        |backend| {
+            backend.active().path.as_ref() == Some(&fourth)
+                && backend.lines.first().map(String::as_str) == Some("four")
+        },
+    );
     run_ex(&mut horizontal, &format!("hs {}", second.display()));
+    wait_until_with_backend(
+        &mut horizontal.backend,
+        "horizontal second view open",
+        Duration::from_secs(5),
+        |backend| {
+            backend.active().path.as_ref() == Some(&second)
+                && backend.lines.first().map(String::as_str) == Some("two")
+        },
+    );
     run_ex(&mut horizontal, "swap_view_up");
     assert_eq!(window_paths(&horizontal), vec![first.clone(), second.clone(), fourth.clone()]);
     assert_eq!(horizontal.backend.active().path.as_ref(), Some(&second));

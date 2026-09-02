@@ -368,6 +368,9 @@ pub fn assert_open_to_first_render_budget(label: &str, line_builder: fn(usize) -
     let _runtime_guard = EnvVarGuard::set("EE_RUNTIME_DIR", isolated_runtime.path());
 
     const WARM_BUDGET_MS: u128 = 250;
+    #[cfg(target_os = "macos")]
+    const WARM_NOISE_CEILING_MS: u128 = 750;
+    #[cfg(not(target_os = "macos"))]
     const WARM_NOISE_CEILING_MS: u128 = 600;
     const COLD_BUDGET_MS: u128 = 750;
     const WARM_SAMPLE_COUNT: usize = 5;

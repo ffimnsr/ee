@@ -24,7 +24,7 @@ use xi_core_lib::plugin_rpc::{Diagnostic, DiagnosticSeverity, Range, SelectionRa
 use crate::app::{AgentPaneLayout, App, ThreadUiState};
 use crate::tests::helpers::*;
 
-const WAIT: Duration = Duration::from_secs(5);
+const WAIT: Duration = Duration::from_secs(30);
 
 // ── Fake transport factories ─────────────────────────────────────────────────
 

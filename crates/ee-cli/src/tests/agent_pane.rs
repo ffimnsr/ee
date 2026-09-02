@@ -887,6 +887,8 @@ fn enter_without_config_reports_needed_server_and_keeps_draft() {
     let mut app = App::from_path(None).unwrap();
     drop(_cwd_restore);
     drop(_cwd_lock);
+    app.config.agents.servers.clear();
+    app.config.agents.default_agent = None;
 
     run_ex(&mut app, "agents");
     type_text(&mut app, "qwe");
@@ -908,6 +910,8 @@ fn exit_slash_commands_work_without_a_configured_agent() {
     let mut app = App::from_path(None).unwrap();
     drop(_cwd_restore);
     drop(_cwd_lock);
+    app.config.agents.servers.clear();
+    app.config.agents.default_agent = None;
 
     run_ex(&mut app, "agents");
     assert_eq!(app.agents.layout, AgentPaneLayout::Full);

@@ -2566,8 +2566,13 @@ fn proxy_socket_path() -> PathBuf {
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
     let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir()
-        .join(format!("ee-mcp-proxy-{}-{nonce}-{sequence}.sock", std::process::id()))
+    let file_name = format!("ee-mcp-proxy-{}-{nonce}-{sequence}.sock", std::process::id());
+    let socket_path = std::env::temp_dir().join(&file_name);
+    if socket_path.as_os_str().as_encoded_bytes().len() < 100 {
+        socket_path
+    } else {
+        PathBuf::from("/tmp").join(file_name)
+    }
 }
 
 /// A per-run proxy auth token (never logged).
