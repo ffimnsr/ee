@@ -491,14 +491,15 @@ mod e2e {
         let target = temp.path().join("src/generated/audit.rs");
         fs::write(&target, "v0").unwrap();
         let secret_content = "API_TOKEN=super-secret-value";
-        let script = crate::tests::agent_bridge::base_script().emit(
-            crate::tests::agent_bridge::write_text_file(
+        let script = crate::tests::agent_bridge::base_script()
+            .wait_for("session/prompt")
+            .emit(crate::tests::agent_bridge::write_text_file(
                 103,
                 "s1",
                 &target.display().to_string(),
                 secret_content,
-            ),
-        );
+            ))
+            .respond(json!({ "stopReason": "end_turn" }));
         let (mut app, fake) = crate::tests::agent_bridge::agents_app_in(&temp, script);
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
@@ -530,6 +531,10 @@ mod e2e {
             })
             .expect("seed store");
         open_pane_and_wait_ready(&mut app);
+        for ch in "perform audited write".chars() {
+            press(&mut app, KeyCode::Char(ch), KeyModifiers::NONE);
+        }
+        press(&mut app, KeyCode::Enter, KeyModifiers::NONE);
 
         wait_until(&mut app, "audited write and trust notice recorded", |app| {
             fake.agent().response_with_id(103).is_some()
