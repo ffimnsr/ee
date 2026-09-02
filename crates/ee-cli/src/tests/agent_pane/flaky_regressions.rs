@@ -5,22 +5,38 @@ fn approve_until_repeated_validation_complete(
     label: &str,
     max_approvals: usize,
 ) -> usize {
-    let deadline = Instant::now() + WAIT;
+    let mut progress_deadline = Instant::now() + WAIT;
     let mut approvals = 0;
-    while Instant::now() < deadline {
+    let mut last_state = app.agents.threads[0].state;
+    let mut last_evidence_count = 0;
+    loop {
         app.pump_agents();
         let _ = app.backend.drain_events();
+        let state = app.agents.threads[0].state;
+        let evidence_count = app.agents.threads[0]
+            .terminal_evidence
+            .as_ref()
+            .map_or(0, |summary| summary.evidence_ids.len());
+        if state != last_state || evidence_count != last_evidence_count {
+            progress_deadline = Instant::now() + WAIT;
+            last_state = state;
+            last_evidence_count = evidence_count;
+        }
         if !app.agents.approvals.is_empty() {
             assert!(approvals < max_approvals, "{label} exceeded {max_approvals} approvals");
             press(app, KeyCode::Enter, KeyModifiers::NONE);
             approvals += 1;
-        } else if app.agents.threads[0].state == ThreadUiState::Ready
+            progress_deadline = Instant::now() + WAIT;
+        } else if state == ThreadUiState::Ready
             && app.agents.threads[0].terminal_evidence.as_ref().is_some_and(|summary| {
                 summary.status == TurnTerminalStatus::Blocked
                     && summary.blocker == Some(TurnBlocker::ValidationFailed)
             })
         {
             return approvals;
+        }
+        if Instant::now() >= progress_deadline {
+            break;
         }
         thread::sleep(Duration::from_millis(10));
     }
