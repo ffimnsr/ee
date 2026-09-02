@@ -449,9 +449,7 @@ pub fn reload_default_runtime_loader_languages(
                 trusted: external.workspace_trusted,
                 overrides: &external.workspace_overrides,
             });
-        loader.reload_merged_languages(languages, &overrides, workspace)?;
-        loader.invalidate_all();
-        Ok(())
+        loader.reload_merged_languages_and_invalidate_changed(languages, &overrides, workspace)
     })
 }
 

@@ -5,6 +5,7 @@ pub mod helpers;
 pub mod languages;
 pub mod loader;
 pub mod queries;
+mod reload;
 pub mod types;
 
 #[cfg(test)]

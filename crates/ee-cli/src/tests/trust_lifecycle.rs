@@ -531,8 +531,14 @@ mod e2e {
             .expect("seed store");
         open_pane_and_wait_ready(&mut app);
 
-        wait_until(&mut app, "audited write dispatched", |_| {
+        wait_until(&mut app, "audited write and trust notice recorded", |app| {
             fake.agent().response_with_id(103).is_some()
+                && app.agents.threads.iter().any(|thread| {
+                    thread
+                        .system_notices()
+                        .iter()
+                        .any(|notice| notice.contains("trusted by write_audit"))
+                })
         });
         let response = fake.agent().response_with_id(103).expect("write answered");
         if response.get("result").is_none() {

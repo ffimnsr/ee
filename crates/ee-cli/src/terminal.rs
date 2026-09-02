@@ -149,9 +149,9 @@ pub(crate) fn run_command_with_input(
         .stderr(Stdio::piped());
     let mut child = child.spawn()?;
     if let Some(input) = input
-        && let Some(mut stdin) = child.stdin.take()
+        && let Some(stdin) = child.stdin.take()
     {
-        stdin.write_all(input.as_bytes())?;
+        write_command_input(stdin, input)?;
     }
     let output = child.wait_with_output()?;
 
@@ -164,6 +164,13 @@ pub(crate) fn run_command_with_input(
         exit_code: output.status.code(),
         duration: started.elapsed(),
     })
+}
+
+fn write_command_input(mut stdin: impl Write, input: &str) -> io::Result<()> {
+    match stdin.write_all(input.as_bytes()) {
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        result => result,
+    }
 }
 
 pub(crate) fn render_transcript(result: &TerminalRunResult) -> String {
@@ -334,6 +341,23 @@ mod tests {
 
         assert!(result.success);
         assert_eq!(result.stdout, "alpha");
+    }
+
+    #[test]
+    fn command_input_tolerates_child_closing_stdin() {
+        struct ClosedStdin;
+
+        impl Write for ClosedStdin {
+            fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+                Err(io::Error::from(io::ErrorKind::BrokenPipe))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        write_command_input(ClosedStdin, "unused selection").unwrap();
     }
 
     #[cfg(not(windows))]

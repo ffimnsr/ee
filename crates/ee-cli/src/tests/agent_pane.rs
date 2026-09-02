@@ -4654,8 +4654,12 @@ fn agents_stop_cancels_running_turn_and_updates_status() {
     wait_until(&mut app, "cancel reply lands", |app| {
         app.backend.status_message.as_deref() == Some("turn cancelled")
     });
-    wait_until(&mut app, "turn cancelled notice", |app| {
-        app.agents.threads[0].system_notices().iter().any(|notice| notice == "turn cancelled")
+    wait_until(&mut app, "turn cancellation completed", |app| {
+        app.agents.threads[0].state == ThreadUiState::Ready
+            && app.agents.threads[0]
+                .system_notices()
+                .iter()
+                .any(|notice| notice == "turn cancelled")
     });
     assert_eq!(app.agents.threads[0].state, ThreadUiState::Ready);
 }
