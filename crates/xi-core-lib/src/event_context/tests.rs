@@ -226,6 +226,15 @@ fn smoke_test() {
 #[test]
 fn language_changed_invalidates_view_for_syntax_refresh() {
     let _guard = crate::runtime_loader::runtime_loader_test_guard();
+    crate::runtime_loader::ensure_default_runtime_loader_has_test_grammars();
+    crate::runtime_loader::with_default_runtime_loader_mut(|loader| {
+        for kind in [
+            crate::runtime_loader::RuntimeQueryKind::Highlights,
+            crate::runtime_loader::RuntimeQueryKind::Injections,
+        ] {
+            let _ = loader.compile_query_kind("rust", kind);
+        }
+    });
     let harness = ContextHarness::new("let x = 1;\n");
     harness.take_notifications();
 

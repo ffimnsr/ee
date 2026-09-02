@@ -25,8 +25,6 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, Stdio};
 #[cfg(test)]
-use std::sync::LazyLock;
-#[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
@@ -55,19 +53,11 @@ use tokio_util::sync::CancellationToken;
 
 use super::*;
 
+#[cfg(test)]
+pub(super) mod test_hooks;
+
 use super::agents_mcp::ProxyRoute;
 use super::write_leases::{WriteLeaseId, WriteLeaseOwner};
-
-#[cfg(test)]
-type WriteVerificationTestHook = Box<dyn FnOnce(&mut App) + Send>;
-
-#[cfg(test)]
-static PRE_WRITE_VERIFICATION_TEST_HOOK: LazyLock<Mutex<Option<WriteVerificationTestHook>>> =
-    LazyLock::new(|| Mutex::new(None));
-
-#[cfg(test)]
-static POST_WRITE_TEST_HOOK: LazyLock<Mutex<Option<WriteVerificationTestHook>>> =
-    LazyLock::new(|| Mutex::new(None));
 
 #[cfg(test)]
 static WEB_DISPATCH_TEST_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -5791,34 +5781,30 @@ impl App {
 
     #[cfg(test)]
     pub(crate) fn set_pre_write_verification_test_hook(
+        &mut self,
         hook: impl FnOnce(&mut App) + Send + 'static,
     ) {
-        *PRE_WRITE_VERIFICATION_TEST_HOOK
-            .lock()
-            .expect("pre-write verification test hook poisoned") = Some(Box::new(hook));
+        self.write_verification_test_hooks.set_pre_verification(Box::new(hook));
     }
 
     #[cfg(test)]
     fn run_pre_write_verification_test_hook(&mut self) {
-        if let Some(hook) = PRE_WRITE_VERIFICATION_TEST_HOOK
-            .lock()
-            .expect("pre-write verification test hook poisoned")
-            .take()
-        {
+        if let Some(hook) = self.write_verification_test_hooks.take_pre_verification() {
             hook(self);
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn set_post_write_test_hook(hook: impl FnOnce(&mut App) + Send + 'static) {
-        *POST_WRITE_TEST_HOOK.lock().expect("post-write test hook poisoned") = Some(Box::new(hook));
+    pub(crate) fn set_post_write_test_hook(
+        &mut self,
+        hook: impl FnOnce(&mut App) + Send + 'static,
+    ) {
+        self.write_verification_test_hooks.set_post_write(Box::new(hook));
     }
 
     #[cfg(test)]
     fn run_post_write_test_hook(&mut self) {
-        if let Some(hook) =
-            POST_WRITE_TEST_HOOK.lock().expect("post-write test hook poisoned").take()
-        {
+        if let Some(hook) = self.write_verification_test_hooks.take_post_write() {
             hook(self);
         }
     }

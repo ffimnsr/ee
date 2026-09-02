@@ -49,6 +49,8 @@ use url::Url;
 use super::agent_export::{format_agent_transcript_markdown, write_agent_transcript_export};
 use super::*;
 
+mod pump;
+
 // ── Pane geometry constants ──────────────────────────────────────────────────
 
 /// Width of the right-split agents pane.
@@ -1774,33 +1776,6 @@ impl App {
         self.agents.layout
     }
 
-    /// Drains host events, session replies, cancel replies, and elicitation
-    /// requests.  Called from the main loop on every tick; safe to call from
-    /// tests.
-    pub(crate) fn pump_agents(&mut self) {
-        let events = {
-            let Some(host) = &mut self.agents.host else {
-                return;
-            };
-            let mut events = Vec::new();
-            while let Ok(event) = host.events.try_recv() {
-                events.push(event);
-            }
-            events
-        };
-        for event in events {
-            self.handle_agent_event(event);
-        }
-
-        self.pump_session_reply();
-        self.pump_cancel_reply();
-        self.pump_thread_action_reply();
-        self.pump_external_critic_reply();
-        self.pump_bridge_requests();
-        self.pump_mcp_events();
-        self.pump_mcp_replies();
-    }
-
     /// Applies one host event to the pane state.
     fn handle_agent_event(&mut self, event: AgentEvent) {
         match event {
@@ -1891,7 +1866,8 @@ impl App {
             }
             AgentEvent::TurnStarted { session_id, .. } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
-                    self.agents.threads[index].state = ThreadUiState::Running;
+                    self.agents.threads[index].state =
+                        pump::state_after_turn_activity(self.agents.threads[index].state);
                     self.agents.threads[index].verification_paths.clear();
                     self.agents.threads[index].verification_revision = None;
                     self.agents.threads[index].active_response_group = None;
@@ -1910,7 +1886,8 @@ impl App {
             }
             AgentEvent::TurnDispatched { session_id } => {
                 if let Some(index) = self.agents.thread_index(session_id.0.as_ref()) {
-                    self.agents.threads[index].state = ThreadUiState::Running;
+                    self.agents.threads[index].state =
+                        pump::state_after_turn_activity(self.agents.threads[index].state);
                 }
             }
 

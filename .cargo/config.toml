@@ -1,0 +1,4 @@
+# Large macOS test binaries can exceed ld64's 16 MiB compact-unwind offset table.
+# DWARF unwind data remains available; suppress only this known size warning.
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "link-arg=-Wl,-no_warn_compact_unwind"]

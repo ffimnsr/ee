@@ -357,6 +357,10 @@ pub(crate) struct App {
     /// clock; tests substitute a deterministic fake.
     #[cfg(feature = "agents")]
     pub(crate) trust_clock: crate::policy::PolicyClock,
+    /// Per-app write-verification hooks used by concurrent regression tests.
+    #[cfg(all(test, feature = "agents"))]
+    pub(super) write_verification_test_hooks:
+        super::agent_bridge::test_hooks::WriteVerificationTestHooks,
     /// Force next frame to clear and redraw the terminal surface.
     pub(crate) redraw_requested: bool,
     /// Per-session render observability counters.
@@ -461,6 +465,9 @@ impl App {
             project_knowledge: super::agent_knowledge::ProjectKnowledge::default(),
             #[cfg(feature = "agents")]
             trust_clock: crate::policy::PolicyClock::default(),
+            #[cfg(all(test, feature = "agents"))]
+            write_verification_test_hooks:
+                super::agent_bridge::test_hooks::WriteVerificationTestHooks::default(),
             redraw_requested: false,
             render_metrics: crate::render_metrics::RenderMetrics::new(),
         })
