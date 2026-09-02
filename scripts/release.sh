@@ -497,9 +497,6 @@ main() {
   bash scripts/build-runtime.sh --force --source-root target/release-runtime-sources --output-root target/release-runtime
 
   cargo check --workspace --all-targets --quiet
-  cargo fmt --all --check
-  cargo clippy --workspace --all-targets --all-features -- -D warnings
-  cargo test --workspace
 
   git add Cargo.lock Cargo.toml "$CHANGELOG_FILE"
   [[ -f "$FUZZ_MANIFEST" ]] && git add "$FUZZ_MANIFEST"

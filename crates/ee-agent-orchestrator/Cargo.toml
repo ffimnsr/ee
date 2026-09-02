@@ -1,6 +1,6 @@
 [package]
 name = "ee-agent-orchestrator"
-version = "0.11.5"
+version = "0.11.6"
 license = "Apache-2.0"
 authors = ["Edward Fitz Abucay <gh:ffimnsr>"]
 description = "Optional server-side agent orchestration above ee-acp-agent-server: bounded model-tool loops, tool registry, tasks, memory, budgets, and policy gates."

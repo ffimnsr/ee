@@ -180,7 +180,7 @@ main() {
         run_stable_clippy
 
         echo "[pre-commit] test stable (${scope_args[*]})"
-        cargo test "${scope_args[@]}" --all-features
+        cargo test --quiet "${scope_args[@]}" --all-features
         echo "[pre-commit] test passed"
     else
         echo "[pre-commit] no Rust changes staged; skipping cargo fmt/clippy/test"
