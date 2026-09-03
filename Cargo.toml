@@ -116,16 +116,16 @@ sha2 = "0.10.9"
 zeroize = "1.8.2"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
-ee-acp-agent-server = { package = "ee-acp-agent-server", path = "crates/ee-acp-agent-server", version = "0.11.7" }
-ee-agent-host = { package = "ee-agent-host", path = "crates/ee-agent-host", version = "0.11.7" }
-ee-agent-memory = { package = "ee-agent-memory", path = "crates/ee-agent-memory", version = "0.11.7" }
-ee-agent-orchestrator = { package = "ee-agent-orchestrator", path = "crates/ee-agent-orchestrator", version = "0.11.7" }
-ee-agent-protocol = { package = "ee-agent-protocol", path = "crates/ee-agent-protocol", version = "0.11.7" }
-ee-mcp = { package = "ee-mcp", path = "crates/ee-mcp", version = "0.11.7" }
-xi-core-lib = { package = "ee-xi-core-lib", path = "crates/xi-core-lib", version = "0.11.7" }
-xi-plugin-derive = { package = "ee-xi-plugin-derive", path = "crates/xi-plugin-derive", version = "0.11.7" }
-xi-plugin-lib = { package = "ee-xi-plugin-lib", path = "crates/xi-plugin-lib", version = "0.11.7" }
-xi-rope = { package = "ee-xi-rope", path = "crates/xi-rope", version = "0.11.7" }
-xi-rpc = { package = "ee-xi-rpc", path = "crates/xi-rpc", version = "0.11.7" }
-xi-unicode = { package = "ee-xi-unicode", path = "crates/xi-unicode", version = "0.11.7" }
-xi-lsp-lib = { package = "ee-xi-lsp-lib", path = "crates/xi-lsp-lib", version = "0.11.7" }
+ee-acp-agent-server = { package = "ee-acp-agent-server", path = "crates/ee-acp-agent-server", version = "0.11.8" }
+ee-agent-host = { package = "ee-agent-host", path = "crates/ee-agent-host", version = "0.11.8" }
+ee-agent-memory = { package = "ee-agent-memory", path = "crates/ee-agent-memory", version = "0.11.8" }
+ee-agent-orchestrator = { package = "ee-agent-orchestrator", path = "crates/ee-agent-orchestrator", version = "0.11.8" }
+ee-agent-protocol = { package = "ee-agent-protocol", path = "crates/ee-agent-protocol", version = "0.11.8" }
+ee-mcp = { package = "ee-mcp", path = "crates/ee-mcp", version = "0.11.8" }
+xi-core-lib = { package = "ee-xi-core-lib", path = "crates/xi-core-lib", version = "0.11.8" }
+xi-plugin-derive = { package = "ee-xi-plugin-derive", path = "crates/xi-plugin-derive", version = "0.11.8" }
+xi-plugin-lib = { package = "ee-xi-plugin-lib", path = "crates/xi-plugin-lib", version = "0.11.8" }
+xi-rope = { package = "ee-xi-rope", path = "crates/xi-rope", version = "0.11.8" }
+xi-rpc = { package = "ee-xi-rpc", path = "crates/xi-rpc", version = "0.11.8" }
+xi-unicode = { package = "ee-xi-unicode", path = "crates/xi-unicode", version = "0.11.8" }
+xi-lsp-lib = { package = "ee-xi-lsp-lib", path = "crates/xi-lsp-lib", version = "0.11.8" }

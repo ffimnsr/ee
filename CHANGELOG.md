@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.8 - 2026-09-03
+
+### Fixes
+
+- update phase 6 very flaky regression on very slow CI macos runners (`6353920d`)
+
+
 ## 0.11.7 - 2026-09-03
 
 ### Features
