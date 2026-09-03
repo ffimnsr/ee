@@ -771,6 +771,7 @@ fn symbols_notification_populates_picker() {
                 path: String::from("/src/lib.rs"),
                 line: 5,
                 column: 0,
+                children: Vec::new(),
             }],
         })
         .expect("send should succeed");

@@ -4,12 +4,13 @@ use xi_rope::{LinesMetric, Rope, RopeDelta};
 
 use crate::edit_types::{BufferEvent, EventDomain, SpecialEvent};
 use crate::editor::Editor;
+use crate::fold_support::{DEFAULT_FOLD_PARSE_TIMEOUT, fold_ranges_for_text};
 use crate::indent::SyntaxIndentContext;
 use crate::line_offset::LineOffset;
 use crate::rpc::{EditNotification, FoldRangePreview, LineRange};
 use crate::selection::{InsertDrift, Selection};
 use crate::tabs::RENDER_VIEW_IDLE_MASK;
-use crate::tree_sitter_support::{fold_ranges_for_text, syntax_feature_availability};
+use crate::tree_sitter_support::syntax_feature_availability;
 use crate::view::View;
 
 use super::{BufferItems, EventContext, RENDER_DELAY};
@@ -86,7 +87,7 @@ impl<'a> EventContext<'a> {
             Some(self.language.as_ref()),
             file_path,
             &text,
-            std::time::Duration::from_millis(25),
+            DEFAULT_FOLD_PARSE_TIMEOUT,
         );
         let start_line = start_line.unwrap_or(0);
         let end_line = end_line.unwrap_or(usize::MAX);

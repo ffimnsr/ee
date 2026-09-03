@@ -340,6 +340,20 @@ fn plugin_diagnostics_round_trip_through_view_state() {
 }
 
 #[test]
+fn counted_vertical_motion_moves_relative_to_backend_cursor() {
+    use crate::rpc::EditNotification;
+
+    let harness = ContextHarness::new("zero\none\ntwo\nthree");
+    let mut ctx = harness.make_context();
+
+    ctx.do_edit(EditNotification::MoveVertical { lines: 2, up: false, modify_selection: false });
+    assert_eq!(harness.debug_render(), "zero\none\n|two\nthree");
+
+    ctx.do_edit(EditNotification::MoveVertical { lines: 1, up: true, modify_selection: false });
+    assert_eq!(harness.debug_render(), "zero\n|one\ntwo\nthree");
+}
+
+#[test]
 fn test_gestures() {
     use crate::rpc::{EditNotification, GestureType::*};
 

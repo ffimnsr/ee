@@ -454,6 +454,12 @@ pub enum EditNotification {
     MoveUpAndModifySelection,
     MoveDown,
     MoveDownAndModifySelection,
+    MoveVertical {
+        lines: usize,
+        up: bool,
+        #[serde(default)]
+        modify_selection: bool,
+    },
     MoveLeft,
     // synoynm for `MoveLeft`
     MoveBackward,
@@ -637,6 +643,7 @@ pub enum EditNotification {
     RequestTypeDefinition,
     RequestReferences,
     RequestImplementation,
+    RequestDocumentSymbols,
     FormatDocument,
     RequestCodeActions {
         #[serde(default)]
@@ -891,6 +898,16 @@ mod tests {
             serde_json::from_str(r#"{"view_id":"view-id-1","method":"toggle_block_comment"}"#)
                 .unwrap();
         assert!(matches!(block.cmd, EditNotification::ToggleBlockComment));
+    }
+
+    #[test]
+    fn deserialize_document_symbols_edit() {
+        let edit: EditCommand<EditNotification> = serde_json::from_str(
+            r#"{"view_id":"view-id-1","method":"request_document_symbols","params":{}}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(edit.cmd, EditNotification::RequestDocumentSymbols));
     }
 
     #[test]

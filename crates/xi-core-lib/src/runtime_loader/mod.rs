@@ -1,6 +1,7 @@
 pub mod builtin;
 pub mod errors;
 pub mod grammar;
+mod grammar_layout;
 pub mod helpers;
 pub mod languages;
 pub mod loader;

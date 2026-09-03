@@ -37,6 +37,7 @@ mod agents;
 #[cfg(feature = "agents")]
 pub(crate) mod agents_mcp;
 mod commands;
+mod fold_navigation;
 mod parsing;
 mod state;
 #[cfg(feature = "agents")]
@@ -695,6 +696,20 @@ impl App {
                     _ => {}
                 }
                 if self.handle_vlf_direct_edit_action(method, count as usize) {
+                    return;
+                }
+                if let Some(motion) = self.fold_vertical_motion(method, count as usize) {
+                    if self.handle_vlf_navigation(method, motion.line_count as u64) {
+                        return;
+                    }
+                    let _ = self.backend.send_edit(
+                        "move_vertical",
+                        json!({
+                            "lines": motion.line_count,
+                            "up": motion.up,
+                            "modify_selection": motion.modify_selection,
+                        }),
+                    );
                     return;
                 }
                 if self.handle_vlf_navigation(method, u64::from(count)) {
@@ -3417,21 +3432,16 @@ impl App {
         self.last_editor_height = editor_height;
         self.last_editor_width = editor_width;
         let cursor_line = self.backend.cursor_line;
-        // Clamp scroll_offset to half the editor height to avoid pathological cases.
-        let off = self.config.scroll_offset.min(editor_height / 2);
-
-        if cursor_line < self.viewport.top_line + off {
-            self.viewport.top_line = cursor_line.saturating_sub(off);
-        } else if cursor_line + off + 1 > self.viewport.top_line + editor_height {
-            self.viewport.top_line = cursor_line + off + 1 - editor_height;
-        }
-        // Clamp top_line so we never show blank rows at the bottom when there
-        // are enough lines above to fill the editor area.
+        let buffer_id = self.backend.active().id;
         let total_lines = self.backend.line_count().max(1);
-        let max_top = total_lines.saturating_sub(editor_height);
-        if self.viewport.top_line > max_top {
-            self.viewport.top_line = max_top;
-        }
+        self.viewport.top_line = self.folds.viewport_top_for_cursor(
+            buffer_id,
+            self.viewport.top_line,
+            cursor_line,
+            editor_height,
+            self.config.scroll_offset,
+            total_lines,
+        );
         let line = self.backend.get_line(cursor_line).unwrap_or("");
         let cursor_display_col = byte_col_to_display_col(line, self.backend.cursor_col);
         self.viewport.target_col = cursor_display_col;

@@ -53,6 +53,7 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         builtin_language_definition("java", &["java"]),
         builtin_language_definition("javascript", &["cjs", "js", "jsx", "mjs"]),
         builtin_language_definition("json", &["json"]),
+        builtin_language_definition("markdown", &["md", "markdown"]),
         builtin_language_definition("php", &["php", "phtml"]),
         builtin_language_definition("python", &["py", "pyw"]),
         builtin_language_definition("ruby", &["rb", "gemspec", "gemfile", "rake", "rakefile"]),
@@ -258,6 +259,24 @@ fn builtin_runtime_components() -> (Languages, RuntimeLanguageOverrides) {
         "0.24.8",
         "tree_sitter_json",
         ["json"],
+        metadata!(
+            LineCommentStyle::Unsupported,
+            BlockCommentStyle::Unsupported,
+            IndentationStrategy::Unsupported,
+            &[
+                SemanticTargetKind::Function,
+                SemanticTargetKind::Class,
+                SemanticTargetKind::Parameter,
+                SemanticTargetKind::Test,
+            ]
+        )
+    );
+    builtin_language!(
+        "markdown",
+        "tree-sitter-md",
+        "0.5.3",
+        "tree_sitter_markdown",
+        ["markdown", "md"],
         metadata!(
             LineCommentStyle::Unsupported,
             BlockCommentStyle::Unsupported,
@@ -549,6 +568,7 @@ fn preload_builtin_test_grammars(loader: &mut RuntimeLoader) {
     preload_test_language!("java", test_grammars::java(), "tree_sitter_java");
     preload_test_language!("javascript", test_grammars::javascript(), "tree_sitter_javascript");
     preload_test_language!("json", test_grammars::json(), "tree_sitter_json");
+    preload_test_language!("markdown", test_grammars::markdown(), "tree_sitter_markdown");
     preload_test_language!("php", test_grammars::php(), "tree_sitter_php");
     preload_test_language!("python", test_grammars::python(), "tree_sitter_python");
     preload_test_language!("ruby", test_grammars::ruby(), "tree_sitter_ruby");

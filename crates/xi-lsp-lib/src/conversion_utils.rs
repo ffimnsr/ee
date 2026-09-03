@@ -558,36 +558,46 @@ fn symbol_kind_name(kind: SymbolKind) -> &'static str {
     }
 }
 
-/// Convert a flat list of `DocumentSymbol` (from `textDocument/documentSymbol`)
-/// to `SymbolItem`s, resolving locations against `document_uri`.
+/// Convert hierarchical LSP `DocumentSymbol`s to backend `SymbolItem`s.
+///
+/// LSP positions use UTF-16 code units. `SymbolItem` uses zero-based UTF-8 byte
+/// columns, so conversion must use current unsaved document text.
 pub(crate) fn symbol_items_from_document_symbols(
-    document_uri: &Uri,
     symbols: Vec<DocumentSymbol>,
     file_path: &str,
-) -> Vec<SymbolItem> {
-    let _ = document_uri;
-    let mut result = Vec::new();
-    flatten_document_symbols(symbols, file_path, &mut result);
-    result
+    document_text: Option<&str>,
+) -> Result<Vec<SymbolItem>, LanguageResponseError> {
+    symbols
+        .into_iter()
+        .map(|symbol| document_symbol_item(symbol, file_path, document_text))
+        .collect()
 }
 
-fn flatten_document_symbols(
-    symbols: Vec<DocumentSymbol>,
+fn document_symbol_item(
+    symbol: DocumentSymbol,
     file_path: &str,
-    out: &mut Vec<SymbolItem>,
-) {
-    for sym in symbols {
-        out.push(SymbolItem {
-            name: sym.name,
-            kind: symbol_kind_name(sym.kind).to_owned(),
-            path: file_path.to_owned(),
-            line: sym.range.start.line as usize,
-            column: sym.range.start.character as usize,
-        });
-        if let Some(children) = sym.children {
-            flatten_document_symbols(children, file_path, out);
-        }
-    }
+    document_text: Option<&str>,
+) -> Result<SymbolItem, LanguageResponseError> {
+    let position = symbol.selection_range.start;
+    let column = match document_text {
+        Some(text) => byte_column_of_position_in_document(text, position)?,
+        None => 0,
+    };
+    let children = symbol
+        .children
+        .unwrap_or_default()
+        .into_iter()
+        .map(|child| document_symbol_item(child, file_path, document_text))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(SymbolItem {
+        name: symbol.name,
+        kind: symbol_kind_name(symbol.kind).to_owned(),
+        path: file_path.to_owned(),
+        line: position.line as usize,
+        column,
+        children,
+    })
 }
 
 /// Convert `SymbolInformation` items (from `workspace/symbol`) to `SymbolItem`s.
@@ -604,6 +614,7 @@ pub(crate) fn symbol_items_from_workspace_symbols(
                 path: path.to_string_lossy().to_string(),
                 line: sym.location.range.start.line as usize,
                 column: sym.location.range.start.character as usize,
+                children: Vec::new(),
             })
         })
         .collect()
@@ -698,5 +709,44 @@ mod tests {
         assert_eq!(actions[0].title, "Fix let");
         assert_eq!(actions[0].edits.len(), 1);
         assert_eq!(actions[0].edits[0].new_text, "let");
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn document_symbols_preserve_hierarchy_and_convert_utf16_columns() {
+        let text = "😀 parent\n  child\n";
+        let child = DocumentSymbol {
+            name: String::from("child"),
+            detail: None,
+            kind: SymbolKind::METHOD,
+            tags: None,
+            deprecated: None,
+            range: Range::new(Position::new(1, 0), Position::new(1, 7)),
+            selection_range: Range::new(Position::new(1, 2), Position::new(1, 7)),
+            children: None,
+        };
+        let parent = DocumentSymbol {
+            name: String::from("parent"),
+            detail: None,
+            kind: SymbolKind::CLASS,
+            tags: None,
+            deprecated: None,
+            range: Range::new(Position::new(0, 0), Position::new(1, 7)),
+            selection_range: Range::new(Position::new(0, 3), Position::new(0, 9)),
+            children: Some(vec![child]),
+        };
+
+        let symbols =
+            symbol_items_from_document_symbols(vec![parent], "/tmp/example.rs", Some(text))
+                .expect("valid LSP positions should convert");
+
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "parent");
+        assert_eq!(symbols[0].line, 0);
+        assert_eq!(symbols[0].column, 5);
+        assert_eq!(symbols[0].children.len(), 1);
+        assert_eq!(symbols[0].children[0].name, "child");
+        assert_eq!(symbols[0].children[0].line, 1);
+        assert_eq!(symbols[0].children[0].column, 2);
     }
 }

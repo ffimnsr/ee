@@ -9,6 +9,7 @@ use semver::Version;
 use serde::Deserialize;
 use tree_sitter_loader::Loader;
 
+use super::grammar_layout::candidate_dir_matches_language;
 use super::helpers::{
     bundled_repo_runtime_root, cargo_registry_src_root, copy_runtime_query_file,
     default_symbol_name, effective_host_triple, effective_target_triple,
@@ -918,10 +919,6 @@ pub fn resolve_nested_grammar_subdir(
     source_dir: &Path,
     language: &RuntimeLanguage,
 ) -> Result<Option<PathBuf>, RuntimeOperationError> {
-    let target_names = [language.grammar_id(), language.canonical_id(), language.query_language()]
-        .into_iter()
-        .map(normalize_lookup_key)
-        .collect::<Vec<_>>();
     let candidates = fs::read_dir(source_dir)
         .map_err(|error| {
             RuntimeOperationError::grammar_source(format!(
@@ -934,11 +931,9 @@ pub fn resolve_nested_grammar_subdir(
         .filter(|path| path.is_dir() && path.join("src").join("parser.c").exists())
         .collect::<Vec<_>>();
 
-    if let Some(path) = candidates.iter().find(|path| {
-        path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
-            target_names.iter().any(|target| *target == normalize_lookup_key(name))
-        })
-    }) {
+    if let Some(path) =
+        candidates.iter().find(|path| candidate_dir_matches_language(path, language))
+    {
         return Ok(Some(path.clone()));
     }
 

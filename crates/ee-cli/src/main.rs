@@ -2171,7 +2171,14 @@ fn run_app(
         let editor_height = ui::compute_editor_height(term_rect, app);
         let editor_width = ui::compute_editor_width(term_rect, app);
         app.scroll_into_view(editor_height, editor_width);
-        app.backend.notify_scroll(app.viewport.top_line, app.viewport.top_line + editor_height)?;
+        let active = app.backend.active();
+        let viewport_range = app.folds.line_range_for_rendered_rows(
+            active.id,
+            app.viewport.top_line,
+            editor_height,
+            active.line_count(),
+        );
+        app.backend.notify_scroll(viewport_range.0, viewport_range.1)?;
 
         terminal.draw(|frame| ui(frame, app))?;
         app.render_metrics.record_render();

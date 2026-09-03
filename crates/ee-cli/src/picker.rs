@@ -215,19 +215,8 @@ impl PickerState {
 
     /// Open a symbol picker from LSP document/workspace symbol results.
     pub(crate) fn new_symbols(title: impl Into<String>, symbols: Vec<SymbolItem>) -> Self {
-        let items: Vec<PickerItem> = symbols
-            .into_iter()
-            .map(|sym| PickerItem {
-                label: format!("{} ({})", sym.name, sym.kind),
-                detail: Some(sym.path.clone()),
-                path: Some(PathBuf::from(&sym.path)),
-                buf_id: None,
-                // 0-based line for navigation
-                line: Some(sym.line.saturating_sub(1)),
-                col: Some(sym.column.saturating_sub(1)),
-                choice_index: None,
-            })
-            .collect();
+        let mut items = Vec::new();
+        append_symbol_items(&symbols, 0, &mut items);
         let filtered = (0..items.len()).collect();
         Self {
             kind: PickerKind::Symbols,
@@ -358,6 +347,26 @@ impl PickerState {
                 .collect();
         }
         self.selected = 0;
+    }
+}
+
+const SYMBOL_PICKER_LIMIT: usize = 4_096;
+
+fn append_symbol_items(symbols: &[SymbolItem], depth: usize, items: &mut Vec<PickerItem>) {
+    for symbol in symbols {
+        if items.len() >= SYMBOL_PICKER_LIMIT {
+            return;
+        }
+        items.push(PickerItem {
+            label: format!("{}{} ({})", "  ".repeat(depth.min(32)), symbol.name, symbol.kind),
+            detail: Some(symbol.path.clone()),
+            path: Some(PathBuf::from(&symbol.path)),
+            buf_id: None,
+            line: Some(symbol.line),
+            col: Some(symbol.column),
+            choice_index: None,
+        });
+        append_symbol_items(&symbol.children, depth + 1, items);
     }
 }
 
@@ -518,6 +527,37 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].label, "sample.txt:2: Beta match");
         assert_eq!(items[0].line, Some(1));
+    }
+
+    #[test]
+    fn symbol_picker_flattens_hierarchy_and_keeps_zero_based_locations() {
+        let symbols = vec![SymbolItem {
+            name: String::from("Parent"),
+            kind: String::from("section"),
+            path: String::from("/tmp/README.md"),
+            line: 0,
+            column: 2,
+            children: vec![SymbolItem {
+                name: String::from("Child"),
+                kind: String::from("section"),
+                path: String::from("/tmp/README.md"),
+                line: 3,
+                column: 3,
+                children: Vec::new(),
+            }],
+        }];
+        let mut picker = PickerState::new_symbols("Symbols", symbols);
+
+        assert_eq!(picker.visible_items_range(0, 2), ["Parent (section)", "  Child (section)"]);
+        assert_eq!(picker.selected_item().unwrap().line, Some(0));
+        assert_eq!(picker.selected_item().unwrap().col, Some(2));
+
+        picker.move_down();
+        assert_eq!(picker.selected_item().unwrap().line, Some(3));
+        picker.push_char('c');
+        picker.push_char('h');
+        assert_eq!(picker.visible_count(), 1);
+        assert_eq!(picker.selected_item().unwrap().line, Some(3));
     }
 
     #[test]

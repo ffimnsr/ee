@@ -40,6 +40,10 @@ pub enum Movement {
     Up,
     /// Move down one visible line.
     Down,
+    /// Move up by a specific number of lines.
+    UpLines(usize),
+    /// Move down by a specific number of lines.
+    DownLines(usize),
     /// Move up one viewport height.
     UpPage,
     /// Move down one viewport height.
@@ -235,6 +239,14 @@ pub fn region_movement(
         }
         Movement::Up => vertical_motion(r, lo, text, -1, modify),
         Movement::Down => vertical_motion(r, lo, text, 1, modify),
+        Movement::UpLines(lines) => {
+            let lines = isize::try_from(lines).unwrap_or(isize::MAX);
+            vertical_motion(r, lo, text, -lines, modify)
+        }
+        Movement::DownLines(lines) => {
+            let lines = isize::try_from(lines).unwrap_or(isize::MAX);
+            vertical_motion(r, lo, text, lines, modify)
+        }
         Movement::UpExactPosition => vertical_motion_exact_pos(r, lo, text, true, modify),
         Movement::DownExactPosition => vertical_motion_exact_pos(r, lo, text, false, modify),
         Movement::StartOfParagraph => {

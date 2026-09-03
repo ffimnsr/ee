@@ -20,6 +20,7 @@ language_fn!(html, tree_sitter_html::LANGUAGE);
 language_fn!(java, tree_sitter_java::LANGUAGE);
 language_fn!(javascript, tree_sitter_javascript::LANGUAGE);
 language_fn!(json, tree_sitter_json::LANGUAGE);
+language_fn!(markdown, tree_sitter_md::LANGUAGE);
 language_fn!(php, tree_sitter_php::LANGUAGE_PHP);
 language_fn!(python, tree_sitter_python::LANGUAGE);
 language_fn!(ruby, tree_sitter_ruby::LANGUAGE);

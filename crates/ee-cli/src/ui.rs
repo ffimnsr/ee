@@ -247,7 +247,9 @@ pub(crate) fn hit_test_buffer_cell(
     let vp = app.tabs.focused_windows().viewport_for_window(win_id, app.viewport);
     let [_, buffer_area] = window_chunks(app, win_rect, buf.line_count());
     let content_area = buffer_content_area(buffer_area);
-    let line = vp.top_line + usize::from(row.saturating_sub(content_area.y));
+    let rendered_row = usize::from(row.saturating_sub(content_area.y));
+    let line =
+        app.folds.line_for_rendered_row(buf_id, vp.top_line, rendered_row, buf.line_count())?;
     let display_col = if column < buffer_area.x {
         0
     } else if column < content_area.x {
@@ -2651,7 +2653,8 @@ fn cursor_position_for(
     let line = buf.get_line(buf.cursor_line).unwrap_or("");
     let display_col = byte_col_to_display_col(line, buf.cursor_col);
 
-    let screen_line = buf.cursor_line.saturating_sub(vp.top_line);
+    let screen_line =
+        app.folds.rendered_row_for_line(buf.id, vp.top_line, buf.cursor_line).unwrap_or_default();
     let screen_col = display_col.saturating_sub(vp.left_col);
 
     let x = (editor_area.x + screen_col as u16).min(max_x);

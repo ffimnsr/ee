@@ -301,6 +301,14 @@ impl From<EditNotification> for EventDomain {
                 ViewEvent::Move(Movement::Down).into(),
             MoveDownAndModifySelection =>
                 ViewEvent::ModifySelection(Movement::Down).into(),
+            MoveVertical { lines, up, modify_selection } => {
+                let movement = if up { Movement::UpLines(lines) } else { Movement::DownLines(lines) };
+                if modify_selection {
+                    ViewEvent::ModifySelection(movement).into()
+                } else {
+                    ViewEvent::Move(movement).into()
+                }
+            },
             MoveLeft | MoveBackward =>
                 ViewEvent::Move(Movement::Left).into(),
             MoveLeftAndModifySelection =>
@@ -575,6 +583,12 @@ impl From<EditNotification> for EventDomain {
                 SpecialEvent::DispatchPluginCommand {
                     capability: PluginCapability::Edit,
                     method: "request_implementation",
+                    params: serde_json::json!({}),
+                }.into(),
+            RequestDocumentSymbols =>
+                SpecialEvent::DispatchPluginCommand {
+                    capability: PluginCapability::Edit,
+                    method: "request_document_symbols",
                     params: serde_json::json!({}),
                 }.into(),
             FormatDocument =>

@@ -18,6 +18,7 @@ pub(crate) mod edit_buffer;
 pub(crate) mod edit_commands;
 pub(crate) mod edit_goto;
 pub(crate) mod edit_paste;
+pub(crate) mod folding;
 pub(crate) mod git;
 pub(crate) mod helpers;
 pub(crate) mod input;

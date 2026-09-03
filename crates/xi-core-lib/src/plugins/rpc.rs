@@ -305,6 +305,9 @@ pub struct NavigationTarget {
 }
 
 /// A symbol entry returned by document-symbol or workspace-symbol queries.
+///
+/// Locations use zero-based lines and UTF-8 byte columns. Document symbols may
+/// contain nested children; workspace symbols remain flat.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SymbolItem {
     pub name: String,
@@ -312,6 +315,8 @@ pub struct SymbolItem {
     pub path: String,
     pub line: usize,
     pub column: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<SymbolItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

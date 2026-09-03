@@ -15,6 +15,7 @@ use xi_plugin_lib::Plugin;
 use xi_plugin_lib::mainloop;
 
 pub mod conversion_utils;
+mod document_symbols;
 pub mod language_server_client;
 pub mod lsp_plugin;
 mod result_queue;

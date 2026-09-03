@@ -256,6 +256,52 @@ fn help_command_opens_help_picker() {
 // ── LSP / workspace config ─────────────────────────────────────────────────────
 
 #[test]
+fn markdown_symbols_use_tree_sitter_when_lsp_is_disabled() {
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    let temp = tempfile::tempdir().unwrap();
+    let config_home = temp.path().join("xdg-config");
+    fs::create_dir_all(&config_home).unwrap();
+    let _xdg_guard = EnvVarGuard::set("XDG_CONFIG_HOME", &config_home);
+    install_test_lsp_plugin(&config_home);
+
+    env::set_current_dir(temp.path()).unwrap();
+    fs::write(temp.path().join(".ee.toml"), "[lsp.servers.markdown]\nenabled = false\n").unwrap();
+    let file = temp.path().join("README.md");
+    fs::write(&file, "# Parent\n\n## Child\n\nNext\n====\n").unwrap();
+
+    let mut app = App::from_path(Some(file)).unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "LSP plugin startup",
+        Duration::from_secs(5),
+        |backend| {
+            backend
+                .available_plugins_for_current_view()
+                .iter()
+                .any(|plugin| plugin.name == crate::config::LSP_PLUGIN_NAME && plugin.running)
+        },
+    );
+
+    app.backend.request_document_symbols().unwrap();
+    wait_until_with_backend(
+        &mut app.backend,
+        "Tree-sitter document symbols",
+        Duration::from_secs(5),
+        |backend| !backend.pending_symbols.is_empty(),
+    );
+
+    let pending = app.backend.drain_pending_symbols();
+    assert_eq!(pending.len(), 1);
+    let symbols = &pending[0].2;
+    assert_eq!(symbols.len(), 2);
+    assert_eq!(symbols[0].name, "Parent");
+    assert_eq!(symbols[0].children.len(), 1);
+    assert_eq!(symbols[0].children[0].name, "Child");
+    assert_eq!(symbols[1].name, "Next");
+}
+
+#[test]
 fn project_lsp_config_starts_and_reloads_custom_server() {
     let _cwd_lock = cwd_test_lock().lock().unwrap();
     let _cwd_guard = CurrentDirGuard::capture();
