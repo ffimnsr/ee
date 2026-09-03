@@ -31,9 +31,9 @@
 //!   keeps its `ee_*` names (`ee_workspace_roots`, `ee_search_text`, edit,
 //!   format, rename, and terminal tools); external servers are namespaced
 //!   `mcp_<server>_<tool>`.  Side effects are classified from the original
-//!   MCP names, so write/execute tools stay behind the orchestrator policy
-//!   (the default orchestrated policy allows reads, executes, and delegates
-//!   but denies writes).
+//!   MCP names. Default orchestrated policy admits trusted ee proxy writes and
+//!   external-network reads only to existing host approval gates; unrelated
+//!   destructive operations remain denied.
 //! - Server configuration secrets (stdio env values) are redacted from every
 //!   transcript, schema, event, log, diagnostic, and error surface.
 //! - Discovery failures surface as bounded diagnostics; the turn continues

@@ -2,10 +2,10 @@
 //!
 //! Tools that delete, move, overwrite, chmod, kill terminals, or touch the
 //! network are denied by default even when their side-effect class is
-//! allowed.  Each destructive subclass must be explicitly allowed through
-//! [`crate::policy::ToolPolicy::allow_side_effect_subclass`]; terminal kills
-//! additionally require the target terminal to be owned by the session
-//! ([`crate::policy::ToolPolicy::with_owned_terminal`]).
+//! allowed. Each destructive subclass must be explicitly allowed through
+//! [`crate::policy::ToolPolicy::allow_side_effect_subclass`]. Terminal kills
+//! additionally require session ownership; external network access requires
+//! a host-approved read tool.
 
 use std::fmt;
 

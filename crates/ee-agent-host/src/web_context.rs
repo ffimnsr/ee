@@ -264,9 +264,9 @@ impl WebSearchProviderOptions {
 /// Configuration resolution belongs to frontend code. This host-side type
 /// contains semantic values only. Resolved provider credentials stay private and
 /// are only attached to first-party configured search requests.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct AgentWebContextConfig {
-    /// Web retrieval is fail-closed unless explicitly enabled.
+    /// Web retrieval is enabled by default and can still be explicitly disabled.
     pub enabled: bool,
     /// Selected trusted provider. Agent requests cannot alter it.
     pub provider: WebSearchProvider,
@@ -291,6 +291,8 @@ pub struct AgentWebContextConfig {
     search_authorization: Option<SearchAuthorization>,
     browser_run_api_token: Option<Zeroizing<String>>,
 }
+
+mod defaults;
 
 /// Opaque provider credential. It has neither equality nor a value-revealing formatter.
 #[derive(Clone)]
@@ -3066,8 +3068,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_config_is_disabled() {
-        assert!(!AgentWebContextConfig::default().enabled);
+    async fn default_config_enables_fetch_without_search_provider() {
+        let config = AgentWebContextConfig::default();
+        assert!(config.enabled);
+
+        let service =
+            WebContextService::new(config, FakeTransport::new(vec![public_ip()], Vec::new()))
+                .unwrap();
+        assert_eq!(
+            service.search_initial_host().unwrap_err().code,
+            WebContextErrorCode::WebSearchUnavailable
+        );
+        assert_eq!(
+            service
+                .fetch(WebFetchRequest { url: "https://docs.example/".to_owned() })
+                .await
+                .unwrap_err()
+                .code,
+            WebContextErrorCode::NetworkApprovalRequired
+        );
     }
 
     #[tokio::test]
@@ -3163,7 +3182,8 @@ mod tests {
     #[tokio::test]
     async fn disabled_service_does_not_make_network_request() {
         let transport = FakeTransport::new(vec![public_ip()], Vec::new());
-        let service = WebContextService::new(AgentWebContextConfig::default(), transport).unwrap();
+        let config = AgentWebContextConfig { enabled: false, ..Default::default() };
+        let service = WebContextService::new(config, transport).unwrap();
         assert_eq!(
             service
                 .fetch(WebFetchRequest { url: "https://docs.example/".to_owned() })

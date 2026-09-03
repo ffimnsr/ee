@@ -1312,8 +1312,9 @@ pub(crate) struct AgentsToml {
     pub rubber_duck: Option<RubberDuckToml>,
     /// Explicit opt-in and quotas for durable canonical-workspace memory.
     pub workspace_memory: Option<WorkspaceMemoryToml>,
-    /// Trusted configuration for optional agent web retrieval. Only user-global
-    /// config can grant access; workspace files can only disable or restrict it.
+    /// Trusted configuration for agent web retrieval. Direct fetch is enabled by
+    /// default; only user-global config can grant search-provider access. Workspace
+    /// files can only disable or restrict web context.
     pub web_context: Option<AgentWebContextToml>,
 }
 
@@ -1366,7 +1367,7 @@ pub(crate) struct RubberDuckToml {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AgentWebContextToml {
-    /// Enables optional web retrieval. Defaults to `false`.
+    /// Enables optional web retrieval. Defaults to `true`.
     pub enabled: Option<bool>,
     /// Selected trusted search provider.
     pub backend: Option<WebContextBackendToml>,
@@ -5600,14 +5601,14 @@ command = "other-agent"
     // ── Agent web context trusted config (phase 1) ───────────────────────────
 
     #[test]
-    fn agent_web_context_is_disabled_by_default() {
-        assert!(!EditorSettings::default().agents.web_context.enabled);
+    fn agent_web_context_is_enabled_by_default() {
+        assert!(EditorSettings::default().agents.web_context.enabled);
 
         let temp = tempfile::tempdir().unwrap();
         let env = test_config_environment(temp.path());
         std::fs::create_dir_all(&env.cwd).unwrap();
         let settings = load_config_with_env(None, &env);
-        assert!(!settings.agents.web_context.enabled);
+        assert!(settings.agents.web_context.enabled);
     }
 
     #[test]

@@ -693,7 +693,7 @@
           ]
         },
         "web_context": {
-          "description": "Trusted configuration for optional agent web retrieval. Only user-global\nconfig can grant access; workspace files can only disable or restrict it.",
+          "description": "Trusted configuration for agent web retrieval. Direct fetch is enabled by\ndefault; only user-global config can grant search-provider access. Workspace\nfiles can only disable or restrict web context.",
           "anyOf": [
             {
               "$ref": "#/$defs/AgentWebContextToml"
@@ -927,7 +927,7 @@
       "type": "object",
       "properties": {
         "enabled": {
-          "description": "Enables optional web retrieval. Defaults to `false`.",
+          "description": "Enables optional web retrieval. Defaults to `true`.",
           "type": [
             "boolean",
             "null"

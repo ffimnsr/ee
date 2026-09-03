@@ -162,6 +162,7 @@ impl PolicyEngine {
         // the editor host. Do not block their dispatch before that prompt.
         if self.policy.allow_host_approved_side_effects
             && tool.host_approval
+            && tool.side_effect_subclass != Some(SideEffectSubclass::ExternalNetwork)
             && matches!(tool.side_effect_class, SideEffectClass::Write | SideEffectClass::Execute)
         {
             return PolicyDecision::allowed();
@@ -181,13 +182,20 @@ impl PolicyEngine {
         if !decision.allow {
             return decision;
         }
-        if let Some(subclass) = tool.side_effect_subclass
-            && !self.policy.allowed_side_effect_subclasses.contains(&subclass)
-        {
-            return PolicyDecision::denied(format!(
-                "destructive side effect {} requires explicit policy allowance",
-                subclass.as_str()
-            ));
+        if let Some(subclass) = tool.side_effect_subclass {
+            if !self.policy.allowed_side_effect_subclasses.contains(&subclass) {
+                return PolicyDecision::denied(format!(
+                    "destructive side effect {} requires explicit policy allowance",
+                    subclass.as_str()
+                ));
+            }
+            if subclass == SideEffectSubclass::ExternalNetwork
+                && (!tool.host_approval || tool.side_effect_class != SideEffectClass::Read)
+            {
+                return PolicyDecision::denied(
+                    "external network access requires a host-approved read tool",
+                );
+            }
         }
         PolicyDecision::allowed()
     }
@@ -325,6 +333,40 @@ mod tests {
         assert!(engine.check(&tool(SideEffectClass::Write), PolicyContext::default()).allow);
         assert!(engine.check(&tool(SideEffectClass::Execute), PolicyContext::default()).allow);
         assert!(!engine.check(&tool(SideEffectClass::Delegate), PolicyContext::default()).allow);
+    }
+
+    #[test]
+    fn external_network_allowance_requires_host_approved_read_tool() {
+        let engine = PolicyEngine::new(
+            ToolPolicy::default().allow_side_effect_subclass(SideEffectSubclass::ExternalNetwork),
+        );
+        let network_tool =
+            |class| tool(class).side_effect_subclass(SideEffectSubclass::ExternalNetwork);
+
+        assert!(
+            engine
+                .check(
+                    &network_tool(SideEffectClass::Read).host_approval(),
+                    PolicyContext::default(),
+                )
+                .allow
+        );
+        assert!(
+            !engine.check(&network_tool(SideEffectClass::Read), PolicyContext::default()).allow
+        );
+
+        let execute_engine = PolicyEngine::new(
+            ToolPolicy { allow_execute: true, ..ToolPolicy::default() }
+                .allow_side_effect_subclass(SideEffectSubclass::ExternalNetwork),
+        );
+        assert!(
+            !execute_engine
+                .check(
+                    &network_tool(SideEffectClass::Execute).host_approval(),
+                    PolicyContext::default(),
+                )
+                .allow
+        );
     }
 
     #[test]
