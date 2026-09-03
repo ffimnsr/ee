@@ -11,6 +11,7 @@ use crate::tree_sitter_support::{
     VisibleSyntaxLimits, VisibleSyntaxSpan, syntax_feature_availability, visible_syntax_spans,
 };
 
+use super::vlf_tail::{vlf_tail_lines_for_count, vlf_tail_lines_for_range};
 use super::{EventContext, VlfViewportResponse};
 
 // ── VLF free functions ──
@@ -69,72 +70,6 @@ pub(crate) fn vlf_read_exact_text_range(
     }
 
     Some((text[start..end].to_owned(), range))
-}
-
-pub(crate) fn vlf_tail_lines_for_range(
-    store: &dyn TextStore,
-    requested_line_start: u64,
-    requested_count: usize,
-    exact_line_count: u64,
-) -> Option<(u64, Vec<String>, ByteRange)> {
-    let tail_len = (256 * 1024).min(store.len_bytes());
-    let tail_start = ByteOffset(store.len_bytes().saturating_sub(tail_len));
-    let tail_end = ByteOffset(store.len_bytes());
-    let (tail_text, tail_byte_range) =
-        vlf_read_text_range(store, ByteRange { start: tail_start, end: tail_end })?;
-
-    let mut tail_lines = tail_text.split('\n').map(str::to_owned).collect::<Vec<_>>();
-    if tail_byte_range.start.0 > 0 && !tail_lines.is_empty() {
-        tail_lines.remove(0);
-    }
-
-    let effective_line_count =
-        if tail_byte_range.start.0 == 0 { tail_lines.len() as u64 } else { exact_line_count };
-    let tail_line_start = effective_line_count.saturating_sub(tail_lines.len() as u64);
-    let response_line_start = requested_line_start.max(tail_line_start);
-    let requested_line_end =
-        requested_line_start.saturating_add(requested_count as u64).min(effective_line_count);
-    if response_line_start >= requested_line_end {
-        return None;
-    }
-
-    let start_idx = usize::try_from(response_line_start.saturating_sub(tail_line_start)).ok()?;
-    let end_idx = usize::try_from(requested_line_end.saturating_sub(tail_line_start)).ok()?;
-    if start_idx >= tail_lines.len() || end_idx > tail_lines.len() || start_idx >= end_idx {
-        return None;
-    }
-
-    Some((response_line_start, tail_lines[start_idx..end_idx].to_vec(), tail_byte_range))
-}
-
-pub(crate) fn vlf_tail_lines_for_count(
-    store: &dyn TextStore,
-    requested_count: usize,
-    approximate_line_count: u64,
-) -> Option<(u64, Vec<String>, Option<u64>, ByteRange)> {
-    let tail_len = (256 * 1024).min(store.len_bytes());
-    let tail_start = ByteOffset(store.len_bytes().saturating_sub(tail_len));
-    let tail_end = ByteOffset(store.len_bytes());
-    let (tail_text, tail_byte_range) =
-        vlf_read_text_range(store, ByteRange { start: tail_start, end: tail_end })?;
-
-    let mut tail_lines = tail_text.split('\n').map(str::to_owned).collect::<Vec<_>>();
-    if tail_byte_range.start.0 > 0 && !tail_lines.is_empty() {
-        tail_lines.remove(0);
-    }
-
-    if tail_lines.is_empty() {
-        return None;
-    }
-
-    let exact_line_count = (tail_byte_range.start.0 == 0).then_some(tail_lines.len() as u64);
-    let reported_line_count =
-        exact_line_count.unwrap_or_else(|| approximate_line_count.max(tail_lines.len() as u64));
-    let start_idx = tail_lines.len().saturating_sub(requested_count.max(1));
-    let lines = tail_lines[start_idx..].to_vec();
-    let response_line_start = reported_line_count.saturating_sub(lines.len() as u64);
-
-    Some((response_line_start, lines, exact_line_count, tail_byte_range))
 }
 
 pub(crate) fn vlf_estimate_line_count_from_head(store: &dyn TextStore, minimum: u64) -> u64 {

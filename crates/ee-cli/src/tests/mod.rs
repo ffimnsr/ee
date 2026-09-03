@@ -44,5 +44,6 @@ pub(crate) mod trust_policy_foundation;
 pub(crate) mod trust_rule_manager;
 pub(crate) mod vlf_cache;
 pub(crate) mod vlf_edit;
+pub(crate) mod vlf_viewport;
 pub(crate) mod workspace_read_trust;
 pub(crate) mod write_trust;

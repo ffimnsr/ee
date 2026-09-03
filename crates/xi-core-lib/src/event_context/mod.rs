@@ -21,6 +21,7 @@ mod init;
 mod movement;
 mod plugins;
 mod vlf;
+mod vlf_tail;
 
 #[cfg(test)]
 mod tests;

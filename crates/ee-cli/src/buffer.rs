@@ -26,6 +26,7 @@ use crate::backend::{
     send_rpc_request, startup_render_ready, xi_reader_thread,
 };
 use crate::text::previous_char_boundary;
+use crate::vlf_viewport::{VlfViewportRequest, VlfViewportScheduler};
 
 pub(crate) type BufferId = u32;
 
@@ -701,6 +702,7 @@ pub(crate) struct BufferManager {
     pub(crate) pending_ui_actions: Vec<PendingUiAction>,
     startup_profile: StartupProfile,
     startup_profile_active: bool,
+    vlf_viewports: VlfViewportScheduler,
 }
 
 impl std::ops::Deref for BufferManager {
@@ -893,6 +895,7 @@ impl BufferManager {
                 ..StartupProfile::default()
             },
             startup_profile_active: true,
+            vlf_viewports: VlfViewportScheduler::default(),
         };
 
         let init_apply_started = Instant::now();
@@ -1655,10 +1658,13 @@ impl BufferManager {
         let view_id = buf.view_id.clone();
 
         if buf.is_vlf {
-            if buf.pending_vlf_tail_jump {
-                return Ok(());
-            }
             let visible_lines = last_line.saturating_sub(first_line);
+            if buf.pending_vlf_tail_jump {
+                if buf.pending_line_request {
+                    return Ok(());
+                }
+                return self.request_vlf_tail_viewport(visible_lines);
+            }
             let mut requested_last_line = if visible_lines >= Self::STARTUP_VLF_VIEWPORT_LINES {
                 last_line
             } else {
@@ -1677,27 +1683,25 @@ impl BufferManager {
             {
                 return Ok(());
             }
-            buf.last_scroll = Some(request_range);
             // VLF mode: use the dedicated viewport protocol so the backend
-            // only decodes the visible line range from disk.  Increment the
+            // only decodes the visible line range from disk. Increment the
             // generation counter so any in-flight response from the previous
             // scroll position is discarded when it arrives.
             let generation = buf.vlf_generation.wrapping_add(1);
+            self.vlf_viewports.submit(
+                &self.tx,
+                VlfViewportRequest::new(
+                    view_id,
+                    first_line as u64,
+                    requested_last_line as u64,
+                    generation,
+                ),
+            )?;
+            let buf = &mut self.bufs[self.current];
+            buf.last_scroll = Some(request_range);
             buf.vlf_generation = generation;
             buf.pending_line_request = true;
-            send_xi_notification(
-                &self.tx,
-                "edit",
-                json!({
-                    "view_id": view_id,
-                    "method": "vlf_viewport",
-                    "params": {
-                        "line_start": first_line as u64,
-                        "line_end": requested_last_line as u64,
-                        "generation": generation,
-                    },
-                }),
-            )
+            Ok(())
         } else {
             if buf.last_scroll == Some(range) {
                 return Ok(());
@@ -1729,22 +1733,18 @@ impl BufferManager {
             return Ok(());
         }
         let generation = buf.vlf_generation.wrapping_add(1);
+        let request = VlfViewportRequest::new(
+            buf.view_id.clone(),
+            first_line as u64,
+            last_line as u64,
+            generation,
+        );
+        self.vlf_viewports.submit(&self.tx, request)?;
+        let buf = &mut self.bufs[self.current];
         buf.vlf_generation = generation;
         buf.pending_line_request = true;
         buf.last_scroll = Some((first_line, last_line));
-        send_xi_notification(
-            &self.tx,
-            "edit",
-            json!({
-                "view_id": buf.view_id,
-                "method": "vlf_viewport",
-                "params": {
-                    "line_start": first_line as u64,
-                    "line_end": last_line as u64,
-                    "generation": generation,
-                },
-            }),
-        )
+        Ok(())
     }
     pub(crate) fn request_vlf_tail_viewport(&mut self, line_count: usize) -> io::Result<()> {
         let buf = &mut self.bufs[self.current];
@@ -1754,23 +1754,19 @@ impl BufferManager {
 
         let requested_lines = line_count.max(Self::TAIL_VLF_PREFETCH_LINES);
         let generation = buf.vlf_generation.wrapping_add(1);
+        let request = VlfViewportRequest::new(
+            buf.view_id.clone(),
+            u64::MAX,
+            requested_lines.saturating_sub(1) as u64,
+            generation,
+        );
+        self.vlf_viewports.submit(&self.tx, request)?;
+        let buf = &mut self.bufs[self.current];
         buf.vlf_generation = generation;
         buf.pending_line_request = true;
         buf.pending_vlf_tail_jump = true;
         buf.last_scroll = None;
-        send_xi_notification(
-            &self.tx,
-            "edit",
-            json!({
-                "view_id": buf.view_id,
-                "method": "vlf_viewport",
-                "params": {
-                    "line_start": u64::MAX,
-                    "line_end": requested_lines.saturating_sub(1) as u64,
-                    "generation": generation,
-                },
-            }),
-        )
+        Ok(())
     }
 
     pub(crate) fn cancel_vlf_tail_jump(&mut self) {
@@ -1779,10 +1775,13 @@ impl BufferManager {
             return;
         }
 
+        let cancelled_generation = buf.vlf_generation;
         buf.vlf_generation = buf.vlf_generation.wrapping_add(1);
         buf.pending_line_request = false;
         buf.pending_vlf_tail_jump = false;
         buf.last_scroll = None;
+        let view_id = buf.view_id.clone();
+        self.vlf_viewports.cancel_request(&view_id, cancelled_generation);
     }
 
     pub(crate) fn apply_local_vlf_replace_range(
@@ -2011,6 +2010,7 @@ impl BufferManager {
                 index_progress,
             } => {
                 let _ = index_progress;
+                self.vlf_viewports.response_received(&self.tx, &view_id, generation)?;
                 let Some(idx) = self.buffer_index_for_view(&view_id) else {
                     return Ok(());
                 };
@@ -2280,6 +2280,7 @@ impl BufferManager {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "buffer not found"))?;
 
         let view_id = self.bufs[pos].view_id.clone();
+        self.vlf_viewports.cancel_view(&view_id);
         let _ = send_xi_notification(&self.tx, "close_view", json!({ "view_id": view_id }));
 
         self.bufs.remove(pos);
@@ -2575,6 +2576,7 @@ impl BufferManager {
             pending_ui_actions: Vec::new(),
             startup_profile: StartupProfile::default(),
             startup_profile_active: false,
+            vlf_viewports: VlfViewportScheduler::default(),
         }
     }
 
@@ -2636,6 +2638,7 @@ impl BufferManager {
         let old_view_id = self.bufs[idx].view_id.clone();
 
         // Close the old xi view.
+        self.vlf_viewports.cancel_view(&old_view_id);
         let _ = send_xi_notification(&self.tx, "close_view", json!({ "view_id": old_view_id }));
         self.view_to_idx.remove(&old_view_id);
 

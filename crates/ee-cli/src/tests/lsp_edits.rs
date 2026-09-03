@@ -879,14 +879,15 @@ fn coalesce_backend_events_keeps_latest_noisy_view_events() {
         },
     ];
     let coalesced = coalesce_backend_events(events);
-    assert_eq!(coalesced.len(), 3);
-    match &coalesced[0] {
+    assert_eq!(coalesced.len(), 4);
+    assert!(matches!(&coalesced[0], BackendEvent::VlfChunks { generation: 1, line_start: 0, .. }));
+    match &coalesced[1] {
         BackendEvent::VlfSearchStatus { scanned_bytes, .. } => {
             assert_eq!(*scanned_bytes, 50);
         }
         other => panic!("expected latest vlf search status, got {other:?}"),
     }
-    match &coalesced[1] {
+    match &coalesced[2] {
         BackendEvent::VlfChunks { generation, line_start, lines, .. } => {
             assert_eq!(*generation, 2);
             assert_eq!(*line_start, 5);

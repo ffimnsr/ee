@@ -43,4 +43,6 @@ mod theme;
 mod ui;
 pub mod vlf_bench_support;
 #[allow(dead_code)]
+mod vlf_viewport;
+#[allow(dead_code)]
 mod window;

@@ -176,8 +176,8 @@ impl BackendEvent {
             Self::DocumentMode { view_id, .. } => {
                 Some(BackendEventCoalesceKey::DocumentMode(view_id.clone()))
             }
-            Self::VlfChunks { view_id, .. } => {
-                Some(BackendEventCoalesceKey::VlfChunks(view_id.clone()))
+            Self::VlfChunks { view_id, generation, .. } => {
+                Some(BackendEventCoalesceKey::VlfChunks(view_id.clone(), *generation))
             }
             Self::VlfSearchStatus { view_id, query, .. } => {
                 Some(BackendEventCoalesceKey::VlfSearchStatus(view_id.clone(), query.clone()))
@@ -196,7 +196,7 @@ enum BackendEventCoalesceKey {
     CodeActions(String),
     AgentToolResult(String, String),
     DocumentMode(String),
-    VlfChunks(String),
+    VlfChunks(String, u64),
     VlfSearchStatus(String, String),
 }
 
