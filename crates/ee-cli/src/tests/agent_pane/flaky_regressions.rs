@@ -85,6 +85,9 @@ fn phase_six_live_openrouter_pane_repeated_selected_validation_stops_repair() {
     let mut app = live_openrouter_app_in(workspace.path(), factory.clone());
     let buffer_id = app.backend.open_buffer(Some(target.clone())).expect("open target buffer");
     app.backend.switch_to_id(buffer_id).expect("focus target buffer");
+    wait_until(&mut app, "target buffer loaded", |app| {
+        app.backend.active().whole_text().as_deref() == Some("pub fn phase_six() {}\n")
+    });
     open_pane_and_wait_ready(&mut app);
     select_live_write_mode(&mut app);
 

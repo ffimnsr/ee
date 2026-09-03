@@ -6,7 +6,7 @@
       "command": "atlas",
       "args": [
         "--repo",
-        "/Users/pastel/Projects/ee",
+        "/home/pastel/Projects/ee",
         "serve",
         "--direct-stdio",
       ],
