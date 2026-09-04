@@ -9,7 +9,7 @@ description = "OpenRouter ACP agent provider built on the ee-acp-agent-server fr
 
 [features]
 # Exposes hermetic scripted completions for cross-crate integration tests.
-test-utils = []
+test-utils = ["tokio/test-util"]
 
 [dependencies]
 clap.workspace = true
@@ -26,4 +26,4 @@ ee-acp-agent-server = { workspace = true, features = ["test-utils"] }
 ee-agent-protocol.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "test-util"] }

@@ -1,0 +1,11 @@
+mod agents;
+mod common;
+mod discovery;
+mod editor;
+mod init;
+mod lsp;
+mod mcp;
+mod runtime;
+mod value;
+mod web_context;
+mod workspace_memory;

@@ -4,7 +4,7 @@ use xi_rope::{LinesMetric, Rope, RopeDelta};
 
 use crate::edit_types::{BufferEvent, EventDomain, SpecialEvent};
 use crate::editor::Editor;
-use crate::fold_support::{DEFAULT_FOLD_PARSE_TIMEOUT, fold_ranges_for_text};
+use crate::fold_support::{fold_parse_timeout, fold_ranges_for_text};
 use crate::indent::SyntaxIndentContext;
 use crate::line_offset::LineOffset;
 use crate::rpc::{EditNotification, FoldRangePreview, LineRange};
@@ -87,7 +87,7 @@ impl<'a> EventContext<'a> {
             Some(self.language.as_ref()),
             file_path,
             &text,
-            DEFAULT_FOLD_PARSE_TIMEOUT,
+            fold_parse_timeout(text.len()),
         );
         let start_line = start_line.unwrap_or(0);
         let end_line = end_line.unwrap_or(usize::MAX);

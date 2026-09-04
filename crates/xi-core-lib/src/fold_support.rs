@@ -9,7 +9,17 @@ use crate::runtime_loader::{
 };
 use crate::tree_sitter_support::FoldRange;
 
-pub(crate) const DEFAULT_FOLD_PARSE_TIMEOUT: Duration = Duration::from_millis(250);
+const MIN_FOLD_PARSE_TIMEOUT: Duration = Duration::from_millis(250);
+const MAX_FOLD_PARSE_TIMEOUT: Duration = Duration::from_secs(2);
+const FOLD_PARSE_MILLIS_PER_KIB: u64 = 4;
+
+/// Keeps small-file folding responsive while giving larger documents enough
+/// CPU budget when wall-clock parse time includes scheduler contention.
+pub(crate) fn fold_parse_timeout(text_len: usize) -> Duration {
+    let kibibytes = u64::try_from(text_len.div_ceil(1024)).unwrap_or(u64::MAX);
+    let scaled = Duration::from_millis(kibibytes.saturating_mul(FOLD_PARSE_MILLIS_PER_KIB));
+    MIN_FOLD_PARSE_TIMEOUT.saturating_add(scaled).min(MAX_FOLD_PARSE_TIMEOUT)
+}
 
 /// Returns backend-authoritative fold ranges for one complete document.
 ///
@@ -136,6 +146,14 @@ fn fold_ranges_from_query(
 mod tests {
     use super::*;
     use crate::runtime_loader::runtime_loader_test_guard;
+
+    #[test]
+    fn fold_parse_timeout_scales_with_input_and_stays_bounded() {
+        assert_eq!(fold_parse_timeout(0), Duration::from_millis(250));
+        assert_eq!(fold_parse_timeout(1024), Duration::from_millis(254));
+        assert_eq!(fold_parse_timeout(300 * 1024), Duration::from_millis(1_450));
+        assert_eq!(fold_parse_timeout(usize::MAX), Duration::from_secs(2));
+    }
 
     #[test]
     fn markdown_sections_fold_content_by_heading_level() {

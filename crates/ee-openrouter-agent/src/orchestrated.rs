@@ -550,6 +550,7 @@ pub mod test_support {
     use std::collections::VecDeque;
     use std::future;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use serde_json::{Value, json};
 
@@ -563,8 +564,10 @@ pub mod test_support {
 
     #[derive(Clone)]
     enum ScriptStep {
+        PauseClock,
         Response(Value),
         Pending,
+        AdvanceClockThenPending(Duration),
     }
 
     /// Replays canned OpenRouter response envelopes and records normalized requests.
@@ -611,6 +614,30 @@ pub mod test_support {
             }
         }
 
+        /// Creates a deterministic timeout script for a dedicated current-thread Tokio runtime.
+        ///
+        /// Runtime time pauses on the first model request, keeping setup and host approval outside
+        /// the deadline. The pending model request then advances past `turn_timeout` before it
+        /// awaits, so the owning turn times out only after that request has started.
+        #[must_use]
+        pub fn pause_then_with_virtual_timeout(
+            responses: Vec<Value>,
+            resume_responses: Vec<Value>,
+            turn_timeout: Duration,
+        ) -> Self {
+            let mut steps = VecDeque::new();
+            steps.push_back(ScriptStep::PauseClock);
+            steps.extend(responses.into_iter().map(ScriptStep::Response));
+            steps.push_back(ScriptStep::AdvanceClockThenPending(
+                turn_timeout.saturating_add(Duration::from_nanos(1)),
+            ));
+            steps.extend(resume_responses.into_iter().map(ScriptStep::Response));
+            Self {
+                script: Arc::new(Mutex::new(Script::Steps(steps))),
+                bodies: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
         /// Builds a concrete OpenRouter adapter backed by this scripted client.
         #[must_use]
         pub fn adapter(&self, config: Config) -> OpenRouterModelAdapter {
@@ -628,6 +655,28 @@ pub mod test_support {
             self.request_bodies()
         }
 
+        async fn next_response(&self) -> Value {
+            loop {
+                let step = match &mut *self.script.lock().expect("script poisoned") {
+                    Script::Steps(steps) => steps.pop_front().unwrap_or_else(|| {
+                        ScriptStep::Response(json!({
+                            "choices": [{ "message": { "content": "" }, "finish_reason": "stop" }]
+                        }))
+                    }),
+                    Script::Never => ScriptStep::Pending,
+                };
+                match step {
+                    ScriptStep::PauseClock => tokio::time::pause(),
+                    ScriptStep::Response(response) => return response,
+                    ScriptStep::Pending => return future::pending().await,
+                    ScriptStep::AdvanceClockThenPending(advance) => {
+                        tokio::time::advance(advance).await;
+                        return future::pending().await;
+                    }
+                }
+            }
+        }
+
         pub(crate) fn client(&self) -> Arc<OpenRouterCompletionClient> {
             let scripted = self.clone();
             Arc::new(move |_config, _api_key, messages, tools| {
@@ -640,19 +689,7 @@ pub mod test_support {
                         .lock()
                         .expect("bodies poisoned")
                         .push(json!({ "messages": messages, "tools": tools }));
-                    let response = match &mut *scripted.script.lock().expect("script poisoned") {
-                        Script::Steps(steps) => match steps.pop_front() {
-                            Some(ScriptStep::Response(response)) => Some(response),
-                            Some(ScriptStep::Pending) => None,
-                            None => Some(json!({
-                                "choices": [{ "message": { "content": "" }, "finish_reason": "stop" }]
-                            })),
-                        },
-                        Script::Never => None,
-                    };
-                    let Some(response) = response else {
-                        return future::pending().await;
-                    };
+                    let response = scripted.next_response().await;
                     crate::openrouter::extract_openrouter_message(&response).ok_or_else(|| {
                         ee_acp_agent_server::ProviderError::BackendFailure(
                             "scripted OpenRouter response has no assistant message".into(),
@@ -660,6 +697,28 @@ pub mod test_support {
                     })
                 })
             })
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[tokio::test]
+        async fn virtual_timeout_advances_only_at_pending_model_request() {
+            let turn_timeout = Duration::from_secs(1);
+            let initial = json!({ "stage": "initial" });
+            let resumed = json!({ "stage": "resumed" });
+            let scripted = ScriptedOpenRouterCompletion::pause_then_with_virtual_timeout(
+                vec![initial.clone()],
+                vec![resumed.clone()],
+                turn_timeout,
+            );
+
+            assert_eq!(scripted.next_response().await, initial);
+            let interrupted = tokio::time::timeout(turn_timeout, scripted.next_response()).await;
+            assert!(interrupted.is_err(), "pending step must advance the virtual turn deadline");
+            assert_eq!(scripted.next_response().await, resumed);
         }
     }
 }

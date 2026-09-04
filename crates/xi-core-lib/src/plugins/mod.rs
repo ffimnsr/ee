@@ -876,4 +876,6 @@ fn spawn_stderr_thread(name: String, stderr: std::process::ChildStderr, core: We
 }
 
 #[cfg(test)]
+pub(crate) mod test_support;
+#[cfg(test)]
 mod tests;

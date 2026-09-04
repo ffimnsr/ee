@@ -52,8 +52,8 @@ use crate::plugin_rpc::{PluginNotification, PluginRequest};
 use crate::plugins::rpc::ClientPluginInfo;
 use crate::plugins::rpc::SelectionRange;
 use crate::plugins::{
-    Plugin, PluginCatalog, PluginDescription, PluginPid, PluginStartError, PluginStartErrorKind,
-    PluginTerminationReason, start_plugin_process,
+    Plugin, PluginCatalog, PluginDescription, PluginPid, PluginTerminationReason,
+    start_plugin_process,
 };
 use crate::rpc::{
     CoreNotification, CoreRequest, EditNotification, PluginNotification as CorePluginNotification,
@@ -69,6 +69,9 @@ use crate::width_cache::WidthCache;
 use crate::watcher::{FileWatcher, WatchToken};
 #[cfg(feature = "notify")]
 use notify::Event;
+
+mod plugin_lifecycle;
+
 /// ViewIds are the primary means of routing messages between
 /// xi-core and a client view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -1711,51 +1714,6 @@ impl CoreState {
 
 /// plugin event handling
 impl CoreState {
-    /// Called from a plugin's thread after trying to start the plugin.
-    pub(crate) fn plugin_connect(&mut self, plugin: Result<Plugin, PluginStartError>) {
-        match plugin {
-            Ok(plugin) => {
-                self.launching_plugins.remove(&plugin.name);
-                let pending_commands = self.take_pending_plugin_commands(&plugin.name);
-                let init_info = self.plugin_init_info(&plugin, &pending_commands);
-                let plugin_config = self
-                    .config_manager
-                    .get_plugin_config(&plugin.name)
-                    .cloned()
-                    .unwrap_or_default();
-                let should_shutdown =
-                    pending_commands.iter().any(|command| command.shutdown_after_dispatch)
-                        || (plugin.is_single_invocation() && !pending_commands.is_empty());
-                let plugin_id = plugin.id;
-                plugin.initialize(init_info, &plugin_config);
-                pending_commands.iter().for_each(|command| {
-                    plugin.dispatch_command(command.view_id, &command.method, &command.params);
-                });
-                self.plugin_restart_state.entry(plugin.name.clone()).or_default().last_start =
-                    Some(Instant::now());
-                self.running_plugins.push(plugin);
-                if should_shutdown {
-                    self.begin_plugin_shutdown(plugin_id, StopReason::SingleInvocation);
-                }
-            }
-            Err(err) => {
-                self.launching_plugins.remove(&err.name);
-                error!("failed to start plugin {}: {:?}", err.name, err.source);
-                let detail = match err.source {
-                    PluginStartErrorKind::Io(source) => source.to_string(),
-                    PluginStartErrorKind::UnsupportedTransport(transport) => {
-                        format!("unsupported transport {transport:?}")
-                    }
-                    PluginStartErrorKind::Sandbox(detail) | PluginStartErrorKind::Wasm(detail) => {
-                        detail
-                    }
-                };
-                self.peer.alert(format!("failed to start plugin {}: {}", err.name, detail));
-                self.schedule_plugin_restart(&err.name);
-            }
-        }
-    }
-
     pub(crate) fn plugin_exit(&mut self, id: PluginId, error: Result<(), ReadError>) {
         warn!("plugin {:?} exited with result {:?}", id, error);
         let running_idx = self.running_plugins.iter().position(|p| p.id == id);
