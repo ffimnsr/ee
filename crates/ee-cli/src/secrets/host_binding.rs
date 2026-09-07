@@ -1,4 +1,4 @@
-//! Host binding (phase 2): versioned SHA-256 digest of the canonical platform
+//! Host binding: versioned SHA-256 digest of the canonical platform
 //! machine identifier.
 //!
 //! The digest is authenticated binding data, not a cryptographic secret, and
@@ -100,7 +100,7 @@ fn trim_line_endings(mut raw: Vec<u8>) -> Vec<u8> {
 /// Vault metadata relevant to host binding: format version and the SHA-256
 /// host-binding digest.
 ///
-/// Phase 3 persists and AEAD-authenticates this metadata; callers must only
+/// Persists and AEAD-authenticates this metadata; callers must only
 /// verify metadata that passed authentication (the AEAD decryption result).
 /// It holds no raw machine identifier and no secret material.
 #[derive(Clone, PartialEq, Eq)]

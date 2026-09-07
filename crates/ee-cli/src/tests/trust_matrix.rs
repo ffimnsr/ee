@@ -1,4 +1,4 @@
-//! Phase 7 cross-transport security and compatibility matrix tests
+//! Cross-transport security and compatibility matrix tests
 //! (ISSUES.md "Unified Host-Local Workspace Trust Policy"): the
 //! operation-category × policy-state matrix, the three-transport decision
 //! matrix (direct ACP, stdio MCP proxy, ACP-native MCP-over-ACP), the

@@ -1,5 +1,4 @@
-//! Session-local persistent-rule usage ledger (Phase 2 foundation, Phase 6
-//! lifecycle).
+//! Session-local persistent-rule usage ledger.
 //!
 //! Successful trusted dispatches are counted per
 //! `(workspace identity, session_id, rule_id)`.  Counters are session-local

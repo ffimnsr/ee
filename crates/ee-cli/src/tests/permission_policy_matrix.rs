@@ -1,4 +1,4 @@
-//! Phase 14 extended permission-policy security and compatibility matrix.
+//! Extended permission-policy security and compatibility matrix.
 //!
 //! Uses deterministic clocks, temporary owner-only stores, immutable evaluator
 //! inputs, injected dispatch counters, and fake agent UI seams. No live network

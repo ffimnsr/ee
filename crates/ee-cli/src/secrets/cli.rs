@@ -1,4 +1,4 @@
-//! `ee do secrets` command surface (phase 4).
+//! `ee do secrets` command surface.
 //!
 //! Safe, scriptable commands over the [`SecretStore`]: `set`, `get`, `list`,
 //! `delete`, `reset`, and `status`. Secret values never appear as CLI arguments, in

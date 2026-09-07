@@ -1,4 +1,4 @@
-//! ee-pinned tool manifest classification (Phase 3 MCP trust).
+//! ee-pinned tool manifest classification (MCP trust).
 //!
 //! The ee proxy tool set is an application-owned manifest: tool names,
 //! argument schemas, and side-effect classes are pinned here, never derived

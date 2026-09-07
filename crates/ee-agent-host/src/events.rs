@@ -1,4 +1,4 @@
-//! Deterministic host events consumed by the UI (Phase 3) and bridges.
+//! Deterministic host events consumed by the UI and bridges.
 //!
 //! `ee-agent-host` stays UI-free: it never renders widgets.  Instead every
 //! observable state change emits exactly one [`AgentEvent`] value; the UI

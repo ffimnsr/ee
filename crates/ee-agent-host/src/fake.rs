@@ -29,8 +29,8 @@ use serde_json::{Value, json};
 /// A concrete, nameable type so test harnesses can store transport
 /// factories (see [`crate::manager::FakeTransportFactory`]) without
 /// resorting to generics.
-/// Maximum bytes accepted on one ACP JSON-RPC line from an agent (Phase 7
-/// resource limit).  Oversized lines fail the connection as a transport
+/// Maximum bytes accepted on one ACP JSON-RPC line from an agent.
+/// Oversized lines fail the connection as a transport
 /// error instead of being parsed.
 pub const MAX_ACP_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 

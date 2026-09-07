@@ -1,4 +1,4 @@
-//! Session MCP server descriptors (Phase 12).
+//! Session MCP server descriptors.
 //!
 //! `session/new` carries `mcpServers` entries; the provider captures them
 //! once per session as validated [`McpServerDescriptor`]s.  Descriptors keep

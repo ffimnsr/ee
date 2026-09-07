@@ -1,4 +1,4 @@
-//! Phase 5 bounded create/modify write trust tests (ISSUES.md "Unified
+//! Bounded create/modify write trust tests (ISSUES.md "Unified
 //! Host-Local Workspace Trust Policy"): the write matcher, safety maxima,
 //! protected-path rejection, and the terminal-approval integration with
 //! host-local persistence.

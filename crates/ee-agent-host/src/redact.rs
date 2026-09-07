@@ -1,4 +1,4 @@
-//! Secret redaction utilities (Phase 7).
+//! Secret redaction utilities.
 //!
 //! Secrets must never reach debug logs, stderr panes, test snapshots, or
 //! approval text.  This module owns the shared marker list and value

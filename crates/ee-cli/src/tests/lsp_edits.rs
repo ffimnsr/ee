@@ -621,7 +621,7 @@ fn plugin_terminated_notification_updates_status_message() {
 #[test]
 fn ee_cli_sources_do_not_use_raw_lsp_or_plugin_routes() {
     let app_src = include_str!("../app/mod.rs");
-    let buffer_src = include_str!("../buffer.rs");
+    let buffer_src = include_str!("../buffer/mod.rs");
     let backend_src = include_str!("../backend.rs");
 
     assert!(!app_src.contains("xi-lsp-plugin"));

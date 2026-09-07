@@ -1,8 +1,8 @@
 //! Irssi-style agents pane: transcript scrollback, status footer, and
-//! composer input (Phase 3).
+//! composer input.
 //!
 //! The pane is frontend-owned: all agent state arrives as deterministic
-//! [`AgentEvent`]s from `ee-agent-host` and is rendered from the local
+//! AgentEvent's from `ee-agent-host` and is rendered from the local
 //! transcript model.  This module never crafts ACP JSON; prompt, permission,
 //! and elicitation responses go through host APIs only.
 //!

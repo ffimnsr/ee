@@ -140,12 +140,12 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --locked
 
-      - name: Run secrets-store regression tests (phases 1-6)
+      - name: Run secrets-store regression tests
         run: |
           cargo test -p ee-cli --locked secrets
           cargo test -p ee-cli --locked --all-features secrets
 
-      - name: Run deterministic LLM harness baseline gate (phase 8)
+      - name: Run deterministic LLM harness baseline gate
         run: cargo test --quiet -p ee-agent-orchestrator --features test-utils evaluation
 
       - name: Run Phase 6 pane fixture matrix gate

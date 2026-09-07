@@ -1,4 +1,4 @@
-//! Focused Phase 10 mandatory-confirm and safe-default regressions.
+//! Mandatory-confirm and safe-default regressions.
 
 use std::fs;
 use std::path::Path;

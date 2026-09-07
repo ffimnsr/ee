@@ -1,4 +1,4 @@
-//! Phase 4 workspace-gated read trust tests (ISSUES.md "Unified Host-Local
+//! Workspace-gated read trust tests (ISSUES.md "Unified Host-Local
 //! Workspace Trust Policy"): workspace gate, native/MCP read rules, and
 //! protected-path classification.
 //!

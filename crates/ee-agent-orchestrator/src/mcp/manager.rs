@@ -1,4 +1,4 @@
-//! Per-session MCP client manager (Phase 12).
+//! Per-session MCP client manager.
 //!
 //! [`McpSessionManager`] connects the session's advertised MCP servers for
 //! one prompt turn: ACP-native servers through the framework's

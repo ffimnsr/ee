@@ -1,4 +1,4 @@
-//! Protected-path classification for persistent read trust (Phase 4).
+//! Protected-path classification for persistent read trust.
 //!
 //! Read rules require canonical in-workspace paths; this classifier marks
 //! path classes that persistent trust must never cover: hidden entries

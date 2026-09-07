@@ -1,4 +1,4 @@
-//! Phase 6 trust lifecycle tests (ISSUES.md "Unified Host-Local Workspace
+//! Trust lifecycle tests (ISSUES.md "Unified Host-Local Workspace
 //! Trust Policy"): injected-clock expiry, finite-use budgets, workspace-
 //! scoped usage ledger, invalid persisted scope, and redacted audit
 //! metadata.  Every time-dependent assertion runs against a deterministic

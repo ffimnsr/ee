@@ -1,4 +1,4 @@
-//! Phase 11 non-overridable safeguard integration regressions.
+//! Non-overridable safeguard integration regressions.
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -1,4 +1,4 @@
-//! Phase 4 curated command profile tests (ISSUES.md "Unified Host-Local
+//! Curated command profile tests (ISSUES.md "Unified Host-Local
 //! Workspace Trust Policy"): the application-owned profile registry and the
 //! terminal approval integration.
 //!

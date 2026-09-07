@@ -1,4 +1,4 @@
-//! Focused Phase 9 persistent-deny app/UI regressions.
+//! Persistent-deny app/UI regressions.
 //!
 //! Tests drive approval policy directly through test-only bridge seams. No
 //! agent transport or terminal process starts.

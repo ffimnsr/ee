@@ -76,7 +76,7 @@ pub struct NamespacedResourceTemplate {
     pub template: ResourceTemplate,
 }
 
-/// Compact summary for host browsing (prompt/resource pickers, Phase 6).
+/// Compact summary for host browsing (prompt/resource pickers).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrimitiveSummary {
     /// Registry key.

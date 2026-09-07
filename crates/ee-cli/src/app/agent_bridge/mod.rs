@@ -1,4 +1,4 @@
-//! Phase 4 bridge: ACP `fs/*` and `terminal/*` client methods against editor
+//! Bridge: ACP `fs/*` and `terminal/*` client methods against editor
 //! buffers, the existing save pipeline, and tracked terminal processes.
 //!
 //! The host's [`BridgeUiHandler`] forwards file and terminal-create requests

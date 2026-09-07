@@ -1,4 +1,4 @@
-//! OS secure-storage boundary and vault-key lifecycle (phase 2).
+//! OS secure-storage boundary and vault-key lifecycle.
 //!
 //! The [`Keychain`] trait is the injectable boundary: tests use fakes, the
 //! [`KeyringKeychain`] adapter talks to the real OS keychain. The vault key is

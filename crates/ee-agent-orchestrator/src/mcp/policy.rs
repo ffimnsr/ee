@@ -1,4 +1,4 @@
-//! Side-effect classification of MCP tools (Phase 12).
+//! Side-effect classification of MCP tools.
 //!
 //! Classification runs on the *original* MCP tool name plus configured
 //! metadata — never on sanitized display names — so write/execute tools

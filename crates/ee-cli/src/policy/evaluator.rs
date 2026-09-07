@@ -1,4 +1,4 @@
-//! Pure shared trust-policy evaluator (Phase 1 foundation).
+//! Pure shared trust-policy evaluator.
 //!
 //! The evaluator never reads files, spawns processes, touches transports or
 //! UI, reads the clock, or mutates usage state.  Every input — effective

@@ -1,4 +1,4 @@
-//! Provider-facing MCP tool name resolution (Phase 12).
+//! Provider-facing MCP tool name resolution.
 //!
 //! Some upstream model providers reject dots and other punctuation in
 //! function/tool names, so every model-facing MCP tool name must be

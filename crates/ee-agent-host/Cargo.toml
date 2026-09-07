@@ -41,3 +41,7 @@ ee-agent-orchestrator = { path = "../ee-agent-orchestrator", features = ["test-u
 ee-openrouter-agent = { path = "../ee-openrouter-agent", features = ["test-utils"] }
 rusqlite.workspace = true
 tempfile.workspace = true
+
+[[test]]
+name = "host_flows"
+path = "tests/host_flows/mod.rs"

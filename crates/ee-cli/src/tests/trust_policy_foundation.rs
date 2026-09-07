@@ -1,4 +1,4 @@
-//! Phase 1 foundation tests for the unified host-local workspace trust
+//! Foundation tests for the unified host-local workspace trust
 //! policy (ISSUES.md "Unified Host-Local Workspace Trust Policy").
 //!
 //! Covers the shared trust-domain contracts, the pure shared evaluator, the

@@ -1,4 +1,4 @@
-//! Phase 12: bridge session-advertised MCP servers into the orchestrated
+//! Bridge session-advertised MCP servers into the orchestrated
 //! tool registry.
 //!
 //! The host appends the ee MCP proxy to `session/new` — ACP-native

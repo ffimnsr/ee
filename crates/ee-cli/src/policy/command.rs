@@ -1,4 +1,4 @@
-//! Structured terminal command trust (Phase 2).
+//! Structured terminal command trust.
 //!
 //! Command identity is the executable token plus structured argv tokens from
 //! `CreateTerminalRequest`; display text is never matched.  Shell wrappers,

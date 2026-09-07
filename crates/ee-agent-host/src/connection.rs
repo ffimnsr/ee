@@ -162,7 +162,7 @@ pub(crate) struct AgentConnectionInner {
     pub workspace_memory: Arc<WorkspaceMemoryHost>,
     pub process: Arc<Mutex<Option<AgentProcess>>>,
     pub threads: Arc<Mutex<HashMap<SessionId, Arc<ThreadShared>>>>,
-    /// ACP-native MCP-over-ACP hosting for the ee proxy (Phase 6b).
+    /// ACP-native MCP-over-ACP hosting for the ee proxy.
     pub mcp: McpOverAcpRegistry,
     active_url_elicitations: Mutex<HashMap<String, Option<SessionId>>>,
     completed_url_elicitations: Mutex<HashSet<String>>,
@@ -1328,7 +1328,7 @@ fn build_client_builder(
             },
             on_receive_request!(),
         )
-        // Phase 6b: ACP-native MCP-over-ACP for the ee proxy.  These use the
+        // ACP-native MCP-over-ACP for the ee proxy.  These use the
         // official SDK request types (method metadata from
         // `CLIENT_METHOD_NAMES`); strict ordering/identity rules live in
         // `crate::mcp_over_acp`.
@@ -1591,7 +1591,7 @@ async fn driver_loop(
                         }
                         let _ = connection.send_notification(CancelNotification::new(session_id));
                         // Turn cancel closes every logical MCP connection on
-                        // this connection (Phase 6b lifecycle rule).
+                        // this connection.
                         inner.mcp.close_all();
                     }
                     ConnectionCommand::Close => break,

@@ -1,4 +1,4 @@
-//! Authenticated encrypted vault format and durable persistence (phase 3).
+//! Authenticated encrypted vault format and durable persistence.
 //!
 //! A single version-1 vault file holds sorted records of XChaCha20-Poly1305
 //! ciphertext. Every record is bound to the vault version, the host-binding

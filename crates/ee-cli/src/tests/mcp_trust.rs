@@ -1,4 +1,4 @@
-//! Phase 3 MCP trust tests (ISSUES.md "Unified Host-Local Workspace Trust
+//! MCP trust tests (ISSUES.md "Unified Host-Local Workspace Trust
 //! Policy"): exact generic MCP invocation trust.
 //!
 //! Covers the exact-invocation matcher, canonical argument handling, the

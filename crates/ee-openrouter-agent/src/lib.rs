@@ -16,7 +16,7 @@
 //! instead of the simple provider mode. `OPENROUTER_ORCHESTRATED=0` is a
 //! temporary fallback for diagnostics.
 //!
-//! # MCP servers (Phase 12)
+//! # MCP servers
 //!
 //! Orchestrated sessions discover session-advertised MCP servers and bridge
 //! their tools into the model–tool loop:

@@ -1,4 +1,4 @@
-//! ACP-native MCP-over-ACP client transport (Phase 12).
+//! ACP-native MCP-over-ACP client transport.
 //!
 //! The agent is the MCP client; the host serves the `ee` proxy's MCP server
 //! over ACP `mcp/connect` / `mcp/message` / `mcp/disconnect` requests.  This

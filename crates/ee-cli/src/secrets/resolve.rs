@@ -1,4 +1,4 @@
-//! Agent-environment secret-reference resolution (phase 5).
+//! Agent-environment secret-reference resolution.
 //!
 //! References are resolved only at agent launch, after the final config
 //! merge, and only from the typed [`AgentServerSettings`] values that carry

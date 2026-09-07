@@ -1,4 +1,4 @@
-//! Curated command validation profiles (Phase 4).
+//! Curated command validation profiles.
 //!
 //! The profile registry is application-owned and versioned: stable profile
 //! ids (`git_readonly`, `rust_validate`, `terminal_readonly`) map to fixed structured

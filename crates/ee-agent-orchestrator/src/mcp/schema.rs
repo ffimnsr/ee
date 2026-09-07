@@ -1,4 +1,4 @@
-//! MCP input schema → `ToolDefinition` input schema conversion (Phase 12).
+//! MCP input schema → `ToolDefinition` input schema conversion.
 //!
 //! MCP tool `inputSchema` values are JSON Schema objects; they pass through
 //! to the orchestrator's `ToolDefinition` mostly unchanged (the loop's

@@ -1,4 +1,4 @@
-//! Phase 6 end-to-end fixtures: encrypted secret → global config reference →
+//! End-to-end fixtures: encrypted secret → global config reference →
 //! agent launch environment, entirely through fakes.
 //!
 //! No developer keychain, machine ID, network, or real OpenRouter endpoint is

@@ -1,4 +1,4 @@
-//! Host-local per-workspace trust store (Phase 1 foundation).
+//! Host-local per-workspace trust store.
 //!
 //! Persistent grants live only here: a versioned TOML document under the
 //! platform state directory (`$XDG_STATE_HOME/ee/trust/` on Linux), keyed by

@@ -1,4 +1,4 @@
-//! `ee do secrets` command tests (phase 4): parser coverage, safe input,
+//! `ee do secrets` command tests: parser coverage, safe input,
 //! stdout/stderr separation, stable exit codes, and secret redaction.
 
 use std::io::Cursor;

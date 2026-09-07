@@ -19,7 +19,7 @@
 //!
 //! # Module map
 //!
-//! - [`mcp`] — Phase 12 MCP bridge: per-session MCP client manager, ACP-native
+//! - [`mcp`] — Bridge: per-session MCP client manager, ACP-native
 //!   MCP-over-ACP transport over the framework `ClientBridge`, stdio
 //!   transport, provider-compatible tool-name translation, side-effect
 //!   classification, and discovery diagnostics.

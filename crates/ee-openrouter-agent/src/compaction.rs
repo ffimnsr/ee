@@ -1,4 +1,4 @@
-//! OpenRouter session compaction helpers (Phase 12).
+//! OpenRouter session compaction helpers.
 //!
 //! `/compact` turns ask the configured model for a continuation summary over
 //! the stored history.  The helpers here own the deterministic boundaries:

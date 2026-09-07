@@ -17,7 +17,7 @@ use xi_rope::diff::{Diff, LineHashDiff};
 use xi_rope::rope::{Rope, RopeDelta};
 
 static EDITOR_STR: &str = include_str!("../../xi-core-lib/src/editor.rs");
-static VIEW_STR: &str = include_str!("../../xi-core-lib/src/view.rs");
+static VIEW_STR: &str = include_str!("../../xi-core-lib/src/view/mod.rs");
 
 static INTERVAL_STR: &str = include_str!("../src/interval.rs");
 static BREAKS_STR: &str = include_str!("../src/breaks.rs");

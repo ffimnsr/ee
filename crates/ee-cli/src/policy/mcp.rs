@@ -1,4 +1,4 @@
-//! Generic MCP invocation trust (Phase 3).
+//! Generic MCP invocation trust.
 //!
 //! An [`McpInvocation`] is a validated generic MCP tool invocation: server
 //! identity, transport identity, tool name, manifest schema version,

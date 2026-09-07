@@ -1,4 +1,4 @@
-//! Phase 2 command trust tests (ISSUES.md "Unified Host-Local Workspace
+//! Command trust tests (ISSUES.md "Unified Host-Local Workspace
 //! Trust Policy"): exact structured terminal command trust.
 //!
 //! Covers shell wrapper / token / cwd eligibility, the pure command

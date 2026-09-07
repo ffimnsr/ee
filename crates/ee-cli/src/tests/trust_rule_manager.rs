@@ -1,4 +1,4 @@
-//! Focused Phase 13 trust manager, tester, and explainability regressions.
+//! Focused trust manager, tester, and explainability regressions.
 
 use std::fs;
 use std::time::{Duration, SystemTime};

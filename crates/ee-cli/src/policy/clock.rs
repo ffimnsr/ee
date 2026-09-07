@@ -1,4 +1,4 @@
-//! Injectable policy clock (Phase 6 lifecycle).
+//! Injectable policy clock.
 //!
 //! The evaluator itself never reads the clock — time is injected per
 //! evaluation — but grant creation, store-load validation, and lifecycle

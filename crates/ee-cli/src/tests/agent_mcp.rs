@@ -1,4 +1,4 @@
-//! Phase 6 + 7 integration tests: MCP config forwarding, health registry,
+//! MCP config forwarding, health registry,
 //! prompt/resource browsing, the ee MCP proxy (same permission broker as
 //! direct ACP methods), shutdown orchestration, and approval policy.
 //!
