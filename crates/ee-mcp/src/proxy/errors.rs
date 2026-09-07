@@ -1,7 +1,7 @@
 //! Proxy tool errors: backend failure types and stable web-context error codes.
 use serde::{Deserialize, Serialize};
 
-/// Error produced by an [`EeProxyBackend`] operation.
+/// Error produced by an EeProxyBackend operation.
 ///
 /// Backend failures never become JSON-RPC protocol errors: they surface as
 /// `isError` tool results so the caller sees the message. The

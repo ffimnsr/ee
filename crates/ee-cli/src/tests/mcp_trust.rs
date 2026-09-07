@@ -301,7 +301,7 @@ mod e2e {
             scope: TrustRuleScope {
                 workspace: ws,
                 agent: None,
-                expires_at: Some(SystemTime::now() + Duration::from_secs(3600)),
+                expires_at: Some(crate::policy::clock::fixture_now() + Duration::from_secs(3600)),
                 max_uses: Some(max_uses),
             },
             server: "ee".to_string(),

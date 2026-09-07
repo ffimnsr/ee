@@ -511,7 +511,7 @@ mod e2e {
             scope: TrustRuleScope {
                 workspace: *store.workspace(),
                 agent: None,
-                expires_at: Some(SystemTime::now() + Duration::from_secs(3600)),
+                expires_at: Some(crate::policy::clock::fixture_now() + Duration::from_secs(3600)),
                 max_uses: Some(5),
             },
             operation: crate::policy::WriteOperationKind::Modify,
@@ -663,7 +663,7 @@ mod e2e {
             &state_dir,
             temp.path(),
             "cmd_lifecycle",
-            SystemTime::now() + Duration::from_secs(3600),
+            crate::policy::clock::fixture_now() + Duration::from_secs(3600),
             20,
         );
 

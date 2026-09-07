@@ -537,7 +537,8 @@ mod e2e {
         let mut rule = read_path_rule("read_src", workspace, prefix, max_bytes);
         match &mut rule {
             TrustRule::ReadPath(inner) => {
-                inner.scope.expires_at = Some(SystemTime::now() + Duration::from_secs(3600));
+                inner.scope.expires_at =
+                    Some(crate::policy::clock::fixture_now() + Duration::from_secs(3600));
             }
             _ => unreachable!(),
         }

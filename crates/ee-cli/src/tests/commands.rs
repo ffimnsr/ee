@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use clap::{CommandFactory, Parser};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
@@ -28,7 +28,7 @@ fn agent_trust_grant_persists_host_local_read_and_git_rules() {
 
     let document = crate::grant_agent_trust_profiles_at(
         &store,
-        SystemTime::now(),
+        crate::policy::clock::fixture_now(),
         crate::ALL_AGENT_TRUST_PROFILES,
     )
     .unwrap();
@@ -67,7 +67,7 @@ fn agent_trust_profiles_are_selective_and_revocable() {
     let state = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let store = crate::policy::TrustStore::at(state.path(), workspace.path()).unwrap();
-    let now = SystemTime::now();
+    let now = crate::policy::clock::fixture_now();
 
     let terminal = crate::grant_agent_trust_profiles_at(
         &store,
