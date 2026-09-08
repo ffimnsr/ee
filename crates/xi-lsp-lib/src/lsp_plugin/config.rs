@@ -14,6 +14,7 @@ impl LspPlugin {
             disabled_views: HashMap::new(),
             inactive_views: HashMap::new(),
             route_views: HashMap::new(),
+            pending_symbol_retries: HashMap::new(),
         }
     }
 

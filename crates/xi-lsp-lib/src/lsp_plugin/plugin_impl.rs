@@ -103,6 +103,7 @@ impl Plugin for LspPlugin {
         if let Some(key) = self.route_views.remove(&view.get_id()) {
             self.remove_status_item(view.get_id(), &key);
         }
+        self.pending_symbol_retries.remove(&view.get_id());
     }
 
     fn new_view(&mut self, view: &mut View<Self::Cache>) {
@@ -337,6 +338,11 @@ impl Plugin for LspPlugin {
                     Err(err) => self.record_view_failure(view, format!("{title} failed: {err:?}")),
                 },
             }
+        }
+        if self.pending_symbol_retries.contains_key(&view.get_id()) {
+            // Deferred tree-sitter symbol fallback: the cold backend has had
+            // an idle tick to finish loading; retry the one-shot request.
+            self.request_document_symbols(view);
         }
     }
 

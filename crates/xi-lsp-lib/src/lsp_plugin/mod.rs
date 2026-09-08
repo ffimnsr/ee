@@ -71,7 +71,15 @@ pub struct LspPlugin {
     disabled_views: HashMap<ViewId, String>,
     inactive_views: HashMap<ViewId, String>,
     route_views: HashMap<ViewId, String>,
+    /// Tree-sitter symbol fallbacks that returned empty on a cold backend;
+    /// the request is retried on the idle loop instead of surfacing a
+    /// misleading empty picker.
+    pending_symbol_retries: HashMap<ViewId, u32>,
 }
+
+/// Bound on one-shot tree-sitter symbol retries after a cold-start empty
+/// result (grammar/query loading is lazy per plugin process).
+const MAX_TREE_SITTER_SYMBOL_RETRIES: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LanguageMatch {

@@ -15,7 +15,7 @@ impl LspPlugin {
             Ok(client) => client,
             Err(err) => {
                 debug!("document symbols using Tree-sitter fallback: {err}");
-                self.queue_document_symbols(view_id, context.fallback_symbols());
+                self.queue_fallback_symbols(view_id, context);
                 return;
             }
         };
@@ -40,8 +40,32 @@ impl LspPlugin {
             });
         if let Err(err) = request {
             debug!("document symbols request failed; using Tree-sitter fallback: {err}");
-            self.queue_document_symbols(view_id, context.fallback_symbols());
+            self.queue_fallback_symbols(view_id, context);
         }
+    }
+
+    /// Tree-sitter fallback for one symbol request.  A cold backend (grammar
+    /// or query not loaded yet in this plugin process) yields an empty result;
+    /// deferring the request through the idle loop instead of queueing an
+    /// empty picker keeps the one-shot UI correct.
+    pub(super) fn queue_fallback_symbols(
+        &mut self,
+        view_id: ViewId,
+        context: Arc<DocumentSymbolContext>,
+    ) {
+        let symbols = context.fallback_symbols();
+        if symbols.is_empty() {
+            let retries = self.pending_symbol_retries.entry(view_id).or_insert(0);
+            if *retries < MAX_TREE_SITTER_SYMBOL_RETRIES {
+                *retries += 1;
+                if let Some(core) = &self.core {
+                    core.schedule_idle(view_id);
+                }
+                return;
+            }
+        }
+        self.pending_symbol_retries.remove(&view_id);
+        self.queue_document_symbols(view_id, symbols);
     }
 
     pub(super) fn queue_document_symbols(
