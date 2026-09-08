@@ -158,13 +158,23 @@ pub fn built_xi_lsp_binary(name: &str) -> PathBuf {
     let candidates = [target_dir.join("debug"), workspace_root.join("target").join("debug")];
 
     let cargo = env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(cargo)
+    let mut command = Command::new(cargo);
+    command
         .current_dir(workspace_root)
-        .args(["build", "--manifest-path"])
+        .arg("build")
+        .arg("--manifest-path")
         .arg(crate_dir.join("Cargo.toml"))
-        .args(["--bin", name])
-        .status()
-        .expect("cargo build for xi-lsp binary should start");
+        .arg("--bin")
+        .arg(name);
+    if name == "xi-lsp-plugin" {
+        // Hermetic grammars for the test-spawned plugin: as a real subprocess
+        // it cannot see the in-process `cfg(test)` grammar preload of the app
+        // test binary, so without the forwarded feature its tree-sitter paths
+        // depend on grammar artifacts in the user state dir (present only on
+        // developer machines that fetched them).
+        command.args(["--features", "test-grammars"]);
+    }
+    let status = command.status().expect("cargo build for xi-lsp binary should start");
     assert!(status.success(), "cargo build for xi-lsp binary should succeed");
     candidates
         .iter()

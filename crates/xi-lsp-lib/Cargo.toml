@@ -28,6 +28,14 @@ xi-core-lib.workspace = true
 xi-rope.workspace = true
 xi-rpc.workspace = true
 
+# Hermetic grammars for the plugin binary when spawned by in-process tests:
+# the plugin is a real (non-test) process, so it cannot use the app test
+# binary's `cfg(test)` grammar preload; this feature forwards the same
+# bundled test grammars so symbol/highlights paths never depend on user
+# state-dir grammar artifacts.  Enabled only by the test harness build.
+[features]
+test-grammars = ["xi-core-lib/test-grammars"]
+
 [[bin]]
 name = "xi_lsp_fake_server"
 path = "tests/support/fake_language_server.rs"
