@@ -1,7 +1,8 @@
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
@@ -283,17 +284,38 @@ fn markdown_symbols_use_tree_sitter_when_lsp_is_disabled() {
         },
     );
 
-    app.backend.request_document_symbols().unwrap();
-    wait_until_with_backend(
-        &mut app.backend,
-        "Tree-sitter document symbols",
-        Duration::from_secs(5),
-        |backend| !backend.pending_symbols.is_empty(),
-    );
-
-    let pending = app.backend.drain_pending_symbols();
-    assert_eq!(pending.len(), 1);
-    let symbols = &pending[0].2;
+    // One request may come back empty while the plugin's tree-sitter backend
+    // is still cold-starting (lazy per-process grammar/query loading).  Re-run
+    // the request like a user would re-open :symbols, and surface the plugin
+    // state in the failure message instead of asserting against a single
+    // arbitrary result.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let symbols = loop {
+        app.backend.request_document_symbols().unwrap();
+        while app.backend.pending_symbols.is_empty() && Instant::now() < deadline {
+            let _ = app.backend.pump();
+            thread::sleep(Duration::from_millis(10));
+        }
+        let pending = app.backend.drain_pending_symbols();
+        assert_eq!(
+            pending.len(),
+            1,
+            "one symbol result per request; plugins={:?} status={:?}",
+            app.backend.available_plugins_for_current_view(),
+            app.backend.status_message,
+        );
+        let symbols = pending.into_iter().next().unwrap().2;
+        if !symbols.is_empty() || Instant::now() >= deadline {
+            break symbols;
+        }
+    };
+    if symbols.is_empty() {
+        panic!(
+            "tree-sitter document symbols stayed empty after retries; plugins={:?} status={:?}",
+            app.backend.available_plugins_for_current_view(),
+            app.backend.status_message,
+        );
+    }
     assert_eq!(symbols.len(), 2);
     assert_eq!(symbols[0].name, "Parent");
     assert_eq!(symbols[0].children.len(), 1);

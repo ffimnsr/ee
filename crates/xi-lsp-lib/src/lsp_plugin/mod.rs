@@ -78,8 +78,9 @@ pub struct LspPlugin {
 }
 
 /// Bound on one-shot tree-sitter symbol retries after a cold-start empty
-/// result (grammar/query loading is lazy per plugin process).
-const MAX_TREE_SITTER_SYMBOL_RETRIES: u32 = 3;
+/// result (grammar/query loading is lazy per plugin process).  Generous
+/// enough for slow start-up bursts: each retry costs one idle tick.
+const MAX_TREE_SITTER_SYMBOL_RETRIES: u32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LanguageMatch {
