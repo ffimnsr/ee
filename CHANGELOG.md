@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.11.9 - 2026-09-08
+
+### Features
+
+- update the code folding and some bugs that were found along it (`1932a877`)
+- do initial patch on vlf for scrolling backwards (`4f06d064`)
+- make web context enabled by default (`1295418b`)
+- fix flaky tests and update router (`1594a357`)
+- update and split multiple monotonic files to smaller files (`c50ec210`)
+- update the markdown symbol test (`1f515ceb`)
+
+
+### Tests
+
+- update and fix offending test (`1f259342`)
+- fix the markdown symbols test (`068d0ed3`)
+- fix the missing test grammars (`a3d4f80c`)
+
+
 ## 0.11.8 - 2026-09-03
 
 ### Fixes
