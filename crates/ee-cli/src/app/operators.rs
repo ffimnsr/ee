@@ -3,8 +3,11 @@ use super::*;
 
 impl App {
     pub(super) fn handle_default(&mut self, key: KeyEvent) {
-        // Cancel operator-pending on Escape
-        if key.code == KeyCode::Esc && self.mode == Mode::OperatorPending {
+        // Cancel operator-pending on Escape / Ctrl-c (like vim).
+        let cancel = key.code == KeyCode::Esc
+            || (key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('c')));
+        if cancel && self.mode == Mode::OperatorPending {
             self.enter_normal_mode();
             self.input_state.reset();
             return;
@@ -26,6 +29,9 @@ impl App {
         match self.mode {
             Mode::OperatorPending => {
                 self.handle_operator_pending(ch);
+            }
+            Mode::Replace => {
+                self.replace_mode_insert(ch);
             }
             Mode::Insert => {
                 let s = ch.to_string();
@@ -210,6 +216,14 @@ impl App {
                 }
                 let _ = self.backend.send_edit("paste", json!({ "chars": text }));
             }
+            Mode::Replace => {
+                // Overwrite-mode paste: insert at cursor as in Insert mode.
+                self.insert_buffer.push_str(&text);
+                if self.try_vlf_insert_text(&text) {
+                    return;
+                }
+                let _ = self.backend.send_edit("insert", json!({ "chars": text }));
+            }
             #[cfg(feature = "agents")]
             Mode::Agent => {
                 // Paste into the agents composer draft.
@@ -305,6 +319,13 @@ impl App {
                 self.input_state.reset();
                 self.enter_normal_mode();
             }
+            Operator::Reindent => {
+                self.record_edit("reindent", json!([]));
+                self.push_change();
+                let _ = self.backend.send_edit("collapse_selections", json!([]));
+                self.input_state.reset();
+                self.enter_normal_mode();
+            }
             Operator::Uppercase => {
                 self.record_edit("uppercase", json!([]));
                 self.push_change();
@@ -350,19 +371,25 @@ impl App {
                 let _ = self.backend.send_edit("delete_forward", json!([]));
             }
             Operator::Yank => {
-                let _ = self.backend.send_edit("move_to_left_end_of_line", json!([]));
-                let _ = self
+                // Capture from the frontend line cache: an RPC preview right
+                // after selection edits can race the core's request channel.
+                let text = self
                     .backend
-                    .send_edit("move_to_right_end_of_line_and_modify_selection", json!([]));
-                let _ = self.backend.send_edit("delete_forward", json!([]));
+                    .get_line(self.backend.cursor_line)
+                    .map(|line| format!("{line}\n"))
+                    .unwrap_or_default();
+                let reg = self.take_register();
+                self.registers.yank(&reg, text, false);
                 let _ = self.backend.send_edit("yank", json!([]));
-                let _ = self.backend.send_edit("collapse_selections", json!([]));
             }
             Operator::Indent => {
                 let _ = self.backend.send_edit("indent", json!([]));
             }
             Operator::Outdent => {
                 let _ = self.backend.send_edit("outdent", json!([]));
+            }
+            Operator::Reindent => {
+                let _ = self.backend.send_edit("reindent", json!([]));
             }
             Operator::Uppercase => {
                 let _ = self.backend.send_edit("move_to_left_end_of_line", json!([]));
@@ -436,6 +463,7 @@ impl App {
                 | (Operator::Yank, 'y')
                 | (Operator::Indent, '>')
                 | (Operator::Outdent, '<')
+                | (Operator::Reindent, '=')
                 | (Operator::Uppercase, 'U')
                 | (Operator::Lowercase, 'u')
                 | (Operator::CaseToggle, '~')
@@ -492,13 +520,66 @@ impl App {
             _ => {}
         }
 
-        // Priority 9: motions that extend selection.
+        // Priority 9: motions that extend selection. `w`/`e`/`W`/`E`/`B` use
+        // the vim word-boundary parsers (word start / end, long-word family);
+        // `b` keeps the line-based word-start motion.
+        match (ch, self.input_state.prefix) {
+            ('w', None) => {
+                for _ in 0..count {
+                    let _ = self.backend.move_word_start(true, false, true);
+                }
+                self.apply_operator(op);
+                return;
+            }
+            ('e', None) => {
+                for _ in 0..count {
+                    let _ = self.backend.move_word_end(false, true);
+                }
+                self.apply_operator(op);
+                return;
+            }
+            ('W', None) => {
+                for _ in 0..count {
+                    let _ = self.backend.move_word_start(true, true, true);
+                }
+                self.apply_operator(op);
+                return;
+            }
+            ('E', None) => {
+                for _ in 0..count {
+                    let _ = self.backend.move_word_end(true, true);
+                }
+                self.apply_operator(op);
+                return;
+            }
+            ('g', Some('e')) => {
+                for _ in 0..count {
+                    let _ = self.backend.move_word_end_backward(false, true);
+                }
+                self.apply_operator(op);
+                return;
+            }
+            ('g', Some('E')) => {
+                for _ in 0..count {
+                    let _ = self.backend.move_word_end_backward(true, true);
+                }
+                self.apply_operator(op);
+                return;
+            }
+            ('B', None) => {
+                for _ in 0..count {
+                    let _ = self.backend.move_word_start(false, true, true);
+                }
+                self.apply_operator(op);
+                return;
+            }
+            _ => {}
+        }
         let motion_cmd = match (ch, self.input_state.prefix) {
             ('h', None) => Some("move_left_and_modify_selection"),
             ('l', None) => Some("move_right_and_modify_selection"),
             ('j', None) => Some("move_down_and_modify_selection"),
             ('k', None) => Some("move_up_and_modify_selection"),
-            ('w', None) | ('e', None) => Some("move_word_right_and_modify_selection"),
             ('b', None) => Some("move_word_left_and_modify_selection"),
             ('$', None) => Some("move_to_right_end_of_line_and_modify_selection"),
             ('^', None) => Some("move_to_beginning_of_paragraph_and_modify_selection"),

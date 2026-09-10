@@ -94,6 +94,15 @@ pub(crate) fn parse_action_spec(spec: &str) -> Result<Action, String> {
         return Ok(Action::MoveWordEnd { long_word });
     }
 
+    if let Some(family) = spec.strip_prefix("move_word_end_backward:") {
+        let long_word = match family {
+            "word" => false,
+            "long" | "long_word" | "big" | "big_word" => true,
+            _ => return Err(format!("unknown word family `{family}`")),
+        };
+        return Ok(Action::MoveWordEndBackward { long_word });
+    }
+
     if let Some(direction) = spec.strip_prefix("search_word_under_cursor:") {
         let forward = match direction {
             "forward" => true,
@@ -101,6 +110,61 @@ pub(crate) fn parse_action_spec(spec: &str) -> Result<Action, String> {
             _ => return Err(format!("unknown direction `{direction}`")),
         };
         return Ok(Action::SearchWordUnderCursor { forward });
+    }
+
+    if let Some(direction) = spec.strip_prefix("search_word_under_cursor_loose:") {
+        let forward = match direction {
+            "forward" => true,
+            "backward" => false,
+            _ => return Err(format!("unknown direction `{direction}`")),
+        };
+        return Ok(Action::SearchWordUnderCursorLoose { forward });
+    }
+
+    if let Some(dir) = spec.strip_prefix("scroll_lines:") {
+        let down = match dir {
+            "down" => true,
+            "up" => false,
+            _ => return Err(format!("unknown direction `{dir}`")),
+        };
+        return Ok(Action::ScrollLines { down });
+    }
+
+    if let Some(space) = spec.strip_prefix("join_lines:") {
+        let select_space = match space {
+            "with_space" => true,
+            "without_space" => false,
+            _ => return Err(format!("unknown join space mode `{space}`")),
+        };
+        return Ok(Action::JoinLines { select_space });
+    }
+
+    if let Some(direction) = spec.strip_prefix("goto_paragraph:") {
+        let forward = match direction {
+            "forward" => true,
+            "backward" => false,
+            _ => return Err(format!("unknown direction `{direction}`")),
+        };
+        return Ok(Action::GotoParagraph { forward });
+    }
+
+    if let Some(direction) = spec.strip_prefix("goto_sentence:") {
+        let forward = match direction {
+            "forward" => true,
+            "backward" => false,
+            _ => return Err(format!("unknown direction `{direction}`")),
+        };
+        return Ok(Action::GotoSentence { forward });
+    }
+
+    if let Some(dir) = spec.strip_prefix("goto_line_first_nonblank:") {
+        let (down, zero_based) = match dir {
+            "down" => (true, false),
+            "up" => (false, false),
+            "down_zero" => (true, true),
+            _ => return Err(format!("unknown direction `{dir}`")),
+        };
+        return Ok(Action::GotoLineFirstNonBlank { down, zero_based });
     }
 
     if let Some(mode) = spec.strip_prefix("mark_jump_prefix:") {
@@ -147,6 +211,25 @@ pub(crate) fn parse_action_spec(spec: &str) -> Result<Action, String> {
         "find_previous" => Action::FindPrevious,
         "goto_line" => Action::GotoLine,
         "goto_column" => Action::GotoColumn,
+        "goto_byte" => Action::GotoByte,
+        "delete_char_forward" => Action::DeleteCharForward,
+        "delete_char_backward" => Action::DeleteCharBackward,
+        "toggle_case_chars" => Action::ToggleCaseChars,
+        "delete_to_line_end" => Action::DeleteToLineEnd,
+        "change_to_line_end" => Action::ChangeToLineEnd,
+        "yank_lines" => Action::YankLines,
+        "goto_line_last_nonblank" => Action::GotoLineLastNonBlank,
+        "view_center_cursor" => Action::ViewCenterCursor,
+        "view_top_cursor" => Action::ViewTopCursor,
+        "view_bottom_cursor" => Action::ViewBottomCursor,
+        "file_status" => Action::FileStatus,
+        "hex_dump_char" => Action::HexDumpChar,
+        "open_target_under_cursor" => Action::OpenTargetUnderCursor,
+        "insert_at_last_edit" => Action::InsertAtLastEdit,
+        "insert_at_column_zero" => Action::InsertAtColumnZero,
+        "repeat_substitute" => Action::RepeatSubstitute,
+        "alternate_buffer" => Action::AlternateBuffer,
+        "repeat_last_motion_reversed" => Action::RepeatLastMotionReversed,
         "goto_first_nonwhitespace" => Action::GotoFirstNonWhitespace,
         "goto_file_start" => Action::GotoFileStart,
         "goto_last_line" => Action::GotoLastLine,
@@ -301,8 +384,6 @@ pub(crate) fn parse_action_spec(spec: &str) -> Result<Action, String> {
         "open_above" => Action::OpenLineAbove,
         "substitute_char" => Action::SubstituteChar,
         "substitute_line" => Action::SubstituteLine,
-        "delete_char_backward" => Action::DeleteBackward,
-        "delete_char_forward" => Action::Edit("delete_forward"),
         "delete_word_backward" => Action::DeleteWordBackward,
         "delete_word_forward" => Action::Edit("delete_word_forward"),
         "delete_to_line_start" => Action::DeleteToLineStart,
@@ -384,6 +465,7 @@ pub(crate) fn format_binding_mode(mode: Mode) -> &'static str {
     match mode {
         Mode::Normal => "normal",
         Mode::Insert => "insert",
+        Mode::Replace => "replace",
         Mode::Visual => "visual",
         Mode::VisualLine => "visual_line",
         Mode::VisualBlock => "visual_block",
@@ -502,9 +584,57 @@ pub(crate) fn format_action_spec(action: &Action) -> String {
         Action::MoveWordEnd { long_word } => {
             format!("move_word_end:{}", if *long_word { "long_word" } else { "word" })
         }
+        Action::MoveWordEndBackward { long_word } => {
+            format!("move_word_end_backward:{}", if *long_word { "long_word" } else { "word" })
+        }
         Action::GotoFirstNonWhitespace => String::from("goto_first_nonwhitespace"),
         Action::GotoLine => String::from("goto_line"),
         Action::GotoColumn => String::from("goto_column"),
+        Action::GotoByte => String::from("goto_byte"),
+        Action::DeleteCharForward => String::from("delete_char_forward"),
+        Action::DeleteCharBackward => String::from("delete_char_backward"),
+        Action::ToggleCaseChars => String::from("toggle_case_chars"),
+        Action::DeleteToLineEnd => String::from("delete_to_line_end"),
+        Action::ChangeToLineEnd => String::from("change_to_line_end"),
+        Action::YankLines => String::from("yank_lines"),
+        Action::ScrollLines { down } => {
+            format!("scroll_lines:{}", if *down { "down" } else { "up" })
+        }
+        Action::JoinLines { select_space } => {
+            format!("join_lines:{}", if *select_space { "with_space" } else { "without_space" })
+        }
+        Action::GotoParagraph { forward } => {
+            format!("goto_paragraph:{}", if *forward { "forward" } else { "backward" })
+        }
+        Action::GotoSentence { forward } => {
+            format!("goto_sentence:{}", if *forward { "forward" } else { "backward" })
+        }
+        Action::GotoLineFirstNonBlank { down, zero_based } => {
+            let dir = match (*down, *zero_based) {
+                (true, true) => "down_zero",
+                (true, false) => "down",
+                (false, _) => "up",
+            };
+            format!("goto_line_first_nonblank:{dir}")
+        }
+        Action::GotoLineLastNonBlank => String::from("goto_line_last_nonblank"),
+        Action::ViewCenterCursor => String::from("view_center_cursor"),
+        Action::ViewTopCursor => String::from("view_top_cursor"),
+        Action::ViewBottomCursor => String::from("view_bottom_cursor"),
+        Action::FileStatus => String::from("file_status"),
+        Action::HexDumpChar => String::from("hex_dump_char"),
+        Action::OpenTargetUnderCursor => String::from("open_target_under_cursor"),
+        Action::InsertAtLastEdit => String::from("insert_at_last_edit"),
+        Action::InsertAtColumnZero => String::from("insert_at_column_zero"),
+        Action::RepeatSubstitute => String::from("repeat_substitute"),
+        Action::AlternateBuffer => String::from("alternate_buffer"),
+        Action::RepeatLastMotionReversed => String::from("repeat_last_motion_reversed"),
+        Action::SearchWordUnderCursorLoose { forward } => {
+            format!(
+                "search_word_under_cursor_loose:{}",
+                if *forward { "forward" } else { "backward" }
+            )
+        }
         Action::GotoFileStart => String::from("goto_file_start"),
         Action::GotoLastLine => String::from("goto_last_line"),
         Action::GotoFile => String::from("goto_file"),
@@ -645,6 +775,7 @@ pub(crate) fn format_mode_spec(mode: Mode) -> &'static str {
     match mode {
         Mode::Normal => "normal",
         Mode::Insert => "insert",
+        Mode::Replace => "replace",
         Mode::Visual => "visual",
         Mode::VisualLine => "visual_line",
         Mode::VisualBlock => "visual_block",
@@ -667,6 +798,7 @@ pub(crate) fn format_operator_spec(operator: Operator) -> &'static str {
         Operator::Yank => "yank",
         Operator::Indent => "indent",
         Operator::Outdent => "outdent",
+        Operator::Reindent => "reindent",
         Operator::Uppercase => "uppercase",
         Operator::Lowercase => "lowercase",
         Operator::CaseToggle => "case_toggle",
@@ -677,6 +809,7 @@ pub(crate) fn parse_mode_spec(spec: &str) -> Option<Mode> {
     match spec.trim().to_ascii_lowercase().as_str() {
         "normal" => Some(Mode::Normal),
         "insert" => Some(Mode::Insert),
+        "replace" => Some(Mode::Replace),
         "visual" => Some(Mode::Visual),
         "visual_line" | "visualline" | "line_visual" => Some(Mode::VisualLine),
         "visual_block" | "visualblock" | "block_visual" => Some(Mode::VisualBlock),
@@ -705,6 +838,7 @@ pub(crate) fn parse_operator_spec(spec: &str) -> Option<Operator> {
         "yank" => Some(Operator::Yank),
         "indent" => Some(Operator::Indent),
         "outdent" => Some(Operator::Outdent),
+        "reindent" => Some(Operator::Reindent),
         "uppercase" => Some(Operator::Uppercase),
         "lowercase" => Some(Operator::Lowercase),
         "case_toggle" | "casetoggle" => Some(Operator::CaseToggle),

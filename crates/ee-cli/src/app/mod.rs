@@ -55,8 +55,8 @@ mod state;
 mod substitute;
 mod swift_motion;
 mod terminal;
-#[cfg(feature = "agents")]
 mod trust_manager;
+mod vim_extras;
 mod visual;
 mod vlf;
 mod windows;

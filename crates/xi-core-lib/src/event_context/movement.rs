@@ -186,6 +186,23 @@ impl<'a> EventContext<'a> {
         })
     }
 
+    /// Vim `ge`: back to the end of the previous word.
+    pub(super) fn do_move_word_end_backward(
+        &mut self,
+        long_word: bool,
+        modify_selection: bool,
+    ) -> Option<Selection> {
+        self.with_view(|view, text| {
+            let selection = super::move_word_end_backward_selection(
+                text,
+                view.sel_regions(),
+                long_word,
+                modify_selection,
+            );
+            (!selection.is_empty()).then_some(selection)
+        })
+    }
+
     pub(super) fn do_find_char(
         &mut self,
         target: char,

@@ -7,6 +7,8 @@ pub(crate) enum Operator {
     Yank,
     Indent,
     Outdent,
+    /// `=`: reindent selected lines.
+    Reindent,
     Uppercase,
     Lowercase,
     CaseToggle,
@@ -16,6 +18,8 @@ pub(crate) enum Operator {
 pub(crate) enum Mode {
     Normal,
     Insert,
+    /// Overwrite mode (`R`): typed characters replace the char under cursor.
+    Replace,
     /// Char-wise visual selection (`v`).
     Visual,
     /// Line-wise visual selection (`V`).
@@ -45,6 +49,7 @@ impl Mode {
         match self {
             Mode::Normal => "NOR",
             Mode::Insert => "INS",
+            Mode::Replace => "REP",
             Mode::Visual => "VIS",
             Mode::VisualLine => "VLN",
             Mode::VisualBlock => "VBK",

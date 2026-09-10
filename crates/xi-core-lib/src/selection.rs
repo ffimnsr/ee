@@ -84,6 +84,15 @@ impl Selection {
         }
     }
 
+    /// Clamp all region offsets to `max` (e.g. text length). Guards against
+    /// out-of-range offsets from RPC sources like offset-based jumps (`go`).
+    pub fn clamp(&mut self, max: usize) {
+        for region in &mut self.regions {
+            region.start = region.start.min(max);
+            region.end = region.end.min(max);
+        }
+    }
+
     /// Add a region to the selection. This method implements merging logic.
     ///
     /// Two non-caret regions merge if their interiors intersect; merely

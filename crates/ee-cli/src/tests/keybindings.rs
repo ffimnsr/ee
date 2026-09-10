@@ -117,7 +117,7 @@ fn bindings_table_has_requested_goto_prefix_bindings() {
     };
 
     assert_eq!(lookup(KeyCode::Char('g')), Some(Action::GotoFileStart));
-    assert_eq!(lookup(KeyCode::Char('e')), Some(Action::GotoLastLine));
+    assert_eq!(lookup(KeyCode::Char('e')), Some(Action::MoveWordEndBackward { long_word: false }));
     assert_eq!(lookup(KeyCode::Char('f')), Some(Action::GotoFile));
     assert_eq!(lookup(KeyCode::Char('h')), Some(Action::Edit("move_to_left_end_of_line")));
     assert_eq!(lookup(KeyCode::Char('l')), Some(Action::Edit("move_to_right_end_of_line")));
@@ -247,7 +247,8 @@ fn parse_action_spec_accepts_requested_command_aliases() {
         ("code_action", Action::RequestCodeActions),
         ("register_prefix", Action::RegisterPrefix),
         ("insert_register", Action::InsertRegister),
-        ("delete_char_forward", Action::Edit("delete_forward")),
+        ("delete_char_forward", Action::DeleteCharForward),
+        ("delete_char_backward", Action::DeleteCharBackward),
         ("delete_word_forward", Action::Edit("delete_word_forward")),
         ("kill_line", Action::DeleteCurrentLine),
         ("insert_newline", Action::Edit("insert_newline")),

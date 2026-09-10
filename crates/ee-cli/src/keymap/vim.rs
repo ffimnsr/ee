@@ -21,7 +21,7 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     }
 
     bind!(Normal, KeyCode::Char('c'), ctrl, None, NoOp);
-    for &mode in &[Insert, Visual, CommandLine, Search] {
+    for &mode in &[Insert, Mode::Replace, Visual, CommandLine, Search] {
         bind!(mode, KeyCode::Char('c'), ctrl, None, EnterMode(Normal));
     }
 
@@ -63,6 +63,7 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     // Normal mode: unprefixed bindings.
     // Quit is available via `:q`, `:quit`, `:q!`, `:quit!`.
     bind!(Normal, KeyCode::Char('i'), none, None, EnterMode(Insert));
+    bind!(Normal, KeyCode::Char('R'), none, None, EnterMode(Mode::Replace));
     bind!(Normal, KeyCode::Char('v'), none, None, EnterMode(Visual));
     bind!(Normal, KeyCode::Char('V'), none, None, EnterVisualLine);
     bind!(Normal, KeyCode::Char(':'), none, None, EnterCommandMode);
@@ -86,22 +87,35 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(Normal, KeyCode::Char('k'), none, None, Edit("move_up"));
     bind!(Normal, KeyCode::Down, none, None, Edit("move_down"));
     bind!(Normal, KeyCode::Char('j'), none, None, Edit("move_down"));
-    bind!(Normal, KeyCode::Char('w'), none, None, Edit("move_word_right"));
-    bind!(Normal, KeyCode::Char('e'), none, None, Edit("move_word_right"));
-    bind!(Normal, KeyCode::Char('b'), none, None, Edit("move_word_left"));
     bind!(Normal, KeyCode::Char('^'), none, None, GotoFirstNonWhitespace);
     bind!(Normal, KeyCode::Char('$'), none, None, Edit("move_to_right_end_of_line"));
     bind!(Normal, KeyCode::Char('G'), none, None, Edit("move_to_end_of_document"));
+    // vim `w`/`e` use the vim word-boundary parsers in the backend; `b` keeps
+    // the line-based word-start motion (matches vim `b`).
+    bind!(
+        Normal,
+        KeyCode::Char('w'),
+        none,
+        None,
+        MoveWordStart { forward: true, long_word: false }
+    );
+    bind!(Normal, KeyCode::Char('e'), none, None, MoveWordEnd { long_word: false });
+    bind!(Normal, KeyCode::Char('b'), none, None, Edit("move_word_left"));
     bind!(Normal, KeyCode::PageDown, none, None, Edit("scroll_page_down"));
     bind!(Normal, KeyCode::PageUp, none, None, Edit("scroll_page_up"));
-    bind!(Normal, KeyCode::Char('d'), ctrl, None, Edit("scroll_page_down"));
-    bind!(Normal, KeyCode::Char('u'), ctrl, None, Edit("scroll_page_up"));
+    // vim `Ctrl-d`/`Ctrl-u`: scroll half a window (count = lines).
+    bind!(Normal, KeyCode::Char('d'), ctrl, None, PageCursorHalfDown);
+    bind!(Normal, KeyCode::Char('u'), ctrl, None, PageCursorHalfUp);
     bind!(Normal, KeyCode::Char('w'), ctrl, None, WindowCommandPrefix);
     bind!(Normal, KeyCode::Char('o'), ctrl, None, JumpListOlder);
     bind!(Normal, KeyCode::Tab, none, None, JumpListNewer);
     bind!(Normal, KeyCode::BackTab, none, None, JumpListNewer);
     bind!(Normal, KeyCode::Char('n'), none, None, FindNext);
     bind!(Normal, KeyCode::Char('N'), none, None, FindPrevious);
+    // `gn`/`gN`: backend find selects the next match, so these match vim's
+    // "select next/prev search match" semantics.
+    bind!(Normal, KeyCode::Char('n'), none, Some('g'), FindNext);
+    bind!(Normal, KeyCode::Char('N'), none, Some('g'), FindPrevious);
     bind!(Normal, KeyCode::Char('K'), none, None, RequestHover);
     bind!(Normal, KeyCode::Up, ctrl, None, Edit("add_selection_above"));
     bind!(Normal, KeyCode::Down, ctrl, None, Edit("add_selection_below"));
@@ -163,17 +177,15 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(Normal, KeyCode::Char('a'), ctrl, None, Edit("increase_number"));
     bind!(Normal, KeyCode::Char('x'), ctrl, None, Edit("decrease_number"));
 
-    // Normal mode: g-prefixed bindings.
     bind!(Normal, KeyCode::Char('g'), none, Some('g'), GotoFileStart);
-    bind!(Normal, KeyCode::Char('e'), none, Some('g'), GotoLastLine);
+    bind!(Normal, KeyCode::Char('e'), none, Some('g'), MoveWordEndBackward { long_word: false });
     bind!(Normal, KeyCode::Char('f'), none, Some('g'), GotoFile);
     bind!(Normal, KeyCode::Char('h'), none, Some('g'), Edit("move_to_left_end_of_line"));
     bind!(Normal, KeyCode::Char('l'), none, Some('g'), Edit("move_to_right_end_of_line"));
-    bind!(Normal, KeyCode::Char('d'), none, Some('g'), Edit("duplicate_line"));
+    bind!(Normal, KeyCode::Char('d'), none, Some('g'), RequestDeclaration);
+    bind!(Normal, KeyCode::Char('D'), none, Some('g'), RequestDefinition);
+    bind!(Normal, KeyCode::Char('o'), none, Some('g'), GotoByte);
     bind!(Normal, KeyCode::Char('b'), none, Some('g'), GitBlame);
-    bind!(Normal, KeyCode::Char('D'), none, Some('g'), GitDiff);
-    bind!(Normal, KeyCode::Char('o'), none, Some('g'), RequestDocumentSymbols);
-    bind!(Normal, KeyCode::Char('O'), none, Some('g'), RequestWorkspaceSymbols);
     bind!(Normal, KeyCode::Char('u'), none, Some('g'), SetOperator(Operator::Lowercase));
     bind!(Normal, KeyCode::Char('U'), none, Some('g'), SetOperator(Operator::Uppercase));
     bind!(Normal, KeyCode::Char('~'), none, Some('g'), SetOperator(Operator::CaseToggle));
@@ -182,14 +194,42 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(Normal, KeyCode::Char(','), none, Some('g'), ChangeListNewer);
     bind!(Normal, KeyCode::Char('t'), none, Some('g'), TabNext);
     bind!(Normal, KeyCode::Char('T'), none, Some('g'), TabPrev);
+    // g-extras: vim insert-pendings, joins, formats, info.
+    bind!(Normal, KeyCode::Char('i'), none, Some('g'), InsertAtLastEdit);
+    bind!(Normal, KeyCode::Char('I'), none, Some('g'), InsertAtColumnZero);
+    bind!(Normal, KeyCode::Char('J'), none, Some('g'), JoinLines { select_space: false });
+    bind!(Normal, KeyCode::Char('p'), none, Some('g'), PasteAfter);
+    bind!(Normal, KeyCode::Char('P'), none, Some('g'), PasteBefore);
+    bind!(Normal, KeyCode::Char('q'), none, Some('g'), FormatSelections);
+    bind!(Normal, KeyCode::Char('w'), none, Some('g'), FormatSelections);
+    bind!(Normal, KeyCode::Char('x'), none, Some('g'), OpenTargetUnderCursor);
+    bind!(Normal, KeyCode::Char('8'), none, Some('g'), HexDumpChar);
+    bind!(Normal, KeyCode::Char('_'), none, Some('g'), GotoLineLastNonBlank);
+    bind!(
+        Normal,
+        KeyCode::Char('*'),
+        none,
+        Some('g'),
+        SearchWordUnderCursorLoose { forward: true }
+    );
+    bind!(
+        Normal,
+        KeyCode::Char('#'),
+        none,
+        Some('g'),
+        SearchWordUnderCursorLoose { forward: false }
+    );
+    bind!(Normal, KeyCode::Char('E'), none, Some('g'), MoveWordEndBackward { long_word: true });
 
     // Normal mode: list navigation prefixes.
     bind!(Normal, KeyCode::Char('q'), none, Some(']'), QfNext);
     bind!(Normal, KeyCode::Char('Q'), none, Some(']'), LocNext);
     bind!(Normal, KeyCode::Char('h'), none, Some(']'), GitNextHunk);
+    bind!(Normal, KeyCode::Char('c'), none, Some(']'), GitNextHunk);
     bind!(Normal, KeyCode::Char('q'), none, Some('['), QfPrev);
     bind!(Normal, KeyCode::Char('Q'), none, Some('['), LocPrev);
     bind!(Normal, KeyCode::Char('h'), none, Some('['), GitPrevHunk);
+    bind!(Normal, KeyCode::Char('c'), none, Some('['), GitPrevHunk);
 
     // Normal mode: z-prefixed fold bindings.
     bind!(Normal, KeyCode::Char('a'), none, Some('z'), FoldToggle);
@@ -211,9 +251,54 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(Visual, KeyCode::Char('k'), none, None, Edit("move_up_and_modify_selection"),);
     bind!(Visual, KeyCode::Down, none, None, Edit("move_down_and_modify_selection"),);
     bind!(Visual, KeyCode::Char('j'), none, None, Edit("move_down_and_modify_selection"),);
-    // Visual char: word motions also extend selection
-    bind!(Visual, KeyCode::Char('w'), none, None, Edit("move_word_right_and_modify_selection"),);
+    // Visual char: vim word motions also extend selection
+    bind!(
+        Visual,
+        KeyCode::Char('w'),
+        none,
+        None,
+        MoveWordStart { forward: true, long_word: false },
+    );
+    bind!(Visual, KeyCode::Char('e'), none, None, MoveWordEnd { long_word: false },);
+    bind!(Visual, KeyCode::Char('W'), none, None, MoveWordStart { forward: true, long_word: true },);
+    bind!(Visual, KeyCode::Char('E'), none, None, MoveWordEnd { long_word: true },);
+    bind!(
+        Visual,
+        KeyCode::Char('B'),
+        none,
+        None,
+        MoveWordStart { forward: false, long_word: true },
+    );
+    bind!(Visual, KeyCode::Char('e'), none, Some('g'), MoveWordEndBackward { long_word: false },);
+    bind!(Visual, KeyCode::Char('E'), none, Some('g'), MoveWordEndBackward { long_word: true },);
     bind!(Visual, KeyCode::Char('b'), none, None, Edit("move_word_left_and_modify_selection"),);
+    bind!(Visual, KeyCode::Char('{'), none, None, GotoParagraph { forward: false },);
+    bind!(Visual, KeyCode::Char('}'), none, None, GotoParagraph { forward: true },);
+    bind!(Visual, KeyCode::Char('('), none, None, GotoSentence { forward: false },);
+    bind!(Visual, KeyCode::Char(')'), none, None, GotoSentence { forward: true },);
+    bind!(Visual, KeyCode::Char('|'), none, None, GotoColumn);
+    bind!(
+        Visual,
+        KeyCode::Char('+'),
+        none,
+        None,
+        GotoLineFirstNonBlank { down: true, zero_based: false },
+    );
+    bind!(
+        Visual,
+        KeyCode::Char('-'),
+        none,
+        None,
+        GotoLineFirstNonBlank { down: false, zero_based: false },
+    );
+    bind!(
+        Visual,
+        KeyCode::Char('_'),
+        none,
+        None,
+        GotoLineFirstNonBlank { down: true, zero_based: true },
+    );
+    bind!(Visual, KeyCode::Char('_'), none, Some('g'), GotoLineLastNonBlank);
     bind!(
         Visual,
         KeyCode::Char('$'),
@@ -265,6 +350,15 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(VisualBlock, KeyCode::Down, none, None, Edit("move_down"),);
     bind!(VisualBlock, KeyCode::Char('j'), none, None, Edit("move_down"),);
 
+    // Replace mode: mirror insert-mode movement plus Exit.
+    bind!(Mode::Replace, KeyCode::Esc, none, None, EnterMode(Normal));
+    bind!(Mode::Replace, KeyCode::Left, none, None, Edit("move_left"));
+    bind!(Mode::Replace, KeyCode::Right, none, None, Edit("move_right"));
+    bind!(Mode::Replace, KeyCode::Up, none, None, Edit("move_up"));
+    bind!(Mode::Replace, KeyCode::Down, none, None, Edit("move_down"));
+    bind!(Mode::Replace, KeyCode::Enter, none, None, Edit("insert_newline"));
+    bind!(Mode::Replace, KeyCode::Backspace, none, None, DeleteBackward);
+
     // Insert mode: unprefixed bindings.
     bind!(Insert, KeyCode::Esc, none, None, EnterMode(Normal));
     bind!(Insert, KeyCode::Left, none, None, Edit("move_left"));
@@ -296,9 +390,75 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(Search, KeyCode::Enter, KeyModifiers::ALT, None, FindAll);
 
     // Normal mode: edit history and repeat.
-    bind!(Normal, KeyCode::Char('u'), none, None, Undo);
+    bind!(Normal, KeyCode::Char('f'), ctrl, None, Edit("scroll_page_down"));
+    bind!(Normal, KeyCode::Char('b'), ctrl, None, Edit("scroll_page_up"));
+    bind!(Normal, KeyCode::Char('e'), ctrl, None, ScrollLines { down: true });
+    bind!(Normal, KeyCode::Char('y'), ctrl, None, ScrollLines { down: false });
+    bind!(Normal, KeyCode::Char('g'), ctrl, None, FileStatus);
+    bind!(Normal, KeyCode::Char('^'), ctrl, None, AlternateBuffer);
     bind!(Normal, KeyCode::Char('r'), ctrl, None, Redo);
     bind!(Normal, KeyCode::Char('.'), none, None, RepeatLastChange);
+    bind!(Normal, KeyCode::Char(';'), none, None, RepeatLastMotion);
+    bind!(Normal, KeyCode::Char(','), none, None, RepeatLastMotionReversed);
+    bind!(Normal, KeyCode::Char('&'), none, None, RepeatSubstitute);
+    bind!(Normal, KeyCode::Char('~'), none, None, ToggleCaseChars);
+    bind!(Normal, KeyCode::Char('x'), none, None, DeleteCharForward);
+    bind!(Normal, KeyCode::Char('X'), none, None, DeleteCharBackward);
+    bind!(Normal, KeyCode::Char('r'), none, None, Action::Replace);
+    bind!(Normal, KeyCode::Char('D'), none, None, DeleteToLineEnd);
+    bind!(Normal, KeyCode::Char('C'), none, None, ChangeToLineEnd);
+    bind!(Normal, KeyCode::Char('Y'), none, None, YankLines);
+    bind!(Normal, KeyCode::Char('J'), none, None, JoinLines { select_space: true });
+    bind!(Normal, KeyCode::Char('='), none, None, SetOperator(Operator::Reindent));
+    bind!(Normal, KeyCode::Char('W'), none, None, MoveWordStart { forward: true, long_word: true });
+    bind!(Normal, KeyCode::Char('E'), none, None, MoveWordEnd { long_word: true });
+    bind!(
+        Normal,
+        KeyCode::Char('B'),
+        none,
+        None,
+        MoveWordStart { forward: false, long_word: true }
+    );
+    bind!(Normal, KeyCode::Char('{'), none, None, GotoParagraph { forward: false });
+    bind!(Normal, KeyCode::Char('}'), none, None, GotoParagraph { forward: true });
+    bind!(Normal, KeyCode::Char('('), none, None, GotoSentence { forward: false });
+    bind!(Normal, KeyCode::Char(')'), none, None, GotoSentence { forward: true });
+    bind!(Normal, KeyCode::Char('|'), none, None, GotoColumn);
+    bind!(
+        Normal,
+        KeyCode::Char('+'),
+        none,
+        None,
+        GotoLineFirstNonBlank { down: true, zero_based: false }
+    );
+    bind!(
+        Normal,
+        KeyCode::Char('-'),
+        none,
+        None,
+        GotoLineFirstNonBlank { down: false, zero_based: false }
+    );
+    bind!(
+        Normal,
+        KeyCode::Char('_'),
+        none,
+        None,
+        GotoLineFirstNonBlank { down: true, zero_based: true }
+    );
+    bind!(
+        Normal,
+        KeyCode::Enter,
+        none,
+        None,
+        GotoLineFirstNonBlank { down: true, zero_based: false }
+    );
+    bind!(Normal, KeyCode::Backspace, none, None, Edit("move_left"));
+    bind!(Normal, KeyCode::Char('H'), none, None, GotoWindowTop);
+    bind!(Normal, KeyCode::Char('M'), none, None, GotoWindowCenter);
+    bind!(Normal, KeyCode::Char('L'), none, None, GotoWindowBottom);
+    bind!(Normal, KeyCode::Char('z'), none, Some('z'), ViewCenterCursor);
+    bind!(Normal, KeyCode::Char('t'), none, Some('z'), ViewTopCursor);
+    bind!(Normal, KeyCode::Char('b'), none, Some('z'), ViewBottomCursor);
 
     // Normal and visual mode: paste.
     bind!(Normal, KeyCode::Char('p'), none, None, PasteAfter);

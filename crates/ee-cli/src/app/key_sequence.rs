@@ -94,7 +94,11 @@ impl App {
             return;
         }
 
-        if key.code == KeyCode::Esc && self.has_pending_input_state() {
+        // Escape / Ctrl-c cancel any in-progress input (like vim).
+        let cancel = key.code == KeyCode::Esc
+            || (key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('c')));
+        if cancel && self.has_pending_input_state() {
             self.cancel_pending_input_state();
             return;
         }

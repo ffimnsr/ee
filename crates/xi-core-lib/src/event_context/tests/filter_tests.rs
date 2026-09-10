@@ -162,6 +162,77 @@ fn move_word_end_extends_selection_when_requested() {
 }
 
 #[test]
+fn set_selections_clamps_out_of_range_offsets() {
+    use crate::plugins::rpc::SelectionRange;
+    use crate::rpc::EditNotification;
+
+    // `go` with a huge count must clamp to the end of the buffer.
+    let harness = ContextHarness::new("alpha beta");
+    let mut ctx = harness.make_context();
+
+    ctx.do_edit(EditNotification::SetSelections {
+        selections: vec![SelectionRange { start: 500, end: 500 }],
+    });
+
+    assert_eq!(harness.debug_render(), "alpha beta|");
+}
+
+#[test]
+fn move_word_end_backward_moves_to_previous_word_end() {
+    use crate::rpc::{EditNotification, GestureType};
+
+    // From the end of the last word, `ge` lands on the end of the previous word.
+    let harness = ContextHarness::new("alpha beta");
+    let mut ctx = harness.make_context();
+
+    ctx.do_edit(EditNotification::Gesture { line: 0, col: 9, ty: GestureType::PointSelect });
+    ctx.do_edit(EditNotification::MoveWordEndBackward {
+        long_word: false,
+        modify_selection: false,
+    });
+    assert_eq!(harness.debug_render(), "alph|a beta");
+}
+
+#[test]
+fn move_word_end_backward_from_inside_word_jumps_over_it() {
+    use crate::rpc::{EditNotification, GestureType};
+
+    // Cursor in the middle of the first word: no previous word, so no move.
+    let harness = ContextHarness::new("alpha beta");
+    let mut ctx = harness.make_context();
+
+    ctx.do_edit(EditNotification::Gesture { line: 0, col: 1, ty: GestureType::PointSelect });
+    ctx.do_edit(EditNotification::MoveWordEndBackward {
+        long_word: false,
+        modify_selection: false,
+    });
+    assert_eq!(harness.debug_render(), "a|lpha beta");
+
+    // Cursor in the middle of the second word: previous word is "alpha".
+    ctx.do_edit(EditNotification::Gesture { line: 0, col: 7, ty: GestureType::PointSelect });
+    ctx.do_edit(EditNotification::MoveWordEndBackward {
+        long_word: false,
+        modify_selection: false,
+    });
+    assert_eq!(harness.debug_render(), "alph|a beta");
+}
+
+#[test]
+fn move_word_end_backward_on_punctuation_uses_word_before_cursor() {
+    use crate::rpc::{EditNotification, GestureType};
+
+    let harness = ContextHarness::new("a-b");
+    let mut ctx = harness.make_context();
+
+    ctx.do_edit(EditNotification::Gesture { line: 0, col: 1, ty: GestureType::PointSelect });
+    ctx.do_edit(EditNotification::MoveWordEndBackward {
+        long_word: false,
+        modify_selection: false,
+    });
+    assert_eq!(harness.debug_render(), "|a-b");
+}
+
+#[test]
 fn find_char_moves_with_inclusive_and_exclusive_variants() {
     use crate::rpc::{EditNotification, GestureType};
 

@@ -714,6 +714,13 @@ pub enum EditNotification {
         #[serde(default)]
         modify_selection: bool,
     },
+    /// Vim `ge`: back to the end of the previous word.
+    MoveWordEndBackward {
+        #[serde(default)]
+        long_word: bool,
+        #[serde(default)]
+        modify_selection: bool,
+    },
     FindChar {
         target: char,
         #[serde(default)]

@@ -336,14 +336,52 @@ impl App {
                 self.input_state.pending_find = Some(PendingCharFind { forward, inclusive });
             }
             Action::MoveWordStart { forward, long_word } => {
-                self.move_word_start(forward, long_word);
+                for _ in 0..self.input_state.count() {
+                    self.move_word_start(forward, long_word);
+                }
             }
             Action::MoveWordEnd { long_word } => {
-                self.move_word_end(long_word);
+                for _ in 0..self.input_state.count() {
+                    self.move_word_end(long_word);
+                }
+            }
+            Action::MoveWordEndBackward { long_word } => {
+                for _ in 0..self.input_state.count() {
+                    self.move_word_end_backward(long_word);
+                }
             }
             Action::GotoFirstNonWhitespace => self.goto_first_nonwhitespace(),
             Action::GotoLine => self.goto_line_from_count(),
             Action::GotoColumn => self.goto_column_from_count(),
+            Action::GotoByte => self.goto_byte_from_count(),
+            Action::DeleteCharForward => self.delete_char_forward(),
+            Action::DeleteCharBackward => self.delete_char_backward(),
+            Action::ToggleCaseChars => self.toggle_case_chars(),
+            Action::DeleteToLineEnd => self.delete_to_line_end(),
+            Action::ChangeToLineEnd => self.change_to_line_end(),
+            Action::YankLines => self.yank_lines(),
+            Action::ScrollLines { down } => self.scroll_lines(down),
+            Action::JoinLines { select_space } => self.join_lines_with_selection(select_space),
+            Action::GotoParagraph { forward } => self.goto_paragraph_boundary(forward),
+            Action::GotoSentence { forward } => self.goto_sentence_boundary(forward),
+            Action::GotoLineFirstNonBlank { down, zero_based } => {
+                self.goto_line_first_nonblank(down, zero_based);
+            }
+            Action::GotoLineLastNonBlank => self.goto_line_last_nonblank(),
+            Action::ViewCenterCursor => self.view_center_cursor(),
+            Action::ViewTopCursor => self.view_top_cursor(),
+            Action::ViewBottomCursor => self.view_bottom_cursor(),
+            Action::FileStatus => self.show_file_status(),
+            Action::HexDumpChar => self.hex_dump_char(),
+            Action::OpenTargetUnderCursor => self.open_target_under_cursor(),
+            Action::InsertAtLastEdit => self.insert_at_last_edit(),
+            Action::InsertAtColumnZero => self.insert_at_column_zero(),
+            Action::RepeatSubstitute => self.repeat_substitute(),
+            Action::AlternateBuffer => self.alternate_buffer(),
+            Action::RepeatLastMotionReversed => self.repeat_last_motion_with_direction(true),
+            Action::SearchWordUnderCursorLoose { forward } => {
+                self.search_word_under_cursor_loose(forward);
+            }
             Action::GotoFileStart => self.goto_file_start_from_count(),
             Action::GotoLastLine => self.goto_last_line(),
             Action::GotoFile => self.goto_file_under_cursor(),

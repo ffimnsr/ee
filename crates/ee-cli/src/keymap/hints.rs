@@ -369,6 +369,10 @@ pub(crate) fn action_hint_description(action: &Action) -> String {
             let family = if *long_word { "long word" } else { "word" };
             format!("next {family} end")
         }
+        Action::MoveWordEndBackward { long_word } => {
+            let family = if *long_word { "long word" } else { "word" };
+            format!("previous {family} end")
+        }
         Action::SetOperator(operator) => match operator {
             Operator::Delete => String::from("delete operator"),
             Operator::Change => String::from("change operator"),
@@ -378,6 +382,7 @@ pub(crate) fn action_hint_description(action: &Action) -> String {
             Operator::Uppercase => String::from("uppercase operator"),
             Operator::Lowercase => String::from("lowercase operator"),
             Operator::CaseToggle => String::from("toggle case operator"),
+            Operator::Reindent => String::from("reindent operator"),
         },
         Action::MarkJumpPrefix { line_start } => {
             String::from(if *line_start { "jump to mark line" } else { "jump to exact mark" })
@@ -390,6 +395,7 @@ pub(crate) fn action_hint_description(action: &Action) -> String {
         },
         Action::GotoFileStart => String::from("file start"),
         Action::GotoLastLine => String::from("last line"),
+        Action::GotoByte => String::from("goto byte"),
         Action::GotoFile => String::from("goto file"),
         Action::RequestDocumentSymbols => String::from("document symbols"),
         Action::RequestWorkspaceSymbols => String::from("workspace symbols"),
@@ -438,6 +444,7 @@ pub(crate) fn mode_hint_description(mode: Mode) -> &'static str {
     match mode {
         Mode::Normal => "normal mode",
         Mode::Insert => "insert mode",
+        Mode::Replace => "replace mode",
         Mode::Visual => "visual mode",
         Mode::VisualLine => "visual line mode",
         Mode::VisualBlock => "visual block mode",

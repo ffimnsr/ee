@@ -189,6 +189,10 @@ pub(crate) enum SpecialEvent {
         long_word: bool,
         modify_selection: bool,
     },
+    MoveWordEndBackward {
+        long_word: bool,
+        modify_selection: bool,
+    },
     FindChar {
         target: char,
         forward: bool,
@@ -658,6 +662,9 @@ impl From<EditNotification> for EventDomain {
             }
             MoveWordEnd { long_word, modify_selection } => {
                 SpecialEvent::MoveWordEnd { long_word, modify_selection }.into()
+            }
+            MoveWordEndBackward { long_word, modify_selection } => {
+                SpecialEvent::MoveWordEndBackward { long_word, modify_selection }.into()
             }
             FindChar { target, forward, inclusive, modify_selection } => {
                 SpecialEvent::FindChar { target, forward, inclusive, modify_selection }.into()

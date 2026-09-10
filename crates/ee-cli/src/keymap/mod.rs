@@ -95,9 +95,68 @@ pub(crate) enum Action {
     MoveWordEnd {
         long_word: bool,
     },
+    MoveWordEndBackward {
+        long_word: bool,
+    },
+    /// `x`/`X`: delete char forward/backward with register yank.
+    DeleteCharForward,
+    DeleteCharBackward,
+    /// `~`: toggle ASCII case of chars under cursor.
+    ToggleCaseChars,
+    /// `D`/`C`: delete/change to end of line.
+    DeleteToLineEnd,
+    ChangeToLineEnd,
+    /// `Y`: yank whole lines (vim `yy`).
+    YankLines,
+    /// `J`/`gJ`: join lines, with or without a separating space.
+    JoinLines {
+        select_space: bool,
+    },
+    /// `{`/`}` and `(`/`)`: paragraph / sentence jumps.
+    GotoParagraph {
+        forward: bool,
+    },
+    GotoSentence {
+        forward: bool,
+    },
+    /// `+`/`Enter`/`-`/`_`: line offset to first non-blank.
+    GotoLineFirstNonBlank {
+        down: bool,
+        zero_based: bool,
+    },
+    /// `g_`: last non-blank char of line below.
+    GotoLineLastNonBlank,
+    /// `zz`/`zt`/`zb`: viewport centering.
+    ViewCenterCursor,
+    ViewTopCursor,
+    ViewBottomCursor,
+    /// `Ctrl-e`/`Ctrl-y`: line scroll without moving the cursor.
+    ScrollLines {
+        down: bool,
+    },
+    /// `Ctrl-g`: file status in status line.
+    FileStatus,
+    /// `g8`: hex dump of char under cursor.
+    HexDumpChar,
+    /// `gx`: open target under cursor.
+    OpenTargetUnderCursor,
+    /// `gi`/`gI`: insert at last edit / column zero.
+    InsertAtLastEdit,
+    InsertAtColumnZero,
+    /// `&`: repeat last substitute.
+    RepeatSubstitute,
+    /// `Ctrl-^`: alternate buffer.
+    AlternateBuffer,
+    /// `,`: repeat last motion with flipped direction.
+    RepeatLastMotionReversed,
+    /// `g*`/`g#`: search word under cursor without word boundaries.
+    SearchWordUnderCursorLoose {
+        forward: bool,
+    },
     GotoFirstNonWhitespace,
     GotoLine,
     GotoColumn,
+    GotoByte,
     GotoFileStart,
     GotoLastLine,
     GotoFile,

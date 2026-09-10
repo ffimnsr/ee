@@ -613,6 +613,28 @@ impl XiClient {
         )
     }
 
+    pub(crate) fn move_word_end_backward(
+        &mut self,
+        long_word: bool,
+        modify_selection: bool,
+    ) -> io::Result<()> {
+        self.send_edit(
+            "move_word_end_backward",
+            json!({
+                "long_word": long_word,
+                "modify_selection": modify_selection,
+            }),
+        )
+    }
+
+    /// Vim `go` [count]: jump to byte offset (1-based) in the buffer.
+    pub(crate) fn goto_byte(&mut self, offset: usize) -> io::Result<()> {
+        self.send_edit(
+            "set_selections",
+            json!({"selections": [{ "start": offset, "end": offset }]}),
+        )
+    }
+
     pub(crate) fn find_char(
         &mut self,
         target: char,

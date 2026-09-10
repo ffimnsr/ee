@@ -65,8 +65,11 @@ impl<'a> EventContext<'a> {
 
         let pending_selection = self.dispatch_event(event);
         self.after_edit("core");
-        if let Some(selection) = pending_selection {
-            self.with_view(|view, text| view.set_selection(text, selection));
+        if let Some(mut selection) = pending_selection {
+            self.with_view(|view, text| {
+                selection.clamp(text.len());
+                view.set_selection(text, selection);
+            });
         }
         self.render_if_needed();
     }
@@ -267,6 +270,9 @@ impl<'a> EventContext<'a> {
             }
             SpecialEvent::MoveWordEnd { long_word, modify_selection } => {
                 self.do_move_word_end(long_word, modify_selection)
+            }
+            SpecialEvent::MoveWordEndBackward { long_word, modify_selection } => {
+                self.do_move_word_end_backward(long_word, modify_selection)
             }
             SpecialEvent::FindChar { target, forward, inclusive, modify_selection } => {
                 self.do_find_char(target, forward, inclusive, modify_selection)

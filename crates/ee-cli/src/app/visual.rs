@@ -173,6 +173,13 @@ impl App {
                 self.end_record();
                 self.enter_normal_mode();
             }
+            '=' => {
+                self.begin_record();
+                self.record_edit("reindent", json!([]));
+                let _ = self.backend.send_edit("collapse_selections", json!([]));
+                self.end_record();
+                self.enter_normal_mode();
+            }
             // `o` — swap anchor (handled as Action::SwapVisualAnchor in bindings,
             // but also catch it here for VisualLine/VisualBlock where not bound).
             'o' => self.swap_visual_anchor(),

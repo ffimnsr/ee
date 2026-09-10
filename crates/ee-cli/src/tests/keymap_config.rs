@@ -698,7 +698,6 @@ fn git_bindings_are_registered() {
     assert_eq!(lookup(KeyCode::Char('h'), Some(']')), Some(Action::GitNextHunk));
     assert_eq!(lookup(KeyCode::Char('h'), Some('[')), Some(Action::GitPrevHunk));
     assert_eq!(lookup(KeyCode::Char('b'), Some('g')), Some(Action::GitBlame));
-    assert_eq!(lookup(KeyCode::Char('D'), Some('g')), Some(Action::GitDiff));
 }
 
 #[test]
@@ -790,7 +789,7 @@ fn ctrl_p_and_ctrl_alt_p_bind_normal_mode_picker_shortcuts() {
 }
 
 #[test]
-fn gd_binds_duplicate_line() {
+fn gd_binds_declaration_like_vim() {
     let b = bindings();
     let lookup = b
         .get(&BindingKey {
@@ -800,5 +799,5 @@ fn gd_binds_duplicate_line() {
             prefix: Some('g'),
         })
         .cloned();
-    assert_eq!(lookup, Some(Action::Edit("duplicate_line")));
+    assert_eq!(lookup, Some(Action::RequestDeclaration));
 }

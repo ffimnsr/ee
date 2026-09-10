@@ -151,6 +151,13 @@ impl App {
     pub(super) fn move_word_end(&mut self, long_word: bool) {
         let _ = self.backend.move_word_end(long_word, self.mode.is_visual());
     }
+    pub(super) fn move_word_end_backward(&mut self, long_word: bool) {
+        let _ = self.backend.move_word_end_backward(long_word, self.mode.is_visual());
+    }
+    pub(super) fn goto_byte_from_count(&mut self) {
+        let offset = self.input_state.count().saturating_sub(1) as usize;
+        let _ = self.backend.goto_byte(offset);
+    }
     pub(super) fn goto_line_from_count(&mut self) {
         let target = self.input_state.count().saturating_sub(1) as usize;
         self.jump_to_line(target);
@@ -234,7 +241,9 @@ impl App {
         let editor_rows = crossterm::terminal::size()
             .map(|(_, height)| height.saturating_sub(2) as usize)
             .unwrap_or(22);
-        let delta = (editor_rows / 2).max(1);
+        // vim: no count = half window; [count] = that many lines.
+        let count = self.input_state.count();
+        let delta = if count > 0 { count as usize } else { (editor_rows / 2).max(1) };
         let max_line = self.backend.line_count().saturating_sub(1);
         let next_line = if down {
             self.backend.cursor_line.saturating_add(delta).min(max_line)

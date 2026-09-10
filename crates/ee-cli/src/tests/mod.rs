@@ -42,6 +42,7 @@ pub(crate) mod trust_matrix;
 pub(crate) mod trust_policy_effects;
 pub(crate) mod trust_policy_foundation;
 pub(crate) mod trust_rule_manager;
+pub(crate) mod vim_keys;
 pub(crate) mod vlf_cache;
 pub(crate) mod vlf_edit;
 pub(crate) mod vlf_viewport;

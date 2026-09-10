@@ -30,7 +30,7 @@ pub(super) fn render_prompt(frame: &mut ratatui::Frame<'_>, area: Rect, app: &Ap
     }
 
     let prompt = match app.mode {
-        Mode::Normal => Line::default(),
+        Mode::Normal | Mode::Replace => Line::default(),
         Mode::Insert
         | Mode::Visual
         | Mode::VisualLine

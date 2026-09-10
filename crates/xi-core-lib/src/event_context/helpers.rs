@@ -388,6 +388,30 @@ pub(crate) fn move_word_end_selection(
     selection
 }
 
+pub(crate) fn move_word_end_backward_selection(
+    text: &Rope,
+    regions: &[SelRegion],
+    long_word: bool,
+    modify_selection: bool,
+) -> Selection {
+    let mut selection = Selection::new();
+    let source_regions =
+        if regions.is_empty() { vec![SelRegion::caret(0)] } else { regions.to_vec() };
+
+    for region in source_regions {
+        let active = region.end;
+        let line = text.line_of_offset(active);
+        let line_start = text.offset_of_line(line);
+        let line_text = line_text(text, line);
+        let cursor_byte = active.saturating_sub(line_start).min(line_text.len());
+        if let Some(col) = prev_word_end(&line_text, cursor_byte, long_word) {
+            selection.add_region(selection_region(region, line_start + col, modify_selection));
+        }
+    }
+
+    selection
+}
+
 pub(crate) fn find_char_selection(
     text: &Rope,
     regions: &[SelRegion],
@@ -677,6 +701,55 @@ fn next_word_end(line: &str, byte: usize, long_word: bool) -> Option<usize> {
     }
 
     found.then_some(end)
+}
+
+/// Vim `ge`: the end of the word before the character under the cursor.
+///
+/// Mirrors vim's `bckend_word`: if the cursor sits on (or just past) a word
+/// character, first back up to the start of that word so the target is the
+/// word strictly before it; then skip whitespace/punctuation to land on the
+/// previous word's last character.
+fn prev_word_end(line: &str, byte: usize, long_word: bool) -> Option<usize> {
+    if line.is_empty() || byte == 0 {
+        return None;
+    }
+
+    let end = byte.min(line.len());
+    let mut idx = previous_char_boundary(line, end);
+
+    // Character under the cursor; a cursor past the end of the line counts as
+    // sitting on its final character.
+    let under = line.get(end..).and_then(|s| s.chars().next()).or_else(|| char_at(line, idx));
+    if under.is_some_and(|ch| is_motion_char(ch, long_word)) {
+        while let Some(ch) = char_at(line, idx) {
+            if !is_motion_char(ch, long_word) {
+                break;
+            }
+            if idx == 0 {
+                return None;
+            }
+            idx = prev_char_start(line, idx);
+        }
+    }
+
+    // Skip whitespace/punctuation, then land on the previous word's last char.
+    loop {
+        if let Some(ch) = char_at(line, idx)
+            && is_motion_char(ch, long_word)
+        {
+            return Some(idx);
+        }
+        if idx == 0 {
+            break;
+        }
+        let prev = prev_char_start(line, idx);
+        if prev == idx {
+            break;
+        }
+        idx = prev;
+    }
+
+    None
 }
 
 // ── Selection range helpers ──
