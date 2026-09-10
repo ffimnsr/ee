@@ -96,4 +96,42 @@ EE_INSTALL_LOCAL_PACKAGE="$tarball" \
     --sudo true >/dev/null
 [[ ! -e "$bin_dir_without_agent/ee-openrouter-agent" ]]
 
+# ── completions wiring ──────────────────────────────────────────────────────
+# Completion generation lives under `ee do completions`; an `ee completions`
+# invocation parses as file arguments and launches the editor instead of
+# printing a completion script.
+! grep -qF '"${_ee}" completions' "$script_path"
+grep -qF '"${_ee}" do completions fish' "$script_path"
+grep -qF "Run 'ee do completions <shell>' manually." "$script_path"
+
+# Exercise the shipped rc-file helper in isolation: the legacy broken line must
+# be replaced, and repeated runs must not duplicate the eval line.
+installer_fn="$(sed -n '/^install_rc_completions() {/,/^}$/p' "$script_path")"
+[[ -n "$installer_fn" ]] || { echo 'failed to extract install_rc_completions'; exit 1; }
+need_cmd() { :; }
+eval "$installer_fn"
+
+rc_legacy="$tmpdir/bashrc-legacy"
+cat >"$rc_legacy" <<'EOF'
+export PATH="$HOME/.local/bin:$PATH"
+eval "$(ee completions bash)"
+EOF
+
+repair_output="$(install_rc_completions "$rc_legacy" bash)"
+[[ "$repair_output" == *"Replaced broken completions line in $rc_legacy"* ]]
+[[ "$repair_output" == *"Added completions eval to $rc_legacy"* ]]
+! grep -qF 'ee completions bash' "$rc_legacy"
+grep -qxF 'eval "$(ee do completions bash)"' "$rc_legacy"
+grep -qxF 'export PATH="$HOME/.local/bin:$PATH"' "$rc_legacy"
+
+rc_fresh="$tmpdir/zshrc-fresh"
+printf 'alias ll="ls -la"\n' >"$rc_fresh"
+install_rc_completions "$rc_fresh" zsh >/dev/null
+grep -qxF 'eval "$(ee do completions zsh)"' "$rc_fresh"
+
+install_rc_completions "$rc_fresh" zsh >/dev/null
+install_rc_completions "$rc_legacy" bash >/dev/null
+[[ "$(grep -cF 'ee do completions' "$rc_fresh" || true)" -eq 1 ]]
+[[ "$(grep -cF 'ee do completions' "$rc_legacy" || true)" -eq 1 ]]
+
 printf 'install.sh script passed\n'

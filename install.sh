@@ -84,7 +84,7 @@ main() {
 }
 
 maybe_install_completions() {
-    local _bin_dir _shell _rc_file _eval_line _comp_dir _comp_file
+    local _bin_dir _shell _comp_dir _comp_file
     _bin_dir="$1"
 
     # Skip when stdin is not a terminal (non-interactive installs).
@@ -112,41 +112,52 @@ maybe_install_completions() {
     _ee="${_bin_dir}/${PACKAGE_NAME}"
 
     case "${_shell}" in
-        bash)
-            _rc_file="${HOME}/.bashrc"
-            _eval_line='eval "$(ee completions bash)"'
-            if ! grep -qF 'ee completions' "${_rc_file}" 2>/dev/null; then
-                printf '\n%s\n' "${_eval_line}" >> "${_rc_file}"
-                echo "Added completions eval to ${_rc_file}"
-            else
-                echo "Completions already configured in ${_rc_file}"
-            fi
-            ;;
-        zsh)
-            _rc_file="${HOME}/.zshrc"
-            _eval_line='eval "$(ee completions zsh)"'
-            if ! grep -qF 'ee completions' "${_rc_file}" 2>/dev/null; then
-                printf '\n%s\n' "${_eval_line}" >> "${_rc_file}"
-                echo "Added completions eval to ${_rc_file}"
-            else
-                echo "Completions already configured in ${_rc_file}"
-            fi
-            ;;
+        bash) install_rc_completions "${HOME}/.bashrc" bash ;;
+        zsh) install_rc_completions "${HOME}/.zshrc" zsh ;;
         fish)
             _comp_dir="${HOME}/.config/fish/completions"
             _comp_file="${_comp_dir}/ee.fish"
             mkdir -p "${_comp_dir}"
-            "${_ee}" completions fish > "${_comp_file}" 2>/dev/null \
+            "${_ee}" do completions fish > "${_comp_file}" 2>/dev/null \
                 || err "failed to generate fish completions"
             echo "Installed fish completions to ${_comp_file}"
             ;;
         *)
-            echo "Unsupported shell '${_shell}'. Run 'ee completions <shell>' manually."
+            echo "Unsupported shell '${_shell}'. Run 'ee do completions <shell>' manually."
             return 0
             ;;
     esac
 
     echo "Restart your shell or source the rc file to enable completions."
+}
+
+# Adds the completions eval line to a shell rc file. Completion generation lives
+# under `ee do completions`, so an rc line without `do` runs the editor with
+# `completions` as a file argument; older installers wrote that broken line and
+# it is replaced here instead of being left to fail on every shell start.
+install_rc_completions() {
+    local _rc_file _shell _legacy_line _eval_line _tmp_file
+    _rc_file="$1"
+    _shell="$2"
+    need_cmd grep
+
+    _legacy_line="eval \"\$(ee completions ${_shell})\""
+    _eval_line="eval \"\$(ee do completions ${_shell})\""
+
+    if [ -f "${_rc_file}" ] && grep -qxF -- "${_legacy_line}" "${_rc_file}"; then
+        _tmp_file="${_rc_file}.ee-completions.$$"
+        grep -vxF -- "${_legacy_line}" "${_rc_file}" > "${_tmp_file}"
+        cat -- "${_tmp_file}" > "${_rc_file}"
+        rm -f -- "${_tmp_file}"
+        echo "Replaced broken completions line in ${_rc_file}"
+    fi
+
+    if ! grep -qF 'ee do completions' "${_rc_file}" 2>/dev/null; then
+        printf '\n%s\n' "${_eval_line}" >> "${_rc_file}"
+        echo "Added completions eval to ${_rc_file}"
+    else
+        echo "Completions already configured in ${_rc_file}"
+    fi
 }
 
 parse_args() {
