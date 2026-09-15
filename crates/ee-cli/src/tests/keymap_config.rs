@@ -784,7 +784,8 @@ fn ctrl_p_and_ctrl_alt_p_bind_normal_mode_picker_shortcuts() {
 
     assert_eq!(file_picker, Some(Action::FilePickerInCurrentDirectory));
     assert_eq!(command_palette, Some(Action::CommandPalette));
-    assert_eq!(insert_file_picker, None);
+    // vim: insert-mode Ctrl-p opens completion (Ctrl-n too); Ctrl-Alt-p stays free.
+    assert_eq!(insert_file_picker, Some(Action::RequestCompletion));
     assert_eq!(insert_command_palette, None);
 }
 

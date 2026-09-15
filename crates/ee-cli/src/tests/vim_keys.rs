@@ -713,6 +713,194 @@ fn search_ctrl_w_and_u_edit_search_line() {
     assert_eq!(app.command_buffer, "");
 }
 
+#[test]
+fn insert_mode_keys_follow_vim() {
+    let bindings = bindings_for(&normal());
+    let ins = |k: KeyCode, m: KeyModifiers| key(Mode::Insert, k, m, None);
+    let ctrl = KeyModifiers::CONTROL;
+    assert_eq!(bindings.get(&ins(KeyCode::Char('n'), ctrl)), Some(&Action::RequestCompletion));
+    assert_eq!(bindings.get(&ins(KeyCode::Char('p'), ctrl)), Some(&Action::RequestCompletion));
+    assert_eq!(bindings.get(&ins(KeyCode::Char('o'), ctrl)), Some(&Action::OneShotNormal));
+    assert_eq!(bindings.get(&ins(KeyCode::Char('a'), ctrl)), Some(&Action::RepeatLastInsert));
+    assert_eq!(
+        bindings.get(&ins(KeyCode::Char('@'), ctrl)),
+        Some(&Action::RepeatLastInsertAndExit)
+    );
+    assert_eq!(
+        bindings.get(&ins(KeyCode::Char('e'), ctrl)),
+        Some(&Action::ScrollLines { down: true })
+    );
+    assert_eq!(
+        bindings.get(&ins(KeyCode::Char('y'), ctrl)),
+        Some(&Action::ScrollLines { down: false })
+    );
+    assert_eq!(bindings.get(&ins(KeyCode::Char('v'), ctrl)), Some(&Action::NoOp));
+    // Completion menu navigation: Ctrl-n next, Ctrl-p previous.
+    assert_eq!(
+        bindings.get(&key(Mode::Picker, KeyCode::Char('n'), ctrl, None)),
+        Some(&Action::PickerMoveDown)
+    );
+    assert_eq!(
+        bindings.get(&key(Mode::Picker, KeyCode::Char('p'), ctrl, None)),
+        Some(&Action::PickerMoveUp)
+    );
+}
+
+#[test]
+fn insert_ctrl_o_runs_one_normal_command_then_returns_to_insert() {
+    let (_temp, mut app) = open_text_file("abc");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Insert);
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)));
+    assert_eq!(app.mode, Mode::Normal);
+    assert!(app.input_state.one_shot_normal);
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Insert, "one-shot command returns to insert");
+    assert!(!app.input_state.one_shot_normal);
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "cursor moved",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_col == 1,
+    );
+    // Typing now lands in insert mode again.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE)));
+    wait_for_line(&mut app, "aXbc");
+}
+
+#[test]
+fn insert_ctrl_o_esc_cancels_back_to_insert() {
+    let (_temp, mut app) = open_text_file("abc");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Insert);
+    assert!(!app.input_state.one_shot_normal);
+}
+
+#[test]
+fn insert_ctrl_a_reinserts_last_insert_text() {
+    let (_temp, mut app) = open_text_file("abc");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    wait_for_line(&mut app, "XYabc");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)));
+    wait_for_line(&mut app, "XYQXYabc");
+    assert_eq!(app.mode, Mode::Insert);
+}
+
+#[test]
+fn insert_ctrl_at_reinserts_last_insert_and_exits() {
+    let (_temp, mut app) = open_text_file("abc");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    wait_for_line(&mut app, "Xabc");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::CONTROL)));
+    assert_eq!(app.mode, Mode::Normal);
+    wait_for_line(&mut app, "XXabc");
+}
+
+#[test]
+fn insert_action_spec_roundtrips() {
+    assert_eq!(parse_action_spec("one_shot_normal").unwrap(), Action::OneShotNormal);
+    assert_eq!(format_action_spec(&Action::OneShotNormal), "one_shot_normal");
+    assert_eq!(parse_action_spec("repeat_last_insert").unwrap(), Action::RepeatLastInsert);
+    assert_eq!(format_action_spec(&Action::RepeatLastInsert), "repeat_last_insert");
+    assert_eq!(
+        parse_action_spec("repeat_last_insert_and_exit").unwrap(),
+        Action::RepeatLastInsertAndExit
+    );
+    assert_eq!(format_action_spec(&Action::RepeatLastInsertAndExit), "repeat_last_insert_and_exit");
+}
+
+#[test]
+fn insert_ctrl_o_then_i_consumes_one_shot() {
+    let (_temp, mut app) = open_text_file("abc");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Insert, "Ctrl-o i ends the one-shot in insert");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Normal, "Esc after Ctrl-o i exits insert for good");
+    assert!(!app.input_state.one_shot_normal);
+}
+
+#[test]
+fn insert_ctrl_o_applies_count_then_returns() {
+    let (_temp, mut app) = open_text_file("abc def");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Normal, "count still in flight");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Insert, "counted motion returns to insert");
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "cursor moved 3",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_col == 3,
+    );
+}
+
+#[test]
+fn insert_ctrl_o_prefix_ge_completes_sequence_then_returns() {
+    let (_temp, mut app) = open_text_file("ab cd");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    // First one-shot: `w` to the next word, back to insert.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "word start",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_col == 3,
+    );
+    assert_eq!(app.mode, Mode::Insert);
+    // Second one-shot: `g` `e` (two keys) then back to insert.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Insert, "prefix chain returns to insert");
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "prev word end",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_col == 1,
+    );
+}
+
+#[test]
+fn insert_ctrl_o_operator_deletes_then_returns() {
+    let (_temp, mut app) = open_text_file("abc def");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Insert, "operator completes back to insert");
+    wait_for_line(&mut app, "def");
+}
+
+#[test]
+fn insert_ctrl_o_colon_command_returns_to_insert() {
+    let (_temp, mut app) = open_text_file("abc");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::CommandLine);
+    for ch in "nosuchcmd".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Insert, "colon command returns to insert");
+    assert!(app.backend.status_message.is_some());
+}
+
 fn open_text_file(text: &str) -> (tempfile::TempDir, App) {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("sample.txt");

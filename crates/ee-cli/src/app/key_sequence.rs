@@ -199,7 +199,10 @@ impl App {
         let action = self.lookup_action(key, self.mode, self.input_state.prefix);
 
         if let Some(action) = action {
+            let keep_one_shot = is_state_setting_action(&action);
             self.dispatch(action, key);
+            // Reset first, then resolve the one-shot: the reset clears the
+            // consumed count but must not clear the `Ctrl-o` flag itself.
             if (self.mode == Mode::Normal || self.mode.is_visual())
                 && !matches!(key.code, KeyCode::Char(c) if c.is_ascii_digit())
                 && self.input_state.prefix.is_none()
@@ -214,8 +217,12 @@ impl App {
             {
                 self.input_state.reset();
             }
+            self.finish_one_shot_normal(keep_one_shot);
         } else {
             self.handle_default(key);
+            // Unbound key while a one-shot command is pending: resolve it now
+            // (e.g. `Esc` cancels back to insert).
+            self.finish_one_shot_normal(false);
         }
     }
     pub(super) fn lookup_action(
@@ -237,6 +244,34 @@ impl App {
                 }
             })
             .cloned()
+    }
+    /// vim `Ctrl-o` one-shot normal: after the command completes, return to
+    /// insert — unless the action only *starts* a normal-mode state (prefix,
+    /// char-find, operator, register, mark, macro) or a count is mid-flight,
+    /// in which case the next key continues the sequence and the flag stays.
+    pub(super) fn finish_one_shot_normal(&mut self, keep: bool) {
+        if !self.input_state.one_shot_normal {
+            return;
+        }
+        if keep {
+            return;
+        }
+        if self.mode == Mode::Normal
+            && self.input_state.count_digits.is_empty()
+            && self.input_state.prefix.is_none()
+            && self.input_state.pending_find.is_none()
+            && self.input_state.pending_operator.is_none()
+            && !self.input_state.awaiting_register
+            && !self.input_state.awaiting_mark_set
+            && self.input_state.awaiting_mark_jump.is_none()
+            && !self.input_state.awaiting_macro_record
+            && !self.input_state.awaiting_macro_replay
+            && !self.input_state.awaiting_window_cmd
+            && !self.input_state.awaiting_replace_char
+        {
+            self.input_state.one_shot_normal = false;
+            self.mode = Mode::Insert;
+        }
     }
     pub(crate) fn active_key_sequence_node(&self) -> Option<&SequenceNode> {
         if self.input_state.key_sequence.is_empty() {
@@ -461,7 +496,9 @@ impl App {
                 return true;
             };
             self.clear_active_key_sequence();
+            let keep_one_shot = is_state_setting_action(&action);
             self.dispatch(action, key);
+            self.finish_one_shot_normal(keep_one_shot);
         }
 
         true
@@ -501,4 +538,22 @@ impl App {
             picker.push_char(c);
         }
     }
+}
+
+/// Actions that only *start* a normal-mode input state instead of completing
+/// a command — `Ctrl-o` one-shot normal must stay across these until the
+/// multi-key command finishes.
+fn is_state_setting_action(action: &crate::keymap::Action) -> bool {
+    matches!(
+        action,
+        crate::keymap::Action::SetPrefix(_)
+            | crate::keymap::Action::PendingCharFind { .. }
+            | crate::keymap::Action::SetOperator(_)
+            | crate::keymap::Action::RegisterPrefix
+            | crate::keymap::Action::MarkSetPrefix
+            | crate::keymap::Action::MarkJumpPrefix { .. }
+            | crate::keymap::Action::MacroRecordToggle
+            | crate::keymap::Action::MacroReplayPrefix
+            | crate::keymap::Action::OneShotNormal
+    )
 }

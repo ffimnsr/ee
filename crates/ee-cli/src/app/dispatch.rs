@@ -35,6 +35,11 @@ impl App {
             | Action::AgentToggleTranscriptRaw => {}
             Action::Quit => self.should_quit = true,
             Action::EnterMode(mode) => {
+                // Entering a mode explicitly consumes a pending `Ctrl-o`
+                // one-shot (`Ctrl-o i` / `Ctrl-o Esc` should not bounce back).
+                if matches!(mode, Mode::Normal | Mode::Insert) {
+                    self.input_state.one_shot_normal = false;
+                }
                 if mode == Mode::Normal {
                     self.enter_normal_mode();
                 } else {
@@ -563,6 +568,21 @@ impl App {
             // Insert mode editing controls
             Action::DeleteWordBackward => {
                 let _ = self.backend.send_edit("delete_word_backward", json!([]));
+            }
+            Action::OneShotNormal => {
+                // vim `Ctrl-o`: run exactly one normal-mode command, then
+                // return to insert (handled in `key_sequence` after dispatch).
+                self.input_state.one_shot_normal = true;
+                self.mode = Mode::Normal;
+            }
+            Action::RepeatLastInsert | Action::RepeatLastInsertAndExit => {
+                if let Some(crate::registers::LastChange::Insert(text)) = &self.last_change {
+                    self.insert_buffer.push_str(text);
+                    let _ = self.backend.send_edit("insert", json!({ "chars": text }));
+                }
+                if matches!(action, Action::RepeatLastInsertAndExit) {
+                    self.enter_normal_mode();
+                }
             }
             Action::DeleteToLineStart => {
                 let _ = self.backend.send_edit("delete_to_beginning_of_line", json!([]));

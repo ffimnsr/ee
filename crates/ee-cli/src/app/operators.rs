@@ -272,6 +272,9 @@ impl App {
         self.mode = Mode::Normal;
         self.command_buffer.clear();
         self.swift_motion = None;
+        // A pending `Ctrl-o` one-shot completes when the normal-mode command
+        // finishes (operator end, `:` command, visual exit): back to insert.
+        self.finish_one_shot_normal(false);
     }
     /// Apply operator to the current xi selection, then return to Normal (or
     /// Insert for Change).  Resets input state before returning.

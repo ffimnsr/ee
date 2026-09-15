@@ -218,6 +218,13 @@ pub(crate) enum Action {
     OpenLineAbove,
     SubstituteChar,
     SubstituteLine,
+    /// vim `Ctrl-o` in insert: run one normal-mode command, then return to insert.
+    OneShotNormal,
+    /// vim `Ctrl-a`: insert the text from the most recent insert session.
+    RepeatLastInsert,
+    /// vim `Ctrl-@`: insert the text from the most recent insert session, then
+    /// leave insert mode.
+    RepeatLastInsertAndExit,
     // Insert mode editing controls
     DeleteWordBackward,
     DeleteToLineStart,

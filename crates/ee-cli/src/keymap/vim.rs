@@ -385,6 +385,21 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(Insert, KeyCode::Char('u'), ctrl, None, DeleteToLineStart);
     bind!(Insert, KeyCode::Char('t'), ctrl, None, IndentLine);
     bind!(Insert, KeyCode::Char('d'), ctrl, None, OutdentLine);
+    // vim insert-mode keys: Ctrl-n/p completion (also navigate in the picker),
+    // Ctrl-o one-shot normal, Ctrl-a re-insert last insert, Ctrl-@ same + exit,
+    // Ctrl-e/y scroll without leaving insert.  Ctrl-v (literal insert) is a
+    // no-op: ee inserts typed chars literally, so the default already matches.
+    bind!(Insert, KeyCode::Char('n'), ctrl, None, RequestCompletion);
+    bind!(Insert, KeyCode::Char('p'), ctrl, None, RequestCompletion);
+    bind!(Insert, KeyCode::Char('o'), ctrl, None, OneShotNormal);
+    bind!(Insert, KeyCode::Char('a'), ctrl, None, RepeatLastInsert);
+    bind!(Insert, KeyCode::Char('@'), ctrl, None, RepeatLastInsertAndExit);
+    bind!(Insert, KeyCode::Char('e'), ctrl, None, ScrollLines { down: true });
+    bind!(Insert, KeyCode::Char('y'), ctrl, None, ScrollLines { down: false });
+    bind!(Insert, KeyCode::Char('v'), ctrl, None, NoOp);
+    // vim completion menu navigation (Ctrl-n next, Ctrl-p previous).
+    bind!(Picker, KeyCode::Char('n'), ctrl, None, PickerMoveDown);
+    bind!(Picker, KeyCode::Char('p'), ctrl, None, PickerMoveUp);
 
     // Command-line mode: unprefixed bindings.
     bind!(CommandLine, KeyCode::Esc, none, None, EnterMode(Normal));

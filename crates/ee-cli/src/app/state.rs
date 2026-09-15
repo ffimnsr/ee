@@ -196,6 +196,9 @@ pub(crate) struct InputState {
     pub(crate) awaiting_window_cmd: bool,
     /// Set when `replace` is pressed; next char replaces current selection.
     pub(crate) awaiting_replace_char: bool,
+    /// vim `Ctrl-o` in insert: run one normal-mode command, then return to
+    /// insert.  Stays set while state-setting prefix keys are in flight.
+    pub(crate) one_shot_normal: bool,
 }
 
 impl InputState {
@@ -225,6 +228,8 @@ impl InputState {
         self.awaiting_macro_replay = false;
         self.awaiting_window_cmd = false;
         self.awaiting_replace_char = false;
+        // one_shot_normal is NOT cleared here: `Ctrl-o` one-shot handling runs
+        // after the post-dispatch reset.
     }
 }
 
