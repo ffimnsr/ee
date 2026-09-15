@@ -200,7 +200,7 @@ impl App {
 
         if let Some(action) = action {
             self.dispatch(action, key);
-            if self.mode == Mode::Normal
+            if (self.mode == Mode::Normal || self.mode.is_visual())
                 && !matches!(key.code, KeyCode::Char(c) if c.is_ascii_digit())
                 && self.input_state.prefix.is_none()
                 && self.input_state.pending_find.is_none()

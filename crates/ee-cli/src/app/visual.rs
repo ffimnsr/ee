@@ -91,14 +91,31 @@ impl App {
     }
     /// Handle a character key while in any visual mode.
     pub(super) fn handle_visual_char(&mut self, ch: char) {
+        // Counts: accumulate digits like normal mode so `3w` extends 3 words.
+        if let Some(digit) =
+            ch.to_digit(10).filter(|d| *d > 0 || !self.input_state.count_digits.is_empty())
+        {
+            self.input_state.count_digits.push(digit as u8);
+            return;
+        }
+        if ch == '0' && self.input_state.count_digits.is_empty() {
+            let _ =
+                self.backend.send_edit("move_to_left_end_of_line_and_modify_selection", json!([]));
+            return;
+        }
+
+        // Visual block: corner / EOL / replace / case ops are block-local.
+        if self.mode == Mode::VisualBlock {
+            self.handle_visual_block_char(ch);
+            return;
+        }
+
         match ch {
             // Operators
             'd' | 'x' => {
                 self.begin_record();
                 if self.mode == Mode::VisualLine {
                     self.apply_visual_line_delete();
-                } else if self.mode == Mode::VisualBlock {
-                    self.apply_visual_block_op(Operator::Delete);
                 } else {
                     let reg = self.take_register();
                     let text = self.selected_text_preview(false);
@@ -112,8 +129,6 @@ impl App {
                 self.begin_record();
                 if self.mode == Mode::VisualLine {
                     self.apply_visual_line_yank();
-                } else if self.mode == Mode::VisualBlock {
-                    self.apply_visual_block_op(Operator::Yank);
                 } else {
                     let reg = self.take_register();
                     let text = self.selected_text_preview(false);
@@ -129,11 +144,9 @@ impl App {
                     let reg = self.take_register();
                     let text = self.selected_text_preview(true);
                     self.registers.delete(&reg, text, false);
+                    self.sync_linewise_selection_if_needed();
                     self.record_edit("delete_forward", json!([]));
                     self.enter_normal_mode();
-                    self.mode = Mode::Insert;
-                } else if self.mode == Mode::VisualBlock {
-                    self.apply_visual_block_op(Operator::Change);
                     self.mode = Mode::Insert;
                 } else {
                     let reg = self.take_register();
@@ -145,8 +158,91 @@ impl App {
                 }
                 self.end_record();
             }
+            // vim visual `s` = change; `S` = change whole lines.
+            's' => {
+                self.handle_visual_char('c');
+            }
+            'S' => {
+                self.begin_record();
+                if self.mode == Mode::VisualLine {
+                    self.sync_linewise_selection_if_needed();
+                } else {
+                    let _ = self.backend.send_edit("extend_to_line_bounds", json!([]));
+                }
+                let reg = self.take_register();
+                let text = self.selected_text_preview(true);
+                self.registers.delete(&reg, text, false);
+                self.record_edit("delete_forward", json!([]));
+                self.end_record();
+                self.enter_normal_mode();
+                self.mode = Mode::Insert;
+            }
+            // vim visual `D` = delete to end of line; `X` = to line start.
+            'D' => {
+                self.begin_record();
+                let _ = self
+                    .backend
+                    .send_edit("move_to_right_end_of_line_and_modify_selection", json!([]));
+                let reg = self.take_register();
+                let text = self.selected_text_preview(false);
+                self.registers.delete(&reg, text, false);
+                self.record_edit("delete_forward", json!([]));
+                self.end_record();
+                self.enter_normal_mode();
+            }
+            'X' => {
+                self.begin_record();
+                let _ = self
+                    .backend
+                    .send_edit("move_to_left_end_of_line_and_modify_selection", json!([]));
+                let reg = self.take_register();
+                let text = self.selected_text_preview(false);
+                self.registers.delete(&reg, text, false);
+                self.record_edit("delete_forward", json!([]));
+                self.end_record();
+                self.enter_normal_mode();
+            }
+            // vim visual `J` = join the selected lines.
+            'J' => {
+                self.begin_record();
+                if self.mode == Mode::VisualLine {
+                    self.sync_linewise_selection_if_needed();
+                } else {
+                    let _ = self.backend.send_edit("extend_to_line_bounds", json!([]));
+                }
+                let _ = self.backend.send_edit("join_selections", json!({ "select_space": true }));
+                let _ = self.backend.send_edit("collapse_selections", json!([]));
+                self.end_record();
+                self.push_change();
+                self.enter_normal_mode();
+            }
+            // vim visual `~` = toggle case of the selection.
+            '~' => {
+                self.begin_record();
+                self.sync_linewise_selection_if_needed();
+                let text = self.selected_text_preview(false);
+                let toggled: String = text
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_lowercase() {
+                            c.to_ascii_uppercase()
+                        } else if c.is_ascii_uppercase() {
+                            c.to_ascii_lowercase()
+                        } else {
+                            c
+                        }
+                    })
+                    .collect();
+                if !toggled.is_empty() {
+                    self.record_edit("delete_forward", json!([]));
+                    let _ = self.backend.send_edit("insert", json!({ "chars": toggled }));
+                }
+                self.end_record();
+                self.enter_normal_mode();
+            }
             '>' => {
                 self.begin_record();
+                self.sync_linewise_selection_if_needed();
                 self.record_edit("indent", json!([]));
                 let _ = self.backend.send_edit("collapse_selections", json!([]));
                 self.end_record();
@@ -154,6 +250,7 @@ impl App {
             }
             '<' => {
                 self.begin_record();
+                self.sync_linewise_selection_if_needed();
                 self.record_edit("outdent", json!([]));
                 let _ = self.backend.send_edit("collapse_selections", json!([]));
                 self.end_record();
@@ -161,6 +258,7 @@ impl App {
             }
             'U' => {
                 self.begin_record();
+                self.sync_linewise_selection_if_needed();
                 self.record_edit("uppercase", json!([]));
                 let _ = self.backend.send_edit("collapse_selections", json!([]));
                 self.end_record();
@@ -168,6 +266,7 @@ impl App {
             }
             'u' => {
                 self.begin_record();
+                self.sync_linewise_selection_if_needed();
                 self.record_edit("lowercase", json!([]));
                 let _ = self.backend.send_edit("collapse_selections", json!([]));
                 self.end_record();
@@ -175,6 +274,7 @@ impl App {
             }
             '=' => {
                 self.begin_record();
+                self.sync_linewise_selection_if_needed();
                 self.record_edit("reindent", json!([]));
                 let _ = self.backend.send_edit("collapse_selections", json!([]));
                 self.end_record();
@@ -184,6 +284,128 @@ impl App {
             // but also catch it here for VisualLine/VisualBlock where not bound).
             'o' => self.swap_visual_anchor(),
             _ => {}
+        }
+    }
+    /// Handle a char in visual block mode: corners, EOL extension, replace and
+    /// case-toggle are block-local (the backend only sees a caret here).
+    fn handle_visual_block_char(&mut self, ch: char) {
+        let (al, ac) =
+            self.visual_anchor.unwrap_or((self.backend.cursor_line, self.backend.cursor_col));
+        let (cl, cc) = (self.backend.cursor_line, self.backend.cursor_col);
+        match ch {
+            // vim block `o`: other corner on the same line (swap columns).
+            'o' => {
+                self.visual_anchor = Some((al, cc));
+                self.move_cursor_to(cl, ac);
+            }
+            // vim block `O`: other corner on the same column (swap rows).
+            'O' => {
+                self.visual_anchor = Some((cl, ac));
+                self.move_cursor_to(al, cc);
+            }
+            // vim block `$`: extend the right edge to the longest line in the block.
+            '$' => {
+                let (top, bottom) = if al <= cl { (al, cl) } else { (cl, al) };
+                let max_len = (top..=bottom)
+                    .filter_map(|line| self.backend.line_len(line))
+                    .max()
+                    .unwrap_or(cc);
+                self.move_cursor_to(cl, max_len);
+            }
+            // vim block `~`: toggle ASCII case of every char in the block columns.
+            '~' => self.block_toggle_case(),
+            // vim block operators on the rectangle: `d`/`x` delete, `c` change,
+            // `y` yank.
+            'd' | 'x' => self.apply_visual_block_op(Operator::Delete),
+            'c' => self.apply_visual_block_op(Operator::Change),
+            'y' => self.apply_visual_block_op(Operator::Yank),
+            // Backend single-char deletes/cuts also work per block via the
+            // existing operators; ignore anything else here.
+            _ => {}
+        }
+    }
+
+    /// vim block `r<char>`: replace the block columns with the char (per line,
+    /// clamped to existing text — no padding).
+    pub(super) fn block_replace_char(&mut self, ch: char) {
+        let (al, ac) =
+            self.visual_anchor.unwrap_or((self.backend.cursor_line, self.backend.cursor_col));
+        let (cl, cc) = (self.backend.cursor_line, self.backend.cursor_col);
+        let (top, bottom) = if al <= cl { (al, cl) } else { (cl, al) };
+        let (left, right) = if ac <= cc { (ac, cc) } else { (cc, ac) };
+        if right <= left {
+            self.enter_normal_mode();
+            return;
+        }
+        let mut replacements = Vec::new();
+        for line in top..=bottom {
+            let Some(text) = self.backend.get_line(line).map(str::to_owned) else {
+                continue;
+            };
+            let start = left.min(text.len());
+            let end = right.min(text.len());
+            if start < end {
+                let mut chars: Vec<char> = text.chars().collect();
+                for idx in byte_cols_to_char_indices(&text, start..end) {
+                    chars[idx] = ch;
+                }
+                replacements.push(xi_core_lib::rpc::LineReplacement {
+                    line,
+                    text: chars.into_iter().collect(),
+                });
+            }
+        }
+        if !replacements.is_empty() {
+            let _ = self.backend.apply_line_replacements(&replacements);
+            self.push_change();
+        }
+        self.enter_normal_mode();
+    }
+
+    /// vim block `~`: toggle ASCII case of every char in the block columns.
+    pub(super) fn block_toggle_case(&mut self) {
+        let (al, ac) =
+            self.visual_anchor.unwrap_or((self.backend.cursor_line, self.backend.cursor_col));
+        let (cl, cc) = (self.backend.cursor_line, self.backend.cursor_col);
+        let (top, bottom) = if al <= cl { (al, cl) } else { (cl, al) };
+        let (left, right) = if ac <= cc { (ac, cc) } else { (cc, ac) };
+        let mut replacements = Vec::new();
+        for line in top..=bottom {
+            let Some(text) = self.backend.get_line(line).map(str::to_owned) else {
+                continue;
+            };
+            let start = left.min(text.len());
+            let end = right.min(text.len());
+            if start < end {
+                let mut chars: Vec<char> = text.chars().collect();
+                for idx in byte_cols_to_char_indices(&text, start..end) {
+                    let c = chars[idx];
+                    chars[idx] = if c.is_ascii_lowercase() {
+                        c.to_ascii_uppercase()
+                    } else if c.is_ascii_uppercase() {
+                        c.to_ascii_lowercase()
+                    } else {
+                        c
+                    };
+                }
+                replacements.push(xi_core_lib::rpc::LineReplacement {
+                    line,
+                    text: chars.into_iter().collect(),
+                });
+            }
+        }
+        if !replacements.is_empty() {
+            let _ = self.backend.apply_line_replacements(&replacements);
+            self.push_change();
+        }
+        self.enter_normal_mode();
+    }
+
+    /// Re-send the full-line selection when an operator runs in VisualLine
+    /// mode, so partial columns never leak into linewise ops (c/S/J/~, > < U u =).
+    fn sync_linewise_selection_if_needed(&mut self) {
+        if self.mode == Mode::VisualLine {
+            self.sync_visual_line_selection();
         }
     }
     pub(super) fn apply_visual_line_delete(&mut self) {
@@ -275,4 +497,17 @@ impl App {
             );
         }
     }
+}
+
+/// Map a byte range to the indices of the chars intersecting it (used for
+/// block-column replacements so multibyte chars are never split).
+fn byte_cols_to_char_indices(text: &str, byte_range: std::ops::Range<usize>) -> Vec<usize> {
+    text.char_indices()
+        .enumerate()
+        .filter(|(_, (byte, ch))| {
+            let byte_end = byte + ch.len_utf8();
+            byte_range.start < byte_end && byte_range.end > *byte
+        })
+        .map(|(idx, _)| idx)
+        .collect()
 }

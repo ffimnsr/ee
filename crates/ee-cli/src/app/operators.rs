@@ -522,7 +522,37 @@ impl App {
 
         // Priority 9: motions that extend selection. `w`/`e`/`W`/`E`/`B` use
         // the vim word-boundary parsers (word start / end, long-word family);
-        // `b` keeps the line-based word-start motion.
+        // `^` extends to first non-whitespace via explicit gestures; `b` keeps
+        // the line-based word-start motion.
+        if ch == '^' && self.input_state.prefix.is_none() {
+            let line = self.backend.cursor_line;
+            let cursor_col = self.backend.cursor_col;
+            let target_col = self
+                .backend
+                .get_line(line)
+                .and_then(|text| text.find(|c: char| !c.is_whitespace()))
+                .unwrap_or(0);
+            if target_col != cursor_col {
+                let _ = self.backend.send_edit(
+                    "gesture",
+                    json!({
+                        "line": line as u64,
+                        "col": cursor_col as u64,
+                        "ty": { "select": { "granularity": "point", "multi": false } },
+                    }),
+                );
+                let _ = self.backend.send_edit(
+                    "gesture",
+                    json!({
+                        "line": line as u64,
+                        "col": target_col as u64,
+                        "ty": { "select_extend": { "granularity": "point" } },
+                    }),
+                );
+            }
+            self.apply_operator(op);
+            return;
+        }
         match (ch, self.input_state.prefix) {
             ('w', None) => {
                 for _ in 0..count {
@@ -582,7 +612,6 @@ impl App {
             ('k', None) => Some("move_up_and_modify_selection"),
             ('b', None) => Some("move_word_left_and_modify_selection"),
             ('$', None) => Some("move_to_right_end_of_line_and_modify_selection"),
-            ('^', None) => Some("move_to_beginning_of_paragraph_and_modify_selection"),
             ('G', None) => Some("move_to_end_of_document_and_modify_selection"),
             ('g', Some('g')) => Some("move_to_beginning_of_document_and_modify_selection"),
             _ => None,

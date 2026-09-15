@@ -228,6 +228,8 @@ pub(crate) enum Action {
     // Paste
     PasteAfter,
     PasteBefore,
+    /// Visual `p`: replace the selection with the unnamed register.
+    PasteOverSelection,
     PasteClipboardAfter,
     PasteClipboardBefore,
     PastePrimaryClipboardAfter,

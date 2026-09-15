@@ -240,9 +240,18 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
 
     // Visual mode: unprefixed bindings.
     bind!(Visual, KeyCode::Esc, none, None, CollapseAndEnterNormal);
+    // vim: pressing the mode key you're already in exits visual mode;
+    // pressing a *different* mode key switches (V / Ctrl-v below).
     bind!(Visual, KeyCode::Char('v'), none, None, CollapseAndEnterNormal);
+    bind!(Visual, KeyCode::Char('V'), none, None, EnterVisualLine);
+    bind!(Visual, KeyCode::Char('v'), ctrl, None, EnterVisualBlock);
     bind!(Visual, KeyCode::Char(':'), none, None, EnterCommandMode);
     bind!(Visual, KeyCode::Char('o'), none, None, SwapVisualAnchor);
+    bind!(Visual, KeyCode::Char('r'), none, None, Action::Replace);
+    bind!(Visual, KeyCode::Char('%'), none, None, MatchingPair);
+    bind!(Visual, KeyCode::Char(';'), none, None, RepeatLastMotion);
+    bind!(Visual, KeyCode::Char(','), none, None, RepeatLastMotionReversed);
+    bind!(Visual, KeyCode::Char('p'), none, None, PasteOverSelection);
     bind!(Visual, KeyCode::Left, none, None, Edit("move_left_and_modify_selection"),);
     bind!(Visual, KeyCode::Char('h'), none, None, Edit("move_left_and_modify_selection"),);
     bind!(Visual, KeyCode::Right, none, None, Edit("move_right_and_modify_selection"),);
@@ -306,21 +315,20 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
         None,
         Edit("move_to_right_end_of_line_and_modify_selection"),
     );
-    bind!(
-        Visual,
-        KeyCode::Char('^'),
-        none,
-        None,
-        Edit("move_to_beginning_of_paragraph_and_modify_selection"),
-    );
-    bind!(Visual, KeyCode::Char('p'), none, None, PasteAfter);
+    bind!(Visual, KeyCode::Char('^'), none, None, GotoFirstNonWhitespace,);
 
     // Visual line mode: unprefixed bindings.
     bind!(VisualLine, KeyCode::Esc, none, None, CollapseAndEnterNormal);
     bind!(VisualLine, KeyCode::Char('V'), none, None, CollapseAndEnterNormal);
     bind!(VisualLine, KeyCode::Char('v'), none, None, EnterMode(Visual));
+    bind!(VisualLine, KeyCode::Char('v'), ctrl, None, EnterVisualBlock);
     bind!(VisualLine, KeyCode::Char('o'), none, None, SwapVisualAnchor);
     bind!(VisualLine, KeyCode::Char(':'), none, None, EnterCommandMode);
+    bind!(VisualLine, KeyCode::Char('r'), none, None, Action::Replace);
+    bind!(VisualLine, KeyCode::Char('%'), none, None, MatchingPair);
+    bind!(VisualLine, KeyCode::Char(';'), none, None, RepeatLastMotion);
+    bind!(VisualLine, KeyCode::Char(','), none, None, RepeatLastMotionReversed);
+    bind!(VisualLine, KeyCode::Char('p'), none, None, PasteOverSelection);
     bind!(VisualLine, KeyCode::Up, none, None, Edit("move_up_and_modify_selection"),);
     bind!(VisualLine, KeyCode::Char('k'), none, None, Edit("move_up_and_modify_selection"),);
     bind!(VisualLine, KeyCode::Down, none, None, Edit("move_down_and_modify_selection"),);
@@ -337,7 +345,10 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(Normal, KeyCode::Char('v'), ctrl, None, EnterVisualBlock);
     bind!(VisualBlock, KeyCode::Esc, none, None, CollapseAndEnterNormal);
     bind!(VisualBlock, KeyCode::Char('v'), ctrl, None, CollapseAndEnterNormal);
-    bind!(VisualBlock, KeyCode::Char('o'), none, None, SwapVisualAnchor);
+    // vim: `v` switches blockwise to charwise, `V` to linewise.
+    bind!(VisualBlock, KeyCode::Char('v'), none, None, EnterMode(Visual));
+    bind!(VisualBlock, KeyCode::Char('V'), none, None, EnterVisualLine);
+    bind!(VisualBlock, KeyCode::Char('r'), none, None, Action::Replace);
     bind!(VisualBlock, KeyCode::Char('I'), none, None, VisualBlockInsert);
     bind!(VisualBlock, KeyCode::Char('A'), none, None, VisualBlockAppend);
     bind!(VisualBlock, KeyCode::Char(':'), none, None, EnterCommandMode);

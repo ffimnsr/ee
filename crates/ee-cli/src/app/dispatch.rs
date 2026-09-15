@@ -39,9 +39,12 @@ impl App {
                     self.enter_normal_mode();
                 } else {
                     if mode.is_visual() {
-                        // Set anchor at current cursor position.
-                        self.visual_anchor =
-                            Some((self.backend.cursor_line, self.backend.cursor_col));
+                        // Set anchor at current cursor position, unless one is
+                        // already tracked (mode switches keep the region).
+                        if self.visual_anchor.is_none() {
+                            self.visual_anchor =
+                                Some((self.backend.cursor_line, self.backend.cursor_col));
+                        }
                     }
                     self.mode = mode;
                 }
@@ -577,6 +580,9 @@ impl App {
             // ── Paste ────────────────────────────────────────────────────────
             Action::PasteAfter => self.paste(false),
             Action::PasteBefore => self.paste(true),
+            Action::PasteOverSelection => {
+                self.replace_selections_with_register(RegisterName::Unnamed);
+            }
             Action::PasteClipboardAfter => self.paste_from_register(RegisterName::Clipboard, false),
             Action::PasteClipboardBefore => self.paste_from_register(RegisterName::Clipboard, true),
             Action::PastePrimaryClipboardAfter => {

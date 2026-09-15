@@ -381,8 +381,7 @@ fn vlf_goto_last_line_uses_sparse_line_count_without_core_edit() {
     app.backend.line_cache = vec![LineSlot::Invalid; 500];
     app.backend.vlf_line_count_exact = true;
 
-    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE)));
-    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE)));
 
     assert_eq!((app.backend.cursor_line, app.backend.cursor_col), (499, 0));
     assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));

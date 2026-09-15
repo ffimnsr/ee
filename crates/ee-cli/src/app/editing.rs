@@ -168,16 +168,28 @@ impl App {
         }
     }
     pub(super) fn replace_with_char(&mut self, ch: char) {
+        // Visual block replace works per line on the block rectangle.
+        if self.mode == Mode::VisualBlock {
+            self.block_replace_char(ch);
+            return;
+        }
         let repeat = if self.mode.is_visual() {
-            self.selected_text_preview(false)
+            // Replace every non-newline char of the selection; keep the
+            // newline structure so multi-line regions stay multi-line.
+            let replacement: String = self
+                .selected_text_preview(false)
                 .chars()
-                .filter(|current| *current != '\n')
-                .count()
-                .max(1)
+                .map(|c| if c == '\n' { '\n' } else { ch })
+                .collect();
+            let _ = self.backend.send_edit("delete_forward", json!([]));
+            let _ = self.backend.send_edit("insert", json!({ "chars": replacement }));
+            self.push_change();
+            self.enter_normal_mode();
+            return;
         } else {
             self.input_state.count() as usize
         };
-        if !self.mode.is_visual() && !self.select_chars_from_cursor(repeat) {
+        if !self.select_chars_from_cursor(repeat) {
             return;
         }
         let _ = self.backend.send_edit("delete_forward", json!([]));
@@ -185,9 +197,6 @@ impl App {
             .backend
             .send_edit("insert", json!({ "chars": ch.to_string().repeat(repeat.max(1)) }));
         self.push_change();
-        if self.mode.is_visual() {
-            self.enter_normal_mode();
-        }
     }
     pub(super) fn replace_with_yanked(&mut self) {
         let reg = self.take_register();
@@ -223,8 +232,13 @@ impl App {
             return;
         }
 
+        // vim: visual `p` yanks the replaced text into the unnamed register.
+        let replaced = if had_visual { Some(self.selected_text_preview(false)) } else { None };
         let _ = self.backend.send_edit("delete_forward", json!([]));
         let _ = self.backend.send_edit("paste_register", json!({ "chars": text, "before": true }));
+        if let Some(replaced) = replaced {
+            self.registers.yank(&RegisterName::Unnamed, replaced, false);
+        }
         self.push_change();
         if had_visual {
             self.enter_normal_mode();

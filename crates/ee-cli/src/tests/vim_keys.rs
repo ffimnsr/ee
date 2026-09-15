@@ -191,6 +191,420 @@ fn normal_mode_extras_are_bound() {
 }
 
 #[test]
+fn visual_mode_bindings_follow_vim() {
+    let bindings = bindings_for(&normal());
+    let v = |k: KeyCode, p: Option<char>| key(Mode::Visual, k, KeyModifiers::NONE, p);
+    let vl = |k: KeyCode, p: Option<char>| key(Mode::VisualLine, k, KeyModifiers::NONE, p);
+    let vb = |k: KeyCode, p: Option<char>| key(Mode::VisualBlock, k, KeyModifiers::NONE, p);
+
+    // Charwise: `v` exits (vim same-key rule), `V`/`Ctrl-v` switch to line/block.
+    assert_eq!(bindings.get(&v(KeyCode::Char('v'), None)), Some(&Action::CollapseAndEnterNormal));
+    assert_eq!(bindings.get(&v(KeyCode::Char('V'), None)), Some(&Action::EnterVisualLine));
+    assert_eq!(
+        bindings.get(&key(Mode::Visual, KeyCode::Char('v'), KeyModifiers::CONTROL, None)),
+        Some(&Action::EnterVisualBlock)
+    );
+    // Linewise: `v` switches to charwise, `V` exits, Ctrl-v to block.
+    assert_eq!(bindings.get(&vl(KeyCode::Char('v'), None)), Some(&Action::EnterMode(Mode::Visual)));
+    assert_eq!(bindings.get(&vl(KeyCode::Char('V'), None)), Some(&Action::CollapseAndEnterNormal));
+    assert_eq!(
+        bindings.get(&key(Mode::VisualLine, KeyCode::Char('v'), KeyModifiers::CONTROL, None)),
+        Some(&Action::EnterVisualBlock)
+    );
+    assert_eq!(bindings.get(&v(KeyCode::Char('^'), None)), Some(&Action::GotoFirstNonWhitespace));
+    assert_eq!(bindings.get(&v(KeyCode::Char('%'), None)), Some(&Action::MatchingPair));
+    assert_eq!(bindings.get(&v(KeyCode::Char(';'), None)), Some(&Action::RepeatLastMotion));
+    assert_eq!(bindings.get(&v(KeyCode::Char(','), None)), Some(&Action::RepeatLastMotionReversed));
+    assert_eq!(bindings.get(&v(KeyCode::Char('r'), None)), Some(&Action::Replace));
+    assert_eq!(bindings.get(&v(KeyCode::Char('p'), None)), Some(&Action::PasteOverSelection));
+    // Linewise gets the same action set.
+    assert_eq!(bindings.get(&vl(KeyCode::Char('r'), None)), Some(&Action::Replace));
+    assert_eq!(bindings.get(&vl(KeyCode::Char('%'), None)), Some(&Action::MatchingPair));
+    assert_eq!(bindings.get(&vl(KeyCode::Char('p'), None)), Some(&Action::PasteOverSelection));
+    // Block: `r` replace, `o`/`O` handled by the block char handler, mode
+    // switches to charwise/linewise on `v`/`V`, Ctrl-v exits.
+    assert_eq!(bindings.get(&vb(KeyCode::Char('r'), None)), Some(&Action::Replace));
+    assert_eq!(bindings.get(&vb(KeyCode::Char('o'), None)), None);
+    assert_eq!(bindings.get(&vb(KeyCode::Char('v'), None)), Some(&Action::EnterMode(Mode::Visual)));
+    assert_eq!(bindings.get(&vb(KeyCode::Char('V'), None)), Some(&Action::EnterVisualLine));
+    assert_eq!(
+        bindings.get(&key(Mode::VisualBlock, KeyCode::Char('v'), KeyModifiers::CONTROL, None)),
+        Some(&Action::CollapseAndEnterNormal)
+    );
+}
+
+#[test]
+fn visual_s_changes_selection() {
+    let (_temp, mut app) = open_text_file("abc");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "selection extended",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_col == 1,
+    );
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Insert);
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    // Half-open selection: `s` changes only the anchor char.
+    wait_for_line(&mut app, "Xbc");
+}
+
+#[test]
+fn visual_p_replaces_selection_with_register() {
+    let (_temp, mut app) = open_text_file("abc");
+    app.registers.yank(&crate::registers::RegisterName::Unnamed, String::from("ZZ"), false);
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "selection extended",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_col == 1,
+    );
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)));
+    // Backend selections are half-open: `vl` selects the char under the anchor
+    // only, so the replacement leaves "bc" intact.
+    wait_for_line(&mut app, "ZZbc");
+    assert_eq!(app.mode, Mode::Normal);
+    // vim: visual `p` swaps the replaced text into the unnamed register.
+    assert_eq!(app.registers.get(&crate::registers::RegisterName::Unnamed), "a");
+}
+
+#[test]
+fn visual_tilde_toggles_selection_case() {
+    let (_temp, mut app) = open_text_file("abc");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "selection extended",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_col == 1,
+    );
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('~'), KeyModifiers::NONE)));
+    // Half-open selection: only the anchor char is toggled.
+    wait_for_line(&mut app, "Abc");
+}
+
+#[test]
+fn visual_counts_extend_motions() {
+    let (_temp, mut app) = open_text_file("ab cd ef");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "two words extended",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_col == 6,
+    );
+    // Count resets after the motion (no `3w` on the next `w`).
+    assert!(app.input_state.count_digits.is_empty());
+    assert_eq!(app.mode, Mode::Visual);
+}
+
+#[test]
+fn visual_block_o_swaps_horizontal_corner() {
+    let (_temp, mut app) = open_text_file("ab\ncd");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)));
+    // Extend the block down-right.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "block extended",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_line == 1 && backend.cursor_col == 1,
+    );
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)));
+    // Anchor keeps its row, column swaps to the cursor's column.
+    assert_eq!(app.visual_anchor, Some((0, 1)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "corner swapped",
+        std::time::Duration::from_secs(15),
+        |backend| (backend.cursor_line, backend.cursor_col) == (1, 0),
+    );
+}
+
+#[test]
+fn visual_block_tilde_toggles_case_in_block() {
+    let (_temp, mut app) = open_text_file("ab\ncd");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "block extended",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_line == 1 && backend.cursor_col == 1,
+    );
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('~'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "block cased",
+        std::time::Duration::from_secs(15),
+        |backend| backend.get_line(0) == Some("Ab") && backend.get_line(1) == Some("Cd"),
+    );
+}
+
+#[test]
+fn visual_block_r_replaces_block_columns() {
+    let (_temp, mut app) = open_text_file("ab\ncd");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "block extended",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_line == 1 && backend.cursor_col == 1,
+    );
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "block replaced",
+        std::time::Duration::from_secs(15),
+        |backend| backend.get_line(0) == Some("xb") && backend.get_line(1) == Some("xd"),
+    );
+}
+
+#[test]
+fn visual_block_shift_o_swaps_vertical_corner() {
+    let (_temp, mut app) = open_text_file("ab\ncd");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "block extended",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_line == 1 && backend.cursor_col == 1,
+    );
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('O'), KeyModifiers::NONE)));
+    // `O` swaps the vertical corner: anchor picks up the cursor row, the
+    // cursor jumps to the anchor row on the same column.
+    assert_eq!(app.visual_anchor, Some((1, 0)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "corner swapped",
+        std::time::Duration::from_secs(15),
+        |backend| (backend.cursor_line, backend.cursor_col) == (0, 1),
+    );
+}
+
+#[test]
+fn visual_block_dollar_extends_to_longest_line() {
+    let (_temp, mut app) = open_text_file("ab\ncdef");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "block extended",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_line == 1,
+    );
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('$'), KeyModifiers::NONE)));
+    // Right edge extends to the longest line (4 chars); cursor keeps its row.
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "right edge extended",
+        std::time::Duration::from_secs(15),
+        |backend| (backend.cursor_line, backend.cursor_col) == (1, 4),
+    );
+}
+
+#[test]
+fn visual_r_replaces_multiline_selection_keeping_newlines() {
+    let (_temp, mut app) = open_text_file("ab\ncd");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "multi-line selection",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_line == 1,
+    );
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "replaced per line",
+        std::time::Duration::from_secs(15),
+        |backend| backend.get_line(0) == Some("xx") && backend.get_line(1) == Some("cd"),
+    );
+}
+
+#[test]
+fn visual_block_d_deletes_block_columns() {
+    let (_temp, mut app) = open_text_file("ab\ncd");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "block extended",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_line == 1 && backend.cursor_col == 1,
+    );
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Normal);
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "block columns deleted",
+        std::time::Duration::from_secs(15),
+        |backend| backend.get_line(0) == Some("b") && backend.get_line(1) == Some("d"),
+    );
+}
+
+#[test]
+fn visual_block_c_changes_block_columns() {
+    let (_temp, mut app) = open_text_file("ab\ncd");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "block extended",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_line == 1 && backend.cursor_col == 1,
+    );
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Insert);
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "block columns changed",
+        std::time::Duration::from_secs(15),
+        |backend| backend.get_line(0) == Some("b") && backend.get_line(1) == Some("d"),
+    );
+}
+
+#[test]
+fn visual_block_y_yanks_block_columns() {
+    let (_temp, mut app) = open_text_file("ab\ncd");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "block extended",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_line == 1 && backend.cursor_col == 1,
+    );
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Normal);
+    // Block preview includes each line's trailing newline.
+    assert_eq!(app.registers.get(&crate::registers::RegisterName::Unnamed), "a\nc\n");
+}
+
+#[test]
+fn visual_line_d_deletes_full_lines() {
+    let (_temp, mut app) = open_text_file("ab\ncd");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "line selection extended",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_line == 1,
+    );
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Normal);
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "full lines deleted",
+        std::time::Duration::from_secs(15),
+        |backend| backend.line_count() == 0,
+    );
+}
+
+#[test]
+fn visual_shift_s_changes_whole_lines() {
+    let (_temp, mut app) = open_text_file("abc");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "selection extended",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_col == 1,
+    );
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('S'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Insert);
+    // Backend "end of line" includes the newline: the whole line is removed.
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "whole line changed",
+        std::time::Duration::from_secs(15),
+        |backend| backend.line_count() == 0,
+    );
+}
+
+#[test]
+fn visual_shift_d_deletes_to_end_of_line() {
+    let (_temp, mut app) = open_text_file("ab cd");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "selection extended",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_col == 1,
+    );
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Normal);
+    // Backend "end of line" includes the newline: the whole line is removed.
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "to EOL deleted",
+        std::time::Duration::from_secs(15),
+        |backend| backend.line_count() == 0,
+    );
+}
+
+#[test]
+fn visual_shift_x_deletes_to_line_start() {
+    let (_temp, mut app) = open_text_file("ab cd");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Normal);
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "to line start deleted",
+        std::time::Duration::from_secs(15),
+        |backend| backend.get_line(0) == Some(" cd"),
+    );
+}
+
+#[test]
+fn visual_shift_j_joins_selected_lines() {
+    let (_temp, mut app) = open_text_file("ab\ncd");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "selection extended",
+        std::time::Duration::from_secs(15),
+        |backend| backend.cursor_line == 1,
+    );
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('J'), KeyModifiers::NONE)));
+    assert_eq!(app.mode, Mode::Normal);
+    crate::tests::helpers::wait_until_with_backend(
+        &mut app.backend,
+        "lines joined",
+        std::time::Duration::from_secs(15),
+        |backend| backend.get_line(0) == Some("ab cd"),
+    );
+}
+
+#[test]
 fn replace_mode_has_bindings() {
     let bindings = bindings_for(&normal());
     assert_eq!(
@@ -391,15 +805,12 @@ fn ctrl_e_scrolls_view_one_line() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut saw_scroll = false;
     while std::time::Instant::now() < deadline && !saw_scroll {
-        match rx.recv_timeout(Duration::from_millis(50)) {
-            Ok(message) => {
-                let value: serde_json::Value = serde_json::from_str(&message).unwrap();
-                if value["params"]["method"] == "scroll" {
-                    assert_eq!(value["params"]["params"]["first"], 11);
-                    saw_scroll = true;
-                }
+        if let Ok(message) = rx.recv_timeout(Duration::from_millis(50)) {
+            let value: serde_json::Value = serde_json::from_str(&message).unwrap();
+            if value["params"]["method"] == "scroll" {
+                assert_eq!(value["params"]["params"]["first"], 11);
+                saw_scroll = true;
             }
-            Err(_) => {}
         }
     }
     assert!(saw_scroll, "expected a scroll edit to be sent");
