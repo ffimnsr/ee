@@ -188,6 +188,12 @@ impl App {
                 }
             }
             crate::picker::PickerKind::Help => {}
+            crate::picker::PickerKind::CommandHistory => {
+                // `q:` window: pre-fill the command line with the selection.
+                self.command_buffer = item.label;
+                self.history_idx = None;
+                self.mode = Mode::CommandLine;
+            }
             #[cfg(feature = "agents")]
             crate::picker::PickerKind::AgentThreads => {
                 let Some(index) = item.choice_index else { return };

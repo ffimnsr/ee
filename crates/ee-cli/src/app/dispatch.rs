@@ -146,17 +146,34 @@ impl App {
             }
             Action::SearchBackspace => {
                 self.command_buffer.pop();
-                let chars = self.command_buffer.clone();
-                let case_sensitive = smart_case_sensitive(&chars);
-                let _ = self.backend.send_edit(
-                    "find",
-                    json!({
-                        "chars": chars,
-                        "case_sensitive": case_sensitive,
-                        "regex": false,
-                        "whole_words": false
-                    }),
-                );
+                self.refresh_search_from_buffer();
+            }
+            Action::CommandDeleteWord => {
+                self.history_idx = None;
+                let buffer = &mut self.command_buffer;
+                // Drop trailing whitespace, then the word before the cursor;
+                // vim keeps the separator whitespace.
+                let trimmed = buffer.trim_end_matches(|c: char| c.is_whitespace()).len();
+                buffer.truncate(trimmed);
+                match buffer.rfind(|c: char| c.is_whitespace()) {
+                    Some(separator) => buffer.truncate(separator + 1),
+                    None => buffer.clear(),
+                }
+                if self.mode == Mode::Search {
+                    self.refresh_search_from_buffer();
+                }
+            }
+            Action::CommandClearLine => {
+                self.history_idx = None;
+                self.command_buffer.clear();
+                if self.mode == Mode::Search {
+                    self.refresh_search_from_buffer();
+                }
+            }
+            Action::CommandHistoryWindow => {
+                // `q:`: history picker; confirming pre-fills the command line.
+                let history: Vec<String> = self.command_history.iter().rev().cloned().collect();
+                self.open_picker(crate::picker::PickerState::new_command_history(history));
             }
             Action::FindNext => {
                 self.push_jump();

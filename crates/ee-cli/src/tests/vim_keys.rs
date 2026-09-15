@@ -621,6 +621,98 @@ fn replace_mode_has_bindings() {
     );
 }
 
+#[test]
+fn cmdline_edit_keys_follow_vim() {
+    let bindings = bindings_for(&normal());
+    let cmd = |k: KeyCode, m: KeyModifiers| key(Mode::CommandLine, k, m, None);
+    let se = |k: KeyCode, m: KeyModifiers| key(Mode::Search, k, m, None);
+    let ctrl = KeyModifiers::CONTROL;
+    assert_eq!(bindings.get(&cmd(KeyCode::Char('w'), ctrl)), Some(&Action::CommandDeleteWord));
+    assert_eq!(bindings.get(&cmd(KeyCode::Char('u'), ctrl)), Some(&Action::CommandClearLine));
+    assert_eq!(bindings.get(&cmd(KeyCode::Char('h'), ctrl)), Some(&Action::CommandBackspace));
+    assert_eq!(bindings.get(&cmd(KeyCode::Char('r'), ctrl)), Some(&Action::InsertRegister));
+    assert_eq!(bindings.get(&cmd(KeyCode::Char('f'), ctrl)), Some(&Action::CommandHistoryWindow));
+    assert_eq!(bindings.get(&cmd(KeyCode::Char('v'), ctrl)), Some(&Action::NoOp));
+    assert_eq!(bindings.get(&se(KeyCode::Char('w'), ctrl)), Some(&Action::CommandDeleteWord));
+    assert_eq!(bindings.get(&se(KeyCode::Char('u'), ctrl)), Some(&Action::CommandClearLine));
+    assert_eq!(bindings.get(&se(KeyCode::Char('h'), ctrl)), Some(&Action::SearchBackspace));
+    assert_eq!(bindings.get(&se(KeyCode::Char('r'), ctrl)), Some(&Action::InsertRegister));
+}
+
+fn enter_cmdline_and_type(app: &mut App, text: &str) {
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE)));
+    for ch in text.chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+}
+
+#[test]
+fn cmdline_ctrl_w_deletes_word_keeping_separator() {
+    let (_temp, mut app) = open_text_file("abc");
+    enter_cmdline_and_type(&mut app, "set nu");
+    assert_eq!(app.command_buffer, "set nu");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)));
+    assert_eq!(app.command_buffer, "set ");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)));
+    assert_eq!(app.command_buffer, "");
+    assert_eq!(app.mode, Mode::CommandLine);
+}
+
+#[test]
+fn cmdline_ctrl_u_clears_and_ctrl_h_backspaces() {
+    let (_temp, mut app) = open_text_file("abc");
+    enter_cmdline_and_type(&mut app, "ab");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL)));
+    assert_eq!(app.command_buffer, "a");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)));
+    assert_eq!(app.command_buffer, "ac");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)));
+    assert_eq!(app.command_buffer, "");
+}
+
+#[test]
+fn cmdline_ctrl_r_inserts_named_register() {
+    let (_temp, mut app) = open_text_file("abc");
+    app.registers.yank(&crate::registers::RegisterName::Named('x'), String::from("ZZ"), false);
+    enter_cmdline_and_type(&mut app, "set ");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)));
+    assert!(app.input_state.awaiting_register_insert);
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+    assert_eq!(app.command_buffer, "set ZZ");
+    assert_eq!(app.mode, Mode::CommandLine);
+}
+
+#[test]
+fn cmdline_ctrl_f_opens_history_window_and_prefills() {
+    let (_temp, mut app) = open_text_file("abc");
+    app.restore_command_history(vec![String::from("set number"), String::from("w")]);
+    enter_cmdline_and_type(&mut app, "");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)));
+    let picker = app.picker.as_ref().expect("history window should open");
+    assert_eq!(picker.kind, crate::picker::PickerKind::CommandHistory);
+    // Newest entry first and selected.
+    assert_eq!(picker.selected_item().map(|i| i.label.as_str()), Some("w"));
+    assert_eq!(picker.visible_count(), 2);
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    assert!(app.picker.is_none());
+    assert_eq!(app.command_buffer, "w");
+    assert_eq!(app.mode, Mode::CommandLine);
+}
+
+#[test]
+fn search_ctrl_w_and_u_edit_search_line() {
+    let (_temp, mut app) = open_text_file("abc");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)));
+    for ch in "foo bar".chars() {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    assert_eq!(app.mode, Mode::Search);
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)));
+    assert_eq!(app.command_buffer, "foo ");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)));
+    assert_eq!(app.command_buffer, "");
+}
+
 fn open_text_file(text: &str) -> (tempfile::TempDir, App) {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("sample.txt");
@@ -830,6 +922,16 @@ fn move_word_end_backward_action_roundtrips_through_spec() {
 fn goto_byte_action_roundtrips_through_spec() {
     assert_eq!(parse_action_spec("goto_byte").unwrap(), Action::GotoByte);
     assert_eq!(format_action_spec(&Action::GotoByte), "goto_byte");
+}
+
+#[test]
+fn cmdline_edit_actions_roundtrip_through_spec() {
+    assert_eq!(parse_action_spec("command_delete_word").unwrap(), Action::CommandDeleteWord);
+    assert_eq!(format_action_spec(&Action::CommandDeleteWord), "command_delete_word");
+    assert_eq!(parse_action_spec("command_clear_line").unwrap(), Action::CommandClearLine);
+    assert_eq!(format_action_spec(&Action::CommandClearLine), "command_clear_line");
+    assert_eq!(parse_action_spec("command_history_window").unwrap(), Action::CommandHistoryWindow);
+    assert_eq!(format_action_spec(&Action::CommandHistoryWindow), "command_history_window");
 }
 
 #[test]

@@ -2,6 +2,21 @@
 use super::*;
 
 impl App {
+    /// Re-send the current search buffer to the backend find (live preview
+    /// while editing the search line).
+    pub(super) fn refresh_search_from_buffer(&mut self) {
+        let chars = self.command_buffer.clone();
+        let case_sensitive = smart_case_sensitive(&chars);
+        let _ = self.backend.send_edit(
+            "find",
+            json!({
+                "chars": chars,
+                "case_sensitive": case_sensitive,
+                "regex": false,
+                "whole_words": false
+            }),
+        );
+    }
     pub(super) fn execute_search(&mut self) {
         let chars = self.command_buffer.clone();
         let case_sensitive = smart_case_sensitive(&chars);

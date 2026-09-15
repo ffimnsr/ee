@@ -29,6 +29,7 @@ pub(crate) enum PickerKind {
     CodeActions,
     Symbols,
     Locations,
+    CommandHistory,
     #[cfg(feature = "agents")]
     AgentThreads,
     #[cfg(feature = "agents")]
@@ -153,6 +154,33 @@ impl PickerState {
         Self {
             kind: PickerKind::Help,
             title: title.into(),
+            query: String::new(),
+            cwd: PathBuf::from("."),
+            items,
+            filtered,
+            selected: 0,
+        }
+    }
+
+    /// Open the command-history window (`q:`) from the given entries,
+    /// newest first.  Confirming an entry pre-fills the command line.
+    pub(crate) fn new_command_history(entries: impl IntoIterator<Item = String>) -> Self {
+        let items: Vec<PickerItem> = entries
+            .into_iter()
+            .map(|label| PickerItem {
+                label,
+                detail: None,
+                path: None,
+                buf_id: None,
+                line: None,
+                col: None,
+                choice_index: None,
+            })
+            .collect();
+        let filtered = (0..items.len()).collect();
+        Self {
+            kind: PickerKind::CommandHistory,
+            title: String::from("Command History"),
             query: String::new(),
             cwd: PathBuf::from("."),
             items,

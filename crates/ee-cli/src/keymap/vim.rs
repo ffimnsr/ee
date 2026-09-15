@@ -393,12 +393,27 @@ pub(crate) fn build_vim_bindings() -> HashMap<BindingKey, Action> {
     bind!(CommandLine, KeyCode::Tab, none, None, CompleteCommandLine);
     bind!(CommandLine, KeyCode::Up, none, None, CommandHistoryOlder);
     bind!(CommandLine, KeyCode::Down, none, None, CommandHistoryNewer);
+    // vim cmdline editing: Ctrl-w delete word, Ctrl-u clear, Ctrl-h = backspace,
+    // Ctrl-r insert register, Ctrl-f history window (`q:`).  Ctrl-v is a no-op
+    // here: the cmdline has no magic expansions, so literal insert is already
+    // the default — the binding exists so the key stays visible/rebindable.
+    bind!(CommandLine, KeyCode::Char('w'), ctrl, None, CommandDeleteWord);
+    bind!(CommandLine, KeyCode::Char('u'), ctrl, None, CommandClearLine);
+    bind!(CommandLine, KeyCode::Char('h'), ctrl, None, CommandBackspace);
+    bind!(CommandLine, KeyCode::Char('r'), ctrl, None, InsertRegister);
+    bind!(CommandLine, KeyCode::Char('f'), ctrl, None, CommandHistoryWindow);
+    bind!(CommandLine, KeyCode::Char('v'), ctrl, None, NoOp);
 
     // Search mode: unprefixed bindings.
     bind!(Search, KeyCode::Esc, none, None, EnterMode(Normal));
     bind!(Search, KeyCode::Enter, none, None, ExecuteSearch);
     bind!(Search, KeyCode::Backspace, none, None, SearchBackspace);
     bind!(Search, KeyCode::Enter, KeyModifiers::ALT, None, FindAll);
+    // vim search-line editing: same word/clear/backspace/register keys.
+    bind!(Search, KeyCode::Char('w'), ctrl, None, CommandDeleteWord);
+    bind!(Search, KeyCode::Char('u'), ctrl, None, CommandClearLine);
+    bind!(Search, KeyCode::Char('h'), ctrl, None, SearchBackspace);
+    bind!(Search, KeyCode::Char('r'), ctrl, None, InsertRegister);
 
     // Normal mode: edit history and repeat.
     bind!(Normal, KeyCode::Char('f'), ctrl, None, Edit("scroll_page_down"));

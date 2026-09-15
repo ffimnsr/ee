@@ -27,6 +27,12 @@ pub(crate) enum Action {
     DeleteBackward,
     CommandBackspace,
     SearchBackspace,
+    /// Ctrl-w on the command line / search: delete the word before the cursor.
+    CommandDeleteWord,
+    /// Ctrl-u on the command line / search: clear the whole line.
+    CommandClearLine,
+    /// Ctrl-f on the command line: open the history window (`q:`).
+    CommandHistoryWindow,
     EnterSearch,
     EnterSearchBackward,
     ExecuteSearch,
