@@ -1,5 +1,6 @@
 ---
 source: crates/ee-cli/tests/pty_render.rs
+assertion_line: 338
 expression: editor_rows(parser.screen())
 ---
     1  Lorem ipsum dolor sit amet, consectetur adipiscing elit. Maecenas

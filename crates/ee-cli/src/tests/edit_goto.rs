@@ -6,6 +6,7 @@ use serde_json::Value;
 use xi_core_lib::plugin_rpc::{Diagnostic, DiagnosticSeverity, Range};
 
 use crate::app::{App, Mode};
+use crate::backend::{CachedLine, LineSlot};
 use crate::buffer::BufferManager;
 use crate::keymap::{Action, BindingKey};
 use crate::tests::helpers::*;
@@ -239,7 +240,20 @@ fn goto_change_commands_reuse_git_hunk_navigation() {
     let mut app = App::from_path(None).unwrap();
     app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
     app.backend.path = Some(path);
-    app.backend.lines = modified_lines;
+    // Model a fully-rendered buffer: hunk navigation skips buffers that are
+    // not fully cached (an empty cache no longer counts as fully cached).
+    app.backend.line_cache = modified_lines
+        .iter()
+        .map(|text| {
+            LineSlot::Known(CachedLine {
+                text: text.clone(),
+                cursors: Vec::new(),
+                syntax_spans: Vec::new(),
+                logical_line: None,
+            })
+        })
+        .collect();
+    app.backend.rebuild_lines();
 
     app.backend.cursor_line = 0;
     run_ex(&mut app, "goto_next_change");
