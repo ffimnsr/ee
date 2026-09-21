@@ -337,3 +337,43 @@ fn pty_wrap_blanks_continuation_rows_and_stays_aligned() {
     // Editor-area snapshot for review: wrap gutter + `wrap` flag status.
     insta::assert_snapshot!(editor_rows(parser.screen()));
 }
+
+#[test]
+fn pty_git_sign_absent_for_tracked_clean_file() {
+    // `test_assets/hello.txt` is gitignored (`*.txt`), so the app correctly
+    // shows it as an all-added file.  A tracked, clean file must show no git
+    // signs in the gutter; capture it through the same PTY path for review.
+    let temp = tempfile::tempdir().expect("temp dir");
+    let (master, slave) = open_pty(ROWS, COLS);
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("test_assets/sample-program.rs");
+    let _proc = spawn_ee(Some(&path), slave, temp.path());
+    let rx = spawn_reader(master.try_clone().expect("clone master reader"));
+    let mut parser = vt100::Parser::new(ROWS, COLS, 0);
+
+    wait_for_screen(&rx, &mut parser, Duration::from_secs(20), "sample-program render", |screen| {
+        row_text(screen, 0).contains("use std::collections")
+            && row_text(screen, 9).contains("use std::time")
+    });
+    // Source-control refresh runs ~250ms after startup idle; the large
+    // fixture is never fully cached, so no git status is ever cached for it —
+    // wait out the refresh window and assert both the missing badge and the
+    // absence of phantom gutter signs.
+    std::thread::sleep(Duration::from_millis(1500));
+    wait_stable(&rx, &mut parser, Duration::from_secs(10), "git refresh settled", |_| true);
+
+    let status = row_text(parser.screen(), ROWS as usize - 2);
+    assert!(
+        !status.contains("git:"),
+        "partially-cached file must not cache a git status, got {status:?}"
+    );
+    for row in 0..ROWS as usize - 2 {
+        let t = tokens(&row_text(parser.screen(), row));
+        assert!(
+            !matches!(t.first().map(String::as_str), Some("+" | "-" | "~")),
+            "row {row} must have no git sign when the file is clean, got {t:?}"
+        );
+    }
+    insta::assert_snapshot!(editor_rows(parser.screen()));
+}

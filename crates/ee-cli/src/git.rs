@@ -554,7 +554,12 @@ fn git_error(error: git2::Error) -> io::Error {
 }
 
 fn split_blob_lines(text: &str) -> Vec<String> {
-    text.lines().map(|line| line.to_owned()).collect()
+    // Match the frontend buffer line model (`normalize_line_text`): split on
+    // newlines, drop a trailing `\r`, and keep the trailing empty line that a
+    // file ending in `\n` produces (the extra line below the last line, like
+    // vim).  `str::lines()` drops it, which makes clean files diff against
+    // their own HEAD blob and paints phantom git signs in the gutter.
+    text.split('\n').map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned()).collect()
 }
 
 fn normalize_pathspec(path: &Path) -> String {
@@ -745,5 +750,17 @@ mod tests {
         assert!(rendered.contains("@@ -2 +2 @@"));
         assert!(rendered.contains("-old"));
         assert!(rendered.contains("+new"));
+    }
+
+    #[test]
+    fn split_blob_lines_matches_frontend_buffer_model() {
+        // A file ending in `\n` produces a trailing empty line in the buffer
+        // (like vim's extra line); `str::lines()` drops it, which made clean
+        // files diff against their own HEAD blob.
+        assert_eq!(split_blob_lines("a\nb\n"), vec!["a", "b", ""]);
+        assert_eq!(split_blob_lines("a\nb"), vec!["a", "b"]);
+        // CRLF is normalized the same way `normalize_line_text` strips `\r`.
+        assert_eq!(split_blob_lines("a\r\nb\r\n"), vec!["a", "b", ""]);
+        assert_eq!(split_blob_lines("a"), vec!["a"]);
     }
 }

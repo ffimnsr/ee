@@ -1,0 +1,16 @@
+---
+source: crates/ee-cli/tests/pty_render.rs
+expression: editor_rows(parser.screen())
+---
+     1  use std::collections::HashMap;
+     2  use std::env;
+     3  use std::fs;
+     4  use std::path::PathBuf;
+     5  use std::process::Command;
+     6  use std::sync::mpsc;
+     7  use std::sync::mpsc::TryRecvError;
+     8  use std::sync::{Mutex, OnceLock};
+     9  use std::thread;
+    10  use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    11
+    12  use crossterm::event::{

@@ -670,6 +670,31 @@ fn source_control_skips_constrained_sized_buffers() {
 }
 
 #[test]
+fn source_control_skips_loading_buffer_with_empty_cache() {
+    // Regression: `all()` on an empty line cache is vacuously true, so the
+    // first deferred refresh could run while a buffer was still loading and
+    // diff padded-empty lines against the HEAD blob — painting phantom git
+    // signs (`-`) on a clean file.  An empty cache must not count as fully
+    // cached.
+    let (tx, _rx) = mpsc::channel();
+    let (_backend_tx, backend_rx) = mpsc::channel();
+    let mut app = App::from_path(None).unwrap();
+    app.backend = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+    let buf_id = app.backend.active().id;
+    assert!(app.backend.line_cache.is_empty());
+
+    assert!(
+        !app.backend.is_fully_cached(),
+        "an empty (loading) cache must not be treated as fully cached"
+    );
+    app.refresh_source_control();
+    assert!(
+        !app.source_control.contains_key(&buf_id),
+        "background refresh must skip a buffer that is still loading"
+    );
+}
+
+#[test]
 fn apply_update_large_cache_insert_does_not_clone_non_copy_range() {
     // Prove that a Copy op over a large prefix followed by an Insert only
     // allocates what is actually needed: the copy range and the new line.

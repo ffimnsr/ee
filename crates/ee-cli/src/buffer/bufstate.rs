@@ -184,7 +184,12 @@ impl BufState {
                 && self.line_cache.len() == self.line_count()
                 && self.line_cache.iter().all(|slot| matches!(slot, LineSlot::Known(_)));
         }
-        self.line_cache.iter().all(|slot| matches!(slot, LineSlot::Known(_)))
+        // An empty cache is a loading state, not a fully-cached one:
+        // `all()` on an empty iterator is vacuously true, which made the
+        // first deferred source-control refresh run while the buffer was
+        // still loading and diff padded-empty slots against HEAD.
+        !self.line_cache.is_empty()
+            && self.line_cache.iter().all(|slot| matches!(slot, LineSlot::Known(_)))
     }
 
     /// Return the total line count regardless of mode.
