@@ -28,6 +28,7 @@ fn ui_render_shows_scrolled_gutter_for_long_buffer() {
             text: String::new(),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         });
         51
     ];
@@ -57,6 +58,57 @@ fn ui_render_shows_scrolled_gutter_for_long_buffer() {
 }
 
 #[test]
+fn ui_render_blanks_gutter_on_wrapped_continuation_rows() {
+    let mut app = App::from_path(None).unwrap();
+    // Rows: logical line 0 wrapped into three visual rows, then line 1.
+    app.backend.lines = vec![
+        String::from("wrapped-A"),
+        String::from("wrapped-B"),
+        String::from("wrapped-C"),
+        String::from("next"),
+    ];
+    app.backend.line_cache = vec![
+        LineSlot::Known(CachedLine {
+            text: String::from("wrapped-A"),
+            cursors: Vec::new(),
+            syntax_spans: Vec::new(),
+            logical_line: Some(0),
+        }),
+        LineSlot::Known(CachedLine {
+            text: String::from("wrapped-B"),
+            cursors: Vec::new(),
+            syntax_spans: Vec::new(),
+            logical_line: Some(0),
+        }),
+        LineSlot::Known(CachedLine {
+            text: String::from("wrapped-C"),
+            cursors: Vec::new(),
+            syntax_spans: Vec::new(),
+            logical_line: Some(0),
+        }),
+        LineSlot::Known(CachedLine {
+            text: String::from("next"),
+            cursors: Vec::new(),
+            syntax_spans: Vec::new(),
+            logical_line: Some(1),
+        }),
+    ];
+
+    let backend = TestBackend::new(80, 10);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, &app)).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let gutter_row =
+        |row: u16| (0..6).map(|x| buffer.cell((x, row)).unwrap().symbol()).collect::<String>();
+    // Only the first visual row of logical line 1 is numbered.
+    assert!(gutter_row(0).trim_end().ends_with("1"), "row 0 gutter: {:?}", gutter_row(0));
+    assert_eq!(gutter_row(1).trim(), "", "continuation row 1 must be blank: {:?}", gutter_row(1));
+    assert_eq!(gutter_row(2).trim(), "", "continuation row 2 must be blank: {:?}", gutter_row(2));
+    assert!(gutter_row(3).trim_end().ends_with("2"), "row 3 gutter: {:?}", gutter_row(3));
+}
+
+#[test]
 fn ui_render_uses_backend_syntax_spans_only() {
     fn render_numeric_fg(with_backend_syntax: bool, is_vlf: bool) -> ratatui::style::Color {
         let mut app = App::from_path(None).unwrap();
@@ -77,6 +129,7 @@ fn ui_render_uses_backend_syntax_spans_only() {
             } else {
                 Vec::new()
             },
+            logical_line: None,
         })];
 
         let backend = TestBackend::new(40, 6);
@@ -110,6 +163,7 @@ fn ui_render_sanitizes_carriage_returns_in_buffer_text() {
         text: line,
         cursors: Vec::new(),
         syntax_spans: Vec::new(),
+        logical_line: None,
     })];
 
     let backend = TestBackend::new(40, 6);
@@ -151,6 +205,7 @@ fn ui_render_shows_git_gutter_sign() {
         text: line,
         cursors: vec![0],
         syntax_spans: Vec::new(),
+        logical_line: None,
     })];
     app.source_control.insert(
         buf_id,
@@ -200,6 +255,7 @@ fn ui_render_hides_git_signs_and_shows_vlf_disabled_marker() {
         text: line,
         cursors: vec![0],
         syntax_spans: Vec::new(),
+        logical_line: None,
     })];
     app.source_control.insert(
         buf_id,

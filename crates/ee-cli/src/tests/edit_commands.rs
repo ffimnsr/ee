@@ -829,6 +829,7 @@ fn vlf_source_control_commands_report_disabled_reason() {
         text: String::from("visible"),
         cursors: vec![0],
         syntax_spans: Vec::new(),
+        logical_line: None,
     })];
 
     for command in ["goto_next_change", "gblame", "gdiff", "ghunkdiff", "diffget"] {

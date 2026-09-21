@@ -4,6 +4,15 @@ use super::*;
 impl BufState {
     pub(super) const VLF_PREVIOUS_VIEWPORT_MAX_BYTES: usize = 32 * 1024 * 1024;
 
+    /// Logical line number of the visual row at `idx` (repeated on wrapped
+    /// continuation rows), when the backend reported it.
+    pub(crate) fn row_logical_line(&self, idx: usize) -> Option<usize> {
+        match self.line_cache.get(idx)? {
+            LineSlot::Known(line) => line.logical_line,
+            LineSlot::Invalid => None,
+        }
+    }
+
     pub(crate) fn title(&self) -> String {
         if let Some(name) = &self.display_name {
             return name.clone();
@@ -305,7 +314,12 @@ impl BufState {
         let replacement_count = replacement_lines.len();
         let replacement =
             replacement_lines.into_iter().zip(replacement_spans).map(|(line, syntax_spans)| {
-                LineSlot::Known(CachedLine { text: line, cursors: Vec::new(), syntax_spans })
+                LineSlot::Known(CachedLine {
+                    text: line,
+                    cursors: Vec::new(),
+                    syntax_spans,
+                    logical_line: None,
+                })
             });
         let replaced_count = end_local - start_local + 1;
         self.line_cache.splice(start_local..=end_local, replacement);
@@ -411,6 +425,7 @@ impl BufState {
                     text: normalize_line_text(Some(text.clone())),
                     cursors: Vec::new(),
                     syntax_spans: spans,
+                    logical_line: None,
                 })
             })
             .collect();

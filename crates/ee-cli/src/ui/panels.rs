@@ -76,6 +76,15 @@ pub(super) fn render_gutter(
             theme::BG_CHROME
         };
 
+        // Wrapped continuation rows repeat the previous row's logical line
+        // number; vim leaves the gutter blank on them.
+        let is_wrap_continuation = li > top
+            && buf
+                .row_logical_line(li - 1)
+                .zip(buf.row_logical_line(li))
+                .is_some_and(|(prev, cur)| prev == cur);
+        let number = buf.row_logical_line(li).map(|n| n + 1).unwrap_or(li + 1);
+
         // Sign column: show fold markers when applicable.
         let sign_spans = if sign_col {
             let (marker, fg) = if let Some(severity) = diagnostic_marker_for_line(buf, li) {
@@ -107,22 +116,28 @@ pub(super) fn render_gutter(
             Vec::new()
         };
 
-        let num_text = match app.config.number_style {
-            NumberStyle::Absolute => format!("{:>width$} ", li + 1, width = num_digits),
-            NumberStyle::Relative => {
-                let dist = li.abs_diff(cursor_line);
-                if dist == 0 {
-                    format!("{:>width$} ", li + 1, width = num_digits)
-                } else {
-                    format!("{:>width$} ", dist, width = num_digits)
+        let num_text = if is_wrap_continuation {
+            // Blank gutter on wrapped continuation rows, like vim.
+            format!("{:>width$} ", "", width = num_digits)
+        } else {
+            match app.config.number_style {
+                NumberStyle::None => String::new(),
+                NumberStyle::Absolute => format!("{:>width$} ", number, width = num_digits),
+                NumberStyle::Relative => {
+                    let dist = li.abs_diff(cursor_line);
+                    if dist == 0 {
+                        format!("{:>width$} ", number, width = num_digits)
+                    } else {
+                        format!("{:>width$} ", dist, width = num_digits)
+                    }
                 }
-            }
-            NumberStyle::RelativeAbsolute => {
-                let dist = li.abs_diff(cursor_line);
-                if is_cursor {
-                    format!("{:>width$} ", li + 1, width = num_digits)
-                } else {
-                    format!("{:>width$} ", dist, width = num_digits)
+                NumberStyle::RelativeAbsolute => {
+                    let dist = li.abs_diff(cursor_line);
+                    if is_cursor {
+                        format!("{:>width$} ", number, width = num_digits)
+                    } else {
+                        format!("{:>width$} ", dist, width = num_digits)
+                    }
                 }
             }
         };

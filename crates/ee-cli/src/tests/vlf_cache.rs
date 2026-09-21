@@ -126,7 +126,8 @@ fn apply_vlf_chunks_populates_line_cache() {
         LineSlot::Known(CachedLine {
             text: String::from("alpha"),
             cursors: vec![],
-            syntax_spans: vec![]
+            syntax_spans: vec![],
+            logical_line: None,
         })
     );
     assert_eq!(
@@ -134,7 +135,8 @@ fn apply_vlf_chunks_populates_line_cache() {
         LineSlot::Known(CachedLine {
             text: String::from("beta"),
             cursors: vec![],
-            syntax_spans: vec![]
+            syntax_spans: vec![],
+            logical_line: None,
         })
     );
     assert_eq!(buf.line_count(), 3);
@@ -172,11 +174,13 @@ fn apply_vlf_chunks_empty_response_preserves_loaded_cache() {
             text: String::from("line 40"),
             cursors: vec![],
             syntax_spans: vec![],
+            logical_line: None,
         }),
         LineSlot::Known(CachedLine {
             text: String::from("line 41"),
             cursors: vec![],
             syntax_spans: vec![],
+            logical_line: None,
         }),
     ];
 
@@ -391,6 +395,7 @@ fn vlf_notify_scroll_prefetches_beyond_ready_visible_rows() {
                 text: format!("line {line}"),
                 cursors: Vec::new(),
                 syntax_spans: Vec::new(),
+                logical_line: None,
             })
         })
         .collect();
@@ -464,6 +469,7 @@ fn vlf_ignores_normal_update_after_document_mode() {
                         text: Some(String::from("stale normal line")),
                         cursor: Vec::new(),
                         syntax_spans: Some(Vec::new()),
+                        logical_line: None,
                     }],
                 }],
                 pristine: true,
@@ -646,6 +652,7 @@ fn source_control_skips_constrained_sized_buffers() {
                 text: format!("line {i}"),
                 cursors: Vec::new(),
                 syntax_spans: Vec::new(),
+                logical_line: None,
             })
         })
         .collect();
@@ -675,6 +682,7 @@ fn apply_update_large_cache_insert_does_not_clone_non_copy_range() {
                 text: format!("existing {i}"),
                 cursors: Vec::new(),
                 syntax_spans: Vec::new(),
+                logical_line: None,
             })
         })
         .collect();
@@ -695,6 +703,7 @@ fn apply_update_large_cache_insert_does_not_clone_non_copy_range() {
                         text: Some(String::from("new-tail")),
                         cursor: Vec::new(),
                         syntax_spans: None,
+                        logical_line: None,
                     }],
                 },
             ],
@@ -760,6 +769,7 @@ fn bounded_invalid_range_scan_stops_at_window_boundary() {
             text: String::from("before"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         });
     }
     for slot in &mut cache[viewport_end..] {
@@ -767,6 +777,7 @@ fn bounded_invalid_range_scan_stops_at_window_boundary() {
             text: String::from("after"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         });
     }
 
@@ -800,6 +811,7 @@ fn normal_render_large_line_cache_only_displays_viewport_rows() {
         text: String::from("first line"),
         cursors: vec![0],
         syntax_spans: Vec::new(),
+        logical_line: None,
     })];
     cache.extend(std::iter::repeat_n(LineSlot::Invalid, total_lines - 1));
     app.backend.line_cache = cache;

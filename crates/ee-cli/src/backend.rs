@@ -256,6 +256,9 @@ pub(crate) struct CachedLine {
     pub(crate) text: String,
     pub(crate) cursors: Vec<usize>,
     pub(crate) syntax_spans: Vec<CoreSyntaxSpan>,
+    /// Logical line number of this visual row; repeated on wrapped
+    /// continuation rows so the gutter can leave them blank.
+    pub(crate) logical_line: Option<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -315,6 +318,10 @@ pub(crate) struct CoreLine {
     pub(crate) cursor: Vec<usize>,
     #[serde(default)]
     pub(crate) syntax_spans: Option<Vec<CoreSyntaxSpan>>,
+    /// Logical line number of this visual row (repeated on wrapped
+    /// continuations), 0-based.
+    #[serde(default, rename = "ln")]
+    pub(crate) logical_line: Option<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -627,7 +634,7 @@ impl XiClient {
         )
     }
 
-    /// Vim `go` [count]: jump to byte offset (1-based) in the buffer.
+    /// Vim `go` with a count: jump to byte offset (1-based) in the buffer.
     pub(crate) fn goto_byte(&mut self, offset: usize) -> io::Result<()> {
         self.send_edit(
             "set_selections",
@@ -895,6 +902,7 @@ impl XiClient {
                                     text,
                                     cursors: Vec::new(),
                                     syntax_spans: spans,
+                                    logical_line: None,
                                 })
                             })
                             .collect();
@@ -1186,6 +1194,7 @@ impl From<CoreLine> for LineSlot {
             text: normalize_line_text(line.text),
             cursors: line.cursor,
             syntax_spans: line.syntax_spans.unwrap_or_default(),
+            logical_line: line.logical_line,
         })
     }
 }
@@ -1200,6 +1209,9 @@ impl LineSlot {
                 line.cursors = update.cursor;
                 if let Some(syntax_spans) = update.syntax_spans {
                     line.syntax_spans = syntax_spans;
+                }
+                if update.logical_line.is_some() {
+                    line.logical_line = update.logical_line;
                 }
                 Ok(LineSlot::Known(line))
             }

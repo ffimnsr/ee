@@ -56,15 +56,18 @@ impl App {
             }
             Action::EnterCommandMode => {
                 self.command_mode_origin = Some(self.mode);
+                self.reset_command_completion();
                 self.mode = Mode::CommandLine;
                 self.command_buffer.clear();
             }
             Action::PrefillCommandLine(template) => {
                 self.command_mode_origin = Some(self.mode);
+                self.reset_command_completion();
                 self.mode = Mode::CommandLine;
                 self.command_buffer = template.to_owned();
             }
             Action::EnterSearch => {
+                self.reset_command_completion();
                 self.mode = Mode::Search;
                 self.search_backward = false;
                 self.command_buffer.clear();
@@ -80,6 +83,7 @@ impl App {
                 let _ = self.backend.send_edit("highlight_find", json!({ "visible": true }));
             }
             Action::EnterSearchBackward => {
+                self.reset_command_completion();
                 self.mode = Mode::Search;
                 self.search_backward = true;
                 self.command_buffer.clear();
@@ -147,14 +151,17 @@ impl App {
                 }
             }
             Action::CommandBackspace => {
+                self.reset_command_completion();
                 self.command_buffer.pop();
             }
             Action::SearchBackspace => {
+                self.reset_command_completion();
                 self.command_buffer.pop();
                 self.refresh_search_from_buffer();
             }
             Action::CommandDeleteWord => {
                 self.history_idx = None;
+                self.reset_command_completion();
                 let buffer = &mut self.command_buffer;
                 // Drop trailing whitespace, then the word before the cursor;
                 // vim keeps the separator whitespace.
@@ -170,6 +177,7 @@ impl App {
             }
             Action::CommandClearLine => {
                 self.history_idx = None;
+                self.reset_command_completion();
                 self.command_buffer.clear();
                 if self.mode == Mode::Search {
                     self.refresh_search_from_buffer();

@@ -34,6 +34,8 @@ use xi_core_lib::config::Table as XiConfigTable;
 /// Line-number display style in the gutter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum NumberStyle {
+    /// Hide the line-number gutter entirely.
+    None,
     /// Always show the absolute 1-based line number.
     #[default]
     Absolute,
@@ -246,6 +248,7 @@ impl EditorSettings {
         }
         if let Some(s) = &patch.number_style {
             match s.to_lowercase().as_str() {
+                "none" | "hidden" => self.number_style = NumberStyle::None,
                 "absolute" => self.number_style = NumberStyle::Absolute,
                 "relative" => self.number_style = NumberStyle::Relative,
                 "relative_absolute" | "relativenumber" => {

@@ -901,6 +901,23 @@ fn insert_ctrl_o_colon_command_returns_to_insert() {
     assert!(app.backend.status_message.is_some());
 }
 
+#[test]
+fn cmdline_tab_rotation_via_keys() {
+    let (_temp, mut app) = open_text_file("abc");
+    enter_cmdline_and_type(&mut app, "ta");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+    assert_eq!(app.command_buffer, "tab");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+    assert_eq!(app.command_buffer, "tabc");
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+    assert_eq!(app.command_buffer, "tabclose");
+    // Typing after a completion starts a fresh session; Tab with no match
+    // leaves the buffer untouched.
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+    assert_eq!(app.command_buffer, "tabclosex");
+}
+
 fn open_text_file(text: &str) -> (tempfile::TempDir, App) {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("sample.txt");

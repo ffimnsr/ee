@@ -59,6 +59,7 @@ pub(crate) fn resolved_config_with_env(
         auto_indent: Some(settings.auto_indent),
         smart_indent: Some(settings.smart_indent),
         number_style: Some(match settings.number_style {
+            NumberStyle::None => String::from("none"),
             NumberStyle::Absolute => String::from("absolute"),
             NumberStyle::Relative => String::from("relative"),
             NumberStyle::RelativeAbsolute => String::from("relative_absolute"),

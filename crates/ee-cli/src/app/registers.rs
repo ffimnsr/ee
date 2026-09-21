@@ -69,9 +69,11 @@ impl App {
             }
             Mode::CommandLine => {
                 self.history_idx = None;
+                self.reset_command_completion();
                 self.command_buffer.push_str(&text);
             }
             Mode::Search => {
+                self.reset_command_completion();
                 self.command_buffer.push_str(&text);
                 let chars = self.command_buffer.clone();
                 let case_sensitive = smart_case_sensitive(&chars);

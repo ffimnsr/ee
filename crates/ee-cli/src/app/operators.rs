@@ -42,8 +42,9 @@ impl App {
                 let _ = self.backend.send_edit("insert", json!({ "chars": s }));
             }
             Mode::CommandLine => {
-                // Any typed char resets history navigation.
+                // Any typed char resets history navigation and completion.
                 self.history_idx = None;
+                self.reset_command_completion();
                 self.command_buffer.push(ch);
             }
             Mode::Normal => {
@@ -72,6 +73,7 @@ impl App {
             }
             Mode::Search => {
                 self.command_buffer.push(ch);
+                self.reset_command_completion();
                 let chars = self.command_buffer.clone();
                 let case_sensitive = smart_case_sensitive(&chars);
                 let _ = self.backend.send_edit(
@@ -192,6 +194,7 @@ impl App {
             }
             Mode::CommandLine | Mode::Search => {
                 // Paste into the command/search buffer.
+                self.reset_command_completion();
                 self.command_buffer.push_str(&text);
                 if self.mode == Mode::Search {
                     let chars = self.command_buffer.clone();

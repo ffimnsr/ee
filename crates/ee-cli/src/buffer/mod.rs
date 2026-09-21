@@ -257,6 +257,9 @@ pub(crate) struct BufferManager {
     alternate: Option<usize>,
     access_history: Vec<BufferId>,
     modified_history: Vec<BufferId>,
+    /// Last viewport size pushed to the backend, re-sent when the active view
+    /// changes so word wrap uses the real width in every view.
+    pub(crate) last_resize: Option<(f64, f64)>,
     next_buf_id: BufferId,
     next_rpc_id: u64,
     /// Pending synchronous RPC responses keyed by request id.

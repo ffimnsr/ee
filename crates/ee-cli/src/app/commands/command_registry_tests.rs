@@ -76,6 +76,94 @@ fn completion_now_covers_new_registry_aliases() {
 }
 
 #[test]
+fn tab_completion_rotates_through_candidates() {
+    let mut app = App::from_path(None).unwrap();
+
+    // `tab` is the common prefix of all tab* matches, so the first Tab lands
+    // on the first candidate, and repeated Tabs cycle in registry order.
+    app.command_buffer = String::from("tab");
+    app.complete_command();
+    assert_eq!(app.command_buffer, "tabc");
+    app.complete_command();
+    assert_eq!(app.command_buffer, "tabclose");
+    app.complete_command();
+    assert_eq!(app.command_buffer, "tabe");
+    app.complete_command();
+    assert_eq!(app.command_buffer, "tabedit");
+}
+
+#[test]
+fn tab_completion_completes_common_prefix_before_rotating() {
+    let mut app = App::from_path(None).unwrap();
+
+    // First Tab widens `ta` to the common prefix `tab`; the next Tab rotates.
+    app.command_buffer = String::from("ta");
+    app.complete_command();
+    assert_eq!(app.command_buffer, "tab");
+    app.complete_command();
+    assert_eq!(app.command_buffer, "tabc");
+    app.complete_command();
+    assert_eq!(app.command_buffer, "tabclose");
+}
+
+#[test]
+fn tab_completion_restarts_after_buffer_edit() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.command_buffer = String::from("tab");
+    app.complete_command();
+    assert_eq!(app.command_buffer, "tabc");
+    // Editing the buffer invalidates the session; the next Tab starts fresh.
+    app.command_buffer = String::from("tabcx");
+    app.complete_command();
+    assert_eq!(app.command_buffer, "tabcx", "no match: buffer must stay");
+}
+
+#[test]
+fn tab_completion_merges_all_registry_aliases() {
+    // Contract: pre-existing registry tests assert exact first-candidate
+    // behavior for several prefixes (`conf`, `nohl`, `wsy`, `wr`, `bp`, `ed`)
+    // and `completion_now_covers_new_registry_aliases` proves fresh sessions
+    // across prefix changes.  This test pins the opposite direction: every
+    // registered alias must stay reachable — completing a full alias never
+    // loses it, and every completion result resolves back to a command.
+    let mut app = App::from_path(None).unwrap();
+    for alias in App::command_registry_aliases() {
+        app.reset_command_completion();
+        app.command_buffer = alias.to_owned();
+        app.complete_command();
+        let completed = app.command_buffer.clone();
+        assert!(completed.starts_with(alias), "alias {alias:?} completed to {completed:?}");
+        assert!(
+            App::resolve_ex_command(&completed).is_some(),
+            "completion {completed:?} (from {alias:?}) is not a valid command"
+        );
+    }
+}
+
+#[test]
+fn tab_completion_ignores_non_command_input() {
+    let mut app = App::from_path(None).unwrap();
+
+    // Numeric line jumps and unknown text have no command matches.
+    for non_command in ["123", "%!", "zzz_nope", "tab ", "w foo.txt"] {
+        app.reset_command_completion();
+        app.command_buffer = non_command.to_owned();
+        app.complete_command();
+        assert_eq!(app.command_buffer, non_command, "{non_command:?} must stay untouched");
+    }
+}
+
+#[test]
+fn tab_completion_unique_match_completes_directly() {
+    let mut app = App::from_path(None).unwrap();
+
+    app.command_buffer = String::from("tabnext");
+    app.complete_command();
+    assert_eq!(app.command_buffer, "tabnext");
+}
+
+#[test]
 fn completable_aliases_all_resolve_through_registry() {
     let unresolved: Vec<_> = App::command_registry_aliases()
         .into_iter()

@@ -557,6 +557,12 @@ fn run_app(
     app: &mut App,
     shutdown: Arc<AtomicBool>,
 ) -> io::Result<()> {
+    // Report the initial size so the backend can word-wrap at the real width
+    // (core wraps at width 0 = every word on its own line).
+    if let Ok(size) = terminal.size() {
+        app.last_terminal_size = (size.width as usize, size.height as usize);
+        app.sync_backend_viewport_size();
+    }
     while !app.should_quit && !shutdown.load(Ordering::Relaxed) {
         app.backend.drain_events()?;
         app.handle_pending_ui_actions();
@@ -604,8 +610,10 @@ fn run_app(
             for event in coalesce_input_events(events) {
                 match event {
                     // SIGWINCH arrives as Event::Resize from crossterm; force a
-                    // full redraw by clearing the terminal buffer.
-                    Event::Resize(_, _) => {
+                    // full redraw and keep the backend wrap width in sync.
+                    Event::Resize(cols, rows) => {
+                        app.last_terminal_size = (cols as usize, rows as usize);
+                        app.sync_backend_viewport_size();
                         terminal.clear()?;
                     }
                     ev => app.handle_event(ev),
@@ -640,6 +648,14 @@ fn run_app(
             ratatui::layout::Rect { x: 0, y: 0, width: size.width, height: size.height };
         let editor_height = ui::compute_editor_height(term_rect, app);
         let editor_width = ui::compute_editor_width(term_rect, app);
+        app.last_editor_width = editor_width;
+        app.last_editor_height = editor_height;
+        // Keep the backend wrap width at the real text width (word wrap uses
+        // the viewport size reported via `resize`).  Deduped: only sends when
+        // the width actually changed.
+        if app.config.wrap_lines {
+            app.sync_backend_viewport_size();
+        }
         app.scroll_into_view(editor_height, editor_width);
         let active = app.backend.active();
         let viewport_range = app.folds.line_range_for_rendered_rows(

@@ -74,8 +74,8 @@ pub(crate) use parsing::{
     text_obj_bracket, text_obj_quote, text_obj_tag, text_obj_word,
 };
 pub(crate) use state::{
-    App, HoverPopup, Mode, Operator, PendingCharFind, PrivilegedSavePending, RepeatableMotion,
-    SubstitutePending, SwiftMotionState, SwiftMotionTarget, Viewport,
+    App, CommandCompletion, HoverPopup, Mode, Operator, PendingCharFind, PrivilegedSavePending,
+    RepeatableMotion, SubstitutePending, SwiftMotionState, SwiftMotionTarget, Viewport,
 };
 
 // Served to the bin's `tests/` modules; the lib test build compiles this

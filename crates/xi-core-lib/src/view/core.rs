@@ -69,8 +69,13 @@ impl View {
     }
 
     pub(crate) fn update_wrap_settings(&mut self, text: &Rope, wrap_cols: usize, word_wrap: bool) {
+        // Word wrap wraps at the frontend-reported view width.  Until a real
+        // size arrives (e.g. terminal frontend sends `resize` on startup) the
+        // width is 0 — wrapping at 0 would break after every word, so treat
+        // it as no wrap until the frontend reports its size.
         let wrap_width = match (word_wrap, wrap_cols) {
-            (true, _) => WrapWidth::Width(self.size.width),
+            (true, _) if self.size.width > 0.0 => WrapWidth::Width(self.size.width),
+            (true, _) => WrapWidth::None,
             (false, 0) => WrapWidth::None,
             (false, cols) => WrapWidth::Bytes(cols),
         };

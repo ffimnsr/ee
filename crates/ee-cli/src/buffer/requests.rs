@@ -20,6 +20,25 @@ impl BufferManager {
         Ok(())
     }
 
+    /// Push the *runtime* editor settings (`:set` session overrides) to the
+    /// backend as the general config scope, keeping per-file overrides.
+    pub(crate) fn push_runtime_editor_config(
+        &mut self,
+        settings: &crate::config::EditorSettings,
+    ) -> io::Result<()> {
+        send_config_notification(&self.tx, json!("general"), settings.to_xi_config_table())?;
+        for idx in 0..self.bufs.len() {
+            let (_, _, overrides) =
+                crate::config::xi_config_tables_for_file(self.bufs[idx].path.as_deref());
+            send_config_notification(
+                &self.tx,
+                json!({ "user_override": self.bufs[idx].view_id }),
+                overrides,
+            )?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn request_completion(&mut self, index: Option<usize>) -> io::Result<()> {
         self.send_edit("request_completion", json!({ "index": index }))
     }

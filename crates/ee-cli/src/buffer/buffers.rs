@@ -145,6 +145,10 @@ impl BufferManager {
             self.access_history.push(self.bufs[self.current].id);
             self.alternate = Some(self.current);
             self.current = idx;
+            // The new view also needs the viewport size for word wrap.
+            if let Some((width, height)) = self.last_resize {
+                let _ = self.send_edit("resize", json!({ "width": width, "height": height }));
+            }
         }
     }
 
@@ -261,5 +265,75 @@ impl BufferManager {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    fn second_buf_state() -> BufState {
+        BufState {
+            id: 2,
+            path: None,
+            display_name: None,
+            view_id: String::from("view-id-2"),
+            editor_config_synced: true,
+            pending_line_request: false,
+            line_cache: Vec::new(),
+            lines: Vec::new(),
+            cursor_line: 0,
+            cursor_col: 0,
+            pristine: true,
+            save_complete: true,
+            last_save_generation: 0,
+            completed_save_generation: 0,
+            last_save_result_generation: 0,
+            last_save_succeeded: true,
+            last_save_permission_denied: false,
+            last_save_error_message: None,
+            status_message: None,
+            last_scroll: None,
+            mtime: None,
+            externally_modified: false,
+            diagnostics: Vec::new(),
+            annotations: Vec::new(),
+            is_vlf: false,
+            vlf_cache_start_line: 0,
+            vlf_previous_viewport: None,
+            vlf_generation: 0,
+            vlf_approx_line_count: 0,
+            vlf_line_count_exact: false,
+            pending_vlf_tail_jump: false,
+            vlf_search_ranges: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn switch_view_replays_last_resize_for_word_wrap() {
+        let (tx, rx) = mpsc::channel();
+        let (_backend_tx, backend_rx) = mpsc::channel();
+        let mut mgr = BufferManager::test_new(tx, backend_rx, String::from("view-id-1"));
+        mgr.last_resize = Some((100.0, 40.0));
+        mgr.bufs.push(second_buf_state());
+
+        mgr.switch_to_idx(1);
+
+        // The new view inherits the stored viewport size so word wrap works
+        // there too (core wraps at the size reported via `resize`).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut saw_resize = false;
+        while std::time::Instant::now() < deadline && !saw_resize {
+            if let Ok(message) = rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                let value: serde_json::Value = serde_json::from_str(&message).unwrap();
+                if value["params"]["method"] == "resize"
+                    && value["params"]["params"]["width"] == 100.0
+                {
+                    saw_resize = true;
+                }
+            }
+        }
+        assert!(saw_resize, "expected resize replay on view switch");
     }
 }

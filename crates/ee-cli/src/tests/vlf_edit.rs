@@ -25,11 +25,13 @@ fn vlf_local_navigation_moves_cursor_without_core_edit() {
             text: String::from("alpha"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
         LineSlot::Known(CachedLine {
             text: String::from("beta"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
     ];
 
@@ -56,11 +58,13 @@ fn vlf_insert_key_uses_overlay_edit_rpc_without_cursor_jump() {
             text: String::from("alpha"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
         LineSlot::Known(CachedLine {
             text: String::from("beta"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
     ];
     app.last_editor_height = 6;
@@ -111,6 +115,7 @@ fn vlf_insert_preserves_untouched_syntax_spans_before_viewport_reply() {
             CoreSyntaxSpan { start_byte: 0, end_byte: 2, scope: String::from("prefix") },
             CoreSyntaxSpan { start_byte: 2, end_byte: 4, scope: String::from("suffix") },
         ],
+        logical_line: None,
     })];
     app.last_editor_height = 6;
 
@@ -148,31 +153,37 @@ fn vlf_insert_forces_viewport_refresh_when_current_range_is_already_cached() {
             text: String::from("alpha"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
         LineSlot::Known(CachedLine {
             text: String::from("beta"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
         LineSlot::Known(CachedLine {
             text: String::from("gamma"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
         LineSlot::Known(CachedLine {
             text: String::from("delta"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
         LineSlot::Known(CachedLine {
             text: String::from("epsilon"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
         LineSlot::Known(CachedLine {
             text: String::from("zeta"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
     ];
 
@@ -212,11 +223,13 @@ fn vlf_insert_newline_updates_local_cache_before_viewport_reply() {
             text: String::from("alpha"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
         LineSlot::Known(CachedLine {
             text: String::from("beta"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
     ];
     app.last_editor_height = 6;
@@ -261,11 +274,13 @@ fn vlf_backspace_updates_local_cache_before_viewport_reply() {
             text: String::from("be"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
         LineSlot::Known(CachedLine {
             text: String::from("ta"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
     ];
     app.last_editor_height = 6;
@@ -313,11 +328,13 @@ fn vlf_delete_char_forward_command_uses_overlay_edit_rpc() {
             text: String::from("be"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
         LineSlot::Known(CachedLine {
             text: String::from("ta"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
     ];
     app.last_editor_height = 6;
@@ -363,6 +380,7 @@ fn vlf_zero_moves_to_line_start_without_core_edit() {
         text: String::from("alpha"),
         cursors: Vec::new(),
         syntax_spans: Vec::new(),
+        logical_line: None,
     });
 
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE)));
@@ -513,6 +531,7 @@ fn vlf_completed_tail_jump_then_top_restores_cached_top_viewport() {
                 text: format!("top {line}"),
                 cursors: Vec::new(),
                 syntax_spans: Vec::new(),
+                logical_line: None,
             })
         })
         .collect();
@@ -868,6 +887,7 @@ fn vlf_visual_line_escape_restores_cursor_without_core_edit() {
         text: String::from("abcdef"),
         cursors: Vec::new(),
         syntax_spans: Vec::new(),
+        logical_line: None,
     });
 
     app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('V'), KeyModifiers::NONE)));

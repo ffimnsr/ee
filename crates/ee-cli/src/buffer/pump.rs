@@ -132,6 +132,7 @@ impl BufferManager {
             alternate: None,
             access_history: Vec::new(),
             modified_history: Vec::new(),
+            last_resize: None,
             next_buf_id: 2,
             next_rpc_id: 2,
             pending: Arc::new(Mutex::new(HashMap::new())),

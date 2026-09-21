@@ -107,9 +107,10 @@ fn encode_line_includes_backend_syntax_spans_with_byte_ranges() {
     ];
 
     let line = VisualLine { interval: Interval::new(0, 10), line_num: Some(1) };
-    let encoded = view.encode_line(line, Some(&text), &syntax_spans, text.len());
+    let encoded = view.encode_line(line, Some(&text), &syntax_spans, text.len(), 0);
     let syntax = encoded["syntax_spans"].as_array().expect("missing syntax spans");
 
+    assert_eq!(encoded["ln"], 0, "logical line number is always emitted");
     assert_eq!(syntax.len(), 2);
     assert_eq!(syntax[0]["start_byte"], 0);
     assert_eq!(syntax[0]["end_byte"], 3);
@@ -130,7 +131,7 @@ fn encode_line_keeps_line_relative_syntax_spans() {
     }];
 
     let line = VisualLine { interval: Interval::new(6, 16), line_num: Some(2) };
-    let encoded = view.encode_line(line, Some(&text), &syntax_spans, text.len());
+    let encoded = view.encode_line(line, Some(&text), &syntax_spans, text.len(), 1);
     let syntax = encoded["syntax_spans"].as_array().expect("missing syntax spans");
 
     assert_eq!(syntax.len(), 1);
@@ -145,7 +146,7 @@ fn encode_line_omits_syntax_spans_when_backend_has_no_data() {
     let text = Rope::from("plain text\n");
     let line = VisualLine { interval: Interval::new(0, 10), line_num: Some(1) };
 
-    let encoded = view.encode_line(line, Some(&text), &[], text.len());
+    let encoded = view.encode_line(line, Some(&text), &[], text.len(), 0);
 
     assert!(encoded.get("syntax_spans").is_none());
 }
@@ -289,4 +290,61 @@ fn syntax_span_render_perf_probe() {
     );
 
     assert!(syntax_bytes > 0, "probe should emit a measured update payload");
+}
+
+#[test]
+fn update_lines_carry_repeated_logical_ln_for_wrapped_rows() {
+    let text = Rope::from("one two three four\nfive six seven\neight nine ten eleven\n");
+    let mut view = View::new(1.into(), BufferId::new(2));
+    view.height = 40;
+    // Narrow byte wrap: every logical line spans several visual rows.
+    view.debug_force_rewrap_cols(&text, 4);
+
+    let (client, peer) = recording_client();
+    view.render_if_dirty(&text, &client, true, "", false);
+
+    let updates = peer.take_notifications();
+    let update_json = updates
+        .iter()
+        .find(|(method, _)| method == "update")
+        .map(|(_, params)| params.clone())
+        .expect("update notification");
+    let lines = update_json["update"]["ops"]
+        .as_array()
+        .expect("ops")
+        .iter()
+        .flat_map(|op| op["lines"].as_array().cloned().unwrap_or_default())
+        .collect::<Vec<_>>();
+    assert!(!lines.is_empty(), "wrapped rows must be emitted");
+
+    let ln: Vec<usize> = lines.iter().map(|l| l["ln"].as_u64().unwrap() as usize).collect();
+    assert_eq!(ln.first(), Some(&0), "first row starts at logical 0");
+    // Every logical line (0..=3, the trailing newline adds an empty 4th
+    // logical line) appears; no skips; non-decreasing order.
+    for window in ln.windows(2) {
+        assert!(window[1] >= window[0], "ln must be non-decreasing: {ln:?}");
+    }
+    let mut seen: Vec<usize> = ln.to_vec();
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen, vec![0, 1, 2, 3], "ln sequence: {ln:?}");
+    // Wrapped rows repeat their logical line's number at least once.
+    assert!(ln.len() > 4, "expected wrapping, got {ln:?}");
+}
+
+#[test]
+fn word_wrap_waits_for_reported_view_size() {
+    let text = Rope::from("one two three four five six seven eight nine ten");
+    let mut view = View::new(1.into(), BufferId::new(2));
+
+    // No frontend-reported size yet: word wrap must not break at width 0.
+    view.update_wrap_settings(&text, 0, true);
+    let (start, end) = view.lines.logical_line_range(&text, 0);
+    assert_eq!((start, end), (0, text.len()), "no wrap before a size arrives");
+    assert!(view.lines.is_converged(), "no pending wrap work at size 0");
+
+    // Once the frontend reports its size, word wrap wraps at that width.
+    view.set_size(Size { width: 10.0, height: 24.0 });
+    view.update_wrap_settings(&text, 0, true);
+    assert!(!view.lines.is_converged(), "word wrap is active once a size is reported");
 }

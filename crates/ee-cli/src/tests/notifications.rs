@@ -146,6 +146,7 @@ fn apply_update_merges_copy_update_insert_and_invalidate() {
             text: "alpha".into(),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
         LineSlot::Known(CachedLine {
             text: "beta".into(),
@@ -155,11 +156,13 @@ fn apply_update_merges_copy_update_insert_and_invalidate() {
                 end_byte: 4,
                 scope: "keyword.control.rust".into(),
             }],
+            logical_line: None,
         }),
         LineSlot::Known(CachedLine {
             text: "gamma".into(),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
     ];
     client.rebuild_lines();
@@ -177,7 +180,12 @@ fn apply_update_merges_copy_update_insert_and_invalidate() {
                 CoreUpdateOp {
                     op: CoreUpdateKind::Update,
                     n: 1,
-                    lines: vec![CoreLine { text: None, cursor: vec![1], syntax_spans: None }],
+                    lines: vec![CoreLine {
+                        text: None,
+                        cursor: vec![1],
+                        syntax_spans: None,
+                        logical_line: None,
+                    }],
                 },
                 CoreUpdateOp {
                     op: CoreUpdateKind::Insert,
@@ -190,6 +198,7 @@ fn apply_update_merges_copy_update_insert_and_invalidate() {
                             end_byte: 5,
                             scope: "entity.name.function.rust".into(),
                         }]),
+                        logical_line: None,
                     }],
                 },
                 CoreUpdateOp { op: CoreUpdateKind::Invalidate, n: 2, lines: Vec::new() },
@@ -214,6 +223,7 @@ fn update_merge_normalizes_line_text() {
         text: String::from("alpha"),
         cursors: Vec::new(),
         syntax_spans: Vec::new(),
+        logical_line: None,
     });
 
     let merged = slot
@@ -221,6 +231,7 @@ fn update_merge_normalizes_line_text() {
             text: Some(String::from("beta\n")),
             cursor: Vec::new(),
             syntax_spans: None,
+            logical_line: None,
         })
         .expect("update merge should succeed");
 
@@ -243,16 +254,19 @@ fn pristine_external_reload_update_clears_changed_flag_for_trailing_blank_line_r
             text: String::from("alpha"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
         LineSlot::Known(CachedLine {
             text: String::new(),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
         LineSlot::Known(CachedLine {
             text: String::new(),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
     ];
     client.rebuild_lines();
@@ -293,6 +307,7 @@ fn stale_view_updates_are_ignored() {
         text: String::from("alpha"),
         cursors: Vec::new(),
         syntax_spans: Vec::new(),
+        logical_line: None,
     })];
     client.rebuild_lines();
 
@@ -333,6 +348,7 @@ fn core_update_keeps_invalid_lines_lazy() {
                             text: Some(String::from("visible")),
                             cursor: Vec::new(),
                             syntax_spans: None,
+                            logical_line: None,
                         }],
                     },
                     CoreUpdateOp { op: CoreUpdateKind::Invalidate, n: 100_000, lines: Vec::new() },
@@ -381,6 +397,7 @@ fn source_control_skips_lazy_line_cache() {
             text: String::from("visible"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
         LineSlot::Invalid,
     ];
@@ -400,6 +417,7 @@ fn source_control_skips_vlf_buffers_and_clears_stale_cache() {
         text: String::from("visible"),
         cursors: Vec::new(),
         syntax_spans: Vec::new(),
+        logical_line: None,
     })];
     app.source_control.insert(
         buf_id,
@@ -483,6 +501,7 @@ fn startup_render_ready_after_first_visible_line() {
         text: String::from("line-0"),
         cursors: Vec::new(),
         syntax_spans: Vec::new(),
+        logical_line: None,
     })]));
     assert!(!startup_render_ready(&[
         LineSlot::Invalid,
@@ -490,6 +509,7 @@ fn startup_render_ready_after_first_visible_line() {
             text: String::from("line-1"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
+            logical_line: None,
         }),
     ]));
 }

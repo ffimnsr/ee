@@ -233,6 +233,21 @@ impl InputState {
     }
 }
 
+/// Active command-line Tab completion session (vim-style rotation).
+#[derive(Debug, Clone)]
+pub(crate) struct CommandCompletion {
+    /// Full names matching the prefix at the first Tab, in registry order.
+    pub(crate) candidates: Vec<String>,
+    /// Index of the currently shown candidate while cycling.
+    pub(crate) index: usize,
+    /// True right after the first Tab, when the buffer holds the common
+    /// prefix instead of a full candidate.
+    pub(crate) at_lcp: bool,
+    /// Text the completion put into the buffer; rotation only continues while
+    /// the buffer still matches it (any edit starts a fresh session).
+    pub(crate) shown: String,
+}
+
 #[derive(Debug)]
 pub(crate) struct App {
     pub(crate) config: crate::config::EditorSettings,
@@ -250,6 +265,9 @@ pub(crate) struct App {
     pub(crate) viewport: Viewport,
     pub(crate) last_editor_height: usize,
     pub(crate) last_editor_width: usize,
+    /// Latest full terminal size from `Event::Resize` (cols, rows).  Used to
+    /// keep the backend's wrap width in sync when the editor width is unknown.
+    pub(crate) last_terminal_size: (usize, usize),
     pub(crate) input_state: InputState,
     /// Anchor position (line, col) when a visual mode was entered.
     pub(crate) visual_anchor: Option<(usize, usize)>,
@@ -303,6 +321,9 @@ pub(crate) struct App {
     pub(super) history_idx: Option<usize>,
     /// Saved `command_buffer` snapshot taken before history navigation began.
     pub(super) history_draft: String,
+    /// Active command-line Tab completion session (vim-style rotation).
+    /// `None` when the buffer was edited since the last Tab.
+    pub(crate) command_completion: Option<CommandCompletion>,
     /// Per-buffer syntax override set via `:set_language`.
     pub(crate) syntax_overrides: HashMap<crate::buffer::BufferId, String>,
     // ── Picker overlay ─────────────────────────────────────────────────────
@@ -422,6 +443,7 @@ impl App {
             viewport: Viewport::default(),
             last_editor_height: 0,
             last_editor_width: 0,
+            last_terminal_size: (80, 24),
             input_state: InputState::default(),
             visual_anchor: None,
             visual_restore_cursor: None,
@@ -446,6 +468,7 @@ impl App {
             command_history: Vec::new(),
             history_idx: None,
             history_draft: String::new(),
+            command_completion: None,
             syntax_overrides: HashMap::new(),
             picker: None,
             last_picker: None,

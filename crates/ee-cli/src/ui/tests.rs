@@ -237,6 +237,7 @@ fn vlf_search_ranges_render_with_find_highlight() {
         text: String::from("alpha needle omega"),
         cursors: vec![],
         syntax_spans: vec![],
+        logical_line: None,
     })];
     app.backend.vlf_search_ranges = vec![VlfSearchRange { line: 0, start_col: 6, end_col: 12 }];
 
@@ -266,6 +267,7 @@ fn vlf_cursor_position_uses_line_cache_text() {
         text: String::from("abcdef"),
         cursors: vec![],
         syntax_spans: vec![],
+        logical_line: None,
     })];
 
     let pos = cursor_position_for(

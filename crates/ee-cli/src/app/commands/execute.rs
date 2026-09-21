@@ -1434,8 +1434,8 @@ impl App {
                 return;
             }
             "set" => {
-                let opt = parts.next().unwrap_or_default();
-                self.apply_set_option(opt);
+                let args: Vec<&str> = parts.collect();
+                self.apply_set_args(&args);
             }
             "noh" | "nohlsearch" => {
                 self.search_pattern = None;

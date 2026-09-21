@@ -21,6 +21,7 @@ fn sustained_reverse_scroll_only_loads_latest_queued_vlf_viewport() {
                 text: format!("tail {line}"),
                 cursors: Vec::new(),
                 syntax_spans: Vec::new(),
+                logical_line: None,
             })
         })
         .collect();

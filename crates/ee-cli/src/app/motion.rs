@@ -2,6 +2,25 @@
 use super::*;
 
 impl App {
+    /// Keep the backend's wrap width in sync with the actual text area: xi
+    /// core word-wraps at the size reported via the `resize` edit.  Prefer the
+    /// last rendered editor width; fall back to the terminal width.  Skips the
+    /// send when the size is unchanged (e.g. per-frame calls).
+    pub(crate) fn sync_backend_viewport_size(&mut self) {
+        let (term_cols, _term_rows) = self.last_terminal_size;
+        let width = if self.last_editor_width > 0 {
+            self.last_editor_width.min(term_cols)
+        } else {
+            term_cols.max(1)
+        };
+        let height = self.last_editor_height.max(1);
+        let resize = (width as f64, height as f64);
+        if self.backend.last_resize == Some(resize) {
+            return;
+        }
+        let _ = self.backend.send_edit("resize", json!({ "width": resize.0, "height": resize.1 }));
+        self.backend.last_resize = Some(resize);
+    }
     /// Re-send the current search buffer to the backend find (live preview
     /// while editing the search line).
     pub(super) fn refresh_search_from_buffer(&mut self) {

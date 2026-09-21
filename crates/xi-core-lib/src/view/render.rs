@@ -8,6 +8,7 @@ impl View {
         text: Option<&Rope>,
         syntax_spans: &[VisibleSyntaxSpan],
         last_pos: usize,
+        logical_line: usize,
     ) -> Value {
         let start_pos = line.interval.start;
         let pos = line.interval.end;
@@ -61,9 +62,10 @@ impl View {
         if !cursors.is_empty() {
             result["cursor"] = json!(cursors);
         }
-        if let Some(line_num) = line.line_num {
-            result["ln"] = json!(line_num);
-        }
+        // Logical line number (0-based) for every visual row: wrapped
+        // continuation rows repeat the number of their logical line, letting
+        // frontends leave the gutter blank on continuations.
+        result["ln"] = json!(logical_line.saturating_sub(1));
         result
     }
 
@@ -233,15 +235,26 @@ impl View {
                             // ALL_VALID; copy lines as-is
                             ops.push(UpdateOp::copy(seg.n, logical_line + 1));
                         } else {
-                            // !CURSOR_VALID; update cursors
+                            // !CURSOR_VALID; update cursors.  `iter_lines`
+                            // reports logical line numbers 1-based.
                             let start_line = seg.our_line_num;
+                            let mut running_logical = logical_line + 1;
 
                             let encoded_lines = self
                                 .lines
                                 .iter_lines(text, start_line)
                                 .take(seg.n)
                                 .map(|l| {
-                                    self.encode_line(l, /* text = */ None, &[], text.len())
+                                    if let Some(n) = l.line_num {
+                                        running_logical = n;
+                                    }
+                                    self.encode_line(
+                                        l,
+                                        /* text = */ None,
+                                        &[],
+                                        text.len(),
+                                        running_logical,
+                                    )
                                 })
                                 .collect::<Vec<_>>();
 
@@ -263,13 +276,24 @@ impl View {
                             language_name,
                             syntax_enabled,
                         );
+                        let mut running_logical =
+                            text.line_of_offset(self.offset_of_line(text, seg.our_line_num)) + 1;
                         let encoded_lines = self
                             .lines
                             .iter_lines(text, start_line)
                             .take(seg.n)
                             .zip(syntax_spans)
                             .map(|(line, syntax)| {
-                                self.encode_line(line, Some(text), &syntax, text.len())
+                                if let Some(n) = line.line_num {
+                                    running_logical = n;
+                                }
+                                self.encode_line(
+                                    line,
+                                    Some(text),
+                                    &syntax,
+                                    text.len(),
+                                    running_logical,
+                                )
                             })
                             .collect::<Vec<_>>();
                         debug_assert_eq!(encoded_lines.len(), seg.n);

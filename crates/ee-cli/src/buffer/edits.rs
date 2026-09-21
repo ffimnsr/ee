@@ -359,7 +359,7 @@ impl BufferManager {
         )
     }
 
-    /// Vim `go` [count]: jump to byte offset (1-based) in the buffer.
+    /// Vim `go` with a count: jump to byte offset (1-based) in the buffer.
     pub(crate) fn goto_byte(&mut self, offset: usize) -> io::Result<()> {
         self.send_edit(
             "set_selections",
