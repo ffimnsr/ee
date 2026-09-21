@@ -1,0 +1,8 @@
+---
+source: crates/ee-cli/src/tests/render.rs
+expression: focus
+---
+       vulputate.
+    2
+    3  Ut ultrices auctor arcu id euismod. Sed leo nisl,
+       feugiat vitae convallis vitae, venenatis in

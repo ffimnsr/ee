@@ -91,7 +91,9 @@ ee-agent-orchestrator.workspace = true
 ee-mcp = { workspace = true, features = ["test-utils"] }
 ee-openrouter-agent = { path = "../ee-openrouter-agent", features = ["test-utils"] }
 futures.workspace = true
+insta.workspace = true
 tempfile.workspace = true
+vt100.workspace = true
 xi-core-lib = { workspace = true, features = ["test-grammars"] }
 
 [build-dependencies]

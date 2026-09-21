@@ -317,19 +317,24 @@ fn update_lines_carry_repeated_logical_ln_for_wrapped_rows() {
         .collect::<Vec<_>>();
     assert!(!lines.is_empty(), "wrapped rows must be emitted");
 
-    let ln: Vec<usize> = lines.iter().map(|l| l["ln"].as_u64().unwrap() as usize).collect();
-    assert_eq!(ln.first(), Some(&0), "first row starts at logical 0");
-    // Every logical line (0..=3, the trailing newline adds an empty 4th
-    // logical line) appears; no skips; non-decreasing order.
-    for window in ln.windows(2) {
-        assert!(window[1] >= window[0], "ln must be non-decreasing: {ln:?}");
+    let ln: Vec<Option<usize>> =
+        lines.iter().map(|l| l["ln"].as_u64().map(|v| v as usize)).collect();
+    assert_eq!(ln.first(), Some(&Some(0)), "first row starts at logical 0");
+    // `ln` is carried only on the first visual row of each logical line
+    // (0..=3, the trailing newline adds an empty 4th logical line); wrapped
+    // continuation rows omit it entirely.
+    let mut expected = 0;
+    for (row, value) in ln.iter().enumerate() {
+        if let Some(n) = value {
+            assert_eq!(*n, expected, "row {row} must open logical line {expected}: {ln:?}");
+            expected += 1;
+        }
     }
-    let mut seen: Vec<usize> = ln.to_vec();
-    seen.sort_unstable();
-    seen.dedup();
-    assert_eq!(seen, vec![0, 1, 2, 3], "ln sequence: {ln:?}");
-    // Wrapped rows repeat their logical line's number at least once.
+    assert_eq!(expected, 4, "missing logical lines in {ln:?}");
+    // Wrapped rows stay enumerated by their logical line, with continuation
+    // rows carrying no `ln`.
     assert!(ln.len() > 4, "expected wrapping, got {ln:?}");
+    assert!(ln.contains(&None), "continuation rows must omit ln: {ln:?}");
 }
 
 #[test]

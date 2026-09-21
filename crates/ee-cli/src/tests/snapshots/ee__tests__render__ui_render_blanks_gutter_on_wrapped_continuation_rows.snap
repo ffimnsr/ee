@@ -1,0 +1,12 @@
+---
+source: crates/ee-cli/src/tests/render.rs
+expression: grid
+---
+    1  wrapped-A
+       wrapped-B
+       wrapped-C
+    2  next
+~
+~
+~
+~

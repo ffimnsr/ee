@@ -61,6 +61,19 @@ pub(super) fn render_gutter(
     let mut lines: Vec<Line> = Vec::with_capacity(height);
     let mut li = top;
     let tilde_style = Style::default().fg(theme::FG_TILDE).bg(theme::BG_CHROME);
+    // Walk rows top-to-bottom carrying the last reported logical line forward.
+    // The backend reports `ln` only on the first visual row of a logical line,
+    // so a row without one after a known line is a wrapped continuation and
+    // gets a blank gutter (like vim).  Scanning the cache above the viewport
+    // covers a viewport that starts mid-wrap.
+    let mut carried_logical: Option<usize> =
+        (0..=top).rev().find_map(|row| buf.row_logical_line(row));
+    // Relative numbering measures logical-line distance: resolve the cursor's
+    // logical line once from the nearest preceding row with a reported line.
+    let cursor_logical = (0..=cursor_line)
+        .rev()
+        .find_map(|row| buf.row_logical_line(row).map(|n| n + 1))
+        .unwrap_or(cursor_line + 1);
     for _ in 0..height {
         if li >= line_count {
             lines.push(Line::from(Span::styled("~", tilde_style)));
@@ -76,14 +89,13 @@ pub(super) fn render_gutter(
             theme::BG_CHROME
         };
 
-        // Wrapped continuation rows repeat the previous row's logical line
-        // number; vim leaves the gutter blank on them.
-        let is_wrap_continuation = li > top
-            && buf
-                .row_logical_line(li - 1)
-                .zip(buf.row_logical_line(li))
-                .is_some_and(|(prev, cur)| prev == cur);
-        let number = buf.row_logical_line(li).map(|n| n + 1).unwrap_or(li + 1);
+        let logical_line = buf.row_logical_line(li);
+        if logical_line.is_some() {
+            carried_logical = logical_line;
+        }
+        // Wrapped continuation rows omit `ln`; vim leaves the gutter blank.
+        let is_wrap_continuation = logical_line.is_none() && carried_logical.is_some();
+        let number = carried_logical.map(|n| n + 1).unwrap_or(li + 1);
 
         // Sign column: show fold markers when applicable.
         let sign_spans = if sign_col {
@@ -124,7 +136,7 @@ pub(super) fn render_gutter(
                 NumberStyle::None => String::new(),
                 NumberStyle::Absolute => format!("{:>width$} ", number, width = num_digits),
                 NumberStyle::Relative => {
-                    let dist = li.abs_diff(cursor_line);
+                    let dist = number.abs_diff(cursor_logical);
                     if dist == 0 {
                         format!("{:>width$} ", number, width = num_digits)
                     } else {
@@ -132,11 +144,10 @@ pub(super) fn render_gutter(
                     }
                 }
                 NumberStyle::RelativeAbsolute => {
-                    let dist = li.abs_diff(cursor_line);
                     if is_cursor {
                         format!("{:>width$} ", number, width = num_digits)
                     } else {
-                        format!("{:>width$} ", dist, width = num_digits)
+                        format!("{:>width$} ", number.abs_diff(cursor_logical), width = num_digits)
                     }
                 }
             }
@@ -378,11 +389,17 @@ pub(super) fn render_buffer(
         })
         .collect();
 
+    // Core already wraps cache rows at the reported editor width, so the
+    // paragraph wrap is normally a no-op — and ratatui's WordWrapper
+    // duplicates whitespace-only lines (blank rows, cursor/annotation
+    // markers), pushing every following row one terminal line down.  Only
+    // enable wrapping when a row actually overflows the viewport width
+    // (stale size until the next rewrap).
+    let rows_overflow = text.iter().any(|line| line.width() > viewport_width);
     let mut widget = Paragraph::new(text)
         .block(Block::default().borders(Borders::NONE))
         .style(Style::default().fg(theme::FG_BUFFER).bg(buf_bg));
-
-    if app.config.wrap_lines {
+    if app.config.wrap_lines && rows_overflow {
         widget = widget.wrap(Wrap { trim: false });
     }
 

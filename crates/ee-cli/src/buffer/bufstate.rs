@@ -4,8 +4,8 @@ use super::*;
 impl BufState {
     pub(super) const VLF_PREVIOUS_VIEWPORT_MAX_BYTES: usize = 32 * 1024 * 1024;
 
-    /// Logical line number of the visual row at `idx` (repeated on wrapped
-    /// continuation rows), when the backend reported it.
+    /// Logical line number of the visual row at `idx` (0-based); `None` on
+    /// wrapped continuation rows and on lines the backend has not reported.
     pub(crate) fn row_logical_line(&self, idx: usize) -> Option<usize> {
         match self.line_cache.get(idx)? {
             LineSlot::Known(line) => line.logical_line,

@@ -62,10 +62,12 @@ impl View {
         if !cursors.is_empty() {
             result["cursor"] = json!(cursors);
         }
-        // Logical line number (0-based) for every visual row: wrapped
-        // continuation rows repeat the number of their logical line, letting
-        // frontends leave the gutter blank on continuations.
-        result["ln"] = json!(logical_line.saturating_sub(1));
+        // Logical line number (0-based), only on the first visual row of a
+        // logical line: `line_num` is `None` on wrapped continuation rows,
+        // letting frontends leave the gutter blank there.
+        if line.line_num.is_some() {
+            result["ln"] = json!(logical_line.saturating_sub(1));
+        }
         result
     }
 

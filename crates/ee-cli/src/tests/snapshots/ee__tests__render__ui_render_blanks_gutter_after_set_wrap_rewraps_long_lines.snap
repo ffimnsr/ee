@@ -1,0 +1,28 @@
+---
+source: crates/ee-cli/src/tests/render.rs
+expression: grid
+---
+    1  Lorem ipsum dolor sit amet, consectetur
+       adipiscing elit. Maecenas malesuada mauris eu
+       vehicula convallis. Nunc consectetur, urna ut
+       dapibus venenatis, tellus nisi varius mauris, at
+       eleifend felis enim eget risus. Duis efficitur
+       dui eget sagittis fermentum. Proin tincidunt
+       neque sed augue scelerisque fermentum. Ut urna
+       odio, vehicula vel nulla ac, mollis placerat dui.
+       Duis erat risus, cursus vel tempor ac, faucibus
+       nec ante. Fusce ultrices hendrerit ligula, et
+       eleifend ligula dignissim quis. Vivamus tempor
+       consectetur semper. Duis convallis magna in purus
+       laoreet viverra. Phasellus ultricies scelerisque
+       felis, eu luctus est pulvinar eu. Mauris
+       vulputate neque arcu, vitae vehicula lacus
+       hendrerit at. Nullam pulvinar finibus diam, at
+       ultrices enim tristique a. Vivamus pretium eget
+       lorem ut maximus. Pellentesque habitant morbi
+       tristique senectus et netus et malesuada fames ac
+       turpis egestas. Vivamus dictum molestie
+       vulputate.
+    2
+    3  Ut ultrices auctor arcu id euismod. Sed leo nisl,
+       feugiat vitae convallis vitae, venenatis in

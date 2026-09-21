@@ -19,6 +19,8 @@ use crate::theme::syntax;
 use crate::theme::ui as theme;
 use crate::ui::ui;
 
+use super::helpers::render_editor_screen;
+
 #[test]
 fn ui_render_shows_scrolled_gutter_for_long_buffer() {
     let mut app = App::from_path(None).unwrap();
@@ -74,17 +76,18 @@ fn ui_render_blanks_gutter_on_wrapped_continuation_rows() {
             syntax_spans: Vec::new(),
             logical_line: Some(0),
         }),
+        // Wrapped continuation rows carry no logical line.
         LineSlot::Known(CachedLine {
             text: String::from("wrapped-B"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
-            logical_line: Some(0),
+            logical_line: None,
         }),
         LineSlot::Known(CachedLine {
             text: String::from("wrapped-C"),
             cursors: Vec::new(),
             syntax_spans: Vec::new(),
-            logical_line: Some(0),
+            logical_line: None,
         }),
         LineSlot::Known(CachedLine {
             text: String::from("next"),
@@ -94,18 +97,108 @@ fn ui_render_blanks_gutter_on_wrapped_continuation_rows() {
         }),
     ];
 
-    let backend = TestBackend::new(80, 10);
-    let mut terminal = Terminal::new(backend).unwrap();
-    terminal.draw(|frame| ui(frame, &app)).unwrap();
+    let grid = render_editor_screen(&app, 80, 10);
+    // cat -n parity: only the first visual row of the wrapped line is
+    // numbered; continuation rows leave the gutter blank; the next logical
+    // line shows 2.
+    insta::assert_snapshot!(grid);
+}
 
-    let buffer = terminal.backend().buffer();
-    let gutter_row =
-        |row: u16| (0..6).map(|x| buffer.cell((x, row)).unwrap().symbol()).collect::<String>();
-    // Only the first visual row of logical line 1 is numbered.
-    assert!(gutter_row(0).trim_end().ends_with("1"), "row 0 gutter: {:?}", gutter_row(0));
-    assert_eq!(gutter_row(1).trim(), "", "continuation row 1 must be blank: {:?}", gutter_row(1));
-    assert_eq!(gutter_row(2).trim(), "", "continuation row 2 must be blank: {:?}", gutter_row(2));
-    assert!(gutter_row(3).trim_end().ends_with("2"), "row 3 gutter: {:?}", gutter_row(3));
+/// Opens `test_assets/hello.txt`, waits for the unwrapped 9-line render, then
+/// toggles word wrap (`:set wrap`) at `editor_width`.  Returns the wrapped app
+/// ready for further `pump_until` convergence.
+fn hello_app_wrapped(editor_width: usize) -> App {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..").join("test_assets/hello.txt");
+    let mut app = App::from_path(Some(path)).unwrap();
+    app.backend
+        .pump_until(|state| state.line_count() == 9 && state.row_logical_line(0) == Some(0))
+        .expect("hello.txt initial render");
+    app.last_editor_width = editor_width;
+    app.last_editor_height = 24;
+    for ch in [':', 's', 'e', 't', ' ', 'w', 'r', 'a', 'p'] {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+    }
+    app.handle_event(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    app
+}
+
+#[test]
+fn ui_render_blanks_gutter_after_set_wrap_rewraps_long_lines() {
+    let mut app = hello_app_wrapped(50);
+    // Without wrapping every visual row is its own logical line.
+    assert_eq!(app.backend.row_logical_line(1), Some(1));
+    app.backend
+        .pump_until(|state| {
+            state.row_logical_line(0) == Some(0)
+                && state.row_logical_line(1).is_none()
+                && (2..256).any(|row| state.row_logical_line(row) == Some(1))
+        })
+        .expect("set wrap re-render");
+
+    // Row holding the blank logical line 1: line 1 wraps above it.
+    let blank_row = (1..)
+        .find(|&row| app.backend.row_logical_line(row) == Some(1))
+        .expect("wrapped line 1 must span multiple rows");
+    assert!(blank_row > 2, "line 1 must wrap into several rows, got {blank_row}");
+
+    let height = (blank_row + 5).clamp(8, 60) as u16;
+    let grid = render_editor_screen(&app, 60, height);
+    // Full deterministic screen: gutter numbers on the first visual rows,
+    // blank continuation rows, then 2 (blank line) and 3 (next paragraph).
+    insta::assert_snapshot!(grid);
+}
+
+#[test]
+fn ui_render_full_hello_wrap_screen_matches_cat_n() {
+    let mut app = hello_app_wrapped(50);
+    app.backend
+        .pump_until(|state| {
+            state.is_fully_cached()
+                && state.line_count() > 60
+                && (0..state.line_count()).any(|row| state.row_logical_line(row) == Some(8))
+        })
+        .expect("full hello.txt wrap render");
+    assert!(
+        app.backend.line_count() > 60,
+        "wrapped file must span many rows, got {}",
+        app.backend.line_count()
+    );
+
+    // Tall enough for the whole wrapped file plus trailing tildes.
+    let height = (app.backend.line_count() + 4).clamp(10, 120) as u16;
+    let grid = render_editor_screen(&app, 60, height);
+    insta::assert_snapshot!(grid);
+}
+
+#[test]
+fn ui_render_wrap_keeps_blank_line_aligned_with_cursor() {
+    let mut app = hello_app_wrapped(50);
+    app.backend
+        .pump_until(|state| {
+            state.is_fully_cached()
+                && state.line_count() > 60
+                && (0..state.line_count()).any(|row| state.row_logical_line(row) == Some(8))
+        })
+        .expect("full wrap render");
+    let blank_row = (1..)
+        .find(|&row| app.backend.row_logical_line(row) == Some(1))
+        .expect("blank logical line");
+    // Move the cursor onto the blank line (visual row `blank_row`).
+    for _ in 0..blank_row {
+        app.handle_event(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+        app.backend.pump().unwrap();
+    }
+    app.backend
+        .pump_until(|state| state.cursor_line == blank_row)
+        .expect("cursor lands on blank line");
+
+    // The blank row and the row below must stay aligned: `3` carries the
+    // next paragraph text instead of rendering an extra empty row (ratatui
+    // WordWrapper duplicates whitespace-only lines).
+    let grid = render_editor_screen(&app, 60, 30);
+    let focus = grid.lines().skip(blank_row - 1).take(4).collect::<Vec<_>>().join("\n");
+    insta::assert_snapshot!(focus);
 }
 
 #[test]

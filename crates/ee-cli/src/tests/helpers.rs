@@ -37,6 +37,33 @@ pub fn tree_sitter_test_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+// ── Deterministic render snapshots ────────────────────────────────────────────
+
+/// Renders `app` into a `TestBackend` and returns the editor area as a
+/// deterministic text grid: one line per terminal row, styles dropped,
+/// trailing whitespace trimmed per row.  The tab/status bars (bottom two
+/// rows) are excluded so snapshots do not depend on git, path, or mode state.
+///
+/// Suitable for `insta::assert_snapshot!` assertions of layout behavior
+/// (gutter numbers, wrapping, folds) without ANSI/style noise.
+pub fn render_editor_screen(app: &App, width: u16, height: u16) -> String {
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|frame| ui(frame, app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let editor_height = height.saturating_sub(2);
+    (0..editor_height)
+        .map(|row| {
+            (0..width)
+                .map(|col| buffer.cell((col, row)).unwrap().symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 // ── Guards ─────────────────────────────────────────────────────────────────────
 
 pub struct CurrentDirGuard(pub PathBuf);

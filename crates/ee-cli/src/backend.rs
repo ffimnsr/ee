@@ -256,7 +256,7 @@ pub(crate) struct CachedLine {
     pub(crate) text: String,
     pub(crate) cursors: Vec<usize>,
     pub(crate) syntax_spans: Vec<CoreSyntaxSpan>,
-    /// Logical line number of this visual row; repeated on wrapped
+    /// Logical line number of this visual row (0-based); `None` on wrapped
     /// continuation rows so the gutter can leave them blank.
     pub(crate) logical_line: Option<usize>,
 }
@@ -318,8 +318,8 @@ pub(crate) struct CoreLine {
     pub(crate) cursor: Vec<usize>,
     #[serde(default)]
     pub(crate) syntax_spans: Option<Vec<CoreSyntaxSpan>>,
-    /// Logical line number of this visual row (repeated on wrapped
-    /// continuations), 0-based.
+    /// Logical line number of this visual row (0-based); `None` on wrapped
+    /// continuation rows, present only on the first row of each logical line.
     #[serde(default, rename = "ln")]
     pub(crate) logical_line: Option<usize>,
 }
