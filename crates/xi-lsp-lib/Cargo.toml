@@ -33,6 +33,9 @@ xi-rpc.workspace = true
 # binary's `cfg(test)` grammar preload; this feature forwards the same
 # bundled test grammars so symbol/highlights paths never depend on user
 # state-dir grammar artifacts.  Enabled only by the test harness build.
+[dev-dependencies]
+tempfile.workspace = true
+
 [features]
 test-grammars = ["xi-core-lib/test-grammars"]
 

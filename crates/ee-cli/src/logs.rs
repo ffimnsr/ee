@@ -11,11 +11,7 @@ pub(crate) struct LogPathCandidate {
 }
 
 pub(crate) fn state_dir() -> Option<PathBuf> {
-    std::env::var_os("XDG_STATE_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(dirs::state_dir)
-        .map(|dir| dir.join("ee"))
+    xi_core_lib::user_state_dir()
 }
 
 pub(crate) fn preferred_editor_log_path() -> PathBuf {

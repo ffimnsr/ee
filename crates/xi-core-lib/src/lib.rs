@@ -54,6 +54,7 @@ pub mod linewrap;
 pub mod movement;
 pub mod object;
 pub mod open_policy;
+pub(crate) mod paths;
 pub mod plugins;
 #[cfg(test)]
 pub mod recorder;
@@ -80,6 +81,7 @@ pub mod rpc;
 pub use crate::config::{BufferItems as BufferConfig, Table as ConfigTable};
 pub use crate::core::{WeakXiCore, XiCore};
 pub use crate::editor::EditType;
+pub use crate::paths::user_state_dir;
 pub use crate::plugins::PluginPid;
 pub use crate::plugins::manifest as plugin_manifest;
 pub use crate::plugins::rpc as plugin_rpc;

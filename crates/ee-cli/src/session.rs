@@ -298,7 +298,7 @@ impl From<SessionSplitDir> for SplitDir {
 }
 
 fn session_file_path() -> Option<PathBuf> {
-    dirs::state_dir().or_else(dirs::data_dir).map(|dir| dir.join("ee").join("session.json"))
+    xi_core_lib::user_state_dir().map(|dir| dir.join("session.json"))
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
