@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.11.10 - 2026-09-22
+
+### Features
+
+- add new keybindings for vim mode (`3bcd3064`)
+- add visual keybindings from vim (`32ad1893`)
+- add command line vim keys (`06aa1a87`)
+- add insert mode new key bindings (`baa78d6d`)
+- add vt100 test and insta test (`61758dd8`)
+- add vt100 for testing (`91ce1ea7`)
+- update the goto and some test that causes hang (`7efaa36e`)
+
+
+### Fixes
+
+- initial line wrap fixes (`3037e523`)
+- sample message test keys revoked (`fc42add6`)
+- test on reindent flaky (`7e188a12`)
+- test race on cancel notif (`9e904470`)
+
+
+### Tests
+
+- update test errors (`06a0a665`)
+
+
+### Maintenance
+
+- update install script to properly setup the completions (`8b2fc0d2`)
+
+
 ## 0.11.9 - 2026-09-08
 
 ### Features
