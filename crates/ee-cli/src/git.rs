@@ -37,8 +37,17 @@ pub(crate) struct GitRepository {
 
 impl GitRepository {
     /// Discovers repository containing `path`. A non-repository path returns `Ok(None)`.
+    ///
+    /// Relative paths are absolutized first: a root-level file opened as
+    /// `ee CHANGELOG.md` has an empty `parent()`, which would make
+    /// `Repository::discover` fail to find any repository.
     pub(crate) fn discover(path: &Path) -> Result<Option<Self>, git2::Error> {
-        let search_path = if path.is_dir() { path } else { path.parent().unwrap_or(path) };
+        let absolute = absolutize_path(path);
+        let search_path = if absolute.is_dir() {
+            absolute.as_path()
+        } else {
+            absolute.parent().unwrap_or(&absolute)
+        };
         let repository = match Repository::discover(search_path) {
             Ok(repository) => repository,
             Err(error) if error.code() == ErrorCode::NotFound => return Ok(None),
@@ -382,10 +391,11 @@ pub(crate) fn inspect_buffer(
     path: &Path,
     current_lines: &[String],
 ) -> io::Result<Option<GitBufferStatus>> {
-    let Some(repository) = GitRepository::discover(path).map_err(git_error)? else {
+    let path = absolutize_path(path);
+    let Some(repository) = GitRepository::discover(&path).map_err(git_error)? else {
         return Ok(None);
     };
-    let repo_relative = match repository.relative_path(path) {
+    let repo_relative = match repository.relative_path(&path) {
         Ok(path) => normalize_pathspec(&path),
         Err(_) => return Ok(None),
     };
@@ -413,10 +423,11 @@ pub(crate) fn inspect_buffer(
 }
 
 pub(crate) fn blame_line(path: &Path, line: usize) -> io::Result<Option<GitBlameInfo>> {
-    let Some(repository) = GitRepository::discover(path).map_err(git_error)? else {
+    let path = absolutize_path(path);
+    let Some(repository) = GitRepository::discover(&path).map_err(git_error)? else {
         return Ok(None);
     };
-    let repo_relative = match repository.relative_path(path) {
+    let repo_relative = match repository.relative_path(&path) {
         Ok(path) => path,
         Err(_) => return Ok(None),
     };
@@ -551,6 +562,45 @@ fn read_head_blob(
 
 fn git_error(error: git2::Error) -> io::Error {
     io::Error::other(error)
+}
+
+/// Resolves `path` to an absolute path before Git discovery.
+///
+/// `ee CHANGELOG.md` stores a bare relative path on the buffer; canonicalizing
+/// resolves `..` components and symlinks so the repository-relative path stays
+/// correct regardless of where the editor was launched from. Falls back to
+/// `cwd.join(path)` (lexically normalized) for files that do not exist yet
+/// (e.g. new untracked buffers), where `..` must not survive into
+/// `relative_path`, which rejects `ParentDir` components.
+fn absolutize_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    lexical_normalize(
+        &std::env::current_dir().map(|cwd| cwd.join(path)).unwrap_or_else(|_| path.to_path_buf()),
+    )
+}
+
+/// Drops `.` and resolves `..` lexically, mapping `..` above the root to the
+/// root (filesystem semantics). Used only to clean up `cwd.join(relative)`
+/// fallbacks for paths whose files do not exist yet.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() && !path.has_root() {
+                    out.push(Component::ParentDir.as_os_str());
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 fn split_blob_lines(text: &str) -> Vec<String> {
@@ -762,5 +812,17 @@ mod tests {
         // CRLF is normalized the same way `normalize_line_text` strips `\r`.
         assert_eq!(split_blob_lines("a\r\nb\r\n"), vec!["a", "b", ""]);
         assert_eq!(split_blob_lines("a"), vec!["a"]);
+    }
+
+    #[test]
+    fn lexical_normalize_drops_dot_resolves_double_dot_and_clamps_at_root() {
+        assert_eq!(lexical_normalize(Path::new("a/./b")), PathBuf::from("a/b"));
+        assert_eq!(lexical_normalize(Path::new("/a/../b")), PathBuf::from("/b"));
+        assert_eq!(lexical_normalize(Path::new("/a/b/../../..")), PathBuf::from("/"));
+        assert_eq!(lexical_normalize(Path::new("nested/../ghost.txt")), PathBuf::from("ghost.txt"));
+        assert_eq!(
+            lexical_normalize(Path::new("../pending-relative.txt")),
+            PathBuf::from("../pending-relative.txt")
+        );
     }
 }

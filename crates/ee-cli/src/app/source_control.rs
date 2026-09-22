@@ -73,10 +73,27 @@ impl App {
 
         let buf = self.backend.active();
         if !buf.is_fully_cached() {
-            self.backend.status_message =
-                Some(String::from("git: status unavailable until buffer lines are loaded"));
-            return None;
+            // Explicit commands (`:gdiff`, hunk jumps) may target files larger
+            // than the viewport cache window, whose `line_cache` is never fully
+            // known. Pull the whole document synchronously instead of bailing,
+            // matching the intended "explicit git commands still work" split
+            // from the throttled background refresh. The sync is bounded (~24
+            // rounds with 10ms waits) and applies to all open buffers; a buffer
+            // that still cannot finish within the bound (e.g. very large files)
+            // falls through to a clear status message instead of silently
+            // opening nothing.
+            if let Err(error) = self.backend.sync_pending_events_for_whole_document() {
+                self.backend.status_message =
+                    Some(format!("git: cannot load buffer lines: {error}"));
+                return None;
+            }
+            if !self.backend.active().is_fully_cached() {
+                self.backend.status_message =
+                    Some(String::from("git: status unavailable until buffer lines are loaded"));
+                return None;
+            }
         }
+        let buf = self.backend.active();
         let fingerprint = git::buffer_fingerprint(buf.path.as_deref(), &buf.lines);
         let status = buf
             .path

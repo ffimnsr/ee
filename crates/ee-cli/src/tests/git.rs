@@ -5,6 +5,7 @@ use git2::{IndexAddOption, Repository, Signature};
 use tempfile::TempDir;
 
 use crate::git::{GitReadLimits, GitRepository};
+use crate::tests::helpers::{CurrentDirGuard, cwd_test_lock};
 
 fn fixture() -> (TempDir, Repository) {
     let directory = tempfile::tempdir().expect("temporary directory");
@@ -123,4 +124,67 @@ fn git_diffs_are_path_scoped_staged_and_byte_bounded() {
         .expect("bounded diff");
     assert!(bounded.truncated);
     assert!(bounded.bytes_returned <= bounded.byte_limit);
+}
+
+#[test]
+fn inspect_buffer_discovers_repository_for_root_level_relative_path() {
+    // Regression: `ee CHANGELOG.md` keeps a bare relative buffer path whose
+    // `parent()` is empty. Repository discovery used to start from "" and
+    // failed, so `:gdiff`/git gutter signs silently disappeared.
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    let (directory, _repository) = fixture();
+    std::env::set_current_dir(directory.path()).unwrap();
+    fs::write(directory.path().join("tracked.txt"), "after\n").expect("modify tracked file");
+
+    let discovered = GitRepository::discover(Path::new("tracked.txt"))
+        .expect("discover repository")
+        .expect("repository found for bare relative path");
+    assert_eq!(discovered.root(), directory.path().canonicalize().expect("canonical root"));
+
+    let status = crate::git::inspect_buffer(Path::new("tracked.txt"), &[String::from("after")])
+        .expect("inspect_buffer should not error")
+        .expect("git status should exist for relative buffer path");
+    assert!(status.tracked);
+    assert_eq!(status.repo_relative, "tracked.txt");
+    assert!(!status.hunks.is_empty());
+
+    let rendered = crate::git::render_diff(&status, None);
+    assert!(rendered.contains("--- a/tracked.txt"));
+    assert!(rendered.contains("-before"));
+    assert!(rendered.contains("+after"));
+
+    // Buffer in a repo but unchanged: clean status, hunks stay empty.
+    let clean =
+        crate::git::inspect_buffer(Path::new("staged.txt"), &[String::from("base"), String::new()])
+            .expect("inspect_buffer should not error")
+            .expect("git status should exist");
+    assert!(clean.tracked);
+    assert!(clean.hunks.is_empty());
+    assert!(!clean.dirty);
+
+    // Existing file reached through `..` (e.g. `ee ../file.txt` from a
+    // subdirectory): canonicalize resolves it, repo-relative stays clean.
+    let nested = directory.path().join("nested");
+    fs::create_dir(&nested).expect("create nested directory");
+    std::env::set_current_dir(&nested).unwrap();
+    let via_parent = crate::git::inspect_buffer(
+        Path::new("../tracked.txt"),
+        &[String::from("after"), String::new()],
+    )
+    .expect("inspect_buffer should not error")
+    .expect("git status should exist for .. path");
+    assert_eq!(via_parent.repo_relative, "tracked.txt");
+    assert!(!via_parent.hunks.is_empty());
+
+    // Nonexistent file through `..` (untracked new buffer): fallback joins
+    // against cwd and lexically normalizes; discovery still succeeds.
+    let ghost = crate::git::inspect_buffer(
+        Path::new("../ghost.txt"),
+        &[String::from("draft"), String::new()],
+    )
+    .expect("inspect_buffer should not error")
+    .expect("git status should exist for nonexistent .. path");
+    assert!(!ghost.tracked);
+    assert!(ghost.dirty);
 }

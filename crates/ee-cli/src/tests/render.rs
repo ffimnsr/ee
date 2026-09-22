@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::env;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Instant;
@@ -19,7 +21,9 @@ use crate::theme::syntax;
 use crate::theme::ui as theme;
 use crate::ui::ui;
 
-use super::helpers::render_editor_screen;
+use super::helpers::{
+    CurrentDirGuard, cwd_test_lock, init_test_git_repo, render_editor_screen, run_ex, run_git,
+};
 
 #[test]
 fn ui_render_shows_scrolled_gutter_for_long_buffer() {
@@ -101,6 +105,60 @@ fn ui_render_blanks_gutter_on_wrapped_continuation_rows() {
     // cat -n parity: only the first visual row of the wrapped line is
     // numbered; continuation rows leave the gutter blank; the next logical
     // line shows 2.
+    insta::assert_snapshot!(grid);
+}
+
+#[test]
+fn ui_render_gdiff_shows_diff_scratch_buffer_for_relative_root_path() {
+    // Regression x2: `ee CHANGELOG.md` keeps a bare relative buffer path
+    // whose `parent()` is empty (repo discovery previously failed), and a file
+    // larger than the viewport cache window never reaches a fully-known
+    // `line_cache` (so the old cache gate blocked `:gdiff` too). End-to-end
+    // TUI check: real repo, relative launch path, viewport-cached edit,
+    // `:gdiff`, snapshot the rendered screen.
+    let _cwd_lock = cwd_test_lock().lock().unwrap();
+    let _cwd_guard = CurrentDirGuard::capture();
+    let temp = tempfile::tempdir().expect("temporary directory");
+    let repo = temp.path();
+    init_test_git_repo(repo);
+    let mut seed = String::from("## before\n");
+    for index in 0..399 {
+        seed.push_str(&format!("filler line {index}\n"));
+    }
+    fs::write(repo.join("CHANGELOG.md"), seed).expect("write changelog");
+    run_git(repo, &["add", "CHANGELOG.md"]);
+    run_git(repo, &["commit", "-m", "init"]);
+    env::set_current_dir(repo).expect("change cwd to repo root");
+
+    // Same relative launch form as `ee CHANGELOG.md`.
+    let mut app = App::from_path(Some(PathBuf::from("CHANGELOG.md"))).expect("open app");
+    app.backend
+        .pump_until(|state| state.line_count() >= 400 && !state.lines.is_empty())
+        .expect("changelog loaded");
+
+    // Edit through the viewport-scoped path only (`insert_text` would
+    // whole-document sync and mask the cache-window gate the old code had).
+    app.backend.send_edit("insert", json!({ "chars": "X" })).expect("send edit");
+    app.backend.sync_pending_events().expect("viewport sync");
+    app.backend
+        .pump_until(|state| state.lines.first().is_some_and(|line| line.starts_with('X')))
+        .expect("edit applied");
+    assert!(
+        !app.backend.active().is_fully_cached(),
+        "400-line buffer must not be fully cached by viewport-scoped requests"
+    );
+
+    run_ex(&mut app, "gdiff");
+    app.backend
+        .pump_until(|state| state.lines.iter().any(|line| line.contains("diff --git")))
+        .expect("gdiff scratch buffer rendered");
+    assert_eq!(
+        app.backend.status_message.as_deref(),
+        Some("git diff"),
+        "gdiff must report success"
+    );
+
+    let grid = render_editor_screen(&app, 64, 10);
     insta::assert_snapshot!(grid);
 }
 

@@ -1,0 +1,13 @@
+---
+source: crates/ee-cli/src/tests/render.rs
+assertion_line: 146
+expression: grid
+---
+    1  diff --git a/CHANGELOG.md b/CHANGELOG.md
+    2  --- a/CHANGELOG.md
+    3  +++ b/CHANGELOG.md
+    4  @@ -1 +1 @@
+    5  -## before
+    6  +X## before
+    7
+~
