@@ -50,6 +50,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::fold_support::fold_parse_timeout;
 use crate::runtime_loader::{
     RuntimeLoader, RuntimeQueryKind, with_default_runtime_loader, with_default_runtime_loader_mut,
 };
@@ -63,8 +64,6 @@ use tree_sitter::{
 pub(crate) const DEFAULT_VISIBLE_SYNTAX_MAX_BYTES: usize = 128 * 1024;
 /// Default hard wall-clock budget for one visible VLF parse window.
 pub(crate) const DEFAULT_VISIBLE_SYNTAX_TIMEOUT: Duration = Duration::from_millis(4);
-/// Default hard wall-clock budget for one whole-buffer reindent parse.
-pub(crate) const DEFAULT_REINDENT_PARSE_TIMEOUT: Duration = Duration::from_millis(25);
 /// Default maximum highlighted node matches for one visible VLF parse window.
 pub(crate) const DEFAULT_VISIBLE_SYNTAX_MAX_MATCHES: usize = 2_048;
 /// Default maximum emitted captures/spans for one visible VLF parse window.
@@ -1042,11 +1041,14 @@ pub(crate) fn indentation_levels_for_text(
     text: &str,
     max_line: usize,
 ) -> Option<Vec<usize>> {
+    // Whole-buffer parses share the scaled fold budget: a flat sub-250ms
+    // wall-clock budget flakes on shared CI runners, where a descheduled
+    // test thread can blow the budget before parsing a tiny buffer.
     indentation_levels_for_text_with_timeout(
         language_name,
         text,
         max_line,
-        DEFAULT_REINDENT_PARSE_TIMEOUT,
+        fold_parse_timeout(text.len()),
     )
 }
 
@@ -1677,6 +1679,17 @@ mod tests {
     fn indentation_levels_returns_none_when_parse_budget_is_zero() {
         let src = "fn main() {\nlet x = 1;\n}\n";
         assert!(indentation_levels_for_text_with_timeout("rust", src, 2, Duration::ZERO).is_none());
+    }
+
+    #[test]
+    fn indentation_levels_uses_shared_scaled_parse_budget() {
+        // CI flake guard: the default reindent budget must come from the
+        // shared scaled parse budget (250ms floor for tiny buffers), not a
+        // flat sub-100ms constant that a descheduled CI thread can exceed
+        // before parsing a tiny buffer (macOS-only `reindent("C")` failure).
+        let src = "int main() {\nreturn 0;\n}\n";
+        assert!(fold_parse_timeout(src.len()) >= Duration::from_millis(250));
+        assert!(indentation_levels_for_text("C", src, 2).is_some());
     }
 
     // --------------------------------------------------
