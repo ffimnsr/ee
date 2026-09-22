@@ -144,6 +144,21 @@ fn concurrent_cancellations_keep_session_scoped_results() {
     assert_eq!(app.agents.threads[1].state, ThreadUiState::Cancelling);
 
     wait_until(&mut app, "both cancellations resolve", |app| app.agents.pending_cancels.is_empty());
+    // The host resolves turn cancellation locally as soon as the in-flight
+    // prompt is cancelled; the `session/cancel` and `$/cancel_request` frames
+    // reach the agent through the connection task afterwards.  Poll the fake's
+    // log so the delivery assertions below cannot race the transport (macOS
+    // CI deschedules the connection task past the assertions).
+    wait_until(&mut app, "cancel notifications recorded by agent", |_| {
+        let session_cancels = fake.agent().requests_by_method("session/cancel").len();
+        let cancel_ids: std::collections::BTreeSet<String> = fake
+            .agent()
+            .requests_by_method("$/cancel_request")
+            .iter()
+            .filter_map(|request| request["params"]["requestId"].as_str().map(str::to_string))
+            .collect();
+        session_cancels == 2 && cancel_ids.len() == 2
+    });
     assert_eq!(
         fake.agent().requests_by_method("session/cancel").len(),
         2,
