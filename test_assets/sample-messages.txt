@@ -969,7 +969,7 @@ May  3 20:53:02 ifn8 kernel: BIOS-e820: [mem 0x000000043f380000-0x000000043fffff
 May  3 20:53:02 ifn8 kernel: NX (Execute Disable) protection: active
 May  3 20:53:02 ifn8 kernel: APIC: Static calls initialized
 May  3 20:53:02 ifn8 kernel: efi: EFI v2.7 by American Megatrends
-May  3 20:53:02 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb87da218 ESRT=0xb6935b98 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018 
+May  3 20:53:02 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb87da218 ESRT=0xb6935b98 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018
 May  3 20:53:02 ifn8 kernel: random: crng init done
 May  3 20:53:02 ifn8 kernel: efi: Remove mem292: MMIO range=[0xf0000000-0xf7ffffff] (128MB) from e820 map
 May  3 20:53:02 ifn8 kernel: efi: Remove mem293: MMIO range=[0xfd200000-0xfd2fffff] (1MB) from e820 map
@@ -996,7 +996,7 @@ May  3 20:53:02 ifn8 kernel: total RAM covered: 3071M
 May  3 20:53:02 ifn8 kernel: Found optimal setting for mtrr clean up
 May  3 20:53:02 ifn8 kernel: gran_size: 64K #011chunk_size: 64M #011num_reg: 3  #011lose cover RAM: 0G
 May  3 20:53:02 ifn8 kernel: MTRR map: 8 entries (4 fixed + 4 variable; max 21), built from 9 variable MTRRs
-May  3 20:53:02 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT  
+May  3 20:53:02 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT
 May  3 20:53:02 ifn8 kernel: last_pfn = 0xbf000 max_arch_pfn = 0x400000000
 May  3 20:53:02 ifn8 kernel: esrt: Reserving ESRT space from 0x00000000b6935b98 to 0x00000000b6935bd0.
 May  3 20:53:02 ifn8 kernel: Using GB pages for direct mapping
@@ -1125,7 +1125,7 @@ May  3 20:53:02 ifn8 kernel: printk: log buffer data + meta data: 262144 + 91750
 May  3 20:53:02 ifn8 kernel: Dentry cache hash table entries: 2097152 (order: 12, 16777216 bytes, linear)
 May  3 20:53:02 ifn8 kernel: Inode-cache hash table entries: 1048576 (order: 11, 8388608 bytes, linear)
 May  3 20:53:02 ifn8 kernel: software IO TLB: area num 16.
-May  3 20:53:02 ifn8 kernel: Fallback order for Node 0: 0 
+May  3 20:53:02 ifn8 kernel: Fallback order for Node 0: 0
 May  3 20:53:02 ifn8 kernel: Built 1 zonelists, mobility grouping on.  Total pages: 4169749
 May  3 20:53:02 ifn8 kernel: Policy zone: Normal
 May  3 20:53:02 ifn8 kernel: mem auto-init: stack:all(zero), heap alloc:on, heap free:off
@@ -1576,7 +1576,7 @@ May  3 20:53:02 ifn8 kernel: integrity: Platform Keyring initialized
 May  3 20:53:02 ifn8 kernel: integrity: Machine keyring initialized
 May  3 20:53:02 ifn8 kernel: cryptd: max_cpu_qlen set to 1000
 May  3 20:53:02 ifn8 kernel: NET: Registered PF_ALG protocol family
-May  3 20:53:02 ifn8 kernel: xor: automatically using best checksumming function   avx       
+May  3 20:53:02 ifn8 kernel: xor: automatically using best checksumming function   avx
 May  3 20:53:02 ifn8 kernel: Key type asymmetric registered
 May  3 20:53:02 ifn8 kernel: Asymmetric key parser 'x509' registered
 May  3 20:53:02 ifn8 kernel: Block layer SCSI generic (bsg) driver version 0.4 loaded (major 244)
@@ -1617,7 +1617,7 @@ May  3 20:53:02 ifn8 kernel: ACPI: bus type drm_connector registered
 May  3 20:53:02 ifn8 kernel: ahci 0000:02:00.1: SSS flag set, parallel bus scan disabled
 May  3 20:53:02 ifn8 kernel: ahci 0000:02:00.1: AHCI vers 0001.0301, 32 command slots, 6 Gbps, SATA mode
 May  3 20:53:02 ifn8 kernel: ahci 0000:02:00.1: 6/6 ports implemented (port mask 0x3f)
-May  3 20:53:02 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst 
+May  3 20:53:02 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst
 May  3 20:53:02 ifn8 kernel: scsi host0: ahci
 May  3 20:53:02 ifn8 kernel: scsi host1: ahci
 May  3 20:53:02 ifn8 kernel: scsi host2: ahci
@@ -1768,8 +1768,8 @@ May  3 20:53:02 ifn8 kernel: usb 1-1: Manufacturer: DOIO
 May  3 20:53:02 ifn8 kernel: usb 1-1: SerialNumber: vial:f64c2b3c
 May  3 20:53:02 ifn8 kernel: usb 3-2: New USB device found, idVendor=2109, idProduct=2817, bcdDevice=90.24
 May  3 20:53:02 ifn8 kernel: usb 3-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  3 20:53:02 ifn8 kernel: usb 3-2: Product: USB2.0 Hub             
-May  3 20:53:02 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.         
+May  3 20:53:02 ifn8 kernel: usb 3-2: Product: USB2.0 Hub
+May  3 20:53:02 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.
 May  3 20:53:02 ifn8 kernel: input: DOIO KB16-01 as /devices/pci0000:00/0000:00:01.2/0000:02:00.0/usb1/1-1/1-1:1.0/0003:D010:1601.0001/input/input2
 May  3 20:53:02 ifn8 kernel: hub 3-2:1.0: USB hub found
 May  3 20:53:02 ifn8 kernel: hub 3-2:1.0: 4 ports detected
@@ -1799,8 +1799,8 @@ May  3 20:53:02 ifn8 kernel: ata4: SATA link down (SStatus 0 SControl 300)
 May  3 20:53:02 ifn8 kernel: ata5: SATA link down (SStatus 0 SControl 330)
 May  3 20:53:02 ifn8 kernel: usb 4-2: New USB device found, idVendor=2109, idProduct=0817, bcdDevice=90.24
 May  3 20:53:02 ifn8 kernel: usb 4-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  3 20:53:02 ifn8 kernel: usb 4-2: Product: USB3.0 Hub             
-May  3 20:53:02 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.         
+May  3 20:53:02 ifn8 kernel: usb 4-2: Product: USB3.0 Hub
+May  3 20:53:02 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.
 May  3 20:53:02 ifn8 kernel: hub 4-2:1.0: USB hub found
 May  3 20:53:02 ifn8 kernel: hub 4-2:1.0: 4 ports detected
 May  3 20:53:02 ifn8 kernel: usb 3-3: new full-speed USB device number 3 using xhci_hcd
@@ -3476,7 +3476,7 @@ May  3 12:53:29 ifn8 bluetoothd[955]: Endpoint registered: sender=:1.79 path=/Me
 May  3 12:53:29 ifn8 bluetoothd[955]: Endpoint registered: sender=:1.79 path=/MediaEndpoint/A2DPSource/opus_05_duplex
 May  3 12:53:29 ifn8 kdeconnectd[2411]: No object for name "@DEFAULT_SINK@"
 May  3 12:53:29 ifn8 kdeconnectd[2411]: No object for name "@DEFAULT_SOURCE@"
-May  3 12:53:29 ifn8 kded6[2107]: Failed to connect to Bolt manager DBus interface: 
+May  3 12:53:29 ifn8 kded6[2107]: Failed to connect to Bolt manager DBus interface:
 May  3 12:53:29 ifn8 kded6[2107]: Couldn't connect to Bolt DBus daemon
 May  3 12:53:29 ifn8 systemd[1571]: Starting plasma-ksplash.service - Splash screen shown during boot...
 May  3 12:53:29 ifn8 kconf_update[2452]: /usr/share/kconf_update/filepicker.upd defined Version=5 but Version=6 was expected
@@ -5023,7 +5023,7 @@ May  3 15:12:13 ifn8 init: Setting product property ro.product.name to 'lineage_
 May  3 15:12:13 ifn8 init: Setting property 'ro.build.fingerprint' to 'waydroid/lineage_waydroid_x86_64/waydroid_x86_64:13/TQ3A.230901.001/eng.aleast.20260403.113748:userdebug/test-keys'
 May  3 15:12:13 ifn8 audit: SELINUX_ERR op=fscreate invalid_context="u:object_r:mnt_user_file:s0"
 May  3 15:12:13 ifn8 selinux: SELinux: Loaded file_contexts
-May  3 15:12:13 ifn8 selinux: 
+May  3 15:12:13 ifn8 selinux:
 May  3 15:12:13 ifn8 init: Running restorecon...
 May  3 15:12:13 ifn8 init: Created socket '/dev/socket/property_service', mode 666, user 0, group 0
 May  3 15:12:13 ifn8 init: SetupMountNamespaces done
@@ -5164,7 +5164,7 @@ May  3 15:12:13 ifn8 init: processing action (TestPerfEventSelinux) from (<Built
 May  3 15:12:13 ifn8 init: processing action (ConnectEarlyStageSnapuserd) from (<Builtin Action>:0)
 May  3 15:12:13 ifn8 init: processing action (early-init) from (/system/etc/init/hw/init.rc:15)
 May  3 15:12:13 ifn8 init: Command 'write /proc/sys/kernel/sysrq 0' action=early-init (/system/etc/init/hw/init.rc:17) took 0ms and failed: Unable to write to file '/proc/sys/kernel/sysrq': open() failed: Read-only file system
-May  3 15:12:13 ifn8 init: Command 'write /proc/sys/kernel/modprobe 
+May  3 15:12:13 ifn8 init: Command 'write /proc/sys/kernel/modprobe
 May  3 15:12:13 ifn8 init: ' action=early-init (/system/etc/init/hw/init.rc:22) took 0ms and failed: Unable to write to file '/proc/sys/kernel/modprobe': open() failed: Read-only file system
 May  3 15:12:13 ifn8 init: Command 'mkdir /acct/uid' action=early-init (/system/etc/init/hw/init.rc:30) took 0ms and failed: mkdir() failed on /acct/uid: Read-only file system
 May  3 15:12:13 ifn8 audit: SELINUX_ERR op=fscreate invalid_context="u:object_r:device:s0"
@@ -5191,7 +5191,7 @@ May  3 15:12:13 ifn8 init: createProcessGroup(0, 6) failed for service 'apexd-bo
 May  3 15:12:13 ifn8 init: SVC_EXEC service 'apexd-bootstrap' pid 6 (uid 0 gid 1000+0 context default) started; waiting...
 May  3 15:12:13 ifn8 ueventd: ueventd started!
 May  3 15:12:13 ifn8 selinux: SELinux: Loaded file_contexts
-May  3 15:12:13 ifn8 selinux: 
+May  3 15:12:13 ifn8 selinux:
 May  3 15:12:13 ifn8 ueventd: Parsing file /system/etc/ueventd.rc...
 May  3 15:12:13 ifn8 ueventd: Added '/vendor/etc/ueventd.rc' to import list
 May  3 15:12:13 ifn8 ueventd: Added '/odm/etc/ueventd.rc' to import list
@@ -7340,7 +7340,7 @@ May  4 19:03:27 ifn8 kernel: BIOS-e820: [mem 0x000000043f380000-0x000000043fffff
 May  4 19:03:27 ifn8 kernel: NX (Execute Disable) protection: active
 May  4 19:03:27 ifn8 kernel: APIC: Static calls initialized
 May  4 19:03:27 ifn8 kernel: efi: EFI v2.7 by American Megatrends
-May  4 19:03:27 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb87da218 ESRT=0xb6935b98 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018 
+May  4 19:03:27 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb87da218 ESRT=0xb6935b98 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018
 May  4 19:03:27 ifn8 kernel: random: crng init done
 May  4 19:03:27 ifn8 kernel: efi: Remove mem292: MMIO range=[0xf0000000-0xf7ffffff] (128MB) from e820 map
 May  4 19:03:27 ifn8 kernel: efi: Remove mem293: MMIO range=[0xfd200000-0xfd2fffff] (1MB) from e820 map
@@ -7367,7 +7367,7 @@ May  4 19:03:27 ifn8 kernel: total RAM covered: 3071M
 May  4 19:03:27 ifn8 kernel: Found optimal setting for mtrr clean up
 May  4 19:03:27 ifn8 kernel: gran_size: 64K #011chunk_size: 64M #011num_reg: 3  #011lose cover RAM: 0G
 May  4 19:03:27 ifn8 kernel: MTRR map: 8 entries (4 fixed + 4 variable; max 21), built from 9 variable MTRRs
-May  4 19:03:27 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT  
+May  4 19:03:27 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT
 May  4 19:03:27 ifn8 kernel: last_pfn = 0xbf000 max_arch_pfn = 0x400000000
 May  4 19:03:27 ifn8 kernel: esrt: Reserving ESRT space from 0x00000000b6935b98 to 0x00000000b6935bd0.
 May  4 19:03:27 ifn8 kernel: Using GB pages for direct mapping
@@ -7496,7 +7496,7 @@ May  4 19:03:27 ifn8 kernel: printk: log buffer data + meta data: 262144 + 91750
 May  4 19:03:27 ifn8 kernel: Dentry cache hash table entries: 2097152 (order: 12, 16777216 bytes, linear)
 May  4 19:03:27 ifn8 kernel: Inode-cache hash table entries: 1048576 (order: 11, 8388608 bytes, linear)
 May  4 19:03:27 ifn8 kernel: software IO TLB: area num 16.
-May  4 19:03:27 ifn8 kernel: Fallback order for Node 0: 0 
+May  4 19:03:27 ifn8 kernel: Fallback order for Node 0: 0
 May  4 19:03:27 ifn8 kernel: Built 1 zonelists, mobility grouping on.  Total pages: 4169749
 May  4 19:03:27 ifn8 kernel: Policy zone: Normal
 May  4 19:03:27 ifn8 kernel: mem auto-init: stack:all(zero), heap alloc:on, heap free:off
@@ -7947,7 +7947,7 @@ May  4 19:03:27 ifn8 kernel: integrity: Platform Keyring initialized
 May  4 19:03:27 ifn8 kernel: integrity: Machine keyring initialized
 May  4 19:03:27 ifn8 kernel: cryptd: max_cpu_qlen set to 1000
 May  4 19:03:27 ifn8 kernel: NET: Registered PF_ALG protocol family
-May  4 19:03:27 ifn8 kernel: xor: automatically using best checksumming function   avx       
+May  4 19:03:27 ifn8 kernel: xor: automatically using best checksumming function   avx
 May  4 19:03:27 ifn8 kernel: Key type asymmetric registered
 May  4 19:03:27 ifn8 kernel: Asymmetric key parser 'x509' registered
 May  4 19:03:27 ifn8 kernel: Block layer SCSI generic (bsg) driver version 0.4 loaded (major 244)
@@ -7988,7 +7988,7 @@ May  4 19:03:27 ifn8 kernel: ACPI: bus type drm_connector registered
 May  4 19:03:27 ifn8 kernel: ahci 0000:02:00.1: SSS flag set, parallel bus scan disabled
 May  4 19:03:27 ifn8 kernel: ahci 0000:02:00.1: AHCI vers 0001.0301, 32 command slots, 6 Gbps, SATA mode
 May  4 19:03:27 ifn8 kernel: ahci 0000:02:00.1: 6/6 ports implemented (port mask 0x3f)
-May  4 19:03:27 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst 
+May  4 19:03:27 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst
 May  4 19:03:27 ifn8 kernel: scsi host0: ahci
 May  4 19:03:27 ifn8 kernel: scsi host1: ahci
 May  4 19:03:27 ifn8 kernel: scsi host2: ahci
@@ -8140,8 +8140,8 @@ May  4 19:03:27 ifn8 kernel: usb 1-1: SerialNumber: vial:f64c2b3c
 May  4 19:03:27 ifn8 kernel: input: DOIO KB16-01 as /devices/pci0000:00/0000:00:01.2/0000:02:00.0/usb1/1-1/1-1:1.0/0003:D010:1601.0001/input/input2
 May  4 19:03:27 ifn8 kernel: usb 3-2: New USB device found, idVendor=2109, idProduct=2817, bcdDevice=90.24
 May  4 19:03:27 ifn8 kernel: usb 3-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  4 19:03:27 ifn8 kernel: usb 3-2: Product: USB2.0 Hub             
-May  4 19:03:27 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.         
+May  4 19:03:27 ifn8 kernel: usb 3-2: Product: USB2.0 Hub
+May  4 19:03:27 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.
 May  4 19:03:27 ifn8 kernel: hub 3-2:1.0: USB hub found
 May  4 19:03:27 ifn8 kernel: hub 3-2:1.0: 4 ports detected
 May  4 19:03:27 ifn8 kernel: hid-generic 0003:D010:1601.0001: input,hidraw0: USB HID v1.11 Keyboard [DOIO KB16-01] on usb-0000:02:00.0-1/input0
@@ -8181,8 +8181,8 @@ May  4 19:03:27 ifn8 kernel: usb 1-8: SerialNumber: 000000000
 May  4 19:03:27 ifn8 kernel: ata5: SATA link down (SStatus 0 SControl 330)
 May  4 19:03:27 ifn8 kernel: usb 4-2: New USB device found, idVendor=2109, idProduct=0817, bcdDevice=90.24
 May  4 19:03:27 ifn8 kernel: usb 4-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  4 19:03:27 ifn8 kernel: usb 4-2: Product: USB3.0 Hub             
-May  4 19:03:27 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.         
+May  4 19:03:27 ifn8 kernel: usb 4-2: Product: USB3.0 Hub
+May  4 19:03:27 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.
 May  4 19:03:27 ifn8 kernel: hub 4-2:1.0: USB hub found
 May  4 19:03:27 ifn8 kernel: hub 4-2:1.0: 4 ports detected
 May  4 19:03:27 ifn8 kernel: usb 3-3: new full-speed USB device number 3 using xhci_hcd
@@ -9845,7 +9845,7 @@ May  4 11:03:51 ifn8 bluetoothd[948]: Endpoint registered: sender=:1.79 path=/Me
 May  4 11:03:51 ifn8 bluetoothd[948]: Endpoint registered: sender=:1.79 path=/MediaEndpoint/A2DPSource/opus_05_duplex
 May  4 11:03:51 ifn8 kdeconnectd[2384]: No object for name "@DEFAULT_SINK@"
 May  4 11:03:51 ifn8 kdeconnectd[2384]: No object for name "@DEFAULT_SOURCE@"
-May  4 11:03:51 ifn8 kded6[2084]: Failed to connect to Bolt manager DBus interface: 
+May  4 11:03:51 ifn8 kded6[2084]: Failed to connect to Bolt manager DBus interface:
 May  4 11:03:51 ifn8 kded6[2084]: Couldn't connect to Bolt DBus daemon
 May  4 11:03:51 ifn8 systemd[1543]: Starting plasma-ksplash.service - Splash screen shown during boot...
 May  4 11:03:51 ifn8 kconf_update[2424]: /usr/share/kconf_update/filepicker.upd defined Version=5 but Version=6 was expected
@@ -10440,7 +10440,7 @@ May  4 11:41:41 ifn8 kernel: [Hardware Error]: System Fatal error.
 May  4 11:41:41 ifn8 kernel: [Hardware Error]: CPU:1 (19:21:2) MC7_STATUS[Over|UE|MiscV|AddrV|PCC|SyndV|CECC|Deferred|-|Scrub]: 0xffffd50fc02fce70
 May  4 11:41:41 ifn8 kernel: [Hardware Error]: Error Addr: 0x0000000000000000
 May  4 11:41:41 ifn8 kernel: [Hardware Error]: IPID: 0x0000000000000000, Syndrome: 0x0000000000000000
-May  4 11:41:41 ifn8 kernel: 
+May  4 11:41:41 ifn8 kernel:
 May  4 11:41:41 ifn8 kernel: [Hardware Error]: Bank 7 is reserved.
 May  4 11:41:41 ifn8 kernel: [Hardware Error]: cache level: RESV, tx: INSN
 May  4 11:41:42 ifn8 rsyslogd[1294]: get tty for session '3' failed with [61]:No data available  [v8.2602.0-1.fc43]
@@ -11264,7 +11264,7 @@ May  5 04:13:29 ifn8 kernel: BIOS-e820: [mem 0x000000043f380000-0x000000043fffff
 May  5 04:13:29 ifn8 kernel: NX (Execute Disable) protection: active
 May  5 04:13:29 ifn8 kernel: APIC: Static calls initialized
 May  5 04:13:29 ifn8 kernel: efi: EFI v2.7 by American Megatrends
-May  5 04:13:29 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb87da218 ESRT=0xb6935b98 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018 
+May  5 04:13:29 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb87da218 ESRT=0xb6935b98 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018
 May  5 04:13:29 ifn8 kernel: random: crng init done
 May  5 04:13:29 ifn8 kernel: efi: Remove mem292: MMIO range=[0xf0000000-0xf7ffffff] (128MB) from e820 map
 May  5 04:13:29 ifn8 kernel: efi: Remove mem293: MMIO range=[0xfd200000-0xfd2fffff] (1MB) from e820 map
@@ -11291,7 +11291,7 @@ May  5 04:13:29 ifn8 kernel: total RAM covered: 3071M
 May  5 04:13:29 ifn8 kernel: Found optimal setting for mtrr clean up
 May  5 04:13:29 ifn8 kernel: gran_size: 64K #011chunk_size: 64M #011num_reg: 3  #011lose cover RAM: 0G
 May  5 04:13:29 ifn8 kernel: MTRR map: 8 entries (4 fixed + 4 variable; max 21), built from 9 variable MTRRs
-May  5 04:13:29 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT  
+May  5 04:13:29 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT
 May  5 04:13:29 ifn8 kernel: last_pfn = 0xbf000 max_arch_pfn = 0x400000000
 May  5 04:13:29 ifn8 kernel: esrt: Reserving ESRT space from 0x00000000b6935b98 to 0x00000000b6935bd0.
 May  5 04:13:29 ifn8 kernel: Using GB pages for direct mapping
@@ -11420,7 +11420,7 @@ May  5 04:13:29 ifn8 kernel: printk: log buffer data + meta data: 262144 + 91750
 May  5 04:13:29 ifn8 kernel: Dentry cache hash table entries: 2097152 (order: 12, 16777216 bytes, linear)
 May  5 04:13:29 ifn8 kernel: Inode-cache hash table entries: 1048576 (order: 11, 8388608 bytes, linear)
 May  5 04:13:29 ifn8 kernel: software IO TLB: area num 16.
-May  5 04:13:29 ifn8 kernel: Fallback order for Node 0: 0 
+May  5 04:13:29 ifn8 kernel: Fallback order for Node 0: 0
 May  5 04:13:29 ifn8 kernel: Built 1 zonelists, mobility grouping on.  Total pages: 4169749
 May  5 04:13:29 ifn8 kernel: Policy zone: Normal
 May  5 04:13:29 ifn8 kernel: mem auto-init: stack:all(zero), heap alloc:on, heap free:off
@@ -11871,7 +11871,7 @@ May  5 04:13:29 ifn8 kernel: integrity: Platform Keyring initialized
 May  5 04:13:29 ifn8 kernel: integrity: Machine keyring initialized
 May  5 04:13:29 ifn8 kernel: cryptd: max_cpu_qlen set to 1000
 May  5 04:13:29 ifn8 kernel: NET: Registered PF_ALG protocol family
-May  5 04:13:29 ifn8 kernel: xor: automatically using best checksumming function   avx       
+May  5 04:13:29 ifn8 kernel: xor: automatically using best checksumming function   avx
 May  5 04:13:29 ifn8 kernel: Key type asymmetric registered
 May  5 04:13:29 ifn8 kernel: Asymmetric key parser 'x509' registered
 May  5 04:13:29 ifn8 kernel: Block layer SCSI generic (bsg) driver version 0.4 loaded (major 244)
@@ -11912,7 +11912,7 @@ May  5 04:13:29 ifn8 kernel: ACPI: bus type drm_connector registered
 May  5 04:13:29 ifn8 kernel: ahci 0000:02:00.1: SSS flag set, parallel bus scan disabled
 May  5 04:13:29 ifn8 kernel: ahci 0000:02:00.1: AHCI vers 0001.0301, 32 command slots, 6 Gbps, SATA mode
 May  5 04:13:29 ifn8 kernel: ahci 0000:02:00.1: 6/6 ports implemented (port mask 0x3f)
-May  5 04:13:29 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst 
+May  5 04:13:29 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst
 May  5 04:13:29 ifn8 kernel: scsi host0: ahci
 May  5 04:13:29 ifn8 kernel: scsi host1: ahci
 May  5 04:13:29 ifn8 kernel: scsi host2: ahci
@@ -12065,8 +12065,8 @@ May  5 04:13:29 ifn8 kernel: usb 1-1: SerialNumber: vial:f64c2b3c
 May  5 04:13:29 ifn8 kernel: input: DOIO KB16-01 as /devices/pci0000:00/0000:00:01.2/0000:02:00.0/usb1/1-1/1-1:1.0/0003:D010:1601.0001/input/input2
 May  5 04:13:29 ifn8 kernel: usb 3-2: New USB device found, idVendor=2109, idProduct=2817, bcdDevice=90.24
 May  5 04:13:29 ifn8 kernel: usb 3-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  5 04:13:29 ifn8 kernel: usb 3-2: Product: USB2.0 Hub             
-May  5 04:13:29 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.         
+May  5 04:13:29 ifn8 kernel: usb 3-2: Product: USB2.0 Hub
+May  5 04:13:29 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.
 May  5 04:13:29 ifn8 kernel: hid-generic 0003:D010:1601.0001: input,hidraw0: USB HID v1.11 Keyboard [DOIO KB16-01] on usb-0000:02:00.0-1/input0
 May  5 04:13:29 ifn8 kernel: hid-generic 0003:D010:1601.0002: hiddev96,hidraw1: USB HID v1.11 Device [DOIO KB16-01] on usb-0000:02:00.0-1/input1
 May  5 04:13:29 ifn8 kernel: input: DOIO KB16-01 Mouse as /devices/pci0000:00/0000:00:01.2/0000:02:00.0/usb1/1-1/1-1:1.2/0003:D010:1601.0003/input/input3
@@ -12106,8 +12106,8 @@ May  5 04:13:29 ifn8 kernel: usb 1-8: Manufacturer: MediaTek Inc.
 May  5 04:13:29 ifn8 kernel: usb 1-8: SerialNumber: 000000000
 May  5 04:13:29 ifn8 kernel: usb 4-2: New USB device found, idVendor=2109, idProduct=0817, bcdDevice=90.24
 May  5 04:13:29 ifn8 kernel: usb 4-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  5 04:13:29 ifn8 kernel: usb 4-2: Product: USB3.0 Hub             
-May  5 04:13:29 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.         
+May  5 04:13:29 ifn8 kernel: usb 4-2: Product: USB3.0 Hub
+May  5 04:13:29 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.
 May  5 04:13:29 ifn8 kernel: hub 4-2:1.0: USB hub found
 May  5 04:13:29 ifn8 kernel: hub 4-2:1.0: 4 ports detected
 May  5 04:13:29 ifn8 kernel: usb 3-3: new full-speed USB device number 3 using xhci_hcd
@@ -13800,7 +13800,7 @@ May  4 20:13:58 ifn8 bluetoothd[942]: Endpoint registered: sender=:1.79 path=/Me
 May  4 20:13:58 ifn8 bluetoothd[942]: Endpoint registered: sender=:1.79 path=/MediaEndpoint/A2DPSource/opus_05_duplex
 May  4 20:13:58 ifn8 kdeconnectd[2373]: No object for name "@DEFAULT_SINK@"
 May  4 20:13:58 ifn8 kdeconnectd[2373]: No object for name "@DEFAULT_SOURCE@"
-May  4 20:13:58 ifn8 kded6[2080]: Failed to connect to Bolt manager DBus interface: 
+May  4 20:13:58 ifn8 kded6[2080]: Failed to connect to Bolt manager DBus interface:
 May  4 20:13:58 ifn8 kded6[2080]: Couldn't connect to Bolt DBus daemon
 May  4 20:13:58 ifn8 systemd[1540]: Starting plasma-ksplash.service - Splash screen shown during boot...
 May  4 20:13:58 ifn8 kconf_update[2414]: /usr/share/kconf_update/filepicker.upd defined Version=5 but Version=6 was expected
@@ -15231,7 +15231,6 @@ May  4 20:51:09 ifn8 audit[1]: SERVICE_STOP pid=1 uid=0 auid=4294967295 ses=4294
 May  4 20:51:09 ifn8 audit: BPF prog-id=129 op=UNLOAD
 May  4 20:51:09 ifn8 audit: BPF prog-id=128 op=UNLOAD
 May  4 20:51:09 ifn8 audit: BPF prog-id=127 op=UNLOAD
-May  4 20:51:18 ifn8 firefox[17904]: Safe Browsing server returned a 400 during update:request url = https://safebrowsing.googleapis.com/v5/hashLists:batchGet?key=AIzaSyBPGXa4AYD4FC3HJK7LnIKxm4fDusVuuco, payload =
 May  4 20:51:33 ifn8 firefox[17904]: [fluent-dom] An element named "count" wasn't found in the source.
 May  4 20:51:33 ifn8 firefox[17904]: [fluent-dom] An element named "count" wasn't found in the source.
 May  4 20:51:53 ifn8 systemd[1540]: app-org.mozilla.firefox@409e69c1ccdb412cbf8efef0ce21ddae.service: Consumed 54.135s CPU time, 1.6G memory peak.
@@ -16549,7 +16548,7 @@ May  5 15:14:03 ifn8 kernel: BIOS-e820: [mem 0x000000043f380000-0x000000043fffff
 May  5 15:14:03 ifn8 kernel: NX (Execute Disable) protection: active
 May  5 15:14:03 ifn8 kernel: APIC: Static calls initialized
 May  5 15:14:03 ifn8 kernel: efi: EFI v2.7 by American Megatrends
-May  5 15:14:03 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb87da218 ESRT=0xb6935b98 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018 
+May  5 15:14:03 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb87da218 ESRT=0xb6935b98 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018
 May  5 15:14:03 ifn8 kernel: random: crng init done
 May  5 15:14:03 ifn8 kernel: efi: Remove mem292: MMIO range=[0xf0000000-0xf7ffffff] (128MB) from e820 map
 May  5 15:14:03 ifn8 kernel: efi: Remove mem293: MMIO range=[0xfd200000-0xfd2fffff] (1MB) from e820 map
@@ -16576,7 +16575,7 @@ May  5 15:14:03 ifn8 kernel: total RAM covered: 3071M
 May  5 15:14:03 ifn8 kernel: Found optimal setting for mtrr clean up
 May  5 15:14:03 ifn8 kernel: gran_size: 64K #011chunk_size: 64M #011num_reg: 3  #011lose cover RAM: 0G
 May  5 15:14:03 ifn8 kernel: MTRR map: 8 entries (4 fixed + 4 variable; max 21), built from 9 variable MTRRs
-May  5 15:14:03 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT  
+May  5 15:14:03 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT
 May  5 15:14:03 ifn8 kernel: last_pfn = 0xbf000 max_arch_pfn = 0x400000000
 May  5 15:14:03 ifn8 kernel: esrt: Reserving ESRT space from 0x00000000b6935b98 to 0x00000000b6935bd0.
 May  5 15:14:03 ifn8 kernel: Using GB pages for direct mapping
@@ -16705,7 +16704,7 @@ May  5 15:14:03 ifn8 kernel: printk: log buffer data + meta data: 262144 + 91750
 May  5 15:14:03 ifn8 kernel: Dentry cache hash table entries: 2097152 (order: 12, 16777216 bytes, linear)
 May  5 15:14:03 ifn8 kernel: Inode-cache hash table entries: 1048576 (order: 11, 8388608 bytes, linear)
 May  5 15:14:03 ifn8 kernel: software IO TLB: area num 16.
-May  5 15:14:03 ifn8 kernel: Fallback order for Node 0: 0 
+May  5 15:14:03 ifn8 kernel: Fallback order for Node 0: 0
 May  5 15:14:03 ifn8 kernel: Built 1 zonelists, mobility grouping on.  Total pages: 4169749
 May  5 15:14:03 ifn8 kernel: Policy zone: Normal
 May  5 15:14:03 ifn8 kernel: mem auto-init: stack:all(zero), heap alloc:on, heap free:off
@@ -17156,7 +17155,7 @@ May  5 15:14:03 ifn8 kernel: integrity: Platform Keyring initialized
 May  5 15:14:03 ifn8 kernel: integrity: Machine keyring initialized
 May  5 15:14:03 ifn8 kernel: cryptd: max_cpu_qlen set to 1000
 May  5 15:14:03 ifn8 kernel: NET: Registered PF_ALG protocol family
-May  5 15:14:03 ifn8 kernel: xor: automatically using best checksumming function   avx       
+May  5 15:14:03 ifn8 kernel: xor: automatically using best checksumming function   avx
 May  5 15:14:03 ifn8 kernel: Key type asymmetric registered
 May  5 15:14:03 ifn8 kernel: Asymmetric key parser 'x509' registered
 May  5 15:14:03 ifn8 kernel: Block layer SCSI generic (bsg) driver version 0.4 loaded (major 244)
@@ -17197,7 +17196,7 @@ May  5 15:14:03 ifn8 kernel: ACPI: bus type drm_connector registered
 May  5 15:14:03 ifn8 kernel: ahci 0000:02:00.1: SSS flag set, parallel bus scan disabled
 May  5 15:14:03 ifn8 kernel: ahci 0000:02:00.1: AHCI vers 0001.0301, 32 command slots, 6 Gbps, SATA mode
 May  5 15:14:03 ifn8 kernel: ahci 0000:02:00.1: 6/6 ports implemented (port mask 0x3f)
-May  5 15:14:03 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst 
+May  5 15:14:03 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst
 May  5 15:14:03 ifn8 kernel: scsi host0: ahci
 May  5 15:14:03 ifn8 kernel: scsi host1: ahci
 May  5 15:14:03 ifn8 kernel: scsi host2: ahci
@@ -17351,8 +17350,8 @@ May  5 15:14:03 ifn8 kernel: usb 1-1: SerialNumber: vial:f64c2b3c
 May  5 15:14:03 ifn8 kernel: input: DOIO KB16-01 as /devices/pci0000:00/0000:00:01.2/0000:02:00.0/usb1/1-1/1-1:1.0/0003:D010:1601.0001/input/input2
 May  5 15:14:03 ifn8 kernel: usb 3-2: New USB device found, idVendor=2109, idProduct=2817, bcdDevice=90.24
 May  5 15:14:03 ifn8 kernel: usb 3-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  5 15:14:03 ifn8 kernel: usb 3-2: Product: USB2.0 Hub             
-May  5 15:14:03 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.         
+May  5 15:14:03 ifn8 kernel: usb 3-2: Product: USB2.0 Hub
+May  5 15:14:03 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.
 May  5 15:14:03 ifn8 kernel: hub 3-2:1.0: USB hub found
 May  5 15:14:03 ifn8 kernel: hub 3-2:1.0: 4 ports detected
 May  5 15:14:03 ifn8 kernel: hid-generic 0003:D010:1601.0001: input,hidraw0: USB HID v1.11 Keyboard [DOIO KB16-01] on usb-0000:02:00.0-1/input0
@@ -17392,8 +17391,8 @@ May  5 15:14:03 ifn8 kernel: usb 1-8: Manufacturer: MediaTek Inc.
 May  5 15:14:03 ifn8 kernel: usb 1-8: SerialNumber: 000000000
 May  5 15:14:03 ifn8 kernel: usb 4-2: New USB device found, idVendor=2109, idProduct=0817, bcdDevice=90.24
 May  5 15:14:03 ifn8 kernel: usb 4-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  5 15:14:03 ifn8 kernel: usb 4-2: Product: USB3.0 Hub             
-May  5 15:14:03 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.         
+May  5 15:14:03 ifn8 kernel: usb 4-2: Product: USB3.0 Hub
+May  5 15:14:03 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.
 May  5 15:14:03 ifn8 kernel: hub 4-2:1.0: USB hub found
 May  5 15:14:03 ifn8 kernel: hub 4-2:1.0: 4 ports detected
 May  5 15:14:03 ifn8 kernel: usb 3-3: new full-speed USB device number 3 using xhci_hcd
@@ -19022,7 +19021,7 @@ May  5 07:14:27 ifn8 bluetoothd[945]: Endpoint registered: sender=:1.78 path=/Me
 May  5 07:14:27 ifn8 bluetoothd[945]: Endpoint registered: sender=:1.78 path=/MediaEndpoint/A2DPSource/opus_05_duplex
 May  5 07:14:27 ifn8 kdeconnectd[2383]: No object for name "@DEFAULT_SINK@"
 May  5 07:14:27 ifn8 kdeconnectd[2383]: No object for name "@DEFAULT_SOURCE@"
-May  5 07:14:27 ifn8 kded6[2088]: Failed to connect to Bolt manager DBus interface: 
+May  5 07:14:27 ifn8 kded6[2088]: Failed to connect to Bolt manager DBus interface:
 May  5 07:14:27 ifn8 kded6[2088]: Couldn't connect to Bolt DBus daemon
 May  5 07:14:27 ifn8 systemd[1534]: Starting plasma-ksplash.service - Splash screen shown during boot...
 May  5 07:14:27 ifn8 kconf_update[2423]: /usr/share/kconf_update/filepicker.upd defined Version=5 but Version=6 was expected
@@ -20607,7 +20606,7 @@ May  5 12:32:10 ifn8 ModemManager[1069]: <msg> [sleep-monitor-systemd] system is
 May  5 12:32:10 ifn8 NetworkManager[1129]: <info>  [1777955530.2710] device (eno1): state change: unmanaged -> unavailable (reason 'managed', managed-type: 'external')
 May  5 12:32:10 ifn8 kernel: Realtek Internal NBASE-T PHY r8169-0-400:00: attached PHY driver (mii_bus:phy_addr=r8169-0-400:00, irq=MAC)
 May  5 12:32:10 ifn8 kernel: kwin_wayland: page allocation failure: order:3, mode:0x40920(GFP_ATOMIC|__GFP_ZERO|__GFP_COMP), nodemask=(null),cpuset=/,mems_allowed=0
-May  5 12:32:10 ifn8 kernel: CPU: 5 UID: 1000 PID: 1899 Comm: kwin_wayland Not tainted 6.19.13-200.fc43.x86_64 #1 PREEMPT(lazy) 
+May  5 12:32:10 ifn8 kernel: CPU: 5 UID: 1000 PID: 1899 Comm: kwin_wayland Not tainted 6.19.13-200.fc43.x86_64 #1 PREEMPT(lazy)
 May  5 12:32:10 ifn8 kernel: Hardware name: Gigabyte Technology Co., Ltd. B550I AORUS PRO AX/B550I AORUS PRO AX, BIOS F16e 07/20/2022
 May  5 12:32:10 ifn8 kernel: Call Trace:
 May  5 12:32:10 ifn8 kernel: <TASK>
@@ -24994,7 +24993,7 @@ May  6 01:44:51 ifn8 kernel: BIOS-e820: [mem 0x000000043f380000-0x000000043fffff
 May  6 01:44:51 ifn8 kernel: NX (Execute Disable) protection: active
 May  6 01:44:51 ifn8 kernel: APIC: Static calls initialized
 May  6 01:44:51 ifn8 kernel: efi: EFI v2.7 by American Megatrends
-May  6 01:44:51 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb6847698 ESRT=0xb6934198 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018 
+May  6 01:44:51 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb6847698 ESRT=0xb6934198 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018
 May  6 01:44:51 ifn8 kernel: random: crng init done
 May  6 01:44:51 ifn8 kernel: efi: Remove mem292: MMIO range=[0xf0000000-0xf7ffffff] (128MB) from e820 map
 May  6 01:44:51 ifn8 kernel: efi: Remove mem293: MMIO range=[0xfd200000-0xfd2fffff] (1MB) from e820 map
@@ -25021,7 +25020,7 @@ May  6 01:44:51 ifn8 kernel: total RAM covered: 3071M
 May  6 01:44:51 ifn8 kernel: Found optimal setting for mtrr clean up
 May  6 01:44:51 ifn8 kernel: gran_size: 64K #011chunk_size: 64M #011num_reg: 3  #011lose cover RAM: 0G
 May  6 01:44:51 ifn8 kernel: MTRR map: 8 entries (4 fixed + 4 variable; max 21), built from 9 variable MTRRs
-May  6 01:44:51 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT  
+May  6 01:44:51 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT
 May  6 01:44:51 ifn8 kernel: last_pfn = 0xbf000 max_arch_pfn = 0x400000000
 May  6 01:44:51 ifn8 kernel: esrt: Reserving ESRT space from 0x00000000b6934198 to 0x00000000b69341d0.
 May  6 01:44:51 ifn8 kernel: Using GB pages for direct mapping
@@ -25150,7 +25149,7 @@ May  6 01:44:51 ifn8 kernel: printk: log buffer data + meta data: 262144 + 91750
 May  6 01:44:51 ifn8 kernel: Dentry cache hash table entries: 2097152 (order: 12, 16777216 bytes, linear)
 May  6 01:44:51 ifn8 kernel: Inode-cache hash table entries: 1048576 (order: 11, 8388608 bytes, linear)
 May  6 01:44:51 ifn8 kernel: software IO TLB: area num 16.
-May  6 01:44:51 ifn8 kernel: Fallback order for Node 0: 0 
+May  6 01:44:51 ifn8 kernel: Fallback order for Node 0: 0
 May  6 01:44:51 ifn8 kernel: Built 1 zonelists, mobility grouping on.  Total pages: 4169749
 May  6 01:44:51 ifn8 kernel: Policy zone: Normal
 May  6 01:44:51 ifn8 kernel: mem auto-init: stack:all(zero), heap alloc:on, heap free:off
@@ -25601,7 +25600,7 @@ May  6 01:44:51 ifn8 kernel: integrity: Platform Keyring initialized
 May  6 01:44:51 ifn8 kernel: integrity: Machine keyring initialized
 May  6 01:44:51 ifn8 kernel: cryptd: max_cpu_qlen set to 1000
 May  6 01:44:51 ifn8 kernel: NET: Registered PF_ALG protocol family
-May  6 01:44:51 ifn8 kernel: xor: automatically using best checksumming function   avx       
+May  6 01:44:51 ifn8 kernel: xor: automatically using best checksumming function   avx
 May  6 01:44:51 ifn8 kernel: Key type asymmetric registered
 May  6 01:44:51 ifn8 kernel: Asymmetric key parser 'x509' registered
 May  6 01:44:51 ifn8 kernel: Block layer SCSI generic (bsg) driver version 0.4 loaded (major 244)
@@ -25642,7 +25641,7 @@ May  6 01:44:51 ifn8 kernel: ACPI: bus type drm_connector registered
 May  6 01:44:51 ifn8 kernel: ahci 0000:02:00.1: SSS flag set, parallel bus scan disabled
 May  6 01:44:51 ifn8 kernel: ahci 0000:02:00.1: AHCI vers 0001.0301, 32 command slots, 6 Gbps, SATA mode
 May  6 01:44:51 ifn8 kernel: ahci 0000:02:00.1: 6/6 ports implemented (port mask 0x3f)
-May  6 01:44:51 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst 
+May  6 01:44:51 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst
 May  6 01:44:51 ifn8 kernel: scsi host0: ahci
 May  6 01:44:51 ifn8 kernel: scsi host1: ahci
 May  6 01:44:51 ifn8 kernel: scsi host2: ahci
@@ -25787,8 +25786,8 @@ May  6 01:44:51 ifn8 kernel: ata1: SATA link down (SStatus 0 SControl 330)
 May  6 01:44:51 ifn8 kernel: usb 1-1: new full-speed USB device number 2 using xhci_hcd
 May  6 01:44:51 ifn8 kernel: usb 3-2: New USB device found, idVendor=2109, idProduct=2817, bcdDevice=90.24
 May  6 01:44:51 ifn8 kernel: usb 3-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  6 01:44:51 ifn8 kernel: usb 3-2: Product: USB2.0 Hub             
-May  6 01:44:51 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.         
+May  6 01:44:51 ifn8 kernel: usb 3-2: Product: USB2.0 Hub
+May  6 01:44:51 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.
 May  6 01:44:51 ifn8 kernel: hub 3-2:1.0: USB hub found
 May  6 01:44:51 ifn8 kernel: hub 3-2:1.0: 4 ports detected
 May  6 01:44:51 ifn8 kernel: usb 4-2: new SuperSpeed USB device number 2 using xhci_hcd
@@ -25828,8 +25827,8 @@ May  6 01:44:51 ifn8 kernel: hid-generic 0003:048D:5702.0004: hiddev97,hidraw3: 
 May  6 01:44:51 ifn8 kernel: ata4: SATA link down (SStatus 0 SControl 300)
 May  6 01:44:51 ifn8 kernel: usb 4-2: New USB device found, idVendor=2109, idProduct=0817, bcdDevice=90.24
 May  6 01:44:51 ifn8 kernel: usb 4-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  6 01:44:51 ifn8 kernel: usb 4-2: Product: USB3.0 Hub             
-May  6 01:44:51 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.         
+May  6 01:44:51 ifn8 kernel: usb 4-2: Product: USB3.0 Hub
+May  6 01:44:51 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.
 May  6 01:44:51 ifn8 kernel: usb 1-8: new high-speed USB device number 4 using xhci_hcd
 May  6 01:44:51 ifn8 kernel: hub 4-2:1.0: USB hub found
 May  6 01:44:51 ifn8 kernel: hub 4-2:1.0: 4 ports detected
@@ -27464,7 +27463,7 @@ May  5 17:45:25 ifn8 bluetoothd[948]: Endpoint registered: sender=:1.79 path=/Me
 May  5 17:45:25 ifn8 bluetoothd[948]: Endpoint registered: sender=:1.79 path=/MediaEndpoint/A2DPSource/opus_05_duplex
 May  5 17:45:25 ifn8 kdeconnectd[2404]: No object for name "@DEFAULT_SINK@"
 May  5 17:45:25 ifn8 kdeconnectd[2404]: No object for name "@DEFAULT_SOURCE@"
-May  5 17:45:25 ifn8 kded6[2115]: Failed to connect to Bolt manager DBus interface: 
+May  5 17:45:25 ifn8 kded6[2115]: Failed to connect to Bolt manager DBus interface:
 May  5 17:45:25 ifn8 kded6[2115]: Couldn't connect to Bolt DBus daemon
 May  5 17:45:25 ifn8 systemd[1562]: Starting plasma-ksplash.service - Splash screen shown during boot...
 May  5 17:45:25 ifn8 kconf_update[2445]: /usr/share/kconf_update/filepicker.upd defined Version=5 but Version=6 was expected
@@ -28612,7 +28611,7 @@ May  6 05:13:05 ifn8 kernel: BIOS-e820: [mem 0x000000043f380000-0x000000043fffff
 May  6 05:13:05 ifn8 kernel: NX (Execute Disable) protection: active
 May  6 05:13:05 ifn8 kernel: APIC: Static calls initialized
 May  6 05:13:05 ifn8 kernel: efi: EFI v2.7 by American Megatrends
-May  6 05:13:05 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb6847698 ESRT=0xb6934198 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018 
+May  6 05:13:05 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb6847698 ESRT=0xb6934198 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018
 May  6 05:13:05 ifn8 kernel: random: crng init done
 May  6 05:13:05 ifn8 kernel: efi: Remove mem292: MMIO range=[0xf0000000-0xf7ffffff] (128MB) from e820 map
 May  6 05:13:05 ifn8 kernel: efi: Remove mem293: MMIO range=[0xfd200000-0xfd2fffff] (1MB) from e820 map
@@ -28639,7 +28638,7 @@ May  6 05:13:05 ifn8 kernel: total RAM covered: 3071M
 May  6 05:13:05 ifn8 kernel: Found optimal setting for mtrr clean up
 May  6 05:13:05 ifn8 kernel: gran_size: 64K #011chunk_size: 64M #011num_reg: 3  #011lose cover RAM: 0G
 May  6 05:13:05 ifn8 kernel: MTRR map: 8 entries (4 fixed + 4 variable; max 21), built from 9 variable MTRRs
-May  6 05:13:05 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT  
+May  6 05:13:05 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT
 May  6 05:13:05 ifn8 kernel: last_pfn = 0xbf000 max_arch_pfn = 0x400000000
 May  6 05:13:05 ifn8 kernel: esrt: Reserving ESRT space from 0x00000000b6934198 to 0x00000000b69341d0.
 May  6 05:13:05 ifn8 kernel: Using GB pages for direct mapping
@@ -28768,7 +28767,7 @@ May  6 05:13:05 ifn8 kernel: printk: log buffer data + meta data: 262144 + 91750
 May  6 05:13:05 ifn8 kernel: Dentry cache hash table entries: 2097152 (order: 12, 16777216 bytes, linear)
 May  6 05:13:05 ifn8 kernel: Inode-cache hash table entries: 1048576 (order: 11, 8388608 bytes, linear)
 May  6 05:13:05 ifn8 kernel: software IO TLB: area num 16.
-May  6 05:13:05 ifn8 kernel: Fallback order for Node 0: 0 
+May  6 05:13:05 ifn8 kernel: Fallback order for Node 0: 0
 May  6 05:13:05 ifn8 kernel: Built 1 zonelists, mobility grouping on.  Total pages: 4169749
 May  6 05:13:05 ifn8 kernel: Policy zone: Normal
 May  6 05:13:05 ifn8 kernel: mem auto-init: stack:all(zero), heap alloc:on, heap free:off
@@ -29219,7 +29218,7 @@ May  6 05:13:05 ifn8 kernel: integrity: Platform Keyring initialized
 May  6 05:13:05 ifn8 kernel: integrity: Machine keyring initialized
 May  6 05:13:05 ifn8 kernel: cryptd: max_cpu_qlen set to 1000
 May  6 05:13:05 ifn8 kernel: NET: Registered PF_ALG protocol family
-May  6 05:13:05 ifn8 kernel: xor: automatically using best checksumming function   avx       
+May  6 05:13:05 ifn8 kernel: xor: automatically using best checksumming function   avx
 May  6 05:13:05 ifn8 kernel: Key type asymmetric registered
 May  6 05:13:05 ifn8 kernel: Asymmetric key parser 'x509' registered
 May  6 05:13:05 ifn8 kernel: Block layer SCSI generic (bsg) driver version 0.4 loaded (major 244)
@@ -29260,7 +29259,7 @@ May  6 05:13:05 ifn8 kernel: ACPI: bus type drm_connector registered
 May  6 05:13:05 ifn8 kernel: ahci 0000:02:00.1: SSS flag set, parallel bus scan disabled
 May  6 05:13:05 ifn8 kernel: ahci 0000:02:00.1: AHCI vers 0001.0301, 32 command slots, 6 Gbps, SATA mode
 May  6 05:13:05 ifn8 kernel: ahci 0000:02:00.1: 6/6 ports implemented (port mask 0x3f)
-May  6 05:13:05 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst 
+May  6 05:13:05 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst
 May  6 05:13:05 ifn8 kernel: scsi host0: ahci
 May  6 05:13:05 ifn8 kernel: scsi host1: ahci
 May  6 05:13:05 ifn8 kernel: scsi host2: ahci
@@ -29408,8 +29407,8 @@ May  6 05:13:05 ifn8 kernel: ata1: SATA link down (SStatus 0 SControl 330)
 May  6 05:13:05 ifn8 kernel: usb 1-1: new full-speed USB device number 2 using xhci_hcd
 May  6 05:13:05 ifn8 kernel: usb 3-2: New USB device found, idVendor=2109, idProduct=2817, bcdDevice=90.24
 May  6 05:13:05 ifn8 kernel: usb 3-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  6 05:13:05 ifn8 kernel: usb 3-2: Product: USB2.0 Hub             
-May  6 05:13:05 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.         
+May  6 05:13:05 ifn8 kernel: usb 3-2: Product: USB2.0 Hub
+May  6 05:13:05 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.
 May  6 05:13:05 ifn8 kernel: hub 3-2:1.0: USB hub found
 May  6 05:13:05 ifn8 kernel: hub 3-2:1.0: 4 ports detected
 May  6 05:13:05 ifn8 kernel: usb 4-2: new SuperSpeed USB device number 2 using xhci_hcd
@@ -29450,8 +29449,8 @@ May  6 05:13:05 ifn8 kernel: ata4: SATA link down (SStatus 0 SControl 300)
 May  6 05:13:05 ifn8 kernel: usb 1-8: new high-speed USB device number 4 using xhci_hcd
 May  6 05:13:05 ifn8 kernel: usb 4-2: New USB device found, idVendor=2109, idProduct=0817, bcdDevice=90.24
 May  6 05:13:05 ifn8 kernel: usb 4-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  6 05:13:05 ifn8 kernel: usb 4-2: Product: USB3.0 Hub             
-May  6 05:13:05 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.         
+May  6 05:13:05 ifn8 kernel: usb 4-2: Product: USB3.0 Hub
+May  6 05:13:05 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.
 May  6 05:13:05 ifn8 kernel: hub 4-2:1.0: USB hub found
 May  6 05:13:05 ifn8 kernel: hub 4-2:1.0: 4 ports detected
 May  6 05:13:05 ifn8 kernel: usb 3-3: new full-speed USB device number 3 using xhci_hcd
@@ -30841,7 +30840,7 @@ May  5 21:13:25 ifn8 kernel: atomic remove_fb failed with -22
 May  5 21:13:25 ifn8 kernel: WARNING: drivers/gpu/drm/drm_framebuffer.c:1176 at drm_framebuffer_remove+0x20d/0x220, CPU#0: kworker/0:1/11
 May  5 21:13:25 ifn8 kernel: Modules linked in: snd_seq_dummy rfcomm snd_hrtimer sunrpc nf_conntrack_netbios_ns nf_conntrack_broadcast nft_fib_inet nft_fib_ipv4 nft_fib_ipv6 nft_fib nft_reject_inet nf_reject_ipv4 nf_reject_ipv6 nft_reject nft_ct nft_chain_nat nf_nat nf_conntrack nf_defrag_ipv6 nf_defrag_ipv4 nf_tables qrtr uhid bnep vfat fat mt7921e mt7921_common snd_hda_codec_alc882 snd_hda_codec_realtek_lib mt792x_lib snd_hda_codec_atihdmi snd_hda_codec_generic snd_hda_codec_hdmi mt76_connac_lib snd_usb_audio amd_atl intel_rapl_msr snd_hda_intel mt76 intel_rapl_common snd_hda_codec snd_usbmidi_lib mc snd_hda_core snd_ump mac80211 cdc_acm snd_intel_dspcfg snd_rawmidi btusb edac_mce_amd snd_intel_sdw_acpi btmtk snd_hwdep kvm_amd btrtl snd_seq btbcm btintel snd_seq_device cfg80211 kvm snd_pcm bluetooth snd_timer r8169 snd irqbypass soundcore i2c_piix4 wmi_bmof realtek rapl rfkill gigabyte_wmi libarc4 pcspkr k10temp i2c_smbus hid_logitech_hidpp joydev gpio_amdpt gpio_generic loop nfnetlink zram lz4hc_compress lz4_compress amdgpu
 May  5 21:13:25 ifn8 kernel: hid_logitech_dj amdxcp i2c_algo_bit drm_ttm_helper ttm drm_exec drm_panel_backlight_quirks gpu_sched drm_suballoc_helper video nvme drm_buddy nvme_core drm_display_helper nvme_keyring nvme_auth ghash_clmulni_intel cec sp5100_tco hkdf wmi ntsync fuse i2c_dev
-May  5 21:13:25 ifn8 kernel: CPU: 0 UID: 0 PID: 11 Comm: kworker/0:1 Not tainted 6.19.14-200.fc43.x86_64 #1 PREEMPT(lazy) 
+May  5 21:13:25 ifn8 kernel: CPU: 0 UID: 0 PID: 11 Comm: kworker/0:1 Not tainted 6.19.14-200.fc43.x86_64 #1 PREEMPT(lazy)
 May  5 21:13:25 ifn8 kernel: Hardware name: Gigabyte Technology Co., Ltd. B550I AORUS PRO AX/B550I AORUS PRO AX, BIOS F16e 07/20/2022
 May  5 21:13:25 ifn8 kernel: Workqueue: events drm_mode_rmfb_work_fn
 May  5 21:13:25 ifn8 kernel: RIP: 0010:drm_framebuffer_remove+0x20f/0x220
@@ -31142,7 +31141,7 @@ May  5 21:13:28 ifn8 bluetoothd[944]: Endpoint registered: sender=:1.79 path=/Me
 May  5 21:13:28 ifn8 bluetoothd[944]: Endpoint registered: sender=:1.79 path=/MediaEndpoint/A2DPSource/opus_05_duplex
 May  5 21:13:28 ifn8 kdeconnectd[2402]: No object for name "@DEFAULT_SINK@"
 May  5 21:13:28 ifn8 kdeconnectd[2402]: No object for name "@DEFAULT_SOURCE@"
-May  5 21:13:28 ifn8 kded6[2107]: Failed to connect to Bolt manager DBus interface: 
+May  5 21:13:28 ifn8 kded6[2107]: Failed to connect to Bolt manager DBus interface:
 May  5 21:13:28 ifn8 kded6[2107]: Couldn't connect to Bolt DBus daemon
 May  5 21:13:28 ifn8 systemd[1543]: Starting plasma-ksplash.service - Splash screen shown during boot...
 May  5 21:13:28 ifn8 kconf_update[2442]: /usr/share/kconf_update/filepicker.upd defined Version=5 but Version=6 was expected
@@ -32111,7 +32110,7 @@ May  5 21:56:16 ifn8 kwin_wayland[1919]: The main thread was hanging temporarily
 May  5 21:56:20 ifn8 kwin_wayland[1919]: The main thread was hanging temporarily!
 May  5 21:56:39 ifn8 kwin_wayland[1919]: The main thread was hanging temporarily!
 May  5 21:56:40 ifn8 kernel: VizCompositorTh invoked oom-killer: gfp_mask=0x140cca(GFP_HIGHUSER_MOVABLE|__GFP_COMP), order=0, oom_score_adj=200
-May  5 21:56:40 ifn8 kernel: CPU: 7 UID: 1000 PID: 4559 Comm: VizCompositorTh Tainted: G        W           6.19.14-200.fc43.x86_64 #1 PREEMPT(lazy) 
+May  5 21:56:40 ifn8 kernel: CPU: 7 UID: 1000 PID: 4559 Comm: VizCompositorTh Tainted: G        W           6.19.14-200.fc43.x86_64 #1 PREEMPT(lazy)
 May  5 21:56:40 ifn8 systemd[1]: user@1000.service: A process of this unit has been killed by the OOM killer.
 May  5 21:56:40 ifn8 kernel: Tainted: [W]=WARN
 May  5 21:56:40 ifn8 systemd[1543]: app-org.chromium.Chromium-4437.scope: A process of this unit has been killed by the OOM killer.
@@ -33499,7 +33498,7 @@ May  6 00:39:54 ifn8 systemd-resolved[909]: Resetting learnt feature levels on a
 May  6 00:39:54 ifn8 NetworkManager[1130]: <info>  [1777999194.6459] manager: sleep: wake requested (sleeping: yes  enabled: yes)
 May  6 00:39:54 ifn8 NetworkManager[1130]: <info>  [1777999194.6461] device (eno1): state change: unmanaged -> unavailable (reason 'managed', managed-type: 'external')
 May  6 00:39:54 ifn8 kernel: kwin_wayland: page allocation failure: order:3, mode:0x40920(GFP_ATOMIC|__GFP_ZERO|__GFP_COMP), nodemask=(null),cpuset=/,mems_allowed=0
-May  6 00:39:54 ifn8 kernel: CPU: 6 UID: 1000 PID: 1919 Comm: kwin_wayland Tainted: G        W           6.19.14-200.fc43.x86_64 #1 PREEMPT(lazy) 
+May  6 00:39:54 ifn8 kernel: CPU: 6 UID: 1000 PID: 1919 Comm: kwin_wayland Tainted: G        W           6.19.14-200.fc43.x86_64 #1 PREEMPT(lazy)
 May  6 00:39:54 ifn8 kernel: Tainted: [W]=WARN
 May  6 00:39:54 ifn8 kernel: Hardware name: Gigabyte Technology Co., Ltd. B550I AORUS PRO AX/B550I AORUS PRO AX, BIOS F16e 07/20/2022
 May  6 00:39:54 ifn8 kernel: Call Trace:
@@ -35022,7 +35021,7 @@ May  6 20:54:19 ifn8 kernel: BIOS-e820: [mem 0x000000043f380000-0x000000043fffff
 May  6 20:54:19 ifn8 kernel: NX (Execute Disable) protection: active
 May  6 20:54:19 ifn8 kernel: APIC: Static calls initialized
 May  6 20:54:19 ifn8 kernel: efi: EFI v2.7 by American Megatrends
-May  6 20:54:19 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb87da218 ESRT=0xb6935b98 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018 
+May  6 20:54:19 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb87da218 ESRT=0xb6935b98 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018
 May  6 20:54:19 ifn8 kernel: random: crng init done
 May  6 20:54:19 ifn8 kernel: efi: Remove mem292: MMIO range=[0xf0000000-0xf7ffffff] (128MB) from e820 map
 May  6 20:54:19 ifn8 kernel: efi: Remove mem293: MMIO range=[0xfd200000-0xfd2fffff] (1MB) from e820 map
@@ -35049,7 +35048,7 @@ May  6 20:54:19 ifn8 kernel: total RAM covered: 3071M
 May  6 20:54:19 ifn8 kernel: Found optimal setting for mtrr clean up
 May  6 20:54:19 ifn8 kernel: gran_size: 64K #011chunk_size: 64M #011num_reg: 3  #011lose cover RAM: 0G
 May  6 20:54:19 ifn8 kernel: MTRR map: 8 entries (4 fixed + 4 variable; max 21), built from 9 variable MTRRs
-May  6 20:54:19 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT  
+May  6 20:54:19 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT
 May  6 20:54:19 ifn8 kernel: last_pfn = 0xbf000 max_arch_pfn = 0x400000000
 May  6 20:54:19 ifn8 kernel: esrt: Reserving ESRT space from 0x00000000b6935b98 to 0x00000000b6935bd0.
 May  6 20:54:19 ifn8 kernel: Using GB pages for direct mapping
@@ -35178,7 +35177,7 @@ May  6 20:54:19 ifn8 kernel: printk: log buffer data + meta data: 262144 + 91750
 May  6 20:54:19 ifn8 kernel: Dentry cache hash table entries: 2097152 (order: 12, 16777216 bytes, linear)
 May  6 20:54:19 ifn8 kernel: Inode-cache hash table entries: 1048576 (order: 11, 8388608 bytes, linear)
 May  6 20:54:19 ifn8 kernel: software IO TLB: area num 16.
-May  6 20:54:19 ifn8 kernel: Fallback order for Node 0: 0 
+May  6 20:54:19 ifn8 kernel: Fallback order for Node 0: 0
 May  6 20:54:19 ifn8 kernel: Built 1 zonelists, mobility grouping on.  Total pages: 4169749
 May  6 20:54:19 ifn8 kernel: Policy zone: Normal
 May  6 20:54:19 ifn8 kernel: mem auto-init: stack:all(zero), heap alloc:on, heap free:off
@@ -35629,7 +35628,7 @@ May  6 20:54:19 ifn8 kernel: integrity: Platform Keyring initialized
 May  6 20:54:19 ifn8 kernel: integrity: Machine keyring initialized
 May  6 20:54:19 ifn8 kernel: cryptd: max_cpu_qlen set to 1000
 May  6 20:54:19 ifn8 kernel: NET: Registered PF_ALG protocol family
-May  6 20:54:19 ifn8 kernel: xor: automatically using best checksumming function   avx       
+May  6 20:54:19 ifn8 kernel: xor: automatically using best checksumming function   avx
 May  6 20:54:19 ifn8 kernel: Key type asymmetric registered
 May  6 20:54:19 ifn8 kernel: Asymmetric key parser 'x509' registered
 May  6 20:54:19 ifn8 kernel: Block layer SCSI generic (bsg) driver version 0.4 loaded (major 244)
@@ -35670,7 +35669,7 @@ May  6 20:54:19 ifn8 kernel: ACPI: bus type drm_connector registered
 May  6 20:54:19 ifn8 kernel: ahci 0000:02:00.1: SSS flag set, parallel bus scan disabled
 May  6 20:54:19 ifn8 kernel: ahci 0000:02:00.1: AHCI vers 0001.0301, 32 command slots, 6 Gbps, SATA mode
 May  6 20:54:19 ifn8 kernel: ahci 0000:02:00.1: 6/6 ports implemented (port mask 0x3f)
-May  6 20:54:19 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst 
+May  6 20:54:19 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst
 May  6 20:54:19 ifn8 kernel: scsi host0: ahci
 May  6 20:54:19 ifn8 kernel: scsi host1: ahci
 May  6 20:54:19 ifn8 kernel: scsi host2: ahci
@@ -35819,8 +35818,8 @@ May  6 20:54:19 ifn8 kernel: usb 3-2: device descriptor read/64, error -71
 May  6 20:54:19 ifn8 kernel: ata2: SATA link down (SStatus 0 SControl 330)
 May  6 20:54:19 ifn8 kernel: usb 3-2: New USB device found, idVendor=2109, idProduct=2817, bcdDevice=90.24
 May  6 20:54:19 ifn8 kernel: usb 3-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  6 20:54:19 ifn8 kernel: usb 3-2: Product: USB2.0 Hub             
-May  6 20:54:19 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.         
+May  6 20:54:19 ifn8 kernel: usb 3-2: Product: USB2.0 Hub
+May  6 20:54:19 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.
 May  6 20:54:19 ifn8 kernel: hub 3-2:1.0: USB hub found
 May  6 20:54:19 ifn8 kernel: hub 3-2:1.0: 4 ports detected
 May  6 20:54:19 ifn8 kernel: usb 1-1: New USB device found, idVendor=d010, idProduct=1601, bcdDevice= 0.02
@@ -35866,8 +35865,8 @@ May  6 20:54:19 ifn8 kernel: usb 1-8: SerialNumber: 000000000
 May  6 20:54:19 ifn8 kernel: ata5: SATA link down (SStatus 0 SControl 330)
 May  6 20:54:19 ifn8 kernel: usb 4-2: New USB device found, idVendor=2109, idProduct=0817, bcdDevice=90.24
 May  6 20:54:19 ifn8 kernel: usb 4-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  6 20:54:19 ifn8 kernel: usb 4-2: Product: USB3.0 Hub             
-May  6 20:54:19 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.         
+May  6 20:54:19 ifn8 kernel: usb 4-2: Product: USB3.0 Hub
+May  6 20:54:19 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.
 May  6 20:54:19 ifn8 kernel: hub 4-2:1.0: USB hub found
 May  6 20:54:19 ifn8 kernel: hub 4-2:1.0: 4 ports detected
 May  6 20:54:19 ifn8 kernel: usb 3-3: new full-speed USB device number 3 using xhci_hcd
@@ -37241,7 +37240,7 @@ May  6 12:54:39 ifn8 kernel: atomic remove_fb failed with -22
 May  6 12:54:39 ifn8 kernel: WARNING: drivers/gpu/drm/drm_framebuffer.c:1176 at drm_framebuffer_remove+0x20d/0x220, CPU#1: kworker/1:2/329
 May  6 12:54:39 ifn8 kernel: Modules linked in: snd_seq_dummy rfcomm snd_hrtimer sunrpc nf_conntrack_netbios_ns nf_conntrack_broadcast nft_fib_inet nft_fib_ipv4 nft_fib_ipv6 nft_fib nft_reject_inet nf_reject_ipv4 nf_reject_ipv6 nft_reject nft_ct nft_chain_nat nf_nat nf_conntrack nf_defrag_ipv6 nf_defrag_ipv4 nf_tables qrtr uhid bnep vfat fat amd_atl intel_rapl_msr mt7921e snd_hda_codec_alc882 intel_rapl_common snd_hda_codec_realtek_lib snd_usb_audio snd_hda_codec_atihdmi mt7921_common snd_hda_codec_generic mt792x_lib snd_hda_codec_hdmi hid_logitech_hidpp mt76_connac_lib snd_usbmidi_lib snd_hda_intel btusb edac_mce_amd mc mt76 snd_hda_codec btmtk snd_ump cdc_acm snd_rawmidi btrtl kvm_amd snd_hda_core btbcm mac80211 snd_intel_dspcfg btintel snd_intel_sdw_acpi snd_hwdep kvm bluetooth snd_seq snd_seq_device cfg80211 snd_pcm irqbypass r8169 snd_timer rapl gigabyte_wmi wmi_bmof rfkill pcspkr i2c_piix4 snd realtek libarc4 k10temp i2c_smbus soundcore joydev gpio_amdpt gpio_generic hid_logitech_dj loop nfnetlink zram lz4hc_compress
 May  6 12:54:39 ifn8 kernel: lz4_compress amdgpu amdxcp i2c_algo_bit drm_ttm_helper ttm drm_exec drm_panel_backlight_quirks gpu_sched drm_suballoc_helper video nvme drm_buddy nvme_core drm_display_helper nvme_keyring ghash_clmulni_intel cec sp5100_tco nvme_auth hkdf wmi ntsync fuse i2c_dev
-May  6 12:54:39 ifn8 kernel: CPU: 1 UID: 0 PID: 329 Comm: kworker/1:2 Not tainted 6.19.14-200.fc43.x86_64 #1 PREEMPT(lazy) 
+May  6 12:54:39 ifn8 kernel: CPU: 1 UID: 0 PID: 329 Comm: kworker/1:2 Not tainted 6.19.14-200.fc43.x86_64 #1 PREEMPT(lazy)
 May  6 12:54:39 ifn8 kernel: Hardware name: Gigabyte Technology Co., Ltd. B550I AORUS PRO AX/B550I AORUS PRO AX, BIOS F16e 07/20/2022
 May  6 12:54:39 ifn8 kernel: Workqueue: events drm_mode_rmfb_work_fn
 May  6 12:54:39 ifn8 kernel: RIP: 0010:drm_framebuffer_remove+0x20f/0x220
@@ -37529,7 +37528,7 @@ May  6 12:54:43 ifn8 bluetoothd[948]: Endpoint registered: sender=:1.78 path=/Me
 May  6 12:54:43 ifn8 bluetoothd[948]: Endpoint registered: sender=:1.78 path=/MediaEndpoint/A2DPSource/opus_05_duplex
 May  6 12:54:43 ifn8 kdeconnectd[2389]: No object for name "@DEFAULT_SINK@"
 May  6 12:54:43 ifn8 kdeconnectd[2389]: No object for name "@DEFAULT_SOURCE@"
-May  6 12:54:43 ifn8 kded6[2094]: Failed to connect to Bolt manager DBus interface: 
+May  6 12:54:43 ifn8 kded6[2094]: Failed to connect to Bolt manager DBus interface:
 May  6 12:54:43 ifn8 kded6[2094]: Couldn't connect to Bolt DBus daemon
 May  6 12:54:43 ifn8 systemd[1543]: Starting plasma-ksplash.service - Splash screen shown during boot...
 May  6 12:54:43 ifn8 kconf_update[2429]: /usr/share/kconf_update/filepicker.upd defined Version=5 but Version=6 was expected
@@ -41950,7 +41949,7 @@ May  6 23:24:09 ifn8 microsoft-edge-stable[506837]: [506832:506832:0506/232409.8
 May  6 23:24:09 ifn8 microsoft-edge-stable[506837]: [506832:506832:0506/232409.893104:ERROR:mojo/public/cpp/bindings/lib/interface_endpoint_client.cc:748] Message 2 rejected by interface blink.mojom.WidgetHost
 May  6 23:25:08 ifn8 wireplumber[1907]: wp-event-dispatcher: <WpAsyncEventHook:0x56396873f710> failed: failed to activate item: Object activation aborted: proxy destroyed
 May  6 23:26:53 ifn8 systemd[1543]: Started app-systemsettings@e2e5bea610dc4bd7956609653905944e.service - System Settings - System Settings.
-May  6 23:26:54 ifn8 systemsettings[659166]: Failed to connect to Bolt manager DBus interface: 
+May  6 23:26:54 ifn8 systemsettings[659166]: Failed to connect to Bolt manager DBus interface:
 May  6 23:26:55 ifn8 systemsettings[659166]: Failed to register with host portal QDBusError("org.freedesktop.portal.Error.Failed", "Could not register app ID: Connection already associated with an application ID")
 May  6 23:27:07 ifn8 plasmashell[2147]: requesting unexisting screen available rect -1
 May  6 23:27:07 ifn8 systemd[1543]: Started dbus-:1.2-org.kde.KSplash@1.service.
@@ -42993,7 +42992,7 @@ May  7 21:09:41 ifn8 kernel: BIOS-e820: [mem 0x000000043f380000-0x000000043fffff
 May  7 21:09:41 ifn8 kernel: NX (Execute Disable) protection: active
 May  7 21:09:41 ifn8 kernel: APIC: Static calls initialized
 May  7 21:09:41 ifn8 kernel: efi: EFI v2.7 by American Megatrends
-May  7 21:09:41 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb87da218 ESRT=0xb6935b98 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018 
+May  7 21:09:41 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb87da218 ESRT=0xb6935b98 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018
 May  7 21:09:41 ifn8 kernel: random: crng init done
 May  7 21:09:41 ifn8 kernel: efi: Remove mem292: MMIO range=[0xf0000000-0xf7ffffff] (128MB) from e820 map
 May  7 21:09:41 ifn8 kernel: efi: Remove mem293: MMIO range=[0xfd200000-0xfd2fffff] (1MB) from e820 map
@@ -43020,7 +43019,7 @@ May  7 21:09:41 ifn8 kernel: total RAM covered: 3071M
 May  7 21:09:41 ifn8 kernel: Found optimal setting for mtrr clean up
 May  7 21:09:41 ifn8 kernel: gran_size: 64K #011chunk_size: 64M #011num_reg: 3  #011lose cover RAM: 0G
 May  7 21:09:41 ifn8 kernel: MTRR map: 8 entries (4 fixed + 4 variable; max 21), built from 9 variable MTRRs
-May  7 21:09:41 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT  
+May  7 21:09:41 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT
 May  7 21:09:41 ifn8 kernel: last_pfn = 0xbf000 max_arch_pfn = 0x400000000
 May  7 21:09:41 ifn8 kernel: esrt: Reserving ESRT space from 0x00000000b6935b98 to 0x00000000b6935bd0.
 May  7 21:09:41 ifn8 kernel: Using GB pages for direct mapping
@@ -43149,7 +43148,7 @@ May  7 21:09:41 ifn8 kernel: printk: log buffer data + meta data: 262144 + 91750
 May  7 21:09:41 ifn8 kernel: Dentry cache hash table entries: 2097152 (order: 12, 16777216 bytes, linear)
 May  7 21:09:41 ifn8 kernel: Inode-cache hash table entries: 1048576 (order: 11, 8388608 bytes, linear)
 May  7 21:09:41 ifn8 kernel: software IO TLB: area num 16.
-May  7 21:09:41 ifn8 kernel: Fallback order for Node 0: 0 
+May  7 21:09:41 ifn8 kernel: Fallback order for Node 0: 0
 May  7 21:09:41 ifn8 kernel: Built 1 zonelists, mobility grouping on.  Total pages: 4169749
 May  7 21:09:41 ifn8 kernel: Policy zone: Normal
 May  7 21:09:41 ifn8 kernel: mem auto-init: stack:all(zero), heap alloc:on, heap free:off
@@ -43600,7 +43599,7 @@ May  7 21:09:41 ifn8 kernel: integrity: Platform Keyring initialized
 May  7 21:09:41 ifn8 kernel: integrity: Machine keyring initialized
 May  7 21:09:41 ifn8 kernel: cryptd: max_cpu_qlen set to 1000
 May  7 21:09:41 ifn8 kernel: NET: Registered PF_ALG protocol family
-May  7 21:09:41 ifn8 kernel: xor: automatically using best checksumming function   avx       
+May  7 21:09:41 ifn8 kernel: xor: automatically using best checksumming function   avx
 May  7 21:09:41 ifn8 kernel: Key type asymmetric registered
 May  7 21:09:41 ifn8 kernel: Asymmetric key parser 'x509' registered
 May  7 21:09:41 ifn8 kernel: Block layer SCSI generic (bsg) driver version 0.4 loaded (major 244)
@@ -43641,7 +43640,7 @@ May  7 21:09:41 ifn8 kernel: ACPI: bus type drm_connector registered
 May  7 21:09:41 ifn8 kernel: ahci 0000:02:00.1: SSS flag set, parallel bus scan disabled
 May  7 21:09:41 ifn8 kernel: ahci 0000:02:00.1: AHCI vers 0001.0301, 32 command slots, 6 Gbps, SATA mode
 May  7 21:09:41 ifn8 kernel: ahci 0000:02:00.1: 6/6 ports implemented (port mask 0x3f)
-May  7 21:09:41 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst 
+May  7 21:09:41 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst
 May  7 21:09:41 ifn8 kernel: scsi host0: ahci
 May  7 21:09:41 ifn8 kernel: scsi host1: ahci
 May  7 21:09:41 ifn8 kernel: scsi host2: ahci
@@ -43787,8 +43786,8 @@ May  7 21:09:41 ifn8 kernel: ata1: SATA link down (SStatus 0 SControl 330)
 May  7 21:09:41 ifn8 kernel: usb 1-1: new full-speed USB device number 2 using xhci_hcd
 May  7 21:09:41 ifn8 kernel: usb 3-2: New USB device found, idVendor=2109, idProduct=2817, bcdDevice=90.24
 May  7 21:09:41 ifn8 kernel: usb 3-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  7 21:09:41 ifn8 kernel: usb 3-2: Product: USB2.0 Hub             
-May  7 21:09:41 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.         
+May  7 21:09:41 ifn8 kernel: usb 3-2: Product: USB2.0 Hub
+May  7 21:09:41 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.
 May  7 21:09:41 ifn8 kernel: hub 3-2:1.0: USB hub found
 May  7 21:09:41 ifn8 kernel: hub 3-2:1.0: 4 ports detected
 May  7 21:09:41 ifn8 kernel: usb 4-2: new SuperSpeed USB device number 2 using xhci_hcd
@@ -43828,8 +43827,8 @@ May  7 21:09:41 ifn8 kernel: hid-generic 0003:048D:5702.0004: hiddev97,hidraw3: 
 May  7 21:09:41 ifn8 kernel: ata4: SATA link down (SStatus 0 SControl 300)
 May  7 21:09:41 ifn8 kernel: usb 4-2: New USB device found, idVendor=2109, idProduct=0817, bcdDevice=90.24
 May  7 21:09:41 ifn8 kernel: usb 4-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  7 21:09:41 ifn8 kernel: usb 4-2: Product: USB3.0 Hub             
-May  7 21:09:41 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.         
+May  7 21:09:41 ifn8 kernel: usb 4-2: Product: USB3.0 Hub
+May  7 21:09:41 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.
 May  7 21:09:41 ifn8 kernel: usb 1-8: new high-speed USB device number 4 using xhci_hcd
 May  7 21:09:41 ifn8 kernel: hub 4-2:1.0: USB hub found
 May  7 21:09:41 ifn8 kernel: hub 4-2:1.0: 4 ports detected
@@ -45541,7 +45540,7 @@ May  7 13:10:24 ifn8 bluetoothd[945]: Endpoint registered: sender=:1.79 path=/Me
 May  7 13:10:24 ifn8 bluetoothd[945]: Endpoint registered: sender=:1.79 path=/MediaEndpoint/A2DPSource/opus_05_duplex
 May  7 13:10:24 ifn8 kdeconnectd[2386]: No object for name "@DEFAULT_SINK@"
 May  7 13:10:24 ifn8 kdeconnectd[2386]: No object for name "@DEFAULT_SOURCE@"
-May  7 13:10:24 ifn8 kded6[2111]: Failed to connect to Bolt manager DBus interface: 
+May  7 13:10:24 ifn8 kded6[2111]: Failed to connect to Bolt manager DBus interface:
 May  7 13:10:24 ifn8 kded6[2111]: Couldn't connect to Bolt DBus daemon
 May  7 13:10:24 ifn8 systemd[1547]: Starting plasma-ksplash.service - Splash screen shown during boot...
 May  7 13:10:24 ifn8 kconf_update[2427]: /usr/share/kconf_update/filepicker.upd defined Version=5 but Version=6 was expected
@@ -50999,7 +50998,7 @@ May  8 19:03:49 ifn8 kernel: BIOS-e820: [mem 0x000000043f380000-0x000000043fffff
 May  8 19:03:49 ifn8 kernel: NX (Execute Disable) protection: active
 May  8 19:03:49 ifn8 kernel: APIC: Static calls initialized
 May  8 19:03:49 ifn8 kernel: efi: EFI v2.7 by American Megatrends
-May  8 19:03:49 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb87da218 ESRT=0xb6935b98 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018 
+May  8 19:03:49 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb87da218 ESRT=0xb6935b98 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018
 May  8 19:03:49 ifn8 kernel: random: crng init done
 May  8 19:03:49 ifn8 kernel: efi: Remove mem292: MMIO range=[0xf0000000-0xf7ffffff] (128MB) from e820 map
 May  8 19:03:49 ifn8 kernel: efi: Remove mem293: MMIO range=[0xfd200000-0xfd2fffff] (1MB) from e820 map
@@ -51026,7 +51025,7 @@ May  8 19:03:49 ifn8 kernel: total RAM covered: 3071M
 May  8 19:03:49 ifn8 kernel: Found optimal setting for mtrr clean up
 May  8 19:03:49 ifn8 kernel: gran_size: 64K #011chunk_size: 64M #011num_reg: 3  #011lose cover RAM: 0G
 May  8 19:03:49 ifn8 kernel: MTRR map: 8 entries (4 fixed + 4 variable; max 21), built from 9 variable MTRRs
-May  8 19:03:49 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT  
+May  8 19:03:49 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT
 May  8 19:03:49 ifn8 kernel: last_pfn = 0xbf000 max_arch_pfn = 0x400000000
 May  8 19:03:49 ifn8 kernel: esrt: Reserving ESRT space from 0x00000000b6935b98 to 0x00000000b6935bd0.
 May  8 19:03:49 ifn8 kernel: Using GB pages for direct mapping
@@ -51155,7 +51154,7 @@ May  8 19:03:49 ifn8 kernel: printk: log buffer data + meta data: 262144 + 91750
 May  8 19:03:49 ifn8 kernel: Dentry cache hash table entries: 2097152 (order: 12, 16777216 bytes, linear)
 May  8 19:03:49 ifn8 kernel: Inode-cache hash table entries: 1048576 (order: 11, 8388608 bytes, linear)
 May  8 19:03:49 ifn8 kernel: software IO TLB: area num 16.
-May  8 19:03:49 ifn8 kernel: Fallback order for Node 0: 0 
+May  8 19:03:49 ifn8 kernel: Fallback order for Node 0: 0
 May  8 19:03:49 ifn8 kernel: Built 1 zonelists, mobility grouping on.  Total pages: 4169749
 May  8 19:03:49 ifn8 kernel: Policy zone: Normal
 May  8 19:03:49 ifn8 kernel: mem auto-init: stack:all(zero), heap alloc:on, heap free:off
@@ -51606,7 +51605,7 @@ May  8 19:03:49 ifn8 kernel: integrity: Platform Keyring initialized
 May  8 19:03:49 ifn8 kernel: integrity: Machine keyring initialized
 May  8 19:03:49 ifn8 kernel: cryptd: max_cpu_qlen set to 1000
 May  8 19:03:49 ifn8 kernel: NET: Registered PF_ALG protocol family
-May  8 19:03:49 ifn8 kernel: xor: automatically using best checksumming function   avx       
+May  8 19:03:49 ifn8 kernel: xor: automatically using best checksumming function   avx
 May  8 19:03:49 ifn8 kernel: Key type asymmetric registered
 May  8 19:03:49 ifn8 kernel: Asymmetric key parser 'x509' registered
 May  8 19:03:49 ifn8 kernel: Block layer SCSI generic (bsg) driver version 0.4 loaded (major 244)
@@ -51647,7 +51646,7 @@ May  8 19:03:49 ifn8 kernel: ACPI: bus type drm_connector registered
 May  8 19:03:49 ifn8 kernel: ahci 0000:02:00.1: SSS flag set, parallel bus scan disabled
 May  8 19:03:49 ifn8 kernel: ahci 0000:02:00.1: AHCI vers 0001.0301, 32 command slots, 6 Gbps, SATA mode
 May  8 19:03:49 ifn8 kernel: ahci 0000:02:00.1: 6/6 ports implemented (port mask 0x3f)
-May  8 19:03:49 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst 
+May  8 19:03:49 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst
 May  8 19:03:49 ifn8 kernel: scsi host0: ahci
 May  8 19:03:49 ifn8 kernel: scsi host1: ahci
 May  8 19:03:49 ifn8 kernel: scsi host2: ahci
@@ -51793,8 +51792,8 @@ May  8 19:03:49 ifn8 kernel: usb 3-2: device descriptor read/64, error -71
 May  8 19:03:49 ifn8 kernel: ata2: SATA link down (SStatus 0 SControl 330)
 May  8 19:03:49 ifn8 kernel: usb 3-2: New USB device found, idVendor=2109, idProduct=2817, bcdDevice=90.24
 May  8 19:03:49 ifn8 kernel: usb 3-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  8 19:03:49 ifn8 kernel: usb 3-2: Product: USB2.0 Hub             
-May  8 19:03:49 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.         
+May  8 19:03:49 ifn8 kernel: usb 3-2: Product: USB2.0 Hub
+May  8 19:03:49 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.
 May  8 19:03:49 ifn8 kernel: hub 3-2:1.0: USB hub found
 May  8 19:03:49 ifn8 kernel: hub 3-2:1.0: 4 ports detected
 May  8 19:03:49 ifn8 kernel: usb 1-1: New USB device found, idVendor=d010, idProduct=1601, bcdDevice= 0.02
@@ -51840,8 +51839,8 @@ May  8 19:03:49 ifn8 kernel: usb 1-8: Manufacturer: MediaTek Inc.
 May  8 19:03:49 ifn8 kernel: usb 1-8: SerialNumber: 000000000
 May  8 19:03:49 ifn8 kernel: usb 4-2: New USB device found, idVendor=2109, idProduct=0817, bcdDevice=90.24
 May  8 19:03:49 ifn8 kernel: usb 4-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  8 19:03:49 ifn8 kernel: usb 4-2: Product: USB3.0 Hub             
-May  8 19:03:49 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.         
+May  8 19:03:49 ifn8 kernel: usb 4-2: Product: USB3.0 Hub
+May  8 19:03:49 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.
 May  8 19:03:49 ifn8 kernel: hub 4-2:1.0: USB hub found
 May  8 19:03:49 ifn8 kernel: hub 4-2:1.0: 4 ports detected
 May  8 19:03:49 ifn8 kernel: usb 3-3: new full-speed USB device number 3 using xhci_hcd
@@ -53482,7 +53481,7 @@ May  8 11:04:13 ifn8 bluetoothd[946]: Endpoint registered: sender=:1.78 path=/Me
 May  8 11:04:13 ifn8 bluetoothd[946]: Endpoint registered: sender=:1.78 path=/MediaEndpoint/A2DPSource/opus_05_duplex
 May  8 11:04:13 ifn8 kdeconnectd[2373]: No object for name "@DEFAULT_SINK@"
 May  8 11:04:13 ifn8 kdeconnectd[2373]: No object for name "@DEFAULT_SOURCE@"
-May  8 11:04:13 ifn8 kded6[2096]: Failed to connect to Bolt manager DBus interface: 
+May  8 11:04:13 ifn8 kded6[2096]: Failed to connect to Bolt manager DBus interface:
 May  8 11:04:13 ifn8 kded6[2096]: Couldn't connect to Bolt DBus daemon
 May  8 11:04:13 ifn8 systemd[1538]: Starting plasma-ksplash.service - Splash screen shown during boot...
 May  8 11:04:13 ifn8 kconf_update[2414]: /usr/share/kconf_update/filepicker.upd defined Version=5 but Version=6 was expected
@@ -59607,7 +59606,7 @@ May  9 12:11:23 ifn8 kernel: BIOS-e820: [mem 0x000000043f380000-0x000000043fffff
 May  9 12:11:23 ifn8 kernel: NX (Execute Disable) protection: active
 May  9 12:11:23 ifn8 kernel: APIC: Static calls initialized
 May  9 12:11:23 ifn8 kernel: efi: EFI v2.7 by American Megatrends
-May  9 12:11:23 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb87da218 ESRT=0xb6935b98 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018 
+May  9 12:11:23 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb87da218 ESRT=0xb6935b98 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018
 May  9 12:11:23 ifn8 kernel: random: crng init done
 May  9 12:11:23 ifn8 kernel: efi: Remove mem292: MMIO range=[0xf0000000-0xf7ffffff] (128MB) from e820 map
 May  9 12:11:23 ifn8 kernel: efi: Remove mem293: MMIO range=[0xfd200000-0xfd2fffff] (1MB) from e820 map
@@ -59634,7 +59633,7 @@ May  9 12:11:23 ifn8 kernel: total RAM covered: 3071M
 May  9 12:11:23 ifn8 kernel: Found optimal setting for mtrr clean up
 May  9 12:11:23 ifn8 kernel: gran_size: 64K #011chunk_size: 64M #011num_reg: 3  #011lose cover RAM: 0G
 May  9 12:11:23 ifn8 kernel: MTRR map: 8 entries (4 fixed + 4 variable; max 21), built from 9 variable MTRRs
-May  9 12:11:23 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT  
+May  9 12:11:23 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT
 May  9 12:11:23 ifn8 kernel: last_pfn = 0xbf000 max_arch_pfn = 0x400000000
 May  9 12:11:23 ifn8 kernel: esrt: Reserving ESRT space from 0x00000000b6935b98 to 0x00000000b6935bd0.
 May  9 12:11:23 ifn8 kernel: Using GB pages for direct mapping
@@ -59763,7 +59762,7 @@ May  9 12:11:23 ifn8 kernel: printk: log buffer data + meta data: 262144 + 91750
 May  9 12:11:23 ifn8 kernel: Dentry cache hash table entries: 2097152 (order: 12, 16777216 bytes, linear)
 May  9 12:11:23 ifn8 kernel: Inode-cache hash table entries: 1048576 (order: 11, 8388608 bytes, linear)
 May  9 12:11:23 ifn8 kernel: software IO TLB: area num 16.
-May  9 12:11:23 ifn8 kernel: Fallback order for Node 0: 0 
+May  9 12:11:23 ifn8 kernel: Fallback order for Node 0: 0
 May  9 12:11:23 ifn8 kernel: Built 1 zonelists, mobility grouping on.  Total pages: 4169749
 May  9 12:11:23 ifn8 kernel: Policy zone: Normal
 May  9 12:11:23 ifn8 kernel: mem auto-init: stack:all(zero), heap alloc:on, heap free:off
@@ -60214,7 +60213,7 @@ May  9 12:11:23 ifn8 kernel: integrity: Platform Keyring initialized
 May  9 12:11:23 ifn8 kernel: integrity: Machine keyring initialized
 May  9 12:11:23 ifn8 kernel: cryptd: max_cpu_qlen set to 1000
 May  9 12:11:23 ifn8 kernel: NET: Registered PF_ALG protocol family
-May  9 12:11:23 ifn8 kernel: xor: automatically using best checksumming function   avx       
+May  9 12:11:23 ifn8 kernel: xor: automatically using best checksumming function   avx
 May  9 12:11:23 ifn8 kernel: Key type asymmetric registered
 May  9 12:11:23 ifn8 kernel: Asymmetric key parser 'x509' registered
 May  9 12:11:23 ifn8 kernel: Block layer SCSI generic (bsg) driver version 0.4 loaded (major 244)
@@ -60255,7 +60254,7 @@ May  9 12:11:23 ifn8 kernel: ACPI: bus type drm_connector registered
 May  9 12:11:23 ifn8 kernel: ahci 0000:02:00.1: SSS flag set, parallel bus scan disabled
 May  9 12:11:23 ifn8 kernel: ahci 0000:02:00.1: AHCI vers 0001.0301, 32 command slots, 6 Gbps, SATA mode
 May  9 12:11:23 ifn8 kernel: ahci 0000:02:00.1: 6/6 ports implemented (port mask 0x3f)
-May  9 12:11:23 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst 
+May  9 12:11:23 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst
 May  9 12:11:23 ifn8 kernel: scsi host0: ahci
 May  9 12:11:23 ifn8 kernel: scsi host1: ahci
 May  9 12:11:23 ifn8 kernel: scsi host2: ahci
@@ -60404,8 +60403,8 @@ May  9 12:11:23 ifn8 kernel: usb 3-2: device descriptor read/64, error -71
 May  9 12:11:23 ifn8 kernel: ata2: SATA link down (SStatus 0 SControl 330)
 May  9 12:11:23 ifn8 kernel: usb 3-2: New USB device found, idVendor=2109, idProduct=2817, bcdDevice=90.24
 May  9 12:11:23 ifn8 kernel: usb 3-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  9 12:11:23 ifn8 kernel: usb 3-2: Product: USB2.0 Hub             
-May  9 12:11:23 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.         
+May  9 12:11:23 ifn8 kernel: usb 3-2: Product: USB2.0 Hub
+May  9 12:11:23 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.
 May  9 12:11:23 ifn8 kernel: hub 3-2:1.0: USB hub found
 May  9 12:11:23 ifn8 kernel: hub 3-2:1.0: 4 ports detected
 May  9 12:11:23 ifn8 kernel: usb 1-1: New USB device found, idVendor=d010, idProduct=1601, bcdDevice= 0.02
@@ -60451,8 +60450,8 @@ May  9 12:11:23 ifn8 kernel: usb 1-8: SerialNumber: 000000000
 May  9 12:11:23 ifn8 kernel: ata5: SATA link down (SStatus 0 SControl 330)
 May  9 12:11:23 ifn8 kernel: usb 4-2: New USB device found, idVendor=2109, idProduct=0817, bcdDevice=90.24
 May  9 12:11:23 ifn8 kernel: usb 4-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May  9 12:11:23 ifn8 kernel: usb 4-2: Product: USB3.0 Hub             
-May  9 12:11:23 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.         
+May  9 12:11:23 ifn8 kernel: usb 4-2: Product: USB3.0 Hub
+May  9 12:11:23 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.
 May  9 12:11:23 ifn8 kernel: hub 4-2:1.0: USB hub found
 May  9 12:11:23 ifn8 kernel: hub 4-2:1.0: 4 ports detected
 May  9 12:11:23 ifn8 kernel: usb 3-3: new full-speed USB device number 3 using xhci_hcd
@@ -61881,7 +61880,7 @@ May  9 04:11:56 ifn8 kernel: atomic remove_fb failed with -22
 May  9 04:11:56 ifn8 kernel: WARNING: drivers/gpu/drm/drm_framebuffer.c:1176 at drm_framebuffer_remove+0x20d/0x220, CPU#10: kworker/10:1/153
 May  9 04:11:56 ifn8 kernel: Modules linked in: snd_seq_dummy rfcomm snd_hrtimer sunrpc nf_conntrack_netbios_ns nf_conntrack_broadcast nft_fib_inet nft_fib_ipv4 nft_fib_ipv6 nft_fib nft_reject_inet nf_reject_ipv4 nf_reject_ipv6 nft_reject nft_ct nft_chain_nat nf_nat nf_conntrack nf_defrag_ipv6 nf_defrag_ipv4 nf_tables qrtr uhid bnep vfat fat snd_hda_codec_alc882 snd_hda_codec_realtek_lib mt7921e snd_hda_codec_generic snd_hda_codec_atihdmi mt7921_common snd_hda_codec_hdmi snd_usb_audio mt792x_lib snd_hda_intel hid_logitech_hidpp mt76_connac_lib snd_usbmidi_lib snd_hda_codec intel_rapl_msr amd_atl mc mt76 intel_rapl_common snd_hda_core snd_ump cdc_acm snd_rawmidi snd_intel_dspcfg mac80211 snd_intel_sdw_acpi btusb edac_mce_amd snd_hwdep btmtk snd_seq btrtl kvm_amd snd_seq_device btbcm btintel kvm snd_pcm cfg80211 bluetooth snd_timer snd irqbypass r8169 soundcore rfkill i2c_piix4 rapl realtek gigabyte_wmi wmi_bmof libarc4 pcspkr i2c_smbus k10temp gpio_amdpt joydev gpio_generic hid_logitech_dj loop nfnetlink zram lz4hc_compress
 May  9 04:11:56 ifn8 kernel: lz4_compress amdgpu amdxcp i2c_algo_bit drm_ttm_helper ttm drm_exec drm_panel_backlight_quirks gpu_sched drm_suballoc_helper video nvme drm_buddy nvme_core drm_display_helper nvme_keyring ghash_clmulni_intel cec nvme_auth sp5100_tco hkdf wmi ntsync fuse i2c_dev
-May  9 04:11:56 ifn8 kernel: CPU: 10 UID: 0 PID: 153 Comm: kworker/10:1 Not tainted 6.19.14-200.fc43.x86_64 #1 PREEMPT(lazy) 
+May  9 04:11:56 ifn8 kernel: CPU: 10 UID: 0 PID: 153 Comm: kworker/10:1 Not tainted 6.19.14-200.fc43.x86_64 #1 PREEMPT(lazy)
 May  9 04:11:56 ifn8 kernel: Hardware name: Gigabyte Technology Co., Ltd. B550I AORUS PRO AX/B550I AORUS PRO AX, BIOS F16e 07/20/2022
 May  9 04:11:56 ifn8 kernel: Workqueue: events drm_mode_rmfb_work_fn
 May  9 04:11:56 ifn8 kernel: RIP: 0010:drm_framebuffer_remove+0x20f/0x220
@@ -62176,7 +62175,7 @@ May  9 04:11:59 ifn8 bluetoothd[944]: Endpoint registered: sender=:1.78 path=/Me
 May  9 04:11:59 ifn8 bluetoothd[944]: Endpoint registered: sender=:1.78 path=/MediaEndpoint/A2DPSource/opus_05_duplex
 May  9 04:11:59 ifn8 kdeconnectd[2384]: No object for name "@DEFAULT_SINK@"
 May  9 04:11:59 ifn8 kdeconnectd[2384]: No object for name "@DEFAULT_SOURCE@"
-May  9 04:11:59 ifn8 kded6[2107]: Failed to connect to Bolt manager DBus interface: 
+May  9 04:11:59 ifn8 kded6[2107]: Failed to connect to Bolt manager DBus interface:
 May  9 04:11:59 ifn8 kded6[2107]: Couldn't connect to Bolt DBus daemon
 May  9 04:11:59 ifn8 systemd[1531]: Starting plasma-ksplash.service - Splash screen shown during boot...
 May  9 04:11:59 ifn8 kconf_update[2425]: /usr/share/kconf_update/filepicker.upd defined Version=5 but Version=6 was expected
@@ -63975,7 +63974,7 @@ May 10 21:31:15 ifn8 kernel: BIOS-e820: [mem 0x000000043f380000-0x000000043fffff
 May 10 21:31:15 ifn8 kernel: NX (Execute Disable) protection: active
 May 10 21:31:15 ifn8 kernel: APIC: Static calls initialized
 May 10 21:31:15 ifn8 kernel: efi: EFI v2.7 by American Megatrends
-May 10 21:31:15 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb87da218 ESRT=0xb6935b98 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018 
+May 10 21:31:15 ifn8 kernel: efi: ACPI=0xbd156000 ACPI 2.0=0xbd156014 TPMFinalLog=0xbd120000 SMBIOS=0xbdc27000 SMBIOS 3.0=0xbdc26000 MEMATTR=0xb87da218 ESRT=0xb6935b98 MOKvar=0xbdc6d000 RNG=0xbca6d018 TPMEventLog=0xbca31018
 May 10 21:31:15 ifn8 kernel: random: crng init done
 May 10 21:31:15 ifn8 kernel: efi: Remove mem292: MMIO range=[0xf0000000-0xf7ffffff] (128MB) from e820 map
 May 10 21:31:15 ifn8 kernel: efi: Remove mem293: MMIO range=[0xfd200000-0xfd2fffff] (1MB) from e820 map
@@ -64002,7 +64001,7 @@ May 10 21:31:15 ifn8 kernel: total RAM covered: 3071M
 May 10 21:31:15 ifn8 kernel: Found optimal setting for mtrr clean up
 May 10 21:31:15 ifn8 kernel: gran_size: 64K #011chunk_size: 64M #011num_reg: 3  #011lose cover RAM: 0G
 May 10 21:31:15 ifn8 kernel: MTRR map: 8 entries (4 fixed + 4 variable; max 21), built from 9 variable MTRRs
-May 10 21:31:15 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT  
+May 10 21:31:15 ifn8 kernel: x86/PAT: Configuration [0-7]: WB  WC  UC- UC  WB  WP  UC- WT
 May 10 21:31:15 ifn8 kernel: last_pfn = 0xbf000 max_arch_pfn = 0x400000000
 May 10 21:31:15 ifn8 kernel: esrt: Reserving ESRT space from 0x00000000b6935b98 to 0x00000000b6935bd0.
 May 10 21:31:15 ifn8 kernel: Using GB pages for direct mapping
@@ -64131,7 +64130,7 @@ May 10 21:31:15 ifn8 kernel: printk: log buffer data + meta data: 262144 + 91750
 May 10 21:31:15 ifn8 kernel: Dentry cache hash table entries: 2097152 (order: 12, 16777216 bytes, linear)
 May 10 21:31:15 ifn8 kernel: Inode-cache hash table entries: 1048576 (order: 11, 8388608 bytes, linear)
 May 10 21:31:15 ifn8 kernel: software IO TLB: area num 16.
-May 10 21:31:15 ifn8 kernel: Fallback order for Node 0: 0 
+May 10 21:31:15 ifn8 kernel: Fallback order for Node 0: 0
 May 10 21:31:15 ifn8 kernel: Built 1 zonelists, mobility grouping on.  Total pages: 4169749
 May 10 21:31:15 ifn8 kernel: Policy zone: Normal
 May 10 21:31:15 ifn8 kernel: mem auto-init: stack:all(zero), heap alloc:on, heap free:off
@@ -64582,7 +64581,7 @@ May 10 21:31:15 ifn8 kernel: integrity: Platform Keyring initialized
 May 10 21:31:15 ifn8 kernel: integrity: Machine keyring initialized
 May 10 21:31:15 ifn8 kernel: cryptd: max_cpu_qlen set to 1000
 May 10 21:31:15 ifn8 kernel: NET: Registered PF_ALG protocol family
-May 10 21:31:15 ifn8 kernel: xor: automatically using best checksumming function   avx       
+May 10 21:31:15 ifn8 kernel: xor: automatically using best checksumming function   avx
 May 10 21:31:15 ifn8 kernel: Key type asymmetric registered
 May 10 21:31:15 ifn8 kernel: Asymmetric key parser 'x509' registered
 May 10 21:31:15 ifn8 kernel: Block layer SCSI generic (bsg) driver version 0.4 loaded (major 244)
@@ -64623,7 +64622,7 @@ May 10 21:31:15 ifn8 kernel: ACPI: bus type drm_connector registered
 May 10 21:31:15 ifn8 kernel: ahci 0000:02:00.1: SSS flag set, parallel bus scan disabled
 May 10 21:31:15 ifn8 kernel: ahci 0000:02:00.1: AHCI vers 0001.0301, 32 command slots, 6 Gbps, SATA mode
 May 10 21:31:15 ifn8 kernel: ahci 0000:02:00.1: 6/6 ports implemented (port mask 0x3f)
-May 10 21:31:15 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst 
+May 10 21:31:15 ifn8 kernel: ahci 0000:02:00.1: flags: 64bit ncq sntf stag pm led clo only pmp pio slum part sxs deso sadm sds apst
 May 10 21:31:15 ifn8 kernel: scsi host0: ahci
 May 10 21:31:15 ifn8 kernel: scsi host1: ahci
 May 10 21:31:15 ifn8 kernel: scsi host2: ahci
@@ -64771,8 +64770,8 @@ May 10 21:31:15 ifn8 kernel: usb 3-2: device descriptor read/64, error -71
 May 10 21:31:15 ifn8 kernel: ata2: SATA link down (SStatus 0 SControl 330)
 May 10 21:31:15 ifn8 kernel: usb 3-2: New USB device found, idVendor=2109, idProduct=2817, bcdDevice=90.24
 May 10 21:31:15 ifn8 kernel: usb 3-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May 10 21:31:15 ifn8 kernel: usb 3-2: Product: USB2.0 Hub             
-May 10 21:31:15 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.         
+May 10 21:31:15 ifn8 kernel: usb 3-2: Product: USB2.0 Hub
+May 10 21:31:15 ifn8 kernel: usb 3-2: Manufacturer: VIA Labs, Inc.
 May 10 21:31:15 ifn8 kernel: hub 3-2:1.0: USB hub found
 May 10 21:31:15 ifn8 kernel: hub 3-2:1.0: 4 ports detected
 May 10 21:31:15 ifn8 kernel: usb 1-1: New USB device found, idVendor=d010, idProduct=1601, bcdDevice= 0.02
@@ -64818,8 +64817,8 @@ May 10 21:31:15 ifn8 kernel: usb 1-8: Manufacturer: MediaTek Inc.
 May 10 21:31:15 ifn8 kernel: usb 1-8: SerialNumber: 000000000
 May 10 21:31:15 ifn8 kernel: usb 4-2: New USB device found, idVendor=2109, idProduct=0817, bcdDevice=90.24
 May 10 21:31:15 ifn8 kernel: usb 4-2: New USB device strings: Mfr=1, Product=2, SerialNumber=0
-May 10 21:31:15 ifn8 kernel: usb 4-2: Product: USB3.0 Hub             
-May 10 21:31:15 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.         
+May 10 21:31:15 ifn8 kernel: usb 4-2: Product: USB3.0 Hub
+May 10 21:31:15 ifn8 kernel: usb 4-2: Manufacturer: VIA Labs, Inc.
 May 10 21:31:15 ifn8 kernel: hub 4-2:1.0: USB hub found
 May 10 21:31:15 ifn8 kernel: hub 4-2:1.0: 4 ports detected
 May 10 21:31:15 ifn8 kernel: usb 3-3: new full-speed USB device number 3 using xhci_hcd
@@ -66485,7 +66484,7 @@ May 10 13:31:44 ifn8 bluetoothd[944]: Endpoint registered: sender=:1.78 path=/Me
 May 10 13:31:44 ifn8 bluetoothd[944]: Endpoint registered: sender=:1.78 path=/MediaEndpoint/A2DPSource/opus_05_duplex
 May 10 13:31:44 ifn8 kdeconnectd[2382]: No object for name "@DEFAULT_SINK@"
 May 10 13:31:44 ifn8 kdeconnectd[2382]: No object for name "@DEFAULT_SOURCE@"
-May 10 13:31:44 ifn8 kded6[2105]: Failed to connect to Bolt manager DBus interface: 
+May 10 13:31:44 ifn8 kded6[2105]: Failed to connect to Bolt manager DBus interface:
 May 10 13:31:44 ifn8 kded6[2105]: Couldn't connect to Bolt DBus daemon
 May 10 13:31:44 ifn8 kdeconnectd[2382]: No object for name "@DEFAULT_SINK@"
 May 10 13:31:44 ifn8 kdeconnectd[2382]: No object for name "@DEFAULT_SOURCE@"
