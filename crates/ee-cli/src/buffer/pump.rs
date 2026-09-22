@@ -47,6 +47,10 @@ impl BufferManager {
     ///
     /// Use this instead of bare `pump()` when a test must wait for xi-core to
     /// finish processing a batch of keystrokes before inspecting state.
+    ///
+    /// Returns an error when the deadline expires before the predicate holds,
+    /// so tests fail fast instead of asserting against stale state or spinning
+    /// in a subsequent unbounded scan.
     #[cfg(test)]
     pub(crate) fn pump_until<F>(&mut self, predicate: F) -> io::Result<()>
     where
@@ -55,11 +59,16 @@ impl BufferManager {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             self.sync_pending_events()?;
-            if predicate(self.active()) || Instant::now() >= deadline {
-                break;
+            if predicate(self.active()) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "pump_until: predicate never held before the 2s deadline",
+                ));
             }
         }
-        Ok(())
     }
 
     /// Test-only constructor that builds a minimal `BufferManager` around

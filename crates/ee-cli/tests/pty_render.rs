@@ -22,9 +22,17 @@ use vt100::Screen;
 fn open_pty(rows: u16, cols: u16) -> (File, File) {
     let mut master: std::ffi::c_int = 0;
     let mut slave: std::ffi::c_int = 0;
-    let win = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
+    let mut win = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
     let rc = unsafe {
-        libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), &win)
+        // `termp`/`winp` are `*const` on Linux but `*mut` on macOS/BSD:
+        // `addr_of_mut!` yields a raw pointer that coerces to both.
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::addr_of_mut!(win),
+        )
     };
     assert_eq!(rc, 0, "openpty failed: {rc}");
     let (master, slave) = unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };

@@ -136,8 +136,10 @@ fn ui_render_blanks_gutter_after_set_wrap_rewraps_long_lines() {
         })
         .expect("set wrap re-render");
 
-    // Row holding the blank logical line 1: line 1 wraps above it.
-    let blank_row = (1..)
+    // Row holding the blank logical line 1: line 1 wraps above it.  Scan only
+    // rows the backend can actually report (cache length bounds the visual
+    // row span) so a missing row panics instead of scanning forever.
+    let blank_row = (1..app.backend.line_cache.len())
         .find(|&row| app.backend.row_logical_line(row) == Some(1))
         .expect("wrapped line 1 must span multiple rows");
     assert!(blank_row > 2, "line 1 must wrap into several rows, got {blank_row}");
@@ -181,7 +183,7 @@ fn ui_render_wrap_keeps_blank_line_aligned_with_cursor() {
                 && (0..state.line_count()).any(|row| state.row_logical_line(row) == Some(8))
         })
         .expect("full wrap render");
-    let blank_row = (1..)
+    let blank_row = (1..app.backend.line_cache.len())
         .find(|&row| app.backend.row_logical_line(row) == Some(1))
         .expect("blank logical line");
     // Move the cursor onto the blank line (visual row `blank_row`).
